@@ -1,0 +1,40 @@
+[repositories]
+personal = "../personal-teams-knowledge"
+
+[[resources]]
+id = "assistant-operations"
+description = "Documentación de operación del asistente: controles, permisos y comportamiento."
+topics = ["asistente", "operación", "Teams"]
+enabled = true
+external_processing = true
+# Grant access to the entire conversation, not just the person asking.
+# Explicit values: "chats/19:..." or "teams/UUID/channels/19:...".
+allowed_conversations = []
+allowed_senders = []
+kind = "file"
+repository = "personal"
+path = "assistant.md"
+
+# A website must be an exact HTTPS URL. Redirects, private IPs and credentials are blocked.
+# [[resources]]
+# id = "public-docs"
+# description = "Public documentation for an approved product"
+# topics = ["product"]
+# enabled = false
+# external_processing = true
+# allowed_conversations = []
+# kind = "url"
+# url = "https://docs.example.com/product"
+
+# [[resources]]
+# id = "payment-status"
+# description = "Read a payment status using an explicit id: VALUE in the question"
+# topics = ["payment", "status"]
+# enabled = false
+# external_processing = true
+# allowed_conversations = []
+# kind = "tool"
+# [resources.tool]
+# type = "sql_server"
+# operation = "get_payment_status"
+# secret_ref = "secret://sqlserver/payments-readonly"

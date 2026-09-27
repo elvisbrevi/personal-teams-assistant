@@ -1,0 +1,21 @@
+services:
+  assistant:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:3000:3000"
+    env_file: .env
+    volumes:
+      - ./config.toml:/app/config.toml:ro
+      - ./knowledge-map.toml:/app/knowledge-map.toml:ro
+      - ../personal-teams-knowledge:/knowledge/personal:ro
+      - assistant-state:/app/data
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+volumes:
+  assistant-state:

@@ -1,0 +1,44 @@
+knowledge_map = "knowledge-map.toml"
+
+[server]
+bind = "127.0.0.1:3000"
+public_url = "https://assistant.example.com"
+data_dir = "data"
+
+[graph]
+tenant_id = "00000000-0000-0000-0000-000000000001"
+client_id = "00000000-0000-0000-0000-000000000002"
+user_id = "00000000-0000-0000-0000-000000000003"
+# Explicit opt-in. Each ID must be a chat in which the authorized user participates.
+allowed_chats = []
+discover_all_chats = false
+channels = []
+# channels = [{ team_id = "TEAM-UUID", channel_id = "19:CHANNEL@thread.tacv2" }]
+
+[jev]
+model = "jev-latest"
+routing_threshold = 0.92
+evidence_threshold = 0.95
+final_threshold = 0.97
+
+[llm]
+provider = "deepseek"
+model = "deepseek-v4-flash"
+style = "Español natural y breve. Una o dos frases. Sin promesas ni opiniones personales."
+
+[policy]
+dry_run = true
+greeting = "¡Hola!"
+max_context_chars = 6000
+max_answer_chars = 1000
+max_message_age_seconds = 300
+allowed_senders = []
+sensitive_patterns = []
+# Add business identifiers, customer names and other domain-specific PII patterns.
+
+[secrets]
+# References point to environment variable names, never values.
+# "secret://sqlserver/payments-readonly" = "SQLSERVER_READONLY_CONNECTION_SECRET"
+# "secret://azure-devops/reader" = "AZURE_DEVOPS_READONLY_TOKEN"
+# "secret://rabbitmq/monitor" = "RABBITMQ_READONLY_AUTH"
+# "secret://internal/status" = "INTERNAL_API_TOKEN"

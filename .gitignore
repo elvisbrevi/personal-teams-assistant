@@ -1,0 +1,12 @@
+/target/
+.env
+.env.*
+!.env.example
+/config.toml
+/knowledge-map.toml
+/data/
+/knowledge/
+*.db*
+*.pem
+*.key
+.DS_Store
