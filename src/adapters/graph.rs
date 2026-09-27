@@ -170,9 +170,14 @@ impl Graph {
         );
         for s in &remote {
             let resource = s["resource"].as_str().unwrap_or("").trim_start_matches('/');
-            let owned = s["clientState"]
-                .as_str()
-                .is_some_and(|v| crate::security::constant_eq(v, &self.client_state));
+            let owned = self
+                .store
+                .subscriptions()?
+                .iter()
+                .any(|local| Some(local.id.as_str()) == s["id"].as_str())
+                || s["clientState"]
+                    .as_str()
+                    .is_some_and(|v| crate::security::constant_eq(v, &self.client_state));
             if !owned {
                 continue;
             }

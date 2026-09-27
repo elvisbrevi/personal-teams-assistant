@@ -25,7 +25,7 @@ async fn main() -> Result<()> {
     let routing = gate
         .evaluate(
             Stage::Routing,
-            json!({"question":question}),
+            json!({"question":question,"sources":{"hours":"Horario de soporte"}}),
             BTreeMap::from([("hours".into(), "Horario de soporte".into())]),
         )
         .await?;
