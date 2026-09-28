@@ -11,6 +11,8 @@ python3 scripts/local.py
 
 El script compila, carga secretos con `lazy-workflow credentials-get` en memoria, crea un Quick Tunnel y actualiza el redirect URI de la app configurada. Usa el tenant y cuenta con permisos de modificar esa app en Azure CLI. El servicio escucha solo en loopback; Graph entra por el túnel HTTPS. La URL actual queda en `data/local-url.txt`.
 
+Mantén abierta la terminal del script mientras uses el asistente. Consulta la URL vigente con `cat data/local-url.txt` y abre `<URL vigente>/test` para usar el simulador. Pulsa `Ctrl-C` en esa terminal para detener juntos el servicio y el túnel. Vuelve a ejecutar `python3 scripts/local.py` para iniciarlos otra vez. Si el script quedó en segundo plano, identifica su PID con `pgrep -fl 'scripts/local.py'` y usa `kill -TERM <PID>`; el script termina también sus procesos hijos.
+
 Para recuperar la clave de administración en tu propia terminal sin ponerla en argumentos:
 
 ```sh
