@@ -38,16 +38,40 @@ impl Pipeline {
         ) {
             return self.store.record(resource, &audit);
         }
+        let mut context_question = None;
+        let mut detail_requested = false;
         let proposal = if greeting(&message.text) {
             audit.reason = "deterministic_greeting".into();
             self.config.policy.greeting.clone()
         } else {
-            let question = self.redactor.redact(&message.text);
+            let current = self.redactor.redact(&message.text);
+            let question = if let Some(previous) = self.store.context(&message.conversation)? {
+                let verdict = self.gate.evaluate(Stage::FollowUp,
+                    json!({"current":&current,"previous_question":&previous.question,"previous_answer":&previous.answer}),
+                    BTreeMap::new()).await?;
+                audit.confidences.push(verdict.confidence);
+                if !verdict.allows(self.config.jev.follow_up_threshold) {
+                    audit.reason = "ambiguous_follow_up".into();
+                    return self.store.record(resource, &audit);
+                }
+                if verdict.selected == "follow_up" {
+                    detail_requested = true;
+                    format!(
+                        "Pregunta anterior: {}. Respuesta anterior: {}. Solicitud actual: {}",
+                        previous.question, previous.answer, current
+                    )
+                } else {
+                    current
+                }
+            } else {
+                current
+            };
             // Questions containing secrets/PII stay manual, including tool requests with personal identifiers.
             if !self.redactor.clean(&question) {
                 audit.reason = "sensitive_question".into();
                 return self.store.record(resource, &audit);
             }
+            context_question = Some(question.chars().take(1800).collect::<String>());
             let available = self
                 .knowledge
                 .available(&message.conversation, &message.sender);
@@ -68,20 +92,29 @@ impl Pipeline {
                     )
                 })
                 .collect();
-            let routing = self
-                .gate
-                .evaluate(
-                    Stage::Routing,
-                    json!({"question":question,"sources":candidates}),
-                    candidates.clone(),
-                )
-                .await?;
-            audit.confidences.push(routing.confidence);
-            if !routing.allows(self.config.jev.routing_threshold) {
-                audit.reason = "routing_gate".into();
-                return self.store.record(resource, &audit);
-            }
-            let Some(source) = available.into_iter().find(|r| r.id == routing.selected) else {
+            let selected = if status_question(&question)
+                && available.iter().any(|r| r.id == "azure-devops-status")
+            {
+                // Explicit status requests have a known source. Jev still judges the
+                // retrieved evidence and the exact answer before anything is sent.
+                "azure-devops-status".to_owned()
+            } else {
+                let routing = self
+                    .gate
+                    .evaluate(
+                        Stage::Routing,
+                        json!({"question":question,"sources":candidates}),
+                        candidates.clone(),
+                    )
+                    .await?;
+                audit.confidences.push(routing.confidence);
+                if !routing.allows(self.config.jev.routing_threshold) {
+                    audit.reason = "routing_gate".into();
+                    return self.store.record(resource, &audit);
+                }
+                routing.selected
+            };
+            let Some(source) = available.into_iter().find(|r| r.id == selected) else {
                 audit.reason = "unknown_source".into();
                 return self.store.record(resource, &audit);
             };
@@ -142,6 +175,7 @@ impl Pipeline {
                 .generate(GenerationInput {
                     question: &question,
                     evidence: &evidence,
+                    detail_requested,
                 })
                 .await?;
             audit.proposed = Some(self.redactor.redact(&answer));
@@ -202,7 +236,17 @@ impl Pipeline {
                 audit.reason = "send_result_unknown_manual_review".into();
             }
         }
-        self.store.record(resource, &audit)
+        self.store.record(resource, &audit)?;
+        if audit.status == "sent"
+            && let Some(question) = context_question
+        {
+            self.store.save_context(
+                &message.conversation,
+                &self.redactor.redact(&question),
+                &self.redactor.redact(audit.sent.as_deref().unwrap_or("")),
+            )?;
+        }
+        Ok(())
     }
     fn checkpoint(&self, resource: &str, audit: &Audit, stage: &str) -> Result<()> {
         let mut saved = audit.clone();
@@ -214,5 +258,61 @@ impl Pipeline {
         !answer.trim().is_empty()
             && answer.chars().count() <= self.config.policy.max_answer_chars
             && self.redactor.clean(answer)
+    }
+}
+
+fn status_question(question: &str) -> bool {
+    let q = question.to_lowercase();
+    let words: Vec<&str> = q.split(|c: char| !c.is_alphanumeric()).collect();
+    if words.iter().any(|w| {
+        matches!(
+            *w,
+            "crea"
+                | "crear"
+                | "ejecuta"
+                | "ejecutar"
+                | "despliega"
+                | "desplegar"
+                | "aprueba"
+                | "aprobar"
+                | "modifica"
+                | "modificar"
+        )
+    }) {
+        return false;
+    }
+    words.iter().any(|w| {
+        matches!(
+            *w,
+            "hu" | "hus"
+                | "avance"
+                | "avances"
+                | "impedimentos"
+                | "compromisos"
+                | "pipeline"
+                | "pipelines"
+                | "release"
+                | "releases"
+        )
+    }) || (q.contains("esta semana")
+        && (q.contains("he hecho") || q.contains("trabaj") || q.contains("hice")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::status_question;
+
+    #[test]
+    fn explicit_status_routes_only_reads() {
+        assert!(status_question(
+            "¿En qué HU estás trabajando y cuáles son tus impedimentos?"
+        ));
+        assert!(status_question("¿Qué he hecho esta semana?"));
+        assert!(status_question(
+            "Pregunta anterior: avance de HU. Solicitud actual: dame más detalles"
+        ));
+        assert!(!status_question("Crea una HU para mañana"));
+        assert!(!status_question("Despliega el release ahora"));
+        assert!(!status_question("¿Cuál es el horario de soporte?"));
     }
 }

@@ -1,4 +1,5 @@
 pub mod adapters;
+pub mod ado;
 pub mod config;
 pub mod decision;
 pub mod knowledge;

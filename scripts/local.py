@@ -40,7 +40,8 @@ def main():
         raise RuntimeError("Local mode requires server.bind = 127.0.0.1:PORT")
     # Capture credentials directly in memory; neither values nor subprocess output are logged.
     env = os.environ.copy()
-    for name in ("ENTRA_CLIENT_SECRET", "TYPESAFE_API_KEY", "DEEPSEEK_API_KEY", "ADMIN_AUTH_KEY", "GRAPH_WEBHOOK_SECRET", "STATE_ENCRYPTION_KEY"):
+    required = ("ENTRA_CLIENT_SECRET", "TYPESAFE_API_KEY", "DEEPSEEK_API_KEY", "ADMIN_AUTH_KEY", "GRAPH_WEBHOOK_SECRET", "STATE_ENCRYPTION_KEY")
+    for name in (*required, *info.get("additional_secrets", [])):
         if not env.get(name) and not env.get(name + "_FILE"):
             result = subprocess.run(["lazy-workflow", "credentials-get", "--name", name, "--force", "--no-log-file"], capture_output=True, text=True)
             if result.returncode:

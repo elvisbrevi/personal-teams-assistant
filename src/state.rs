@@ -17,6 +17,11 @@ pub struct Subscription {
     pub resource: String,
     pub expires_at: i64,
 }
+#[derive(Clone, Debug)]
+pub struct ConversationContext {
+    pub question: String,
+    pub answer: String,
+}
 #[derive(Clone, Default, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Audit {
@@ -39,7 +44,8 @@ impl Store {
             CREATE TABLE IF NOT EXISTS subscriptions(id TEXT PRIMARY KEY,resource TEXT NOT NULL UNIQUE,expires_at INTEGER NOT NULL);
             CREATE TABLE IF NOT EXISTS vault(name TEXT PRIMARY KEY,value BLOB NOT NULL);
             CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY,time INTEGER NOT NULL DEFAULT (unixepoch()),kind TEXT NOT NULL,detail TEXT NOT NULL);
-            UPDATE jobs SET status='pending' WHERE status='processing';
+            CREATE TABLE IF NOT EXISTS conversation_context(conversation TEXT PRIMARY KEY,question TEXT NOT NULL,answer TEXT NOT NULL,updated_at INTEGER NOT NULL DEFAULT (unixepoch()));
+            UPDATE jobs SET status='pending' WHERE status='processing' AND resource NOT LIKE 'simulation:%';
             UPDATE jobs SET status='uncertain',audit='{"reason":"restart_during_send"}' WHERE status='sending';"#)?;
         Ok(Self { db: Mutex::new(db) })
     }
@@ -48,6 +54,28 @@ impl Store {
             "INSERT OR IGNORE INTO jobs(resource) VALUES (?1)",
             [resource],
         )? == 1)
+    }
+    pub fn begin_simulation(&self, resource: &str) -> Result<()> {
+        self.db.lock().unwrap().execute(
+            "INSERT INTO jobs(resource,status) VALUES (?1,'processing')",
+            [resource],
+        )?;
+        Ok(())
+    }
+    pub fn context(&self, conversation: &str) -> Result<Option<ConversationContext>> {
+        Ok(self.db.lock().unwrap().query_row(
+            "SELECT question,answer FROM conversation_context WHERE conversation=?1 AND updated_at>=unixepoch()-1800",
+            [conversation], |r| Ok(ConversationContext { question:r.get(0)?, answer:r.get(1)? })
+        ).optional()?)
+    }
+    pub fn save_context(&self, conversation: &str, question: &str, answer: &str) -> Result<()> {
+        let db = self.db.lock().unwrap();
+        db.execute(
+            "DELETE FROM conversation_context WHERE updated_at<unixepoch()-1800",
+            [],
+        )?;
+        db.execute("INSERT INTO conversation_context(conversation,question,answer) VALUES (?1,?2,?3) ON CONFLICT(conversation) DO UPDATE SET question=excluded.question,answer=excluded.answer,updated_at=unixepoch()",params![conversation,question,answer])?;
+        Ok(())
     }
     pub fn next_job(&self) -> Result<Option<Job>> {
         let mut db = self.db.lock().unwrap();

@@ -1,22 +1,27 @@
 use crate::{
-    adapters::{graph::Graph, oauth::OAuth, teams},
+    adapters::{MessageAdapter, graph::Graph, oauth::OAuth, teams},
+    pipeline::Pipeline,
     security::constant_eq,
 };
+use anyhow::Result;
+use async_trait::async_trait;
 use axum::{
     Router,
     body::Bytes,
-    extract::{DefaultBodyLimit, Form, Query, State},
+    extract::{DefaultBodyLimit, Form, Json, Query, State},
     http::{HeaderMap, StatusCode, header},
     response::{Html, IntoResponse, Redirect, Response},
     routing::{get, post},
 };
 use serde::Deserialize;
+use serde_json::json;
 use std::{collections::HashMap, sync::Arc};
 
 pub struct WebState {
     pub graph: Arc<Graph>,
     pub oauth: Arc<OAuth>,
     pub admin_key: String,
+    pub pipeline: Option<Arc<Pipeline>>,
 }
 pub fn router(state: Arc<WebState>) -> Router {
     Router::new()
@@ -24,10 +29,135 @@ pub fn router(state: Arc<WebState>) -> Router {
         .route("/oauth/login", get(login))
         .route("/oauth/start", post(start))
         .route("/oauth/callback", get(callback))
+        .route("/test", get(test_page))
+        .route("/test/app.js", get(test_script))
+        .route("/test/chat", post(test_chat))
         .route("/graph/notifications", post(notifications))
         .route("/graph/lifecycle", post(lifecycle))
         .layer(DefaultBodyLimit::max(256_000))
         .with_state(state)
+}
+async fn test_page() -> impl IntoResponse {
+    (
+        [
+            (header::CACHE_CONTROL, "no-store"),
+            (
+                header::CONTENT_SECURITY_POLICY,
+                "default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'",
+            ),
+        ],
+        Html(include_str!("../../static/test.html")),
+    )
+}
+async fn test_script() -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, "text/javascript; charset=utf-8"),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        include_str!("../../static/test.js"),
+    )
+}
+#[derive(Deserialize)]
+struct TestMessage {
+    session: String,
+    text: String,
+    #[serde(default)]
+    group: bool,
+    #[serde(default)]
+    mentioned: bool,
+}
+struct TestAdapter(teams::IncomingMessage);
+#[async_trait]
+impl MessageAdapter for TestAdapter {
+    async fn fetch(&self, _: &str) -> Result<teams::IncomingMessage> {
+        Ok(self.0.clone())
+    }
+    async fn send(&self, _: &teams::IncomingMessage, _: &str) -> Result<String> {
+        Ok("simulation-only".into())
+    }
+}
+async fn test_chat(
+    State(state): State<Arc<WebState>>,
+    headers: HeaderMap,
+    Json(input): Json<TestMessage>,
+) -> Response {
+    let bearer = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|h| h.to_str().ok())
+        .and_then(|h| h.strip_prefix("Bearer "))
+        .unwrap_or("");
+    if !constant_eq(bearer, &state.admin_key) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let Some(base) = state.pipeline.as_ref() else {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
+    if input.session.is_empty()
+        || input.session.len() > 64
+        || !input
+            .session
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "_-".contains(c))
+        || input.text.trim().is_empty()
+        || input.text.chars().count() > 2000
+    {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+    let conversation = format!("chats/simulation-{}", input.session);
+    let resource = format!("simulation:{}:{}", input.session, uuid::Uuid::new_v4());
+    let message = teams::IncomingMessage {
+        resource: resource.clone(),
+        conversation,
+        sender: "simulated-user".into(),
+        kind: if input.group {
+            teams::ConversationKind::Group
+        } else {
+            teams::ConversationKind::Direct
+        },
+        mentions: if input.mentioned {
+            vec![state.graph.config.graph.user_id.clone()]
+        } else {
+            vec![]
+        },
+        text: input.text,
+        created_at: chrono::Utc::now().timestamp(),
+        is_user_message: true,
+    };
+    if base.store.begin_simulation(&resource).is_err() {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    }
+    let pipeline = Pipeline {
+        config: base.config.clone(),
+        store: base.store.clone(),
+        adapter: Arc::new(TestAdapter(message)),
+        gate: base.gate.clone(),
+        knowledge: base.knowledge.clone(),
+        llm: base.llm.clone(),
+        tools: base.tools.clone(),
+        redactor: base.redactor.clone(),
+    };
+    if pipeline.process(&resource).await.is_err() {
+        return (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({"status":"error","reason":"provider_or_source_failed"})),
+        )
+            .into_response();
+    }
+    match base.store.audit(&resource) {
+        Ok(Some(audit)) => {
+            let answer = if audit.status == "sent" {
+                audit.sent
+            } else if audit.status == "dry_run" {
+                audit.proposed
+            } else {
+                None
+            };
+            Json(json!({"status":audit.status,"reason":audit.reason,"answer":answer}))
+                .into_response()
+        }
+        _ => StatusCode::SERVICE_UNAVAILABLE.into_response(),
+    }
 }
 async fn login() -> impl IntoResponse {
     (

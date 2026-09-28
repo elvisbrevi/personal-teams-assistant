@@ -83,7 +83,9 @@ impl KnowledgeMap {
             .filter(|r| {
                 r.enabled
                     && r.external_processing
-                    && r.allowed_conversations.iter().any(|c| c == conversation)
+                    && r.allowed_conversations
+                        .iter()
+                        .any(|c| c == conversation || c == "*")
                     && (r.allowed_senders.is_empty()
                         || r.allowed_senders.iter().any(|s| s == sender))
             })
@@ -97,27 +99,7 @@ impl KnowledgeMap {
     ) -> Result<String> {
         let text = match &resource.access {
             Access::File { repository, path } => {
-                let root = std::fs::canonicalize(
-                    self.repositories
-                        .get(repository)
-                        .context("unknown repository")?,
-                )?;
-                ensure!(
-                    root.join(".git").exists(),
-                    "knowledge root must be a Git checkout"
-                );
-                let full = std::fs::canonicalize(root.join(path))?;
-                ensure!(full.starts_with(&root), "knowledge path escapes repository");
-                let ext = full.extension().and_then(|e| e.to_str()).unwrap_or("");
-                ensure!(
-                    ["md", "txt", "json", "toml", "yaml", "yml"].contains(&ext),
-                    "unsupported knowledge format"
-                );
-                ensure!(
-                    std::fs::metadata(&full)?.len() <= 1_000_000,
-                    "knowledge file too large"
-                );
-                std::fs::read_to_string(full)?
+                read_repository_file(&self.repositories, repository, path)?
             }
             Access::Url { url } => {
                 let client = public_client(url).await?;
@@ -144,6 +126,36 @@ impl KnowledgeMap {
         };
         Ok(text)
     }
+}
+pub fn read_repository_file(
+    repositories: &BTreeMap<String, PathBuf>,
+    repository: &str,
+    path: &Path,
+) -> Result<String> {
+    ensure!(
+        !path.is_absolute()
+            && path
+                .components()
+                .all(|c| matches!(c, std::path::Component::Normal(_))),
+        "invalid knowledge path"
+    );
+    let root = std::fs::canonicalize(repositories.get(repository).context("unknown repository")?)?;
+    ensure!(
+        root.join(".git").exists(),
+        "knowledge root must be a Git checkout"
+    );
+    let full = std::fs::canonicalize(root.join(path))?;
+    ensure!(full.starts_with(&root), "knowledge path escapes repository");
+    let ext = full.extension().and_then(|e| e.to_str()).unwrap_or("");
+    ensure!(
+        ["md", "txt", "json", "toml", "yaml", "yml"].contains(&ext),
+        "unsupported knowledge format"
+    );
+    ensure!(
+        std::fs::metadata(&full)?.len() <= 1_000_000,
+        "knowledge file too large"
+    );
+    Ok(std::fs::read_to_string(full)?)
 }
 /// Rank paragraphs locally; only bounded passages from one selected resource leave the process.
 pub fn excerpt(text: &str, question: &str, limit: usize) -> String {

@@ -17,6 +17,7 @@ channels = []
 
 [jev]
 model = "jev-latest"
+follow_up_threshold = 0.70
 routing_threshold = 0.92
 evidence_threshold = 0.95
 final_threshold = 0.97

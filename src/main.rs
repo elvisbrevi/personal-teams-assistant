@@ -31,7 +31,7 @@ async fn main() -> Result<()> {
     if args.first().is_some_and(|s| s == "local-info") {
         println!(
             "{}",
-            serde_json::json!({"bind":config.server.bind,"client_id":config.graph.client_id,"tenant_id":config.graph.tenant_id})
+            serde_json::json!({"bind":config.server.bind,"client_id":config.graph.client_id,"tenant_id":config.graph.tenant_id,"additional_secrets":config.secrets.values().collect::<Vec<_>>()})
         );
         return Ok(());
     }
@@ -118,6 +118,7 @@ async fn main() -> Result<()> {
     )?);
     let tools = Arc::new(Tools {
         bindings: config.secrets.clone(),
+        repositories: knowledge.repositories.clone(),
         client,
     });
     let pipeline = Arc::new(Pipeline {
@@ -134,6 +135,7 @@ async fn main() -> Result<()> {
     let worker = {
         let graph = graph.clone();
         let store = store.clone();
+        let pipeline = pipeline.clone();
         let mut stop = stop_rx.clone();
         tokio::spawn(async move {
             loop {
@@ -189,9 +191,10 @@ async fn main() -> Result<()> {
                 if *stop.borrow() {
                     break;
                 }
-                if graph.reconcile_subscriptions().await.is_err() {
+                if let Err(error) = graph.reconcile_subscriptions().await {
                     tracing::warn!(
                         event = "subscription_sync_failed",
+                        error = %error,
                         action = "check_authorization_and_permissions"
                     );
                 }
@@ -203,6 +206,7 @@ async fn main() -> Result<()> {
         graph,
         oauth,
         admin_key,
+        pipeline: Some(pipeline),
     }));
     let listener = tokio::net::TcpListener::bind(&config.server.bind).await?;
     tracing::info!(event = "started", dry_run = config.policy.dry_run);

@@ -2,7 +2,7 @@ use anyhow::{Result, ensure};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::{collections::BTreeMap, sync::Arc};
+use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
 use tokio_util::compat::TokioAsyncWriteCompatExt;
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -15,6 +15,11 @@ pub enum ToolSpec {
     AzureDevops {
         organization: String,
         project: String,
+        secret_ref: String,
+    },
+    AzureDevopsStatus {
+        repository: String,
+        path: PathBuf,
         secret_ref: String,
     },
     Rabbitmq {
@@ -56,6 +61,18 @@ impl ToolSpec {
                     "invalid ADO credential reference"
                 );
             }
+            Self::AzureDevopsStatus {
+                repository,
+                path,
+                secret_ref,
+            } => {
+                ensure!(
+                    !repository.is_empty()
+                        && secret_ref.starts_with("secret://")
+                        && path.extension().is_some_and(|ext| ext == "toml"),
+                    "invalid ADO status catalog reference"
+                );
+            }
             Self::Rabbitmq { url, secret_ref } => {
                 let u = crate::knowledge::validate_url(url)?;
                 ensure!(
@@ -87,6 +104,7 @@ impl ToolSpec {
                 SqlOperation::GetFailedIntegrations => "get_failed_integrations",
             },
             Self::AzureDevops { .. } => "get_work_item",
+            Self::AzureDevopsStatus { .. } => "get_azure_devops_status",
             Self::Rabbitmq { .. } => "get_queue_status",
             Self::Http { .. } => "http_get",
         }
@@ -98,6 +116,7 @@ pub trait ReadOnlyTool: Send + Sync {
 }
 pub struct Tools {
     pub bindings: BTreeMap<String, String>,
+    pub repositories: BTreeMap<String, PathBuf>,
     pub client: reqwest::Client,
 }
 fn lookup_id(question: &str) -> Result<String> {
@@ -187,6 +206,19 @@ impl ReadOnlyTool for Tools {
                     let v: Value = crate::adapters::bounded_json(response, 64_000).await?;
                     Ok(serde_json::to_string(&v["fields"])?)
                 }
+                ToolSpec::AzureDevopsStatus {
+                    repository,
+                    path,
+                    secret_ref,
+                } => {
+                    let catalog = crate::knowledge::read_repository_file(
+                        &self.repositories,
+                        repository,
+                        path,
+                    )?;
+                    let key = crate::security::resolve(secret_ref, &self.bindings)?;
+                    crate::ado::status(&self.client, &key, &catalog).await
+                }
                 ToolSpec::Rabbitmq { url, secret_ref } => {
                     let auth = crate::security::resolve(secret_ref, &self.bindings)?;
                     let (user, pass) = auth.split_once(':').ok_or_else(|| {
@@ -215,7 +247,12 @@ impl ReadOnlyTool for Tools {
                 }
             }
         };
-        tokio::time::timeout(std::time::Duration::from_secs(5), operation).await?
+        let seconds = if matches!(spec, ToolSpec::AzureDevopsStatus { .. }) {
+            45
+        } else {
+            5
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(seconds), operation).await?
     }
 }
 

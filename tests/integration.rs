@@ -136,8 +136,14 @@ async fn graph_jev_deepseek_end_to_end_and_final_gate() {
         let counter = calls.clone();
         Mock::given(method("POST")).and(path("/v1/systemone")).respond_with(move |_req:&wiremock::Request| {
             let n=counter.fetch_add(1,Ordering::SeqCst);
-            let (options,selected)=if n==0 {(vec!["hours","ignore","human"],"hours")}else{(vec!["allow","ignore","human"],if n==2 && !allow {"ignore"}else{"allow"})};
-            ResponseTemplate::new(200).set_body_json(json!({"model":"jev-test","answers":{"decision":support::choice(&options,selected,0.99),"safety":support::choice(&["safe","unsafe"],"safe",0.99)}}))
+            let answers = if n == 0 {
+                json!({"decision":support::choice(&["hours","ignore"],"hours",0.99),"safety":{"type":"noul","noul":0.99}})
+            } else if n == 1 {
+                json!({"relevant":{"type":"noul","noul":0.99},"qualified":{"type":"noul","noul":0.99},"safe":{"type":"noul","noul":0.99}})
+            } else {
+                json!({"supported":{"type":"noul","noul":if allow {0.99} else {0.01}},"no_new_promise":{"type":"noul","noul":0.99},"privacy":{"type":"noul","noul":0.99},"relevant":{"type":"noul","noul":0.99}})
+            };
+            ResponseTemplate::new(200).set_body_json(json!({"model":"jev-test","answers":answers}))
         }).expect(3).mount(&server).await;
         Mock::given(method("POST")).and(path("/chat/completions")).respond_with(ResponseTemplate::new(200).set_body_json(json!({"id":"gen1","object":"chat.completion","created":1,"model":"deepseek-test","choices":[{"index":0,"message":{"role":"assistant","content":"El soporte atiende de lunes a viernes de 09:00 a 18:00."},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":10,"total_tokens":20,"prompt_cache_hit_tokens":0,"prompt_cache_miss_tokens":10}}))).expect(1).mount(&server).await;
         Mock::given(method("POST"))
@@ -188,6 +194,60 @@ async fn graph_jev_deepseek_end_to_end_and_final_gate() {
             assert!(!body.contains("test-access-token"));
         }
     }
+}
+#[tokio::test]
+async fn jev_follow_up_uses_yes_probability_and_checks_fail_closed() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/systemone"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "answers":{"continuation":{"type":"noul","noul":0.03}}
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let gate = Jev {
+        client: reqwest::Client::new(),
+        endpoint: format!("{}/v1/systemone", server.uri()),
+        api_key: "test-key".into(),
+        model: "jev-test".into(),
+    };
+    let verdict = gate
+        .evaluate(
+            Stage::FollowUp,
+            json!({"current":"otra pregunta","previous_question":"estado","previous_answer":"respuesta"}),
+            BTreeMap::new(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(verdict.selected, "new_topic");
+    assert!(verdict.allows(0.9));
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/systemone"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "answers":{"relevant":{"type":"noul","noul":0.99},"qualified":{"type":"noul","noul":0.99},"safe":{"type":"noul","noul":0.12}}
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let gate = Jev {
+        client: reqwest::Client::new(),
+        endpoint: format!("{}/v1/systemone", server.uri()),
+        api_key: "test-key".into(),
+        model: "jev-test".into(),
+    };
+    let verdict = gate
+        .evaluate(
+            Stage::Evidence,
+            json!({"question":"status","evidence":"sample"}),
+            BTreeMap::new(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(verdict.selected, "ignore");
+    assert!(!verdict.allows(0.7));
 }
 #[tokio::test]
 async fn send_error_is_not_retried() {
@@ -250,6 +310,7 @@ async fn webhook_validates_source_tenant_subscription_and_resource() {
         graph: graph.clone(),
         oauth,
         admin_key: "test-admin".into(),
+        pipeline: None,
     }));
     let response = app
         .clone()
@@ -302,6 +363,89 @@ async fn webhook_validates_source_tenant_subscription_and_resource() {
     }
     assert!(store.next_job().unwrap().is_some());
     assert!(store.next_job().unwrap().is_none());
+}
+#[tokio::test]
+async fn simulation_requires_admin_key_and_never_sends_to_graph() {
+    let server = MockServer::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let store = support::store(&dir);
+    let graph = support::graph(&server, store.clone());
+    let pipeline = Arc::new(Pipeline {
+        config: graph.config.clone(),
+        store: store.clone(),
+        adapter: graph.clone(),
+        gate: Arc::new(NoGate),
+        knowledge: knowledge(&dir),
+        llm: Arc::new(NoLlm),
+        tools: Arc::new(NoTools),
+        redactor: redactor(),
+    });
+    let vault = Vault::new(&base64::engine::general_purpose::STANDARD.encode([3; 32])).unwrap();
+    let oauth = Arc::new(
+        OAuth::new(
+            graph.config.clone(),
+            reqwest::Client::new(),
+            "secret".into(),
+            store,
+            vault,
+        )
+        .unwrap(),
+    );
+    let app = webhook::router(Arc::new(WebState {
+        graph,
+        oauth,
+        admin_key: "test-admin".into(),
+        pipeline: Some(pipeline),
+    }));
+    let body = json!({"session":"same-chat","text":"hola"}).to_string();
+    let unauthorized = app
+        .clone()
+        .oneshot(
+            Request::post("/test/chat")
+                .header("content-type", "application/json")
+                .body(Body::from(body.clone()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+    let ignored_group = app
+        .clone()
+        .oneshot(
+            Request::post("/test/chat")
+                .header("content-type", "application/json")
+                .header("authorization", "Bearer test-admin")
+                .body(Body::from(
+                    json!({"session":"group-test","text":"hola","group":true,"mentioned":false})
+                        .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let ignored_bytes = axum::body::to_bytes(ignored_group.into_body(), 4000)
+        .await
+        .unwrap();
+    let ignored: serde_json::Value = serde_json::from_slice(&ignored_bytes).unwrap();
+    assert_eq!(ignored["status"], "ignored");
+    assert!(ignored["answer"].is_null());
+    let response = app
+        .oneshot(
+            Request::post("/test/chat")
+                .header("content-type", "application/json")
+                .header("authorization", "Bearer test-admin")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(response.into_body(), 4000)
+        .await
+        .unwrap();
+    let result: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(result["answer"], "¡Hola!");
+    assert!(server.received_requests().await.unwrap().is_empty());
 }
 #[test]
 fn map_requires_conversation_authorization_and_no_path_escape() {
@@ -402,6 +546,7 @@ async fn all_chats_use_one_subscription_and_accept_chat_notifications() {
         graph: graph.clone(),
         oauth,
         admin_key: "test-admin".into(),
+        pipeline: None,
     }));
     let body = json!({"value":[{"subscriptionId":"all","clientState":graph.client_state,"tenantId":graph.config.graph.tenant_id,"resource":"chats('chat2')/messages('123')","changeType":"created"}]}).to_string();
     let response = app
@@ -527,6 +672,7 @@ async fn oauth_form_allows_microsoft_redirect_and_sets_secure_cookie() {
         graph,
         oauth,
         admin_key: "test-admin".into(),
+        pipeline: None,
     }));
     let page = app
         .clone()

@@ -44,9 +44,14 @@ pub struct Channel {
 #[serde(deny_unknown_fields)]
 pub struct Jev {
     pub model: String,
+    #[serde(default = "default_follow_up_threshold")]
+    pub follow_up_threshold: f64,
     pub routing_threshold: f64,
     pub evidence_threshold: f64,
     pub final_threshold: f64,
+}
+fn default_follow_up_threshold() -> f64 {
+    0.7
 }
 #[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -106,6 +111,7 @@ impl Config {
             "public_url must be an HTTPS origin"
         );
         for t in [
+            self.jev.follow_up_threshold,
             self.jev.routing_threshold,
             self.jev.evidence_threshold,
             self.jev.final_threshold,

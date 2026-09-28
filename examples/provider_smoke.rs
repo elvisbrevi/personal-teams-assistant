@@ -50,7 +50,13 @@ async fn main() -> Result<()> {
         "Español breve, una frase.",
         "https://api.deepseek.com",
     )?;
-    let answer = llm.generate(GenerationInput { question, evidence }).await?;
+    let answer = llm
+        .generate(GenerationInput {
+            question,
+            evidence,
+            detail_requested: false,
+        })
+        .await?;
     ensure!(!answer.is_empty(), "empty generation");
     println!(
         "Rig/DeepSeek: generated {} characters",
