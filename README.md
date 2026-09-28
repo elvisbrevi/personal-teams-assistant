@@ -74,7 +74,7 @@ En grupos y canales se verifican IDs de menciones de Graph, nunca el texto `@nom
 ## Alcance implementado
 
 - Chats directos y menciones en grupos; canales explícitos como adaptación adicional.
-- OAuth con refresh tokens cifrados, renovación de suscripciones, lifecycle notifications y cola persistente.
+- OAuth con refresh tokens cifrados, renovación de suscripciones, lifecycle notifications y cola persistente. `discover_all_chats = true` usa una sola suscripción Graph a los mensajes de todos los chats del usuario.
 - Mapa de fuentes, múltiples checkouts Git privados, Markdown/TXT/JSON/TOML/YAML y páginas HTTPS aprobadas.
 - Routing, evidence gate y final gate de Jev usando su API real `Choice`, validando confianza, opciones y distribución.
 - `LlmProvider` independiente y DeepSeek mediante Rig. Nuevos proveedores se implementan en `llm`; el pipeline depende solo del trait. Otros proveedores aún no se seleccionan en configuración.

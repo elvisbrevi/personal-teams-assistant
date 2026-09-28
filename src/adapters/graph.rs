@@ -22,6 +22,9 @@ pub struct Graph {
     pub client_state: String,
 }
 impl Graph {
+    pub fn user_messages_resource(&self) -> String {
+        format!("users/{}/chats/getAllMessages", self.config.graph.user_id)
+    }
     fn url(&self, path: &str) -> Result<url::Url> {
         ensure!(
             !path.starts_with('/') && !path.contains("://"),
@@ -41,11 +44,13 @@ impl Graph {
         Ok(url)
     }
     pub fn allowed_collection(&self, resource: &str) -> bool {
-        self.config
-            .graph
-            .allowed_chats
-            .iter()
-            .any(|c| resource == format!("chats/{c}/messages"))
+        (self.config.graph.discover_all_chats && resource == self.user_messages_resource())
+            || self
+                .config
+                .graph
+                .allowed_chats
+                .iter()
+                .any(|c| resource == format!("chats/{c}/messages"))
             || (self.config.graph.discover_all_chats && resource.starts_with("chats/"))
             || self.config.graph.channels.iter().any(|c| {
                 resource == format!("teams/{}/channels/{}/messages", c.team_id, c.channel_id)
@@ -145,16 +150,16 @@ impl Graph {
         Ok(chats)
     }
     pub async fn reconcile_subscriptions(&self) -> Result<()> {
-        let mut chats = self.config.graph.allowed_chats.clone();
-        if self.config.graph.discover_all_chats {
-            chats.extend(self.list_chats().await?);
-        }
-        chats.sort();
-        chats.dedup();
-        let mut desired: Vec<_> = chats
-            .into_iter()
-            .map(|c| format!("chats/{c}/messages"))
-            .collect();
+        let mut desired: Vec<_> = if self.config.graph.discover_all_chats {
+            vec![self.user_messages_resource()]
+        } else {
+            self.config
+                .graph
+                .allowed_chats
+                .iter()
+                .map(|c| format!("chats/{c}/messages"))
+                .collect()
+        };
         desired.extend(
             self.config
                 .graph
@@ -216,7 +221,9 @@ impl Graph {
         }
         let mut failed = false;
         for resource in desired {
-            teams::canonical_resource(&format!("{resource}/0"))?;
+            if resource != self.user_messages_resource() {
+                teams::canonical_resource(&format!("{resource}/0"))?;
+            }
             let expires = chrono::Utc::now() + chrono::Duration::minutes(50);
             let existing = subscriptions.iter().find(|s| s.resource == resource);
             if existing.is_some_and(|s| s.expires_at > chrono::Utc::now().timestamp() + 600) {
@@ -284,11 +291,22 @@ impl Graph {
             self.allowed_collection(collection),
             "recovery collection denied"
         );
-        let page = self.request(Method::GET, collection, None, true).await?;
-        for message in page["value"].as_array().context("invalid message page")? {
-            let id = message["id"].as_str().context("message ID missing")?;
-            let resource = teams::canonical_resource(&format!("{collection}/{id}"))?;
-            self.store.enqueue(&resource)?;
+        let collections = if collection == self.user_messages_resource() {
+            self.list_chats()
+                .await?
+                .into_iter()
+                .map(|id| format!("chats/{id}/messages"))
+                .collect()
+        } else {
+            vec![collection.to_owned()]
+        };
+        for collection in collections {
+            let page = self.request(Method::GET, &collection, None, true).await?;
+            for message in page["value"].as_array().context("invalid message page")? {
+                let id = message["id"].as_str().context("message ID missing")?;
+                let resource = teams::canonical_resource(&format!("{collection}/{id}"))?;
+                self.store.enqueue(&resource)?;
+            }
         }
         Ok(())
     }

@@ -9,6 +9,7 @@ use base64::Engine;
 use personal_teams_assistant::{
     adapters::{
         MessageAdapter,
+        graph::Graph,
         oauth::OAuth,
         webhook::{self, WebState},
     },
@@ -353,6 +354,67 @@ async fn graph_refreshes_and_renews_subscriptions() {
     assert_eq!(store.subscriptions().unwrap().len(), 1);
     store.expire_subscription("sub1").unwrap();
     graph.reconcile_subscriptions().await.unwrap();
+}
+#[tokio::test]
+async fn all_chats_use_one_subscription_and_accept_chat_notifications() {
+    let server = MockServer::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let store = support::store(&dir);
+    let mut cfg = support::config();
+    cfg.graph.discover_all_chats = true;
+    let graph = Arc::new(Graph {
+        client: reqwest::Client::new(),
+        token: Arc::new(support::Token),
+        base_url: server.uri(),
+        config: Arc::new(cfg),
+        store: store.clone(),
+        client_state: "test-webhook-shared-secret-32-chars".into(),
+    });
+    Mock::given(method("GET"))
+        .and(path("/subscriptions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"value":[]})))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/subscriptions"))
+        .and(body_partial_json(json!({"resource":graph.user_messages_resource()})))
+        .respond_with(ResponseTemplate::new(201).set_body_json(json!({"id":"all","expirationDateTime":(chrono::Utc::now()+chrono::Duration::minutes(50)).to_rfc3339()})))
+        .expect(1)
+        .mount(&server)
+        .await;
+    graph.reconcile_subscriptions().await.unwrap();
+    assert_eq!(store.subscriptions().unwrap().len(), 1);
+    let vault = Vault::new(&base64::engine::general_purpose::STANDARD.encode([1; 32])).unwrap();
+    let oauth = Arc::new(
+        OAuth::new(
+            graph.config.clone(),
+            reqwest::Client::new(),
+            "secret".into(),
+            store.clone(),
+            vault,
+        )
+        .unwrap(),
+    );
+    let app = webhook::router(Arc::new(WebState {
+        graph: graph.clone(),
+        oauth,
+        admin_key: "test-admin".into(),
+    }));
+    let body = json!({"value":[{"subscriptionId":"all","clientState":graph.client_state,"tenantId":graph.config.graph.tenant_id,"resource":"chats('chat2')/messages('123')","changeType":"created"}]}).to_string();
+    let response = app
+        .oneshot(
+            Request::post("/graph/notifications")
+                .header("content-type", "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    assert_eq!(
+        store.next_job().unwrap().unwrap().resource,
+        "chats/chat2/messages/123"
+    );
 }
 #[tokio::test]
 async fn graph_fetch_rejects_unapproved_destination() {

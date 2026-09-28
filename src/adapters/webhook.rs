@@ -191,7 +191,11 @@ async fn receive(
                 Some(Ok(s)) => s,
                 _ => return StatusCode::BAD_REQUEST.into_response(),
             };
-            if teams::collection(&resource).ok().as_deref() != Some(&sub.resource) {
+            let collection = teams::collection(&resource).unwrap();
+            if collection != sub.resource
+                && !(sub.resource == state.graph.user_messages_resource()
+                    && collection.starts_with("chats/"))
+            {
                 return StatusCode::FORBIDDEN.into_response();
             }
         }
