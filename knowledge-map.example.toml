@@ -13,7 +13,7 @@ allowed_conversations = []
 allowed_senders = []
 kind = "file"
 repository = "personal"
-path = "assistant.md"
+path = "temas/asistente/operacion.md"
 
 # A website must be an exact HTTPS URL. Redirects, private IPs and credentials are blocked.
 # [[resources]]

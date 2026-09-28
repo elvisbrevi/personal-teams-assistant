@@ -312,7 +312,7 @@ fn map_requires_conversation_authorization_and_no_path_escape() {
     let text = include_str!("../knowledge-map.example.toml");
     assert!(KnowledgeMap::parse(text).is_ok());
     assert!(
-        KnowledgeMap::parse(&text.replace("path = \"assistant.md\"", "path = \"../escape.md\""))
+        KnowledgeMap::parse(&text.replace("path = \"temas/asistente/operacion.md\"", "path = \"../escape.md\""))
             .is_err()
     );
 }
