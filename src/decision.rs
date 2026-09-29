@@ -142,7 +142,7 @@ impl Jev {
             Stage::Final => BTreeMap::from([
                 (
                     "supported",
-                    "Is every factual assertion in the proposed answer directly supported by the evidence? Explicitly qualified missing facts count as supported; do not infer commitments from target dates.",
+                    "Does the answer faithfully summarize the relevant evidence? Treat concise paraphrases of commit messages and pipeline results as supported even when the wording differs. A statement that code was actually deployed or a defect resolved needs separate proof, and broader interpretations must be marked as such. Qualified missing facts are supported; do not infer commitments from target dates or manual actions from automatic pipeline runs.",
                 ),
                 (
                     "no_new_promise",

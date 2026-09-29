@@ -20,18 +20,18 @@ model = "jev-latest"
 follow_up_threshold = 0.70
 routing_threshold = 0.92
 evidence_threshold = 0.95
-final_threshold = 0.97
+final_threshold = 0.70
 
 [llm]
 provider = "deepseek"
 model = "deepseek-v4-flash"
-style = "Español natural y breve. Una o dos frases. Sin promesas ni opiniones personales."
+style = "Español natural y claro. Resume por proyecto y explica lo que sugieren los cambios técnicos. Sin promesas ni opiniones personales."
 
 [policy]
 dry_run = true
 greeting = "¡Hola!"
-max_context_chars = 6000
-max_answer_chars = 1000
+max_context_chars = 16000
+max_answer_chars = 1800
 max_message_age_seconds = 300
 allowed_senders = []
 sensitive_patterns = []

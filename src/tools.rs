@@ -217,7 +217,7 @@ impl ReadOnlyTool for Tools {
                         path,
                     )?;
                     let key = crate::security::resolve(secret_ref, &self.bindings)?;
-                    crate::ado::status(&self.client, &key, &catalog).await
+                    crate::ado::status(&self.client, &key, &catalog, question).await
                 }
                 ToolSpec::Rabbitmq { url, secret_ref } => {
                     let auth = crate::security::resolve(secret_ref, &self.bindings)?;
@@ -248,7 +248,7 @@ impl ReadOnlyTool for Tools {
             }
         };
         let seconds = if matches!(spec, ToolSpec::AzureDevopsStatus { .. }) {
-            45
+            90
         } else {
             5
         };

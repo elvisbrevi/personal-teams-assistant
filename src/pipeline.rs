@@ -142,11 +142,19 @@ impl Pipeline {
                         .await?
                 }
             };
-            let evidence = crate::knowledge::excerpt(
-                &self.redactor.redact(&raw),
-                &question,
-                self.config.policy.max_context_chars,
-            );
+            let sanitized = self.redactor.redact(&raw);
+            let evidence = if source.id == "azure-devops-status" {
+                sanitized
+                    .chars()
+                    .take(self.config.policy.max_context_chars)
+                    .collect()
+            } else {
+                crate::knowledge::excerpt(
+                    &sanitized,
+                    &question,
+                    self.config.policy.max_context_chars,
+                )
+            };
             audit.status = "ignored".into();
             if evidence.trim().is_empty() {
                 audit.reason = "empty_evidence".into();

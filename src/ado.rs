@@ -12,14 +12,12 @@ use url::Url;
 struct Catalog {
     sources: Vec<Source>,
 }
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Source {
     organization: String,
     projects: Vec<String>,
     author_email: String,
-    in_progress_states: Vec<String>,
-    recently_done_states: Vec<String>,
 }
 impl Catalog {
     fn parse(text: &str) -> Result<Self> {
@@ -45,20 +43,22 @@ impl Catalog {
                 "ADO organization must be a dev.azure.com organization URL"
             );
             ensure!(
-                source.author_email.len() <= 254 && source.author_email.contains('@'),
+                source.author_email.len() <= 254
+                    && source.author_email.contains('@')
+                    && source
+                        .author_email
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || ".@_+-".contains(c)),
                 "invalid ADO author email"
             );
             ensure!(
-                !source.projects.is_empty() && source.projects.len() <= 10,
+                !source.projects.is_empty()
+                    && source.projects.len() <= 10
+                    && (source.projects.len() == 1 || !source.projects.iter().any(|p| p == "*")),
                 "invalid ADO projects"
             );
             total += source.projects.len();
-            for value in source
-                .projects
-                .iter()
-                .chain(&source.in_progress_states)
-                .chain(&source.recently_done_states)
-            {
+            for value in &source.projects {
                 ensure!(
                     !value.trim().is_empty()
                         && value.len() <= 120
@@ -66,10 +66,6 @@ impl Catalog {
                     "invalid ADO catalog value"
                 );
             }
-            ensure!(
-                !source.in_progress_states.is_empty() && !source.recently_done_states.is_empty(),
-                "ADO states required"
-            );
         }
         ensure!(total <= 10, "too many ADO projects");
         Ok(catalog)
@@ -144,6 +140,28 @@ async fn wiql(
         .filter_map(|v| v["id"].as_u64())
         .collect())
 }
+async fn projects(client: &Client, key: &str, source: &Source) -> Result<Vec<String>> {
+    if source.projects != ["*"] {
+        return Ok(source.projects.clone());
+    }
+    let mut names = Vec::new();
+    for skip in (0..1000).step_by(100) {
+        let mut url = organization_url(source, &["_apis", "projects"])?;
+        url.query_pairs_mut()
+            .append_pair("$top", "100")
+            .append_pair("$skip", &skip.to_string());
+        let value = request(client, key, Method::GET, url, None).await?;
+        let page = value["value"].as_array().context("invalid ADO projects")?;
+        names.extend(
+            page.iter()
+                .filter_map(|p| p["name"].as_str().map(str::to_owned)),
+        );
+        if page.len() < 100 {
+            return Ok(names);
+        }
+    }
+    anyhow::bail!("ADO organization has more than 1000 projects; project coverage incomplete")
+}
 async fn work_items(
     client: &Client,
     key: &str,
@@ -196,20 +214,6 @@ fn relation_ids(item: &Value, relation: &str) -> Vec<u64> {
         .filter_map(|r| r["url"].as_str()?.rsplit('/').next()?.parse().ok())
         .collect()
 }
-fn linked_repositories(item: &Value) -> BTreeSet<String> {
-    let re = regex::Regex::new(
-        r"(?i)^vstfs:///Git/(?:PullRequestId|Commit)/[0-9a-f-]{36}%2f([0-9a-f-]{36})",
-    )
-    .unwrap();
-    item["relations"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter(|r| r["rel"] == "ArtifactLink")
-        .filter_map(|r| re.captures(r["url"].as_str()?))
-        .map(|c| c[1].to_ascii_lowercase())
-        .collect()
-}
 fn recent(item: &Value, since: chrono::DateTime<Utc>) -> bool {
     chrono::DateTime::parse_from_rfc3339(field(item, "System.ChangedDate"))
         .is_ok_and(|d| d.with_timezone(&Utc) >= since)
@@ -224,284 +228,403 @@ fn label(item: &Value) -> String {
     )
 }
 
-pub async fn status(client: &Client, key: &str, catalog_text: &str) -> Result<String> {
-    let catalog = Catalog::parse(catalog_text)?;
-    let since = Utc::now() - Duration::days(14);
-    let mut output = format!(
-        "Fuente Azure DevOps consultada {}. Ventana de actividad reciente: últimos 14 días. Las fechas objetivo no son promesas personales; ausencia de bloqueo no demuestra que no exista.\n\n",
-        Utc::now().to_rfc3339()
+fn same_user(identity: &Value, email: &str) -> bool {
+    identity["uniqueName"]
+        .as_str()
+        .or_else(|| identity["mailAddress"].as_str())
+        .is_some_and(|name| name.eq_ignore_ascii_case(email))
+}
+
+fn recent_window(question: &str) -> i64 {
+    let q = question.to_lowercase();
+    if q.contains("esta semana") || q.contains("última semana") || q.contains("ultima semana") {
+        7
+    } else {
+        14
+    }
+}
+
+async fn work_item_activity(
+    client: &Client,
+    key: &str,
+    source: &Source,
+    project: &str,
+    since: chrono::DateTime<Utc>,
+) -> Result<(String, usize, bool)> {
+    let email = &source.author_email;
+    let active_query = format!(
+        "SELECT [System.Id] FROM WorkItems WHERE [System.TeamProject] = @project AND [System.AssignedTo] = '{email}' AND [System.State] <> 'Done' AND [System.State] <> 'Removido' ORDER BY [System.ChangedDate] DESC"
     );
-    for source in &catalog.sources {
-        for project in &source.projects {
-            let active_query = "SELECT [System.Id] FROM WorkItems WHERE [System.TeamProject] = @project AND [System.AssignedTo] = @Me AND [System.State] <> 'Done' AND [System.State] <> 'Removido' ORDER BY [System.ChangedDate] DESC";
-            let recent_query = "SELECT [System.Id] FROM WorkItems WHERE [System.TeamProject] = @project AND [System.ChangedBy] = @Me AND [System.ChangedDate] >= @Today - 14 ORDER BY [System.ChangedDate] DESC";
-            let (active, recent_ids) = tokio::try_join!(
-                wiql(client, key, source, project, active_query),
-                wiql(client, key, source, project, recent_query)
-            )?;
-            let ids: BTreeSet<_> = active.into_iter().chain(recent_ids).take(80).collect();
-            let mut items = work_items(client, key, source, project, &ids).await?;
-            let parent_ids: BTreeSet<_> = items
-                .iter()
-                .flat_map(|v| relation_ids(v, "System.LinkTypes.Hierarchy-Reverse"))
-                .take(40)
-                .collect();
-            let missing_parents: BTreeSet<_> = parent_ids
-                .into_iter()
-                .filter(|id| !ids.contains(id))
-                .collect();
-            items.extend(work_items(client, key, source, project, &missing_parents).await?);
-            let mut selected: Vec<_> = items
-                .iter()
-                .filter(|v| {
-                    field(v, "System.WorkItemType") == "Product Backlog Item"
-                        && (source
-                            .in_progress_states
-                            .iter()
-                            .any(|s| s.eq_ignore_ascii_case(field(v, "System.State")))
-                            || (source
-                                .recently_done_states
-                                .iter()
-                                .any(|s| s.eq_ignore_ascii_case(field(v, "System.State")))
-                                && recent(v, since)))
-                        && (belongs_to_user(v, &source.author_email)
-                            || items.iter().any(|t| {
-                                relation_ids(t, "System.LinkTypes.Hierarchy-Reverse")
-                                    .contains(&v["id"].as_u64().unwrap_or(0))
-                                    && belongs_to_user(t, &source.author_email)
-                            }))
-                })
-                .collect();
-            selected.sort_by(|a, b| {
-                let active = |item: &&Value| {
-                    source
-                        .in_progress_states
-                        .iter()
-                        .any(|s| s.eq_ignore_ascii_case(field(item, "System.State")))
-                };
-                active(b).cmp(&active(a)).then_with(|| {
-                    field(b, "System.ChangedDate").cmp(field(a, "System.ChangedDate"))
-                })
-            });
-            selected.truncate(8);
+    let recent_query = format!(
+        "SELECT [System.Id] FROM WorkItems WHERE [System.TeamProject] = @project AND [System.ChangedBy] = '{email}' AND [System.ChangedDate] >= '{}' ORDER BY [System.ChangedDate] DESC",
+        since.format("%Y-%m-%d")
+    );
+    let (active, recent_ids) = tokio::try_join!(
+        wiql(client, key, source, project, &active_query),
+        wiql(client, key, source, project, &recent_query)
+    )?;
+    let ids: BTreeSet<_> = recent_ids.into_iter().chain(active).take(80).collect();
+    let mut items = work_items(client, key, source, project, &ids).await?;
+    let parent_ids: BTreeSet<_> = items
+        .iter()
+        .flat_map(|v| relation_ids(v, "System.LinkTypes.Hierarchy-Reverse"))
+        .take(40)
+        .collect();
+    let missing_parents: BTreeSet<_> = parent_ids
+        .into_iter()
+        .filter(|id| !ids.contains(id))
+        .collect();
+    items.extend(work_items(client, key, source, project, &missing_parents).await?);
+    let by_id: BTreeMap<u64, &Value> = items
+        .iter()
+        .filter_map(|v| Some((v["id"].as_u64()?, v)))
+        .collect();
+    let mut selected: Vec<_> = items
+        .iter()
+        .filter(|item| recent(item, since) && belongs_to_user(item, email))
+        .collect();
+    selected.sort_by(|a, b| field(b, "System.ChangedDate").cmp(field(a, "System.ChangedDate")));
+    selected.truncate(8);
+    let mut output = String::new();
+    let mut blocked = false;
+    for item in &selected {
+        output.push_str(&format!(
+            "Work item {} {} (última modificación registrada {}). ",
+            field(item, "System.WorkItemType"),
+            label(item),
+            field(item, "System.ChangedDate")
+        ));
+        if let Some(parent) = relation_ids(item, "System.LinkTypes.Hierarchy-Reverse")
+            .first()
+            .and_then(|id| by_id.get(id))
+        {
+            output.push_str(&format!("Contexto padre: {}. ", label(parent)));
+        }
+        let due = field(item, "Microsoft.VSTS.Scheduling.TargetDate");
+        if !due.is_empty() {
             output.push_str(&format!(
-                "Proyecto: {} / {}\n",
-                source.organization.trim_end_matches('/'),
-                project
+                "Fecha objetivo registrada: {due}; no es compromiso personal. "
             ));
-            let in_progress = selected
-                .iter()
-                .filter(|hu| {
-                    source
-                        .in_progress_states
-                        .iter()
-                        .any(|s| s.eq_ignore_ascii_case(field(hu, "System.State")))
-                })
-                .count();
-            if in_progress == 0 {
-                output.push_str("No se encontraron HUs en desarrollo vinculadas al usuario en el alcance consultado de este proyecto; puede existir trabajo fuera de ese alcance.\n");
-            } else {
-                output.push_str(&format!("HUs en desarrollo vinculadas al usuario en el alcance consultado de este proyecto: {in_progress}.\n"));
-            }
-            if selected.is_empty() {
-                output.push_str("No se encontraron HUs en desarrollo o desarrollo terminado reciente vinculadas de forma verificable al usuario.\n\n");
+        }
+        let tags = field(item, "System.Tags");
+        if tags.to_lowercase().contains("bloque") || tags.to_lowercase().contains("imped") {
+            blocked = true;
+            output.push_str(&format!(
+                "Impedimento etiquetado: {}. ",
+                tags.chars().take(100).collect::<String>()
+            ));
+        }
+        output.push('\n');
+    }
+    Ok((output, selected.len(), blocked))
+}
+
+async fn repository_activity(
+    client: &Client,
+    key: &str,
+    source: &Source,
+    project: &str,
+    since: chrono::DateTime<Utc>,
+) -> Result<(String, usize, BTreeSet<(String, String)>, bool)> {
+    let url = project_url(
+        source,
+        project,
+        "dev.azure.com",
+        &["_apis", "git", "repositories"],
+    )?;
+    let value = request(client, key, Method::GET, url, None).await?;
+    let repos = value["value"]
+        .as_array()
+        .context("invalid ADO repositories")?;
+    let mut output = String::new();
+    let mut count = 0;
+    let mut commit_ids = BTreeSet::new();
+    let mut incomplete = false;
+    for repo in repos {
+        if repo["isDisabled"].as_bool() == Some(true) {
+            continue;
+        }
+        let (Some(id), Some(name)) = (repo["id"].as_str(), repo["name"].as_str()) else {
+            continue;
+        };
+        let mut url = project_url(
+            source,
+            project,
+            "dev.azure.com",
+            &["_apis", "git", "repositories", id, "commits"],
+        )?;
+        url.query_pairs_mut()
+            .append_pair("searchCriteria.author", &source.author_email)
+            .append_pair("searchCriteria.fromDate", &since.to_rfc3339())
+            .append_pair("searchCriteria.$top", "10");
+        let commits = match request(client, key, Method::GET, url, None).await {
+            Ok(commits) => commits,
+            Err(_) => {
+                incomplete = true;
                 continue;
             }
-            let child_ids: BTreeSet<_> = selected
-                .iter()
-                .flat_map(|hu| relation_ids(hu, "System.LinkTypes.Hierarchy-Forward"))
+        };
+        for commit in commits["value"]
+            .as_array()
+            .context("invalid ADO commits")?
+            .iter()
+            .take(5)
+        {
+            if !commit["author"]["email"]
+                .as_str()
+                .is_some_and(|e| e.eq_ignore_ascii_case(&source.author_email))
+            {
+                continue;
+            }
+            let Some(sha) = commit["commitId"].as_str() else {
+                continue;
+            };
+            commit_ids.insert((id.to_ascii_lowercase(), sha.to_ascii_lowercase()));
+            count += 1;
+            output.push_str(&format!(
+                "Commit personal en {name}: {} ({}): {}.\n",
+                sha.chars().take(8).collect::<String>(),
+                commit["author"]["date"]
+                    .as_str()
+                    .unwrap_or("fecha no disponible"),
+                commit["comment"]
+                    .as_str()
+                    .unwrap_or("sin mensaje")
+                    .lines()
+                    .next()
+                    .unwrap_or("")
+                    .chars()
+                    .take(160)
+                    .collect::<String>()
+            ));
+        }
+    }
+    Ok((output, count, commit_ids, incomplete))
+}
+
+async fn pipeline_activity(
+    client: &Client,
+    key: &str,
+    source: &Source,
+    project: &str,
+    since: chrono::DateTime<Utc>,
+    commit_ids: &BTreeSet<(String, String)>,
+) -> Result<(String, usize)> {
+    let mut url = project_url(
+        source,
+        project,
+        "dev.azure.com",
+        &["_apis", "build", "builds"],
+    )?;
+    url.query_pairs_mut()
+        .append_pair("minTime", &since.to_rfc3339())
+        .append_pair("queryOrder", "queueTimeDescending")
+        .append_pair("$top", "100");
+    let value = request(client, key, Method::GET, url, None).await?;
+    let mut output = String::new();
+    let mut count = 0;
+    let mut build_ids = BTreeSet::new();
+    for build in value["value"].as_array().context("invalid ADO builds")? {
+        let repo = build["repository"]["id"]
+            .as_str()
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        let sha = build["sourceVersion"]
+            .as_str()
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        let personal_commit = commit_ids.contains(&(repo, sha));
+        let requested_by = same_user(&build["requestedBy"], &source.author_email);
+        let requested_for = same_user(&build["requestedFor"], &source.author_email);
+        if !personal_commit && !requested_by && !requested_for {
+            continue;
+        }
+        let Some(id) = build["id"].as_u64() else {
+            continue;
+        };
+        count += 1;
+        build_ids.insert(id);
+        let relationship = if requested_by {
+            "iniciado por el usuario"
+        } else if requested_for {
+            "ejecutado a nombre del usuario"
+        } else {
+            "asociado a commit personal"
+        };
+        output.push_str(&format!(
+            "Pipeline {} (build #{id}, {relationship}): resultado {}, fecha {}.\n",
+            build["definition"]["name"]
+                .as_str()
+                .unwrap_or("sin nombre")
+                .chars()
                 .take(100)
-                .collect();
-            let children = work_items(client, key, source, project, &child_ids).await?;
-            let by_id: BTreeMap<u64, &Value> = items
-                .iter()
-                .chain(children.iter())
-                .filter_map(|v| Some((v["id"].as_u64()?, v)))
-                .collect();
-            let mut linked_repos = BTreeSet::new();
-            for hu in &selected {
-                linked_repos.extend(linked_repositories(hu));
-                output.push_str(&format!(
-                    "HU {}. Cambiada: {}.\n",
-                    label(hu),
-                    field(hu, "System.ChangedDate")
-                ));
-                let due = field(hu, "Microsoft.VSTS.Scheduling.TargetDate");
-                if !due.is_empty() {
-                    output.push_str(&format!("Fecha objetivo registrada: {due}. No implica compromiso personal confirmado.\n"));
-                }
-                let tags = field(hu, "System.Tags");
-                if tags.to_lowercase().contains("bloque") || tags.to_lowercase().contains("imped") {
-                    output.push_str(&format!(
-                        "Etiqueta de impedimento explícita: {}.\n",
-                        tags.chars().take(160).collect::<String>()
-                    ));
-                } else {
-                    output.push_str("No hay impedimento explícito en campos revisados; estado de impedimentos desconocido.\n");
-                }
-                let mut tasks: Vec<_> = relation_ids(hu, "System.LinkTypes.Hierarchy-Forward")
+                .collect::<String>(),
+            build["result"]
+                .as_str()
+                .or_else(|| build["status"].as_str())
+                .unwrap_or("desconocido"),
+            build["finishTime"]
+                .as_str()
+                .or_else(|| build["queueTime"].as_str())
+                .unwrap_or("fecha no disponible")
+        ));
+        if count <= 5 {
+            let timeline_url = project_url(
+                source,
+                project,
+                "dev.azure.com",
+                &["_apis", "build", "builds", &id.to_string(), "timeline"],
+            )?;
+            if let Ok(timeline) = request(client, key, Method::GET, timeline_url, None).await {
+                for stage in timeline["records"]
+                    .as_array()
                     .into_iter()
-                    .filter_map(|id| by_id.get(&id).copied())
-                    .filter(|task| belongs_to_user(task, &source.author_email))
-                    .collect();
-                tasks.sort_by_key(|task| {
-                    let state = field(task, "System.State");
-                    if state.eq_ignore_ascii_case("En Desarrollo") {
-                        0
-                    } else if state.eq_ignore_ascii_case("Desarrollo Terminado") {
-                        1
-                    } else if state.eq_ignore_ascii_case("Done") {
-                        3
-                    } else if state.eq_ignore_ascii_case("Removido") {
-                        4
-                    } else {
-                        2
-                    }
-                });
-                if tasks.is_empty() {
-                    output.push_str(
-                        "Sin tareas personales relacionadas en el conjunto reciente consultado.\n",
-                    );
-                } else {
-                    for task in tasks.into_iter().take(8) {
-                        output.push_str(&format!("Tarea relacionada: {}.\n", label(task)));
-                    }
-                }
-                if !linked_repositories(hu).is_empty() {
-                    output.push_str("La HU tiene enlace a un repositorio mediante PR/commit.\n");
-                }
-                output.push('\n');
-            }
-            if !linked_repos.is_empty() {
-                let from = since.to_rfc3339();
-                for repo in linked_repos.iter().take(3) {
-                    let metadata_url =
-                        organization_url(source, &["_apis", "git", "repositories", repo])?;
-                    let metadata = match request(client, key, Method::GET, metadata_url, None).await
-                    {
-                        Ok(v) => v,
-                        Err(_) => {
-                            output.push_str(
-                                "No se pudo verificar el repositorio enlazado a la HU.\n",
-                            );
-                            continue;
-                        }
-                    };
-                    let Some(repo_project) = metadata["project"]["name"]
-                        .as_str()
-                        .filter(|p| !p.is_empty())
-                    else {
-                        output
-                            .push_str("El proyecto del repositorio enlazado no está disponible.\n");
-                        continue;
-                    };
-                    let mut commit_ids = BTreeSet::new();
-                    let mut url = project_url(
-                        source,
-                        repo_project,
-                        "dev.azure.com",
-                        &["_apis", "git", "repositories", repo, "commits"],
-                    )?;
-                    url.query_pairs_mut()
-                        .append_pair("searchCriteria.author", &source.author_email)
-                        .append_pair("searchCriteria.fromDate", &from)
-                        .append_pair("searchCriteria.$top", "10");
-                    let commits = match request(client, key, Method::GET, url, None).await {
-                        Ok(v) => v,
-                        Err(_) => {
-                            output.push_str("No se pudo verificar actividad de commits del repositorio enlazado.\n");
-                            continue;
-                        }
-                    };
-                    for commit in commits["value"].as_array().into_iter().flatten().take(5) {
-                        if let Some(id) = commit["commitId"].as_str() {
-                            commit_ids.insert(id.to_ascii_lowercase());
-                        }
-                        output.push_str(&format!("Commit reciente del usuario en repositorio enlazado a HU: {} — {}. La relación exacta con la HU requiere enlace explícito.\n",commit["commitId"].as_str().unwrap_or("").chars().take(8).collect::<String>(),commit["comment"].as_str().unwrap_or("").chars().take(100).collect::<String>()));
-                    }
-                    let mut builds_url = project_url(
-                        source,
-                        repo_project,
-                        "dev.azure.com",
-                        &["_apis", "build", "builds"],
-                    )?;
-                    builds_url
-                        .query_pairs_mut()
-                        .append_pair("minTime", &from)
-                        .append_pair("$top", "50");
-                    let builds = match request(client, key, Method::GET, builds_url, None).await {
-                        Ok(v) => v,
-                        Err(_) => {
-                            output.push_str("No se pudo verificar ejecuciones de pipelines.\n");
-                            continue;
-                        }
-                    };
-                    let mut relevant_builds = BTreeSet::new();
-                    for build in builds["value"].as_array().into_iter().flatten() {
-                        let build_repo = build["repository"]["id"].as_str().unwrap_or("");
-                        let commit = build["sourceVersion"]
+                    .flatten()
+                    .filter(|record| record["type"].as_str() == Some("Stage"))
+                    .take(10)
+                {
+                    output.push_str(&format!(
+                        "Etapa {}: {}.\n",
+                        stage["name"]
                             .as_str()
-                            .unwrap_or("")
-                            .to_ascii_lowercase();
-                        if build_repo.eq_ignore_ascii_case(repo) && commit_ids.contains(&commit) {
-                            if let Some(id) = build["id"].as_u64() {
-                                relevant_builds.insert(id);
-                            }
-                            output.push_str(&format!("Pipeline de commit del usuario: build #{} — resultado {}, finalizado {}. La ejecución no demuestra por sí sola que hubo pruebas.\n",build["id"],build["result"].as_str().unwrap_or("desconocido"),build["finishTime"].as_str().unwrap_or("fecha desconocida")));
-                        }
-                    }
-                    if !relevant_builds.is_empty() {
-                        let mut releases_url = project_url(
-                            source,
-                            repo_project,
-                            "vsrm.dev.azure.com",
-                            &["_apis", "release", "releases"],
-                        )?;
-                        releases_url
-                            .query_pairs_mut()
-                            .append_pair("minCreatedTime", &from)
-                            .append_pair("$top", "50");
-                        let releases =
-                            match request(client, key, Method::GET, releases_url, None).await {
-                                Ok(v) => v,
-                                Err(_) => {
-                                    output.push_str("No se pudo verificar releases clásicos.\n");
-                                    continue;
-                                }
-                            };
-                        for release in releases["value"].as_array().into_iter().flatten() {
-                            let linked =
-                                release["artifacts"]
-                                    .as_array()
-                                    .into_iter()
-                                    .flatten()
-                                    .any(|a| {
-                                        a["definitionReference"]["version"]["id"]
-                                            .as_str()
-                                            .and_then(|id| id.parse::<u64>().ok())
-                                            .is_some_and(|id| relevant_builds.contains(&id))
-                                    });
-                            if linked {
-                                output.push_str(&format!(
-                                    "Release asociado al build: {} — estado {}.\n",
-                                    release["name"]
-                                        .as_str()
-                                        .unwrap_or("sin nombre")
-                                        .chars()
-                                        .take(80)
-                                        .collect::<String>(),
-                                    release["status"].as_str().unwrap_or("desconocido")
-                                ));
-                            }
-                        }
-                    }
+                            .unwrap_or("sin nombre")
+                            .chars()
+                            .take(80)
+                            .collect::<String>(),
+                        stage["result"]
+                            .as_str()
+                            .or_else(|| stage["state"].as_str())
+                            .unwrap_or("desconocida")
+                    ));
                 }
-            }
-            output.push_str("Compromisos personales vigentes (qué y para cuándo): no hay un compromiso personal explícito verificable en los campos consultados; requiere confirmación personal. La fecha objetivo de una HU no equivale a un compromiso personal. Riesgo de incumplimiento: no hay evaluación explícita verificable; requiere confirmación personal.\n\n");
-            if output.len() > 18_000 {
-                break;
             }
         }
+        if count >= 10 {
+            break;
+        }
+    }
+    if !build_ids.is_empty() {
+        let mut releases_url = project_url(
+            source,
+            project,
+            "vsrm.dev.azure.com",
+            &["_apis", "release", "releases"],
+        )?;
+        releases_url
+            .query_pairs_mut()
+            .append_pair("minCreatedTime", &since.to_rfc3339())
+            .append_pair("$top", "50");
+        if let Ok(releases) = request(client, key, Method::GET, releases_url, None).await {
+            for release in releases["value"].as_array().into_iter().flatten() {
+                let linked = release["artifacts"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .any(|a| {
+                        a["definitionReference"]["version"]["id"]
+                            .as_str()
+                            .and_then(|v| v.parse::<u64>().ok())
+                            .is_some_and(|id| build_ids.contains(&id))
+                    });
+                if linked {
+                    output.push_str(&format!(
+                        "Release {} asociado a build personal: estado {}.\n",
+                        release["name"]
+                            .as_str()
+                            .unwrap_or("sin nombre")
+                            .chars()
+                            .take(80)
+                            .collect::<String>(),
+                        release["status"].as_str().unwrap_or("desconocido")
+                    ));
+                }
+            }
+        }
+    }
+    Ok((output, count))
+}
+
+pub async fn status(
+    client: &Client,
+    key: &str,
+    catalog_text: &str,
+    question: &str,
+) -> Result<String> {
+    let catalog = Catalog::parse(catalog_text)?;
+    let days = recent_window(question);
+    let since = Utc::now() - Duration::days(days);
+    let mut sections = Vec::new();
+    let mut blocked = false;
+    let mut partial_projects = 0;
+    let mut jobs = tokio::task::JoinSet::new();
+    for source in &catalog.sources {
+        for project in projects(client, key, source).await? {
+            let client = client.clone();
+            let key = key.to_owned();
+            let source = source.clone();
+            jobs.spawn(async move {
+                let (items, commits) = tokio::join!(
+                    work_item_activity(&client, &key, &source, &project, since),
+                    repository_activity(&client, &key, &source, &project, since)
+                );
+                let incomplete = items.is_err() || commits.is_err();
+                let (items, item_count, item_blocked) = items.unwrap_or_default();
+                let (commits, commit_count, commit_ids, repo_incomplete) =
+                    commits.unwrap_or_default();
+                let pipelines =
+                    pipeline_activity(&client, &key, &source, &project, since, &commit_ids).await;
+                let incomplete = incomplete || repo_incomplete || pipelines.is_err();
+                let (pipelines, pipeline_count) = pipelines.unwrap_or_default();
+                let score = item_count + commit_count + pipeline_count;
+                (
+                    project,
+                    score,
+                    format!("{commits}{pipelines}{items}"),
+                    item_blocked,
+                    incomplete,
+                )
+            });
+            if jobs.len() >= 8 {
+                let (project, score, content, item_blocked, incomplete) =
+                    jobs.join_next()
+                        .await
+                        .context("ADO project worker missing")??;
+                if score > 0 {
+                    sections.push((score, format!("Proyecto: {project}.\n{content}")));
+                }
+                blocked |= item_blocked;
+                partial_projects += usize::from(incomplete);
+            }
+        }
+    }
+    while let Some(result) = jobs.join_next().await {
+        let (project, score, content, item_blocked, incomplete) = result?;
+        if score > 0 {
+            sections.push((score, format!("Proyecto: {project}.\n{content}")));
+        }
+        blocked |= item_blocked;
+        partial_projects += usize::from(incomplete);
+    }
+    sections.sort_by(|a, b| b.0.cmp(&a.0));
+    let mut output = format!(
+        "Actividad de Azure DevOps desde {} (últimos {days} días).\n",
+        since.format("%Y-%m-%d")
+    );
+    if sections.is_empty() {
+        output.push_str(
+            "No se pudo verificar actividad personal reciente en los proyectos consultados.\n",
+        );
+    } else {
+        for (_, section) in sections {
+            output.push_str(&section);
+            output.push('\n');
+        }
+    }
+    if question.to_lowercase().contains("imped") && !blocked {
+        output.push_str("Impedimentos: no se encontró un bloqueo explícito en la actividad recuperada; el estado real requiere confirmación personal.\n");
+    }
+    if partial_projects > 0 {
+        output.push_str(&format!("Cobertura parcial: falló al menos una consulta en {partial_projects} proyecto(s); no inferir ausencia de actividad en ellos.\n"));
     }
     Ok(output.chars().take(18_000).collect())
 }
@@ -511,17 +634,33 @@ mod tests {
     use super::*;
     #[test]
     fn catalog_validates_org_and_allows_more_projects() {
-        let valid = "[[sources]]\norganization='https://dev.azure.com/example/'\nprojects=['A','B']\nauthor_email='x@example.com'\nin_progress_states=['En Desarrollo']\nrecently_done_states=['Desarrollo Terminado']\n";
+        let valid = "[[sources]]\norganization='https://dev.azure.com/example/'\nprojects=['A','B']\nauthor_email='x@example.com'\n";
         assert!(Catalog::parse(valid).is_ok());
         assert!(Catalog::parse(&valid.replace("dev.azure.com", "evil.example")).is_err());
     }
     #[test]
-    fn hierarchy_and_repository_links_are_extracted() {
-        let item = json!({"relations":[{"rel":"System.LinkTypes.Hierarchy-Reverse","url":"https://dev.azure.com/x/_apis/wit/workItems/42"},{"rel":"ArtifactLink","url":"vstfs:///Git/PullRequestId/11111111-1111-1111-1111-111111111111%2F22222222-2222-2222-2222-222222222222%2F3"}]});
+    fn hierarchy_and_personal_build_identity_are_extracted() {
+        let item = json!({"relations":[{"rel":"System.LinkTypes.Hierarchy-Reverse","url":"https://dev.azure.com/x/_apis/wit/workItems/42"}]});
         assert_eq!(
             relation_ids(&item, "System.LinkTypes.Hierarchy-Reverse"),
             vec![42]
         );
-        assert!(linked_repositories(&item).contains("22222222-2222-2222-2222-222222222222"));
+        assert!(same_user(
+            &json!({"uniqueName":"ELVIS@example.com"}),
+            "elvis@example.com"
+        ));
+        assert!(!same_user(
+            &json!({"uniqueName":"someone@example.com"}),
+            "elvis@example.com"
+        ));
+    }
+    #[test]
+    fn weekly_question_and_wildcard_project_scope() {
+        assert_eq!(recent_window("¿Qué hice esta semana?"), 7);
+        assert_eq!(recent_window("¿Qué hice la última semana?"), 7);
+        assert_eq!(recent_window("Estado de mis proyectos"), 14);
+        let catalog = "[[sources]]\norganization='https://dev.azure.com/example/'\nprojects=['*']\nauthor_email='x@example.com'\n";
+        assert!(Catalog::parse(catalog).is_ok());
+        assert!(Catalog::parse(&catalog.replace("['*']", "['*','A']")).is_err());
     }
 }
