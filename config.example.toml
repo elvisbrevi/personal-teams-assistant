@@ -19,8 +19,8 @@ channels = []
 model = "jev-latest"
 follow_up_threshold = 0.70
 routing_threshold = 0.92
-evidence_threshold = 0.95
-final_threshold = 0.70
+evidence_threshold = 0.65
+final_threshold = 0.65
 
 [llm]
 provider = "deepseek"
@@ -31,7 +31,7 @@ style = "Español natural y claro. Resume por proyecto y explica lo que sugieren
 dry_run = true
 greeting = "¡Hola!"
 max_context_chars = 16000
-max_answer_chars = 1800
+max_answer_chars = 3000
 max_message_age_seconds = 300
 allowed_senders = []
 sensitive_patterns = []

@@ -120,6 +120,8 @@ async fn main() -> Result<()> {
         bindings: config.secrets.clone(),
         repositories: knowledge.repositories.clone(),
         client,
+        store: store.clone(),
+        graph: graph.clone(),
     });
     let pipeline = Arc::new(Pipeline {
         config: config.clone(),

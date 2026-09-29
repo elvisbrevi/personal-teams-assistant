@@ -13,6 +13,7 @@ use reqwest::Method;
 use serde_json::{Value, json};
 use std::sync::Arc;
 
+#[derive(Clone)]
 pub struct Graph {
     pub client: reqwest::Client,
     pub token: Arc<dyn AccessToken>,
@@ -22,6 +23,237 @@ pub struct Graph {
     pub client_state: String,
 }
 impl Graph {
+    pub async fn recent_project_context(
+        &self,
+        projects: &[String],
+        conversation: &str,
+        since: chrono::DateTime<chrono::Utc>,
+    ) -> Result<String> {
+        let broad = conversation.starts_with("chats/simulation-");
+        if projects.is_empty() && !broad {
+            return Ok(String::new());
+        }
+        let chats = if broad {
+            let mut url = self.url("me/chats")?;
+            url.query_pairs_mut()
+                .append_pair("$expand", "lastMessagePreview")
+                .append_pair("$orderby", "lastMessagePreview/createdDateTime desc")
+                .append_pair("$top", "50");
+            let page = self.request_url(Method::GET, url, None, true).await?;
+            page["value"]
+                .as_array()
+                .context("invalid Graph chats")?
+                .iter()
+                .filter(|c| matches!(c["chatType"].as_str(), Some("oneOnOne" | "group")))
+                .filter(|c| {
+                    c["lastUpdatedDateTime"].as_str().is_some_and(|date| {
+                        chrono::DateTime::parse_from_rfc3339(date)
+                            .is_ok_and(|d| d.with_timezone(&chrono::Utc) >= since)
+                    })
+                })
+                .take(30)
+                .cloned()
+                .collect::<Vec<_>>()
+        } else if conversation.starts_with("chats/")
+            && self.allowed_collection(&format!("{conversation}/messages"))
+        {
+            vec![json!({"id":conversation.trim_start_matches("chats/"),"topic":""})]
+        } else {
+            Vec::new()
+        };
+        let terms: Vec<String> = projects
+            .iter()
+            .flat_map(|p| {
+                p.to_lowercase()
+                    .split(|c: char| !c.is_alphanumeric())
+                    .filter(|w| {
+                        w.len() >= 3
+                            && !["de", "del", "para", "sistema", "proyecto", "red"].contains(w)
+                    })
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        let mut jobs = tokio::task::JoinSet::new();
+        let limit = Arc::new(tokio::sync::Semaphore::new(6));
+        for chat in chats {
+            let Some(id) = chat["id"].as_str() else {
+                continue;
+            };
+            let collection = format!("chats/{id}/messages");
+            if !self.allowed_collection(&collection) {
+                continue;
+            }
+            let graph = self.clone();
+            let terms = terms.clone();
+            let limit = limit.clone();
+            jobs.spawn(async move {
+                let _permit = limit.acquire().await?;
+                let mut url = graph.url(&collection)?;
+                url.query_pairs_mut()
+                    .append_pair("$top", "50")
+                    .append_pair("$orderby", "lastModifiedDateTime desc")
+                    .append_pair(
+                        "$filter",
+                        &format!("lastModifiedDateTime gt {}", since.to_rfc3339()),
+                    );
+                let page = match graph.request_url(Method::GET, url, None, true).await {
+                    Ok(page) => page,
+                    Err(_) => graph.request(Method::GET, &collection, None, true).await?,
+                };
+                let messages = page["value"]
+                    .as_array()
+                    .context("invalid Graph chat messages")?;
+                let mut found = Vec::new();
+                let topic = chat["topic"].as_str().unwrap_or("");
+                let topic_matches = terms.iter().any(|term| topic.to_lowercase().contains(term));
+                for message in messages.iter().rev() {
+                    if message["messageType"].as_str() != Some("message")
+                        || !message["deletedDateTime"].is_null()
+                    {
+                        continue;
+                    }
+                    let Some(date) = message["createdDateTime"].as_str() else {
+                        continue;
+                    };
+                    if !chrono::DateTime::parse_from_rfc3339(date)
+                        .is_ok_and(|d| d.with_timezone(&chrono::Utc) >= since)
+                    {
+                        continue;
+                    }
+                    let raw = message["body"]["content"].as_str().unwrap_or("");
+                    let body = if message["body"]["contentType"].as_str() == Some("html") {
+                        teams::plain_text(raw)
+                    } else {
+                        raw.into()
+                    };
+                    if body.trim().is_empty() {
+                        continue;
+                    }
+                    let sender = message["from"]["user"]["displayName"]
+                        .as_str()
+                        .unwrap_or("Participante");
+                    let mine = message["from"]["user"]["id"].as_str()
+                        == Some(graph.config.graph.user_id.as_str());
+                    found.push((body, format!("{date} {sender}: "), mine));
+                }
+                let project_matches = topic_matches
+                    || found.iter().any(|(body, _, _)| {
+                        terms.iter().any(|term| body.to_lowercase().contains(term))
+                    });
+                let work_terms = [
+                    "desplieg",
+                    "producc",
+                    "stage",
+                    "pipeline",
+                    "reuni",
+                    "coordina",
+                    "gestion",
+                    "gestión",
+                    "incidente",
+                    "revis",
+                    "pase a prod",
+                    "bug",
+                ];
+                let own_work: Vec<usize> = found
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, (body, _, mine))| {
+                        (*mine
+                            && work_terms
+                                .iter()
+                                .any(|term| body.to_lowercase().contains(term)))
+                        .then_some(i)
+                    })
+                    .collect();
+                if !project_matches && own_work.is_empty() {
+                    return Ok::<_, anyhow::Error>((0u8, String::new()));
+                }
+                let mut out = format!(
+                    "{}: {}.\n",
+                    if project_matches {
+                        "Chat de proyecto relevante"
+                    } else {
+                        "Gestión de trabajo en Teams"
+                    },
+                    topic.chars().take(100).collect::<String>()
+                );
+                let matching: Vec<usize> = found
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, (body, _, mine))| {
+                        let lower = body.to_lowercase();
+                        (terms.iter().any(|term| lower.contains(term))
+                            || (topic_matches
+                                && work_terms.iter().any(|term| lower.contains(term)))
+                            || (*mine && work_terms.iter().any(|term| lower.contains(term))))
+                        .then_some(i)
+                    })
+                    .collect();
+                let deployment_chat = found.iter().any(|(body, _, _)| {
+                    let lower = body.to_lowercase();
+                    lower.contains("prod") || lower.contains("stage") || lower.contains("pase a")
+                });
+                let start = found.len().saturating_sub(20);
+                let mut selected: Vec<_> = found
+                    .into_iter()
+                    .enumerate()
+                    .filter(|(i, _)| {
+                        *i >= start && matching.iter().any(|hit| i.abs_diff(*hit) <= 1)
+                    })
+                    .map(|(_, message)| message)
+                    .collect();
+                if selected.is_empty() {
+                    return Ok((0u8, String::new()));
+                }
+                let schedule = selected
+                    .iter()
+                    .find(|(body, _, _)| {
+                        let lower = body.to_lowercase();
+                        lower.contains("fecha estimada") || lower.contains("hora:")
+                    })
+                    .cloned();
+                if selected.len() > 6 {
+                    selected.drain(..selected.len() - 6);
+                }
+                if let Some(schedule) = schedule
+                    && !selected.iter().any(|m| m.1 == schedule.1)
+                {
+                    selected.insert(0, schedule);
+                }
+                for (body, header, _) in selected {
+                    out.push_str(&format!(
+                        "{}{}\n",
+                        header,
+                        body.chars().take(400).collect::<String>()
+                    ));
+                }
+                Ok((
+                    if deployment_chat {
+                        4
+                    } else if topic_matches {
+                        3
+                    } else if project_matches {
+                        2
+                    } else {
+                        1
+                    },
+                    out.chars().take(2300).collect(),
+                ))
+            });
+        }
+        let mut sections = Vec::new();
+        while let Some(result) = jobs.join_next().await {
+            if let Ok(Ok((priority, section))) = result {
+                if !section.is_empty() {
+                    sections.push((priority, section));
+                }
+            }
+        }
+        sections.sort_by(|a, b| b.0.cmp(&a.0));
+        let output: String = sections.into_iter().map(|(_, section)| section).collect();
+        Ok(output.chars().take(3000).collect())
+    }
     pub fn user_messages_resource(&self) -> String {
         format!("users/{}/chats/getAllMessages", self.config.graph.user_id)
     }

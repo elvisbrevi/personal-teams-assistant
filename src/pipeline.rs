@@ -130,6 +130,7 @@ impl Pipeline {
                     ScopedTool {
                         executor: self.tools.clone(),
                         spec: tool.clone(),
+                        conversation: message.conversation.clone(),
                     }
                     .call(ToolArgs {
                         question: question.clone(),

@@ -38,7 +38,7 @@ use wiremock::{
 struct NoTools;
 #[async_trait]
 impl ReadOnlyTool for NoTools {
-    async fn execute(&self, _: &ToolSpec, _: &str) -> Result<String> {
+    async fn execute(&self, _: &ToolSpec, _: &str, _: &str) -> Result<String> {
         panic!("unexpected tool invocation")
     }
 }

@@ -5,9 +5,11 @@ use personal_teams_assistant::{
     decision::{DecisionGate, Jev, Stage},
     llm::{DeepSeek, GenerationInput, LlmProvider},
     security::Redactor,
+    state::Store,
 };
 use serde_json::json;
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -20,15 +22,18 @@ async fn main() -> Result<()> {
     let question = std::env::args()
         .nth(1)
         .unwrap_or_else(|| "¿Qué hice esta semana y qué impedimentos tengo?".into());
-    let evidence = ado::status(&client, &key, &catalog, &question).await?;
+    let dir = tempfile::tempdir()?;
+    let store = Arc::new(Store::open(&dir.path().join("activity.db"))?);
+    let evidence = ado::status(&client, &key, &catalog, &question, store).await?;
     println!(
-        "Azure DevOps read succeeded: {} characters, {} active projects, {} work items, {} commits, {} pipelines, {} stages, {} releases; RPF included: {}; partial coverage: {}",
+        "Azure DevOps read succeeded: {} characters, {} active projects, {} work items, {} commits, {} pipelines, {} stages, {} release definitions, {} releases; RPF included: {}; partial coverage: {}",
         evidence.chars().count(),
         evidence.matches("Proyecto: ").count(),
         evidence.matches("Work item ").count(),
         evidence.matches("Commit personal").count(),
         evidence.matches("Pipeline ").count(),
         evidence.matches("Etapa ").count(),
+        evidence.matches("Definición de release ").count(),
         evidence.matches("Release ").count(),
         evidence.contains("Proyecto: Sistema de Red Pronostico Fitosanitario (RPF)"),
         evidence.contains("Cobertura parcial")
@@ -39,10 +44,11 @@ async fn main() -> Result<()> {
         .and_then(|rest| rest.split("\nProyecto:").next())
     {
         println!(
-            "RPF: {} work items, {} commits, {} pipelines",
+            "RPF: {} work items, {} commits, {} pipelines, PROD stage definition present: {}",
             rpf.matches("Work item ").count(),
             rpf.matches("Commit personal").count(),
-            rpf.matches("Pipeline ").count()
+            rpf.matches("Pipeline ").count(),
+            rpf.contains("Portal ET0 RPF CD - PROD")
         );
     }
     if std::env::var_os("ADO_SMOKE_GENERATE").is_some() {

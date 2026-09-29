@@ -1,3 +1,4 @@
+use crate::{adapters::graph::Graph, state::Store};
 use anyhow::{Result, ensure};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -112,12 +113,14 @@ impl ToolSpec {
 }
 #[async_trait]
 pub trait ReadOnlyTool: Send + Sync {
-    async fn execute(&self, spec: &ToolSpec, question: &str) -> Result<String>;
+    async fn execute(&self, spec: &ToolSpec, question: &str, conversation: &str) -> Result<String>;
 }
 pub struct Tools {
     pub bindings: BTreeMap<String, String>,
     pub repositories: BTreeMap<String, PathBuf>,
     pub client: reqwest::Client,
+    pub store: Arc<Store>,
+    pub graph: Arc<Graph>,
 }
 fn lookup_id(question: &str) -> Result<String> {
     // Deliberately explicit: the question must contain exactly one `id: ABC-123`.
@@ -131,7 +134,7 @@ fn lookup_id(question: &str) -> Result<String> {
 }
 #[async_trait]
 impl ReadOnlyTool for Tools {
-    async fn execute(&self, spec: &ToolSpec, question: &str) -> Result<String> {
+    async fn execute(&self, spec: &ToolSpec, question: &str, conversation: &str) -> Result<String> {
         spec.validate()?;
         let operation = async {
             match spec {
@@ -217,7 +220,35 @@ impl ReadOnlyTool for Tools {
                         path,
                     )?;
                     let key = crate::security::resolve(secret_ref, &self.bindings)?;
-                    crate::ado::status(&self.client, &key, &catalog, question).await
+                    let mut evidence = crate::ado::status(
+                        &self.client,
+                        &key,
+                        &catalog,
+                        question,
+                        self.store.clone(),
+                    )
+                    .await?;
+                    let projects: Vec<String> = evidence
+                        .lines()
+                        .filter_map(|line| {
+                            line.strip_prefix("Proyecto: ")?
+                                .strip_suffix('.')
+                                .map(str::to_owned)
+                        })
+                        .collect();
+                    let since = chrono::Utc::now()
+                        - chrono::Duration::days(crate::ado::recent_window(question));
+                    if let Ok(context) = self
+                        .graph
+                        .recent_project_context(&projects, conversation, since)
+                        .await
+                    {
+                        if !context.is_empty() {
+                            evidence.push_str("\nConversaciones recientes de Teams relacionadas con esos proyectos (contexto, no prueba de ejecución por sí solas):\n");
+                            evidence.push_str(&context);
+                        }
+                    }
+                    Ok(evidence)
                 }
                 ToolSpec::Rabbitmq { url, secret_ref } => {
                     let auth = crate::security::resolve(secret_ref, &self.bindings)?;
@@ -248,7 +279,7 @@ impl ReadOnlyTool for Tools {
             }
         };
         let seconds = if matches!(spec, ToolSpec::AzureDevopsStatus { .. }) {
-            90
+            180
         } else {
             5
         };
@@ -261,6 +292,7 @@ impl ReadOnlyTool for Tools {
 pub struct ScopedTool {
     pub executor: Arc<dyn ReadOnlyTool>,
     pub spec: ToolSpec,
+    pub conversation: String,
 }
 #[derive(Deserialize)]
 pub struct ToolArgs {
@@ -288,7 +320,7 @@ impl rig::tool::Tool for ScopedTool {
     }
     async fn call(&self, args: ToolArgs) -> std::result::Result<String, ToolError> {
         self.executor
-            .execute(&self.spec, &args.question)
+            .execute(&self.spec, &args.question, &self.conversation)
             .await
             .map_err(|_| ToolError)
     }

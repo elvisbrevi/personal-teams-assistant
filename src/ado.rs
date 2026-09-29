@@ -1,11 +1,40 @@
 //! Bounded, read-only evidence from Azure DevOps. The catalog lives in the private knowledge repo.
+use crate::state::Store;
 use anyhow::{Context, Result, ensure};
 use chrono::{Duration, Utc};
 use reqwest::{Client, Method};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 use url::Url;
+
+const COLD_REPO_SECONDS: i64 = 6 * 3600;
+const ACTIVE_REPO_SECONDS: i64 = 5 * 60;
+
+#[derive(Clone)]
+struct CommitRef {
+    repo_id: String,
+    sha: String,
+    date: String,
+    message: String,
+}
+
+async fn cached_read(
+    store: &Store,
+    cache_key: &str,
+    ttl: i64,
+    read: impl std::future::Future<Output = Result<Value>>,
+) -> Result<Value> {
+    if let Some((value, updated_at)) = store.activity_cache(cache_key)?
+        && Utc::now().timestamp() - updated_at < ttl
+    {
+        return Ok(serde_json::from_str(&value)?);
+    }
+    let value = read.await?;
+    store.save_activity_cache(cache_key, &serde_json::to_string(&value)?)?;
+    Ok(value)
+}
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -235,13 +264,277 @@ fn same_user(identity: &Value, email: &str) -> bool {
         .is_some_and(|name| name.eq_ignore_ascii_case(email))
 }
 
-fn recent_window(question: &str) -> i64 {
+pub(crate) fn recent_window(question: &str) -> i64 {
     let q = question.to_lowercase();
     if q.contains("esta semana") || q.contains("última semana") || q.contains("ultima semana") {
         7
     } else {
         14
     }
+}
+
+fn changed_excerpt(before: &str, after: &str) -> String {
+    let old: Vec<&str> = before.lines().collect();
+    let new: Vec<&str> = after.lines().collect();
+    let mut start = 0;
+    while start < old.len() && start < new.len() && old[start] == new[start] {
+        start += 1;
+    }
+    let mut old_end = old.len();
+    let mut new_end = new.len();
+    while old_end > start && new_end > start && old[old_end - 1] == new[new_end - 1] {
+        old_end -= 1;
+        new_end -= 1;
+    }
+    let old_part = old[start..old_end]
+        .iter()
+        .take(12)
+        .copied()
+        .collect::<Vec<_>>()
+        .join("\n");
+    let new_part = new[start..new_end]
+        .iter()
+        .take(12)
+        .copied()
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(
+        "Antes (desde línea {}): {}. Después: {}",
+        start + 1,
+        old_part.chars().take(600).collect::<String>(),
+        new_part.chars().take(900).collect::<String>()
+    )
+}
+
+fn bounded_lines(text: &str, limit: usize) -> String {
+    let mut out = String::new();
+    for line in text.lines() {
+        if out.chars().count() + line.chars().count() + 1 > limit {
+            break;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
+}
+
+async fn file_content(
+    client: &Client,
+    key: &str,
+    source: &Source,
+    project: &str,
+    repo: &str,
+    path: &str,
+    sha: &str,
+) -> Result<String> {
+    let mut url = project_url(
+        source,
+        project,
+        "dev.azure.com",
+        &["_apis", "git", "repositories", repo, "items"],
+    )?;
+    url.query_pairs_mut()
+        .append_pair("path", path)
+        .append_pair("versionDescriptor.version", sha)
+        .append_pair("versionDescriptor.versionType", "commit")
+        .append_pair("includeContent", "true")
+        .append_pair("$format", "json");
+    let item = request(client, key, Method::GET, url, None).await?;
+    Ok(item["content"]
+        .as_str()
+        .unwrap_or("")
+        .chars()
+        .take(100_000)
+        .collect())
+}
+
+async fn commit_detail(
+    client: &Client,
+    key: &str,
+    source: &Source,
+    project: &str,
+    commit: &CommitRef,
+) -> Result<String> {
+    let segments = [
+        "_apis",
+        "git",
+        "repositories",
+        commit.repo_id.as_str(),
+        "commits",
+        commit.sha.as_str(),
+    ];
+    let detail = request(
+        client,
+        key,
+        Method::GET,
+        project_url(source, project, "dev.azure.com", &segments)?,
+        None,
+    )
+    .await?;
+    let parent = detail["parents"]
+        .as_array()
+        .and_then(|a| a.first())
+        .and_then(Value::as_str);
+    let mut changes_url = project_url(
+        source,
+        project,
+        "dev.azure.com",
+        &[
+            "_apis",
+            "git",
+            "repositories",
+            &commit.repo_id,
+            "commits",
+            &commit.sha,
+            "changes",
+        ],
+    )?;
+    changes_url.query_pairs_mut().append_pair("top", "100");
+    let changes = request(client, key, Method::GET, changes_url, None).await?;
+    let mut output = format!(
+        "Detalle del commit {} ({}): {}. ",
+        &commit.sha[..commit.sha.len().min(8)],
+        commit.date,
+        commit.message.chars().take(220).collect::<String>()
+    );
+    let mut files = 0;
+    let mut changed: Vec<_> = changes["changes"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .collect();
+    changed.sort_by_key(|c| {
+        let p = c["item"]["path"]
+            .as_str()
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        if p.contains("pipeline")
+            || p.contains("stage")
+            || p.ends_with(".yml")
+            || p.ends_with(".yaml")
+        {
+            0
+        } else {
+            1
+        }
+    });
+    for change in changed {
+        let path = change["item"]["path"].as_str().unwrap_or("");
+        let lower = path.to_ascii_lowercase();
+        if path.is_empty()
+            || change["item"]["gitObjectType"].as_str() != Some("blob")
+            || [
+                ".env",
+                "secret",
+                "credential",
+                "private",
+                ".pem",
+                ".key",
+                "password",
+            ]
+            .iter()
+            .any(|x| lower.contains(x))
+        {
+            continue;
+        }
+        let kind = change["changeType"].as_str().unwrap_or("cambio");
+        output.push_str(&format!(
+            "Archivo {}: {}. ",
+            path.chars().take(160).collect::<String>(),
+            kind
+        ));
+        if matches!(kind, "edit" | "add" | "rename") {
+            if let Ok(after) = file_content(
+                client,
+                key,
+                source,
+                project,
+                &commit.repo_id,
+                path,
+                &commit.sha,
+            )
+            .await
+            {
+                if !after.is_empty() {
+                    let before = if let Some(parent) = parent {
+                        let old_path = change["originalPath"].as_str().unwrap_or(path);
+                        file_content(
+                            client,
+                            key,
+                            source,
+                            project,
+                            &commit.repo_id,
+                            old_path,
+                            parent,
+                        )
+                        .await
+                        .unwrap_or_default()
+                    } else {
+                        String::new()
+                    };
+                    output.push_str(&format!(
+                        "Cambio de contenido: {}. ",
+                        changed_excerpt(&before, &after)
+                    ));
+                }
+            }
+        }
+        files += 1;
+        if files >= 3 {
+            break;
+        }
+    }
+    if let Some(pr_id) = commit
+        .message
+        .strip_prefix("Merged PR ")
+        .and_then(|s| s.split(':').next())
+        .and_then(|s| s.trim().parse::<u64>().ok())
+    {
+        let mut url = project_url(
+            source,
+            project,
+            "dev.azure.com",
+            &[
+                "_apis",
+                "git",
+                "repositories",
+                &commit.repo_id,
+                "pullrequests",
+                &pr_id.to_string(),
+            ],
+        )?;
+        url.query_pairs_mut()
+            .append_pair("includeWorkItemRefs", "true");
+        if let Ok(pr) = request(client, key, Method::GET, url, None).await {
+            output.push_str(&format!(
+                "PR #{pr_id}: {} (estado {}). ",
+                pr["title"]
+                    .as_str()
+                    .unwrap_or("")
+                    .chars()
+                    .take(160)
+                    .collect::<String>(),
+                pr["status"].as_str().unwrap_or("desconocido")
+            ));
+            let ids: BTreeSet<u64> = pr["workItemRefs"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|w| w["id"].as_str()?.parse().ok())
+                .take(5)
+                .collect();
+            if let Ok(items) = work_items(client, key, source, project, &ids).await {
+                for item in items {
+                    output.push_str(&format!(
+                        "Work item relacionado {} {}. ",
+                        field(&item, "System.WorkItemType"),
+                        label(&item)
+                    ));
+                }
+            }
+        }
+    }
+    Ok(output.chars().take(1200).collect())
 }
 
 async fn work_item_activity(
@@ -325,20 +618,35 @@ async fn repository_activity(
     source: &Source,
     project: &str,
     since: chrono::DateTime<Utc>,
-) -> Result<(String, usize, BTreeSet<(String, String)>, bool)> {
+    store: &Store,
+) -> Result<(
+    String,
+    usize,
+    BTreeSet<(String, String)>,
+    Vec<CommitRef>,
+    bool,
+)> {
     let url = project_url(
         source,
         project,
         "dev.azure.com",
         &["_apis", "git", "repositories"],
     )?;
-    let value = request(client, key, Method::GET, url, None).await?;
+    let scope = format!("{}|{}|{project}", source.organization, source.author_email);
+    let value = cached_read(
+        store,
+        &format!("ado-repos|{scope}"),
+        COLD_REPO_SECONDS,
+        request(client, key, Method::GET, url, None),
+    )
+    .await?;
     let repos = value["value"]
         .as_array()
         .context("invalid ADO repositories")?;
     let mut output = String::new();
     let mut count = 0;
     let mut commit_ids = BTreeSet::new();
+    let mut commit_refs = Vec::new();
     let mut incomplete = false;
     for repo in repos {
         if repo["isDisabled"].as_bool() == Some(true) {
@@ -355,9 +663,32 @@ async fn repository_activity(
         )?;
         url.query_pairs_mut()
             .append_pair("searchCriteria.author", &source.author_email)
-            .append_pair("searchCriteria.fromDate", &since.to_rfc3339())
+            .append_pair(
+                "searchCriteria.fromDate",
+                &(Utc::now() - Duration::days(15)).to_rfc3339(),
+            )
             .append_pair("searchCriteria.$top", "10");
-        let commits = match request(client, key, Method::GET, url, None).await {
+        let cache_key = format!("ado-commits|{scope}|{id}");
+        let previous = store.activity_cache(&cache_key)?;
+        let active = previous.as_ref().is_some_and(|(value, _)| {
+            serde_json::from_str::<Value>(value)
+                .ok()
+                .and_then(|v| v["value"].as_array().map(|a| !a.is_empty()))
+                .unwrap_or(false)
+        });
+        let ttl = if active {
+            ACTIVE_REPO_SECONDS
+        } else {
+            COLD_REPO_SECONDS
+        };
+        let commits = match cached_read(
+            store,
+            &cache_key,
+            ttl,
+            request(client, key, Method::GET, url, None),
+        )
+        .await
+        {
             Ok(commits) => commits,
             Err(_) => {
                 incomplete = true;
@@ -379,27 +710,35 @@ async fn repository_activity(
             let Some(sha) = commit["commitId"].as_str() else {
                 continue;
             };
+            let date = commit["author"]["date"].as_str().unwrap_or("");
+            if !chrono::DateTime::parse_from_rfc3339(date)
+                .is_ok_and(|d| d.with_timezone(&Utc) >= since)
+            {
+                continue;
+            }
             commit_ids.insert((id.to_ascii_lowercase(), sha.to_ascii_lowercase()));
             count += 1;
+            let message = commit["comment"]
+                .as_str()
+                .unwrap_or("sin mensaje")
+                .lines()
+                .next()
+                .unwrap_or("");
+            commit_refs.push(CommitRef {
+                repo_id: id.into(),
+                sha: sha.into(),
+                date: date.into(),
+                message: message.into(),
+            });
             output.push_str(&format!(
                 "Commit personal en {name}: {} ({}): {}.\n",
                 sha.chars().take(8).collect::<String>(),
-                commit["author"]["date"]
-                    .as_str()
-                    .unwrap_or("fecha no disponible"),
-                commit["comment"]
-                    .as_str()
-                    .unwrap_or("sin mensaje")
-                    .lines()
-                    .next()
-                    .unwrap_or("")
-                    .chars()
-                    .take(160)
-                    .collect::<String>()
+                date,
+                message.chars().take(160).collect::<String>()
             ));
         }
     }
-    Ok((output, count, commit_ids, incomplete))
+    Ok((output, count, commit_ids, commit_refs, incomplete))
 }
 
 async fn pipeline_activity(
@@ -544,11 +883,129 @@ async fn pipeline_activity(
     Ok((output, count))
 }
 
+async fn release_definition_activity(
+    client: &Client,
+    key: &str,
+    source: &Source,
+    project: &str,
+    since: chrono::DateTime<Utc>,
+) -> Result<(String, usize)> {
+    let mut url = project_url(
+        source,
+        project,
+        "vsrm.dev.azure.com",
+        &["_apis", "release", "definitions"],
+    )?;
+    url.query_pairs_mut().append_pair("$top", "100");
+    let list = request(client, key, Method::GET, url, None).await?;
+    let mut output = String::new();
+    let mut count = 0;
+    for definition in list["value"]
+        .as_array()
+        .context("invalid release definitions")?
+    {
+        let date = definition["modifiedOn"].as_str().unwrap_or("");
+        if !chrono::DateTime::parse_from_rfc3339(date).is_ok_and(|d| d.with_timezone(&Utc) >= since)
+            || !same_user(&definition["modifiedBy"], &source.author_email)
+        {
+            continue;
+        }
+        let Some(id) = definition["id"].as_u64() else {
+            continue;
+        };
+        let detail = request(
+            client,
+            key,
+            Method::GET,
+            project_url(
+                source,
+                project,
+                "vsrm.dev.azure.com",
+                &["_apis", "release", "definitions", &id.to_string()],
+            )?,
+            None,
+        )
+        .await?;
+        let revision = detail["revision"].as_u64().unwrap_or(0);
+        output.push_str(&format!(
+            "Definición de release #{} {} (modificada por el usuario {}, revisión {}). ",
+            id,
+            detail["name"]
+                .as_str()
+                .unwrap_or("")
+                .chars()
+                .take(120)
+                .collect::<String>(),
+            date,
+            revision
+        ));
+        if revision == 1 {
+            output.push_str("Es la primera revisión registrada de esta definición. ");
+        }
+        for stage in detail["environments"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .take(4)
+        {
+            output.push_str(&format!(
+                "Stage configurado {}. ",
+                stage["name"]
+                    .as_str()
+                    .unwrap_or("")
+                    .chars()
+                    .take(100)
+                    .collect::<String>()
+            ));
+            for phase in stage["deployPhases"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .take(3)
+            {
+                output.push_str(&format!(
+                    "Fase {}. ",
+                    phase["name"]
+                        .as_str()
+                        .unwrap_or("")
+                        .chars()
+                        .take(100)
+                        .collect::<String>()
+                ));
+                for task in phase["workflowTasks"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter(|t| t["enabled"].as_bool() == Some(true))
+                    .take(5)
+                {
+                    output.push_str(&format!(
+                        "Tarea configurada: {}. ",
+                        task["name"]
+                            .as_str()
+                            .unwrap_or("")
+                            .chars()
+                            .take(100)
+                            .collect::<String>()
+                    ));
+                }
+            }
+        }
+        output.push('\n');
+        count += 1;
+        if count >= 3 {
+            break;
+        }
+    }
+    Ok((output, count))
+}
+
 pub async fn status(
     client: &Client,
     key: &str,
     catalog_text: &str,
     question: &str,
+    store: Arc<Store>,
 ) -> Result<String> {
     let catalog = Catalog::parse(catalog_text)?;
     let days = recent_window(question);
@@ -562,24 +1019,37 @@ pub async fn status(
             let client = client.clone();
             let key = key.to_owned();
             let source = source.clone();
+            let store = store.clone();
             jobs.spawn(async move {
-                let (items, commits) = tokio::join!(
+                let (items, commits, definitions) = tokio::join!(
                     work_item_activity(&client, &key, &source, &project, since),
-                    repository_activity(&client, &key, &source, &project, since)
+                    repository_activity(&client, &key, &source, &project, since, &store),
+                    release_definition_activity(&client, &key, &source, &project, since)
                 );
                 let incomplete = items.is_err() || commits.is_err();
                 let (items, item_count, item_blocked) = items.unwrap_or_default();
-                let (commits, commit_count, commit_ids, repo_incomplete) =
+                let (commits, commit_count, commit_ids, mut commit_refs, repo_incomplete) =
                     commits.unwrap_or_default();
                 let pipelines =
                     pipeline_activity(&client, &key, &source, &project, since, &commit_ids).await;
                 let incomplete = incomplete || repo_incomplete || pipelines.is_err();
                 let (pipelines, pipeline_count) = pipelines.unwrap_or_default();
-                let score = item_count + commit_count + pipeline_count;
+                let (definitions, definition_count) = definitions.unwrap_or_default();
+                commit_refs.sort_by(|a, b| b.date.cmp(&a.date));
+                let mut details = String::new();
+                for commit in commit_refs.iter().take(4) {
+                    if let Ok(detail) =
+                        commit_detail(&client, &key, &source, &project, commit).await
+                    {
+                        details.push_str(&detail);
+                        details.push('\n');
+                    }
+                }
+                let score = item_count + commit_count + pipeline_count + definition_count;
                 (
                     project,
                     score,
-                    format!("{commits}{pipelines}{items}"),
+                    format!("{commits}{details}{definitions}{pipelines}{items}"),
                     item_blocked,
                     incomplete,
                 )
@@ -590,7 +1060,10 @@ pub async fn status(
                         .await
                         .context("ADO project worker missing")??;
                 if score > 0 {
-                    sections.push((score, format!("Proyecto: {project}.\n{content}")));
+                    sections.push((
+                        score,
+                        format!("Proyecto: {project}.\n{}", bounded_lines(&content, 5_000)),
+                    ));
                 }
                 blocked |= item_blocked;
                 partial_projects += usize::from(incomplete);
@@ -600,7 +1073,10 @@ pub async fn status(
     while let Some(result) = jobs.join_next().await {
         let (project, score, content, item_blocked, incomplete) = result?;
         if score > 0 {
-            sections.push((score, format!("Proyecto: {project}.\n{content}")));
+            sections.push((
+                score,
+                format!("Proyecto: {project}.\n{}", bounded_lines(&content, 5_000)),
+            ));
         }
         blocked |= item_blocked;
         partial_projects += usize::from(incomplete);
@@ -626,12 +1102,35 @@ pub async fn status(
     if partial_projects > 0 {
         output.push_str(&format!("Cobertura parcial: falló al menos una consulta en {partial_projects} proyecto(s); no inferir ausencia de actividad en ellos.\n"));
     }
-    Ok(output.chars().take(18_000).collect())
+    Ok(bounded_lines(&output, 11_000))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn content_excerpt_identifies_the_actual_edit() {
+        let before = "stage: prod\nword: Excento\nrun: false\n";
+        let after = "stage: prod\nword: Exento\nrun: false\n";
+        let excerpt = changed_excerpt(before, after);
+        assert!(excerpt.contains("Excento"));
+        assert!(excerpt.contains("Exento"));
+        assert!(!excerpt.contains("run: false"));
+    }
+    #[tokio::test]
+    async fn activity_index_uses_fresh_commits_without_a_network_call() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("activity.db")).unwrap();
+        store
+            .save_activity_cache("repo", "{\"value\":[{\"commitId\":\"abc\"}]}")
+            .unwrap();
+        let result = cached_read(&store, "repo", 300, async {
+            anyhow::bail!("network should not be called")
+        })
+        .await
+        .unwrap();
+        assert_eq!(result["value"][0]["commitId"], "abc");
+    }
     #[test]
     fn catalog_validates_org_and_allows_more_projects() {
         let valid = "[[sources]]\norganization='https://dev.azure.com/example/'\nprojects=['A','B']\nauthor_email='x@example.com'\n";

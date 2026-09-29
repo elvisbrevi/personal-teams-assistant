@@ -45,6 +45,7 @@ impl Store {
             CREATE TABLE IF NOT EXISTS vault(name TEXT PRIMARY KEY,value BLOB NOT NULL);
             CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY,time INTEGER NOT NULL DEFAULT (unixepoch()),kind TEXT NOT NULL,detail TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS conversation_context(conversation TEXT PRIMARY KEY,question TEXT NOT NULL,answer TEXT NOT NULL,updated_at INTEGER NOT NULL DEFAULT (unixepoch()));
+            CREATE TABLE IF NOT EXISTS activity_cache(key TEXT PRIMARY KEY,value TEXT NOT NULL,updated_at INTEGER NOT NULL DEFAULT (unixepoch()));
             UPDATE jobs SET status='pending' WHERE status='processing' AND resource NOT LIKE 'simulation:%';
             UPDATE jobs SET status='uncertain',audit='{"reason":"restart_during_send"}' WHERE status='sending';"#)?;
         Ok(Self { db: Mutex::new(db) })
@@ -75,6 +76,27 @@ impl Store {
             [],
         )?;
         db.execute("INSERT INTO conversation_context(conversation,question,answer) VALUES (?1,?2,?3) ON CONFLICT(conversation) DO UPDATE SET question=excluded.question,answer=excluded.answer,updated_at=unixepoch()",params![conversation,question,answer])?;
+        Ok(())
+    }
+    pub fn activity_cache(&self, key: &str) -> Result<Option<(String, i64)>> {
+        Ok(self
+            .db
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT value,updated_at FROM activity_cache WHERE key=?1",
+                [key],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?)
+    }
+    pub fn save_activity_cache(&self, key: &str, value: &str) -> Result<()> {
+        let db = self.db.lock().unwrap();
+        db.execute(
+            "DELETE FROM activity_cache WHERE updated_at<unixepoch()-2592000",
+            [],
+        )?;
+        db.execute("INSERT INTO activity_cache(key,value) VALUES (?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=unixepoch()", params![key,value])?;
         Ok(())
     }
     pub fn next_job(&self) -> Result<Option<Job>> {
@@ -192,6 +214,19 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn activity_index_survives_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("activity.db");
+        Store::open(&path)
+            .unwrap()
+            .save_activity_cache("repo-a", "{\"value\":[]}")
+            .unwrap();
+        let reopened = Store::open(&path).unwrap();
+        let (value, updated_at) = reopened.activity_cache("repo-a").unwrap().unwrap();
+        assert_eq!(value, "{\"value\":[]}");
+        assert!(updated_at > 0);
+    }
     #[test]
     fn dedup_and_restart_do_not_resend() {
         let dir = tempfile::tempdir().unwrap();
