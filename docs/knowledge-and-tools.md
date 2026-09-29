@@ -8,7 +8,7 @@ Cada fuente requiere `enabled=true`, `external_processing=true` y una conversaci
 
 El mapa contiene descripciones, temas, capacidades (mediante el tipo y operación) y forma de acceso. Jev recibe solo el catálogo de fuentes accesibles al remitente/conversación. Tras elegir una, se lee como máximo 1 MB, se redacta y se seleccionan hasta cuatro pasajes dentro de `max_context_chars`. No se manda el repositorio completo.
 
-Para guardar hechos nuevos o corregir los existentes, los agentes siguen [guardar-conocimiento](../.agents/skills/guardar-conocimiento/SKILL.md). El [repositorio privado](../../personal-teams-knowledge/README.md) define la organización de documentos temáticos y el descriptor que Jev usa para elegirlos.
+Para guardar hechos nuevos o corregir los existentes, los agentes siguen [save-knowledge](../.agents/skills/save-knowledge/SKILL.md). El [repositorio privado](../../personal-teams-knowledge/README.md) define la organización de documentos temáticos y el descriptor que Jev usa para elegirlos.
 
 Archivos: Markdown/TXT y documentos JSON/TOML/YAML se tratan como texto. No se incluyen PDF, imágenes ni Office en esta versión. Los roots adicionales se añaden a `[repositories]`; el pipeline no cambia.
 
