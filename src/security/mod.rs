@@ -39,6 +39,7 @@ fn validate_profile(profile: &str) -> Result<()> {
     Ok(())
 }
 
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 fn active_profile() -> Option<String> {
     KEYRING_PROFILE
         .get()
