@@ -1,5 +1,5 @@
 use anyhow::Result;
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use std::{path::Path, sync::Mutex};
 
@@ -184,6 +184,23 @@ impl Store {
                 })
             })?
             .collect::<std::result::Result<_, _>>()?)
+    }
+    pub fn subscription_health(path: &Path) -> Result<(usize, Option<String>)> {
+        if !path.exists() {
+            return Ok((0, None));
+        }
+        let db = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        let active: usize = db.query_row(
+            "SELECT count(*) FROM subscriptions WHERE expires_at > unixepoch()",
+            [],
+            |r| r.get(0),
+        )?;
+        let issue = db.query_row(
+            "SELECT detail FROM events WHERE kind='subscription' AND time >= unixepoch()-300 ORDER BY id DESC LIMIT 1",
+            [],
+            |r| r.get(0),
+        ).optional()?;
+        Ok((active, issue))
     }
     pub fn save_subscription(&self, s: &Subscription) -> Result<()> {
         self.db.lock().unwrap().execute("INSERT INTO subscriptions VALUES (?1,?2,?3) ON CONFLICT(resource) DO UPDATE SET id=excluded.id,expires_at=excluded.expires_at", params![s.id,s.resource,s.expires_at])?;

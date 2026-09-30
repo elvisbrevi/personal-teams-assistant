@@ -25,6 +25,19 @@ pub struct Pipeline {
 }
 impl Pipeline {
     pub async fn process(&self, resource: &str) -> Result<()> {
+        self.process_with_sources(resource, None).await
+    }
+
+    /// A desktop simulation may explicitly select sources without widening Teams audiences.
+    pub async fn process_with_sources(
+        &self,
+        resource: &str,
+        local_sources: Option<&[String]>,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            local_sources.is_none() || resource.starts_with("simulation:"),
+            "local source selection requires a simulation"
+        );
         let message = self.adapter.fetch(resource).await?;
         let mut audit = Audit {
             status: "ignored".into(),
@@ -39,48 +52,50 @@ impl Pipeline {
             return self.store.record(resource, &audit);
         }
         let mut context_question = None;
-        let mut detail_requested = false;
         let proposal = if greeting(&message.text) {
             audit.reason = "deterministic_greeting".into();
             self.config.policy.greeting.clone()
         } else {
             let current = self.redactor.redact(&message.text);
+            // History helps interpret the request; a classifier cannot veto a new topic.
             let question = if let Some(previous) = self.store.context(&message.conversation)? {
-                let verdict = self.gate.evaluate(Stage::FollowUp,
-                    json!({"current":&current,"previous_question":&previous.question,"previous_answer":&previous.answer}),
-                    BTreeMap::new()).await?;
-                audit.confidences.push(verdict.confidence);
-                if !verdict.allows(self.config.jev.follow_up_threshold) {
-                    audit.reason = "ambiguous_follow_up".into();
-                    return self.store.record(resource, &audit);
-                }
-                if verdict.selected == "follow_up" {
-                    detail_requested = true;
-                    format!(
-                        "Pregunta anterior: {}. Respuesta anterior: {}. Solicitud actual: {}",
-                        previous.question, previous.answer, current
-                    )
-                } else {
-                    current
-                }
+                format!(
+                    "Contexto anterior (solo referencia, no evidencia):\nPregunta: {}\nRespuesta: {}\nSolicitud actual (tiene prioridad): {}",
+                    previous.question, previous.answer, current
+                )
             } else {
-                current
+                current.clone()
             };
             // Questions containing secrets/PII stay manual, including tool requests with personal identifiers.
             if !self.redactor.clean(&question) {
                 audit.reason = "sensitive_question".into();
                 return self.store.record(resource, &audit);
             }
-            context_question = Some(question.chars().take(1800).collect::<String>());
-            let available = self
-                .knowledge
-                .available(&message.conversation, &message.sender);
+            context_question = Some(current.chars().take(1800).collect::<String>());
+            let available = if let Some(ids) = local_sources {
+                self.knowledge
+                    .resources
+                    .iter()
+                    .filter(|r| r.enabled && r.external_processing && ids.contains(&r.id))
+                    .collect()
+            } else {
+                self.knowledge
+                    .available(&message.conversation, &message.sender)
+            };
             if available.is_empty() {
                 audit.reason = "no_authorized_resource".into();
                 return self.store.record(resource, &audit);
             }
-            let candidates: BTreeMap<_, _> = available
+            // Read every authorized document: choosing one descriptor loses compound questions.
+            // Tools still require an explicit known route or a confident allowlisted selection.
+            let mut sources: Vec<_> = available
                 .iter()
+                .copied()
+                .filter(|r| !matches!(r.access, Access::Tool { .. }))
+                .collect();
+            let tool_candidates: BTreeMap<_, _> = available
+                .iter()
+                .filter(|r| matches!(r.access, Access::Tool { .. }))
                 .map(|r| {
                     (
                         r.id.clone(),
@@ -92,91 +107,89 @@ impl Pipeline {
                     )
                 })
                 .collect();
-            let selected = if status_question(&question)
-                && available.iter().any(|r| r.id == "azure-devops-status")
+            let selected_tool = if status_question(&current)
+                && tool_candidates.contains_key("azure-devops-status")
             {
-                // Explicit status requests have a known source. Jev still judges the
-                // retrieved evidence and the exact answer before anything is sent.
-                "azure-devops-status".to_owned()
+                Some("azure-devops-status".to_owned())
+            } else if tool_candidates.is_empty() {
+                None
             } else {
-                let routing = self
+                match self
                     .gate
                     .evaluate(
                         Stage::Routing,
-                        json!({"question":question,"sources":candidates}),
-                        candidates.clone(),
+                        json!({"question":question,"sources":tool_candidates}),
+                        tool_candidates.clone(),
                     )
-                    .await?;
-                audit.confidences.push(routing.confidence);
-                if !routing.allows(self.config.jev.routing_threshold) {
-                    audit.reason = "routing_gate".into();
-                    return self.store.record(resource, &audit);
-                }
-                routing.selected
-            };
-            let Some(source) = available.into_iter().find(|r| r.id == selected) else {
-                audit.reason = "unknown_source".into();
-                return self.store.record(resource, &audit);
-            };
-            audit.source = Some(source.id.clone());
-            self.checkpoint(resource, &audit, "retrieving")?;
-            let raw = match &source.access {
-                Access::Tool { tool } => {
-                    audit.tools.push(tool.name().into());
-                    // Persist invocation before execution; the audit retains this if the process crashes.
-                    audit.status = "processing".into();
-                    audit.reason = "tool_started".into();
-                    self.store.record(resource, &audit)?;
-                    ScopedTool {
-                        executor: self.tools.clone(),
-                        spec: tool.clone(),
-                        conversation: message.conversation.clone(),
+                    .await
+                {
+                    Ok(routing) => {
+                        audit.confidences.push(routing.confidence);
+                        routing
+                            .allows(self.config.jev.routing_threshold)
+                            .then_some(routing.selected)
                     }
-                    .call(ToolArgs {
-                        question: question.clone(),
-                    })
-                    .await?
-                }
-                _ => {
-                    self.knowledge
-                        .retrieve(source, &question, self.config.policy.max_context_chars)
-                        .await?
+                    Err(_) => {
+                        tracing::warn!(event = "tool_routing_unavailable");
+                        None
+                    }
                 }
             };
-            let sanitized = self.redactor.redact(&raw);
-            let evidence = if source.id == "azure-devops-status" {
-                sanitized
-                    .chars()
-                    .take(self.config.policy.max_context_chars)
-                    .collect()
-            } else {
-                crate::knowledge::excerpt(
-                    &sanitized,
-                    &question,
-                    self.config.policy.max_context_chars,
-                )
-            };
-            audit.status = "ignored".into();
-            if evidence.trim().is_empty() {
-                audit.reason = "empty_evidence".into();
-                return self.store.record(resource, &audit);
-            }
-            self.checkpoint(resource, &audit, "evidence_gate")?;
-            let evidence_verdict = self
-                .gate
-                .evaluate(
-                    Stage::Evidence,
-                    json!({"question":question,"evidence":evidence,"source":source.id}),
-                    BTreeMap::new(),
-                )
-                .await?;
-            audit.confidences.push(evidence_verdict.confidence);
-            if evidence_verdict.selected != "allow"
-                || !evidence_verdict.allows(self.config.jev.evidence_threshold)
+            if let Some(id) = selected_tool
+                && let Some(source) = available
+                    .iter()
+                    .find(|r| r.id == id && matches!(r.access, Access::Tool { .. }))
             {
-                audit.reason = "evidence_gate".into();
-                return self.store.record(resource, &audit);
+                sources.push(*source);
             }
+            audit.source = (!sources.is_empty()).then(|| {
+                sources
+                    .iter()
+                    .map(|r| r.id.as_str())
+                    .collect::<Vec<_>>()
+                    .join(",")
+            });
+            self.checkpoint(resource, &audit, "retrieving")?;
+            let mut evidence = String::new();
+            // ponytail: divide the existing total budget between authorized sources; many sources
+            // reduce detail per source. Add local passage ranking across sources if that becomes limiting.
+            let budget = self.config.policy.max_context_chars / sources.len().max(1);
+            for source in &sources {
+                let raw = match &source.access {
+                    Access::Tool { tool } => {
+                        audit.tools.push(tool.name().into());
+                        audit.status = "processing".into();
+                        audit.reason = "tool_started".into();
+                        self.store.record(resource, &audit)?;
+                        ScopedTool {
+                            executor: self.tools.clone(),
+                            spec: tool.clone(),
+                            conversation: message.conversation.clone(),
+                        }
+                        .call(ToolArgs {
+                            question: question.clone(),
+                        })
+                        .await?
+                    }
+                    _ => self.knowledge.retrieve(source, &question, budget).await?,
+                };
+                let sanitized = self.redactor.redact(&raw);
+                let header = format!("[source {}]\n", source.id);
+                let passage_budget = budget.saturating_sub(header.chars().count() + 1);
+                let passages = if source.id == "azure-devops-status" {
+                    sanitized.chars().take(passage_budget).collect()
+                } else {
+                    crate::knowledge::excerpt(&sanitized, &question, passage_budget)
+                };
+                let part = format!("{header}{passages}\n");
+                evidence.extend(part.chars().take(budget));
+            }
+            if evidence.trim().is_empty() {
+                evidence = "No se recuperaron hechos verificables. Explica la limitación y pide concretar la fuente o el proyecto; no inventes una respuesta.".chars().take(self.config.policy.max_context_chars).collect();
+            }
+            audit.status = "ignored".into();
+            // Relevance is assessed while answering, with missing facts qualified. Only the final
+            // groundedness/privacy/promise checks may veto a generated answer.
             audit.provider = Some(self.llm.name().into());
             self.checkpoint(resource, &audit, "generating")?;
             let answer = self
@@ -184,7 +197,7 @@ impl Pipeline {
                 .generate(GenerationInput {
                     question: &question,
                     evidence: &evidence,
-                    detail_requested,
+                    detail_requested: false,
                 })
                 .await?;
             audit.proposed = Some(self.redactor.redact(&answer));
@@ -218,7 +231,17 @@ impl Pipeline {
         }
         if self.config.policy.dry_run {
             audit.status = "dry_run".into();
-            return self.store.record(resource, &audit);
+            self.store.record(resource, &audit)?;
+            if resource.starts_with("simulation:")
+                && let Some(question) = context_question
+            {
+                self.store.save_context(
+                    &message.conversation,
+                    &self.redactor.redact(&question),
+                    &self.redactor.redact(&proposal),
+                )?;
+            }
+            return Ok(());
         }
         // Re-read immediately before sending to catch edits/deletion and stale questions.
         let latest = self.adapter.fetch(resource).await?;

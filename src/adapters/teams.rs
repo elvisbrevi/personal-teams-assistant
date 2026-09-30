@@ -186,7 +186,7 @@ mod tests {
     #[test]
     fn html_is_data() {
         assert_eq!(
-            plain_text("<at id='0'>Elvis</at><p>Hola &amp; adiós</p><script>evil()</script>"),
+            plain_text("<at id='0'>usuario</at><p>Hola &amp; adiós</p><script>evil()</script>"),
             "Hola & adiós"
         );
     }

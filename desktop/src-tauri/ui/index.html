@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Personal Teams Assistant</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <header>
+    <div><h1>Asistente de Teams</h1><p>Control local para Teams y tu base de conocimiento</p></div>
+    <span id="status" role="status">Cargando…</span>
+  </header>
+  <nav aria-label="Secciones">
+    <button data-tab="settings" aria-current="page">Configuración</button>
+    <button data-tab="knowledge">Conocimiento</button>
+    <button data-tab="chat">Chat de prueba</button>
+  </nav>
+  <main>
+    <p id="notice" role="alert" hidden></p>
+    <section id="settings">
+      <div class="panel">
+        <h2>Servicio</h2>
+        <p>El chat de prueba funciona sin conectar Teams. Teams requiere una URL HTTPS pública y las credenciales de tu registro Entra.</p>
+        <div class="actions">
+          <button id="start">Iniciar asistente</button>
+          <button id="stop" class="secondary">Detener</button>
+          <button id="teams-login" class="secondary">Conectar cuenta Microsoft</button>
+        </div>
+      </div>
+      <div class="panel">
+        <h2>Credenciales</h2>
+        <p>Las credenciales marcadas como configuradas ya están listas para usar. Sus valores se mantienen ocultos; los campos sirven para reemplazarlas. Las variables de entorno y los archivos de secretos tienen prioridad.</p>
+        <div id="credentials"></div>
+      </div>
+      <div class="panel">
+        <h2>Proveedores y Teams</h2>
+        <div class="grid">
+          <label>Modelo de Jev<input id="jev-model"></label>
+          <label>Modelo de DeepSeek<input id="llm-model"></label>
+          <label>ID de tenant Entra<input id="tenant-id"></label>
+          <label>Client ID Entra<input id="client-id"></label>
+          <label>ID del usuario Teams<input id="user-id"></label>
+          <label>URL HTTPS pública<input id="public-url" placeholder="https://assistant.example.com"></label>
+          <label>Puerto local<input id="bind" placeholder="127.0.0.1:38655"></label>
+          <label>Config de cloudflared (opcional)<input id="tunnel-config" placeholder="/ruta/privada/config.yml"></label>
+        </div>
+        <label class="check"><input id="cloudflare-tunnel" type="checkbox"> Iniciar y detener Cloudflare Tunnel con el asistente (token guardado)</label>
+        <p>Para un túnel administrado en Cloudflare, activa esta opción, guarda CLOUDFLARE_TUNNEL_TOKEN en Credenciales y deja vacío el archivo local. Su ruta en Cloudflare debe apuntar a la URL y al puerto anteriores. También puedes usar un archivo local con una regla final 404. Si otro supervisor gestiona el túnel, deja ambos desactivados.</p>
+        <label>Estilo de respuesta<textarea id="llm-style" rows="3"></textarea></label>
+        <label class="check"><input id="dry-run" type="checkbox"> Modo de observación: nunca enviar mensajes a Teams</label>
+        <label class="check"><input id="discover-chats" type="checkbox"> Descubrir todos mis chats autorizados</label>
+        <label>Chats permitidos, uno por línea<textarea id="allowed-chats" rows="3"></textarea></label>
+        <div class="actions"><button id="save-settings">Guardar configuración</button></div>
+      </div>
+      <div class="panel">
+        <h2>Migrar esta instalación</h2>
+        <p>Importa tu <code>config.toml</code> actual. Se conserva su client ID, mapa y directorio SQLite. Importa también las credenciales existentes a este equipo, especialmente <code>STATE_ENCRYPTION_KEY</code>.</p>
+        <div class="actions"><input id="legacy-path" aria-label="Ruta del config.toml actual" placeholder="/ruta/al/config.toml"><button id="import" class="secondary">Importar</button></div>
+      </div>
+    </section>
+    <section id="knowledge" hidden>
+      <div class="panel">
+        <h2>Repositorios</h2>
+        <p>Agrega checkouts Git locales. Quitar uno de esta lista no borra sus archivos.</p>
+        <div id="repositories"></div>
+        <div class="grid">
+          <label>Alias<input id="repo-alias" placeholder="mi_conocimiento"></label>
+          <label>Ruta del checkout<input id="repo-path" placeholder="/ruta/al/repositorio"></label>
+        </div>
+        <button id="add-repo">Agregar repositorio</button>
+      </div>
+      <div class="panel">
+        <h2>Repositorios privados de GitHub</h2>
+        <p>Conecta una GitHub App con permiso Contents: read e instalación limitada a los repositorios que elijas. La organización puede requerir aprobación. El token queda en el almacén del sistema.</p>
+        <label>Client ID de la GitHub App<input id="github-client-id" value="Iv23liswvVle1ENUJYBT" placeholder="Client ID público"></label>
+        <div class="actions"><button id="github-connect" class="secondary">Conectar GitHub</button><button id="github-list" class="secondary">Ver repositorios autorizados</button><button id="github-disconnect" class="secondary">Desconectar GitHub</button></div>
+        <div id="github-device" hidden>
+          <p>Copia este código y autoriza la app en GitHub: <strong id="github-code"></strong></p>
+          <div class="actions"><button id="github-open" class="secondary">Abrir GitHub</button><button id="github-finish" class="secondary">Ya autoricé</button></div>
+        </div>
+        <div id="github-repositories"></div>
+      </div>
+      <div class="panel">
+        <h2>Fuentes</h2>
+        <p>Cada archivo necesita descriptor y autorización propia. Una fuente nueva empieza deshabilitada para Teams.</p>
+        <div id="resources"></div>
+        <div class="grid">
+          <label>ID de fuente<input id="source-id" placeholder="operaciones"></label>
+          <label>Repositorio<select id="source-repo"></select></label>
+          <label>Ruta relativa del archivo<input id="source-path" placeholder="temas/operacion.md"></label>
+          <label>Temas, separados por coma<input id="source-topics" placeholder="operación, asistencia"></label>
+        </div>
+        <label>Descripción<input id="source-description" placeholder="Qué preguntas responde"></label>
+        <button id="add-source">Agregar fuente</button>
+        <div class="actions"><button id="save-knowledge">Guardar repositorios y fuentes</button></div>
+      </div>
+    </section>
+    <section id="chat" hidden>
+      <div class="panel">
+        <h2>Chat de prueba</h2>
+        <p>Usa los mismos controles de Jev y DeepSeek. Las respuestas aparecen aquí y nunca se envían a Teams. Selecciona las fuentes cuyo procesamiento externo autorizas para esta prueba.</p>
+        <div id="chat-sources"></div>
+        <div id="history" aria-live="polite"></div>
+        <form id="chat-form">
+          <label for="message">Mensaje</label>
+          <textarea id="message" maxlength="2000" rows="4" required></textarea>
+          <button id="send" type="submit">Enviar en simulación</button>
+        </form>
+      </div>
+    </section>
+  </main>
+</body>
+</html>

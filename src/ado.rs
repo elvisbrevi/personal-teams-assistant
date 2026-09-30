@@ -443,8 +443,8 @@ async fn commit_detail(
             path.chars().take(160).collect::<String>(),
             kind
         ));
-        if matches!(kind, "edit" | "add" | "rename") {
-            if let Ok(after) = file_content(
+        if matches!(kind, "edit" | "add" | "rename")
+            && let Ok(after) = file_content(
                 client,
                 key,
                 source,
@@ -454,30 +454,28 @@ async fn commit_detail(
                 &commit.sha,
             )
             .await
-            {
-                if !after.is_empty() {
-                    let before = if let Some(parent) = parent {
-                        let old_path = change["originalPath"].as_str().unwrap_or(path);
-                        file_content(
-                            client,
-                            key,
-                            source,
-                            project,
-                            &commit.repo_id,
-                            old_path,
-                            parent,
-                        )
-                        .await
-                        .unwrap_or_default()
-                    } else {
-                        String::new()
-                    };
-                    output.push_str(&format!(
-                        "Cambio de contenido: {}. ",
-                        changed_excerpt(&before, &after)
-                    ));
-                }
-            }
+            && !after.is_empty()
+        {
+            let before = if let Some(parent) = parent {
+                let old_path = change["originalPath"].as_str().unwrap_or(path);
+                file_content(
+                    client,
+                    key,
+                    source,
+                    project,
+                    &commit.repo_id,
+                    old_path,
+                    parent,
+                )
+                .await
+                .unwrap_or_default()
+            } else {
+                String::new()
+            };
+            output.push_str(&format!(
+                "Cambio de contenido: {}. ",
+                changed_excerpt(&before, &after)
+            ));
         }
         files += 1;
         if files >= 3 {
@@ -1081,7 +1079,7 @@ pub async fn status(
         blocked |= item_blocked;
         partial_projects += usize::from(incomplete);
     }
-    sections.sort_by(|a, b| b.0.cmp(&a.0));
+    sections.sort_by_key(|a| std::cmp::Reverse(a.0));
     let mut output = format!(
         "Actividad de Azure DevOps desde {} (últimos {days} días).\n",
         since.format("%Y-%m-%d")
@@ -1145,12 +1143,12 @@ mod tests {
             vec![42]
         );
         assert!(same_user(
-            &json!({"uniqueName":"ELVIS@example.com"}),
-            "elvis@example.com"
+            &json!({"uniqueName":"USER@example.com"}),
+            "user@example.com"
         ));
         assert!(!same_user(
             &json!({"uniqueName":"someone@example.com"}),
-            "elvis@example.com"
+            "user@example.com"
         ));
     }
     #[test]

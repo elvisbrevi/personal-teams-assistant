@@ -242,11 +242,10 @@ impl ReadOnlyTool for Tools {
                         .graph
                         .recent_project_context(&projects, conversation, since)
                         .await
+                        && !context.is_empty()
                     {
-                        if !context.is_empty() {
-                            evidence.push_str("\nConversaciones recientes de Teams relacionadas con esos proyectos (contexto, no prueba de ejecución por sí solas):\n");
-                            evidence.push_str(&context);
-                        }
+                        evidence.push_str("\nConversaciones recientes de Teams relacionadas con esos proyectos (contexto, no prueba de ejecución por sí solas):\n");
+                        evidence.push_str(&context);
                     }
                     Ok(evidence)
                 }

@@ -6,26 +6,138 @@ use anyhow::{Context, Result, bail, ensure};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use rand::RngCore;
 use regex::Regex;
-use std::{collections::BTreeMap, path::Path};
+use std::{
+    collections::BTreeMap,
+    path::Path,
+    sync::{OnceLock, RwLock},
+};
 use subtle::ConstantTimeEq;
 
-pub fn secret(name: &str) -> Result<String> {
+static KEYRING_PROFILE: OnceLock<RwLock<Option<String>>> = OnceLock::new();
+
+/// Select the one local profile whose credentials may be read by this process.
+pub fn keyring_profile(profile: Option<&str>) -> Result<()> {
+    if let Some(profile) = profile {
+        validate_profile(profile)?;
+    }
+    *KEYRING_PROFILE
+        .get_or_init(|| RwLock::new(None))
+        .write()
+        .unwrap() = profile.map(str::to_owned);
+    Ok(())
+}
+
+fn validate_profile(profile: &str) -> Result<()> {
+    ensure!(
+        !profile.is_empty()
+            && profile.len() <= 160
+            && profile
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || "_-".contains(c)),
+        "invalid credential profile"
+    );
+    Ok(())
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn active_profile() -> Option<String> {
+    KEYRING_PROFILE
+        .get()
+        .and_then(|p| p.read().unwrap().clone())
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn keyring_entry(profile: &str, name: &str) -> Result<keyring::Entry> {
+    Ok(keyring::Entry::new(
+        &format!("personal-teams-assistant.{profile}"),
+        name,
+    )?)
+}
+
+/// Store a credential for desktop use. The value never belongs in TOML or logs.
+pub fn put_desktop_secret(profile: &str, name: &str, value: &str) -> Result<()> {
+    validate_profile(profile)?;
+    validate_secret(name, value)?;
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    {
+        keyring_entry(profile, name)?.set_password(value)?;
+        Ok(())
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    anyhow::bail!("desktop credential store is unavailable")
+}
+
+pub fn delete_desktop_secret(profile: &str, name: &str) -> Result<()> {
+    validate_profile(profile)?;
+    validate_name(name)?;
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    {
+        keyring_entry(profile, name)?.delete_credential()?;
+        Ok(())
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    anyhow::bail!("desktop credential store is unavailable")
+}
+
+fn validate_name(name: &str) -> Result<()> {
     ensure!(
         Regex::new(r"^[A-Z][A-Z0-9_]*$")?.is_match(name),
         "invalid secret variable name"
     );
+    Ok(())
+}
+
+fn validate_secret(name: &str, value: &str) -> Result<()> {
+    validate_name(name)?;
+    ensure!(
+        value.len() >= 8 && !value.contains(['\n', '\r']),
+        "empty or invalid credential: {name}"
+    );
+    Ok(())
+}
+
+pub fn secret_source(name: &str) -> Result<Option<&'static str>> {
+    validate_name(name)?;
+    if std::env::var_os(format!("{name}_FILE")).is_some() {
+        return Ok(Some("file"));
+    }
+    if std::env::var_os(name).is_some() {
+        return Ok(Some("environment"));
+    }
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    if let Some(profile) = active_profile() {
+        match keyring_entry(&profile, name)?.get_password() {
+            Ok(_) => return Ok(Some("system")),
+            Err(keyring::Error::NoEntry) => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(None)
+}
+
+pub fn secret(name: &str) -> Result<String> {
+    validate_name(name)?;
     let value = if let Ok(file) = std::env::var(format!("{name}_FILE")) {
         std::fs::read_to_string(file)
             .context("cannot read secret mount")?
             .trim_end()
             .to_owned()
+    } else if let Ok(value) = std::env::var(name) {
+        value
     } else {
-        std::env::var(name).with_context(|| format!("missing credential: {name}"))?
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        {
+            let profile = active_profile().context(format!("missing credential: {name}"))?;
+            keyring_entry(&profile, name)?
+                .get_password()
+                .with_context(|| format!("missing credential: {name}"))?
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        {
+            anyhow::bail!("missing credential: {name}")
+        }
     };
-    ensure!(
-        value.len() >= 8 && !value.contains(['\n', '\r']),
-        "empty or invalid credential: {name}"
-    );
+    validate_secret(name, &value)?;
     Ok(value)
 }
 pub fn resolve(reference: &str, bindings: &BTreeMap<String, String>) -> Result<String> {

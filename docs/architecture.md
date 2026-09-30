@@ -23,9 +23,11 @@ Un único worker simplifica concurrencia y auditoría; el límite es throughput 
 
 ## Jev
 
-Cada llamada usa `POST https://api.typesafe.ai/v1/systemone`, `model`, `state` y preguntas `Choice` independientes para decisión y seguridad. La confianza efectiva es la menor de ambas. Se valida tipo, opción permitida, rango finito, distribución y que la opción elegida tenga probabilidad máxima. Respuestas incompletas o desconocidas fallan de forma cerrada.
+No se clasifica la pregunta para descartarla antes de leer los documentos, ni se exige decidir si es seguimiento o tema nuevo. El contexto previo de la misma conversación se conserva como referencia; la solicitud actual manda y solo se guarda esa solicitud para evitar contextos anidados.
 
-El routing contiene candidatos autorizados y las salidas `ignore`/`human`; evidence y final gate contienen `allow`/`ignore`/`human`. El LLM solo recibe pregunta, evidencia limitada y estilo configurado; no el mapa completo ni los secretos de herramientas. Las preguntas con PII detectada quedan manuales.
+Los documentos habilitados y autorizados comparten el presupuesto total `max_context_chars`. Jev usa `choice` y un control de seguridad únicamente para elegir una herramienta permitida cuando no hay una ruta explícita. Una selección incierta, desconocida o una falla de routing no ejecuta herramientas y permite continuar con los documentos o pedir aclaración. No se ejecutan todas las herramientas por defecto.
+
+Después de generar, el control final `noul` comprueba respaldo factual, privacidad, ausencia de nuevas promesas y respuesta a la solicitud. Datos faltantes debidamente señalados y aclaraciones pueden pasar ese control. Respuestas incompletas o inválidas de este control fallan de forma cerrada. La autorización, la redacción, los límites de lectura y la verificación previa al envío siguen siendo barreras obligatorias. Los umbrales de seguimiento/evidencia se aceptan en perfiles antiguos pero ya no se usan para descartar preguntas.
 
 Jev y las instrucciones al LLM reducen riesgos de prompt injection, pero no demuestran ausencia de ataques. Ninguna decisión de modelo concede permisos: audiencias, rutas, acciones, consultas SQL y URLs se verifican en código antes de ejecutar. Los resultados de herramientas y documentos se presentan como datos no confiables. El LLM no tiene ejecución autónoma de herramientas.
 

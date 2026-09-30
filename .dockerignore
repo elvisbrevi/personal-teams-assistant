@@ -2,7 +2,13 @@
 !Cargo.toml
 !Cargo.lock
 !rust-toolchain.toml
+!config.example.toml
 !src
 !src/**
 !static
 !static/**
+!desktop
+!desktop/src-tauri
+!desktop/src-tauri/Cargo.toml
+!desktop/src-tauri/src
+!desktop/src-tauri/src/**

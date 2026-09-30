@@ -2,13 +2,13 @@
 
 ## Registro
 
-1. Registrar una aplicación **single tenant** en el tenant donde está la cuenta Teams de trabajo/escuela. Una cuenta Microsoft personal no cubre los permisos Teams requeridos.
+1. Para el servicio existente se conserva el mismo registro Entra. Ya admite cuentas de cualquier organización Entra (`AzureADMultipleOrgs`), y cada organización aplica su propia política de consentimiento. También puedes registrar una aplicación propia en tu tenant. Una cuenta Microsoft personal no cubre los permisos Teams requeridos.
 2. En plataforma Web registrar `https://HOST/oauth/callback`. No marcar como SPA; el servidor intercambia el código con secreto y PKCE.
-3. Añadir permisos **delegados** `User.Read`, `Chat.Read`, `ChatMessage.Send`, `offline_access`. No usar `Chat.Read.All`, `Chat.ReadWrite.All` ni permisos de aplicación para el MVP.
+3. En el registro existente se conservan únicamente los permisos **delegados** `User.Read`, `Chat.Read`, `ChatMessage.Send`, `offline_access`. No usar `Chat.Read.All`, `Chat.ReadWrite.All` ni permisos de aplicación para el MVP. La aplicación de escritorio usa la plataforma **Mobile and desktop** con redirección `http://localhost` y PKCE, sin secreto de cliente.
 4. Crear un secreto con caducidad limitada y guardarlo en `ENTRA_CLIENT_SECRET` usando `lazy-workflow credentials-set`. Nunca copiarlo a un archivo del proyecto.
 5. Obtener Directory (tenant) ID, Application (client) ID y Object ID del usuario. Completar `[graph]`.
 6. Si se habilitan canales, añadir `ChannelMessage.Read.All` y `ChannelMessage.Send`, y consentir según las reglas del tenant. No se necesitan para chats.
-7. Iniciar sesión desde `/oauth/login`. Microsoft puede exigir aprobación de un administrador aunque el permiso admita consentimiento de usuario; depende de la política corporativa.
+7. En el CLI, iniciar sesión desde `/oauth/login`; en la app de escritorio, pulsar **Conectar cuenta Microsoft**. Cada usuario configura su tenant ID y el client ID del registro que usará. Microsoft puede exigir aprobación de un administrador aunque el permiso admita consentimiento de usuario; depende de la política corporativa. Para una organización nueva, el usuario inicia sesión y usa el flujo de solicitud de aprobación de su tenant si aparece. Esto no cambia los permisos ya concedidos en el tenant propietario.
 
 El servicio comprueba `/me` antes de guardar tokens para impedir conectar una cuenta distinta. Los tokens se cifran con AES-256-GCM-SIV y se guardan en SQLite; la clave reside fuera del estado. El refresh se serializa y cada token rotado se persiste antes de usarse. Revocación, Conditional Access o expiración pueden exigir autorización interactiva de nuevo.
 

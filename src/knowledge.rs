@@ -5,7 +5,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct KnowledgeMap {
     #[serde(default)]
@@ -13,7 +13,7 @@ pub struct KnowledgeMap {
     #[serde(default)]
     pub resources: Vec<Resource>,
 }
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Deserialize, Serialize)]
 pub struct Resource {
     pub id: String,
     pub description: String,
@@ -157,7 +157,7 @@ pub fn read_repository_file(
     );
     Ok(std::fs::read_to_string(full)?)
 }
-/// Rank paragraphs locally; only bounded passages from one selected resource leave the process.
+/// Rank paragraphs locally; the pipeline shares its total budget between authorized sources.
 pub fn excerpt(text: &str, question: &str, limit: usize) -> String {
     let words: Vec<String> = question
         .split(|c: char| !c.is_alphanumeric())

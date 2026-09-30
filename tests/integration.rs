@@ -22,13 +22,7 @@ use personal_teams_assistant::{
     tools::{ReadOnlyTool, ToolSpec},
 };
 use serde_json::json;
-use std::{
-    collections::BTreeMap,
-    sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
-    },
-};
+use std::{collections::BTreeMap, sync::Arc};
 use tower::ServiceExt;
 use wiremock::{
     Mock, MockServer, ResponseTemplate,
@@ -132,19 +126,10 @@ async fn graph_jev_deepseek_end_to_end_and_final_gate() {
         let store = support::store(&dir);
         let graph = support::graph(&server, store.clone());
         support::mock_message(&server, "¿Cuál es el horario del soporte?").await;
-        let calls = Arc::new(AtomicUsize::new(0));
-        let counter = calls.clone();
         Mock::given(method("POST")).and(path("/v1/systemone")).respond_with(move |_req:&wiremock::Request| {
-            let n=counter.fetch_add(1,Ordering::SeqCst);
-            let answers = if n == 0 {
-                json!({"decision":support::choice(&["hours","ignore"],"hours",0.99),"safety":{"type":"noul","noul":0.99}})
-            } else if n == 1 {
-                json!({"relevant":{"type":"noul","noul":0.99},"qualified":{"type":"noul","noul":0.99},"safe":{"type":"noul","noul":0.99}})
-            } else {
-                json!({"supported":{"type":"noul","noul":if allow {0.99} else {0.01}},"no_new_promise":{"type":"noul","noul":0.99},"privacy":{"type":"noul","noul":0.99},"relevant":{"type":"noul","noul":0.99}})
-            };
+            let answers = json!({"supported":{"type":"noul","noul":if allow {0.99} else {0.01}},"no_new_promise":{"type":"noul","noul":0.99},"privacy":{"type":"noul","noul":0.99},"relevant":{"type":"noul","noul":0.99}});
             ResponseTemplate::new(200).set_body_json(json!({"model":"jev-test","answers":answers}))
-        }).expect(3).mount(&server).await;
+        }).expect(1).mount(&server).await;
         Mock::given(method("POST")).and(path("/chat/completions")).respond_with(ResponseTemplate::new(200).set_body_json(json!({"id":"gen1","object":"chat.completion","created":1,"model":"deepseek-test","choices":[{"index":0,"message":{"role":"assistant","content":"El soporte atiende de lunes a viernes de 09:00 a 18:00."},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":10,"total_tokens":20,"prompt_cache_hit_tokens":0,"prompt_cache_miss_tokens":10}}))).expect(1).mount(&server).await;
         Mock::given(method("POST"))
             .and(path("/chats/chat1/messages"))
@@ -182,7 +167,7 @@ async fn graph_jev_deepseek_end_to_end_and_final_gate() {
         pipeline.process(&job.resource).await.unwrap();
         let audit = store.audit(&job.resource).unwrap().unwrap();
         assert_eq!(audit.status, if allow { "sent" } else { "ignored" });
-        assert_eq!(audit.confidences.len(), 3);
+        assert_eq!(audit.confidences.len(), 1);
         let requests = server.received_requests().await.unwrap();
         for r in requests
             .iter()
@@ -193,6 +178,214 @@ async fn graph_jev_deepseek_end_to_end_and_final_gate() {
             assert!(!body.contains("test-deepseek-key"));
             assert!(!body.contains("test-access-token"));
         }
+    }
+}
+struct FinalOnlyGate;
+#[async_trait]
+impl DecisionGate for FinalOnlyGate {
+    async fn evaluate(
+        &self,
+        stage: Stage,
+        _: serde_json::Value,
+        _: BTreeMap<String, String>,
+    ) -> Result<personal_teams_assistant::decision::Verdict> {
+        assert!(
+            matches!(stage, Stage::Final),
+            "a semantic prefilter discarded an answerable question: {stage:?}"
+        );
+        Ok(personal_teams_assistant::decision::Verdict {
+            selected: "allow".into(),
+            confidence: 0.99,
+        })
+    }
+}
+struct CompoundAnswer;
+#[async_trait]
+impl LlmProvider for CompoundAnswer {
+    fn name(&self) -> &str {
+        "synthetic"
+    }
+    async fn generate(&self, input: GenerationInput<'_>) -> Result<String> {
+        assert!(input.evidence.contains("09:00 a 18:00"));
+        assert!(input.evidence.contains("domingo de 02:00 a 03:00"));
+        assert!(!input.evidence.contains("UNAUTHORIZED"));
+        assert!(input.evidence.chars().count() <= 16000);
+        Ok(
+            "Soporte: lunes a viernes de 09:00 a 18:00. Mantenimiento: domingo de 02:00 a 03:00."
+                .into(),
+        )
+    }
+}
+#[tokio::test]
+async fn compound_and_new_topic_questions_read_authorized_sources_without_semantic_prefilters() {
+    for with_history in [false, true] {
+        let server = MockServer::start().await;
+        let dir = tempfile::tempdir().unwrap();
+        let store = support::store(&dir);
+        let graph = support::graph(&server, store.clone());
+        support::mock_message(
+            &server,
+            "¿Cuál es el horario de soporte y cuándo es el mantenimiento?",
+        )
+        .await;
+        Mock::given(method("POST"))
+            .and(path("/chats/chat1/messages"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(json!({"id":"sent1"})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let mut map = knowledge(&dir);
+        std::fs::write(
+            dir.path().join("maintenance.md"),
+            "El mantenimiento es el domingo de 02:00 a 03:00.",
+        )
+        .unwrap();
+        let mut maintenance = map.resources[0].clone();
+        maintenance.id = "maintenance".into();
+        maintenance.description = "Ventana de mantenimiento".into();
+        maintenance.access = Access::File {
+            repository: "private".into(),
+            path: "maintenance.md".into(),
+        };
+        map.resources.push(maintenance.clone());
+        std::fs::write(dir.path().join("private.md"), "UNAUTHORIZED").unwrap();
+        for (id, enabled, external, conversation, sender) in [
+            ("wrong-chat", true, true, "chats/other", ""),
+            ("disabled", false, true, "chats/chat1", ""),
+            ("local-only", true, false, "chats/chat1", ""),
+            ("wrong-sender", true, true, "chats/chat1", "other"),
+        ] {
+            let mut blocked = maintenance.clone();
+            blocked.id = id.into();
+            blocked.enabled = enabled;
+            blocked.external_processing = external;
+            blocked.allowed_conversations = vec![conversation.into()];
+            blocked.allowed_senders = if sender.is_empty() {
+                vec![]
+            } else {
+                vec![sender.into()]
+            };
+            blocked.access = Access::File {
+                repository: "private".into(),
+                path: "private.md".into(),
+            };
+            map.resources.push(blocked);
+        }
+        if with_history {
+            store
+                .save_context(
+                    "chats/chat1",
+                    "¿Cómo está el proyecto anterior?",
+                    "Requiere confirmación.",
+                )
+                .unwrap();
+        }
+        let pipeline = Pipeline {
+            config: graph.config.clone(),
+            store: store.clone(),
+            adapter: graph,
+            gate: Arc::new(FinalOnlyGate),
+            knowledge: map,
+            llm: Arc::new(CompoundAnswer),
+            tools: Arc::new(NoTools),
+            redactor: redactor(),
+        };
+        store.enqueue("chats/chat1/messages/123").unwrap();
+        pipeline.process("chats/chat1/messages/123").await.unwrap();
+        let audit = store.audit("chats/chat1/messages/123").unwrap().unwrap();
+        assert_eq!(audit.status, "sent");
+        assert_eq!(audit.source.as_deref(), Some("hours,maintenance"));
+        assert_eq!(
+            store.context("chats/chat1").unwrap().unwrap().question,
+            "¿Cuál es el horario de soporte y cuándo es el mantenimiento?"
+        );
+    }
+}
+struct UncertainToolGate;
+#[async_trait]
+impl DecisionGate for UncertainToolGate {
+    async fn evaluate(
+        &self,
+        stage: Stage,
+        _: serde_json::Value,
+        _: BTreeMap<String, String>,
+    ) -> Result<personal_teams_assistant::decision::Verdict> {
+        Ok(match stage {
+            Stage::Routing => personal_teams_assistant::decision::Verdict {
+                selected: "status-tool".into(),
+                confidence: 0.48,
+            },
+            Stage::Final => personal_teams_assistant::decision::Verdict {
+                selected: "allow".into(),
+                confidence: 0.99,
+            },
+            _ => panic!("unexpected semantic prefilter"),
+        })
+    }
+}
+struct AnswerOrClarify(bool);
+#[async_trait]
+impl LlmProvider for AnswerOrClarify {
+    fn name(&self) -> &str {
+        "synthetic"
+    }
+    async fn generate(&self, input: GenerationInput<'_>) -> Result<String> {
+        if self.0 {
+            assert!(input.evidence.contains("09:00 a 18:00"));
+            Ok("Soporte: lunes a viernes de 09:00 a 18:00.".into())
+        } else {
+            assert!(
+                input
+                    .evidence
+                    .contains("No se recuperaron hechos verificables")
+            );
+            Ok("No pude verificar el horario. ¿Qué fuente de soporte debo consultar?".into())
+        }
+    }
+}
+#[tokio::test]
+async fn uncertain_tool_routing_answers_from_documents_or_requests_clarification_without_running_tools()
+ {
+    for with_document in [true, false] {
+        let server = MockServer::start().await;
+        let dir = tempfile::tempdir().unwrap();
+        let store = support::store(&dir);
+        let graph = support::graph(&server, store.clone());
+        support::mock_message(&server, "¿Cuál es el horario de soporte?").await;
+        Mock::given(method("POST"))
+            .and(path("/chats/chat1/messages"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(json!({"id":"sent1"})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let mut map = knowledge(&dir);
+        let mut tool = map.resources[0].clone();
+        tool.id = "status-tool".into();
+        tool.access = Access::Tool {
+            tool: ToolSpec::Http {
+                url: "https://example.com/status".into(),
+                secret_ref: None,
+            },
+        };
+        if !with_document {
+            map.resources.clear();
+        }
+        map.resources.push(tool);
+        let pipeline = Pipeline {
+            config: graph.config.clone(),
+            store: store.clone(),
+            adapter: graph,
+            gate: Arc::new(UncertainToolGate),
+            knowledge: map,
+            llm: Arc::new(AnswerOrClarify(with_document)),
+            tools: Arc::new(NoTools),
+            redactor: redactor(),
+        };
+        store.enqueue("chats/chat1/messages/123").unwrap();
+        pipeline.process("chats/chat1/messages/123").await.unwrap();
+        let audit = store.audit("chats/chat1/messages/123").unwrap().unwrap();
+        assert_eq!(audit.status, "sent");
+        assert!(audit.tools.is_empty());
     }
 }
 #[tokio::test]
@@ -391,12 +584,22 @@ async fn simulation_requires_admin_key_and_never_sends_to_graph() {
         )
         .unwrap(),
     );
-    let app = webhook::router(Arc::new(WebState {
+    let state = Arc::new(WebState {
         graph,
         oauth,
         admin_key: "test-admin".into(),
         pipeline: Some(pipeline),
-    }));
+    });
+    let public = webhook::public_router(state.clone());
+    for path in ["/test", "/test/chat", "/oauth/login", "/oauth/callback"] {
+        let response = public
+            .clone()
+            .oneshot(Request::get(path).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
+    }
+    let app = webhook::router(state);
     let body = json!({"session":"same-chat","text":"hola"}).to_string();
     let unauthorized = app
         .clone()
@@ -501,6 +704,35 @@ async fn graph_refreshes_and_renews_subscriptions() {
     assert_eq!(store.subscriptions().unwrap().len(), 1);
     store.expire_subscription("sub1").unwrap();
     graph.reconcile_subscriptions().await.unwrap();
+}
+#[tokio::test]
+async fn recovers_subscription_when_graph_redacts_client_state() {
+    let server = MockServer::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let store = support::store(&dir);
+    let graph = support::graph(&server, store.clone());
+    let cfg = &graph.config;
+    Mock::given(method("GET"))
+        .and(path("/subscriptions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"value":[{
+            "id":"existing",
+            "resource":"chats/chat1/messages",
+            "clientState":null,
+            "applicationId":cfg.graph.client_id,
+            "creatorId":cfg.graph.user_id,
+            "notificationUrl":"https://assistant.example.com/graph/notifications",
+            "expirationDateTime":(chrono::Utc::now()+chrono::Duration::minutes(50)).to_rfc3339()
+        }]})))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/subscriptions"))
+        .respond_with(ResponseTemplate::new(409))
+        .expect(0)
+        .mount(&server)
+        .await;
+    graph.reconcile_subscriptions().await.unwrap();
+    assert_eq!(store.subscriptions().unwrap()[0].id, "existing");
 }
 #[tokio::test]
 async fn all_chats_use_one_subscription_and_accept_chat_notifications() {

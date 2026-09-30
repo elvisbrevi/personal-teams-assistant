@@ -16,3 +16,14 @@ jobs:
       - run: cargo test --locked
       - name: Build container
         run: docker build -t personal-teams-assistant:test .
+  desktop:
+    strategy:
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install pinned Rust
+        run: rustup show
+      - name: Check desktop app
+        run: cargo check -p personal-teams-desktop --locked

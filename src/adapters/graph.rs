@@ -244,13 +244,13 @@ impl Graph {
         }
         let mut sections = Vec::new();
         while let Some(result) = jobs.join_next().await {
-            if let Ok(Ok((priority, section))) = result {
-                if !section.is_empty() {
-                    sections.push((priority, section));
-                }
+            if let Ok(Ok((priority, section))) = result
+                && !section.is_empty()
+            {
+                sections.push((priority, section));
             }
         }
-        sections.sort_by(|a, b| b.0.cmp(&a.0));
+        sections.sort_by_key(|a| std::cmp::Reverse(a.0));
         let output: String = sections.into_iter().map(|(_, section)| section).collect();
         Ok(output.chars().take(3000).collect())
     }
@@ -400,22 +400,38 @@ impl Graph {
                 .map(|c| format!("teams/{}/channels/{}/messages", c.team_id, c.channel_id)),
         );
         // Reconcile server state to recover subscription creation if a response was lost.
-        let remote = self.list_collection("subscriptions").await?;
+        let remote = match self.list_collection("subscriptions").await {
+            Ok(remote) => remote,
+            Err(error) => {
+                self.store.event(
+                    "subscription",
+                    &format!("list_failed_{}", subscription_error_code(&error)),
+                )?;
+                return Err(error);
+            }
+        };
         let callback = format!(
             "{}/graph/notifications",
             self.config.server.public_url.trim_end_matches('/')
         );
         for s in &remote {
             let resource = s["resource"].as_str().unwrap_or("").trim_start_matches('/');
-            let owned = self
+            let locally_owned = self
                 .store
                 .subscriptions()?
                 .iter()
-                .any(|local| Some(local.id.as_str()) == s["id"].as_str())
-                || s["clientState"]
+                .any(|local| Some(local.id.as_str()) == s["id"].as_str());
+            // Graph intentionally omits clientState from GET /subscriptions. Recover only a
+            // subscription for this app, user, resource, and exact callback.
+            let recoverable = desired.iter().any(|r| r == resource)
+                && s["notificationUrl"].as_str() == Some(&callback)
+                && s["applicationId"]
                     .as_str()
-                    .is_some_and(|v| crate::security::constant_eq(v, &self.client_state));
-            if !owned {
+                    .is_some_and(|v| v.eq_ignore_ascii_case(&self.config.graph.client_id))
+                && s["creatorId"]
+                    .as_str()
+                    .is_some_and(|v| v.eq_ignore_ascii_case(&self.config.graph.user_id));
+            if !locally_owned && !recoverable {
                 continue;
             }
             let id = s["id"].as_str().context("subscription id missing")?;
@@ -484,7 +500,10 @@ impl Graph {
                         {
                             self.store.remove_subscription(&s.id)?;
                         }
-                        self.store.event("subscription", "renewal_failed")?;
+                        self.store.event(
+                            "subscription",
+                            &format!("renewal_failed_{}", subscription_error_code(&error)),
+                        )?;
                         failed = true;
                     }
                 }
@@ -495,8 +514,11 @@ impl Graph {
                     .await
                 {
                     Ok(created) => self.persist_subscription(&created, &resource)?,
-                    Err(_) => {
-                        self.store.event("subscription", "creation_failed")?;
+                    Err(error) => {
+                        self.store.event(
+                            "subscription",
+                            &format!("creation_failed_{}", subscription_error_code(&error)),
+                        )?;
                         failed = true;
                     }
                 }
@@ -623,6 +645,12 @@ impl MessageAdapter for Graph {
 
 #[derive(Debug)]
 struct GraphHttpError(u16);
+fn subscription_error_code(error: &anyhow::Error) -> String {
+    match error.downcast_ref::<GraphHttpError>() {
+        Some(status) => format!("graph_http_{}", status.0),
+        None => "request_failed".into(),
+    }
+}
 impl std::fmt::Display for GraphHttpError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "Graph HTTP {}", self.0)

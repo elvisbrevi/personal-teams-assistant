@@ -1,8 +1,8 @@
 use anyhow::{Result, ensure};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, path::PathBuf};
 
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
     pub server: Server,
@@ -14,14 +14,16 @@ pub struct Config {
     #[serde(default)]
     pub secrets: BTreeMap<String, String>,
 }
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Server {
     pub bind: String,
     pub public_url: String,
     pub data_dir: PathBuf,
+    #[serde(default)]
+    pub cloudflare_tunnel: bool,
 }
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Graph {
     pub tenant_id: String,
@@ -34,13 +36,13 @@ pub struct Graph {
     #[serde(default)]
     pub channels: Vec<Channel>,
 }
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Channel {
     pub team_id: String,
     pub channel_id: String,
 }
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Jev {
     pub model: String,
@@ -53,14 +55,14 @@ pub struct Jev {
 fn default_follow_up_threshold() -> f64 {
     0.7
 }
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Llm {
     pub provider: String,
     pub model: String,
     pub style: String,
 }
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Policy {
     pub dry_run: bool,
@@ -74,6 +76,17 @@ pub struct Policy {
     pub allowed_senders: Vec<String>,
 }
 impl Config {
+    pub fn desktop_template() -> Result<Self> {
+        Ok(toml::from_str(include_str!("../config.example.toml"))?)
+    }
+
+    /// Desktop profiles are explicit; process-level overrides must not switch Entra identity.
+    pub fn load_desktop(path: &str) -> Result<Self> {
+        let cfg: Self = toml::from_str(&std::fs::read_to_string(path)?)?;
+        cfg.validate()?;
+        Ok(cfg)
+    }
+
     pub fn load(path: &str) -> Result<Self> {
         let mut cfg: Self = toml::from_str(&std::fs::read_to_string(path)?)?;
         // Only non-secret operational overrides; secrets are resolved separately.
