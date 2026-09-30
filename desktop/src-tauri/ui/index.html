@@ -39,6 +39,8 @@
         <div class="grid">
           <label>Modelo de Jev<input id="jev-model"></label>
           <label>Modelo de DeepSeek<input id="llm-model"></label>
+          <label>Máximo de caracteres: respuesta normal<input id="max-answer-chars" type="number" min="1" max="4000"></label>
+          <label>Máximo de caracteres: respuesta detallada<input id="max-detailed-answer-chars" type="number" min="1" max="16000"></label>
           <label>ID de tenant Entra<input id="tenant-id"></label>
           <label>Client ID Entra<input id="client-id"></label>
           <label>ID del usuario Teams<input id="user-id"></label>
@@ -53,6 +55,13 @@
         <label class="check"><input id="discover-chats" type="checkbox"> Descubrir todos mis chats autorizados</label>
         <label>Chats permitidos, uno por línea<textarea id="allowed-chats" rows="3"></textarea></label>
         <div class="actions"><button id="save-settings">Guardar configuración</button></div>
+      </div>
+      <div class="panel">
+        <h2>Chat conmigo mismo</h2>
+        <p id="self-chat-state"></p>
+        <label>ID del chat personal (opcional; se validará contra Microsoft)<input id="self-chat-id"></label>
+        <div class="actions"><button id="self-chat-enable">Validar y habilitar</button><button id="self-chat-disable" class="secondary">Deshabilitar</button><button id="self-chat-test" class="secondary">Comprobar membresía</button></div>
+        <p>Se procesan mensajes nuevos. Autoriza las fuentes elegidas a la audiencia exacta de este chat. Cada respuesta incluye un enlace PTA para evitar bucles incluso ante un envío ambiguo.</p>
       </div>
       <div class="panel">
         <h2>Migrar esta instalación</h2>

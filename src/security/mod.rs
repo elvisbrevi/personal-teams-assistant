@@ -166,6 +166,72 @@ pub fn private_dir(path: &Path) -> Result<()> {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
     }
+    #[cfg(windows)]
+    restrict_windows(path, true)?;
+    Ok(())
+}
+/// Restrict control/configuration files to the OS account, including Windows ACLs.
+pub fn protect_file(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    #[cfg(windows)]
+    restrict_windows(path, false)?;
+    Ok(())
+}
+#[cfg(windows)]
+fn restrict_windows(path: &Path, directory: bool) -> Result<()> {
+    let output = std::process::Command::new("whoami")
+        .args(["/user", "/fo", "csv", "/nh"])
+        .output()?;
+    ensure!(
+        output.status.success(),
+        "cannot resolve Windows account SID"
+    );
+    let text = String::from_utf8(output.stdout)?;
+    let sid = text
+        .split(',')
+        .next_back()
+        .context("missing Windows SID")?
+        .trim()
+        .trim_matches('"');
+    ensure!(
+        sid.starts_with("S-1-")
+            && sid
+                .chars()
+                .all(|c| c.is_ascii_digit() || c == 'S' || c == '-'),
+        "invalid Windows SID"
+    );
+    let grant = format!("*{sid}:{}F", if directory { "(OI)(CI)" } else { "" });
+    let status = std::process::Command::new("icacls")
+        .arg(path)
+        .args(["/inheritance:r", "/grant:r", &grant])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()?;
+    ensure!(status.success(), "cannot restrict Windows ACL");
+    Ok(())
+}
+
+pub fn replace_private_file(temp: &Path, target: &Path) -> Result<()> {
+    #[cfg(not(windows))]
+    std::fs::rename(temp, target)?;
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn MoveFileExW(existing: *const u16, replacement: *const u16, flags: u32) -> i32;
+        }
+        let source: Vec<u16> = temp.as_os_str().encode_wide().chain(Some(0)).collect();
+        let dest: Vec<u16> = target.as_os_str().encode_wide().chain(Some(0)).collect();
+        // REPLACE_EXISTING | WRITE_THROUGH, same filesystem and private directory.
+        if unsafe { MoveFileExW(source.as_ptr(), dest.as_ptr(), 1 | 8) } == 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+    }
     Ok(())
 }
 pub struct Vault(Aes256GcmSiv);

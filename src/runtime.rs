@@ -18,17 +18,26 @@ use fs2::FileExt;
 use std::{sync::Arc, time::Duration};
 
 pub async fn serve(path: &str, stop_rx: tokio::sync::watch::Receiver<bool>) -> Result<()> {
-    serve_mode(path, stop_rx, false).await
+    serve_mode(path, stop_rx, false, None).await
 }
 
 pub async fn serve_desktop(path: &str, stop_rx: tokio::sync::watch::Receiver<bool>) -> Result<()> {
-    serve_mode(path, stop_rx, true).await
+    serve_mode(path, stop_rx, true, None).await
+}
+
+pub async fn serve_desktop_ready(
+    path: &str,
+    stop_rx: tokio::sync::watch::Receiver<bool>,
+    ready: tokio::sync::oneshot::Sender<()>,
+) -> Result<()> {
+    serve_mode(path, stop_rx, true, Some(ready)).await
 }
 
 async fn serve_mode(
     path: &str,
     stop_rx: tokio::sync::watch::Receiver<bool>,
     desktop: bool,
+    ready: Option<tokio::sync::oneshot::Sender<()>>,
 ) -> Result<()> {
     let config = Arc::new(if desktop {
         Config::load_desktop(path)?
@@ -118,6 +127,9 @@ async fn serve_mode(
         store: store.clone(),
         client_state,
     });
+    if desktop {
+        graph.verify_account().await?;
+    }
     let gate = Arc::new(Jev {
         client: client.clone(),
         endpoint: "https://api.typesafe.ai/v1/systemone".into(),
@@ -147,6 +159,7 @@ async fn serve_mode(
         tools,
         redactor,
     });
+    let listener = tokio::net::TcpListener::bind(&config.server.bind).await?;
     let worker = {
         let graph = graph.clone();
         let store = store.clone();
@@ -198,6 +211,21 @@ async fn serve_mode(
             }
         })
     };
+    let personal_poller = {
+        let graph = graph.clone();
+        let mut stop = stop_rx.clone();
+        tokio::spawn(async move {
+            loop {
+                if *stop.borrow() {
+                    break;
+                }
+                if graph.poll_self_chat().await.is_err() {
+                    let _ = graph.store.event("self_chat", "poll_failed");
+                }
+                tokio::select! { _=tokio::time::sleep(Duration::from_secs(10))=>{}, _=stop.changed()=>{} }
+            }
+        })
+    };
     let renewer = {
         let graph = graph.clone();
         let mut stop = stop_rx.clone();
@@ -217,6 +245,19 @@ async fn serve_mode(
             }
         })
     };
+    struct Background(Vec<tokio::task::AbortHandle>);
+    impl Drop for Background {
+        fn drop(&mut self) {
+            for task in &self.0 {
+                task.abort();
+            }
+        }
+    }
+    let _background = Background(vec![
+        worker.abort_handle(),
+        renewer.abort_handle(),
+        personal_poller.abort_handle(),
+    ]);
     let state = Arc::new(WebState {
         graph,
         oauth,
@@ -228,7 +269,9 @@ async fn serve_mode(
     } else {
         webhook::router(state)
     };
-    let listener = tokio::net::TcpListener::bind(&config.server.bind).await?;
+    if let Some(ready) = ready {
+        let _ = ready.send(());
+    }
     tracing::info!(event = "started", dry_run = config.policy.dry_run);
     axum::serve(listener, app)
         .with_graceful_shutdown(async move {
@@ -240,6 +283,7 @@ async fn serve_mode(
         .await?;
     worker.await?;
     renewer.await?;
+    personal_poller.await?;
     drop(lock);
     Ok(())
 }

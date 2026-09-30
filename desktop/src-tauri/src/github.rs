@@ -277,22 +277,23 @@ pub async fn clone_repository(
         let url = url.clone();
         move || -> Result<()> {
             let exe = std::env::current_exe()?;
-            let status = Command::new("git")
-                .args(["clone", "--single-branch", "--", &url])
-                .arg(&temporary)
-                .env("GIT_ASKPASS", exe)
-                .env("GIT_TERMINAL_PROMPT", "0")
-                .env("PERSONAL_TEAMS_GIT_ASKPASS", "1")
-                .env("PERSONAL_TEAMS_GIT_TOKEN", token)
-                .env("GIT_CONFIG_NOSYSTEM", "1")
-                .env(
-                    "GIT_CONFIG_GLOBAL",
-                    if cfg!(windows) { "NUL" } else { "/dev/null" },
-                )
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status()?;
+            let status = git_status(
+                Command::new("git")
+                    .args(["clone", "--single-branch", "--", &url])
+                    .arg(&temporary)
+                    .env("GIT_ASKPASS", exe)
+                    .env("GIT_TERMINAL_PROMPT", "0")
+                    .env("PERSONAL_TEAMS_GIT_ASKPASS", "1")
+                    .env("PERSONAL_TEAMS_GIT_TOKEN", token)
+                    .env("GIT_CONFIG_NOSYSTEM", "1")
+                    .env(
+                        "GIT_CONFIG_GLOBAL",
+                        if cfg!(windows) { "NUL" } else { "/dev/null" },
+                    )
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null()),
+            )?;
             ensure!(status.success(), "Git clone failed");
             Ok(())
         }
@@ -357,47 +358,49 @@ pub async fn update_repository(alias: &str, path: &Path, data_dir: &Path) -> Res
             clean.status.success() && clean.stdout.is_empty(),
             "Git checkout has local changes"
         );
-        let status = Command::new("git")
-            .arg("-C")
-            .arg(&path)
-            .args(["fetch", "origin"])
-            .env("GIT_ASKPASS", exe)
-            .env("GIT_TERMINAL_PROMPT", "0")
-            .env("PERSONAL_TEAMS_GIT_ASKPASS", "1")
-            .env("PERSONAL_TEAMS_GIT_TOKEN", token)
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env(
-                "GIT_CONFIG_GLOBAL",
-                if cfg!(windows) { "NUL" } else { "/dev/null" },
-            )
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()?;
+        let status = git_status(
+            Command::new("git")
+                .arg("-C")
+                .arg(&path)
+                .args(["fetch", "origin"])
+                .env("GIT_ASKPASS", exe)
+                .env("GIT_TERMINAL_PROMPT", "0")
+                .env("PERSONAL_TEAMS_GIT_ASKPASS", "1")
+                .env("PERSONAL_TEAMS_GIT_TOKEN", token)
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env(
+                    "GIT_CONFIG_GLOBAL",
+                    if cfg!(windows) { "NUL" } else { "/dev/null" },
+                )
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null()),
+        )?;
         ensure!(status.success(), "Git fetch failed");
-        let status = Command::new("git")
-            .arg("-C")
-            .arg(&path)
-            .args([
-                "-c",
-                if cfg!(windows) {
-                    "core.hooksPath=NUL"
-                } else {
-                    "core.hooksPath=/dev/null"
-                },
-                "merge",
-                "--ff-only",
-                "FETCH_HEAD",
-            ])
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env(
-                "GIT_CONFIG_GLOBAL",
-                if cfg!(windows) { "NUL" } else { "/dev/null" },
-            )
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()?;
+        let status = git_status(
+            Command::new("git")
+                .arg("-C")
+                .arg(&path)
+                .args([
+                    "-c",
+                    if cfg!(windows) {
+                        "core.hooksPath=NUL"
+                    } else {
+                        "core.hooksPath=/dev/null"
+                    },
+                    "merge",
+                    "--ff-only",
+                    "FETCH_HEAD",
+                ])
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env(
+                    "GIT_CONFIG_GLOBAL",
+                    if cfg!(windows) { "NUL" } else { "/dev/null" },
+                )
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null()),
+        )?;
         ensure!(status.success(), "Git checkout diverged");
         Ok(())
     })
@@ -417,5 +420,21 @@ pub fn askpass() {
             "{}",
             std::env::var("PERSONAL_TEAMS_GIT_TOKEN").unwrap_or_default()
         );
+    }
+}
+
+fn git_status(command: &mut Command) -> Result<std::process::ExitStatus> {
+    let mut child = command.spawn()?;
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok(status);
+        }
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            anyhow::bail!("Git operation timed out");
+        }
+        std::thread::sleep(Duration::from_millis(100));
     }
 }

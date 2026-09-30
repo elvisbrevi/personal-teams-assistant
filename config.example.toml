@@ -32,6 +32,7 @@ dry_run = true
 greeting = "¡Hola!"
 max_context_chars = 16000
 max_answer_chars = 3000
+max_detailed_answer_chars = 8000
 max_message_age_seconds = 300
 allowed_senders = []
 sensitive_patterns = []

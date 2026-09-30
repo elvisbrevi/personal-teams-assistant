@@ -9,6 +9,14 @@ cargo install --path desktop/src-tauri --locked
 personal-teams-desktop
 ```
 
-Una vez publicados `personal-teams-assistant` y `personal-teams-desktop` en crates.io, la instalación desde el registro será `cargo install personal-teams-desktop`.
+Desde el registro: `cargo install personal-teams-desktop --version 0.2.0 --locked`. Cargo instala GUI y consola `pta`; la skill se entrega mediante `pta skill show/path/install` sin checkout adicional.
+
+`pta --help` es la referencia de comandos. `pta start/stop/restart` controla el mismo host que la GUI; `pta app open/hide/quit` controla la ventana y el host. El host puede arrancar oculto desde terminal. `pta --json status` muestra estado persistido/cargado sin valores secretos.
+
+Configura desde `config show/get/set/apply`, gestiona credenciales por stdin protegido (el terminal con eco se rechaza), conecta Microsoft/GitHub con `auth`, administra repositorios/fuentes/audiencias y ejecuta `test simulate`, `test providers` o `doctor --offline`. Para Teams personal: `self-chat enable [ID]` valida la cuenta y membresía y conserva audiencias. `policy.max_answer_chars` y `policy.max_detailed_answer_chars` limitan cada modo; el agente elige el modo. `test self-chat` verifica membresía; recepción/envío se comprueban en Teams y audit.
+
+En macOS, el bundle contiene `Contents/MacOS/pta`. `pta app install-cli DIRECTORIO` crea un enlace en un directorio existente elegido de PATH. Roadmap Windows (próxima versión): NSIS incorporará `pta.exe` junto a la GUI; se puede invocar por ruta desde PowerShell o copiar a un directorio elegido mediante app install-cli. La copia Windows debe actualizarse con la app.
+
+La instalación conserva el perfil Tauri `dev.personalteams.assistant`, el directorio de datos importado y las credenciales del sistema. El primer acceso o una firma nueva puede solicitar autorización del sistema. Logout elimina tokens locales, sin revocar consentimiento remoto. Los paquetes locales macOS usan firma ad hoc, sin notarización; CI Windows no sustituye una prueba funcional del producto.
 
 El binario instalado por Cargo funciona con ventana y bandeja, pero no crea por sí solo un paquete `.app`/`.dmg` o instalador Windows. Para esos paquetes usa `cargo tauri build` desde este directorio. Consulta el README principal del repositorio para la configuración y el modelo de credenciales.

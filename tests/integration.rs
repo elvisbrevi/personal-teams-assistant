@@ -130,7 +130,7 @@ async fn graph_jev_deepseek_end_to_end_and_final_gate() {
             let answers = json!({"supported":{"type":"noul","noul":if allow {0.99} else {0.01}},"no_new_promise":{"type":"noul","noul":0.99},"privacy":{"type":"noul","noul":0.99},"relevant":{"type":"noul","noul":0.99}});
             ResponseTemplate::new(200).set_body_json(json!({"model":"jev-test","answers":answers}))
         }).expect(1).mount(&server).await;
-        Mock::given(method("POST")).and(path("/chat/completions")).respond_with(ResponseTemplate::new(200).set_body_json(json!({"id":"gen1","object":"chat.completion","created":1,"model":"deepseek-test","choices":[{"index":0,"message":{"role":"assistant","content":"El soporte atiende de lunes a viernes de 09:00 a 18:00."},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":10,"total_tokens":20,"prompt_cache_hit_tokens":0,"prompt_cache_miss_tokens":10}}))).expect(1).mount(&server).await;
+        Mock::given(method("POST")).and(path("/chat/completions")).respond_with(ResponseTemplate::new(200).set_body_json(json!({"id":"gen1","object":"chat.completion","created":1,"model":"deepseek-test","choices":[{"index":0,"message":{"role":"assistant","content":"{\"answer\":\"El soporte atiende de lunes a viernes de 09:00 a 18:00.\",\"detailed\":false}"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":10,"total_tokens":20,"prompt_cache_hit_tokens":0,"prompt_cache_miss_tokens":10}}))).expect(1).mount(&server).await;
         Mock::given(method("POST"))
             .and(path("/chats/chat1/messages"))
             .respond_with(ResponseTemplate::new(201).set_body_json(json!({"id":"sent1"})))
@@ -934,4 +934,289 @@ async fn oauth_form_allows_microsoft_redirect_and_sets_secure_cookie() {
     );
     let cookie = response.headers()["set-cookie"].to_str().unwrap();
     assert!(cookie.contains("HttpOnly; Secure; SameSite=Lax"));
+}
+
+#[tokio::test]
+async fn self_chat_is_scoped_durable_and_does_not_confuse_equal_human_text() {
+    use personal_teams_assistant::{adapters::teams::IncomingMessage, config::SelfChat};
+    let server = MockServer::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let store = support::store(&dir);
+    let mut config = support::config();
+    let user = config.graph.user_id.clone();
+    config.graph.self_chat = Some(SelfChat {
+        id: "chat1".into(),
+        user_id: user.clone(),
+        enabled_at: chrono::Utc::now().timestamp_millis() - 60_000,
+    });
+    let graph = Arc::new(Graph {
+        config: Arc::new(config),
+        ..(*support::graph(&server, store.clone())).clone()
+    });
+    Mock::given(method("GET"))
+        .and(path("/me"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id":user})))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/chats/chat1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"chatType":"oneOnOne"})))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/chats/chat1/members"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"value":[{"userId":user}]})))
+        .mount(&server)
+        .await;
+    for id in ["123", "human-equal", "old"] {
+        Mock::given(method("GET")).and(path(format!("/chats/chat1/messages/{id}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id":id,"messageType":"message","createdDateTime":if id=="old" {(chrono::Utc::now()-chrono::Duration::seconds(120)).to_rfc3339()}else {chrono::Utc::now().to_rfc3339()},"deletedDateTime":null,"from":{"user":{"id":user}},"body":{"contentType":"text","content":"¡Hola!"},"mentions":[]}))).mount(&server).await;
+    }
+    Mock::given(method("POST"))
+        .and(path("/chats/chat1/messages"))
+        .respond_with(ResponseTemplate::new(201).set_body_json(json!({"id":"output-id"})))
+        .expect(2)
+        .mount(&server)
+        .await;
+    let pipeline = Pipeline {
+        config: graph.config.clone(),
+        store: store.clone(),
+        adapter: graph.clone(),
+        gate: Arc::new(NoGate),
+        knowledge: knowledge(&dir),
+        llm: Arc::new(NoLlm),
+        tools: Arc::new(NoTools),
+        redactor: redactor(),
+    };
+    for id in ["123", "old", "human-equal"] {
+        let resource = format!("chats/chat1/messages/{id}");
+        store.enqueue(&resource).unwrap();
+        pipeline.process(&resource).await.unwrap();
+    }
+    assert_eq!(
+        store
+            .audit("chats/chat1/messages/old")
+            .unwrap()
+            .unwrap()
+            .status,
+        "ignored"
+    );
+    assert_eq!(
+        store
+            .audit("chats/chat1/messages/human-equal")
+            .unwrap()
+            .unwrap()
+            .status,
+        "sent"
+    );
+    assert!(store.is_output("chats/chat1", "output-id", "").unwrap());
+    assert!(
+        !store
+            .is_output("chats/chat1", "human-other", "¡Hola!")
+            .unwrap()
+    );
+    let message: IncomingMessage = graph.fetch("chats/chat1/messages/123").await.unwrap();
+    let mut third_party = message.clone();
+    third_party.conversation = "chats/third-party".into();
+    assert!(!third_party.eligible_in(&user, &[], 300, graph.config.graph.self_chat.as_ref()));
+    let unknown = store.begin_output("chats/chat1").unwrap();
+    // If Graph strips the marker and the send result is lost, fail closed.
+    assert!(store.has_unresolved_output("chats/chat1").unwrap());
+    assert!(
+        !graph
+            .fetch("chats/chat1/messages/human-equal")
+            .await
+            .unwrap()
+            .is_user_message
+    );
+    // A webhook can arrive before POST returns, or after an ambiguous send/restart.
+    let marker = format!("<a href=\"https://personalteams.invalid/output/{unknown}\">PTA</a>");
+    assert!(
+        store
+            .is_output("chats/chat1", "early-output", &marker)
+            .unwrap()
+    );
+    assert!(!store.has_unresolved_output("chats/chat1").unwrap());
+    assert!(
+        graph
+            .fetch("chats/chat1/messages/human-equal")
+            .await
+            .unwrap()
+            .is_user_message
+    );
+    let reopened =
+        personal_teams_assistant::state::Store::open(&dir.path().join("test.db")).unwrap();
+    assert!(
+        reopened
+            .is_output("chats/chat1", "early-output", "")
+            .unwrap()
+    );
+    assert!(
+        !reopened
+            .is_output("chats/third-party", "early-output", &marker)
+            .unwrap()
+    );
+    assert!(!reopened.enqueue("chats/chat1/messages/123").unwrap());
+}
+
+#[test]
+fn diagnostic_queries_leave_processing_jobs_untouched_and_hide_content() {
+    use personal_teams_assistant::state::{Audit, Store};
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("test.db");
+    let store = Store::open(&path).unwrap();
+    store.enqueue("chats/chat1/messages/123").unwrap();
+    store.next_job().unwrap();
+    store
+        .record(
+            "chats/chat1/messages/123",
+            &Audit {
+                status: "processing".into(),
+                proposed: Some("private-content-canary".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let safe = Store::inspect(&path, false, 20, None, false).unwrap();
+    assert!(
+        !serde_json::to_string(&safe)
+            .unwrap()
+            .contains("private-content-canary")
+    );
+    assert_eq!(
+        store.status("chats/chat1/messages/123").unwrap().as_deref(),
+        Some("processing")
+    );
+    assert!(
+        Store::inspect(&path, false, 20, None, true).unwrap()[0]["audit"]["proposed"].is_string()
+    );
+    assert!(!Store::has_token(&path).unwrap());
+    assert_eq!(
+        store.status("chats/chat1/messages/123").unwrap().as_deref(),
+        Some("processing")
+    );
+}
+
+struct LengthChoice {
+    detailed: bool,
+}
+#[async_trait]
+impl LlmProvider for LengthChoice {
+    fn name(&self) -> &str {
+        "length-choice"
+    }
+    async fn generate(&self, _: GenerationInput<'_>) -> Result<String> {
+        unreachable!()
+    }
+    async fn generate_response(
+        &self,
+        input: GenerationInput<'_>,
+    ) -> Result<personal_teams_assistant::llm::GeneratedAnswer> {
+        assert_eq!(input.max_answer_chars, 30);
+        assert_eq!(input.max_detailed_answer_chars, 100);
+        Ok(personal_teams_assistant::llm::GeneratedAnswer {
+            answer: "á".repeat(60),
+            detailed: self.detailed,
+        })
+    }
+}
+#[tokio::test]
+async fn agent_selected_character_limits_are_enforced_before_sending() {
+    for detailed in [false, true] {
+        let server = MockServer::start().await;
+        let dir = tempfile::tempdir().unwrap();
+        let store = support::store(&dir);
+        let mut config = support::config();
+        config.policy.max_answer_chars = 30;
+        config.policy.max_detailed_answer_chars = 100;
+        config.validate().unwrap();
+        let graph = Arc::new(Graph {
+            config: Arc::new(config),
+            ..(*support::graph(&server, store.clone())).clone()
+        });
+        support::mock_message(&server, "¿Cuál es el horario de soporte?").await;
+        Mock::given(method("POST"))
+            .and(path("/chats/chat1/messages"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(json!({"id":"sent-limit"})))
+            .expect(if detailed { 1 } else { 0 })
+            .mount(&server)
+            .await;
+        let pipeline = Pipeline {
+            config: graph.config.clone(),
+            store: store.clone(),
+            adapter: graph,
+            gate: Arc::new(FinalOnlyGate),
+            knowledge: knowledge(&dir),
+            llm: Arc::new(LengthChoice { detailed }),
+            tools: Arc::new(NoTools),
+            redactor: redactor(),
+        };
+        store.enqueue("chats/chat1/messages/123").unwrap();
+        pipeline.process("chats/chat1/messages/123").await.unwrap();
+        let audit = store.audit("chats/chat1/messages/123").unwrap().unwrap();
+        assert_eq!(audit.detailed, Some(detailed));
+        assert_eq!(audit.answer_limit, Some(if detailed { 100 } else { 30 }));
+        assert_eq!(audit.status, if detailed { "sent" } else { "ignored" });
+    }
+}
+
+#[tokio::test]
+async fn reserved_notes_require_delegated_account_authorship_without_chat_metadata() {
+    use personal_teams_assistant::config::SelfChat;
+    let server = MockServer::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let store = support::store(&dir);
+    let mut config = support::config();
+    let user = config.graph.user_id.clone();
+    config.graph.self_chat = Some(SelfChat {
+        id: "48:notes".into(),
+        user_id: user.clone(),
+        enabled_at: chrono::Utc::now().timestamp_millis() - 60_000,
+    });
+    let graph = Graph {
+        config: Arc::new(config),
+        ..(*support::graph(&server, store.clone())).clone()
+    };
+    let message = json!({"id":"notes-1","messageType":"message","createdDateTime":chrono::Utc::now().to_rfc3339(),"deletedDateTime":null,"from":{"user":{"id":user}},"body":{"contentType":"text","content":"hola"},"mentions":[]});
+    Mock::given(method("GET"))
+        .and(path("/me"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id":user})))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/me/chats/48:notes/messages"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"value":[message]})))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/me/chats/48:notes/messages/notes-1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(message))
+        .mount(&server)
+        .await;
+    assert_eq!(graph.discover_self_chat().await.unwrap(), "48:notes");
+    graph.poll_self_chat().await.unwrap();
+    assert_eq!(
+        store
+            .status("chats/48:notes/messages/notes-1")
+            .unwrap()
+            .as_deref(),
+        Some("pending")
+    );
+    assert!(
+        graph
+            .fetch("chats/48:notes/messages/notes-1")
+            .await
+            .unwrap()
+            .eligible_in(&user, &[], 300, graph.config.graph.self_chat.as_ref())
+    );
+    Mock::given(method("GET"))
+        .and(path("/me/chats/48:notes/messages"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(
+            json!({"value":[{"messageType":"message","from":{"user":{"id":"another-user"}}}]}),
+        ))
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    assert!(graph.validate_self_chat("48:notes").await.is_err());
+    assert!(!server.received_requests().await.unwrap().iter().any(|r| r.url.path()=="/chats/48:notes" || r.url.path()=="/chats/48:notes/members"));
 }

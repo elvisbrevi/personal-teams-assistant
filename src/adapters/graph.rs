@@ -23,6 +23,155 @@ pub struct Graph {
     pub client_state: String,
 }
 impl Graph {
+    pub async fn verify_account(&self) -> Result<()> {
+        let me = self.request(Method::GET, "me", None, true).await?;
+        ensure!(
+            me["id"].as_str() == Some(&self.config.graph.user_id),
+            "connected account differs"
+        );
+        Ok(())
+    }
+    pub async fn validate_self_chat(&self, id: &str) -> Result<()> {
+        teams::canonical_resource(&format!("chats/{id}/messages/0"))?;
+        let me = self.request(Method::GET, "me", None, true).await?;
+        ensure!(
+            me["id"].as_str() == Some(&self.config.graph.user_id),
+            "connected Graph account differs"
+        );
+        // Teams' reserved notes thread has no ChatThread metadata/members API.
+        // Verify its delegated /me scope and actual authors; never infer another
+        // chat is personal merely because the caller wrote its latest message.
+        if id == "48:notes" {
+            let page = self.personal_page(id).await?;
+            let messages = page["value"]
+                .as_array()
+                .context("invalid personal message page")?;
+            let human: Vec<_> = messages
+                .iter()
+                .filter(|m| m["messageType"] == "message")
+                .collect();
+            ensure!(
+                !human.is_empty()
+                    && human
+                        .iter()
+                        .all(|m| m["from"]["user"]["id"].as_str()
+                            == Some(&self.config.graph.user_id)),
+                "personal notes have no verified account authorship; write a note first"
+            );
+            return Ok(());
+        }
+        let chat = self
+            .request(Method::GET, &format!("chats/{id}"), None, true)
+            .await?;
+        ensure!(
+            chat["chatType"].as_str() == Some("oneOnOne"),
+            "personal chat must be oneOnOne"
+        );
+        let members = self.list_collection(&format!("chats/{id}/members")).await?;
+        ensure!(
+            !members.is_empty()
+                && members
+                    .iter()
+                    .all(|m| m["userId"].as_str() == Some(&self.config.graph.user_id)),
+            "chat has another participant or no verified membership"
+        );
+        Ok(())
+    }
+    /// Explicit manual reconciliation by output nonce and a Graph message ID.
+    pub async fn reconcile_output(&self, nonce: &str, id: &str) -> Result<()> {
+        let chat = self
+            .config
+            .graph
+            .self_chat
+            .as_ref()
+            .context("personal chat disabled")?;
+        self.validate_self_chat(&chat.id).await?;
+        let (conversation, created) = self
+            .store
+            .output_intent(nonce)?
+            .context("unresolved output not found")?;
+        ensure!(
+            conversation == format!("chats/{}", chat.id),
+            "output conversation differs"
+        );
+        let path = teams::canonical_resource(&format!("{conversation}/messages/{id}"))?;
+        let value = self.request(Method::GET, &path, None, true).await?;
+        let message: GraphMessage = serde_json::from_value(value)?;
+        ensure!(
+            message.id == id
+                && message
+                    .from
+                    .and_then(|f| f.user)
+                    .is_some_and(|u| u.id == chat.user_id)
+                && message.created_date_time.timestamp() >= created
+                && message.deleted_date_time.is_none(),
+            "message does not match this send's account/time"
+        );
+        self.store.finish_output(nonce, id)
+    }
+    pub async fn discover_self_chat(&self) -> Result<String> {
+        // A candidate only: validate it against this account before enabling it.
+        if self.validate_self_chat("48:notes").await.is_ok() {
+            return Ok("48:notes".into());
+        }
+        let mut found = Vec::new();
+        for id in self.list_chats().await? {
+            if self.validate_self_chat(&id).await.is_ok() {
+                found.push(id);
+            }
+        }
+        ensure!(
+            found.len() == 1,
+            "personal chat discovery is inconclusive; provide a chat ID to validate"
+        );
+        Ok(found.remove(0))
+    }
+    async fn personal_page(&self, id: &str) -> Result<Value> {
+        let path = if id == "48:notes" {
+            format!("me/chats/{id}/messages")
+        } else {
+            format!("chats/{id}/messages")
+        };
+        let mut url = self.url(&path)?;
+        url.query_pairs_mut()
+            .append_pair("$top", "50")
+            .append_pair("$orderby", "createdDateTime desc");
+        self.request_url(Method::GET, url, None, true).await
+    }
+    pub async fn poll_self_chat(&self) -> Result<()> {
+        if let Some(chat) = &self.config.graph.self_chat {
+            self.validate_self_chat(&chat.id).await?;
+            let collection = format!("chats/{}/messages", chat.id);
+            let page = self.personal_page(&chat.id).await?;
+            let mut newest = chat.enabled_at;
+            for message in page["value"]
+                .as_array()
+                .context("invalid personal message page")?
+                .iter()
+                .rev()
+            {
+                let date = message["createdDateTime"]
+                    .as_str()
+                    .context("message date missing")?;
+                let created = chrono::DateTime::parse_from_rfc3339(date)?.timestamp_millis();
+                newest = newest.max(created);
+                // A bounded overlapping page plus jobs' persistent PK handles duplicates/restarts.
+                if created > chat.enabled_at {
+                    let id = message["id"].as_str().context("message ID missing")?;
+                    self.store.is_output(
+                        &format!("chats/{}", chat.id),
+                        id,
+                        message["body"]["content"].as_str().unwrap_or(""),
+                    )?;
+                    self.store
+                        .enqueue(&teams::canonical_resource(&format!("{collection}/{id}"))?)?;
+                }
+            }
+            self.store
+                .save_activity_cache("self_chat_cursor", &newest.to_string())?;
+        }
+        Ok(())
+    }
     pub async fn recent_project_context(
         &self,
         projects: &[String],
@@ -276,7 +425,12 @@ impl Graph {
         Ok(url)
     }
     pub fn allowed_collection(&self, resource: &str) -> bool {
-        (self.config.graph.discover_all_chats && resource == self.user_messages_resource())
+        self.config
+            .graph
+            .self_chat
+            .as_ref()
+            .is_some_and(|c| resource == format!("chats/{}/messages", c.id))
+            || (self.config.graph.discover_all_chats && resource == self.user_messages_resource())
             || self
                 .config
                 .graph
@@ -295,7 +449,12 @@ impl Graph {
         body: Option<Value>,
         retry_safe: bool,
     ) -> Result<Value> {
-        self.request_url(method, self.url(path)?, body, retry_safe)
+        let scoped = if method == Method::GET && path.starts_with("chats/48:notes/messages/") {
+            format!("me/{path}")
+        } else {
+            path.to_string()
+        };
+        self.request_url(method, self.url(&scoped)?, body, retry_safe)
             .await
     }
     async fn request_url(
@@ -575,7 +734,16 @@ impl MessageAdapter for Graph {
             "conversation no longer allowed"
         );
         let conversation = teams::conversation(&resource)?;
-        let kind = if conversation.starts_with("chats/") {
+        let kind = if conversation == "chats/48:notes"
+            && self
+                .config
+                .graph
+                .self_chat
+                .as_ref()
+                .is_some_and(|c| c.id == "48:notes")
+        {
+            ConversationKind::Direct
+        } else if conversation.starts_with("chats/") {
             let chat = self.request(Method::GET, &conversation, None, true).await?;
             match chat["chatType"].as_str() {
                 Some("oneOnOne") => ConversationKind::Direct,
@@ -585,12 +753,35 @@ impl MessageAdapter for Graph {
         } else {
             ConversationKind::Channel
         };
+        if self
+            .config
+            .graph
+            .self_chat
+            .as_ref()
+            .is_some_and(|c| conversation == format!("chats/{}", c.id))
+        {
+            self.validate_self_chat(self.config.graph.self_chat.as_ref().unwrap().id.as_str())
+                .await?;
+        }
         let value = self.request(Method::GET, &resource, None, true).await?;
         let m: GraphMessage = serde_json::from_value(value)?;
         ensure!(
             resource.rsplit('/').next() == Some(&m.id),
             "message id mismatch"
         );
+        let output = self
+            .store
+            .is_output(&conversation, &m.id, &m.body.content)?;
+        let unresolved = self
+            .config
+            .graph
+            .self_chat
+            .as_ref()
+            .is_some_and(|c| conversation == format!("chats/{}", c.id))
+            && self.store.has_unresolved_output(&conversation)?;
+        if unresolved && !output {
+            self.store.event("self_chat", "paused_unknown_output")?;
+        }
         let text = if m.body.content_type == "html" {
             teams::plain_text(&m.body.content)
         } else {
@@ -612,10 +803,18 @@ impl MessageAdapter for Graph {
                 .collect(),
             text,
             created_at: m.created_date_time.timestamp(),
-            is_user_message: m.message_type == "message" && m.deleted_date_time.is_none(),
+            created_at_millis: m.created_date_time.timestamp_millis(),
+            is_user_message: !output
+                && !unresolved
+                && m.message_type == "message"
+                && m.deleted_date_time.is_none(),
         })
     }
     async fn send(&self, m: &IncomingMessage, text: &str) -> Result<String> {
+        ensure!(
+            text.len() <= 28_000,
+            "Graph answer body exceeds the transport byte limit"
+        );
         let resource = teams::canonical_resource(&m.resource)?;
         ensure!(
             self.allowed_collection(&teams::collection(&resource)?),
@@ -627,19 +826,36 @@ impl MessageAdapter for Graph {
         } else {
             teams::collection(&resource)?
         };
+        let own = self
+            .config
+            .graph
+            .self_chat
+            .as_ref()
+            .is_some_and(|c| m.conversation == format!("chats/{}", c.id));
+        let nonce = if own {
+            Some(self.store.begin_output(&m.conversation)?)
+        } else {
+            None
+        };
+        let body = if let Some(nonce) = &nonce {
+            let escaped = text
+                .replace('&', "&amp;")
+                .replace('<', "&lt;")
+                .replace('>', "&gt;")
+                .replace('\n', "<br>");
+            json!({"body":{"contentType":"html","content":format!("<p>{escaped}</p><p><a href=\"https://personalteams.invalid/output/{nonce}\">PTA</a></p>")}})
+        } else {
+            json!({"body":{"contentType":"text","content":text}})
+        };
         // Never retry a send: Graph provides no idempotency guarantee for this endpoint.
-        let result = self
-            .request(
-                Method::POST,
-                &path,
-                Some(json!({"body":{"contentType":"text","content":text}})),
-                false,
-            )
-            .await?;
-        Ok(result["id"]
+        let result = self.request(Method::POST, &path, Some(body), false).await?;
+        let id = result["id"]
             .as_str()
-            .context("Graph send has no message ID")?
-            .into())
+            .context("Graph send has no message ID")?;
+        if let Some(nonce) = nonce {
+            self.store.finish_output(&nonce, id)?;
+        }
+        Ok(id.into())
     }
 }
 

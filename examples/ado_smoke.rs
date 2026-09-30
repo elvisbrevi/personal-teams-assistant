@@ -76,6 +76,8 @@ async fn main() -> Result<()> {
                 question: &question,
                 evidence: &sanitized,
                 detail_requested: false,
+                max_answer_chars: 3000,
+                max_detailed_answer_chars: 8000,
             })
             .await?;
         println!(
