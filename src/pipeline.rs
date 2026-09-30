@@ -44,14 +44,16 @@ impl Pipeline {
             reason: "ineligible_message".into(),
             ..Default::default()
         };
-        if !message.eligible(
+        if !message.eligible_in(
             &self.config.graph.user_id,
             &self.config.policy.allowed_senders,
             self.config.policy.max_message_age_seconds,
+            self.config.graph.self_chat.as_ref(),
         ) {
             return self.store.record(resource, &audit);
         }
         let mut context_question = None;
+        let mut answer_limit = self.config.policy.max_answer_chars;
         let proposal = if greeting(&message.text) {
             audit.reason = "deterministic_greeting".into();
             self.config.policy.greeting.clone()
@@ -192,16 +194,26 @@ impl Pipeline {
             // groundedness/privacy/promise checks may veto a generated answer.
             audit.provider = Some(self.llm.name().into());
             self.checkpoint(resource, &audit, "generating")?;
-            let answer = self
+            let generated = self
                 .llm
-                .generate(GenerationInput {
+                .generate_response(GenerationInput {
                     question: &question,
                     evidence: &evidence,
                     detail_requested: false,
+                    max_answer_chars: self.config.policy.max_answer_chars,
+                    max_detailed_answer_chars: self.config.policy.max_detailed_answer_chars,
                 })
                 .await?;
+            answer_limit = if generated.detailed {
+                self.config.policy.max_detailed_answer_chars
+            } else {
+                self.config.policy.max_answer_chars
+            };
+            audit.detailed = Some(generated.detailed);
+            audit.answer_limit = Some(answer_limit);
+            let answer = generated.answer;
             audit.proposed = Some(self.redactor.redact(&answer));
-            if !self.valid_answer(&answer) {
+            if !self.valid_answer(&answer, answer_limit) {
                 audit.reason = "unsafe_proposal".into();
                 return self.store.record(resource, &audit);
             }
@@ -225,7 +237,7 @@ impl Pipeline {
             answer
         };
         audit.proposed = Some(self.redactor.redact(&proposal));
-        if !self.valid_answer(&proposal) {
+        if !self.valid_answer(&proposal, answer_limit) {
             audit.reason = "unsafe_answer".into();
             return self.store.record(resource, &audit);
         }
@@ -246,10 +258,11 @@ impl Pipeline {
         // Re-read immediately before sending to catch edits/deletion and stale questions.
         let latest = self.adapter.fetch(resource).await?;
         if latest.text != message.text
-            || !latest.eligible(
+            || !latest.eligible_in(
                 &self.config.graph.user_id,
                 &self.config.policy.allowed_senders,
                 self.config.policy.max_message_age_seconds,
+                self.config.graph.self_chat.as_ref(),
             )
         {
             audit.reason = "message_changed".into();
@@ -286,10 +299,8 @@ impl Pipeline {
         saved.reason = stage.into();
         self.store.record(resource, &saved)
     }
-    fn valid_answer(&self, answer: &str) -> bool {
-        !answer.trim().is_empty()
-            && answer.chars().count() <= self.config.policy.max_answer_chars
-            && self.redactor.clean(answer)
+    fn valid_answer(&self, answer: &str, limit: usize) -> bool {
+        !answer.trim().is_empty() && answer.chars().count() <= limit && self.redactor.clean(answer)
     }
 }
 

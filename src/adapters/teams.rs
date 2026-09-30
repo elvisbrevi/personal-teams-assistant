@@ -17,13 +17,30 @@ pub struct IncomingMessage {
     pub mentions: Vec<String>,
     pub text: String,
     pub created_at: i64,
+    pub created_at_millis: i64,
     pub is_user_message: bool,
 }
 impl IncomingMessage {
     pub fn eligible(&self, user_id: &str, allowed_senders: &[String], max_age: i64) -> bool {
+        self.eligible_in(user_id, allowed_senders, max_age, None)
+    }
+    pub fn eligible_in(
+        &self,
+        user_id: &str,
+        allowed_senders: &[String],
+        max_age: i64,
+        self_chat: Option<&crate::config::SelfChat>,
+    ) -> bool {
+        let own_chat = self_chat.is_some_and(|c| {
+            c.user_id == user_id
+                && self.sender == user_id
+                && self.conversation == format!("chats/{}", c.id)
+                && self.created_at_millis > c.enabled_at
+                && self.kind == ConversationKind::Direct
+        });
         self.is_user_message
             && !self.sender.is_empty()
-            && self.sender != user_id
+            && (self.sender != user_id || own_chat)
             && !self.text.trim().is_empty()
             && self.text.len() <= 16_000
             && (allowed_senders.is_empty() || allowed_senders.contains(&self.sender))
@@ -200,6 +217,7 @@ mod tests {
             mentions: vec![],
             text: "@owner hola".into(),
             created_at: chrono::Utc::now().timestamp(),
+            created_at_millis: chrono::Utc::now().timestamp_millis(),
             is_user_message: true,
         };
         assert!(!m.eligible("owner", &[], 300));

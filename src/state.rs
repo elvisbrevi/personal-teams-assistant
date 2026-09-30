@@ -34,8 +34,16 @@ pub struct Audit {
     pub proposed: Option<String>,
     pub sent: Option<String>,
     pub graph_message_id: Option<String>,
+    pub detailed: Option<bool>,
+    pub answer_limit: Option<usize>,
 }
 impl Store {
+    /// Attach to an existing database without recovering jobs. Used by account probes.
+    pub fn attach(path: &Path) -> Result<Self> {
+        let db = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
+        db.busy_timeout(std::time::Duration::from_secs(2))?;
+        Ok(Self { db: Mutex::new(db) })
+    }
     pub fn open(path: &Path) -> Result<Self> {
         let db = Connection::open(path)?;
         db.busy_timeout(std::time::Duration::from_secs(2))?;
@@ -45,10 +53,174 @@ impl Store {
             CREATE TABLE IF NOT EXISTS vault(name TEXT PRIMARY KEY,value BLOB NOT NULL);
             CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY,time INTEGER NOT NULL DEFAULT (unixepoch()),kind TEXT NOT NULL,detail TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS conversation_context(conversation TEXT PRIMARY KEY,question TEXT NOT NULL,answer TEXT NOT NULL,updated_at INTEGER NOT NULL DEFAULT (unixepoch()));
+            CREATE TABLE IF NOT EXISTS outputs(nonce TEXT PRIMARY KEY,conversation TEXT NOT NULL,message_id TEXT,created_at INTEGER NOT NULL DEFAULT (unixepoch()));
             CREATE TABLE IF NOT EXISTS activity_cache(key TEXT PRIMARY KEY,value TEXT NOT NULL,updated_at INTEGER NOT NULL DEFAULT (unixepoch()));
             UPDATE jobs SET status='pending' WHERE status='processing' AND resource NOT LIKE 'simulation:%';
             UPDATE jobs SET status='uncertain',audit='{"reason":"restart_during_send"}' WHERE status='sending';"#)?;
         Ok(Self { db: Mutex::new(db) })
+    }
+    /// Diagnostic connections never recover or mutate jobs.
+    pub fn self_chat_diagnostics(path: &Path) -> Result<serde_json::Value> {
+        if !path.exists() {
+            return Ok(serde_json::Value::Null);
+        }
+        let db = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        let cursor = db
+            .query_row(
+                "SELECT value,updated_at FROM activity_cache WHERE key='self_chat_cursor'",
+                [],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)),
+            )
+            .optional()?;
+        // Pre-upgrade databases have no outputs table yet.
+        let outputs_table: bool = db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='outputs')",
+            [],
+            |r| r.get(0),
+        )?;
+        let unresolved: usize = if outputs_table {
+            db.query_row(
+                "SELECT count(*) FROM outputs WHERE message_id IS NULL",
+                [],
+                |r| r.get(0),
+            )?
+        } else {
+            0
+        };
+        let mut pending = Vec::new();
+        if outputs_table {
+            let mut stmt=db.prepare("SELECT nonce,conversation,created_at FROM outputs WHERE message_id IS NULL ORDER BY created_at DESC LIMIT 50")?;
+            for row in stmt.query_map([],|r|Ok(serde_json::json!({"nonce":r.get::<_,String>(0)?,"conversation":r.get::<_,String>(1)?,"created_at":r.get::<_,i64>(2)?})))? {pending.push(row?);}
+        }
+        Ok(
+            serde_json::json!({"cursor":cursor,"unresolved_outputs":unresolved,"pending_outputs":pending}),
+        )
+    }
+    pub fn read_encrypted_token(path: &Path) -> Result<Option<Vec<u8>>> {
+        if !path.exists() {
+            return Ok(None);
+        }
+        let db = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        Ok(db
+            .query_row("SELECT value FROM vault WHERE name='oauth'", [], |r| {
+                r.get(0)
+            })
+            .optional()?)
+    }
+    pub fn has_token(path: &Path) -> Result<bool> {
+        if !path.exists() {
+            return Ok(false);
+        }
+        let db = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        Ok(db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM vault WHERE name='oauth')",
+            [],
+            |r| r.get(0),
+        )?)
+    }
+    pub fn logout(path: &Path) -> Result<()> {
+        if !path.exists() {
+            return Ok(());
+        }
+        let db = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
+        db.execute("DELETE FROM vault WHERE name='oauth'", [])?;
+        Ok(())
+    }
+    pub fn inspect(
+        path: &Path,
+        events: bool,
+        limit: usize,
+        resource: Option<&str>,
+        content: bool,
+    ) -> Result<Vec<serde_json::Value>> {
+        if !path.exists() {
+            return Ok(Vec::new());
+        }
+        let db = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        let mut out = Vec::new();
+        if events {
+            let mut stmt =
+                db.prepare("SELECT time,kind,detail FROM events ORDER BY id DESC LIMIT ?1")?;
+            for row in stmt.query_map([limit.min(1000)], |r| Ok(serde_json::json!({"time":r.get::<_,i64>(0)?,"kind":r.get::<_,String>(1)?,"detail":r.get::<_,String>(2)?})))? { out.push(row?); }
+        } else {
+            let mut stmt = db.prepare("SELECT resource,status,audit FROM jobs WHERE (?1 IS NULL OR resource=?1) ORDER BY created_at DESC LIMIT ?2")?;
+            for row in stmt.query_map(params![resource, limit.min(1000)], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, Option<String>>(2)?,
+                ))
+            })? {
+                let (resource, status, text) = row?;
+                let mut audit: serde_json::Value = text
+                    .as_deref()
+                    .map(serde_json::from_str)
+                    .transpose()?
+                    .unwrap_or_default();
+                if !content && let Some(obj) = audit.as_object_mut() {
+                    obj.remove("proposed");
+                    obj.remove("sent");
+                }
+                out.push(serde_json::json!({"resource":resource,"status":status,"audit":audit}));
+            }
+        }
+        Ok(out)
+    }
+    pub fn has_unresolved_output(&self, conversation: &str) -> Result<bool> {
+        Ok(self.db.lock().unwrap().query_row(
+            "SELECT EXISTS(SELECT 1 FROM outputs WHERE conversation=?1 AND message_id IS NULL)",
+            [conversation],
+            |r| r.get(0),
+        )?)
+    }
+    pub fn output_intent(&self, nonce: &str) -> Result<Option<(String, i64)>> {
+        Ok(self
+            .db
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT conversation,created_at FROM outputs WHERE nonce=?1 AND message_id IS NULL",
+                [nonce],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?)
+    }
+    pub fn begin_output(&self, conversation: &str) -> Result<String> {
+        let nonce = uuid::Uuid::new_v4().to_string();
+        self.db.lock().unwrap().execute(
+            "INSERT INTO outputs(nonce,conversation) VALUES (?1,?2)",
+            params![nonce, conversation],
+        )?;
+        Ok(nonce)
+    }
+    pub fn finish_output(&self, nonce: &str, id: &str) -> Result<()> {
+        self.db.lock().unwrap().execute(
+            "UPDATE outputs SET message_id=?2 WHERE nonce=?1",
+            params![nonce, id],
+        )?;
+        Ok(())
+    }
+    pub fn is_output(&self, conversation: &str, id: &str, html: &str) -> Result<bool> {
+        let db = self.db.lock().unwrap();
+        let mut stmt = db.prepare("SELECT nonce,message_id FROM outputs WHERE conversation=?1")?;
+        for row in stmt.query_map([conversation], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
+        })? {
+            let (nonce, sent_id) = row?;
+            // Exact durable HTML link marker, supported by Graph HTML message bodies.
+            if sent_id.as_deref() == Some(id)
+                || html.contains(&format!("https://personalteams.invalid/output/{nonce}"))
+            {
+                if sent_id.is_none() {
+                    db.execute(
+                        "UPDATE outputs SET message_id=?2 WHERE nonce=?1",
+                        params![nonce, id],
+                    )?;
+                }
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
     pub fn enqueue(&self, resource: &str) -> Result<bool> {
         Ok(self.db.lock().unwrap().execute(

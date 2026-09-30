@@ -27,3 +27,25 @@ jobs:
         run: rustup show
       - name: Check desktop app
         run: cargo check -p personal-teams-desktop --locked
+      - name: Check macOS desktop contract
+        if: runner.os == 'macOS'
+        run: cargo clippy -p personal-teams-desktop --all-targets --locked -- -D warnings
+      - name: Test macOS desktop contract
+        if: runner.os == 'macOS'
+        run: cargo test -p personal-teams-desktop --locked
+      - name: Install Tauri bundler
+        if: runner.os == 'macOS'
+        run: cargo install tauri-cli --version 2.12.0 --locked
+      - name: Build macOS bundles
+        if: runner.os == 'macOS'
+        working-directory: desktop/src-tauri
+        env:
+          RUSTFLAGS: --remap-path-prefix=${{ github.workspace }}=/build/source
+        run: cargo tauri build --ci --bundles app,dmg -- --locked
+      - name: Save macOS artifacts
+        if: runner.os == 'macOS'
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-macOS
+          path: target/release/bundle/dmg/*.dmg
+          if-no-files-found: error

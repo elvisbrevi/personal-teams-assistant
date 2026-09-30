@@ -1,4 +1,22 @@
-const invoke = window.__TAURI__.core.invoke;
+const rawInvoke = window.__TAURI__.core.invoke;
+async function invoke(method, args = {}) {
+  const read = ['snapshot', 'chat', 'github_repositories', 'self_chat_status'].includes(method);
+  let result = await rawInvoke('command', { request: {
+    method, args, revision: read ? null : current?.revision ?? null, contract: 1
+  }});
+  if (result.code === 'authorization_pending' && ['connect_microsoft', 'finish_github_login'].includes(method)) {
+    const finish = method === 'connect_microsoft' ? 'finish_microsoft' : 'finish_github_login';
+    const deadline = Date.now() + 600_000;
+    message('Autorización pendiente en el navegador.');
+    while (result.code === 'authorization_pending' && Date.now() < deadline) {
+      await new Promise(resolve => setTimeout(resolve, 2000));
+      result = await rawInvoke('command', { request: { method: finish, args: {}, revision: null, contract: 1 } });
+    }
+  }
+  if (result.revision && current) current.revision = result.revision;
+  if (!result.ok) throw result.message || result.code;
+  return result.data;
+}
 const $ = (selector) => document.querySelector(selector);
 let current;
 const session = crypto.randomUUID();
@@ -166,6 +184,8 @@ async function reload() {
   $('#github-disconnect').disabled = !current.github_connected;
   const config = current.config;
   field('#jev-model', config.jev.model); field('#llm-model', config.llm.model);
+  field('#max-answer-chars', config.policy.max_answer_chars);
+  field('#max-detailed-answer-chars', config.policy.max_detailed_answer_chars);
   field('#tenant-id', config.graph.tenant_id); field('#client-id', config.graph.client_id);
   field('#user-id', config.graph.user_id); field('#public-url', config.server.public_url);
   field('#bind', config.server.bind); field('#llm-style', config.llm.style);
@@ -173,6 +193,11 @@ async function reload() {
   $('#cloudflare-tunnel').checked = config.server.cloudflare_tunnel;
   field('#allowed-chats', config.graph.allowed_chats.join('\n'));
   $('#dry-run').checked = config.policy.dry_run;
+  const personal = await invoke('self_chat_status');
+  const diagnostic = personal.diagnostics;
+  $('#self-chat-state').textContent = config.graph.self_chat
+    ? `Habilitado: ${config.graph.self_chat.id} · Recepción: webhook y consulta cada 10 s · Última consulta: ${diagnostic?.cursor ? new Date(diagnostic.cursor[1] * 1000).toLocaleString() : 'pendiente'} · Salidas sin resolver: ${diagnostic?.unresolved_outputs ?? 0}`
+    : 'Deshabilitado';
   $('#discover-chats').checked = config.graph.discover_all_chats;
   renderCredentials(); renderRepositories(); renderResources();
 }
@@ -182,6 +207,8 @@ setInterval(() => {
 
 function collectSettings() {
   const config = current.config;
+  config.policy.max_answer_chars = Number($('#max-answer-chars').value);
+  config.policy.max_detailed_answer_chars = Number($('#max-detailed-answer-chars').value);
   config.jev.model = $('#jev-model').value.trim();
   config.llm.model = $('#llm-model').value.trim();
   config.llm.style = $('#llm-style').value.trim();
@@ -309,3 +336,16 @@ $('#chat-form').onsubmit = async event => {
   finally { send.disabled = false; }
 };
 reload().catch(message);
+
+$('#self-chat-enable').onclick = async () => {
+  try { await save(); await invoke('self_chat_enable', { id: $('#self-chat-id').value.trim() || null }); await reload(); message('Chat personal validado y habilitado. Las audiencias de fuentes se conservan.'); }
+  catch (error) { message(error); }
+};
+$('#self-chat-disable').onclick = async () => {
+  try { await invoke('self_chat_disable'); await reload(); }
+  catch (error) { message(error); }
+};
+$('#self-chat-test').onclick = async () => {
+  try { const result = await invoke('test_self_chat'); message(result.account_scope_verified ? 'Chat personal validado. Escribe una pregunta nueva en Teams para comprobar recepción y respuesta.' : 'Prueba incompleta.'); }
+  catch (error) { message(error); }
+};

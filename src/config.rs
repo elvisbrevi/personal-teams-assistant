@@ -35,6 +35,15 @@ pub struct Graph {
     pub discover_all_chats: bool,
     #[serde(default)]
     pub channels: Vec<Channel>,
+    #[serde(default)]
+    pub self_chat: Option<SelfChat>,
+}
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SelfChat {
+    pub id: String,
+    pub user_id: String,
+    pub enabled_at: i64,
 }
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -69,11 +78,16 @@ pub struct Policy {
     pub greeting: String,
     pub max_context_chars: usize,
     pub max_answer_chars: usize,
+    #[serde(default = "default_detailed_answer_chars")]
+    pub max_detailed_answer_chars: usize,
     pub max_message_age_seconds: i64,
     #[serde(default)]
     pub sensitive_patterns: Vec<String>,
     #[serde(default)]
     pub allowed_senders: Vec<String>,
+}
+fn default_detailed_answer_chars() -> usize {
+    8000
 }
 impl Config {
     pub fn desktop_template() -> Result<Self> {
@@ -113,6 +127,13 @@ impl Config {
         ] {
             uuid::Uuid::parse_str(id)?;
         }
+        if let Some(chat) = &self.graph.self_chat {
+            crate::adapters::teams::canonical_resource(&format!("chats/{}/messages/0", chat.id))?;
+            ensure!(
+                chat.user_id == self.graph.user_id && chat.enabled_at > 0,
+                "self chat account mismatch"
+            );
+        }
         let url = url::Url::parse(&self.server.public_url)?;
         ensure!(
             url.scheme() == "https"
@@ -141,6 +162,10 @@ impl Config {
         ensure!(
             (1..=4000).contains(&self.policy.max_answer_chars),
             "invalid answer limit"
+        );
+        ensure!(
+            (self.policy.max_answer_chars..=16000).contains(&self.policy.max_detailed_answer_chars),
+            "invalid detailed answer limit (must be >= normal limit, at most 16000)"
         );
         ensure!(
             (30..=3600).contains(&self.policy.max_message_age_seconds),

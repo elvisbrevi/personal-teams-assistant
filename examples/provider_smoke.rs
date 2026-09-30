@@ -55,6 +55,8 @@ async fn main() -> Result<()> {
             question,
             evidence,
             detail_requested: false,
+            max_answer_chars: 3000,
+            max_detailed_answer_chars: 8000,
         })
         .await?;
     ensure!(!answer.is_empty(), "empty generation");

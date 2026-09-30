@@ -2,7 +2,7 @@
 
 Servicio Rust que lee y responde con la identidad del usuario mediante Microsoft Graph y OAuth delegado. Jev toma decisiones tipadas; Rig y DeepSeek redactan únicamente cuando existe evidencia suficiente. Las consultas se intentan responder con hechos verificables; los datos faltantes se señalan o se pide aclaración. Una respuesta insegura o sin respaldo queda para revisión humana.
 
-## App de escritorio (macOS y Windows)
+## App de escritorio (macOS; Windows en roadmap)
 
 La app Tauri usa el mismo núcleo Rust. En macOS se abre desde la barra de menús; en Windows, desde la bandeja. Su ventana permite configurar credenciales en Keychain/Credential Manager, agregar varios repositorios Git y fuentes, iniciar o detener el asistente y chatear localmente sin enviar respuestas a Teams. La GUI no muestra el valor de una credencial guardada. El chat local necesita las claves de Jev y DeepSeek y al menos una fuente habilitada para procesamiento externo; no necesita la conexión Teams.
 
@@ -13,7 +13,7 @@ cargo install --path desktop/src-tauri --locked
 personal-teams-desktop
 ```
 
-Para instalar desde crates.io después de publicar ambos paquetes (`personal-teams-assistant` y `personal-teams-desktop`): `cargo install personal-teams-desktop`. Cargo instala el ejecutable; en macOS el `.app`/`.dmg` ofrece además la integración habitual con Finder y Launch Services.
+La instalación desde crates.io es `cargo install personal-teams-desktop --version 0.2.0 --locked`. Cargo instala la GUI y `pta`, con la skill incorporada; en macOS el `.app`/`.dmg` ofrece además la integración habitual con Finder y Launch Services.
 
 ```sh
 cargo tauri build --bundles app,dmg  # desde desktop/src-tauri en macOS
@@ -29,6 +29,8 @@ Para un túnel administrado en Cloudflare, activa **Iniciar y detener Cloudflare
 Para GitHub integrado, instala [Personal Teams Knowledge Reader](https://github.com/apps/personal-teams-knowledge-reader) únicamente en los repositorios que autorizas. En **Conocimiento**, conecta con el Client ID público ya precargado mediante Device Flow y clona el repositorio elegido. La app usa `Contents: read`, guarda el token en el almacén del sistema y no incrusta claves privadas. También puedes agregar un checkout local autenticado por GitHub Desktop o Git. Quitar un repositorio del mapa no borra sus archivos.
 
 El código fuente actual se puede auditar, pero el historial anterior incluye ejemplos personales y de proyectos. Para un repositorio público, ejecuta `python3 scripts/export-public.py /ruta/nueva/source.tar.gz` y publica ese **snapshot sin el historial privado**, tras revisar su contenido. El exportador excluye archivos ignorados, configuración local, bases SQLite y checkouts de conocimiento y exige un escaneo con Gitleaks. El proyecto no incluye certificados de firma de Apple o Windows; el `.dmg` local se genera sin notarización.
+
+El CLI administrativo comparte el servicio, configuración, credenciales y mapa de la GUI. Consulta [CLI y skill](docs/cli.md) para instalación en PATH, contrato JSON, OAuth, fuentes, límites de respuestas y chat personal.
 
 ## Ejecutar en un equipo local
 
@@ -101,7 +103,7 @@ flowchart TD
   O -->|No| Z
 ```
 
-En grupos y canales se verifican IDs de menciones de Graph, nunca el texto `@nombre`. Se ignoran mensajes propios, eliminados, de sistema, antiguos y tipos de chat no compatibles. Los saludos deben coincidir exactamente con la lista normalizada; “hola, ¿cuál es el estado?” sigue el flujo de evidencia.
+En grupos y canales se verifican IDs de menciones de Graph, nunca el texto `@nombre`. Los mensajes propios solo se admiten en el chat personal validado y habilitado; las salidas del asistente se excluyen mediante registro durable. Se ignoran mensajes eliminados, de sistema, antiguos y tipos de chat no compatibles. Los saludos deben coincidir exactamente con la lista normalizada; “hola, ¿cuál es el estado?” sigue el flujo de evidencia.
 
 ## Alcance implementado
 

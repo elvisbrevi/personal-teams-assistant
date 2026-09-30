@@ -1,12 +1,12 @@
 [package]
 name = "personal-teams-assistant"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.95"
 description = "Core library and CLI for a personal Microsoft Teams knowledge assistant"
 license = "MIT"
 readme = "README.md"
-include = ["Cargo.toml", "LICENSE", "README.md", "src/**", "static/**", "config.example.toml", "knowledge-map.example.toml"]
+include = ["Cargo.toml", "LICENSE", "README.md", "src/**", "static/**", "config.example.toml", "knowledge-map.example.toml", "docs/cli.md", "docs/cli-parity.md"]
 
 [workspace]
 members = [".", "desktop/src-tauri"]

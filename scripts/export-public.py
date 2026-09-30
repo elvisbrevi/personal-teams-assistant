@@ -17,7 +17,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 BLOCKED_NAMES = {"config.toml", "knowledge-map.toml", ".env", "assistant.db", "desktop-chat.db"}
-BLOCKED_PARTS = {".git", "target", "data", "knowledge", "gen", "AppIcon.iconset", ".cloudflared"}
+BLOCKED_PARTS = {".git", "target", "data", "knowledge", "gen", "AppIcon.iconset", ".cloudflared", ".agents", ".codex"}
 
 
 def main() -> None:

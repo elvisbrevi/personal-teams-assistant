@@ -76,6 +76,7 @@ pub async fn run(
         },
         text: input.text,
         created_at: chrono::Utc::now().timestamp(),
+        created_at_millis: chrono::Utc::now().timestamp_millis(),
         is_user_message: true,
     };
     base.store.begin_simulation(&resource)?;
