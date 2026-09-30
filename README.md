@@ -6,14 +6,17 @@ Servicio Rust que lee y responde con la identidad del usuario mediante Microsoft
 
 La app Tauri usa el mismo núcleo Rust. En macOS se abre desde la barra de menús; en Windows, desde la bandeja. Su ventana permite configurar credenciales en Keychain/Credential Manager, agregar varios repositorios Git y fuentes, iniciar o detener el asistente y chatear localmente sin enviar respuestas a Teams. La GUI no muestra el valor de una credencial guardada. El chat local necesita las claves de Jev y DeepSeek y al menos una fuente habilitada para procesamiento externo; no necesita la conexión Teams.
 
-Instalación directa con Cargo desde este repositorio:
+La instalación principal es mediante Cargo desde crates.io. Un solo paquete instala la GUI `personal-teams-desktop`, el CLI administrativo `pta` y la skill incorporada. Requiere Rust y los prerrequisitos nativos de Tauri para compilar; no requiere un checkout ni `cargo tauri`:
 
 ```sh
-cargo install --path desktop/src-tauri --locked
+cargo install personal-teams-desktop --version 0.2.0 --locked
 personal-teams-desktop
+pta --version
 ```
 
-La instalación desde crates.io es `cargo install personal-teams-desktop --version 0.2.0 --locked`. Cargo instala la GUI y `pta`, con la skill incorporada; en macOS el `.app`/`.dmg` ofrece además la integración habitual con Finder y Launch Services.
+Los ejecutables quedan en el directorio `bin` de Cargo (normalmente `~/.cargo/bin`), que debe estar en `PATH`. GUI y CLI comparten el mismo perfil, credenciales y servicio. Para desarrollo desde un checkout, usa `cargo install --path desktop/src-tauri --locked`.
+
+Los binarios precompilados y el `.app`/`.dmg` son alternativas accesorias. El bundle macOS ofrece integración con Finder y Launch Services; su notarización queda pendiente. Para generar esos paquetes desde el código fuente:
 
 ```sh
 cargo tauri build --bundles app,dmg  # desde desktop/src-tauri en macOS

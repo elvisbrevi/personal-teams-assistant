@@ -1,8 +1,16 @@
 # GUI, CLI y agente
 
-Una instalación de `personal-teams-desktop` 0.2.0 entrega `personal-teams-desktop`, `pta` y la skill de operación incorporada. Por Cargo: `cargo install personal-teams-desktop --version 0.2.0 --locked` (requiere los prerrequisitos nativos de Tauri para compilar). El CLI antiguo del núcleo sigue disponible por separado con `serve`, `check` y `local-info`; usa sus reglas de entorno y OAuth confidencial existentes.
+La instalación principal es mediante Cargo desde crates.io. El paquete `personal-teams-desktop` 0.2.0 entrega la GUI `personal-teams-desktop`, el CLI `pta` y la skill de operación incorporada. Requiere Rust y los prerrequisitos nativos de Tauri para compilar:
 
-En macOS, arrastra la app del DMG a Applications. Sus dos ejecutables están en Contents/MacOS. Para habilitar el CLI en un directorio elegido que ya esté en PATH:
+```sh
+cargo install personal-teams-desktop --version 0.2.0 --locked
+personal-teams-desktop
+pta --version
+```
+
+El directorio `bin` de Cargo (normalmente `~/.cargo/bin`) debe estar en `PATH`. Ambos ejecutables comparten perfil, credenciales y servicio. `pta start` inicia el asistente con la GUI oculta; `pta app open` muestra su ventana. El CLI antiguo del núcleo sigue disponible por separado con `serve`, `check` y `local-info`; usa sus reglas de entorno y OAuth confidencial existentes.
+
+Los binarios precompilados y bundles son alternativas accesorias. Para la alternativa macOS, arrastra la app del DMG a Applications. Sus dos ejecutables están en Contents/MacOS. Si elegiste ese bundle, habilita el CLI en un directorio elegido que ya esté en PATH:
 
 ```sh
 "/Applications/Personal Teams Assistant.app/Contents/MacOS/pta" app install-cli "$HOME/.local/bin"
