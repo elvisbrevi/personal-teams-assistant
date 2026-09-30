@@ -3,6 +3,15 @@ name = "personal-teams-assistant"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.95"
+description = "Core library and CLI for a personal Microsoft Teams knowledge assistant"
+license = "MIT"
+readme = "README.md"
+include = ["Cargo.toml", "LICENSE", "README.md", "src/**", "static/**", "config.example.toml", "knowledge-map.example.toml"]
+
+[workspace]
+members = [".", "desktop/src-tauri"]
+default-members = ["."]
+resolver = "3"
 
 [dependencies]
 anyhow = "1"
@@ -30,6 +39,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 url = "2"
 uuid = { version = "1", features = ["v4"] }
 tiberius = { version = "0.12", default-features = false, features = ["rustls", "tds73"] }
+
+[target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
+keyring = "4.2"
 
 [dev-dependencies]
 tempfile = "3"

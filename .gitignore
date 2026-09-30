@@ -10,3 +10,5 @@
 *.pem
 *.key
 .DS_Store
+/desktop/src-tauri/gen/
+/desktop/src-tauri/icons/*.iconset/

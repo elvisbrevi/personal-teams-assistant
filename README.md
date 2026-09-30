@@ -1,6 +1,34 @@
 # Asistente personal de Teams
 
-Servicio Rust que lee y responde con la identidad del usuario mediante Microsoft Graph y OAuth delegado. Jev toma decisiones tipadas; Rig y DeepSeek redactan únicamente cuando existe evidencia suficiente. Ante duda, error o necesidad de juicio humano, guarda silencio.
+Servicio Rust que lee y responde con la identidad del usuario mediante Microsoft Graph y OAuth delegado. Jev toma decisiones tipadas; Rig y DeepSeek redactan únicamente cuando existe evidencia suficiente. Las consultas se intentan responder con hechos verificables; los datos faltantes se señalan o se pide aclaración. Una respuesta insegura o sin respaldo queda para revisión humana.
+
+## App de escritorio (macOS y Windows)
+
+La app Tauri usa el mismo núcleo Rust. En macOS se abre desde la barra de menús; en Windows, desde la bandeja. Su ventana permite configurar credenciales en Keychain/Credential Manager, agregar varios repositorios Git y fuentes, iniciar o detener el asistente y chatear localmente sin enviar respuestas a Teams. La GUI no muestra el valor de una credencial guardada. El chat local necesita las claves de Jev y DeepSeek y al menos una fuente habilitada para procesamiento externo; no necesita la conexión Teams.
+
+Instalación directa con Cargo desde este repositorio:
+
+```sh
+cargo install --path desktop/src-tauri --locked
+personal-teams-desktop
+```
+
+Para instalar desde crates.io después de publicar ambos paquetes (`personal-teams-assistant` y `personal-teams-desktop`): `cargo install personal-teams-desktop`. Cargo instala el ejecutable; en macOS el `.app`/`.dmg` ofrece además la integración habitual con Finder y Launch Services.
+
+```sh
+cargo tauri build --bundles app,dmg  # desde desktop/src-tauri en macOS
+cargo tauri build --bundles nsis     # desde desktop/src-tauri en Windows
+```
+
+Para importar la instalación anterior, indica la ruta a su `config.toml` en **Migrar esta instalación** e importa `STATE_ENCRYPTION_KEY` desde tu gestor local. Se conservan client ID, mapa y SQLite. El login de escritorio usa el **mismo registro Entra y los mismos scopes Graph** (`offline_access User.Read Chat.Read ChatMessage.Send`). El registro existente ya admite `http://localhost` como redirección de escritorio y cuentas de otras organizaciones; no se añadieron permisos Graph. Iniciar sesión de nuevo puede ser necesario. Si Microsoft muestra un consentimiento inesperado para tu propia cuenta, revisa la configuración antes de aceptarlo. Cada persona de otra organización configura su tenant y solicita acceso al iniciar sesión; su administrador decide si aprueba la solicitud según la política de esa organización. También puede usar su propio registro Entra con esos mismos permisos.
+
+Para recibir webhooks Graph, configura una URL HTTPS estable que alcance el puerto local. Se puede indicar un archivo privado `cloudflared` de túnel local administrado en la GUI: debe tener un hostname igual a la URL pública, servicio `http://127.0.0.1:<puerto>` y regla final `http_status:404`; la app supervisa y detiene ese proceso. Si un supervisor externo gestiona el túnel, deja el campo vacío. No uses Quick Tunnel para suscripciones duraderas.
+
+Para un túnel administrado en Cloudflare, activa **Iniciar y detener Cloudflare Tunnel con el asistente** y guarda `CLOUDFLARE_TUNNEL_TOKEN` en Credenciales. El token se pasa a `cloudflared` solo mediante el entorno del proceso hijo; no aparece en argumentos, TOML ni logs. Configura en Cloudflare el hostname público y el servicio local, con una regla final `http_status:404`, y deja vacío el archivo de configuración local. La app necesita `cloudflared` instalado.
+
+Para GitHub integrado, instala [Personal Teams Knowledge Reader](https://github.com/apps/personal-teams-knowledge-reader) únicamente en los repositorios que autorizas. En **Conocimiento**, conecta con el Client ID público ya precargado mediante Device Flow y clona el repositorio elegido. La app usa `Contents: read`, guarda el token en el almacén del sistema y no incrusta claves privadas. También puedes agregar un checkout local autenticado por GitHub Desktop o Git. Quitar un repositorio del mapa no borra sus archivos.
+
+El código fuente actual se puede auditar, pero el historial anterior incluye ejemplos personales y de proyectos. Para un repositorio público, ejecuta `python3 scripts/export-public.py /ruta/nueva/source.tar.gz` y publica ese **snapshot sin el historial privado**, tras revisar su contenido. El exportador excluye archivos ignorados, configuración local, bases SQLite y checkouts de conocimiento y exige un escaneo con Gitleaks. El proyecto no incluye certificados de firma de Apple o Windows; el `.dmg` local se genera sin notarización.
 
 ## Ejecutar en un equipo local
 
@@ -27,7 +55,7 @@ Los túneles temporales son para desarrollo, cambian de hostname y no garantizan
 
 ## Configuración y credenciales
 
-Todo comportamiento se declara en TOML. `config.toml`, `knowledge-map.toml`, `data/` y `.env` están excluidos de Git. La base de conocimiento debe ser un checkout Git privado. El ejemplo apunta a `../personal-teams-knowledge`.
+Todo comportamiento se declara en TOML. `config.toml`, `knowledge-map.toml`, `data/` y `.env` están excluidos de Git. La base de conocimiento debe ser un checkout Git privado. El ejemplo apunta a `../knowledge-repo`.
 
 | Variable secreta | Uso |
 | --- | --- |
@@ -62,10 +90,9 @@ flowchart TD
   E -->|Sí| F{Saludo simple}
   F -->|Sí| G[Respuesta determinista]
   F -->|No| H[Fuentes autorizadas por conversación]
-  H --> I[Seleccionar fuente explícita de avance o routing con Jev]
-  I --> J[Recuperar, redactar y seleccionar evidencia]
-  J --> K[Jev valida evidencia]
-  K --> L[Rig y DeepSeek redactan]
+  H --> I[Documentos autorizados y herramienta de lectura seleccionada]
+  I --> J[Recuperar y redactar evidencia con límite total]
+  J --> L[Rig y DeepSeek responden cada parte o piden aclaración]
   L --> M[Jev valida respuesta y seguridad]
   M --> N[Verificar que el mensaje no cambió]
   G --> N
@@ -81,7 +108,7 @@ En grupos y canales se verifican IDs de menciones de Graph, nunca el texto `@nom
 - Chats directos y menciones en grupos; canales explícitos como adaptación adicional.
 - OAuth con refresh tokens cifrados, renovación de suscripciones, lifecycle notifications y cola persistente. `discover_all_chats = true` usa una sola suscripción Graph a los mensajes de todos los chats del usuario.
 - Mapa de fuentes, múltiples checkouts Git privados, Markdown/TXT/JSON/TOML/YAML y páginas HTTPS aprobadas.
-- Jev usa `choice` para elegir entre fuentes cuando la consulta no identifica una fuente explícita; `noul` para seguimientos y comprobaciones independientes de pertinencia, evidencia, fidelidad, privacidad y compromisos. Los umbrales configurables se aplican a la confianza de `choice` o a la probabilidad afirmativa de cada `noul`; cualquier comprobación insuficiente silencia la respuesta. La autorización de conversación y fuente se verifica en código antes de consultarlo.
+- No hay veto Jev previo por tema, seguimiento o pertinencia de documentos. Se leen los documentos autorizados, compartiendo `max_context_chars`, y se conserva el intercambio anterior como referencia, con prioridad para la solicitud actual. Jev usa `choice` únicamente para seleccionar una herramienta de lectura cuando no hay una ruta explícita; una decisión incierta no cancela la respuesta basada en documentos ni la petición de aclaración. El control final `noul` verifica respaldo, privacidad, pertinencia y ausencia de nuevas promesas. Las audiencias, la redacción y los límites de acceso siguen verificándose en código. `follow_up_threshold` y `evidence_threshold` se conservan para compatibilidad con perfiles anteriores, pero ya no descartan preguntas.
 - Estado de Azure DevOps de solo lectura: consulta work items recientes, commits personales, archivos modificados, ejecuciones de pipelines y sus etapas, definiciones de release configuradas y releases clásicos asociados. Git y pipelines se consultan aunque no haya HU enlazada. La organización, los proyectos y el autor viven en `azure-devops.toml` del repositorio privado de conocimiento; `projects = ["*"]` descubre los proyectos accesibles y solo incluye en la respuesta los que muestran actividad. El índice SQLite en `data/assistant.db` conserva el catálogo y los commits de cada repositorio: actualiza los repositorios activos cada cinco minutos y vuelve a explorar los demás cada seis horas. Una actividad recién iniciada en un repositorio inactivo puede tardar hasta seis horas en aparecer. El informe también consulta mensajes recientes de Teams: en la simulación administrativa busca conversaciones pertinentes del usuario; en una conversación real solo lee el chat donde se pidió el informe. Los mensajes aportan contexto y planes, no prueban por sí solos una ejecución. Una fecha objetivo no se presenta como compromiso personal; impedimentos y riesgos no documentados quedan pendientes de confirmación.
 - Chat de simulación autenticado en `/test`, con contexto breve por sesión para seguimientos y opción de simular grupos con mención, sin enviar mensajes a Teams.
 - `LlmProvider` independiente y DeepSeek mediante Rig. Nuevos proveedores se implementan en `llm`; el pipeline depende solo del trait. Otros proveedores aún no se seleccionan en configuración.

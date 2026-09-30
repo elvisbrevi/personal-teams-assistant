@@ -1,5 +1,5 @@
 [repositories]
-personal = "../personal-teams-knowledge"
+personal = "../knowledge-repo"
 
 [[resources]]
 id = "assistant-operations"

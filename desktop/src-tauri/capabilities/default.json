@@ -1,0 +1,6 @@
+{
+  "identifier": "default",
+  "description": "Local desktop windows",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}

@@ -6,9 +6,9 @@ Clonar los repositorios privados usando SSH o un credential helper de Git. Monta
 
 Cada fuente requiere `enabled=true`, `external_processing=true` y una conversación exacta en `allowed_conversations`. `allowed_senders` restringe además quién puede preguntar. Autorizar un grupo implica autorizar la divulgación al **grupo completo**. Observar todos los chats no concede acceso a todas las fuentes.
 
-El mapa contiene descripciones, temas, capacidades (mediante el tipo y operación) y forma de acceso. Jev recibe solo el catálogo de fuentes accesibles al remitente/conversación. Tras elegir una, se lee como máximo 1 MB, se redacta y se seleccionan hasta cuatro pasajes dentro de `max_context_chars`. No se manda el repositorio completo.
+El mapa contiene descripciones, temas, capacidades (mediante el tipo y operación) y forma de acceso. Se leen los documentos accesibles al remitente/conversación, con un máximo de 1 MB por documento. Tras redactar, se seleccionan hasta cuatro pasajes por documento; todos comparten el límite total `max_context_chars`. Jev recibe solo el catálogo de herramientas autorizadas cuando hace falta elegir una operación de lectura. Su incertidumbre no descarta la pregunta: se responde con los documentos disponibles o se pide aclaración. No se manda el repositorio completo.
 
-Para guardar hechos nuevos o corregir los existentes, los agentes siguen [save-knowledge](../.agents/skills/save-knowledge/SKILL.md). El [repositorio privado](../../personal-teams-knowledge/README.md) define la organización de documentos temáticos y el descriptor que Jev usa para elegirlos.
+Para guardar hechos nuevos o corregir los existentes, los agentes siguen [save-knowledge](../.agents/skills/save-knowledge/SKILL.md). Cada repositorio privado define su propia organización de documentos temáticos y los descriptores de las fuentes.
 
 Archivos: Markdown/TXT y documentos JSON/TOML/YAML se tratan como texto. No se incluyen PDF, imágenes ni Office en esta versión. Los roots adicionales se añaden a `[repositories]`; el pipeline no cambia.
 

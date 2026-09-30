@@ -14,7 +14,8 @@ use std::sync::Arc;
 #[tokio::main]
 async fn main() -> Result<()> {
     let key = std::env::var("AZURE_DEVOPS_TOKEN")?;
-    let catalog = std::fs::read_to_string("../personal-teams-knowledge/azure-devops.toml")?;
+    let catalog_path = std::env::var("AZURE_DEVOPS_CATALOG")?;
+    let catalog = std::fs::read_to_string(catalog_path)?;
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(20))
         .redirect(reqwest::redirect::Policy::none())
@@ -26,7 +27,7 @@ async fn main() -> Result<()> {
     let store = Arc::new(Store::open(&dir.path().join("activity.db"))?);
     let evidence = ado::status(&client, &key, &catalog, &question, store).await?;
     println!(
-        "Azure DevOps read succeeded: {} characters, {} active projects, {} work items, {} commits, {} pipelines, {} stages, {} release definitions, {} releases; RPF included: {}; partial coverage: {}",
+        "Azure DevOps read succeeded: {} characters, {} active projects, {} work items, {} commits, {} pipelines, {} stages, {} release definitions, {} releases; partial coverage: {}",
         evidence.chars().count(),
         evidence.matches("Proyecto: ").count(),
         evidence.matches("Work item ").count(),
@@ -35,22 +36,8 @@ async fn main() -> Result<()> {
         evidence.matches("Etapa ").count(),
         evidence.matches("Definición de release ").count(),
         evidence.matches("Release ").count(),
-        evidence.contains("Proyecto: Sistema de Red Pronostico Fitosanitario (RPF)"),
         evidence.contains("Cobertura parcial")
     );
-    if let Some(rpf) = evidence
-        .split("Proyecto: Sistema de Red Pronostico Fitosanitario (RPF).")
-        .nth(1)
-        .and_then(|rest| rest.split("\nProyecto:").next())
-    {
-        println!(
-            "RPF: {} work items, {} commits, {} pipelines, PROD stage definition present: {}",
-            rpf.matches("Work item ").count(),
-            rpf.matches("Commit personal").count(),
-            rpf.matches("Pipeline ").count(),
-            rpf.contains("Portal ET0 RPF CD - PROD")
-        );
-    }
     if std::env::var_os("ADO_SMOKE_GENERATE").is_some() {
         let config = Config::load("config.toml")?;
         let llm_key = std::env::var("DEEPSEEK_API_KEY")?;

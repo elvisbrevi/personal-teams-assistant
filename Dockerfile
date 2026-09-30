@@ -1,6 +1,8 @@
 FROM rust:1.98.1-bookworm AS build
 WORKDIR /build
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
+COPY desktop/src-tauri/Cargo.toml ./desktop/src-tauri/Cargo.toml
+COPY desktop/src-tauri/src ./desktop/src-tauri/src
 COPY src ./src
 COPY static ./static
 RUN cargo build --release --locked
