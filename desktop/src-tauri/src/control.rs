@@ -81,7 +81,9 @@ pub fn profile_dir() -> Result<PathBuf> {
 }
 pub fn existing_host() -> Result<()> {
     // The lock proves ownership. A stale descriptor or reused PID does not.
-    let dir = profile_dir()?;
+    existing_host_at(&profile_dir()?)
+}
+fn existing_host_at(dir: &Path) -> Result<()> {
     let file = fs::OpenOptions::new()
         .read(true)
         .write(true)
@@ -146,27 +148,40 @@ pub async fn client(request: Request, start_host: bool) -> Result<Reply> {
         }
         ensure!(ready, "desktop host did not become ready");
     }
-    let endpoint: Endpoint =
-        serde_json::from_slice(&fs::read(profile_dir()?.join("control.json"))?)?;
-    ensure!(endpoint.contract == CONTRACT, "incompatible host contract");
-    let response = reqwest::Client::builder()
+    let client = reqwest::Client::builder()
         .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
         .timeout(Duration::from_secs(120))
-        .build()?
-        .post(format!("http://127.0.0.1:{}/control", endpoint.port))
-        .bearer_auth(endpoint.token)
-        .json(&request)
-        .send()
-        .await?;
-    ensure!(
-        response.status().is_success(),
-        "control endpoint rejected the request"
-    );
-    let reply: Reply =
-        personal_teams_assistant::adapters::bounded_json(response, 2_000_000).await?;
-    ensure!(reply.contract == CONTRACT, "incompatible reply contract");
-    Ok(reply)
+        .build()?;
+    for attempt in 0..20 {
+        // A newly claimed lock can precede descriptor replacement. Retry only
+        // connection establishment failures, before any request was delivered.
+        let endpoint: Endpoint =
+            serde_json::from_slice(&fs::read(profile_dir()?.join("control.json"))?)?;
+        ensure!(endpoint.contract == CONTRACT, "incompatible host contract");
+        let response = client
+            .post(format!("http://127.0.0.1:{}/control", endpoint.port))
+            .bearer_auth(endpoint.token)
+            .json(&request)
+            .send()
+            .await;
+        let response = match response {
+            Err(error) if error.is_connect() && attempt < 19 => {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                continue;
+            }
+            result => result?,
+        };
+        ensure!(
+            response.status().is_success(),
+            "control endpoint rejected the request"
+        );
+        let reply: Reply =
+            personal_teams_assistant::adapters::bounded_json(response, 2_000_000).await?;
+        ensure!(reply.contract == CONTRACT, "incompatible reply contract");
+        return Ok(reply);
+    }
+    anyhow::bail!("desktop host did not accept a connection")
 }
 struct LocalState {
     app: tauri::AppHandle,
@@ -174,8 +189,10 @@ struct LocalState {
     _lock: fs::File,
 }
 pub fn claim() -> Result<fs::File> {
-    let dir = profile_dir()?;
-    security::private_dir(&dir)?;
+    claim_at(&profile_dir()?)
+}
+fn claim_at(dir: &Path) -> Result<fs::File> {
+    security::private_dir(dir)?;
     let mut options = fs::OpenOptions::new();
     options.create(true).truncate(false).read(true).write(true);
     #[cfg(unix)]
@@ -187,6 +204,8 @@ pub fn claim() -> Result<fs::File> {
     security::protect_file(&dir.join("control.lock"))?;
     lock.try_lock_exclusive()
         .context("another desktop host owns this profile")?;
+    // A crashed/quitted host leaves a descriptor, but not a usable endpoint.
+    let _ = fs::remove_file(dir.join("control.json"));
     Ok(lock)
 }
 pub fn launch(app: tauri::AppHandle, lock: fs::File) -> Result<()> {
@@ -654,6 +673,37 @@ async fn operate(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn host_lock_does_not_make_a_stale_descriptor_ready() {
+        let dir = tempfile::tempdir().unwrap();
+        let descriptor = dir.path().join("control.json");
+        write_private(
+            &descriptor,
+            &serde_json::to_string(&Endpoint {
+                contract: CONTRACT,
+                port: 1,
+                token: "stale-token".into(),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        let lease = claim_at(dir.path()).unwrap();
+        assert!(existing_host_at(dir.path()).is_err());
+        assert!(claim_at(dir.path()).is_err());
+        write_private(
+            &descriptor,
+            &serde_json::to_string(&Endpoint {
+                contract: CONTRACT,
+                port: 2,
+                token: "new-instance".into(),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(existing_host_at(dir.path()).is_ok());
+        drop(lease);
+        assert!(existing_host_at(dir.path()).is_err());
+    }
     #[test]
     fn local_control_requires_instance_auth_and_rejects_browser_origins() {
         let mut headers = HeaderMap::new();
