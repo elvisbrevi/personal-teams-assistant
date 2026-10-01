@@ -412,6 +412,7 @@ function renderStatus(snapshot) {
 async function reload() {
   current = await invoke('snapshot');
   renderStatus(current);
+  $('#restart-offer').hidden = !current.restart_offer;
   $('#github-list').disabled = !current.github_connected;
   $('#github-disconnect').disabled = !current.github_connected;
   const config = current.config;
@@ -474,6 +475,14 @@ document.querySelectorAll('nav button').forEach(button => button.onclick = () =>
 $('#save-settings').onclick = () => save().catch(message);
 $('#save-knowledge').onclick = () => save().catch(message);
 $('#save-llm').onclick = () => save().catch(message);
+$('#offer-start').onclick = async () => {
+  try { await invoke('start_assistant'); await reload(); message('El asistente sigue corriendo con la versión nueva.'); }
+  catch (error) { message(error); }
+};
+$('#offer-dismiss').onclick = async () => {
+  try { await invoke('dismiss_restart_offer'); await reload(); message('El asistente queda detenido. Puedes iniciarlo cuando quieras.'); }
+  catch (error) { message(error); }
+};
 $('#messages-refresh').onclick = () => loadMessages().catch(message);
 $('#messages-filter').onchange = renderMessages;
 $('#messages-hide-ineligible').onchange = renderMessages;

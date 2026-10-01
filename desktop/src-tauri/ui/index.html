@@ -20,6 +20,11 @@
   </nav>
   <main>
     <p id="notice" role="alert" hidden></p>
+    <div id="restart-offer" class="panel offer" role="alertdialog" aria-labelledby="restart-offer-title" hidden>
+      <h2 id="restart-offer-title">Versión nueva instalada</h2>
+      <p>Se detuvo la versión anterior del asistente (servicio y túnel). El asistente estaba corriendo. ¿Dejarlo corriendo con la versión nueva?</p>
+      <div class="actions"><button id="offer-start">Dejar corriendo</button><button id="offer-dismiss" class="secondary">Dejarlo detenido</button></div>
+    </div>
     <section id="settings">
       <div class="panel">
         <h2>Servicio</h2>

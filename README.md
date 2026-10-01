@@ -1,6 +1,6 @@
 # Personal Teams Assistant
 
-Asistente personal de Microsoft Teams escrito en Rust. Lee y responde **con tu propia identidad** (OAuth delegado de Microsoft Graph, sin bot) cuando alguien te escribe directamente, te menciona en un grupo o le preguntas en tu chat personal. Responde solo con evidencia de fuentes que autorizaste para esa conversación —archivos de repositorios Git, URLs, Azure DevOps (actividad y Wiki) y otras herramientas de solo lectura—, redacta con el modelo de lenguaje que elijas —Codex o Claude Code a través de sus CLI instaladas, o la API de DeepSeek, en un orden de respaldo configurable— y valida con Jev (TypeSafe). Si una respuesta no está respaldada o es insegura, no se envía.
+Asistente personal de Microsoft Teams escrito en Rust. Lee y responde **con tu propia identidad** (OAuth delegado de Microsoft Graph, sin bot) cuando alguien te escribe directamente, te menciona en un grupo o le preguntas en tu chat personal. Responde solo con evidencia de fuentes que autorizaste para esa conversación —archivos de repositorios Git, URLs, Azure DevOps (actividad y Wiki) y otras herramientas de solo lectura—, redacta con el modelo de lenguaje que elijas —Codex o Claude Code a través de sus CLI instaladas, o la API de DeepSeek, en un orden de respaldo configurable— verifica en código referencias, enlaces y datos sensibles, y registra una revisión de Jev (TypeSafe). Si una respuesta cita algo que no se puede verificar o contiene datos sensibles, no se envía (en tu chat personal te avisa) y queda visible en la pestaña Mensajes.
 
 ## Instalación
 
@@ -24,19 +24,30 @@ Sus credenciales se guardan con `pta credentials set` en archivos privados del p
 
 GUI y CLI comparten el mismo perfil, credenciales del Llavero/Credential Manager y servicio. Reinstalar no pide credenciales de nuevo: se conservan el perfil `dev.personalteams.assistant`, el directorio de datos y la cuenta Microsoft conectada.
 
+### Actualizar
+
+```sh
+cargo install personal-teams-desktop --locked
+pta status
+```
+
+Cargo no ejecuta nada después de instalar, así que la versión anterior sigue corriendo hasta el primer uso de la nueva. El primer comando `pta` (cualquiera; `pta status` sirve) o abrir la app detecta que el binario instalado cambió, detiene el host anterior (asistente y túnel) y, si el asistente estaba corriendo, pregunta si dejarlo corriendo con la versión nueva (en la app, con un aviso en la ventana). Sin terminal interactiva (`--non-interactive`, `--json`, systemd) conserva el estado anterior.
+
 ## Uso rápido
 
 ```sh
 personal-teams-desktop            # abre la ventana (o pta app open)
-pta --json status                 # estado del host, servicio y configuración cargada
+pta help                          # todos los comandos, con su descripción
+pta status                        # ¿está corriendo? host, asistente, modo, Teams y modelos
+pta start                         # inicia el asistente
+pta stop                          # lo detiene
 pta auth microsoft login          # OAuth PKCE con el navegador del sistema
 pta auth microsoft finish --wait  # espera a que completes el consentimiento
-pta start                         # inicia el servicio Teams (en modo observación si dry_run=true)
 pta mode active                   # habilita envíos reales tras revisar las propuestas
 pta test simulate <<< '{"session":"demo","text":"¿Qué hice esta semana?","sources":["azure-devops-status"]}'
 ```
 
-`pta --help` lista todos los comandos; `pta skill show` entrega el manual operativo para agentes.
+`pta help` (o `pta`, `pta --help`) lista todos los comandos con su descripción; `--json` devuelve el resultado completo en JSON. `pta skill show` entrega el manual operativo para agentes.
 
 ## Configuración mínima
 

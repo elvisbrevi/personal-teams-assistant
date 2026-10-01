@@ -67,3 +67,5 @@ code { background: #eef2ee; padding: .1rem .3rem; border-radius: 4px; }
 .hint { color: #586b60; }
 .actions select { width: auto; margin: 0; }
 @media (max-width: 760px) { .message summary { grid-template-columns: auto 1fr; } .message summary .excerpt { grid-column: 1 / -1; } }
+.offer { border-color: #e6c46a; background: #fffaf0; }
+#restart-offer[hidden] { display: none; }

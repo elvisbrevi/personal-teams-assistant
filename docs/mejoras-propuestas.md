@@ -95,6 +95,6 @@ Propuestas surgidas al revisar el código completo (2026-10-01). Salvo lo indica
 
 ## 7. Distribución
 
-- **P1 — Publicar 0.3.0.** El repositorio está en 0.3.0 (Wiki, referencias verificadas) y la versión en crates.io es anterior. Orden: `personal-teams-assistant` y luego `personal-teams-desktop`; usar `scripts/export-public.py` si se publica desde un snapshot sin historial privado.
+- **Publicación.** 0.4.0 se publica en crates.io (cadena de modelos, registro de mensajes, actualización al primer uso). Orden: `personal-teams-assistant` y luego `personal-teams-desktop`; revisar los paquetes con `cargo package --list` y gitleaks antes de publicar.
 - **P2 — Linux con Secret Service** opcional (cuando exista D-Bus) en lugar del almacén de archivos.
 - **P2 — Windows funcional:** probar bandeja, Credential Manager, ACL e inicio/parada antes de anunciarlo.
