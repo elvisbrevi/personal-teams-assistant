@@ -14,6 +14,7 @@
   </header>
   <nav aria-label="Secciones">
     <button data-tab="settings" aria-current="page">Configuración</button>
+    <button data-tab="messages">Mensajes</button>
     <button data-tab="knowledge">Conocimiento</button>
     <button data-tab="chat">Chat de prueba</button>
   </nav>
@@ -72,6 +73,26 @@
         <h2>Migrar esta instalación</h2>
         <p>Importa tu <code>config.toml</code> actual. Se conserva su client ID, mapa y directorio SQLite. Importa también las credenciales existentes a este equipo, especialmente <code>STATE_ENCRYPTION_KEY</code>.</p>
         <div class="actions"><input id="legacy-path" aria-label="Ruta del config.toml actual" placeholder="/ruta/al/config.toml"><button id="import" class="secondary">Importar</button></div>
+      </div>
+    </section>
+    <section id="messages" hidden>
+      <div class="panel">
+        <h2>Mensajes recibidos</h2>
+        <p>Cada mensaje que llega desde Teams, qué decidió el asistente, la respuesta enviada o retenida y el registro de cada paso. Abre un mensaje para ver su detalle.</p>
+        <div class="actions">
+          <button id="messages-refresh" class="secondary">Actualizar</button>
+          <label class="check"><input id="messages-auto" type="checkbox" checked> Actualizar cada 10 s</label>
+          <label class="check"><input id="messages-hide-ineligible" type="checkbox" checked> Ocultar mensajes no dirigidos al asistente</label>
+          <select id="messages-filter" aria-label="Filtrar mensajes">
+            <option value="all">Todos</option>
+            <option value="sent">Respondidos</option>
+            <option value="withheld">Retenidos o sin respuesta</option>
+            <option value="error">Con error o envío incierto</option>
+            <option value="active">En curso</option>
+          </select>
+        </div>
+        <p id="messages-summary" class="hint"></p>
+        <div id="messages-list" aria-live="polite"></div>
       </div>
     </section>
     <section id="knowledge" hidden>

@@ -811,6 +811,92 @@ impl MessageAdapter for Graph {
                 && m.deleted_date_time.is_none(),
         })
     }
+    async fn history(
+        &self,
+        m: &IncomingMessage,
+        limit: usize,
+    ) -> Result<Vec<teams::HistoryMessage>> {
+        let resource = teams::canonical_resource(&m.resource)?;
+        let collection = teams::collection(&resource)?;
+        ensure!(
+            self.allowed_collection(&collection),
+            "conversation no longer allowed"
+        );
+        // Notes are readable only through /me, as in personal polling.
+        let path = if m.conversation == "chats/48:notes" {
+            "me/chats/48:notes/messages".to_owned()
+        } else {
+            collection
+        };
+        let mut url = self.url(&path)?;
+        url.query_pairs_mut()
+            .append_pair("$top", "50")
+            .append_pair("$orderby", "createdDateTime desc");
+        let page = self.request_url(Method::GET, url, None, true).await?;
+        let current = resource.rsplit('/').next().unwrap_or("");
+        let mut found = Vec::new();
+        for value in page["value"].as_array().context("invalid message page")? {
+            if found.len() >= limit {
+                break;
+            }
+            let id = value["id"].as_str().unwrap_or("");
+            let Some(created) = value["createdDateTime"]
+                .as_str()
+                .and_then(|d| chrono::DateTime::parse_from_rfc3339(d).ok())
+            else {
+                continue;
+            };
+            if id.is_empty()
+                || id == current
+                || value["messageType"].as_str() != Some("message")
+                || !value["deletedDateTime"].is_null()
+                || created.timestamp_millis() >= m.created_at_millis
+            {
+                continue;
+            }
+            let content = value["body"]["content"].as_str().unwrap_or("");
+            let output = self.store.is_output(&m.conversation, id, content)?;
+            let text = if value["body"]["contentType"] == "html" {
+                teams::plain_text(content)
+            } else {
+                content.to_owned()
+            };
+            // Answers sent by this app end with their «PTA» output marker.
+            let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+            let text: String = text
+                .trim_end_matches("PTA")
+                .trim_end()
+                .chars()
+                .take(800)
+                .collect();
+            if text.is_empty() {
+                continue;
+            }
+            let author = if output {
+                "asistente".to_owned()
+            } else if value["from"]["user"]["id"].as_str() == Some(&self.config.graph.user_id) {
+                "yo".to_owned()
+            } else {
+                value["from"]["user"]["displayName"]
+                    .as_str()
+                    .filter(|name| !name.trim().is_empty())
+                    .unwrap_or("otra persona")
+                    .chars()
+                    .take(80)
+                    .collect()
+            };
+            found.push(teams::HistoryMessage {
+                author,
+                at: created
+                    .with_timezone(&chrono::Local)
+                    .format("%Y-%m-%d %H:%M")
+                    .to_string(),
+                text,
+            });
+        }
+        found.reverse();
+        Ok(found)
+    }
     async fn send(&self, m: &IncomingMessage, text: &str) -> Result<String> {
         // Teams renders HTML bodies: titled links, lists and code blocks instead of raw Markdown.
         let content = teams::html(text);

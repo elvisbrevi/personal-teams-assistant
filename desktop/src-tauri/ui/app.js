@@ -1,6 +1,6 @@
 const rawInvoke = window.__TAURI__.core.invoke;
 async function invoke(method, args = {}) {
-  const read = ['snapshot', 'chat', 'github_repositories', 'self_chat_status', 'llm_providers'].includes(method);
+  const read = ['snapshot', 'chat', 'github_repositories', 'self_chat_status', 'llm_providers', 'audit'].includes(method);
   let result = await rawInvoke('command', { request: {
     method, args, revision: read ? null : current?.revision ?? null, contract: 1
   }});
@@ -32,7 +32,8 @@ function lines(text) { return text.split('\n').map(s => s.trim()).filter(Boolean
 function names(text) { return text.split(',').map(s => s.trim()).filter(Boolean); }
 
 function showTab(name) {
-  for (const section of ['settings', 'knowledge', 'chat']) {
+  if (name === 'messages') loadMessages().catch(message);
+  for (const section of ['settings', 'messages', 'knowledge', 'chat']) {
     $('#' + section).hidden = section !== name;
   }
   for (const button of document.querySelectorAll('nav button')) {
@@ -182,6 +183,138 @@ async function loadChain() {
   catch (error) { message(error); }
   llmRows = chainRows(current.config);
   renderChain();
+}
+
+const statusLabels = {
+  sent: ['Respondido', 'ok'], dry_run: ['En observación (no enviado)', 'info'], sending: ['Enviando', 'active'],
+  processing: ['En curso', 'active'], pending: ['En cola', 'active'], failed: ['Error', 'error'],
+  uncertain: ['Envío incierto', 'error'],
+};
+const reasonLabels = {
+  ineligible_message: 'No dirigido al asistente: propio, de un grupo sin mención, antiguo, vacío o una respuesta de la app.',
+  sensitive_question: 'La pregunta contiene datos sensibles; queda para ti.',
+  no_authorized_resource: 'No hay fuentes autorizadas para esta conversación.',
+  informational_message: 'Mensaje informativo: no pide respuesta.',
+  deterministic_greeting: 'Saludo respondido con el texto configurado.',
+  supported_answer: 'Respuesta generada.',
+  unsafe_proposal: 'Retenida: contenía datos sensibles o no cabía en un mensaje de Teams.',
+  unsafe_answer: 'Retenida: contenía datos sensibles o no cabía en un mensaje de Teams.',
+  reference_selection_failed: 'Bloqueada por Jev al elegir referencias (versión anterior).',
+  final_gate: 'Bloqueada por el control final de Jev (versión anterior).',
+  message_changed: 'El mensaje cambió, se borró o dejó de ser elegible antes de enviar.',
+  send_result_unknown_manual_review: 'No se sabe si el envío llegó: revísalo en Teams (no se reintenta).',
+  read_or_provider_error: 'Error al leer Teams o al llamar a un proveedor; se reintenta.',
+  generating: 'Redactando la respuesta.', retrieving: 'Buscando en las fuentes.', tool_started: 'Consultando una herramienta.',
+  selecting_references: 'Eligiendo referencias.', final_review: 'Revisión final.',
+  holding_reply: 'Enviando aviso de espera.',
+};
+const kindLabels = { self: 'Chat personal', direct: 'Directo', group: 'Grupo', unsupported: 'Otro' };
+let messageRows = [];
+const openMessages = new Set();
+
+function messageState(row) {
+  const reason = row.audit.reason || '';
+  if (row.status === 'ignored') {
+    if (reason === 'ineligible_message') return ['No dirigido', 'muted'];
+    if (/^(unsafe_|invalid_references|reference_selection_failed|final_gate)/.test(reason)) return ['Retenido', 'warn'];
+    return ['Sin respuesta', 'muted'];
+  }
+  return statusLabels[row.status] || [row.status, 'muted'];
+}
+
+function reasonText(reason) {
+  if (!reason) return '';
+  if (reason.startsWith('invalid_references')) return `Retenida: referencias o enlaces no verificables (${reason.replace('invalid_references: ', '')}).`;
+  return reasonLabels[reason] || reason;
+}
+
+function when(row) {
+  const millis = row.audit.received_at ?? row.created_at * 1000;
+  return new Date(millis).toLocaleString();
+}
+
+function messageField(container, label, text, pre = false) {
+  if (!text) return;
+  const block = document.createElement('div'); block.className = 'field-block';
+  const title = document.createElement('strong'); title.textContent = label;
+  const body = document.createElement(pre ? 'pre' : 'p'); body.textContent = text;
+  block.append(title, body); container.append(block);
+}
+
+function renderMessages() {
+  const list = $('#messages-list');
+  const filter = $('#messages-filter').value;
+  const hideIneligible = $('#messages-hide-ineligible').checked;
+  const rows = messageRows.filter(row => {
+    const [, tone] = messageState(row);
+    if (hideIneligible && row.audit.reason === 'ineligible_message' && row.status === 'ignored') return false;
+    return filter === 'all' || (filter === 'sent' && tone === 'ok') || (filter === 'withheld' && (tone === 'warn' || (tone === 'muted' && row.audit.reason !== 'ineligible_message')))
+      || (filter === 'error' && tone === 'error') || (filter === 'active' && tone === 'active');
+  });
+  const counts = messageRows.reduce((acc, row) => { const [label] = messageState(row); acc[label] = (acc[label] || 0) + 1; return acc; }, {});
+  $('#messages-summary').textContent = `${messageRows.length} mensajes recientes · ` + Object.entries(counts).map(([label, n]) => `${label}: ${n}`).join(' · ');
+  list.replaceChildren();
+  if (!rows.length) { list.append(document.createTextNode('No hay mensajes para este filtro.')); return; }
+  for (const row of rows) {
+    const audit = row.audit;
+    const [label, tone] = messageState(row);
+    const item = document.createElement('details'); item.className = 'message';
+    item.open = openMessages.has(row.resource);
+    item.ontoggle = () => { if (item.open) openMessages.add(row.resource); else openMessages.delete(row.resource); };
+    const summary = document.createElement('summary');
+    const badge = document.createElement('span'); badge.className = `badge ${tone}`; badge.textContent = label;
+    const kind = document.createElement('span'); kind.className = 'kind';
+    kind.textContent = kindLabels[audit.conversation_kind] || (row.resource.includes('48:notes') ? 'Chat personal' : row.resource.startsWith('simulation:') ? 'Simulación' : 'Teams');
+    const time = document.createElement('time'); time.textContent = when(row);
+    const text = document.createElement('span'); text.className = 'excerpt';
+    const reply = audit.sent || audit.proposed;
+    text.textContent = audit.question
+      || (reply ? `Respuesta: ${reply.replace(/\s+/g, ' ').slice(0, 140)}` : null)
+      || (audit.reason === 'ineligible_message' ? '(no se guarda el texto de mensajes no dirigidos al asistente)' : '(sin texto registrado)');
+    summary.append(badge, kind, time, text);
+    item.append(summary);
+    const body = document.createElement('div'); body.className = 'message-body';
+    messageField(body, 'Mensaje', audit.question, true);
+    if (audit.resolved_question) messageField(body, 'Interpretado con el contexto', `${audit.resolved_question}${audit.topic ? ` · tema buscado: ${audit.topic}` : ''}`);
+    messageField(body, 'Resultado', reasonText(audit.reason));
+    if (row.status === 'sent') messageField(body, 'Respuesta enviada', audit.sent || audit.proposed, true);
+    else messageField(body, row.status === 'dry_run' ? 'Propuesta (modo observación)' : 'Respuesta propuesta (no enviada)', audit.proposed, true);
+    const details = [];
+    if (audit.history_messages) details.push(`Contexto: ${audit.history_messages} mensajes previos`);
+    if (audit.provider) details.push(`Modelo: ${audit.provider}`);
+    if (audit.provider_fallbacks?.length) details.push(`Fallaron antes: ${audit.provider_fallbacks.join(', ')}`);
+    if (audit.source) details.push(`Fuentes: ${audit.source}`);
+    if (audit.references?.length) details.push(`Referencias: ${audit.used_sources?.length ?? 0} citadas de ${audit.references.length}${audit.reference_selection === 'code' ? ' (elegidas por el código; Jev no disponible)' : ''}`);
+    if (audit.final_check) details.push(`Revisión Jev (informativa): ${audit.final_check === 'unavailable' ? 'no disponible' : audit.final_check}`);
+    const notice = { sending: 'enviando', sent: 'enviado', uncertain: 'incierto (no se reintenta)' };
+    if (audit.holding_reply) details.push(`Aviso de espera: ${notice[audit.holding_reply] || audit.holding_reply}`);
+    if (audit.withheld_notice) details.push(`Aviso de respuesta retenida: ${notice[audit.withheld_notice] || audit.withheld_notice}`);
+    messageField(body, 'Detalle', details.join('\n'), true);
+    if (audit.trace?.length) {
+      const block = document.createElement('div'); block.className = 'field-block';
+      const title = document.createElement('strong'); title.textContent = 'Registro';
+      const log = document.createElement('ol'); log.className = 'trace';
+      for (const step of audit.trace) {
+        const entry = document.createElement('li');
+        const at = document.createElement('time'); at.textContent = new Date(step.at).toLocaleTimeString();
+        const name = document.createElement('b'); name.textContent = step.step;
+        entry.append(at, name, document.createTextNode(step.detail ? ` — ${step.detail}` : ''));
+        log.append(entry);
+      }
+      block.append(title, log); body.append(block);
+    } else {
+      messageField(body, 'Registro', 'Este mensaje se procesó con una versión anterior, sin registro de pasos.');
+    }
+    const resource = document.createElement('small'); resource.className = 'resource-id'; resource.textContent = row.resource;
+    body.append(resource);
+    item.append(body);
+    list.append(item);
+  }
+}
+
+async function loadMessages() {
+  messageRows = await invoke('audit', { limit: 100, resource: null, content: true });
+  renderMessages();
 }
 
 function renderRepositories() {
@@ -341,6 +474,12 @@ document.querySelectorAll('nav button').forEach(button => button.onclick = () =>
 $('#save-settings').onclick = () => save().catch(message);
 $('#save-knowledge').onclick = () => save().catch(message);
 $('#save-llm').onclick = () => save().catch(message);
+$('#messages-refresh').onclick = () => loadMessages().catch(message);
+$('#messages-filter').onchange = renderMessages;
+$('#messages-hide-ineligible').onchange = renderMessages;
+setInterval(() => {
+  if (!$('#messages').hidden && $('#messages-auto').checked) loadMessages().catch(() => {});
+}, 10_000);
 $('#detect-llm').onclick = async () => {
   try { llmCatalog = await invoke('llm_providers'); renderChain(); message('CLI detectadas de nuevo.'); }
   catch (error) { message(error); }

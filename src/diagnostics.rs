@@ -41,6 +41,7 @@ pub async fn providers(config: &Config) -> Result<serde_json::Value> {
                         question,
                         evidence,
                         detail_requested: false,
+                        history: "",
                     })
                     .await?;
                 let chars = generated.answer.chars().count();

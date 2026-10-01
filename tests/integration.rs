@@ -45,6 +45,18 @@ impl LlmProvider for NoLlm {
         panic!("unexpected generation")
     }
 }
+/// Jev is down: every decision call fails; reference hints pass through for code checks.
+struct UnavailableGate;
+#[async_trait]
+impl DecisionGate for UnavailableGate {
+    async fn evaluate(
+        &self,
+        _: Stage,
+        _: serde_json::Value,
+    ) -> Result<personal_teams_assistant::decision::Verdict> {
+        anyhow::bail!("Jev unavailable")
+    }
+}
 struct NoGate;
 #[async_trait]
 impl DecisionGate for NoGate {
@@ -117,7 +129,7 @@ async fn deterministic_greeting_sends_without_jev_or_llm() {
     assert!(store.next_job().unwrap().is_none());
 }
 #[tokio::test]
-async fn graph_jev_deepseek_end_to_end_and_final_gate() {
+async fn graph_jev_deepseek_end_to_end_and_informative_final_review() {
     for allow in [true, false] {
         let server = MockServer::start().await;
         let dir = tempfile::tempdir().unwrap();
@@ -132,7 +144,7 @@ async fn graph_jev_deepseek_end_to_end_and_final_gate() {
         Mock::given(method("POST"))
             .and(path("/chats/chat1/messages"))
             .respond_with(ResponseTemplate::new(201).set_body_json(json!({"id":"sent1"})))
-            .expect(if allow { 1 } else { 0 })
+            .expect(1)
             .mount(&server)
             .await;
         let gate = Arc::new(Jev {
@@ -159,8 +171,23 @@ async fn graph_jev_deepseek_end_to_end_and_final_gate() {
         let job = store.next_job().unwrap().unwrap();
         pipeline.process(&job.resource).await.unwrap();
         let audit = store.audit(&job.resource).unwrap().unwrap();
-        assert_eq!(audit.status, if allow { "sent" } else { "ignored" });
+        // Jev's final review is recorded for the message log but never withholds the answer.
+        assert_eq!(audit.status, "sent");
         assert_eq!(audit.confidences.len(), 1);
+        assert_eq!(
+            audit.final_check.as_deref(),
+            Some(if allow { "allow 0.99" } else { "ignore 0.01" })
+        );
+        assert_eq!(
+            audit.question.as_deref(),
+            Some("¿Cuál es el horario del soporte?")
+        );
+        assert!(audit.trace.iter().any(|s| s.step == "envío"));
+        assert!(audit.trace.iter().any(|s| {
+            s.step == "revisión Jev (informativa)"
+                && s.detail
+                    .contains(if allow { "aprobada" } else { "no bloquea" })
+        }));
         let requests = server.received_requests().await.unwrap();
         for r in requests
             .iter()
@@ -1098,6 +1125,7 @@ impl LlmProvider for LengthChoice {
             answer: "á".repeat(5000),
             detailed: self.detailed,
             provider: None,
+            fallbacks: Vec::new(),
         })
     }
 }
@@ -1241,6 +1269,7 @@ impl LlmProvider for WikiLlm {
             detailed: false,
             used_sources: self.used.clone(),
             provider: None,
+            fallbacks: Vec::new(),
         })
     }
 }
@@ -1325,7 +1354,7 @@ async fn wiki_priority_current_request_mixed_citations_and_complete_gate_without
                 gate: if ids.len() == 2 {
                     Arc::new(WikiGate)
                 } else {
-                    Arc::new(NoGate)
+                    Arc::new(UnavailableGate)
                 },
                 knowledge: KnowledgeMap {
                     repositories: BTreeMap::new(),
@@ -1378,7 +1407,13 @@ async fn wiki_priority_current_request_mixed_citations_and_complete_gate_without
                         .unwrap()
                         .contains("contribución propia verificada")
                 );
+            } else if ids.is_empty() {
+                // Jev unavailable and no page selected: the consulted pages are linked instead
+                // of withholding the answer.
+                assert_eq!(result.status, "dry_run", "{}", result.reason);
+                assert!(result.answer.unwrap().contains("**Páginas consultadas**"));
             } else {
+                // An invented reference is still withheld by code.
                 assert_eq!(result.status, "ignored");
                 assert!(result.reason.starts_with("invalid_references"));
             }
@@ -1403,6 +1438,7 @@ impl LlmProvider for FollowUpLlm {
         &self,
         previous_question: &str,
         previous_answer: &str,
+        _history: &str,
         current: &str,
     ) -> Result<Option<personal_teams_assistant::llm::StandaloneRequest>> {
         assert_eq!(previous_question, "como se usa el microservicio crearsps");
@@ -1435,6 +1471,7 @@ impl LlmProvider for FollowUpLlm {
             detailed: false,
             used_sources: vec![],
             provider: None,
+            fallbacks: Vec::new(),
         })
     }
 }
@@ -1699,7 +1736,7 @@ impl LlmProvider for TeamsAttributionLlm {
     }
 }
 #[tokio::test]
-async fn teams_simulation_preserves_attribution_and_final_gate_rejects_swapped_authors() {
+async fn teams_simulation_preserves_attribution_and_final_review_flags_swapped_authors() {
     for swapped in [false, true] {
         let server = MockServer::start().await;
         let dir = tempfile::tempdir().unwrap();
@@ -1754,10 +1791,22 @@ async fn teams_simulation_preserves_attribution_and_final_gate_rejects_swapped_a
         )
         .await
         .unwrap();
-        assert_eq!(result.status, if swapped { "ignored" } else { "dry_run" });
-        if swapped {
-            assert_eq!(result.reason, "final_gate");
-        }
+        // A swapped attribution is flagged in the log; the review no longer withholds it.
+        assert_eq!(result.status, "dry_run");
+        let rows = personal_teams_assistant::state::Store::inspect(
+            &dir.path().join("test.db"),
+            false,
+            1,
+            None,
+            true,
+        )
+        .unwrap();
+        let audit: personal_teams_assistant::state::Audit =
+            serde_json::from_value(rows[0]["audit"].clone()).unwrap();
+        assert_eq!(
+            audit.final_check.as_deref().map(|c| c.starts_with("allow")),
+            Some(!swapped)
+        );
         assert!(
             server
                 .received_requests()
@@ -1820,6 +1869,7 @@ impl LlmProvider for SlowLlm {
             answer: "El soporte atiende de lunes a viernes de 09:00 a 18:00.".into(),
             detailed: false,
             provider: None,
+            fallbacks: Vec::new(),
         })
     }
 }
@@ -1868,6 +1918,304 @@ async fn slow_answers_send_one_holding_reply_first() {
         } else {
             assert_eq!(sent, vec![HOLDING_REPLY.to_owned(), answer]);
             assert_eq!(audit.holding_reply.as_deref(), Some("sent"));
+        }
+    }
+}
+
+#[tokio::test]
+async fn graph_history_returns_earlier_messages_oldest_first_with_author_and_time() {
+    let server = MockServer::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let store = support::store(&dir);
+    let graph = support::graph(&server, store.clone());
+    let nonce = store.begin_output("chats/chat1").unwrap();
+    let now = chrono::Utc::now();
+    let at = |minutes: i64| (now - chrono::Duration::minutes(minutes)).to_rfc3339();
+    let me = graph.config.graph.user_id.clone();
+    // Graph returns the newest first.
+    let mut page = vec![
+        json!({"id":"124","messageType":"message","createdDateTime":at(-1),"deletedDateTime":null,"from":{"user":{"id":me}},"body":{"contentType":"text","content":"posterior a la pregunta"}}),
+        json!({"id":"123","messageType":"message","createdDateTime":at(0),"deletedDateTime":null,"from":{"user":{"id":me}},"body":{"contentType":"text","content":"pregunta actual"}}),
+        json!({"id":"9","messageType":"message","createdDateTime":at(1),"deletedDateTime":null,"from":{"user":{"id":"ana"}},"body":{"contentType":"html","content":format!("<p>Respuesta del asistente</p><p><a href=\"https://personalteams.invalid/output/{nonce}\">PTA</a></p>")}}),
+        json!({"id":"8","messageType":"systemEventMessage","createdDateTime":at(2),"deletedDateTime":null,"from":null,"body":{"contentType":"html","content":"<p>Evento</p>"}}),
+        json!({"id":"7","messageType":"message","createdDateTime":at(3),"deletedDateTime":at(1),"from":{"user":{"id":"ana"}},"body":{"contentType":"text","content":"borrado"}}),
+        json!({"id":"6","messageType":"message","createdDateTime":at(4),"deletedDateTime":null,"from":{"user":{"id":"ana","displayName":"Ana Pérez"}},"body":{"contentType":"html","content":"<p>Hablamos del <b>microservicio Crear SPS</b></p>"}}),
+        json!({"id":"5","messageType":"message","createdDateTime":at(5),"deletedDateTime":null,"from":{"user":{"id":me}},"body":{"contentType":"text","content":"¿Cómo se usa crearsps?"}}),
+    ];
+    for minutes in 6..20 {
+        page.push(json!({"id":format!("{minutes}00"),"messageType":"message","createdDateTime":at(minutes),"deletedDateTime":null,"from":{"user":{"id":me}},"body":{"contentType":"text","content":format!("mensaje antiguo {minutes}")}}));
+    }
+    Mock::given(method("GET"))
+        .and(path("/chats/chat1/messages"))
+        .and(wiremock::matchers::query_param(
+            "$orderby",
+            "createdDateTime desc",
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"value":page})))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let current = personal_teams_assistant::adapters::teams::IncomingMessage {
+        resource: "chats/chat1/messages/123".into(),
+        conversation: "chats/chat1".into(),
+        sender: me.clone(),
+        kind: personal_teams_assistant::adapters::teams::ConversationKind::Direct,
+        mentions: vec![],
+        text: "pregunta actual".into(),
+        created_at: now.timestamp(),
+        created_at_millis: now.timestamp_millis(),
+        is_user_message: true,
+    };
+    let history = graph.history(&current, 10).await.unwrap();
+    assert_eq!(history.len(), 10);
+    let newest: Vec<_> = history
+        .iter()
+        .rev()
+        .take(3)
+        .map(|m| (m.author.as_str(), m.text.as_str()))
+        .collect();
+    assert_eq!(
+        newest,
+        vec![
+            ("asistente", "Respuesta del asistente"),
+            ("Ana Pérez", "Hablamos del microservicio Crear SPS"),
+            ("yo", "¿Cómo se usa crearsps?"),
+        ]
+    );
+    assert!(history.iter().all(|m| !m.text.contains("borrado")
+        && !m.text.contains("posterior")
+        && !m.text.contains("pregunta actual")
+        && m.at.len() == 16));
+    // Oldest first.
+    assert!(history.windows(2).all(|w| w[0].at <= w[1].at));
+}
+
+struct HistoryTeams {
+    conversation: String,
+    sender: String,
+    sent: std::sync::Mutex<Vec<String>>,
+}
+#[async_trait]
+impl MessageAdapter for HistoryTeams {
+    async fn fetch(
+        &self,
+        resource: &str,
+    ) -> Result<personal_teams_assistant::adapters::teams::IncomingMessage> {
+        Ok(personal_teams_assistant::adapters::teams::IncomingMessage {
+            resource: resource.into(),
+            conversation: self.conversation.clone(),
+            sender: self.sender.clone(),
+            kind: personal_teams_assistant::adapters::teams::ConversationKind::Direct,
+            mentions: vec![],
+            text: "cual es el endpoint para el ambiente de test".into(),
+            created_at: chrono::Utc::now().timestamp(),
+            created_at_millis: chrono::Utc::now().timestamp_millis(),
+            is_user_message: true,
+        })
+    }
+    async fn send(
+        &self,
+        _: &personal_teams_assistant::adapters::teams::IncomingMessage,
+        text: &str,
+    ) -> Result<String> {
+        let mut sent = self.sent.lock().unwrap();
+        sent.push(text.into());
+        Ok(format!("sent-{}", sent.len()))
+    }
+    async fn history(
+        &self,
+        _: &personal_teams_assistant::adapters::teams::IncomingMessage,
+        limit: usize,
+    ) -> Result<Vec<personal_teams_assistant::adapters::teams::HistoryMessage>> {
+        assert_eq!(limit, personal_teams_assistant::pipeline::HISTORY_MESSAGES);
+        Ok(vec![
+            personal_teams_assistant::adapters::teams::HistoryMessage {
+                author: "yo".into(),
+                at: "2026-10-01 18:49".into(),
+                text: "¿Cómo se usa el microservicio crearsps?".into(),
+            },
+            personal_teams_assistant::adapters::teams::HistoryMessage {
+                author: "asistente".into(),
+                at: "2026-10-01 18:51".into(),
+                text: "El microservicio Crear SPS se consume con POST.".into(),
+            },
+        ])
+    }
+}
+/// Records the conversation history it receives; may cite an invented reference.
+struct HistoryLlm {
+    seen: std::sync::Mutex<Vec<String>>,
+    invent_reference: bool,
+}
+#[async_trait]
+impl LlmProvider for HistoryLlm {
+    fn name(&self) -> &str {
+        "history"
+    }
+    async fn generate(&self, _: GenerationInput<'_>) -> Result<String> {
+        unreachable!()
+    }
+    async fn generate_response(
+        &self,
+        input: GenerationInput<'_>,
+    ) -> Result<personal_teams_assistant::llm::GeneratedAnswer> {
+        self.seen.lock().unwrap().push(input.history.to_owned());
+        Ok(personal_teams_assistant::llm::GeneratedAnswer {
+            used_sources: if self.invent_reference {
+                vec!["invented".into()]
+            } else {
+                Vec::new()
+            },
+            answer: "El endpoint de test no está documentado en las fuentes.".into(),
+            detailed: false,
+            provider: Some("codex:gpt-6.1-sol:medium".into()),
+            fallbacks: vec!["claude:claude-fable-5-1:medium: usage_limit".into()],
+        })
+    }
+}
+#[tokio::test]
+async fn earlier_messages_with_time_reach_the_model_and_the_log() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = support::store(&dir);
+    let teams = Arc::new(HistoryTeams {
+        conversation: "chats/chat1".into(),
+        sender: "sender".into(),
+        sent: Default::default(),
+    });
+    let llm = Arc::new(HistoryLlm {
+        seen: Default::default(),
+        invent_reference: false,
+    });
+    // «cual es…» is a clear question, so Jev is not consulted for intent; it is down for
+    // the reference and final reviews, which no longer withhold the answer.
+    let pipeline = Pipeline {
+        config: Arc::new(support::config()),
+        store: store.clone(),
+        adapter: teams.clone(),
+        gate: Arc::new(UnavailableGate),
+        knowledge: knowledge(&dir),
+        llm: llm.clone(),
+        tools: Arc::new(NoTools),
+        redactor: redactor(),
+    };
+    let resource = "chats/chat1/messages/123";
+    store.enqueue(resource).unwrap();
+    pipeline.process(resource).await.unwrap();
+    let history = llm.seen.lock().unwrap().last().cloned().unwrap();
+    assert!(history.starts_with(
+        "[2026-10-01 18:49 · yo] ¿Cómo se usa el microservicio crearsps?\n[2026-10-01 18:51 · asistente] El microservicio Crear SPS se consume con POST.\n["
+    ));
+    assert!(history.ends_with("· solicitud actual]"));
+    let audit = store.audit(resource).unwrap().unwrap();
+    // Jev's final review was unavailable and did not withhold the answer.
+    assert_eq!(audit.status, "sent");
+    assert_eq!(audit.final_check.as_deref(), Some("unavailable"));
+    assert_eq!(audit.history_messages, 2);
+    assert_eq!(audit.provider.as_deref(), Some("codex:gpt-6.1-sol:medium"));
+    assert_eq!(
+        audit.provider_fallbacks,
+        vec!["claude:claude-fable-5-1:medium: usage_limit".to_string()]
+    );
+    let steps: Vec<_> = audit.trace.iter().map(|s| s.step.as_str()).collect();
+    for step in [
+        "recibido",
+        "elegibilidad",
+        "intención",
+        "contexto",
+        "modelo",
+        "envío",
+    ] {
+        assert!(steps.contains(&step), "{step}: {steps:?}");
+    }
+    // The log names decisions, never the message text.
+    assert!(audit.trace.iter().all(|s| !s.detail.contains("endpoint")));
+}
+/// Classifies every ambiguous message as a question; Final review is unavailable.
+struct IntentQuestionGate;
+#[async_trait]
+impl DecisionGate for IntentQuestionGate {
+    async fn evaluate(
+        &self,
+        stage: Stage,
+        _: serde_json::Value,
+    ) -> Result<personal_teams_assistant::decision::Verdict> {
+        anyhow::ensure!(matches!(stage, Stage::Intent), "final review unavailable");
+        Ok(personal_teams_assistant::decision::Verdict {
+            selected: "question".into(),
+            confidence: 0.9,
+        })
+    }
+}
+#[tokio::test]
+async fn withheld_answer_in_the_personal_chat_is_reported_once() {
+    for chat in ["chats/48:notes", "chats/chat1"] {
+        let dir = tempfile::tempdir().unwrap();
+        let store = support::store(&dir);
+        let mut cfg = support::config();
+        cfg.graph.self_chat = Some(personal_teams_assistant::config::SelfChat {
+            id: "48:notes".into(),
+            user_id: cfg.graph.user_id.clone(),
+            enabled_at: 1,
+        });
+        let own = chat == "chats/48:notes";
+        let teams = Arc::new(HistoryTeams {
+            conversation: chat.into(),
+            sender: if own {
+                cfg.graph.user_id.clone()
+            } else {
+                "sender".into()
+            },
+            sent: Default::default(),
+        });
+        let pipeline = Pipeline {
+            config: Arc::new(cfg),
+            store: store.clone(),
+            adapter: teams.clone(),
+            gate: Arc::new(IntentQuestionGate),
+            knowledge: knowledge(&dir),
+            llm: Arc::new(HistoryLlm {
+                seen: Default::default(),
+                invent_reference: true,
+            }),
+            tools: Arc::new(NoTools),
+            redactor: redactor(),
+        };
+        let mut map = knowledge(&dir);
+        map.resources[0].allowed_conversations = vec![chat.into()];
+        let pipeline = Pipeline {
+            knowledge: map,
+            ..pipeline
+        };
+        let resource = format!("{chat}/messages/123");
+        store.enqueue(&resource).unwrap();
+        pipeline.process(&resource).await.unwrap();
+        // Processing the same message again (a retry) never repeats the notice.
+        pipeline.process(&resource).await.unwrap();
+        let audit = store.audit(&resource).unwrap().unwrap();
+        assert_eq!(audit.status, "ignored", "{chat}: {}", audit.reason);
+        assert!(
+            audit.reason.starts_with("invalid_references"),
+            "{chat}: {}",
+            audit.reason
+        );
+        // The withheld proposal is kept for review.
+        assert!(
+            audit
+                .proposed
+                .as_deref()
+                .unwrap()
+                .contains("no está documentado")
+        );
+        let sent = teams.sent.lock().unwrap().clone();
+        if own {
+            assert_eq!(audit.withheld_notice.as_deref(), Some("sent"));
+            assert_eq!(sent.len(), 1);
+            assert!(sent[0].starts_with("No envié la respuesta a tu mensaje: citaba referencias"));
+            assert!(!sent[0].contains("no está documentado"));
+        } else {
+            // Never notify other people.
+            assert!(audit.withheld_notice.is_none());
+            assert!(sent.is_empty());
         }
     }
 }
