@@ -162,17 +162,14 @@ pub async fn client(request: Request, start_host: bool) -> Result<Reply> {
         }
         ensure!(ready, "desktop host did not become ready");
     }
-    // Model-backed operations chain several provider calls of up to five minutes each.
-    let timeout = if matches!(request.method.as_str(), "chat" | "test_providers") {
-        Duration::from_secs(1200)
-    } else {
-        Duration::from_secs(120)
-    };
-    let client = reqwest::Client::builder()
+    // Model-backed operations wait for the model without a deadline.
+    let mut client = reqwest::Client::builder()
         .no_proxy()
-        .redirect(reqwest::redirect::Policy::none())
-        .timeout(timeout)
-        .build()?;
+        .redirect(reqwest::redirect::Policy::none());
+    if !matches!(request.method.as_str(), "chat" | "test_providers") {
+        client = client.timeout(Duration::from_secs(120));
+    }
+    let client = client.build()?;
     for attempt in 0..20 {
         // A newly claimed lock can precede descriptor replacement. Retry only
         // connection establishment failures, before any request was delivered.

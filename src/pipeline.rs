@@ -12,6 +12,17 @@ use anyhow::Result;
 use serde_json::json;
 use std::{collections::BTreeMap, sync::Arc};
 
+/// Deterministic notice sent once when the model is still working after `HOLDING_AFTER`.
+pub const HOLDING_REPLY: &str = "Déjame revisarlo.";
+const HOLDING_AFTER: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// Model calls have no deadline; this tracks when to tell the sender the answer is coming.
+struct Holding {
+    enabled: bool,
+    sent: bool,
+    deadline: tokio::time::Instant,
+}
+
 pub struct Pipeline {
     pub config: Arc<Config>,
     pub store: Arc<Store>,
@@ -38,15 +49,31 @@ impl Pipeline {
             "local source selection requires a simulation"
         );
         let message = self.adapter.fetch(resource).await?;
+        // A holding notice from an earlier attempt commits the assistant to answering.
+        let holding_reply = self
+            .store
+            .audit(resource)?
+            .and_then(|previous| previous.holding_reply);
+        let mut holding = Holding {
+            enabled: !self.config.policy.dry_run && !resource.starts_with("simulation:"),
+            sent: holding_reply.is_some(),
+            deadline: tokio::time::Instant::now() + HOLDING_AFTER,
+        };
+        let started = chrono::Utc::now().timestamp();
         let mut audit = Audit {
             status: "ignored".into(),
             reason: "ineligible_message".into(),
+            holding_reply,
             ..Default::default()
         };
         if !message.eligible_in(
             &self.config.graph.user_id,
             &self.config.policy.allowed_senders,
-            self.config.policy.max_message_age_seconds,
+            if holding.sent {
+                i64::MAX
+            } else {
+                self.config.policy.max_message_age_seconds
+            },
             self.config.graph.self_chat.as_ref(),
         ) {
             return self.store.record(resource, &audit);
@@ -157,9 +184,15 @@ impl Pipeline {
                 && !tool_candidates.is_empty()
             {
                 match self
-                    .llm
-                    .standalone_request(&previous.question, &previous.answer, &current)
-                    .await
+                    .awaiting_model(
+                        &mut holding,
+                        resource,
+                        &message,
+                        &mut audit,
+                        self.llm
+                            .standalone_request(&previous.question, &previous.answer, &current),
+                    )
+                    .await?
                 {
                     Ok(Some(resolved)) => {
                         let question = resolved.question.trim();
@@ -236,7 +269,16 @@ impl Pipeline {
             } else if tool_candidates.len() == 1 {
                 tool_candidates.keys().next().cloned()
             } else {
-                match self.llm.select_tool(&tool_question, &tool_candidates).await {
+                match self
+                    .awaiting_model(
+                        &mut holding,
+                        resource,
+                        &message,
+                        &mut audit,
+                        self.llm.select_tool(&tool_question, &tool_candidates),
+                    )
+                    .await?
+                {
                     Ok(Some(id)) if tool_candidates.contains_key(&id) => Some(id),
                     Ok(_) => None,
                     Err(_) => {
@@ -349,13 +391,18 @@ impl Pipeline {
             audit.provider = Some(self.llm.name().into());
             self.checkpoint(resource, &audit, "generating")?;
             let generated = self
-                .llm
-                .generate_response(GenerationInput {
-                    question: &question,
-                    evidence: &evidence,
-                    detail_requested: false,
-                })
-                .await?;
+                .awaiting_model(
+                    &mut holding,
+                    resource,
+                    &message,
+                    &mut audit,
+                    self.llm.generate_response(GenerationInput {
+                        question: &question,
+                        evidence: &evidence,
+                        detail_requested: false,
+                    }),
+                )
+                .await??;
             context_answer = Some(generated.answer.clone());
             audit.partial = registry.partial;
             audit.coverage_warnings = registry.warnings.clone();
@@ -450,11 +497,17 @@ impl Pipeline {
         }
         // Re-read immediately before sending to catch edits/deletion and stale questions.
         let latest = self.adapter.fetch(resource).await?;
+        // Age is judged when processing started: a slow answer is not a stale question.
+        let max_age = if holding.sent {
+            i64::MAX
+        } else {
+            self.config.policy.max_message_age_seconds + (chrono::Utc::now().timestamp() - started)
+        };
         if latest.text != message.text
             || !latest.eligible_in(
                 &self.config.graph.user_id,
                 &self.config.policy.allowed_senders,
-                self.config.policy.max_message_age_seconds,
+                max_age,
                 self.config.graph.self_chat.as_ref(),
             )
         {
@@ -490,6 +543,39 @@ impl Pipeline {
             )?;
         }
         Ok(())
+    }
+    /// Await a model call without a deadline. If it is still running when the holding
+    /// deadline passes, send the deterministic notice once; the intent is recorded first so
+    /// a retried job never sends it again, and a failed send is never retried.
+    async fn awaiting_model<T>(
+        &self,
+        holding: &mut Holding,
+        resource: &str,
+        message: &crate::adapters::teams::IncomingMessage,
+        audit: &mut Audit,
+        work: impl std::future::Future<Output = T>,
+    ) -> Result<T> {
+        tokio::pin!(work);
+        if !holding.enabled || holding.sent {
+            return Ok(work.await);
+        }
+        tokio::select! {
+            biased;
+            output = &mut work => return Ok(output),
+            _ = tokio::time::sleep_until(holding.deadline) => {}
+        }
+        holding.sent = true;
+        audit.holding_reply = Some("sending".into());
+        self.checkpoint(resource, audit, "holding_reply")?;
+        audit.holding_reply = Some(
+            match self.adapter.send(message, HOLDING_REPLY).await {
+                Ok(_) => "sent",
+                Err(_) => "uncertain",
+            }
+            .into(),
+        );
+        self.checkpoint(resource, audit, "holding_reply")?;
+        Ok(work.await)
     }
     fn checkpoint(&self, resource: &str, audit: &Audit, stage: &str) -> Result<()> {
         let mut saved = audit.clone();

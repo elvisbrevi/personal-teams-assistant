@@ -42,6 +42,7 @@ tiberius = { version = "0.12", default-features = false, features = ["rustls", "
 keyring = "4.2"
 
 [dev-dependencies]
+tokio = { version = "1", features = ["full", "test-util"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tempfile = "3"
 wiremock = "0.6"

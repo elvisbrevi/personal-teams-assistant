@@ -60,8 +60,6 @@ pub fn validate_provider(name: &str) -> Result<()> {
         _ => bail!("unsupported LLM provider; register an LlmProvider implementation"),
     }
 }
-/// Deadline for one completion; maximum-effort reasoning can take minutes.
-const CALL_DEADLINE: std::time::Duration = std::time::Duration::from_secs(300);
 /// The response also carries the reasoning, which can reach the provider's token default.
 const RESPONSE_LIMIT: usize = 16_000_000;
 pub struct DeepSeek {
@@ -73,8 +71,12 @@ pub struct DeepSeek {
 }
 impl DeepSeek {
     pub fn new(key: &str, model: &str, style: &str, endpoint: &str) -> Result<Self> {
+        // No overall deadline: maximum-effort reasoning takes as long as it takes, and the
+        // pipeline tells the sender when it is slow. Only connecting is bounded, and
+        // keepalive detects a dead connection.
         let client = reqwest::Client::builder()
-            .timeout(CALL_DEADLINE)
+            .connect_timeout(std::time::Duration::from_secs(30))
+            .tcp_keepalive(std::time::Duration::from_secs(30))
             .redirect(reqwest::redirect::Policy::none())
             .build()?;
         Ok(Self {
