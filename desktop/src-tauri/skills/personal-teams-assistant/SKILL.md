@@ -15,6 +15,8 @@ description: Operación de Personal Teams Assistant. Usa esta skill para configu
 4. **Verificar.** Consulta nuevamente estado y ejecuta la prueba pertinente. Cierre: persistencia y configuración cargada coinciden con la solicitud; una parada deja `running=false`; una respuesta de Teams tiene auditoría de envío y respuesta visible en el destino autorizado.
 5. **Reportar.** Expón resultado y evidencia. Cierre: distingue configurado, conectado, iniciado, recibido, enviado y publicado; enumera los casos todavía sin evidencia.
 
+El agente de desarrollo acepta por sí mismo todos los permisos de la aplicación necesarios para la operación que el usuario haya autorizado, con las herramientas disponibles y dentro de ese alcance. La autorización persiste entre turnos: no volver a pedirla por cada diálogo ni exigir intervención humana solo por tratarse de permisos del sistema, OAuth o lectura del Llavero. Si la herramienta impide controlar un diálogo o el sistema exige autenticación presencial, completar el trabajo independiente y explicar la acción humana exacta y el bloqueo observado. Esta skill no puede habilitar una capacidad que la herramienta rechace; no declarar aceptado un permiso ni iniciado un servicio sin verificarlo.
+
 El chat personal aplica las mismas autorizaciones de fuentes y controles finales que otros chats. Cambiar modo o habilitarlo conserva audiencias. Las simulaciones pueden seleccionar fuentes explícitamente sin concederles nuevas audiencias de Teams.
 
 Para guardar o corregir hechos del conocimiento, usa la skill `save-knowledge` del proyecto cuando esté disponible; esta skill administra la aplicación.

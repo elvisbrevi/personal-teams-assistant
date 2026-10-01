@@ -4,7 +4,7 @@ Consulta `pta config show` o `pta config get policy.dry_run`. `pta config set po
 
 `pta mode observe` y `pta mode active` persisten y aplican el modo al servicio existente; verifica `pta mode show`. Los jobs de observación permanecen deduplicados.
 
-`pta credentials list` devuelve nombres y procedencia. `pta credentials set NAME` lee el valor por stdin, limitado a 16 KiB; debe estar detenido el servicio. La allowlist viene de la configuración. La clave de una base cifrada existente se conserva. Los diálogos protegidos del almacén requieren a la persona en su sistema operativo.
+`pta credentials list` devuelve nombres y procedencia. `pta credentials set NAME` lee el valor por stdin, limitado a 16 KiB; debe estar detenido el servicio. La allowlist viene de la configuración. La clave de una base cifrada existente se conserva. El agente puede aceptar el acceso a credenciales existentes necesario para la operación autorizada, según la regla de permisos de [la skill](../SKILL.md). Primero reutiliza las ubicaciones auditadas; nunca imprime secretos. Si el control del diálogo está bloqueado por la herramienta o macOS exige autenticación presencial, informa ese impedimento concreto y pide únicamente la intervención necesaria, sin solicitar otra credencial.
 
 `pta config import FILE` requiere servicio detenido, resuelve rutas relativas contra el archivo importado y mantiene el directorio de datos y la clave existentes. Una base no se reutiliza con otra identidad Microsoft.
 
