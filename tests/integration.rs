@@ -1099,24 +1099,23 @@ impl LlmProvider for LengthChoice {
     }
     async fn generate_response(
         &self,
-        input: GenerationInput<'_>,
+        _: GenerationInput<'_>,
     ) -> Result<personal_teams_assistant::llm::GeneratedAnswer> {
-        assert_eq!(input.max_answer_chars, 30);
-        assert_eq!(input.max_detailed_answer_chars, 100);
         Ok(personal_teams_assistant::llm::GeneratedAnswer {
             used_sources: Vec::new(),
-            answer: "á".repeat(60),
+            answer: "á".repeat(5000),
             detailed: self.detailed,
         })
     }
 }
 #[tokio::test]
-async fn agent_selected_character_limits_are_enforced_before_sending() {
+async fn answers_are_not_capped_by_character_count() {
     for detailed in [false, true] {
         let server = MockServer::start().await;
         let dir = tempfile::tempdir().unwrap();
         let store = support::store(&dir);
         let mut config = support::config();
+        // Legacy limits stay in the schema but no longer cap answers.
         config.policy.max_answer_chars = 30;
         config.policy.max_detailed_answer_chars = 100;
         config.validate().unwrap();
@@ -1128,7 +1127,7 @@ async fn agent_selected_character_limits_are_enforced_before_sending() {
         Mock::given(method("POST"))
             .and(path("/chats/chat1/messages"))
             .respond_with(ResponseTemplate::new(201).set_body_json(json!({"id":"sent-limit"})))
-            .expect(if detailed { 1 } else { 0 })
+            .expect(1)
             .mount(&server)
             .await;
         let pipeline = Pipeline {
@@ -1145,8 +1144,8 @@ async fn agent_selected_character_limits_are_enforced_before_sending() {
         pipeline.process("chats/chat1/messages/123").await.unwrap();
         let audit = store.audit("chats/chat1/messages/123").unwrap().unwrap();
         assert_eq!(audit.detailed, Some(detailed));
-        assert_eq!(audit.answer_limit, Some(if detailed { 100 } else { 30 }));
-        assert_eq!(audit.status, if detailed { "sent" } else { "ignored" });
+        assert_eq!(audit.answer_limit, None);
+        assert_eq!(audit.status, "sent");
     }
 }
 
@@ -1772,5 +1771,107 @@ async fn teams_simulation_preserves_attribution_and_final_gate_rejects_swapped_a
                 .iter()
                 .all(|r| r.url.path() == "/jev")
         );
+    }
+}
+
+/// In-memory Teams double: no network, so a paused clock cannot fire transport timeouts.
+struct MemoryTeams {
+    sent: std::sync::Mutex<Vec<String>>,
+}
+#[async_trait]
+impl MessageAdapter for MemoryTeams {
+    async fn fetch(
+        &self,
+        resource: &str,
+    ) -> Result<personal_teams_assistant::adapters::teams::IncomingMessage> {
+        Ok(personal_teams_assistant::adapters::teams::IncomingMessage {
+            resource: resource.into(),
+            conversation: "chats/chat1".into(),
+            sender: "sender".into(),
+            kind: personal_teams_assistant::adapters::teams::ConversationKind::Direct,
+            mentions: vec![],
+            text: "¿Cuál es el horario de soporte?".into(),
+            created_at: chrono::Utc::now().timestamp(),
+            created_at_millis: chrono::Utc::now().timestamp_millis(),
+            is_user_message: true,
+        })
+    }
+    async fn send(
+        &self,
+        _: &personal_teams_assistant::adapters::teams::IncomingMessage,
+        text: &str,
+    ) -> Result<String> {
+        let mut sent = self.sent.lock().unwrap();
+        sent.push(text.into());
+        Ok(format!("sent-{}", sent.len()))
+    }
+}
+struct SlowLlm;
+#[async_trait]
+impl LlmProvider for SlowLlm {
+    fn name(&self) -> &str {
+        "slow"
+    }
+    async fn generate(&self, _: GenerationInput<'_>) -> Result<String> {
+        unreachable!()
+    }
+    async fn generate_response(
+        &self,
+        _: GenerationInput<'_>,
+    ) -> Result<personal_teams_assistant::llm::GeneratedAnswer> {
+        tokio::time::sleep(std::time::Duration::from_secs(301)).await;
+        Ok(personal_teams_assistant::llm::GeneratedAnswer {
+            used_sources: Vec::new(),
+            answer: "El soporte atiende de lunes a viernes de 09:00 a 18:00.".into(),
+            detailed: false,
+        })
+    }
+}
+#[tokio::test(start_paused = true)]
+async fn slow_answers_send_one_holding_reply_first() {
+    use personal_teams_assistant::pipeline::HOLDING_REPLY;
+    for earlier_notice in [None, Some("uncertain")] {
+        let dir = tempfile::tempdir().unwrap();
+        let store = support::store(&dir);
+        let teams = Arc::new(MemoryTeams {
+            sent: Default::default(),
+        });
+        let pipeline = Pipeline {
+            config: Arc::new(support::config()),
+            store: store.clone(),
+            adapter: teams.clone(),
+            gate: Arc::new(FinalOnlyGate),
+            knowledge: knowledge(&dir),
+            llm: Arc::new(SlowLlm),
+            tools: Arc::new(NoTools),
+            redactor: redactor(),
+        };
+        let resource = "chats/chat1/messages/123";
+        store.enqueue(resource).unwrap();
+        if let Some(notice) = earlier_notice {
+            // A retried job whose earlier attempt already tried the notice never repeats it.
+            store
+                .record(
+                    resource,
+                    &personal_teams_assistant::state::Audit {
+                        status: "pending".into(),
+                        holding_reply: Some(notice.into()),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+        }
+        pipeline.process(resource).await.unwrap();
+        let audit = store.audit(resource).unwrap().unwrap();
+        assert_eq!(audit.status, "sent");
+        let answer = audit.sent.unwrap();
+        let sent = teams.sent.lock().unwrap().clone();
+        if earlier_notice.is_some() {
+            assert_eq!(sent, vec![answer]);
+            assert_eq!(audit.holding_reply.as_deref(), Some("uncertain"));
+        } else {
+            assert_eq!(sent, vec![HOLDING_REPLY.to_owned(), answer]);
+            assert_eq!(audit.holding_reply.as_deref(), Some("sent"));
+        }
     }
 }

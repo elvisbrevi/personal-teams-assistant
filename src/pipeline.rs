@@ -9,9 +9,19 @@ use crate::{
     tools::{ReadOnlyTool, ScopedTool, ToolArgs},
 };
 use anyhow::Result;
-use rig::tool::Tool;
 use serde_json::json;
 use std::{collections::BTreeMap, sync::Arc};
+
+/// Deterministic notice sent once when the model is still working after `HOLDING_AFTER`.
+pub const HOLDING_REPLY: &str = "Déjame revisarlo.";
+const HOLDING_AFTER: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// Model calls have no deadline; this tracks when to tell the sender the answer is coming.
+struct Holding {
+    enabled: bool,
+    sent: bool,
+    deadline: tokio::time::Instant,
+}
 
 pub struct Pipeline {
     pub config: Arc<Config>,
@@ -39,15 +49,31 @@ impl Pipeline {
             "local source selection requires a simulation"
         );
         let message = self.adapter.fetch(resource).await?;
+        // A holding notice from an earlier attempt commits the assistant to answering.
+        let holding_reply = self
+            .store
+            .audit(resource)?
+            .and_then(|previous| previous.holding_reply);
+        let mut holding = Holding {
+            enabled: !self.config.policy.dry_run && !resource.starts_with("simulation:"),
+            sent: holding_reply.is_some(),
+            deadline: tokio::time::Instant::now() + HOLDING_AFTER,
+        };
+        let started = chrono::Utc::now().timestamp();
         let mut audit = Audit {
             status: "ignored".into(),
             reason: "ineligible_message".into(),
+            holding_reply,
             ..Default::default()
         };
         if !message.eligible_in(
             &self.config.graph.user_id,
             &self.config.policy.allowed_senders,
-            self.config.policy.max_message_age_seconds,
+            if holding.sent {
+                i64::MAX
+            } else {
+                self.config.policy.max_message_age_seconds
+            },
             self.config.graph.self_chat.as_ref(),
         ) {
             return self.store.record(resource, &audit);
@@ -89,7 +115,6 @@ impl Pipeline {
         };
         let mut context_question = None;
         let mut context_answer = None;
-        let mut answer_limit = self.config.policy.max_answer_chars;
         let proposal = if is_greeting {
             audit.reason = "deterministic_greeting".into();
             self.config.policy.greeting.clone()
@@ -159,9 +184,15 @@ impl Pipeline {
                 && !tool_candidates.is_empty()
             {
                 match self
-                    .llm
-                    .standalone_request(&previous.question, &previous.answer, &current)
-                    .await
+                    .awaiting_model(
+                        &mut holding,
+                        resource,
+                        &message,
+                        &mut audit,
+                        self.llm
+                            .standalone_request(&previous.question, &previous.answer, &current),
+                    )
+                    .await?
                 {
                     Ok(Some(resolved)) => {
                         let question = resolved.question.trim();
@@ -238,7 +269,16 @@ impl Pipeline {
             } else if tool_candidates.len() == 1 {
                 tool_candidates.keys().next().cloned()
             } else {
-                match self.llm.select_tool(&tool_question, &tool_candidates).await {
+                match self
+                    .awaiting_model(
+                        &mut holding,
+                        resource,
+                        &message,
+                        &mut audit,
+                        self.llm.select_tool(&tool_question, &tool_candidates),
+                    )
+                    .await?
+                {
                     Ok(Some(id)) if tool_candidates.contains_key(&id) => Some(id),
                     Ok(_) => None,
                     Err(_) => {
@@ -351,36 +391,25 @@ impl Pipeline {
             audit.provider = Some(self.llm.name().into());
             self.checkpoint(resource, &audit, "generating")?;
             let generated = self
-                .llm
-                .generate_response(GenerationInput {
-                    question: &question,
-                    evidence: &evidence,
-                    detail_requested: false,
-                    max_answer_chars: self
-                        .config
-                        .policy
-                        .max_answer_chars
-                        .saturating_sub(citation_reserve(&registry)),
-                    max_detailed_answer_chars: self
-                        .config
-                        .policy
-                        .max_detailed_answer_chars
-                        .saturating_sub(citation_reserve(&registry)),
-                })
-                .await?;
+                .awaiting_model(
+                    &mut holding,
+                    resource,
+                    &message,
+                    &mut audit,
+                    self.llm.generate_response(GenerationInput {
+                        question: &question,
+                        evidence: &evidence,
+                        detail_requested: false,
+                    }),
+                )
+                .await??;
             context_answer = Some(generated.answer.clone());
-            answer_limit = if generated.detailed {
-                self.config.policy.max_detailed_answer_chars
-            } else {
-                self.config.policy.max_answer_chars
-            };
             audit.partial = registry.partial;
             audit.coverage_warnings = registry.warnings.clone();
             audit.references = registry.references.clone();
             audit.teams_messages = registry.teams.clone();
             audit.detailed = Some(generated.detailed);
-            audit.answer_limit = Some(answer_limit);
-            if !self.valid_answer(&generated.answer, answer_limit) {
+            if !self.valid_answer(&generated.answer) {
                 audit.proposed = Some(self.redactor.redact(&generated.answer));
                 audit.reason = "unsafe_proposal".into();
                 return self.store.record(resource, &audit);
@@ -408,12 +437,8 @@ impl Pipeline {
             };
             audit.used_sources = used_sources.clone();
             let answer = if !registry.references.is_empty() {
-                match crate::evidence::complete_answer(
-                    &generated.answer,
-                    &used_sources,
-                    &registry,
-                    answer_limit,
-                ) {
+                match crate::evidence::complete_answer(&generated.answer, &used_sources, &registry)
+                {
                     Ok(answer) => answer,
                     Err(error) => {
                         audit.reason = format!("invalid_references: {error}");
@@ -427,7 +452,7 @@ impl Pipeline {
                 generated.answer
             };
             audit.proposed = Some(self.redactor.redact(&answer));
-            if !self.valid_answer(&answer, answer_limit) {
+            if !self.valid_answer(&answer) {
                 audit.reason = "unsafe_proposal".into();
                 return self.store.record(resource, &audit);
             }
@@ -449,7 +474,7 @@ impl Pipeline {
             answer
         };
         audit.proposed = Some(self.redactor.redact(&proposal));
-        if !self.valid_answer(&proposal, answer_limit) {
+        if !self.valid_answer(&proposal) {
             audit.reason = "unsafe_answer".into();
             return self.store.record(resource, &audit);
         }
@@ -472,11 +497,17 @@ impl Pipeline {
         }
         // Re-read immediately before sending to catch edits/deletion and stale questions.
         let latest = self.adapter.fetch(resource).await?;
+        // Age is judged when processing started: a slow answer is not a stale question.
+        let max_age = if holding.sent {
+            i64::MAX
+        } else {
+            self.config.policy.max_message_age_seconds + (chrono::Utc::now().timestamp() - started)
+        };
         if latest.text != message.text
             || !latest.eligible_in(
                 &self.config.graph.user_id,
                 &self.config.policy.allowed_senders,
-                self.config.policy.max_message_age_seconds,
+                max_age,
                 self.config.graph.self_chat.as_ref(),
             )
         {
@@ -513,34 +544,53 @@ impl Pipeline {
         }
         Ok(())
     }
+    /// Await a model call without a deadline. If it is still running when the holding
+    /// deadline passes, send the deterministic notice once; the intent is recorded first so
+    /// a retried job never sends it again, and a failed send is never retried.
+    async fn awaiting_model<T>(
+        &self,
+        holding: &mut Holding,
+        resource: &str,
+        message: &crate::adapters::teams::IncomingMessage,
+        audit: &mut Audit,
+        work: impl std::future::Future<Output = T>,
+    ) -> Result<T> {
+        tokio::pin!(work);
+        if !holding.enabled || holding.sent {
+            return Ok(work.await);
+        }
+        tokio::select! {
+            biased;
+            output = &mut work => return Ok(output),
+            _ = tokio::time::sleep_until(holding.deadline) => {}
+        }
+        holding.sent = true;
+        audit.holding_reply = Some("sending".into());
+        self.checkpoint(resource, audit, "holding_reply")?;
+        audit.holding_reply = Some(
+            match self.adapter.send(message, HOLDING_REPLY).await {
+                Ok(_) => "sent",
+                Err(_) => "uncertain",
+            }
+            .into(),
+        );
+        self.checkpoint(resource, audit, "holding_reply")?;
+        Ok(work.await)
+    }
     fn checkpoint(&self, resource: &str, audit: &Audit, stage: &str) -> Result<()> {
         let mut saved = audit.clone();
         saved.status = "processing".into();
         saved.reason = stage.into();
         self.store.record(resource, &saved)
     }
-    fn valid_answer(&self, answer: &str, limit: usize) -> bool {
-        // The rendered Teams HTML must also fit Graph's body limit, checked before `sending`.
+    fn valid_answer(&self, answer: &str) -> bool {
+        // No character cap; the rendered Teams HTML must still fit Graph's body limit.
         !answer.trim().is_empty()
-            && answer.chars().count() <= limit
             && crate::adapters::teams::html(answer).len() <= 27_800
             && self.redactor.clean(answer)
     }
 }
 
-fn citation_reserve(e: &crate::evidence::Evidence) -> usize {
-    // Reserve for up to four selected references. Complete rendering remains fail-closed.
-    e.references
-        .iter()
-        .map(|r| {
-            r.url.chars().count()
-                + r.label.chars().count()
-                + r.author.as_ref().map_or(0, |n| n.chars().count())
-                + 160
-        })
-        .take(4)
-        .sum()
-}
 fn explicit_wiki(question: &str) -> bool {
     question
         .split(|c: char| !c.is_alphanumeric())

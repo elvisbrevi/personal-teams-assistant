@@ -41,20 +41,10 @@ pub async fn providers(config: &Config) -> Result<serde_json::Value> {
                 question,
                 evidence,
                 detail_requested: false,
-                max_answer_chars: config.policy.max_answer_chars,
-                max_detailed_answer_chars: config.policy.max_detailed_answer_chars,
             })
             .await?;
-        let limit = if generated.detailed {
-            config.policy.max_detailed_answer_chars
-        } else {
-            config.policy.max_answer_chars
-        };
         let chars = generated.answer.chars().count();
-        ensure!(
-            chars > 0 && chars <= limit,
-            "provider exceeded the selected character limit"
-        );
+        ensure!(chars > 0, "provider returned an empty answer");
         ensure!(
             generated.detailed == expect_detail,
             "provider selected an unexpected answer mode"
@@ -69,9 +59,7 @@ pub async fn providers(config: &Config) -> Result<serde_json::Value> {
             verdict.selected == "allow" && verdict.allows(config.jev.final_threshold),
             "synthetic final check did not pass"
         );
-        results.push(
-            json!({"detailed":generated.detailed,"chars":chars,"limit":limit,"final_allowed":true}),
-        );
+        results.push(json!({"detailed":generated.detailed,"chars":chars,"final_allowed":true}));
     }
     Ok(json!({"synthetic_only":true,"graph_send":false,"provider_checks":results}))
 }

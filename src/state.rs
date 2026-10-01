@@ -41,6 +41,8 @@ pub struct Audit {
     pub coverage_warnings: Vec<String>,
     pub references: Vec<crate::evidence::Reference>,
     pub teams_messages: Vec<crate::evidence::TeamsMessage>,
+    /// Holding notice for a slow answer: `sending`, `sent` or `uncertain`. Never sent twice.
+    pub holding_reply: Option<String>,
 }
 impl Store {
     /// Attach to an existing database without recovering jobs. Used by account probes.

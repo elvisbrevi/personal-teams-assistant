@@ -24,7 +24,6 @@ fs2 = "0.4"
 rand = "0.9"
 regex = "1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
-rig-core = "0.32"
 rusqlite = { version = "0.37", features = ["bundled"] }
 scraper = "0.24"
 serde = { version = "1", features = ["derive"] }
@@ -43,6 +42,7 @@ tiberius = { version = "0.12", default-features = false, features = ["rustls", "
 keyring = "4.2"
 
 [dev-dependencies]
+tokio = { version = "1", features = ["full", "test-util"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tempfile = "3"
 wiremock = "0.6"

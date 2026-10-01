@@ -206,12 +206,7 @@ impl Reference {
     }
 }
 /// Runs before privacy and Jev's final gate, against the complete rendered answer.
-pub fn complete_answer(
-    body: &str,
-    used: &[String],
-    evidence: &Evidence,
-    limit: usize,
-) -> Result<String> {
+pub fn complete_answer(body: &str, used: &[String], evidence: &Evidence) -> Result<String> {
     let selected: BTreeSet<_> = used.iter().collect();
     ensure!(selected.len() == used.len(), "duplicate used source");
     for id in &selected {
@@ -302,10 +297,6 @@ pub fn complete_answer(
             }
         }
     }
-    ensure!(
-        answer.chars().count() <= limit,
-        "complete answer exceeds character budget for references"
-    );
     Ok(answer)
 }
 
@@ -353,7 +344,6 @@ mod tests {
                 "El procedimiento documentado exige revisar.",
                 &["p".into()],
                 &e,
-                3000,
             )
             .unwrap();
             assert!(a.contains("pagePath=%2FProcedure"));
@@ -370,42 +360,40 @@ mod tests {
         }
     }
     #[test]
-    fn missing_invented_out_of_scope_sources_and_insufficient_citation_space_fail_closed() {
+    fn missing_invented_and_out_of_scope_sources_fail_closed() {
         let e = Evidence {
             references: vec![reference("p", "wiki"), reference("w", "work_item")],
             ..Default::default()
         };
-        assert!(complete_answer("Procedimiento", &[], &e, 3000).is_err());
-        assert!(complete_answer("Procedimiento", &["invented".into()], &e, 3000).is_err());
-        assert!(complete_answer("Según #42", &["p".into()], &e, 3000).is_err());
-        assert!(complete_answer("Según #99", &["p".into()], &e, 3000).is_err());
-        assert!(complete_answer("Procedimiento", &["p".into()], &e, 20).is_err());
+        assert!(complete_answer("Procedimiento", &[], &e).is_err());
+        assert!(complete_answer("Procedimiento", &["invented".into()], &e).is_err());
+        assert!(complete_answer("Según #42", &["p".into()], &e).is_err());
+        assert!(complete_answer("Según #99", &["p".into()], &e).is_err());
         assert!(
             complete_answer(
                 "https://dev.azure.com/other/Project/_workitems/edit/42",
                 &["p".into()],
-                &e,
-                3000
+                &e
             )
             .is_err()
         );
-        let a = complete_answer("Revisar #42", &["p".into(), "w".into()], &e, 3000).unwrap();
+        let a = complete_answer("Revisar #42", &["p".into(), "w".into()], &e).unwrap();
         assert!(a.contains("_workitems/edit/42"));
         assert!(a.contains("pagePath"));
-        assert!(complete_answer("Concreta el tema", &[], &Evidence::default(), 100).is_ok());
+        assert!(complete_answer("Concreta el tema", &[], &Evidence::default()).is_ok());
         let mut bad = e.clone();
         bad.references[0].url =
             "https://dev.azure.com/other/Project/_wiki/wikis/wiki?pagePath=%2FProcedure".into();
-        assert!(complete_answer("Procedimiento", &["p".into()], &bad, 3000).is_err());
+        assert!(complete_answer("Procedimiento", &["p".into()], &bad).is_err());
         bad.references[0] = reference("p", "wiki");
         bad.references[0].organization = "mailto:invalid".into();
-        assert!(complete_answer("Procedimiento", &["p".into()], &bad, 3000).is_err());
+        assert!(complete_answer("Procedimiento", &["p".into()], &bad).is_err());
         bad.references[1].kind = "pipeline_run".into();
-        assert!(complete_answer("Work item 42", &["p".into(), "w".into()], &bad, 3000).is_err());
+        assert!(complete_answer("Work item 42", &["p".into(), "w".into()], &bad).is_err());
         bad.references[0] = reference("p", "wiki");
         bad.references[1].label = "Build #420".into();
         bad.references[1].aliases.clear();
-        assert!(complete_answer("Build 42", &["p".into(), "w".into()], &bad, 3000).is_err());
+        assert!(complete_answer("Build 42", &["p".into(), "w".into()], &bad).is_err());
     }
     #[test]
     fn homonymous_stages_preserve_execution_definition_and_parent_identity() {
@@ -429,18 +417,12 @@ mod tests {
             "Stage Deploy ejecutado en #40",
             &["stage:run:40".into()],
             &e,
-            3000,
         )
         .unwrap();
         assert!(a.contains("buildId=40"));
         assert!(!a.contains("definitionId"));
-        let b = complete_answer(
-            "Stage Deploy configurado",
-            &["stage:config:5:2".into()],
-            &e,
-            3000,
-        )
-        .unwrap();
+        let b =
+            complete_answer("Stage Deploy configurado", &["stage:config:5:2".into()], &e).unwrap();
         assert!(b.contains("configuración en release #5"));
     }
     #[test]
