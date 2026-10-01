@@ -3,11 +3,11 @@ name: personal-teams-assistant
 description: Operación de Personal Teams Assistant. Usa esta skill para configurar la app, controlar su servicio, administrar conexiones y fuentes, o ejecutar pruebas y diagnóstico.
 ---
 
-1. **Descubrir la instalación.** Ejecuta `pta --version` y `pta --json capabilities`. Esta skill usa contrato 1. La instalación es por Cargo y entrega `personal-teams-desktop` y `pta` en el mismo directorio `bin`; ambos deben ser de la misma versión. Cierre: versión y contrato identificados; ante incompatibilidad, informa qué componente requiere actualización.
+1. **Descubrir la instalación.** Ejecuta `pta --version` y `pta --json capabilities`. Esta skill usa contrato 1. La instalación es por Cargo y entrega `personal-teams-desktop` y `pta` en el mismo directorio `bin`; ambos deben ser de la misma versión. `status` indica `headless: true` cuando el host corre sin interfaz (Linux/servidores): ver [lifecycle.md](references/lifecycle.md). Cierre: versión y contrato identificados; ante incompatibilidad, informa qué componente requiere actualización.
 2. **Inspeccionar.** Consulta `pta --json status`. Distingue host, asistente, modo persistido y configuración cargada. Para credenciales lee `pta --json credentials list`: el host consulta el almacén existente. La cuenta y el perfil son los mismos de la GUI. Cierre: precondiciones y alcance de la operación conocidos, incluyendo las audiencias de fuentes afectadas.
 3. **Operar.** Carga solo la referencia pertinente y ejecuta la solicitud completa:
    - Configuración, credenciales, modo o importación: [configuration.md](references/configuration.md).
-   - Inicio, parada, ventanas, túnel o recuperación del host: [lifecycle.md](references/lifecycle.md).
+   - Inicio, parada, ventanas, túnel, host sin interfaz/Linux o recuperación del host: [lifecycle.md](references/lifecycle.md).
    - OAuth, repositorios, fuentes o chat personal: [auth-and-knowledge.md](references/auth-and-knowledge.md).
    - Wiki de Azure DevOps (list/search/read, fuente y permisos independientes): [azure-wiki.md](references/azure-wiki.md). Requiere un host que anuncie soporte Wiki (0.3.0 o posterior).
    - Simulación, diagnóstico y auditoría: [tests-and-diagnostics.md](references/tests-and-diagnostics.md).

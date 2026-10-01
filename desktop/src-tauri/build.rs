@@ -1,5 +1,7 @@
+#[cfg(feature = "gui")]
 use std::{env, fs, path::Path};
 
+#[cfg(feature = "gui")]
 fn copy_tree(source: &Path, target: &Path) {
     fs::create_dir_all(target).unwrap();
     for entry in fs::read_dir(source).unwrap() {
@@ -13,6 +15,13 @@ fn copy_tree(source: &Path, target: &Path) {
     }
 }
 fn main() {
+    // A headless build (--no-default-features) has no Tauri context to generate.
+    #[cfg(feature = "gui")]
+    tauri_main();
+}
+
+#[cfg(feature = "gui")]
+fn tauri_main() {
     // Tauri emits editor schemas relative to cwd. Keep generated files in OUT_DIR
     // so Cargo's package verification sees an immutable source tree.
     let source = env::current_dir().unwrap();

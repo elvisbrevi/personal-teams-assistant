@@ -5,3 +5,22 @@
 `pta tunnel configure token`, `pta tunnel configure file PATH` o `pta tunnel configure external` eligen un modo. El token se guarda como `CLOUDFLARE_TUNNEL_TOKEN` con credentials set, nunca en argumentos. `pta tunnel validate` verifica el modo y los requisitos locales, y no demuestra conectividad desde Internet.
 
 El canal administrativo usa otro puerto loopback, token de instancia en un archivo privado y bloqueo de perfil. El túnel Graph conserva únicamente su origen configurado. Cambiar la configuración valida primero; un reinicio fallido exige inspeccionar si quedó aplicado y detenido. Tras caída abrupta, el próximo host recupera la transacción pendiente de configuración; las salidas ambiguas de Graph no se reenvían.
+
+**Host sin interfaz (Linux/servidores).** Se instala con `cargo install personal-teams-desktop --no-default-features --locked` (sin Tauri/WebKit) o se fuerza con `personal-teams-desktop --headless` / `PTA_HEADLESS=1`. `pta --json status` muestra `headless: true`; `app open/hide` responden `not_ready`; `app quit`, SIGTERM o Ctrl-C detienen servicio y túnel antes de salir. `--start` intenta iniciar el servicio al arrancar y mantiene vivo el host si falla, para diagnosticarlo. En Linux las credenciales se guardan con `pta credentials set NAME` en `~/.config/dev.personalteams.assistant/credentials/default/` (0600) o se entregan como `NAME`/`NAME_FILE` en el entorno del host. Login remoto: `pta auth microsoft login --no-browser`, autorizar la URL en cualquier dispositivo y pegar la dirección `http://localhost:PUERTO/?code=…` que el navegador no pudo abrir en `pta auth microsoft finish --redirect 'URL'`. Servicio de usuario systemd en `~/.config/systemd/user/pta.service` (`systemctl --user enable --now pta`, con `loginctl enable-linger` para que siga sin sesión):
+
+```ini
+[Unit]
+Description=Personal Teams Assistant (headless)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=%h/.cargo/bin/personal-teams-desktop --headless --start
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target
+```
+
+Nunca mantener activas a la vez dos instancias de la misma cuenta (otro equipo, la GUI local o un servidor): duplicarían respuestas y provocarían bucles en el chat personal. Deja la otra detenida o en `pta mode observe`.

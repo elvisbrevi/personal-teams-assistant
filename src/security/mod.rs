@@ -8,12 +8,13 @@ use rand::RngCore;
 use regex::Regex;
 use std::{
     collections::BTreeMap,
-    path::Path,
+    path::{Path, PathBuf},
     sync::{OnceLock, RwLock},
 };
 use subtle::ConstantTimeEq;
 
 static KEYRING_PROFILE: OnceLock<RwLock<Option<String>>> = OnceLock::new();
+static FILE_STORE: OnceLock<RwLock<Option<PathBuf>>> = OnceLock::new();
 
 /// Select the one local profile whose credentials may be read by this process.
 pub fn keyring_profile(profile: Option<&str>) -> Result<()> {
@@ -39,7 +40,66 @@ fn validate_profile(profile: &str) -> Result<()> {
     Ok(())
 }
 
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+/// Root of the private file credential store, used only where no OS keychain is
+/// available (Linux and other Unix). Each credential is `<dir>/<profile>/<NAME>`, mode 0600.
+pub fn file_credential_store(dir: Option<&Path>) {
+    *FILE_STORE
+        .get_or_init(|| RwLock::new(None))
+        .write()
+        .unwrap() = dir.map(Path::to_path_buf);
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn file_store_path(profile: &str, name: &str) -> Option<PathBuf> {
+    FILE_STORE
+        .get()
+        .and_then(|s| s.read().unwrap().clone())
+        .map(|dir| dir.join(profile).join(name))
+}
+
+// Exercised on every platform by tests; used at runtime only without an OS keychain.
+#[cfg_attr(any(target_os = "macos", target_os = "windows"), allow(dead_code))]
+fn file_read(path: &Path) -> Result<Option<String>> {
+    match std::fs::read_to_string(path) {
+        Ok(value) => Ok(Some(value.trim_end_matches(['\r', '\n']).to_owned())),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+// Exercised on every platform by tests; used at runtime only without an OS keychain.
+#[cfg_attr(any(target_os = "macos", target_os = "windows"), allow(dead_code))]
+fn file_write(path: &Path, value: &str) -> Result<()> {
+    let parent = path.parent().context("invalid credential path")?;
+    private_dir(parent)?;
+    let temp = parent.join(format!(".tmp-{}", uuid::Uuid::new_v4()));
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let result = (|| -> Result<()> {
+        use std::io::Write;
+        let mut file = options.open(&temp)?;
+        protect_file(&temp)?;
+        file.write_all(value.as_bytes())?;
+        file.sync_all()?;
+        replace_private_file(&temp, path)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temp);
+    }
+    result
+}
+
+// Exercised on every platform by tests; used at runtime only without an OS keychain.
+#[cfg_attr(any(target_os = "macos", target_os = "windows"), allow(dead_code))]
+fn file_delete(path: &Path) -> Result<()> {
+    std::fs::remove_file(path).context("credential not found")
+}
+
 fn active_profile() -> Option<String> {
     KEYRING_PROFILE
         .get()
@@ -64,7 +124,10 @@ pub fn put_desktop_secret(profile: &str, name: &str, value: &str) -> Result<()> 
         Ok(())
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    anyhow::bail!("desktop credential store is unavailable")
+    file_write(
+        &file_store_path(profile, name).context("credential store is unavailable")?,
+        value,
+    )
 }
 
 pub fn delete_desktop_secret(profile: &str, name: &str) -> Result<()> {
@@ -76,7 +139,7 @@ pub fn delete_desktop_secret(profile: &str, name: &str) -> Result<()> {
         Ok(())
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    anyhow::bail!("desktop credential store is unavailable")
+    file_delete(&file_store_path(profile, name).context("credential store is unavailable")?)
 }
 
 fn validate_name(name: &str) -> Result<()> {
@@ -134,6 +197,12 @@ pub fn secret_source(name: &str) -> Result<Option<&'static str>> {
             Err(error) => return Err(error.into()),
         }
     }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    if let Some(path) = active_profile().and_then(|profile| file_store_path(&profile, name))
+        && path.is_file()
+    {
+        return Ok(Some("system"));
+    }
     Ok(None)
 }
 
@@ -156,7 +225,10 @@ pub fn secret(name: &str) -> Result<String> {
         }
         #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         {
-            anyhow::bail!("missing credential: {name}")
+            let path = active_profile()
+                .and_then(|profile| file_store_path(&profile, name))
+                .with_context(|| format!("missing credential: {name}"))?;
+            file_read(&path)?.with_context(|| format!("missing credential: {name}"))?
         }
     };
     validate_secret(name, &value)?;
@@ -361,6 +433,31 @@ mod tests {
             assert!(!r.clean(s), "{s}");
         }
         assert!(r.clean("El servicio está disponible."));
+    }
+    #[test]
+    fn file_store_is_private_atomic_and_reports_absence() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("default").join("TEST_API_KEY");
+        assert!(file_read(&path).unwrap().is_none());
+        file_write(&path, "first-synthetic-value").unwrap();
+        file_write(&path, "second-synthetic-value").unwrap();
+        assert_eq!(
+            file_read(&path).unwrap().as_deref(),
+            Some("second-synthetic-value")
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode(&path), 0o600);
+            assert_eq!(mode(path.parent().unwrap()), 0o700);
+        }
+        assert_eq!(
+            std::fs::read_dir(path.parent().unwrap()).unwrap().count(),
+            1
+        );
+        file_delete(&path).unwrap();
+        assert!(file_delete(&path).is_err());
     }
     #[test]
     fn vault_authenticates_ciphertext() {

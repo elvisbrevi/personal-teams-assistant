@@ -1,12 +1,13 @@
 # Mejoras propuestas
 
-Propuestas surgidas al revisar el código completo (2026-10-01). Ninguna está implementada. Prioridad: **P1** alto valor y bajo riesgo, **P2** valor claro con más esfuerzo, **P3** evolución. Cada punto indica dónde está el problema para retomarlo sin volver a investigar.
+Propuestas surgidas al revisar el código completo (2026-10-01). Salvo lo indicado en «Estado», no están implementadas. Prioridad: **P1** alto valor y bajo riesgo, **P2** valor claro con más esfuerzo, **P3** evolución. Cada punto indica dónde está el problema para retomarlo sin volver a investigar.
 
 ## 1. Arquitectura
 
-### P1 — Operaciones del host tipadas y separadas de Tauri
+### P1 — Operaciones del host tipadas
 - **Problema:** `desktop/src-tauri/src/lib.rs` (≈1.300 líneas) mezcla UI de bandeja, arranque del servicio, OAuth, túnel, ajustes y Wiki. `control::operate` despacha por strings (`"start_assistant"`) y los códigos de salida se deducen de prefijos de texto (`"[invalid_input] …"`, `"[not_ready] …"`).
-- **Propuesta:** módulo `host` sin dependencia de Tauri con `enum Operation` (serde) y `enum HostError { InvalidInput, NotReady, Conflict, Network, Pending, Failed }` que mapee a exit codes. Tauri e IPC quedan como adaptadores finos.
+- **Estado:** las operaciones ya no dependen de Tauri (`Host` + `Shell`, `gui.rs`/`headless.rs`), pero siguen despachándose por strings.
+- **Propuesta:** `enum Operation` (serde) y `enum HostError { InvalidInput, NotReady, Conflict, Network, Pending, Failed }` que mapee a exit codes. Tauri e IPC quedan como adaptadores finos.
 - **Beneficio:** pruebas de operaciones sin ventana, menos errores al añadir comandos, mensajes coherentes GUI/CLI.
 
 ### P1 — Fábrica única de proveedores
@@ -18,14 +19,9 @@ Propuestas surgidas al revisar el código completo (2026-10-01). Ninguna está i
 - **Propuesta:** etapas `triage → retrieve → generate → cite → gate → deliver`, cada una con un resultado tipado; `enum JobStatus` y `enum Reason` serializados igual que hoy (compatibilidad de auditoría); enrutar por tipo de `ToolSpec`, no por ID.
 - **Beneficio:** cada etapa testeable por separado y motivos estables para la GUI.
 
-### P2 — CLI fuera del crate de Tauri
-- **Problema:** `pta` vive en el mismo crate que la GUI, así que compila y enlaza Tauri/WebView aunque solo hace HTTP loopback.
-- **Propuesta:** crate `pta-protocol` (Request/Reply/contrato) compartido; `pta` como crate propio sin Tauri. Mantener `cargo install personal-teams-desktop` instalando ambos (dependencia o workspace con dos paquetes publicados).
-- **Beneficio:** compilación mucho más rápida del CLI y posibilidad de CLI en Linux.
-
-### P2 — Host sin interfaz y soporte Linux
-- **Problema:** el host exige un proceso Tauri; Linux no tiene almacén de credenciales (`keyring` solo macOS/Windows en `Cargo.toml`).
-- **Propuesta:** modo `--host --headless` sin WebView y backend Secret Service en Linux. Permitiría un servicio `launchd`/systemd para mantener la recepción tras reiniciar sesión.
+### P3 — CLI en su propio crate
+- **Estado:** con `--no-default-features` el paquete ya compila `pta` y el host sin Tauri. Con la GUI activada, `pta` sigue enlazando Tauri.
+- **Propuesta:** crate `pta-protocol` (Request/Reply/contrato) y `pta` como crate propio, para que instalar o compilar solo el CLI sea rápido en cualquier variante.
 
 ### P2 — Esquema de configuración versionado
 - **Problema:** `jev.follow_up_threshold/routing_threshold/evidence_threshold` y `graph.channels` ya no se usan, pero deben persistir porque hosts antiguos que comparten el perfil los exigen (`deny_unknown_fields`).
@@ -78,7 +74,7 @@ Propuestas surgidas al revisar el código completo (2026-10-01). Ninguna está i
 - **P1 — Fuentes de cualquier tipo.** `renderResources()` en `ui/app.js` filtra `kind=file`: la Wiki y la actividad de Azure DevOps solo se administran por CLI. Añadir alta/edición de herramientas, editor de audiencias y conmutadores habilitar/procesamiento externo.
 - **P1 — Estado operativo real.** Panel con suscripciones activas y su caducidad, último mensaje recibido, últimos resultados de auditoría con motivo legible, salidas `uncertain` o pendientes de reconciliar y estado del túnel.
 - **P2 — Icono de bandeja con estado** (sin configurar / detenido / activo / requiere atención) y notificación del sistema ante `uncertain`, fallo de suscripción o login caducado.
-- **P2 — Inicio automático con la sesión** (opción desactivada por defecto; `tauri-plugin-autostart`): la recepción depende de que el host esté vivo.
+- **P2 — Inicio automático con la sesión** (opción desactivada por defecto; `tauri-plugin-autostart`): la recepción depende de que el host esté vivo. En Linux ya basta un servicio systemd de usuario con `--headless --start`.
 - **P2 — Chat de prueba más informativo:** permitir probar sin fuente seleccionada, mostrar referencias como enlaces, cobertura parcial y motivo humanizado.
 - **P3 — Visor de auditoría** con filtro por estado/motivo y contenido solo bajo petición explícita (como `pta audit show --content`).
 
@@ -95,9 +91,10 @@ Propuestas surgidas al revisar el código completo (2026-10-01). Ninguna está i
 - **P1 — Comprobar el JavaScript en CI** (`node --check desktop/src-tauri/ui/app.js` como mínimo).
 - **P2 — Pruebas del host sin Tauri** una vez extraídas las operaciones (arranque/parada, revisión, journal de ajustes, protección de identidad y clave).
 - **P2 — Pruebas de propiedades** (`proptest`) para `teams::canonical_resource`, `knowledge` (rutas) y `Redactor`.
-- **P3 — CLI en Linux en CI** cuando `pta` deje de depender de Tauri.
+- **P2 — Prueba de punta a punta en Linux real** del host sin interfaz con systemd, túnel y una pregunta nueva en Teams (CI solo compila y ejecuta pruebas unitarias en Ubuntu).
 
 ## 7. Distribución
 
 - **P1 — Publicar 0.3.0.** El repositorio está en 0.3.0 (Wiki, referencias verificadas) y la versión en crates.io es anterior. Orden: `personal-teams-assistant` y luego `personal-teams-desktop`; usar `scripts/export-public.py` si se publica desde un snapshot sin historial privado.
+- **P2 — Linux con Secret Service** opcional (cuando exista D-Bus) en lugar del almacén de archivos.
 - **P2 — Windows funcional:** probar bandeja, Credential Manager, ACL e inicio/parada antes de anunciarlo.

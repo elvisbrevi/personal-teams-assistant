@@ -14,6 +14,16 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --all-targets --locked -- -D warnings
       - run: cargo test --locked
+  headless-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install pinned Rust
+        run: rustup show
+      - name: Lint headless host and CLI (no Tauri/WebKit)
+        run: cargo clippy -p personal-teams-desktop --no-default-features --all-targets --locked -- -D warnings
+      - name: Test headless host and CLI
+        run: cargo test -p personal-teams-desktop --no-default-features --locked
   desktop:
     strategy:
       matrix:

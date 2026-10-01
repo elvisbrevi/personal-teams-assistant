@@ -19,6 +19,7 @@ Usage: pta [--json] [--non-interactive] COMMAND ...
   credentials list|set NAME|delete NAME
   auth microsoft|github status|login [CLIENT_ID]|finish|cancel|logout
     login: --no-browser; finish: --wait (maximum 600 seconds)
+    microsoft finish --redirect URL: final http://localhost URL from a browser on another machine
   github repos
   repos list|add ALIAS PATH|edit ALIAS PATH|remove ALIAS|clone OWNER/REPO ALIAS|sync ALIAS
   sources list|show ID|add|edit ID|remove ID|enable ID|disable ID
@@ -89,6 +90,11 @@ fn assign(value: &mut Value, key: &str, next: Value) -> Result<()> {
 }
 fn safe_status_stopped() -> Result<Reply> {
     let dir = control::profile_dir()?;
+    if !dir.join("config.toml").exists() {
+        return Ok(Reply::success(
+            json!({"host_running":false,"running":false,"configured":false,"profile":dir}),
+        ));
+    }
     let config: Config = toml::from_str(&std::fs::read_to_string(dir.join("config.toml"))?)?;
     Ok(Reply::success(
         json!({"host_running":false,"running":false,"persisted_dry_run":config.policy.dry_run,"loaded_config":null,"profile":dir,"config":config,"credential_metadata":"requires host"}),
@@ -107,6 +113,14 @@ fn validate_args(args: &[String]) -> Result<()> {
                 ensure!(
                     args.get(i).is_some_and(|v| v.parse::<usize>().is_ok()),
                     "invalid limit"
+                );
+            }
+            "--redirect" => {
+                i += 1;
+                ensure!(
+                    args.get(i)
+                        .is_some_and(|v| v.starts_with("http://localhost:")),
+                    "invalid redirect URL"
                 );
             }
             _ => {
@@ -165,6 +179,10 @@ fn validate_args(args: &[String]) -> Result<()> {
         ("--offline", p[0] == "doctor"),
         ("--no-browser", p[0] == "auth" && p.get(2) == Some(&"login")),
         ("--wait", p[0] == "auth" && p.get(2) == Some(&"finish")),
+        (
+            "--redirect",
+            p[0] == "auth" && p.get(1) == Some(&"microsoft") && p.get(2) == Some(&"finish"),
+        ),
         ("--content", p[0] == "audit"),
         ("--limit", ["audit", "logs"].contains(&p[0])),
     ] {
@@ -326,8 +344,15 @@ async fn execute(mut args: Vec<String>) -> Result<Reply> {
             ("microsoft", "logout") => "microsoft_logout",
             _ => anyhow::bail!("unknown auth action"),
         };
+        let redirect = args
+            .iter()
+            .position(|a| a == "--redirect")
+            .map(|i| positional(&args, i + 1))
+            .transpose()?;
         let value = if provider == "github" && action == "login" {
             json!({"client_id":positional(&args,3)?})
+        } else if let Some(url) = redirect {
+            json!({"redirect_url":url})
         } else {
             json!({"open":!non_interactive && !args.iter().any(|a|a=="--no-browser")})
         };
@@ -337,7 +362,8 @@ async fn execute(mut args: Vec<String>) -> Result<Reply> {
             reply.code = "authorization_pending".into();
             reply.exit_code = 4;
         }
-        if action == "finish" && args.iter().any(|a| a == "--wait") {
+        // A pasted redirect completes in the background; wait for its result.
+        if action == "finish" && (args.iter().any(|a| a == "--wait") || redirect.is_some()) {
             let deadline = tokio::time::Instant::now() + Duration::from_secs(600);
             while reply.code == "authorization_pending" && tokio::time::Instant::now() < deadline {
                 tokio::time::sleep(Duration::from_secs(2)).await;
@@ -640,5 +666,49 @@ mod wiki_tests {
             )
             .is_err()
         );
+    }
+    #[test]
+    fn microsoft_redirect_flag_is_scoped_to_microsoft_finish() {
+        let check =
+            |args: &[&str]| validate_args(&args.iter().map(|a| a.to_string()).collect::<Vec<_>>());
+        for args in [
+            &[
+                "auth",
+                "microsoft",
+                "finish",
+                "--redirect",
+                "http://localhost:1234/?code=c",
+            ][..],
+            &[
+                "auth",
+                "microsoft",
+                "finish",
+                "--wait",
+                "--redirect",
+                "http://localhost:1/?code=c",
+            ],
+        ] {
+            assert!(check(args).is_ok(), "{args:?}");
+        }
+        for args in [
+            &["auth", "microsoft", "finish", "--redirect"][..],
+            &[
+                "auth",
+                "microsoft",
+                "finish",
+                "--redirect",
+                "https://evil.example/?code=c",
+            ],
+            &[
+                "auth",
+                "github",
+                "finish",
+                "--redirect",
+                "http://localhost:1/?code=c",
+            ],
+            &["status", "--redirect", "http://localhost:1/?code=c"],
+        ] {
+            assert!(check(args).is_err(), "{args:?}");
+        }
     }
 }

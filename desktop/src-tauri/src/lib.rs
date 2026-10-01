@@ -22,18 +22,31 @@ use std::{
     path::{Path, PathBuf},
     sync::Arc,
 };
-use tauri::{
-    Manager, WindowEvent,
-    menu::{Menu, MenuItem},
-    tray::TrayIconBuilder,
-};
-use tauri_plugin_opener::OpenerExt;
 use tokio::sync::{Mutex, oneshot, watch};
 
 pub mod cli;
 pub mod control;
 mod github;
+#[cfg(feature = "gui")]
+mod gui;
+mod headless;
 mod skill;
+
+/// What the process owning the host can do beyond operations: a Tauri window, or nothing.
+pub(crate) trait Shell: Send + Sync {
+    fn headless(&self) -> bool;
+    fn show(&self) -> Result<()>;
+    fn hide(&self) -> Result<()>;
+    /// Open a URL in the user's browser. A headless host only returns the URL to the caller.
+    fn open_url(&self, url: &str) -> Result<()>;
+    fn exit(&self);
+}
+
+/// The single owner of a profile: settings, credentials, the service and its UI shell.
+pub(crate) struct Host {
+    pub(crate) state: DesktopState,
+    pub(crate) shell: Box<dyn Shell>,
+}
 
 struct Running {
     stop: watch::Sender<bool>,
@@ -50,6 +63,7 @@ struct DesktopState {
     github_login: Mutex<Option<github::Pending>>,
     github_finish: Mutex<Option<tokio::task::JoinHandle<std::result::Result<(), String>>>>,
     microsoft_login: Mutex<Option<tokio::task::JoinHandle<std::result::Result<(), String>>>>,
+    microsoft_redirect: Mutex<Option<String>>,
     github_api: Mutex<()>,
     tunnel_path: PathBuf,
 }
@@ -60,6 +74,7 @@ struct Snapshot {
     loaded_config: Option<Config>,
     host_version: String,
     host_running: bool,
+    headless: bool,
     profile: PathBuf,
     tunnel_running: bool,
     microsoft_connected: bool,
@@ -267,9 +282,16 @@ fn cloudflared_command(
     command
 }
 
-fn init_state(app: &tauri::App) -> Result<DesktopState> {
-    let config_dir = app.path().app_config_dir()?;
-    let data_dir = app.path().app_data_dir()?;
+/// Credentials resolve from `NAME_FILE`, `NAME`, then the OS keychain (macOS/Windows) or the
+/// private file store `<profile>/credentials/default/NAME` (Linux).
+pub(crate) fn configure_credentials(config_dir: &Path) -> Result<()> {
+    security::keyring_profile(Some("default"))?;
+    security::file_credential_store(Some(&config_dir.join("credentials")));
+    Ok(())
+}
+
+pub(crate) fn init_state(config_dir: &Path, data_dir: &Path) -> Result<DesktopState> {
+    let (config_dir, data_dir) = (config_dir.to_path_buf(), data_dir.to_path_buf());
     security::private_dir(&config_dir)?;
     security::private_dir(&data_dir)?;
     let config_path = config_dir.join("config.toml");
@@ -304,7 +326,6 @@ fn init_state(app: &tauri::App) -> Result<DesktopState> {
         }
         fs::remove_file(journal)?;
     }
-    security::keyring_profile(Some("default"))?;
     Ok(DesktopState {
         operations: Mutex::new(()),
         loaded_config: Mutex::new(None),
@@ -314,6 +335,7 @@ fn init_state(app: &tauri::App) -> Result<DesktopState> {
         github_login: Mutex::new(None),
         github_finish: Mutex::new(None),
         microsoft_login: Mutex::new(None),
+        microsoft_redirect: Mutex::new(None),
         github_api: Mutex::new(()),
         tunnel_path,
     })
@@ -335,7 +357,8 @@ fn credential_names(config: &Config) -> Vec<String> {
     names
 }
 
-async fn snapshot(state: tauri::State<'_, DesktopState>) -> std::result::Result<Snapshot, String> {
+async fn snapshot(host: &Host) -> std::result::Result<Snapshot, String> {
+    let state = &host.state;
     let config = read_config(&state.config_path).map_err(fail)?;
     let map = KnowledgeMap::load(&state.map_path).map_err(fail)?;
     let (active_subscriptions, subscription_issue) =
@@ -361,7 +384,7 @@ async fn snapshot(state: tauri::State<'_, DesktopState>) -> std::result::Result<
         let _ = finished.task.await;
     }
     Ok(Snapshot {
-        revision: control::revision(&state).map_err(fail)?,
+        revision: control::revision(state).map_err(fail)?,
         loaded_config: state
             .loaded_config
             .lock()
@@ -370,6 +393,7 @@ async fn snapshot(state: tauri::State<'_, DesktopState>) -> std::result::Result<
             .filter(|_| running.is_some()),
         host_version: env!("CARGO_PKG_VERSION").into(),
         host_running: true,
+        headless: host.shell.headless(),
         profile: state.config_path.parent().unwrap().to_path_buf(),
         tunnel_running: running.as_ref().is_some_and(|r| r.tunnel.is_some()),
         microsoft_connected: Store::has_token(&config.server.data_dir.join("assistant.db"))
@@ -403,10 +427,6 @@ async fn stop(state: &DesktopState) -> Result<()> {
     }
     *state.loaded_config.lock().await = None;
     Ok(())
-}
-
-async fn stop_assistant(state: tauri::State<'_, DesktopState>) -> std::result::Result<(), String> {
-    stop(&state).await.map_err(fail)
 }
 
 async fn start(state: &DesktopState) -> Result<()> {
@@ -512,12 +532,8 @@ async fn start(state: &DesktopState) -> Result<()> {
     Ok(())
 }
 
-async fn start_assistant(state: tauri::State<'_, DesktopState>) -> std::result::Result<(), String> {
-    start(&state).await.map_err(fail)
-}
-
 async fn save_settings(
-    state: tauri::State<'_, DesktopState>,
+    state: &DesktopState,
     mut config: Config,
     map: KnowledgeMap,
     tunnel_config: String,
@@ -537,19 +553,16 @@ async fn save_settings(
     }
     let was_running = state.running.lock().await.is_some();
     if was_running {
-        stop(&state).await.map_err(fail)?;
+        stop(state).await.map_err(fail)?;
     }
-    commit_settings(&state, &config, &map, tunnel_config.trim()).map_err(fail)?;
+    commit_settings(state, &config, &map, tunnel_config.trim()).map_err(fail)?;
     if was_running {
-        start(&state).await.map_err(fail)?;
+        start(state).await.map_err(fail)?;
     }
     Ok(())
 }
 
-async fn import_existing(
-    state: tauri::State<'_, DesktopState>,
-    path: String,
-) -> std::result::Result<(), String> {
+async fn import_existing(state: &DesktopState, path: String) -> std::result::Result<(), String> {
     let source = PathBuf::from(path);
     let source_dir = source.parent().ok_or_else(|| "Ruta inválida".to_string())?;
     let mut config: Config =
@@ -580,12 +593,12 @@ async fn import_existing(
             "[conflict] The existing database belongs to another identity.".to_string()
         })?;
     }
-    ensure_stopped(&state)
+    ensure_stopped(state)
         .await
         .map_err(|_| "[conflict] Stop the service before this operation.".to_string())?;
     let tunnel = fs::read_to_string(&state.tunnel_path).unwrap_or_default();
     validate_tunnel_mode(&config, &tunnel).map_err(fail)?;
-    commit_settings(&state, &config, &map, &tunnel).map_err(fail)?;
+    commit_settings(state, &config, &map, &tunnel).map_err(fail)?;
     Ok(())
 }
 
@@ -598,7 +611,7 @@ async fn ensure_stopped(state: &DesktopState) -> Result<()> {
 }
 
 async fn set_credential(
-    state: tauri::State<'_, DesktopState>,
+    state: &DesktopState,
     name: String,
     value: String,
 ) -> std::result::Result<(), String> {
@@ -611,16 +624,13 @@ async fn set_credential(
             "[conflict] The existing database requires its original encryption key.".to_string()
         })?;
     }
-    ensure_stopped(&state)
+    ensure_stopped(state)
         .await
         .map_err(|_| "[conflict] Stop the service before this operation.".to_string())?;
     security::put_desktop_secret("default", &name, &value).map_err(fail)
 }
 
-async fn delete_credential(
-    state: tauri::State<'_, DesktopState>,
-    name: String,
-) -> std::result::Result<(), String> {
+async fn delete_credential(state: &DesktopState, name: String) -> std::result::Result<(), String> {
     let config = read_config(&state.config_path).map_err(fail)?;
     if !credential_names(&config).contains(&name) {
         return Err("[invalid_input] Nombre de credencial no permitido".into());
@@ -628,14 +638,14 @@ async fn delete_credential(
     if name == "STATE_ENCRYPTION_KEY" && config.server.data_dir.join("assistant.db").exists() {
         return Err("La clave protege una base existente y no puede eliminarse.".into());
     }
-    ensure_stopped(&state)
+    ensure_stopped(state)
         .await
         .map_err(|_| "[conflict] Stop the service before this operation.".to_string())?;
     security::delete_desktop_secret("default", &name).map_err(fail)
 }
 
 async fn chat(
-    state: tauri::State<'_, DesktopState>,
+    state: &DesktopState,
     input: SimulationRequest,
 ) -> std::result::Result<SimulationResult, String> {
     tokio::time::timeout(
@@ -650,7 +660,7 @@ async fn chat(
 }
 
 async fn begin_github_login(
-    state: tauri::State<'_, DesktopState>,
+    state: &DesktopState,
     client_id: String,
 ) -> std::result::Result<github::DevicePrompt, String> {
     let (pending, prompt) = github::begin(client_id).await.map_err(fail)?;
@@ -658,14 +668,8 @@ async fn begin_github_login(
     Ok(prompt)
 }
 
-async fn open_github_login(app: tauri::AppHandle) -> std::result::Result<(), String> {
-    app.opener()
-        .open_url("https://github.com/login/device", None::<&str>)
-        .map_err(fail)
-}
-
 async fn github_repositories(
-    state: tauri::State<'_, DesktopState>,
+    state: &DesktopState,
 ) -> std::result::Result<Vec<github::Repository>, String> {
     let _guard = state.github_api.lock().await;
     github::repositories().await.map_err(fail)
@@ -676,7 +680,7 @@ async fn disconnect_github() -> std::result::Result<(), String> {
 }
 
 async fn clone_github_repository(
-    state: tauri::State<'_, DesktopState>,
+    state: &DesktopState,
     full_name: String,
     alias: String,
 ) -> std::result::Result<(), String> {
@@ -698,14 +702,14 @@ async fn clone_github_repository(
     )
     .map_err(fail)?;
     if state.running.lock().await.is_some() {
-        stop(&state).await.map_err(fail)?;
-        start(&state).await.map_err(fail)?;
+        stop(state).await.map_err(fail)?;
+        start(state).await.map_err(fail)?;
     }
     Ok(())
 }
 
 async fn update_github_repository(
-    state: tauri::State<'_, DesktopState>,
+    state: &DesktopState,
     alias: String,
 ) -> std::result::Result<(), String> {
     let _guard = state.github_api.lock().await;
@@ -719,8 +723,8 @@ async fn update_github_repository(
         .await
         .map_err(fail)?;
     if state.running.lock().await.is_some() {
-        stop(&state).await.map_err(fail)?;
-        start(&state).await.map_err(fail)?;
+        stop(state).await.map_err(fail)?;
+        start(state).await.map_err(fail)?;
     }
     Ok(())
 }
@@ -763,11 +767,8 @@ async fn desktop_callback(
     }
 }
 
-async fn begin_microsoft(
-    app: &tauri::AppHandle,
-    open: bool,
-) -> std::result::Result<String, String> {
-    let state = app.state::<DesktopState>();
+async fn begin_microsoft(host: &Arc<Host>, open: bool) -> std::result::Result<String, String> {
+    let state = &host.state;
     if state
         .microsoft_login
         .lock()
@@ -794,7 +795,7 @@ async fn begin_microsoft(
         )
         .map_err(fail)?;
     }
-    stop(&state).await.map_err(fail)?;
+    stop(state).await.map_err(fail)?;
     security::private_dir(&config.server.data_dir).map_err(fail)?;
     let dataset_lock = claim_dataset(&config.server.data_dir).map_err(fail)?;
     let store = Arc::new(Store::open(&config.server.data_dir.join("assistant.db")).map_err(fail)?);
@@ -828,10 +829,11 @@ async fn begin_microsoft(
             csrf,
             result: Mutex::new(Some(sender)),
         }));
-    let app = app.clone();
     if open {
-        app.opener().open_url(&url, None::<&str>).map_err(fail)?;
+        host.shell.open_url(&url).map_err(fail)?;
     }
+    *state.microsoft_redirect.lock().await = Some(redirect);
+    let host = host.clone();
     *state.microsoft_login.lock().await = Some(tokio::spawn(async move {
         let server = tokio::spawn(async move {
             let _ = axum::serve(listener, router).await;
@@ -844,7 +846,8 @@ async fn begin_microsoft(
         }
         let _server = Abort(server);
         let result = tokio::time::timeout(std::time::Duration::from_secs(600), receiver).await;
-        let state = app.state::<DesktopState>();
+        let state = &host.state;
+        *state.microsoft_redirect.lock().await = None;
         let _guard = state.operations.lock().await;
         let user = result
             .map_err(|_| "Microsoft authorization timed out.".to_string())?
@@ -859,11 +862,57 @@ async fn begin_microsoft(
         .map_err(fail)?;
         drop(dataset_lock);
         if was_running {
-            start(&state).await.map_err(fail)?;
+            start(state).await.map_err(fail)?;
         }
         Ok(())
     }));
     Ok(url)
+}
+
+/// Complete a login whose browser ran on another machine: the user pastes the final
+/// `http://localhost:PORT/?code=…&state=…` URL and the host replays it to its own listener.
+async fn forward_microsoft_redirect(
+    state: &DesktopState,
+    pasted: &str,
+) -> std::result::Result<(), String> {
+    let invalid = || "[invalid_input] Paste the complete http://localhost redirect URL.".to_owned();
+    let expected = state
+        .microsoft_redirect
+        .lock()
+        .await
+        .clone()
+        .ok_or_else(|| "[not_ready] No Microsoft authorization pending.".to_owned())?;
+    let expected = url::Url::parse(&expected).map_err(|_| invalid())?;
+    let pasted = url::Url::parse(pasted).map_err(|_| invalid())?;
+    if pasted.scheme() != "http"
+        || pasted.host_str() != Some("localhost")
+        || pasted.port() != expected.port()
+        || pasted.path() != "/"
+        || pasted.query().is_none()
+    {
+        return Err(invalid());
+    }
+    let mut target = expected;
+    target.set_host(Some("127.0.0.1")).map_err(|_| invalid())?;
+    target.set_query(pasted.query());
+    let response = reqwest::Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(std::time::Duration::from_secs(60))
+        .build()
+        .map_err(fail)?
+        .get(target)
+        .send()
+        .await
+        .map_err(fail)?;
+    // The loopback callback answers 200 only after storing the verified account's tokens.
+    if !response.status().is_success() {
+        return Err(
+            "[invalid_input] The pasted redirect was rejected or is stale; start login again."
+                .into(),
+        );
+    }
+    Ok(())
 }
 
 fn commit_settings(
@@ -1007,13 +1056,6 @@ async fn enable_self_chat(state: &DesktopState, id: Option<&str>) -> Result<serd
     self_chat_status(state).await
 }
 
-fn show_main(app: &tauri::AppHandle) {
-    if let Some(window) = app.get_webview_window("main") {
-        let _ = window.show();
-        let _ = window.set_focus();
-    }
-}
-
 fn validate_state_key(config: &Config, value: &str) -> Result<()> {
     let vault = Vault::new(value)?;
     let path = config.server.data_dir.join("assistant.db");
@@ -1046,6 +1088,8 @@ fn import_secret_from_stdin(name: &str) -> Result<()> {
     security::put_desktop_secret("default", name, value)
 }
 
+/// Entry point of `personal-teams-desktop`. Without the `gui` feature, or with `--headless`
+/// (or `PTA_HEADLESS=1`), the host runs without a window and is operated only through `pta`.
 pub fn run() {
     if std::env::var_os("PERSONAL_TEAMS_GIT_ASKPASS").is_some() {
         github::askpass();
@@ -1057,20 +1101,28 @@ pub fn run() {
             .get(1)
             .filter(|_| args.len() == 2)
             .context("missing credential name")
-            .and_then(|name| import_secret_from_stdin(name));
+            .and_then(|name| {
+                configure_credentials(&control::profile_dir()?)?;
+                import_secret_from_stdin(name)
+            });
         if result.is_err() {
             eprintln!("Could not import the credential.");
             std::process::exit(1);
         }
         return;
     }
+    let headless = !cfg!(feature = "gui")
+        || args.iter().any(|a| a == "--headless")
+        || std::env::var_os("PTA_HEADLESS").is_some_and(|v| !v.is_empty() && v != "0");
     if control::existing_host().is_ok() {
-        let hidden = args.iter().any(|a| a == "--host");
-        if !hidden {
-            let _ = tauri::async_runtime::block_on(control::client(
-                control::Request::new("app_open"),
-                false,
-            ));
+        if headless {
+            eprintln!("Another host already owns this profile.");
+            std::process::exit(1);
+        }
+        if !args.iter().any(|a| a == "--host")
+            && let Ok(runtime) = tokio::runtime::Runtime::new()
+        {
+            let _ = runtime.block_on(control::client(control::Request::new("app_open"), false));
         }
         return;
     }
@@ -1078,102 +1130,26 @@ pub fn run() {
         Ok(lock) => lock,
         Err(_) => {
             eprintln!("Another host owns this profile, or its private directory is unavailable.");
-            return;
+            std::process::exit(1);
         }
     };
     // Provider crates must never log prompts or content.
     tracing_subscriber::fmt()
         .with_env_filter("personal_teams_assistant=info,personal_teams_desktop=info")
+        .with_writer(std::io::stderr)
+        .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stderr()))
         .try_init()
         .ok();
-    tauri::Builder::default()
-        .plugin(tauri_plugin_opener::init())
-        .invoke_handler(tauri::generate_handler![control::command])
-        .setup(move |app| {
-            app.manage(init_state(app).map_err(Box::<dyn std::error::Error>::from)?);
-            control::launch(app.handle().clone(), host_lock)
-                .map_err(Box::<dyn std::error::Error>::from)?;
-            let open = MenuItem::with_id(
-                app,
-                "open",
-                "Abrir configuración y chat",
-                true,
-                None::<&str>,
-            )?;
-            let start_item =
-                MenuItem::with_id(app, "start", "Iniciar asistente", true, None::<&str>)?;
-            let stop_item =
-                MenuItem::with_id(app, "stop", "Detener asistente", true, None::<&str>)?;
-            let quit = MenuItem::with_id(app, "quit", "Salir", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&open, &start_item, &stop_item, &quit])?;
-            TrayIconBuilder::new()
-                .icon(
-                    app.default_window_icon()
-                        .context("missing app icon")?
-                        .clone(),
-                )
-                .menu(&menu)
-                .on_menu_event(|app, event| match event.id.as_ref() {
-                    "open" => show_main(app),
-                    "start" => {
-                        let app = app.clone();
-                        tauri::async_runtime::spawn(async move {
-                            let _ =
-                                control::dispatch(&app, control::Request::new("start_assistant"))
-                                    .await;
-                        });
-                    }
-                    "stop" => {
-                        let app = app.clone();
-                        tauri::async_runtime::spawn(async move {
-                            let _ =
-                                control::dispatch(&app, control::Request::new("stop_assistant"))
-                                    .await;
-                        });
-                    }
-                    "quit" => {
-                        let app = app.clone();
-                        tauri::async_runtime::spawn(async move {
-                            let _ =
-                                control::dispatch(&app, control::Request::new("app_quit")).await;
-                        });
-                    }
-                    _ => {}
-                })
-                .build(app)?;
-            if !std::env::args().any(|a| a == "--host") {
-                show_main(app.handle());
-            }
-            Ok(())
-        })
-        .on_window_event(|window, event| {
-            if let WindowEvent::CloseRequested { api, .. } = event {
-                api.prevent_close();
-                let _ = window.hide();
-            }
-        })
-        .build(tauri::generate_context!())
-        .expect("cannot build desktop application")
-        .run(|app, event| match event {
-            // Native macOS Quit/termination may bypass ExitRequested and deliver Exit directly.
-            // Await cleanup on the main event thread while Tokio keeps servicing background tasks.
-            tauri::RunEvent::Exit => {
-                let _ = tauri::async_runtime::block_on(stop(&app.state::<DesktopState>()));
-            }
-            tauri::RunEvent::ExitRequested {
-                code: None, api, ..
-            } => {
-                api.prevent_exit();
-                let app = app.clone();
-                tauri::async_runtime::spawn(async move {
-                    let _ = control::dispatch(&app, control::Request::new("stop_assistant")).await;
-                    app.exit(0);
-                });
-            }
-            #[cfg(target_os = "macos")]
-            tauri::RunEvent::Reopen { .. } => show_main(app),
-            _ => {}
-        });
+    #[cfg(feature = "gui")]
+    if !headless {
+        gui::run(host_lock);
+        return;
+    }
+    // Startup errors carry no credential values; show the chain to the operator.
+    if let Err(error) = headless::run(host_lock, args.iter().any(|a| a == "--start")) {
+        eprintln!("Headless host stopped: {error:#}");
+        std::process::exit(1);
+    }
 }
 
 /// Operator-local Wiki queries use no Graph client or model and grant no audience permissions.
