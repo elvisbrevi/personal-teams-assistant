@@ -66,6 +66,9 @@ struct DesktopState {
     microsoft_redirect: Mutex<Option<String>>,
     github_api: Mutex<()>,
     tunnel_path: PathBuf,
+    /// This host replaced an outdated one whose assistant was running: the window asks
+    /// whether to keep it running.
+    restart_offer: std::sync::atomic::AtomicBool,
 }
 
 #[derive(Serialize)]
@@ -86,6 +89,7 @@ struct Snapshot {
     subscription_issue: Option<String>,
     github_connected: bool,
     tunnel_config: String,
+    restart_offer: bool,
 }
 
 #[derive(Debug)]
@@ -338,6 +342,7 @@ pub(crate) fn init_state(config_dir: &Path, data_dir: &Path) -> Result<DesktopSt
         microsoft_redirect: Mutex::new(None),
         github_api: Mutex::new(()),
         tunnel_path,
+        restart_offer: std::sync::atomic::AtomicBool::new(false),
     })
 }
 
@@ -424,6 +429,9 @@ async fn snapshot(host: &Host) -> std::result::Result<Snapshot, String> {
             .map_err(fail)?
             .is_some(),
         tunnel_config: fs::read_to_string(&state.tunnel_path).unwrap_or_default(),
+        restart_offer: state
+            .restart_offer
+            .load(std::sync::atomic::Ordering::Relaxed),
     })
 }
 
@@ -1101,6 +1109,23 @@ fn import_secret_from_stdin(name: &str) -> Result<()> {
 
 /// Entry point of `personal-teams-desktop`. Without the `gui` feature, or with `--headless`
 /// (or `PTA_HEADLESS=1`), the host runs without a window and is operated only through `pta`.
+/// After an update stopped a running assistant, ask on the terminal whether to keep it
+/// running with the new build. Without a terminal (or when asked not to prompt) the previous
+/// state is kept.
+pub(crate) fn keep_running_after_update(interactive: bool) -> bool {
+    use std::io::{IsTerminal, Write};
+    if !interactive || !std::io::stdin().is_terminal() || !std::io::stderr().is_terminal() {
+        return true;
+    }
+    eprint!("El asistente estaba corriendo. ¿Dejarlo corriendo con la versión nueva? [S/n] ");
+    let _ = std::io::stderr().flush();
+    let mut answer = String::new();
+    if std::io::stdin().read_line(&mut answer).is_err() {
+        return true;
+    }
+    !matches!(answer.trim().to_lowercase().as_str(), "n" | "no")
+}
+
 pub fn run() {
     if std::env::var_os("PERSONAL_TEAMS_GIT_ASKPASS").is_some() {
         github::askpass();
@@ -1125,6 +1150,24 @@ pub fn run() {
     let headless = !cfg!(feature = "gui")
         || args.iter().any(|a| a == "--headless")
         || std::env::var_os("PTA_HEADLESS").is_some_and(|v| !v.is_empty() && v != "0");
+    // A new `cargo install` replaced this executable while the previous build keeps running:
+    // stop that host (assistant and tunnel first) and take its place.
+    let mut previous_running = false;
+    if control::existing_host().is_ok()
+        && std::env::current_exe().is_ok_and(|exe| control::outdated_host(&exe))
+    {
+        match tokio::runtime::Runtime::new()
+            .map(|runtime| runtime.block_on(control::retire_outdated_host()))
+        {
+            Ok(Ok(running)) => previous_running = running,
+            _ => {
+                eprintln!(
+                    "Could not stop the previous version of the host. Quit it from its menu and retry."
+                );
+                std::process::exit(1);
+            }
+        }
+    }
     if control::existing_host().is_ok() {
         if headless {
             eprintln!("Another host already owns this profile.");
@@ -1153,11 +1196,13 @@ pub fn run() {
         .ok();
     #[cfg(feature = "gui")]
     if !headless {
-        gui::run(host_lock);
+        gui::run(host_lock, previous_running);
         return;
     }
+    let start = args.iter().any(|a| a == "--start")
+        || (previous_running && keep_running_after_update(true));
     // Startup errors carry no credential values; show the chain to the operator.
-    if let Err(error) = headless::run(host_lock, args.iter().any(|a| a == "--start")) {
+    if let Err(error) = headless::run(host_lock, start) {
         eprintln!("Headless host stopped: {error:#}");
         std::process::exit(1);
     }

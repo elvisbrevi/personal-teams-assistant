@@ -1,6 +1,6 @@
 [package]
 name = "personal-teams-desktop"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2024"
 rust-version = "1.95"
 build = "build.rs"
@@ -8,7 +8,7 @@ default-run = "personal-teams-desktop"
 description = "Desktop tray app, headless host and CLI for a personal Microsoft Teams knowledge assistant"
 license = "MIT"
 readme = "README.md"
-include = ["Cargo.toml", "LICENSE", "README.md", "build.rs", "Info.plist", "tauri.conf.json", "capabilities/**", "icons/*.png", "icons/*.ico", "src/**", "ui/**", "skills/**"]
+include = ["/Cargo.toml", "/LICENSE", "/README.md", "/build.rs", "/Info.plist", "/tauri.conf.json", "/capabilities/**", "/icons/*.png", "/icons/*.ico", "/src/**", "/ui/**", "/skills/**"]
 
 [[bin]]
 name = "pta"
@@ -26,7 +26,7 @@ sha2 = "0.10"
 anyhow = "1"
 axum = "0.8"
 chrono = "0.4"
-personal-teams-assistant = { version = "0.3.0", path = "../.." }
+personal-teams-assistant = { version = "0.4.0", path = "../.." }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

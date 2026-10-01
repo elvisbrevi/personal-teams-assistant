@@ -71,12 +71,16 @@ fn start_host(app: &tauri::App, host_lock: fs::File) -> Result<Arc<Host>> {
     Ok(host)
 }
 
-pub(crate) fn run(host_lock: fs::File) {
+pub(crate) fn run(host_lock: fs::File, restart_offer: bool) {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![command])
         .setup(move |app| {
             let host = start_host(app, host_lock).map_err(Box::<dyn std::error::Error>::from)?;
+            // Replaced an outdated host whose assistant was running: the window asks.
+            host.state
+                .restart_offer
+                .store(restart_offer, std::sync::atomic::Ordering::Relaxed);
             app.manage(host);
             let open = MenuItem::with_id(
                 app,

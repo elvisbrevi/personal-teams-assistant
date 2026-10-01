@@ -68,6 +68,10 @@ struct Endpoint {
     contract: u32,
     port: u16,
     token: String,
+    /// Fingerprint of the host executable when it started. Hosts older than this field have
+    /// none, which also marks them as outdated once a new build is installed.
+    #[serde(default)]
+    binary: Option<String>,
 }
 
 const IDENTIFIER: &str = "dev.personalteams.assistant";
@@ -115,6 +119,55 @@ fn existing_host_at(dir: &Path) -> Result<()> {
     }
     let _: Endpoint = serde_json::from_slice(&fs::read(dir.join("control.json"))?)?;
     Ok(())
+}
+/// Size and modification time of an executable: they change when `cargo install` replaces it.
+fn fingerprint(path: &Path) -> Option<String> {
+    let metadata = fs::metadata(path).ok()?;
+    let modified = metadata
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_nanos();
+    Some(format!("{}-{modified}", metadata.len()))
+}
+/// A running host started from `installed` before that file was replaced (a new install).
+/// A host started from another path (e.g. a development build) is never considered outdated.
+fn outdated_at(dir: &Path, installed: &Path) -> Result<bool> {
+    existing_host_at(dir)?;
+    let endpoint: Endpoint = serde_json::from_slice(&fs::read(dir.join("control.json"))?)?;
+    let running = PathBuf::from(fs::read_to_string(dir.join("host-path.txt"))?.trim());
+    if fs::canonicalize(&running)? != fs::canonicalize(installed)? {
+        return Ok(false);
+    }
+    Ok(endpoint.binary != fingerprint(installed))
+}
+/// Whether the running host is an older build of the installed `installed` executable.
+pub fn outdated_host(installed: &Path) -> bool {
+    profile_dir()
+        .and_then(|dir| outdated_at(&dir, installed))
+        .unwrap_or(false)
+}
+/// Stop an outdated host (assistant and tunnel first) and wait until it releases the profile.
+/// Returns whether its assistant was running, so the caller can offer to keep it running.
+pub async fn retire_outdated_host() -> Result<bool> {
+    let was_running = client(Request::new("snapshot"), false)
+        .await
+        .map(|reply| reply.data["running"].as_bool() == Some(true))
+        .unwrap_or(false);
+    // The host exits right after replying; a lost reply is fine, the lock tells the outcome.
+    let _ = client(Request::new("app_quit"), false).await;
+    for _ in 0..600 {
+        if existing_host().is_err() {
+            return Ok(was_running);
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    anyhow::bail!("previous host did not stop; quit it from its menu and retry")
+}
+/// The installed host executable used by this CLI.
+pub fn installed_host() -> Result<PathBuf> {
+    host_executable()
 }
 /// `cargo install` places `pta` beside `personal-teams-desktop`; the host also registers its path.
 fn host_executable() -> Result<PathBuf> {
@@ -252,6 +305,7 @@ pub(crate) fn launch(
             contract: CONTRACT,
             port: listener.local_addr()?.port(),
             token: token.clone(),
+            binary: fingerprint(&std::env::current_exe()?),
         })?,
     )?;
     let router = Router::new()
@@ -430,14 +484,26 @@ async fn operate(
     let value = match method {
         "snapshot" => serde_json::to_value(snapshot(host).await?).map_err(fail)?,
         "start_assistant" => {
+            state
+                .restart_offer
+                .store(false, std::sync::atomic::Ordering::Relaxed);
             start(state).await.map_err(fail)?;
             json!({"running":true})
+        }
+        "dismiss_restart_offer" => {
+            state
+                .restart_offer
+                .store(false, std::sync::atomic::Ordering::Relaxed);
+            json!({"restart_offer":false})
         }
         "stop_assistant" => {
             stop(state).await.map_err(fail)?;
             json!({"running":false})
         }
         "restart" => {
+            state
+                .restart_offer
+                .store(false, std::sync::atomic::Ordering::Relaxed);
             stop(state).await.map_err(fail)?;
             start(state).await.map_err(fail)?;
             json!({"running":true})
@@ -739,6 +805,7 @@ mod tests {
                 contract: CONTRACT,
                 port: 1,
                 token: "stale-token".into(),
+                binary: None,
             })
             .unwrap(),
         )
@@ -753,6 +820,7 @@ mod tests {
                 contract: CONTRACT,
                 port: 2,
                 token: "new-instance".into(),
+                binary: None,
             })
             .unwrap(),
         )
@@ -760,6 +828,44 @@ mod tests {
         assert!(existing_host_at(dir.path()).is_ok());
         drop(lease);
         assert!(existing_host_at(dir.path()).is_err());
+    }
+    #[test]
+    fn only_a_replaced_installed_executable_marks_the_running_host_outdated() {
+        let dir = tempfile::tempdir().unwrap();
+        let installed = dir.path().join("personal-teams-desktop");
+        let other = dir.path().join("development-build");
+        fs::write(&installed, b"old build").unwrap();
+        fs::write(&other, b"dev build").unwrap();
+        let publish = |binary: Option<String>, path: &Path| {
+            write_private(
+                &dir.path().join("control.json"),
+                &serde_json::to_string(&Endpoint {
+                    wiki_support: true,
+                    contract: CONTRACT,
+                    port: 1,
+                    token: "instance".into(),
+                    binary,
+                })
+                .unwrap(),
+            )
+            .unwrap();
+            write_private(&dir.path().join("host-path.txt"), &path.to_string_lossy()).unwrap();
+        };
+        // No host running: nothing to retire.
+        assert!(outdated_at(dir.path(), &installed).is_err());
+        let _lease = claim_at(dir.path()).unwrap();
+        publish(fingerprint(&installed), &installed);
+        assert!(!outdated_at(dir.path(), &installed).unwrap());
+        // `cargo install` replaced the file the host was started from.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        fs::write(&installed, b"new build, different size").unwrap();
+        assert!(outdated_at(dir.path(), &installed).unwrap());
+        // A host from before this field existed is outdated too.
+        publish(None, &installed);
+        assert!(outdated_at(dir.path(), &installed).unwrap());
+        // A host started from another path is never retired by this install.
+        publish(None, &other);
+        assert!(!outdated_at(dir.path(), &installed).unwrap());
     }
     #[test]
     fn local_control_requires_instance_auth_and_rejects_browser_origins() {

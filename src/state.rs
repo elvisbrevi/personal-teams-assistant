@@ -43,6 +43,45 @@ pub struct Audit {
     pub teams_messages: Vec<crate::evidence::TeamsMessage>,
     /// Holding notice for a slow answer: `sending`, `sent` or `uncertain`. Never sent twice.
     pub holding_reply: Option<String>,
+    /// Redacted text of an eligible incoming message; never stored for ineligible ones.
+    pub question: Option<String>,
+    /// The request interpreted with the conversation context, and the topic searched.
+    pub resolved_question: Option<String>,
+    pub topic: Option<String>,
+    /// `direct`, `group` or `self`.
+    pub conversation_kind: Option<String>,
+    /// When the incoming message was written (Unix milliseconds).
+    pub received_at: Option<i64>,
+    /// Earlier messages of the conversation given to the model as context.
+    pub history_messages: usize,
+    /// Providers that failed before the one in `provider` answered, as `label: failure`.
+    pub provider_fallbacks: Vec<String>,
+    /// How cited sources were chosen: `jev`, `code` (Jev unavailable) or `none`.
+    pub reference_selection: Option<String>,
+    /// Jev's final review, informative only: `allow 0.91`, `revise 0.40` or `unavailable`.
+    pub final_check: Option<String>,
+    /// Notice sent to the personal chat when an answer was withheld: `sending`, `sent` or
+    /// `uncertain`. Never sent twice.
+    pub withheld_notice: Option<String>,
+    /// Processing steps in order. Details name decisions and counts, never message content.
+    pub trace: Vec<TraceStep>,
+}
+#[derive(Clone, Default, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TraceStep {
+    /// Unix milliseconds.
+    pub at: i64,
+    pub step: String,
+    pub detail: String,
+}
+impl Audit {
+    pub fn step(&mut self, step: &str, detail: impl Into<String>) {
+        self.trace.push(TraceStep {
+            at: chrono::Utc::now().timestamp_millis(),
+            step: step.into(),
+            detail: detail.into(),
+        });
+    }
 }
 impl Store {
     /// Attach to an existing database without recovering jobs. Used by account probes.
@@ -150,23 +189,25 @@ impl Store {
                 db.prepare("SELECT time,kind,detail FROM events ORDER BY id DESC LIMIT ?1")?;
             for row in stmt.query_map([limit.min(1000)], |r| Ok(serde_json::json!({"time":r.get::<_,i64>(0)?,"kind":r.get::<_,String>(1)?,"detail":r.get::<_,String>(2)?})))? { out.push(row?); }
         } else {
-            let mut stmt = db.prepare("SELECT resource,status,audit FROM jobs WHERE (?1 IS NULL OR resource=?1) ORDER BY created_at DESC LIMIT ?2")?;
+            let mut stmt = db.prepare("SELECT resource,status,audit,created_at FROM jobs WHERE (?1 IS NULL OR resource=?1) ORDER BY created_at DESC LIMIT ?2")?;
             for row in stmt.query_map(params![resource, limit.min(1000)], |r| {
                 Ok((
                     r.get::<_, String>(0)?,
                     r.get::<_, String>(1)?,
                     r.get::<_, Option<String>>(2)?,
+                    r.get::<_, i64>(3)?,
                 ))
             })? {
-                let (resource, status, text) = row?;
+                let (resource, status, text, created_at) = row?;
                 let mut audit: serde_json::Value = text
                     .as_deref()
                     .map(serde_json::from_str)
                     .transpose()?
                     .unwrap_or_default();
                 if !content && let Some(obj) = audit.as_object_mut() {
-                    obj.remove("proposed");
-                    obj.remove("sent");
+                    for field in ["proposed", "sent", "question", "resolved_question", "topic"] {
+                        obj.remove(field);
+                    }
                     if let Some(messages) = obj
                         .get_mut("teams_messages")
                         .and_then(serde_json::Value::as_array_mut)
@@ -178,7 +219,7 @@ impl Store {
                         }
                     }
                 }
-                out.push(serde_json::json!({"resource":resource,"status":status,"audit":audit}));
+                out.push(serde_json::json!({"resource":resource,"status":status,"created_at":created_at,"audit":audit}));
             }
         }
         Ok(out)

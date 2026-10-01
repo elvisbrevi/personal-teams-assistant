@@ -49,3 +49,23 @@ code { background: #eef2ee; padding: .1rem .3rem; border-radius: 4px; }
 .order { display: flex; gap: .3rem; }
 .order button { padding: .4rem .6rem; }
 @media (max-width: 760px) { .chain-row { grid-template-columns: 1fr 1fr; } .chain-row .rank { grid-column: 1 / -1; justify-self: start; } }
+.message { border: 1px solid #dce4de; border-radius: 10px; margin-top: .6rem; background: white; }
+.message summary { display: grid; grid-template-columns: auto auto auto 1fr; gap: .6rem; align-items: center; padding: .65rem .8rem; cursor: pointer; }
+.message summary .excerpt { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.message summary time, .message .kind { color: #586b60; font-size: .9rem; white-space: nowrap; }
+.badge { font-size: .8rem; font-weight: 700; border-radius: 100px; padding: .2rem .55rem; white-space: nowrap; }
+.badge.ok { background: #dceee2; color: #1f5a3a; } .badge.warn { background: #fff0cc; color: #7a5300; }
+.badge.error { background: #fde2e1; color: #8a1f1b; } .badge.active { background: #e3edfb; color: #1d4f91; }
+.badge.info { background: #ece8fb; color: #4b3a8f; } .badge.muted { background: #eef1ee; color: #5c6b62; }
+.message-body { border-top: 1px solid #e4eae5; padding: .4rem .9rem .9rem; display: grid; gap: .5rem; }
+.field-block strong { display: block; font-size: .9rem; margin-top: .4rem; }
+.field-block p, .field-block pre { margin: .2rem 0 0; white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; }
+.field-block pre { background: #f5f7f4; border-radius: 8px; padding: .6rem; }
+.trace { margin: .3rem 0 0; padding-left: 1.3rem; display: grid; gap: .2rem; }
+.trace time { color: #586b60; font-variant-numeric: tabular-nums; margin-right: .5rem; }
+.resource-id { color: #7a8a80; overflow-wrap: anywhere; }
+.hint { color: #586b60; }
+.actions select { width: auto; margin: 0; }
+@media (max-width: 760px) { .message summary { grid-template-columns: auto 1fr; } .message summary .excerpt { grid-column: 1 / -1; } }
+.offer { border-color: #e6c46a; background: #fffaf0; }
+#restart-offer[hidden] { display: none; }

@@ -205,8 +205,43 @@ impl Reference {
         }
     }
 }
-/// Runs before privacy and Jev's final gate, against the complete rendered answer.
-pub fn complete_answer(body: &str, used: &[String], evidence: &Evidence) -> Result<String> {
+/// Non-Wiki references the code sees named in the answer (aliases or `#id`). Added to Jev's
+/// selection, and the whole selection when Jev is unavailable, so a named work item, pipeline
+/// or stage always gets its verified link.
+pub fn named_references(body: &str, evidence: &Evidence) -> Vec<String> {
+    let lower = body.to_lowercase();
+    let ids: Vec<String> = regex::Regex::new(r"#(\d+)\b")
+        .map(|re| {
+            re.captures_iter(body)
+                .map(|c| format!("#{}", &c[1]))
+                .collect()
+        })
+        .unwrap_or_default();
+    evidence
+        .references
+        .iter()
+        .filter(|r| r.kind != "wiki")
+        .filter(|r| {
+            r.aliases
+                .iter()
+                .any(|a| !a.is_empty() && lower.contains(&a.to_lowercase()))
+                || ids.iter().any(|id| {
+                    regex::Regex::new(&format!(r"{id}\b")).is_ok_and(|re| re.is_match(&r.label))
+                })
+        })
+        .map(|r| r.id.clone())
+        .collect()
+}
+/// Runs before the privacy checks, against the complete rendered answer. Wiki pages selected
+/// as used are listed under **Fuentes**; when none is, every consulted page is listed under
+/// **Páginas consultadas**, so a Wiki-based answer always links its pages. URLs in the body
+/// must be verified references or appear literally in `evidence_text`.
+pub fn complete_answer(
+    body: &str,
+    used: &[String],
+    evidence: &Evidence,
+    evidence_text: &str,
+) -> Result<String> {
     let selected: BTreeSet<_> = used.iter().collect();
     ensure!(selected.len() == used.len(), "duplicate used source");
     for id in &selected {
@@ -215,15 +250,11 @@ pub fn complete_answer(body: &str, used: &[String], evidence: &Evidence) -> Resu
             "invented used source"
         );
     }
-    if evidence.references.iter().any(|r| r.kind == "wiki") {
-        ensure!(
-            evidence
-                .references
-                .iter()
-                .any(|r| r.kind == "wiki" && selected.contains(&r.id)),
-            "wiki answer missing used sources"
-        );
-    }
+    let consulted_only = evidence.references.iter().any(|r| r.kind == "wiki")
+        && !evidence
+            .references
+            .iter()
+            .any(|r| r.kind == "wiki" && selected.contains(&r.id));
     let lower = body.to_lowercase();
     for r in &evidence.references {
         if r.kind != "wiki"
@@ -273,14 +304,17 @@ pub fn complete_answer(body: &str, used: &[String], evidence: &Evidence) -> Resu
             "concrete entity without verified reference"
         );
     }
-    // Model-supplied URLs must match verified references. Do not let prose override the registry.
+    // Model-supplied URLs must be verified references or be copied from the evidence (a
+    // documented endpoint). Prose cannot introduce a new destination.
     let urls = regex::Regex::new(r"https?://[^\s<>)\]]+")?;
     for hit in urls.find_iter(body) {
+        let url = hit
+            .as_str()
+            .trim_end_matches(['`', '.', ',', ';', ':', '"', '\'', '*']);
         ensure!(
-            evidence
-                .references
-                .iter()
-                .any(|r| r.url == hit.as_str() && selected.contains(&r.id)),
+            evidence.references.iter().any(|r| r.url == url
+                && (selected.contains(&r.id) || (consulted_only && r.kind == "wiki")))
+                || evidence_text.contains(url),
             "unverified answer URL"
         );
     }
@@ -292,6 +326,18 @@ pub fn complete_answer(body: &str, used: &[String], evidence: &Evidence) -> Resu
             if linked.insert((r.url.clone(), r.label.clone())) {
                 if linked.len() == 1 {
                     answer.push_str("\n\n**Fuentes**");
+                }
+                answer.push_str(&format!("\n{}", r.citation()));
+            }
+        }
+    }
+    if consulted_only {
+        let mut consulted = BTreeSet::new();
+        for r in evidence.references.iter().filter(|r| r.kind == "wiki") {
+            r.validate()?;
+            if consulted.insert((r.url.clone(), r.label.clone())) {
+                if consulted.len() == 1 {
+                    answer.push_str("\n\n**Páginas consultadas**");
                 }
                 answer.push_str(&format!("\n{}", r.citation()));
             }
@@ -344,6 +390,7 @@ mod tests {
                 "El procedimiento documentado exige revisar.",
                 &["p".into()],
                 &e,
+                "",
             )
             .unwrap();
             assert!(a.contains("pagePath=%2FProcedure"));
@@ -365,35 +412,61 @@ mod tests {
             references: vec![reference("p", "wiki"), reference("w", "work_item")],
             ..Default::default()
         };
-        assert!(complete_answer("Procedimiento", &[], &e).is_err());
-        assert!(complete_answer("Procedimiento", &["invented".into()], &e).is_err());
-        assert!(complete_answer("Según #42", &["p".into()], &e).is_err());
-        assert!(complete_answer("Según #99", &["p".into()], &e).is_err());
+        // No page selected as used: the consulted pages are listed instead of withholding.
+        let a = complete_answer("No está documentado.", &[], &e, "").unwrap();
+        assert!(a.contains("**Páginas consultadas**\n- [Procedure]("));
+        assert!(!a.contains("**Fuentes**"));
+        assert!(complete_answer("Procedimiento", &["invented".into()], &e, "").is_err());
+        assert!(complete_answer("Según #42", &["p".into()], &e, "").is_err());
+        assert!(complete_answer("Según #99", &["p".into()], &e, "").is_err());
+        assert_eq!(named_references("Según #42", &e), vec!["w".to_string()]);
+        assert!(named_references("Según #99", &e).is_empty());
         assert!(
             complete_answer(
                 "https://dev.azure.com/other/Project/_workitems/edit/42",
                 &["p".into()],
-                &e
+                &e,
+                ""
             )
             .is_err()
         );
-        let a = complete_answer("Revisar #42", &["p".into(), "w".into()], &e).unwrap();
+        // A documented endpoint copied from the evidence is allowed; an invented one is not.
+        let evidence_text = "Ambiente test: https://api-test.example.cl/api/v1/solicitudes/crear";
+        let a = complete_answer(
+            "En test: `https://api-test.example.cl/api/v1/solicitudes/crear`.",
+            &["p".into()],
+            &e,
+            evidence_text,
+        )
+        .unwrap();
+        assert!(a.contains("api-test.example.cl"));
+        assert!(
+            complete_answer(
+                "En test: https://api-prod.example.cl/api/v1/solicitudes/crear",
+                &["p".into()],
+                &e,
+                evidence_text,
+            )
+            .is_err()
+        );
+        let a = complete_answer("Revisar #42", &["p".into(), "w".into()], &e, "").unwrap();
         assert!(a.contains("_workitems/edit/42"));
         assert!(a.contains("pagePath"));
-        assert!(complete_answer("Concreta el tema", &[], &Evidence::default()).is_ok());
+        assert!(complete_answer("Concreta el tema", &[], &Evidence::default(), "").is_ok());
         let mut bad = e.clone();
         bad.references[0].url =
             "https://dev.azure.com/other/Project/_wiki/wikis/wiki?pagePath=%2FProcedure".into();
-        assert!(complete_answer("Procedimiento", &["p".into()], &bad).is_err());
+        assert!(complete_answer("Procedimiento", &["p".into()], &bad, "").is_err());
+        assert!(complete_answer("Procedimiento", &[], &bad, "").is_err());
         bad.references[0] = reference("p", "wiki");
         bad.references[0].organization = "mailto:invalid".into();
-        assert!(complete_answer("Procedimiento", &["p".into()], &bad).is_err());
+        assert!(complete_answer("Procedimiento", &["p".into()], &bad, "").is_err());
         bad.references[1].kind = "pipeline_run".into();
-        assert!(complete_answer("Work item 42", &["p".into(), "w".into()], &bad).is_err());
+        assert!(complete_answer("Work item 42", &["p".into(), "w".into()], &bad, "").is_err());
         bad.references[0] = reference("p", "wiki");
         bad.references[1].label = "Build #420".into();
         bad.references[1].aliases.clear();
-        assert!(complete_answer("Build 42", &["p".into(), "w".into()], &bad).is_err());
+        assert!(complete_answer("Build 42", &["p".into(), "w".into()], &bad, "").is_err());
     }
     #[test]
     fn homonymous_stages_preserve_execution_definition_and_parent_identity() {
@@ -417,12 +490,18 @@ mod tests {
             "Stage Deploy ejecutado en #40",
             &["stage:run:40".into()],
             &e,
+            "",
         )
         .unwrap();
         assert!(a.contains("buildId=40"));
         assert!(!a.contains("definitionId"));
-        let b =
-            complete_answer("Stage Deploy configurado", &["stage:config:5:2".into()], &e).unwrap();
+        let b = complete_answer(
+            "Stage Deploy configurado",
+            &["stage:config:5:2".into()],
+            &e,
+            "",
+        )
+        .unwrap();
         assert!(b.contains("configuración en release #5"));
     }
     #[test]

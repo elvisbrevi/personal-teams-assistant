@@ -15,6 +15,9 @@ use std::{collections::BTreeMap, sync::Arc};
 /// Deterministic notice sent once when the model is still working after `HOLDING_AFTER`.
 pub const HOLDING_REPLY: &str = "Déjame revisarlo.";
 const HOLDING_AFTER: std::time::Duration = std::time::Duration::from_secs(300);
+/// Earlier messages of the conversation given to the model to interpret the current one.
+pub const HISTORY_MESSAGES: usize = 10;
+const HISTORY_CHARS: usize = 6000;
 
 /// Model calls have no deadline; this tracks when to tell the sender the answer is coming.
 struct Holding {
@@ -50,22 +53,40 @@ impl Pipeline {
         );
         let message = self.adapter.fetch(resource).await?;
         // A holding notice from an earlier attempt commits the assistant to answering.
-        let holding_reply = self
-            .store
-            .audit(resource)?
-            .and_then(|previous| previous.holding_reply);
+        // Notices from an earlier attempt are never sent again.
+        let earlier = self.store.audit(resource)?;
+        let holding_reply = earlier.as_ref().and_then(|e| e.holding_reply.clone());
+        let withheld_notice = earlier.and_then(|e| e.withheld_notice);
         let mut holding = Holding {
             enabled: !self.config.policy.dry_run && !resource.starts_with("simulation:"),
             sent: holding_reply.is_some(),
             deadline: tokio::time::Instant::now() + HOLDING_AFTER,
         };
         let started = chrono::Utc::now().timestamp();
+        let own_chat = self
+            .config
+            .graph
+            .self_chat
+            .as_ref()
+            .is_some_and(|c| message.conversation == format!("chats/{}", c.id));
         let mut audit = Audit {
             status: "ignored".into(),
             reason: "ineligible_message".into(),
             holding_reply,
+            withheld_notice,
+            conversation_kind: Some(
+                match (&message.kind, own_chat) {
+                    (_, true) => "self",
+                    (crate::adapters::teams::ConversationKind::Direct, _) => "direct",
+                    (crate::adapters::teams::ConversationKind::Group, _) => "group",
+                    _ => "unsupported",
+                }
+                .into(),
+            ),
+            received_at: Some(message.created_at_millis),
             ..Default::default()
         };
+        audit.step("recibido", "mensaje leído desde Teams");
         if !message.eligible_in(
             &self.config.graph.user_id,
             &self.config.policy.allowed_senders,
@@ -76,11 +97,18 @@ impl Pipeline {
             },
             self.config.graph.self_chat.as_ref(),
         ) {
+            audit.step(
+                "elegibilidad",
+                "no se evalúa: propio, de un grupo sin mención, antiguo, vacío o salida del asistente",
+            );
             return self.store.record(resource, &audit);
         }
         let current = self.redactor.redact(&message.text);
+        audit.question = Some(current.clone());
+        audit.step("elegibilidad", "mensaje dirigido al asistente");
         if !self.redactor.clean(&current) {
             audit.reason = "sensitive_question".into();
+            audit.step("bloqueado", "la pregunta contiene datos sensibles");
             return self.store.record(resource, &audit);
         }
         let available = if let Some(ids) = local_sources {
@@ -94,12 +122,18 @@ impl Pipeline {
                 .available(&message.conversation, &message.sender)
         };
         let is_greeting = if greeting(&current) {
+            audit.step("intención", "saludo");
             true
         } else if question_request(&current) {
+            audit.step("intención", "pregunta");
             false
         } else {
             if available.is_empty() {
                 audit.reason = "no_authorized_resource".into();
+                audit.step(
+                    "fuentes",
+                    "ninguna fuente autorizada para esta conversación",
+                );
                 return self.store.record(resource, &audit);
             }
             let intent = self
@@ -107,8 +141,13 @@ impl Pipeline {
                 .evaluate(Stage::Intent, json!({"message":current}))
                 .await?;
             audit.confidences.push(intent.confidence);
+            audit.step(
+                "intención",
+                format!("Jev: {} ({:.2})", intent.selected, intent.confidence),
+            );
             if !intent.allows(0.5) || !matches!(intent.selected.as_str(), "question" | "greeting") {
                 audit.reason = "informational_message".into();
+                audit.step("sin respuesta", "mensaje informativo: no pide respuesta");
                 return self.store.record(resource, &audit);
             }
             intent.selected == "greeting"
@@ -120,6 +159,28 @@ impl Pipeline {
             self.config.policy.greeting.clone()
         } else {
             let previous = self.store.context(&message.conversation)?;
+            // Earlier messages say what a short follow-up refers to («¿y el endpoint de test?»).
+            let history = match self.adapter.history(&message, HISTORY_MESSAGES).await {
+                Ok(history) => history,
+                Err(_) => {
+                    tracing::warn!(event = "conversation_history_unavailable");
+                    Vec::new()
+                }
+            };
+            audit.history_messages = history.len();
+            let history = self.history_text(&history, message.created_at_millis);
+            audit.step(
+                "contexto",
+                format!(
+                    "{} mensajes previos{}",
+                    audit.history_messages,
+                    if previous.is_some() {
+                        " y el último intercambio con el asistente"
+                    } else {
+                        ""
+                    }
+                ),
+            );
             let more_details = matches!(
                 current
                     .to_lowercase()
@@ -149,10 +210,15 @@ impl Pipeline {
             // Questions containing secrets/PII stay manual, including tool requests with personal identifiers.
             if !self.redactor.clean(&question) {
                 audit.reason = "sensitive_question".into();
+                audit.step("bloqueado", "la pregunta contiene datos sensibles");
                 return self.store.record(resource, &audit);
             }
             if available.is_empty() {
                 audit.reason = "no_authorized_resource".into();
+                audit.step(
+                    "fuentes",
+                    "ninguna fuente autorizada para esta conversación",
+                );
                 return self.store.record(resource, &audit);
             }
             // Read every authorized document: choosing one descriptor loses compound questions.
@@ -180,17 +246,25 @@ impl Pipeline {
             // those words alone misses the page. Resolve it against the previous exchange first;
             // the rewrite only shapes the query inside sources already authorized by code.
             let mut wiki_topic = None;
-            if let Some(previous) = previous.as_ref().filter(|_| !more_details)
+            if (previous.is_some() || !history.is_empty())
+                && !more_details
                 && !tool_candidates.is_empty()
             {
+                let (previous_question, previous_answer) = previous
+                    .as_ref()
+                    .map_or(("", ""), |p| (p.question.as_str(), p.answer.as_str()));
                 match self
                     .awaiting_model(
                         &mut holding,
                         resource,
                         &message,
                         &mut audit,
-                        self.llm
-                            .standalone_request(&previous.question, &previous.answer, &current),
+                        self.llm.standalone_request(
+                            previous_question,
+                            previous_answer,
+                            &history,
+                            &current,
+                        ),
                     )
                     .await?
                 {
@@ -205,10 +279,19 @@ impl Pipeline {
                         }) {
                             tool_question = question.to_owned();
                             wiki_topic = Some(topic.to_owned());
+                            audit.resolved_question = Some(question.to_owned());
+                            audit.topic = Some(topic.to_owned());
+                            audit.step("seguimiento", "solicitud interpretada con el contexto");
                         }
                     }
                     Ok(None) => {}
-                    Err(_) => tracing::warn!(event = "follow_up_resolution_unavailable"),
+                    Err(_) => {
+                        tracing::warn!(event = "follow_up_resolution_unavailable");
+                        audit.step(
+                            "seguimiento",
+                            "ningún modelo pudo interpretarla; se busca el texto literal",
+                        );
+                    }
                 }
             }
             // Chained follow-ups keep the resolved topic instead of the bare follow-up.
@@ -301,6 +384,10 @@ impl Pipeline {
                     .collect::<Vec<_>>()
                     .join(",")
             });
+            audit.step(
+                "fuentes",
+                audit.source.clone().unwrap_or_else(|| "ninguna".into()),
+            );
             self.checkpoint(resource, &audit, "retrieving")?;
             let mut evidence = String::new();
             let mut registry = crate::evidence::Evidence::default();
@@ -382,6 +469,14 @@ impl Pipeline {
                     evidence.extend(format!("{header}{passages}\n").chars().take(budget));
                 }
             }
+            audit.step(
+                "evidencia",
+                format!(
+                    "{} caracteres, {} referencias verificadas",
+                    evidence.chars().count(),
+                    registry.references.len()
+                ),
+            );
             if evidence.trim().is_empty() {
                 evidence = "No se recuperaron hechos verificables. Explica la limitación y pide concretar la fuente o el proyecto; no inventes una respuesta.".chars().take(self.config.policy.max_context_chars).collect();
             }
@@ -400,6 +495,7 @@ impl Pipeline {
                         question: &question,
                         evidence: &evidence,
                         detail_requested: false,
+                        history: &history,
                     }),
                 )
                 .await??;
@@ -407,20 +503,38 @@ impl Pipeline {
             if let Some(provider) = &generated.provider {
                 audit.provider = Some(provider.clone());
             }
+            audit.provider_fallbacks = generated.fallbacks.clone();
+            audit.step(
+                "modelo",
+                match generated.fallbacks.as_slice() {
+                    [] => format!(
+                        "respondió {}",
+                        audit.provider.as_deref().unwrap_or("el modelo")
+                    ),
+                    failed => format!(
+                        "respondió {} tras fallar {}",
+                        audit.provider.as_deref().unwrap_or("el modelo"),
+                        failed.join(", ")
+                    ),
+                },
+            );
             context_answer = Some(generated.answer.clone());
             audit.partial = registry.partial;
             audit.coverage_warnings = registry.warnings.clone();
             audit.references = registry.references.clone();
             audit.teams_messages = registry.teams.clone();
             audit.detailed = Some(generated.detailed);
+            audit.proposed = Some(self.redactor.redact(&generated.answer));
             if !self.valid_answer(&generated.answer) {
-                audit.proposed = Some(self.redactor.redact(&generated.answer));
-                audit.reason = "unsafe_proposal".into();
-                return self.store.record(resource, &audit);
+                return self
+                    .withhold(resource, &message, &mut audit, "unsafe_proposal".into())
+                    .await;
             }
-            let used_sources = if registry.references.is_empty() {
-                Vec::new()
-            } else {
+            // Jev suggests which references the text used, but cannot withhold the answer:
+            // without its selection, code links the entities it sees named and the consulted
+            // Wiki pages, and verifies every ID and URL.
+            let mut used_sources = Vec::new();
+            if !registry.references.is_empty() {
                 self.checkpoint(resource, &audit, "selecting_references")?;
                 match self
                     .gate
@@ -432,58 +546,108 @@ impl Pipeline {
                     )
                     .await
                 {
-                    Ok(ids) => ids,
+                    Ok(ids) => {
+                        audit.reference_selection = Some("jev".into());
+                        audit.step("referencias", format!("Jev eligió {}", ids.len()));
+                        used_sources = ids;
+                    }
                     Err(_) => {
-                        audit.reason = "reference_selection_failed".into();
-                        return self.store.record(resource, &audit);
+                        audit.reference_selection = Some("code".into());
+                        audit.step("referencias", "Jev no disponible; las elige el código");
                     }
                 }
-            };
+                for id in crate::evidence::named_references(&generated.answer, &registry) {
+                    if !used_sources.contains(&id) {
+                        used_sources.push(id);
+                    }
+                }
+            }
             audit.used_sources = used_sources.clone();
             let answer = if !registry.references.is_empty() {
-                match crate::evidence::complete_answer(&generated.answer, &used_sources, &registry)
-                {
+                match crate::evidence::complete_answer(
+                    &generated.answer,
+                    &used_sources,
+                    &registry,
+                    &evidence,
+                ) {
                     Ok(answer) => answer,
                     Err(error) => {
-                        audit.reason = format!("invalid_references: {error}");
-                        return self.store.record(resource, &audit);
+                        return self
+                            .withhold(
+                                resource,
+                                &message,
+                                &mut audit,
+                                format!("invalid_references: {error}"),
+                            )
+                            .await;
                     }
                 }
             } else if !generated.used_sources.is_empty() {
-                audit.reason = "invalid_references: no authorized evidence".into();
-                return self.store.record(resource, &audit);
+                return self
+                    .withhold(
+                        resource,
+                        &message,
+                        &mut audit,
+                        "invalid_references: no authorized evidence".into(),
+                    )
+                    .await;
             } else {
                 generated.answer
             };
             audit.proposed = Some(self.redactor.redact(&answer));
             if !self.valid_answer(&answer) {
-                audit.reason = "unsafe_proposal".into();
-                return self.store.record(resource, &audit);
+                return self
+                    .withhold(resource, &message, &mut audit, "unsafe_proposal".into())
+                    .await;
             }
-            self.checkpoint(resource, &audit, "final_gate")?;
-            let final_verdict = self
+            // Jev's final review is informative: recorded for the message log, never a veto.
+            // Sensitive data, sizes, IDs and URLs are still enforced by code above.
+            self.checkpoint(resource, &audit, "final_review")?;
+            match self
                 .gate
                 .evaluate(
                     Stage::Final,
                     json!({"question":question,"evidence":evidence,"answer":answer,"used_sources":used_sources,"references":registry.references,"teams_messages":registry.teams,"partial":registry.partial,"coverage_warnings":registry.warnings}))
-                .await?;
-            audit.confidences.push(final_verdict.confidence);
-            if final_verdict.selected != "allow"
-                || !final_verdict.allows(self.config.jev.final_threshold)
+                .await
             {
-                audit.reason = "final_gate".into();
-                return self.store.record(resource, &audit);
+                Ok(verdict) => {
+                    audit.confidences.push(verdict.confidence);
+                    audit.final_check =
+                        Some(format!("{} {:.2}", verdict.selected, verdict.confidence));
+                    let approved = verdict.selected == "allow"
+                        && verdict.allows(self.config.jev.final_threshold);
+                    audit.step(
+                        "revisión Jev (informativa)",
+                        if approved {
+                            format!("aprobada ({:.2})", verdict.confidence)
+                        } else {
+                            format!(
+                                "con observaciones ({} {:.2}); no bloquea",
+                                verdict.selected, verdict.confidence
+                            )
+                        },
+                    );
+                }
+                Err(_) => {
+                    audit.final_check = Some("unavailable".into());
+                    audit.step("revisión Jev (informativa)", "no disponible; no bloquea");
+                }
             }
             audit.reason = "supported_answer".into();
             answer
         };
         audit.proposed = Some(self.redactor.redact(&proposal));
         if !self.valid_answer(&proposal) {
-            audit.reason = "unsafe_answer".into();
-            return self.store.record(resource, &audit);
+            return self
+                .withhold(resource, &message, &mut audit, "unsafe_answer".into())
+                .await;
         }
         if self.config.policy.dry_run {
             audit.status = "dry_run".into();
+            audit.step(
+                "modo observación",
+                "propuesta registrada; no se envía a Teams",
+            );
             self.store.record(resource, &audit)?;
             if resource.starts_with("simulation:")
                 && let Some(question) = context_question
@@ -516,6 +680,10 @@ impl Pipeline {
             )
         {
             audit.reason = "message_changed".into();
+            audit.step(
+                "sin envío",
+                "el mensaje cambió, se borró o dejó de ser elegible",
+            );
             return self.store.record(resource, &audit);
         }
         audit.status = "sending".into();
@@ -525,10 +693,15 @@ impl Pipeline {
                 audit.status = "sent".into();
                 audit.sent = Some(proposal);
                 audit.graph_message_id = Some(id);
+                audit.step("envío", "respuesta enviada a Teams");
             }
             Err(_) => {
                 audit.status = "uncertain".into();
                 audit.reason = "send_result_unknown_manual_review".into();
+                audit.step(
+                    "envío",
+                    "resultado incierto; revisar manualmente (no se reintenta)",
+                );
             }
         }
         self.store.record(resource, &audit)?;
@@ -581,6 +754,84 @@ impl Pipeline {
         self.checkpoint(resource, audit, "holding_reply")?;
         Ok(work.await)
     }
+    /// Record a generated answer that code checks withheld. In the personal chat, also tell
+    /// the user once, with a fixed text: the intent is recorded first and a failed send is
+    /// never retried, like the holding notice.
+    async fn withhold(
+        &self,
+        resource: &str,
+        message: &crate::adapters::teams::IncomingMessage,
+        audit: &mut Audit,
+        reason: String,
+    ) -> Result<()> {
+        let explanation = withheld_reason(&reason);
+        audit.reason = reason;
+        audit.step("retenida", explanation);
+        self.store.record(resource, audit)?;
+        let own_chat = self
+            .config
+            .graph
+            .self_chat
+            .as_ref()
+            .is_some_and(|c| message.conversation == format!("chats/{}", c.id));
+        if !own_chat
+            || self.config.policy.dry_run
+            || resource.starts_with("simulation:")
+            || audit.withheld_notice.is_some()
+        {
+            return Ok(());
+        }
+        audit.withheld_notice = Some("sending".into());
+        self.store.record(resource, audit)?;
+        let notice = format!(
+            "No envié la respuesta a tu mensaje: {explanation}. Puedes revisarla en la sección Mensajes de la app."
+        );
+        let sent = self.adapter.send(message, &notice).await.is_ok();
+        audit.withheld_notice = Some(if sent { "sent" } else { "uncertain" }.into());
+        audit.step(
+            "aviso",
+            if sent {
+                "aviso enviado al chat personal"
+            } else {
+                "aviso con resultado incierto (no se reintenta)"
+            },
+        );
+        self.store.record(resource, audit)
+    }
+    /// Earlier messages as `[fecha hora · autor] texto`, redacted, newest kept within budget,
+    /// followed by the time of the current request.
+    fn history_text(
+        &self,
+        history: &[crate::adapters::teams::HistoryMessage],
+        current_millis: i64,
+    ) -> String {
+        let mut lines: Vec<String> = Vec::new();
+        let mut total = 0;
+        for message in history.iter().rev() {
+            let line = format!(
+                "[{} · {}] {}",
+                message.at,
+                self.redactor.redact(&message.author),
+                self.redactor.redact(&message.text).replace('\n', " ")
+            );
+            total += line.chars().count() + 1;
+            if total > HISTORY_CHARS {
+                break;
+            }
+            lines.push(line);
+        }
+        if lines.is_empty() {
+            return String::new();
+        }
+        lines.reverse();
+        if let Some(at) = chrono::DateTime::from_timestamp_millis(current_millis) {
+            lines.push(format!(
+                "[{} · solicitud actual]",
+                at.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M")
+            ));
+        }
+        lines.join("\n")
+    }
     fn checkpoint(&self, resource: &str, audit: &Audit, stage: &str) -> Result<()> {
         let mut saved = audit.clone();
         saved.status = "processing".into();
@@ -595,6 +846,18 @@ impl Pipeline {
     }
 }
 
+/// Plain-language cause of a withheld answer, without its content.
+fn withheld_reason(reason: &str) -> &'static str {
+    match reason {
+        "unsafe_proposal" | "unsafe_answer" => {
+            "contenía datos sensibles o no cabía en un mensaje de Teams"
+        }
+        r if r.starts_with("invalid_references") => {
+            "citaba referencias o enlaces que no se pudieron verificar"
+        }
+        _ => "no pasó los controles de la aplicación",
+    }
+}
 fn explicit_wiki(question: &str) -> bool {
     question
         .split(|c: char| !c.is_alphanumeric())

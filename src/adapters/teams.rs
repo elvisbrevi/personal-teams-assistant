@@ -1,6 +1,17 @@
 use anyhow::{Result, bail, ensure};
 use serde::Deserialize;
 
+/// An earlier message of the same conversation, given to the model to interpret the current
+/// request (subject, references, timing). Context only: never evidence of facts.
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
+pub struct HistoryMessage {
+    /// `yo` (the connected user), `asistente` (an answer sent by this app) or a display name.
+    pub author: String,
+    /// Local date and time, `YYYY-MM-DD HH:MM`.
+    pub at: String,
+    pub text: String,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum ConversationKind {
     Direct,

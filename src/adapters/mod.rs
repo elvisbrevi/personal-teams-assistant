@@ -10,6 +10,14 @@ use serde::de::DeserializeOwned;
 pub trait MessageAdapter: Send + Sync {
     async fn fetch(&self, resource: &str) -> Result<teams::IncomingMessage>;
     async fn send(&self, message: &teams::IncomingMessage, text: &str) -> Result<String>;
+    /// Up to `limit` messages sent before `message` in the same conversation, oldest first.
+    async fn history(
+        &self,
+        _message: &teams::IncomingMessage,
+        _limit: usize,
+    ) -> Result<Vec<teams::HistoryMessage>> {
+        Ok(Vec::new())
+    }
 }
 pub async fn bounded_bytes(mut response: reqwest::Response, limit: usize) -> Result<Vec<u8>> {
     ensure!(
