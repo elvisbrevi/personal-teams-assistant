@@ -111,12 +111,6 @@ fn validate_teams_setup(config: &Config) -> Result<()> {
         config.graph.user_id != uuid::Uuid::nil().to_string(),
         SetupError("Conecta tu cuenta Microsoft antes de iniciar Teams.")
     );
-    ensure!(
-        config.graph.channels.is_empty(),
-        SetupError(
-            "Esta versión de escritorio admite chats de Teams. Quita los canales de la configuración importada."
-        )
-    );
     Ok(())
 }
 
@@ -430,10 +424,7 @@ async fn start(state: &DesktopState) -> Result<()> {
             security::put_desktop_secret("default", name, &security::random_secret())?;
         }
     }
-    for name in credential_names(&config)
-        .into_iter()
-        .filter(|name| name != "ENTRA_CLIENT_SECRET" && name != "ADMIN_AUTH_KEY")
-    {
+    for name in credential_names(&config) {
         security::secret(&name)?;
     }
     let tunnel_path = if state.tunnel_path.exists() {
@@ -466,8 +457,7 @@ async fn start(state: &DesktopState) -> Result<()> {
     let (stop, receiver) = watch::channel(false);
     let path = state.config_path.to_string_lossy().into_owned();
     let (ready_tx, ready_rx) = oneshot::channel();
-    let task =
-        tokio::spawn(async move { runtime::serve_desktop_ready(&path, receiver, ready_tx).await });
+    let task = tokio::spawn(async move { runtime::serve(&path, receiver, ready_tx).await });
     if tokio::time::timeout(std::time::Duration::from_secs(60), ready_rx)
         .await
         .ok()
@@ -790,9 +780,6 @@ async fn begin_microsoft(
     let was_running = state.running.lock().await.is_some();
     let config = read_config(&state.config_path).map_err(fail)?;
     config.validate().map_err(fail)?;
-    if !config.graph.channels.is_empty() {
-        return Err("Desktop does not request channel permissions.".into());
-    }
     if security::secret_source("STATE_ENCRYPTION_KEY")
         .map_err(fail)?
         .is_none()
@@ -817,7 +804,7 @@ async fn begin_microsoft(
         .build()
         .map_err(fail)?;
     let oauth = Arc::new(
-        OAuth::new_public(
+        OAuth::new(
             Arc::new(config.clone()),
             client,
             store,
@@ -945,7 +932,7 @@ async fn profile_graph(state: &DesktopState) -> Result<ProfileGraph> {
         .build()?;
     let dataset_lock = claim_dataset(&config.server.data_dir)?;
     let store = Arc::new(Store::attach(&config.server.data_dir.join("assistant.db"))?);
-    let token = Arc::new(OAuth::new_public(
+    let token = Arc::new(OAuth::new(
         config.clone(),
         client.clone(),
         store.clone(),

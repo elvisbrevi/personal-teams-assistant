@@ -5,7 +5,6 @@ use serde::Deserialize;
 pub enum ConversationKind {
     Direct,
     Group,
-    Channel,
     Unsupported,
 }
 #[derive(Clone, Debug)]
@@ -21,9 +20,7 @@ pub struct IncomingMessage {
     pub is_user_message: bool,
 }
 impl IncomingMessage {
-    pub fn eligible(&self, user_id: &str, allowed_senders: &[String], max_age: i64) -> bool {
-        self.eligible_in(user_id, allowed_senders, max_age, None)
-    }
+    /// Direct chats, groups with a real Graph mention, and the validated personal chat only.
     pub fn eligible_in(
         &self,
         user_id: &str,
@@ -48,9 +45,7 @@ impl IncomingMessage {
             && self.created_at <= chrono::Utc::now().timestamp() + 30
             && match self.kind {
                 ConversationKind::Direct => true,
-                ConversationKind::Group | ConversationKind::Channel => {
-                    self.mentions.iter().any(|m| m == user_id)
-                }
+                ConversationKind::Group => self.mentions.iter().any(|m| m == user_id),
                 ConversationKind::Unsupported => false,
             }
     }
@@ -125,7 +120,7 @@ pub struct Mention {
     pub mentioned: IdentitySet,
 }
 
-/// Accept only documented chat/channel message paths, including OData notification syntax.
+/// Accept only documented chat message paths, including OData notification syntax.
 /// Convert each identifier to a URL path segment; never follow notification-provided hosts/queries.
 pub fn canonical_resource(input: &str) -> Result<String> {
     let input = input.trim_start_matches('/');
@@ -137,12 +132,7 @@ pub fn canonical_resource(input: &str) -> Result<String> {
     };
     let parts: Vec<_> = converted.split('/').collect();
     ensure!(
-        matches!(
-            parts.as_slice(),
-            ["chats", _, "messages", _]
-                | ["teams", _, "channels", _, "messages", _]
-                | ["teams", _, "channels", _, "messages", _, "replies", _]
-        ),
+        matches!(parts.as_slice(), ["chats", _, "messages", _]),
         "invalid Graph message resource"
     );
     for (i, p) in parts.iter().enumerate() {
@@ -164,9 +154,6 @@ pub fn collection(resource: &str) -> Result<String> {
     let p: Vec<_> = resource.split('/').collect();
     match p.as_slice() {
         ["chats", c, "messages", _] => Ok(format!("chats/{c}/messages")),
-        ["teams", t, "channels", c, "messages", ..] => {
-            Ok(format!("teams/{t}/channels/{c}/messages"))
-        }
         _ => bail!("invalid collection"),
     }
 }
@@ -196,6 +183,7 @@ mod tests {
             "chats/%2f/messages/x",
             "chats/x/messages/1?foo",
             "users/1/messages/2",
+            "teams/t/channels/c/messages/1",
         ] {
             assert!(canonical_resource(input).is_err());
         }
@@ -220,10 +208,10 @@ mod tests {
             created_at_millis: chrono::Utc::now().timestamp_millis(),
             is_user_message: true,
         };
-        assert!(!m.eligible("owner", &[], 300));
+        assert!(!m.eligible_in("owner", &[], 300, None));
         m.mentions.push("owner".into());
-        assert!(m.eligible("owner", &[], 300));
+        assert!(m.eligible_in("owner", &[], 300, None));
         m.sender = "owner".into();
-        assert!(!m.eligible("owner", &[], 300));
+        assert!(!m.eligible_in("owner", &[], 300, None));
     }
 }

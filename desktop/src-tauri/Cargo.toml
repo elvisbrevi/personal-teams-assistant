@@ -8,7 +8,7 @@ default-run = "personal-teams-desktop"
 description = "Desktop tray app for a personal Microsoft Teams knowledge assistant"
 license = "MIT"
 readme = "README.md"
-include = ["Cargo.toml", "LICENSE", "README.md", "build.rs", "Info.plist", "tauri.conf.json", "capabilities/**", "icons/*.png", "icons/*.icns", "icons/*.ico", "src/**", "ui/**", "skills/**"]
+include = ["Cargo.toml", "LICENSE", "README.md", "build.rs", "Info.plist", "tauri.conf.json", "capabilities/**", "icons/*.png", "icons/*.ico", "src/**", "ui/**", "skills/**"]
 
 [[bin]]
 name = "pta"

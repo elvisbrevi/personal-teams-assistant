@@ -7,7 +7,6 @@ use crate::{
 };
 use anyhow::{Result, ensure};
 use serde_json::json;
-use std::collections::BTreeMap;
 pub async fn providers(config: &Config) -> Result<serde_json::Value> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(20))
@@ -64,7 +63,6 @@ pub async fn providers(config: &Config) -> Result<serde_json::Value> {
             .evaluate(
                 Stage::Final,
                 json!({"question":question,"evidence":evidence,"answer":generated.answer}),
-                BTreeMap::new(),
             )
             .await?;
         ensure!(

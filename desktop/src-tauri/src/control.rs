@@ -96,6 +96,7 @@ fn existing_host_at(dir: &Path) -> Result<()> {
     let _: Endpoint = serde_json::from_slice(&fs::read(dir.join("control.json"))?)?;
     Ok(())
 }
+/// `cargo install` places `pta` beside `personal-teams-desktop`; the host also registers its path.
 fn host_executable() -> Result<PathBuf> {
     let exe = std::env::current_exe()?;
     let sibling = exe.with_file_name(if cfg!(windows) {
@@ -113,16 +114,7 @@ fn host_executable() -> Result<PathBuf> {
             return Ok(path);
         }
     }
-    #[cfg(target_os = "macos")]
-    {
-        let bundle = PathBuf::from(
-            "/Applications/Personal Teams Assistant.app/Contents/MacOS/personal-teams-desktop",
-        );
-        if bundle.is_file() {
-            return Ok(bundle);
-        }
-    }
-    anyhow::bail!("desktop host missing from this installation")
+    anyhow::bail!("desktop host missing: install both binaries with cargo install")
 }
 pub async fn client(request: Request, start_host: bool) -> Result<Reply> {
     if existing_host().is_err() {
