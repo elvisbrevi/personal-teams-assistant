@@ -2,7 +2,7 @@ use aes_gcm_siv::{
     Aes256GcmSiv, KeyInit, Nonce,
     aead::{Aead, Payload},
 };
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result, ensure};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use rand::RngCore;
 use regex::Regex;
@@ -342,11 +342,6 @@ impl Redactor {
     }
 }
 
-/// Dynamic SQL is intentionally unavailable. Only hard-coded, parameterized semantic queries run.
-pub fn reject_dynamic_sql(_sql: &str) -> Result<()> {
-    bail!("dynamic SQL is disabled; use a semantic read-only tool")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -374,11 +369,5 @@ mod tests {
         assert_eq!(v.open(&sealed).unwrap(), b"example-refresh-token");
         sealed[14] ^= 1;
         assert!(v.open(&sealed).is_err());
-    }
-    #[test]
-    fn sql_fail_closed() {
-        for sql in ["SELECT 1", "DROP TABLE x", "SELECT 1; DELETE x", "EXEC foo"] {
-            assert!(reject_dynamic_sql(sql).is_err());
-        }
     }
 }

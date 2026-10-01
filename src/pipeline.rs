@@ -78,7 +78,7 @@ impl Pipeline {
             }
             let intent = self
                 .gate
-                .evaluate(Stage::Intent, json!({"message":current}), BTreeMap::new())
+                .evaluate(Stage::Intent, json!({"message":current}))
                 .await?;
             audit.confidences.push(intent.confidence);
             if !intent.allows(0.5) || !matches!(intent.selected.as_str(), "question" | "greeting") {
@@ -393,9 +393,7 @@ impl Pipeline {
                 .gate
                 .evaluate(
                     Stage::Final,
-                    json!({"question":question,"evidence":evidence,"answer":answer,"used_sources":used_sources,"references":registry.references,"teams_messages":registry.teams,"partial":registry.partial,"coverage_warnings":registry.warnings}),
-                    BTreeMap::new(),
-                )
+                    json!({"question":question,"evidence":evidence,"answer":answer,"used_sources":used_sources,"references":registry.references,"teams_messages":registry.teams,"partial":registry.partial,"coverage_warnings":registry.warnings}))
                 .await?;
             audit.confidences.push(final_verdict.confidence);
             if final_verdict.selected != "allow"

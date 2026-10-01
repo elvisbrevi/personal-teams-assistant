@@ -4,7 +4,6 @@ use personal_teams_assistant::{config::Config, knowledge::KnowledgeMap};
 use serde_json::{Value, json};
 use std::{
     io::{IsTerminal, Read},
-    path::PathBuf,
     time::Duration,
 };
 
@@ -13,7 +12,7 @@ Usage: pta [--json] [--non-interactive] COMMAND ...
   --version | capabilities
   status | doctor [--offline]
   start | stop | restart
-  app open|hide|quit|install-cli DIRECTORY
+  app open|hide|quit
   config show|get FIELD|set FIELD JSON|apply|validate|import FILE
   mode show|observe|active
   self-chat status|enable [CHAT_ID]|disable|reconcile OUTPUT_NONCE MESSAGE_ID
@@ -122,7 +121,6 @@ fn validate_args(args: &[String]) -> Result<()> {
         p.as_slice(),
         ["capabilities" | "status" | "doctor" | "start" | "stop" | "restart" | "logs" | "chat"]
             | ["app", "open" | "hide" | "quit"]
-            | ["app", "install-cli", _]
             | ["skill", "show" | "path"]
             | ["skill", "install", _]
             | ["config", "show" | "apply" | "validate"]
@@ -190,28 +188,6 @@ async fn execute(mut args: Vec<String>) -> Result<Reply> {
             ));
         }
         "skill" => return crate::skill::command(action, args.get(2).map(String::as_str)),
-        "app" if action == "install-cli" => {
-            let dir = PathBuf::from(positional(&args, 2)?);
-            ensure!(
-                dir.is_absolute() && dir.is_dir(),
-                "choose an existing absolute directory"
-            );
-            let exe = std::env::current_exe()?;
-            let target = dir.join(if cfg!(windows) { "pta.exe" } else { "pta" });
-            ensure!(!target.exists(), "destination already exists");
-            #[cfg(unix)]
-            std::os::unix::fs::symlink(&exe, &target)?;
-            #[cfg(windows)]
-            {
-                std::fs::copy(&exe, &target)?;
-                let host = exe.with_file_name("personal-teams-desktop.exe");
-                ensure!(host.is_file(), "desktop host missing beside the CLI");
-                let profile = control::profile_dir()?;
-                personal_teams_assistant::security::private_dir(&profile)?;
-                crate::write_private(&profile.join("host-path.txt"), &host.to_string_lossy())?;
-            }
-            return Ok(Reply::success(json!({"path":target})));
-        }
         "status" if control::existing_host().is_err() => return safe_status_stopped(),
         "stop" if control::existing_host().is_err() => {
             return Ok(Reply::success(json!({"running":false})));
@@ -595,7 +571,6 @@ pub async fn run() -> i32 {
                 "invalid",
                 "input must",
                 "input is",
-                "choose",
                 "destination",
                 "add sources",
                 "source ID",

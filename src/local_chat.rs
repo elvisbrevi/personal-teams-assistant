@@ -28,7 +28,7 @@ impl AccessToken for NoTeamsToken {
 pub async fn chat(config_path: &Path, input: SimulationRequest) -> Result<SimulationResult> {
     simulation::validate_request(&input)?;
     ensure!(!input.sources.is_empty(), "select at least one source");
-    let config = Config::load_desktop(
+    let config = Config::load(
         config_path
             .to_str()
             .ok_or_else(|| anyhow::anyhow!("invalid path"))?,

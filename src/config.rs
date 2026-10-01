@@ -33,6 +33,7 @@ pub struct Graph {
     pub allowed_chats: Vec<String>,
     #[serde(default)]
     pub discover_all_chats: bool,
+    /// Must stay empty (validated); retained so older profiles keep parsing.
     #[serde(default)]
     pub channels: Vec<Channel>,
     #[serde(default)]
@@ -55,10 +56,13 @@ pub struct Channel {
 #[serde(deny_unknown_fields)]
 pub struct Jev {
     pub model: String,
+    // Legacy thresholds: unused by the pipeline but still validated and written, because
+    // older hosts sharing the same profile require them (`deny_unknown_fields`, no default).
     #[serde(default = "default_follow_up_threshold")]
     pub follow_up_threshold: f64,
     pub routing_threshold: f64,
     pub evidence_threshold: f64,
+    /// Minimum Jev confidence for the final answer gate.
     pub final_threshold: f64,
 }
 fn default_follow_up_threshold() -> f64 {
@@ -94,28 +98,9 @@ impl Config {
         Ok(toml::from_str(include_str!("../config.example.toml"))?)
     }
 
-    /// Desktop profiles are explicit; process-level overrides must not switch Entra identity.
-    pub fn load_desktop(path: &str) -> Result<Self> {
-        let cfg: Self = toml::from_str(&std::fs::read_to_string(path)?)?;
-        cfg.validate()?;
-        Ok(cfg)
-    }
-
+    /// Profiles are explicit: no process environment override may switch Entra identity.
     pub fn load(path: &str) -> Result<Self> {
-        let mut cfg: Self = toml::from_str(&std::fs::read_to_string(path)?)?;
-        // Only non-secret operational overrides; secrets are resolved separately.
-        for (name, field) in [
-            ("ENTRA_TENANT_ID", &mut cfg.graph.tenant_id),
-            ("ENTRA_CLIENT_ID", &mut cfg.graph.client_id),
-            ("TEAMS_USER_ID", &mut cfg.graph.user_id),
-            ("PUBLIC_URL", &mut cfg.server.public_url),
-            ("LLM_PROVIDER", &mut cfg.llm.provider),
-            ("LLM_MODEL", &mut cfg.llm.model),
-        ] {
-            if let Ok(v) = std::env::var(name) {
-                *field = v;
-            }
-        }
+        let cfg: Self = toml::from_str(&std::fs::read_to_string(path)?)?;
         cfg.validate()?;
         Ok(cfg)
     }
@@ -127,6 +112,11 @@ impl Config {
         ] {
             uuid::Uuid::parse_str(id)?;
         }
+        // Kept in the schema so existing profiles still parse; channel scopes are never requested.
+        ensure!(
+            self.graph.channels.is_empty(),
+            "Teams channels are not supported; remove graph.channels"
+        );
         if let Some(chat) = &self.graph.self_chat {
             crate::adapters::teams::canonical_resource(&format!("chats/{}/messages/0", chat.id))?;
             ensure!(
@@ -179,11 +169,8 @@ impl Config {
         crate::llm::validate_provider(&self.llm.provider)?;
         Ok(())
     }
-    pub fn scopes(&self) -> String {
-        let mut scopes = "offline_access User.Read Chat.Read ChatMessage.Send".to_owned();
-        if !self.graph.channels.is_empty() {
-            scopes.push_str(" ChannelMessage.Read.All ChannelMessage.Send");
-        }
-        scopes
+    /// The delegated Graph scopes already consented for this Entra registration. Never widen.
+    pub fn scopes(&self) -> &'static str {
+        "offline_access User.Read Chat.Read ChatMessage.Send"
     }
 }

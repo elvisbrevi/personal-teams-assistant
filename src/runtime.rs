@@ -21,55 +21,22 @@ fn stop_requested(stop: &tokio::sync::watch::Receiver<bool>) -> bool {
     *stop.borrow() || stop.has_changed().is_err()
 }
 
-pub async fn serve(path: &str, stop_rx: tokio::sync::watch::Receiver<bool>) -> Result<()> {
-    serve_mode(path, stop_rx, false, None).await
-}
-
-pub async fn serve_desktop(path: &str, stop_rx: tokio::sync::watch::Receiver<bool>) -> Result<()> {
-    serve_mode(path, stop_rx, true, None).await
-}
-
-pub async fn serve_desktop_ready(
+/// Run the Teams service owned by the desktop host until `stop_rx` turns true or closes.
+/// `ready` fires once the listener is bound and background tasks are running.
+pub async fn serve(
     path: &str,
     stop_rx: tokio::sync::watch::Receiver<bool>,
     ready: tokio::sync::oneshot::Sender<()>,
 ) -> Result<()> {
-    serve_mode(path, stop_rx, true, Some(ready)).await
-}
-
-async fn serve_mode(
-    path: &str,
-    stop_rx: tokio::sync::watch::Receiver<bool>,
-    desktop: bool,
-    ready: Option<tokio::sync::oneshot::Sender<()>>,
-) -> Result<()> {
-    let config = Arc::new(if desktop {
-        Config::load_desktop(path)?
-    } else {
-        Config::load(path)?
-    });
+    let config = Arc::new(Config::load(path)?);
     let knowledge = KnowledgeMap::load(&config.knowledge_map)?;
-    ensure!(
-        !desktop || config.graph.channels.is_empty(),
-        "desktop does not request channel scopes"
-    );
-    let entra = if desktop {
-        None
-    } else {
-        Some(security::secret("ENTRA_CLIENT_SECRET")?)
-    };
     let jev_key = security::secret("TYPESAFE_API_KEY")?;
     let llm_key = security::secret("DEEPSEEK_API_KEY")?;
-    let admin_key = if desktop {
-        String::new()
-    } else {
-        security::secret("ADMIN_AUTH_KEY")?
-    };
     let client_state = security::secret("GRAPH_WEBHOOK_SECRET")?;
     let encryption_key = security::secret("STATE_ENCRYPTION_KEY")?;
     ensure!(
-        (desktop || admin_key.len() >= 32) && client_state.len() >= 32 && client_state.len() <= 128,
-        "admin and webhook secrets must have at least 32 characters (webhook max 128)"
+        client_state.len() >= 32 && client_state.len() <= 128,
+        "webhook secret must have 32-128 characters"
     );
     let mut exact_secrets = vec![
         jev_key.clone(),
@@ -77,12 +44,6 @@ async fn serve_mode(
         client_state.clone(),
         encryption_key.clone(),
     ];
-    if let Some(entra) = &entra {
-        exact_secrets.push(entra.clone());
-    }
-    if !admin_key.is_empty() {
-        exact_secrets.push(admin_key.clone());
-    }
     for name in config.secrets.values() {
         exact_secrets.push(security::secret(name)?);
     }
@@ -107,33 +68,21 @@ async fn serve_mode(
         .timeout(Duration::from_secs(20))
         .redirect(reqwest::redirect::Policy::none())
         .build()?;
-    let oauth = Arc::new(if let Some(entra) = entra {
-        OAuth::new(
-            config.clone(),
-            client.clone(),
-            entra,
-            store.clone(),
-            Vault::new(&encryption_key)?,
-        )?
-    } else {
-        OAuth::new_public(
-            config.clone(),
-            client.clone(),
-            store.clone(),
-            Vault::new(&encryption_key)?,
-        )?
-    });
+    let oauth = Arc::new(OAuth::new(
+        config.clone(),
+        client.clone(),
+        store.clone(),
+        Vault::new(&encryption_key)?,
+    )?);
     let graph = Arc::new(Graph {
         client: client.clone(),
-        token: oauth.clone(),
+        token: oauth,
         base_url: "https://graph.microsoft.com/v1.0".into(),
         config: config.clone(),
         store: store.clone(),
         client_state,
     });
-    if desktop {
-        graph.verify_account().await?;
-    }
+    graph.verify_account().await?;
     let gate = Arc::new(Jev {
         client: client.clone(),
         endpoint: "https://api.typesafe.ai/v1/systemone".into(),
@@ -262,20 +211,8 @@ async fn serve_mode(
         renewer.abort_handle(),
         personal_poller.abort_handle(),
     ]);
-    let state = Arc::new(WebState {
-        graph,
-        oauth,
-        admin_key,
-        pipeline: Some(pipeline),
-    });
-    let app = if desktop {
-        webhook::public_router(state)
-    } else {
-        webhook::router(state)
-    };
-    if let Some(ready) = ready {
-        let _ = ready.send(());
-    }
+    let app = webhook::router(Arc::new(WebState { graph }));
+    let _ = ready.send(());
     tracing::info!(event = "started", dry_run = config.policy.dry_run);
     axum::serve(listener, app)
         .with_graceful_shutdown(async move {

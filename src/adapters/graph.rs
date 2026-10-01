@@ -451,9 +451,6 @@ impl Graph {
                 .iter()
                 .any(|c| resource == format!("chats/{c}/messages"))
             || (self.config.graph.discover_all_chats && resource.starts_with("chats/"))
-            || self.config.graph.channels.iter().any(|c| {
-                resource == format!("teams/{}/channels/{}/messages", c.team_id, c.channel_id)
-            })
     }
     async fn request(
         &self,
@@ -554,7 +551,7 @@ impl Graph {
         Ok(chats)
     }
     pub async fn reconcile_subscriptions(&self) -> Result<()> {
-        let mut desired: Vec<_> = if self.config.graph.discover_all_chats {
+        let desired: Vec<_> = if self.config.graph.discover_all_chats {
             vec![self.user_messages_resource()]
         } else {
             self.config
@@ -564,13 +561,6 @@ impl Graph {
                 .map(|c| format!("chats/{c}/messages"))
                 .collect()
         };
-        desired.extend(
-            self.config
-                .graph
-                .channels
-                .iter()
-                .map(|c| format!("teams/{}/channels/{}/messages", c.team_id, c.channel_id)),
-        );
         // Reconcile server state to recover subscription creation if a response was lost.
         let remote = match self.list_collection("subscriptions").await {
             Ok(remote) => remote,
@@ -756,15 +746,13 @@ impl MessageAdapter for Graph {
                 .is_some_and(|c| c.id == "48:notes")
         {
             ConversationKind::Direct
-        } else if conversation.starts_with("chats/") {
+        } else {
             let chat = self.request(Method::GET, &conversation, None, true).await?;
             match chat["chatType"].as_str() {
                 Some("oneOnOne") => ConversationKind::Direct,
                 Some("group") => ConversationKind::Group,
                 _ => ConversationKind::Unsupported,
             }
-        } else {
-            ConversationKind::Channel
         };
         if self
             .config
@@ -833,12 +821,7 @@ impl MessageAdapter for Graph {
             self.allowed_collection(&teams::collection(&resource)?),
             "send destination denied"
         );
-        let path = if m.kind == ConversationKind::Channel {
-            let root = resource.split("/replies/").next().unwrap();
-            format!("{root}/replies")
-        } else {
-            teams::collection(&resource)?
-        };
+        let path = teams::collection(&resource)?;
         let own = self
             .config
             .graph

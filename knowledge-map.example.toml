@@ -8,7 +8,7 @@ topics = ["asistente", "operación", "Teams"]
 enabled = true
 external_processing = true
 # Grant access to the entire conversation, not just the person asking.
-# Explicit values: "chats/19:..." or "teams/UUID/channels/19:...".
+# Values: exact conversation "chats/19:..." or "*" (every conversation that reaches the assistant).
 allowed_conversations = []
 allowed_senders = []
 kind = "file"

@@ -9,14 +9,15 @@ data_dir = "data"
 tenant_id = "00000000-0000-0000-0000-000000000001"
 client_id = "00000000-0000-0000-0000-000000000002"
 user_id = "00000000-0000-0000-0000-000000000003"
-# Explicit opt-in. Each ID must be a chat in which the authorized user participates.
+# Reception: one subscription to all of the user's chats, or explicit chat IDs.
 allowed_chats = []
 discover_all_chats = false
+# Legacy field, must stay empty: channel scopes are never requested.
 channels = []
-# channels = [{ team_id = "TEAM-UUID", channel_id = "19:CHANNEL@thread.tacv2" }]
 
 [jev]
 model = "jev-latest"
+# Only final_threshold is used; the other thresholds are kept for profile compatibility.
 follow_up_threshold = 0.70
 routing_threshold = 0.92
 evidence_threshold = 0.65
@@ -39,8 +40,9 @@ sensitive_patterns = []
 # Add business identifiers, customer names and other domain-specific PII patterns.
 
 [secrets]
-# References point to environment variable names, never values.
+# Maps secret:// references (used by knowledge-map tools) to credential names stored in the
+# system keychain (or NAME / NAME_FILE environment variables). Never values.
 # "secret://sqlserver/payments-readonly" = "SQLSERVER_READONLY_CONNECTION_SECRET"
-# "secret://azure-devops/reader" = "AZURE_DEVOPS_READONLY_TOKEN"
+# "secret://azure-devops/reader" = "AZURE_DEVOPS_TOKEN"
 # "secret://rabbitmq/monitor" = "RABBITMQ_READONLY_AUTH"
 # "secret://internal/status" = "INTERNAL_API_TOKEN"

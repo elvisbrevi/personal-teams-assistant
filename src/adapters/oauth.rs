@@ -1,6 +1,6 @@
 use crate::{
     config::Config,
-    security::{Vault, constant_eq, random_secret},
+    security::{Vault, random_secret},
     state::Store,
 };
 use anyhow::{Context, Result, ensure};
@@ -36,7 +36,6 @@ struct Pending {
 pub struct OAuth {
     config: Arc<Config>,
     client: reqwest::Client,
-    client_secret: Option<String>,
     token_endpoint: String,
     me_endpoint: String,
     store: Arc<Store>,
@@ -44,30 +43,11 @@ pub struct OAuth {
     tokens: Mutex<Option<Tokens>>,
     pending: Mutex<HashMap<String, Pending>>,
 }
+/// Public desktop client: system browser, PKCE and loopback redirect, no client secret.
 impl OAuth {
     pub fn new(
         config: Arc<Config>,
         client: reqwest::Client,
-        client_secret: String,
-        store: Arc<Store>,
-        vault: Vault,
-    ) -> Result<Self> {
-        Self::new_with_secret(config, client, Some(client_secret), store, vault)
-    }
-
-    pub fn new_public(
-        config: Arc<Config>,
-        client: reqwest::Client,
-        store: Arc<Store>,
-        vault: Vault,
-    ) -> Result<Self> {
-        Self::new_with_secret(config, client, None, store, vault)
-    }
-
-    fn new_with_secret(
-        config: Arc<Config>,
-        client: reqwest::Client,
-        client_secret: Option<String>,
         store: Arc<Store>,
         vault: Vault,
     ) -> Result<Self> {
@@ -88,15 +68,11 @@ impl OAuth {
             me_endpoint: "https://graph.microsoft.com/v1.0/me?$select=id".into(),
             config,
             client,
-            client_secret,
             store,
             vault,
             tokens: Mutex::new(tokens),
             pending: Mutex::new(HashMap::new()),
         })
-    }
-    pub async fn begin(&self) -> Result<(String, String)> {
-        self.begin_with_redirect(self.redirect_uri()).await
     }
     pub async fn begin_desktop(&self, redirect_uri: &str) -> Result<(String, String)> {
         let url = url::Url::parse(redirect_uri)?;
@@ -137,27 +113,18 @@ impl OAuth {
             ("response_type", "code"),
             ("redirect_uri", redirect_uri.as_str()),
             ("response_mode", "query"),
-            ("scope", &self.config.scopes()),
+            ("scope", self.config.scopes()),
             ("state", &state),
             ("code_challenge", &challenge),
             ("code_challenge_method", "S256"),
         ]);
         Ok((url.to_string(), state))
     }
-    fn redirect_uri(&self) -> String {
-        format!(
-            "{}/oauth/callback",
-            self.config.server.public_url.trim_end_matches('/')
-        )
-    }
     async fn exchange(&self, mut fields: Vec<(&str, String)>) -> Result<TokenResponse> {
         fields.extend([
             ("client_id", self.config.graph.client_id.clone()),
-            ("scope", self.config.scopes()),
+            ("scope", self.config.scopes().into()),
         ]);
-        if let Some(secret) = &self.client_secret {
-            fields.push(("client_secret", secret.clone()));
-        }
         let response = self
             .client
             .post(&self.token_endpoint)
@@ -170,15 +137,7 @@ impl OAuth {
         );
         super::bounded_json(response, 64_000).await
     }
-    pub async fn complete(&self, state: &str, cookie: &str, code: &str) -> Result<()> {
-        ensure!(constant_eq(state, cookie), "OAuth state/cookie mismatch");
-        self.complete_pending(state, code).await.map(|_| ())
-    }
     pub async fn complete_desktop(&self, state: &str, code: &str) -> Result<String> {
-        ensure!(
-            self.client_secret.is_none(),
-            "desktop login requires public client"
-        );
         self.complete_pending(state, code).await
     }
     async fn complete_pending(&self, state: &str, code: &str) -> Result<String> {
@@ -295,14 +254,7 @@ mod tests {
         store
             .put_token(&vault.seal(&serde_json::to_vec(&old).unwrap()).unwrap())
             .unwrap();
-        let mut oauth = OAuth::new(
-            config(),
-            reqwest::Client::new(),
-            "test-client-secret".into(),
-            store.clone(),
-            vault,
-        )
-        .unwrap();
+        let mut oauth = OAuth::new(config(), reqwest::Client::new(), store.clone(), vault).unwrap();
         oauth.token_endpoint = format!("{}/token", server.uri());
         Mock::given(method("POST")).and(path("/token")).and(body_string_contains("grant_type=refresh_token")).and(body_string_contains("refresh_token=test-old-refresh")).respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"access_token":"test-new-access","refresh_token":"test-new-refresh","expires_in":3600}))).expect(1).mount(&server).await;
         let (a, b) = tokio::join!(oauth.access_token(), oauth.access_token());
@@ -315,25 +267,27 @@ mod tests {
         assert_eq!(saved.refresh_token, "test-new-refresh");
     }
     #[tokio::test]
-    async fn authorization_checks_cookie_pkce_identity_and_replay() {
+    async fn authorization_checks_pkce_identity_and_replay() {
         let server = MockServer::start().await;
         let dir = tempfile::tempdir().unwrap();
         let store = Arc::new(Store::open(&dir.path().join("tokens.db")).unwrap());
         let mut oauth = OAuth::new(
             config(),
             reqwest::Client::new(),
-            "test-client-secret".into(),
             store.clone(),
             Vault::new(&STANDARD.encode([3; 32])).unwrap(),
         )
         .unwrap();
         oauth.token_endpoint = format!("{}/token", server.uri());
         oauth.me_endpoint = format!("{}/me", server.uri());
-        let (url, state) = oauth.begin().await.unwrap();
+        let (url, state) = oauth
+            .begin_desktop("http://localhost:34567/")
+            .await
+            .unwrap();
         assert!(url.contains("code_challenge_method=S256"));
         assert!(
             oauth
-                .complete(&state, "wrong-cookie", "test-code")
+                .complete_desktop("unknown-state", "test-code")
                 .await
                 .is_err()
         );
@@ -346,9 +300,9 @@ mod tests {
             )
             .mount(&server)
             .await;
-        assert!(oauth.complete(&state, &state, "test-code").await.is_err());
+        assert!(oauth.complete_desktop(&state, "test-code").await.is_err());
         assert!(store.token().unwrap().is_none());
-        assert!(oauth.complete(&state, &state, "test-code").await.is_err());
+        assert!(oauth.complete_desktop(&state, "test-code").await.is_err());
     }
 
     #[tokio::test]
@@ -358,7 +312,7 @@ mod tests {
         let store = Arc::new(Store::open(&dir.path().join("tokens.db")).unwrap());
         let mut config = (*config()).clone();
         config.graph.user_id = uuid::Uuid::nil().to_string();
-        let mut oauth = OAuth::new_public(
+        let mut oauth = OAuth::new(
             Arc::new(config),
             reqwest::Client::new(),
             store.clone(),

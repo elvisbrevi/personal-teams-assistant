@@ -1,15 +1,13 @@
 use crate::{
-    adapters::{graph::Graph, oauth::OAuth, teams},
-    pipeline::Pipeline,
+    adapters::{graph::Graph, teams},
     security::constant_eq,
-    simulation::{self, SimulationRequest},
 };
 use axum::{
     Router,
     body::Bytes,
-    extract::{DefaultBodyLimit, Form, Json, Query, State},
-    http::{HeaderMap, StatusCode, header},
-    response::{Html, IntoResponse, Redirect, Response},
+    extract::{DefaultBodyLimit, Query, State},
+    http::{StatusCode, header},
+    response::{IntoResponse, Response},
     routing::{get, post},
 };
 use serde::Deserialize;
@@ -17,164 +15,16 @@ use std::{collections::HashMap, sync::Arc};
 
 pub struct WebState {
     pub graph: Arc<Graph>,
-    pub oauth: Arc<OAuth>,
-    pub admin_key: String,
-    pub pipeline: Option<Arc<Pipeline>>,
 }
+/// Public listener reached through the tunnel: only Graph callbacks and liveness.
+/// Administration lives on the desktop host's authenticated loopback channel.
 pub fn router(state: Arc<WebState>) -> Router {
     Router::new()
         .route("/healthz", get(|| async { "ok" }))
-        .route("/oauth/login", get(login))
-        .route("/oauth/start", post(start))
-        .route("/oauth/callback", get(callback))
-        .route("/test", get(test_page))
-        .route("/test/app.js", get(test_script))
-        .route("/test/chat", post(test_chat))
         .route("/graph/notifications", post(notifications))
         .route("/graph/lifecycle", post(lifecycle))
         .layer(DefaultBodyLimit::max(256_000))
         .with_state(state)
-}
-/// Desktop public listener: only Graph callbacks may arrive through the tunnel.
-pub fn public_router(state: Arc<WebState>) -> Router {
-    Router::new()
-        .route("/healthz", get(|| async { "ok" }))
-        .route("/graph/notifications", post(notifications))
-        .route("/graph/lifecycle", post(lifecycle))
-        .layer(DefaultBodyLimit::max(256_000))
-        .with_state(state)
-}
-async fn test_page() -> impl IntoResponse {
-    (
-        [
-            (header::CACHE_CONTROL, "no-store"),
-            (
-                header::CONTENT_SECURITY_POLICY,
-                "default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'",
-            ),
-        ],
-        Html(include_str!("../../static/test.html")),
-    )
-}
-async fn test_script() -> impl IntoResponse {
-    (
-        [
-            (header::CONTENT_TYPE, "text/javascript; charset=utf-8"),
-            (header::CACHE_CONTROL, "no-store"),
-        ],
-        include_str!("../../static/test.js"),
-    )
-}
-async fn test_chat(
-    State(state): State<Arc<WebState>>,
-    headers: HeaderMap,
-    Json(input): Json<SimulationRequest>,
-) -> Response {
-    let bearer = headers
-        .get(header::AUTHORIZATION)
-        .and_then(|h| h.to_str().ok())
-        .and_then(|h| h.strip_prefix("Bearer "))
-        .unwrap_or("");
-    if !constant_eq(bearer, &state.admin_key) {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
-    let Some(base) = state.pipeline.as_ref() else {
-        return StatusCode::SERVICE_UNAVAILABLE.into_response();
-    };
-    if simulation::validate_request(&input).is_err() {
-        return StatusCode::BAD_REQUEST.into_response();
-    }
-    match simulation::run(base, input, None).await {
-        Ok(result) => Json(result).into_response(),
-        Err(_) => (
-            StatusCode::BAD_GATEWAY,
-            Json(serde_json::json!({"status":"error","reason":"provider_or_source_failed"})),
-        )
-            .into_response(),
-    }
-}
-async fn login() -> impl IntoResponse {
-    (
-        [
-            (header::CACHE_CONTROL, "no-store"),
-            (
-                header::CONTENT_SECURITY_POLICY,
-                "default-src 'none'; form-action 'self' https://login.microsoftonline.com; frame-ancestors 'none'",
-            ),
-        ],
-        Html(
-            "<!doctype html><html lang=es><meta charset=utf-8><title>Conectar Teams</title><h1>Conectar mi cuenta de Teams</h1><form action=/oauth/start method=post><label>Clave de administración <input name=key type=password required autocomplete=current-password></label><button>Continuar con Microsoft</button></form></html>",
-        ),
-    )
-}
-#[derive(Deserialize)]
-struct Login {
-    key: String,
-}
-async fn start(State(state): State<Arc<WebState>>, Form(form): Form<Login>) -> Response {
-    if !constant_eq(&form.key, &state.admin_key) {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
-    match state.oauth.begin().await {
-        Ok((url, csrf)) => {
-            let mut r = Redirect::to(&url).into_response();
-            r.headers_mut().insert(
-                header::SET_COOKIE,
-                format!(
-                    "teams_oauth={csrf}; HttpOnly; Secure; SameSite=Lax; Path=/oauth; Max-Age=600"
-                )
-                .parse()
-                .unwrap(),
-            );
-            r.headers_mut()
-                .insert(header::CACHE_CONTROL, "no-store".parse().unwrap());
-            r
-        }
-        Err(_) => StatusCode::SERVICE_UNAVAILABLE.into_response(),
-    }
-}
-async fn callback(
-    State(state): State<Arc<WebState>>,
-    Query(query): Query<HashMap<String, String>>,
-    headers: HeaderMap,
-) -> Response {
-    let cookie = headers
-        .get(header::COOKIE)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| {
-            s.split(';')
-                .find_map(|p| p.trim().strip_prefix("teams_oauth="))
-        })
-        .unwrap_or("");
-    let (Some(csrf), Some(code)) = (query.get("state"), query.get("code")) else {
-        return (
-            StatusCode::BAD_REQUEST,
-            "Autorización incompleta; vuelve a iniciar sesión.",
-        )
-            .into_response();
-    };
-    match state.oauth.complete(csrf, cookie, code).await {
-        Ok(()) => (
-            [
-                (
-                    header::SET_COOKIE,
-                    "teams_oauth=; HttpOnly; Secure; SameSite=Lax; Path=/oauth; Max-Age=0",
-                ),
-                (header::CACHE_CONTROL, "no-store"),
-                (header::REFERRER_POLICY, "no-referrer"),
-            ],
-            "Cuenta conectada. Puedes cerrar esta ventana.",
-        )
-            .into_response(),
-        Err(_) => {
-            tracing::warn!(event = "oauth_failed");
-            (
-                StatusCode::BAD_REQUEST,
-                "No se pudo autorizar la cuenta configurada.",
-            )
-                .into_response()
-        }
-    }
 }
 #[derive(Deserialize)]
 struct Batch {

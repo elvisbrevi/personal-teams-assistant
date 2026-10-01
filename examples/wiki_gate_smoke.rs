@@ -6,7 +6,6 @@ use personal_teams_assistant::{
     security,
 };
 use serde_json::json;
-use std::collections::BTreeMap;
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -81,7 +80,7 @@ async fn main() -> Result<()> {
     ] {
         let used = vec!["wiki:synthetic:p".into()];
         let answer = complete_answer(body, &used, &e, 3000)?;
-        let v=gate.evaluate(Stage::Final,json!({"question":"Según la wiki, explica el procedimiento de despliegue","evidence":e.text,"references":e.references,"used_sources":used,"answer":answer,"teams_messages":[]}),BTreeMap::new()).await?;
+        let v=gate.evaluate(Stage::Final,json!({"question":"Según la wiki, explica el procedimiento de despliegue","evidence":e.text,"references":e.references,"used_sources":used,"answer":answer,"teams_messages":[]})).await?;
         let allowed = v.selected == "allow" && v.allows(0.65);
         println!("{name}: allowed={allowed}, confidence={}", v.confidence);
         mismatches += usize::from(allowed != expected);
@@ -113,7 +112,7 @@ async fn main() -> Result<()> {
     ] {
         let used = vec!["wiki:synthetic:p".into(), "wiki:synthetic:third".into()];
         let answer = complete_answer(body, &used, &mixed, 3000)?;
-        let v=gate.evaluate(Stage::Final,json!({"question":"Explica el procedimiento documentado","evidence":mixed.text,"references":mixed.references,"used_sources":used,"answer":answer,"teams_messages":[]}),BTreeMap::new()).await?;
+        let v=gate.evaluate(Stage::Final,json!({"question":"Explica el procedimiento documentado","evidence":mixed.text,"references":mixed.references,"used_sources":used,"answer":answer,"teams_messages":[]})).await?;
         let allowed = v.selected == "allow" && v.allows(0.65);
         println!("{name}: allowed={allowed}, confidence={}", v.confidence);
         mismatches += usize::from(allowed != expected);
@@ -133,7 +132,7 @@ async fn main() -> Result<()> {
         text: text.into(),
     })
     .collect();
-    let v=gate.evaluate(Stage::Final,json!({"question":"Resume quién pidió revisar y quién indicó que faltaba validar","evidence":serde_json::to_string(&messages)?,"teams_messages":messages,"references":[],"used_sources":[],"answer":"Luis pidió revisar el procedimiento y Ana indicó que faltaba validar."}),BTreeMap::new()).await?;
+    let v=gate.evaluate(Stage::Final,json!({"question":"Resume quién pidió revisar y quién indicó que faltaba validar","evidence":serde_json::to_string(&messages)?,"teams_messages":messages,"references":[],"used_sources":[],"answer":"Luis pidió revisar el procedimiento y Ana indicó que faltaba validar."})).await?;
     let allowed = v.selected == "allow" && v.allows(0.65);
     println!(
         "teams_swapped_authors: allowed={allowed}, confidence={}",
@@ -154,7 +153,7 @@ async fn main() -> Result<()> {
         ),
     ] {
         let v = gate
-            .evaluate(Stage::Intent, json!({"message":message}), BTreeMap::new())
+            .evaluate(Stage::Intent, json!({"message":message}))
             .await?;
         let correct = v.selected == expected && v.allows(0.5);
         println!(
