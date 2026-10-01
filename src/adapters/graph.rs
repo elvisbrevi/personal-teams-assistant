@@ -812,8 +812,10 @@ impl MessageAdapter for Graph {
         })
     }
     async fn send(&self, m: &IncomingMessage, text: &str) -> Result<String> {
+        // Teams renders HTML bodies: titled links, lists and code blocks instead of raw Markdown.
+        let content = teams::html(text);
         ensure!(
-            text.len() <= 28_000,
+            content.len() <= 27_800,
             "Graph answer body exceeds the transport byte limit"
         );
         let resource = teams::canonical_resource(&m.resource)?;
@@ -833,16 +835,13 @@ impl MessageAdapter for Graph {
         } else {
             None
         };
-        let body = if let Some(nonce) = &nonce {
-            let escaped = text
-                .replace('&', "&amp;")
-                .replace('<', "&lt;")
-                .replace('>', "&gt;")
-                .replace('\n', "<br>");
-            json!({"body":{"contentType":"html","content":format!("<p>{escaped}</p><p><a href=\"https://personalteams.invalid/output/{nonce}\">PTA</a></p>")}})
-        } else {
-            json!({"body":{"contentType":"text","content":text}})
+        let content = match &nonce {
+            Some(nonce) => format!(
+                "{content}<p><a href=\"https://personalteams.invalid/output/{nonce}\">PTA</a></p>"
+            ),
+            None => content,
         };
+        let body = json!({"body":{"contentType":"html","content":content}});
         // Never retry a send: Graph provides no idempotency guarantee for this endpoint.
         let result = self.request(Method::POST, &path, Some(body), false).await?;
         let id = result["id"]
