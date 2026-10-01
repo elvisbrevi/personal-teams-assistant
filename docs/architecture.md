@@ -1,39 +1,42 @@
 # Arquitectura
 
-Referencia técnica para agentes de código. Describe cómo está construido el sistema, por dónde fluye un mensaje y qué invariantes no se pueden romper. El manual operativo (comandos `pta`) es la [skill incorporada](../desktop/src-tauri/skills/personal-teams-assistant/SKILL.md).
+Referencia técnica para agentes de código. Describe cómo está construido el sistema, por dónde fluye un mensaje y qué invariantes no se pueden romper. El manual operativo (comandos `pta`) es la [skill incorporada](../desktop/skills/personal-teams-assistant/SKILL.md).
 
 ## 1. Qué es
 
 Asistente personal de Microsoft Teams que responde **con la identidad del propio usuario** (OAuth delegado, sin bot). Recibe mensajes por webhooks de Microsoft Graph, decide si corresponde intervenir, recupera evidencia solo de fuentes autorizadas para esa conversación, redacta con un modelo de lenguaje (Codex o Claude Code mediante su CLI instalada, o la API de DeepSeek, en una cadena de respaldo), verifica en código referencias, URLs y datos sensibles, registra una revisión informativa de Jev (TypeSafe) y envía una sola vez. Si un control de código la retiene, no envía: la respuesta queda para la persona (y en el chat personal se le avisa).
 
-Se distribuye exclusivamente por Cargo. Un paquete (`personal-teams-desktop`) instala tres piezas:
+Se distribuye exclusivamente por Cargo. Un solo paquete, `personal-teams-assistant`, instala tres piezas (hasta 0.4.0 la app venía en un paquete aparte, `personal-teams-desktop`, ya obsoleto):
 
 | Pieza | Binario / ruta | Rol |
 | --- | --- | --- |
-| GUI + host | `personal-teams-desktop` | App Tauri de bandeja/barra de menús. Es el **único dueño** del perfil, las credenciales y el servicio Teams. Puede correr oculta (`--host`) o **sin interfaz** (`--headless`, o compilada sin la feature `gui` para Linux/servidores). |
+| GUI + host | `personal-teams-assistant` | App Tauri de bandeja/barra de menús. Es el **único dueño** del perfil, las credenciales y el servicio Teams. Puede correr oculta (`--host`) o **sin interfaz** (`--headless`, o compilada sin la feature `gui` para Linux/servidores). |
 | CLI | `pta` | Cliente administrativo. Habla con el host por IPC loopback autenticado; lo arranca oculto si no existe. |
-| Skill | `desktop/src-tauri/skills/personal-teams-assistant/` | Manual para agentes, compilado dentro de `pta` (`pta skill show/path/install`). |
+| Skill | `desktop/skills/personal-teams-assistant/` | Manual para agentes, compilado dentro de `pta` (`pta skill show/path/install`). |
 
 ## 2. Estructura del repositorio
 
 ```text
-Cargo.toml                    workspace + crate núcleo `personal-teams-assistant` (solo biblioteca)
+Cargo.toml                    paquete único `personal-teams-assistant`: biblioteca + binarios
+                              `personal-teams-assistant` (GUI/host) y `pta`; feature `gui` (Tauri)
+build.rs                      tauri-build desde `desktop/` (solo con `gui`), en OUT_DIR
 src/                          núcleo: pipeline, adaptadores Graph, Jev, LLM, conocimiento, herramientas, SQLite
   llm.rs                      contrato LlmProvider, prompts (`Model`), cadena de respaldo (`Chain`), validación
   llm/deepseek.rs             API DeepSeek (`/chat/completions`)
   llm/agent.rs                Codex (`codex exec`) y Claude Code (`claude -p`) como CLI sin herramientas; catálogo
-tests/integration.rs          integración con wiremock (Graph, Jev, DeepSeek simulados)
-examples/wiki_gate_smoke.rs   regresión opcional contra Jev real con hechos sintéticos
-desktop/src-tauri/            crate `personal-teams-desktop` (GUI, host, CLI, skill)
-  src/lib.rs                  host: Host/Shell, estado, arranque/parada, OAuth, túnel, ajustes, entrada `run`
-  src/gui.rs                  shell Tauri (feature `gui`): ventana, bandeja, comando `command` del WebView
-  src/headless.rs             shell sin interfaz: primer plano, SIGTERM/Ctrl-C, `--start`
-  src/control.rs              rutas del perfil, canal IPC (contrato 1), despachador único de operaciones
-  src/cli.rs                  `pta`: parseo, validación de argumentos, traducción a métodos IPC
-  src/github.rs               GitHub App con Device Flow, clonado/sync sin token en URL/argv
-  src/skill.rs                textos de la skill incorporados con include_str!
+  app.rs                      host: Host/Shell, estado, arranque/parada, OAuth, túnel, ajustes, entrada `run`
+  app/gui.rs                  shell Tauri (feature `gui`): ventana, bandeja, comando `command` del WebView
+  app/headless.rs             shell sin interfaz: primer plano, SIGTERM/Ctrl-C, `--start`
+  app/control.rs              rutas del perfil, canal IPC (contrato 1), despachador único, actualización
+  app/cli.rs                  `pta`: ayuda, parseo, validación de argumentos, traducción a métodos IPC
+  app/github.rs               GitHub App con Device Flow, clonado/sync sin token en URL/argv
+  app/skill.rs                textos de la skill incorporados con include_str!
+  main.rs, bin/pta.rs         binarios (`app::run`, `app::cli::run`)
+desktop/                      recursos de la app: tauri.conf.json, Info.plist, capabilities/, icons/
   ui/                         HTML/CSS/JS sin framework; llama a `control::command` vía invoke
   skills/                     skill operativa (fuente canónica)
+tests/integration.rs          integración con wiremock (Graph, Jev, DeepSeek simulados)
+examples/wiki_gate_smoke.rs   regresión opcional contra Jev real con hechos sintéticos
 config.example.toml           plantilla del perfil (`Config::desktop_template`)
 knowledge-map.example.toml    ejemplo sintético del mapa de fuentes
 scripts/export-public.py      exporta un snapshot sin historial privado (exige gitleaks)
@@ -62,13 +65,13 @@ flowchart LR
 - **Despachador único.** GUI y CLI pasan por `control::dispatch`, que serializa con `operations` y verifica `revision` (SHA-256 de config + mapa + túnel) para escrituras basadas en un snapshot. Mientras hay un login Microsoft/GitHub pendiente solo se permiten lecturas.
 - **Actualización.** `cargo install` no ejecuta nada al terminar y reemplaza el archivo mientras el host anterior sigue corriendo. `control.json` publica `binary` (tamaño y fecha del ejecutable al arrancar; los hosts anteriores no lo tienen). Si el host que corre se lanzó desde la **misma ruta** instalada y su huella ya no coincide, está desactualizado (`control::outdated_host`): el primer `pta` (salvo `capabilities`, `skill` y `doctor --offline`) o la app nueva lo retiran (`retire_outdated_host`: lee si el asistente corría, envía `app_quit` —que detiene asistente y túnel— y espera a que libere el lock, 60 s). Si corría, `pta` pregunta en la terminal si dejarlo corriendo con la versión nueva (sin terminal, `--json` o `--non-interactive` conserva el estado); la GUI nueva muestra el aviso `restart_offer` (`start_assistant` o `dismiss_restart_offer`); el host sin interfaz pregunta si hay terminal o conserva el estado. `start`, `restart`, `stop` y `app quit` deciden el estado por sí mismos. Un host lanzado desde otra ruta (p. ej. una compilación de desarrollo) nunca se retira así.
 - **El CLI lanza el host** (`host_executable`: binario hermano o `host-path.txt`) con `--host` en su propio grupo de procesos y espera el descriptor. El host hereda el entorno de `pta` (credenciales `NAME`/`NAME_FILE`, `PTA_HEADLESS`).
-- **Servicio.** `runtime::serve` corre como tarea Tokio dentro del host. `lib.rs::start` lo lanza, espera `ready` (60 s) y luego arranca `cloudflared` si corresponde. `stop` mata el túnel, envía `true` por el `watch` y espera 20 s antes de abortar. Cerrar el canal también cuenta como parada.
+- **Servicio.** `runtime::serve` corre como tarea Tokio dentro del host. `app.rs::start` lo lanza, espera `ready` (60 s) y luego arranca `cloudflared` si corresponde. `stop` mata el túnel, envía `true` por el `watch` y espera 20 s antes de abortar. Cerrar el canal también cuenta como parada.
 
 ### Host sin interfaz (Linux y servidores)
 
 ```sh
-cargo install personal-teams-desktop --no-default-features --locked   # sin Tauri/WebKit
-personal-teams-desktop --headless --start                              # primer plano; `--start` inicia el servicio
+cargo install personal-teams-assistant --no-default-features --locked   # sin Tauri/WebKit
+personal-teams-assistant --headless --start                              # primer plano; `--start` inicia el servicio
 ```
 
 - Sin la feature `gui` el binario siempre es headless; con ella, `--headless` o `PTA_HEADLESS=1` lo fuerzan. Mismo perfil, contrato y operaciones que la GUI; se opera solo con `pta`.
@@ -216,7 +219,7 @@ Reglas de respuesta (también en `AGENTS.md`): documentación Wiki propia puede 
 - Toda decisión de modelo es consultiva: audiencias, rutas, URLs, herramientas y límites se verifican en código. Pregunta, documentos y resultados se presentan a los modelos como datos no confiables.
 - Las CLI de modelos corren sin herramientas (ni shell, ni lectura de archivos, ni web, ni subagentes), sin configuración de usuario ni sesión persistente, en un directorio vacío y sin las credenciales del host; su salida pasa por los mismos controles (`Redactor`, Jev final, límites) que la de DeepSeek.
 - `security::Redactor`: secretos cargados (coincidencia exacta), tokens/JWT/claves, credenciales en URL, correos, teléfonos, RUT, `secret://` y `sensitive_patterns`. Se aplica a pregunta, evidencia, propuesta y auditoría; una propuesta con patrones sensibles se bloquea.
-- Logs: solo eventos fijos propios (`tracing`, filtro `personal_teams_assistant=info,personal_teams_desktop=info`); no se registran prompts, cuerpos HTTP ni errores de proveedores. Los errores hacia GUI/CLI se traducen a mensajes saneados (`lib.rs::fail`, `cli.rs::run`).
+- Logs: solo eventos fijos propios (`tracing`, filtro `personal_teams_assistant=info`); no se registran prompts, cuerpos HTTP ni errores de proveedores. Los errores hacia GUI/CLI se traducen a mensajes saneados (`lib.rs::fail`, `cli.rs::run`).
 - Clientes HTTP sin redirects; tamaños de respuesta acotados (`adapters::bounded_json`).
 - WebView con CSP estricta (`connect-src 'none'`); solo `control::command` está expuesto a la UI.
 - Git: clones gestionados con askpass (`PERSONAL_TEAMS_GIT_ASKPASS`), sin token en URL/argv; `sync` exige checkout limpio y fast-forward.
@@ -245,16 +248,18 @@ Para añadir una operación: método en `control::operate` (ventana o navegador 
 
 ```sh
 cargo fmt --all --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
+cargo clippy --all-targets -- -D warnings
+cargo clippy --all-targets --no-default-features -- -D warnings
+cargo test
+cargo test --no-default-features
 ```
 
 - Unitarias junto al código; integración en `tests/integration.rs` con `wiremock` y dobles (`NoGate`, `NoLlm`, `NoTools`, `IntentGate`…). Ninguna prueba usa red ni credenciales reales. La cadena se prueba con backends falsos (respaldo y regreso al predeterminado llamada a llamada) y las CLI con un script falso que registra stdin, argv y entorno (Unix).
 - `pta test providers` prueba cada proveedor activo por separado (un respaldo no oculta un predeterminado roto); consume API/uso de suscripción.
 - `pta test simulate` / `pta chat` ejecutan el pipeline real con un adaptador que nunca envía a Graph (`simulation::TestAdapter`, estado `sent` = `simulation-only`). `pta test providers` usa hechos sintéticos y consume API.
 - `cargo run --example wiki_gate_smoke` (credencial Jev existente) evalúa el control final con hechos sintéticos.
-- CI (`.github/workflows/ci.yml`): núcleo en Ubuntu; host sin interfaz y CLI en Ubuntu con `--no-default-features` (clippy, test); GUI/CLI en macOS (check, clippy, test) y Windows (check).
-- Toda operación nueva debe compilar en ambas variantes: `cargo clippy -p personal-teams-desktop --all-targets [--no-default-features] -- -D warnings`. El código de Tauri solo vive en `gui.rs`.
+- CI (`.github/workflows/ci.yml`): en Ubuntu, fmt y el paquete sin la GUI (`--no-default-features`: biblioteca, host sin interfaz y CLI; clippy, test); con la GUI en macOS (check, clippy, test) y Windows (check).
+- Toda operación nueva debe compilar en ambas variantes: `cargo clippy --all-targets [--no-default-features] -- -D warnings`. El código de Tauri solo vive en `src/app/gui.rs` (una prueba comprueba que la UI de `desktop/ui` queda incrustada).
 
 ## 13. Recetas de cambio
 

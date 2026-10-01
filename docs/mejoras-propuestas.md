@@ -5,7 +5,7 @@ Propuestas surgidas al revisar el código completo (2026-10-01). Salvo lo indica
 ## 1. Arquitectura
 
 ### P1 — Operaciones del host tipadas
-- **Problema:** `desktop/src-tauri/src/lib.rs` (≈1.300 líneas) mezcla UI de bandeja, arranque del servicio, OAuth, túnel, ajustes y Wiki. `control::operate` despacha por strings (`"start_assistant"`) y los códigos de salida se deducen de prefijos de texto (`"[invalid_input] …"`, `"[not_ready] …"`).
+- **Problema:** `src/app.rs` (≈1.300 líneas) mezcla UI de bandeja, arranque del servicio, OAuth, túnel, ajustes y Wiki. `control::operate` despacha por strings (`"start_assistant"`) y los códigos de salida se deducen de prefijos de texto (`"[invalid_input] …"`, `"[not_ready] …"`).
 - **Estado:** las operaciones ya no dependen de Tauri (`Host` + `Shell`, `gui.rs`/`headless.rs`), pero siguen despachándose por strings.
 - **Propuesta:** `enum Operation` (serde) y `enum HostError { InvalidInput, NotReady, Conflict, Network, Pending, Failed }` que mapee a exit codes. Tauri e IPC quedan como adaptadores finos.
 - **Beneficio:** pruebas de operaciones sin ventana, menos errores al añadir comandos, mensajes coherentes GUI/CLI.
@@ -82,19 +82,19 @@ Propuestas surgidas al revisar el código completo (2026-10-01). Salvo lo indica
 
 - **P1 — Firma de código estable en macOS.** Cada `cargo install` produce un binario sin firma estable; el Llavero puede volver a preguntar «Permitir acceso» (las credenciales no se pierden). Firmar localmente con un certificado propio estable tras instalar (o un script `pta`-asistido) mantiene la ACL entre versiones.
 - **P2 — Límite de tasa y concurrencia en el listener público** (`tower` `ConcurrencyLimit`/`RateLimit` en `webhook::router`); hoy cualquier origen que alcance el túnel puede forzar validaciones y lecturas de la base.
-- **P2 — Ruta absoluta configurable de `cloudflared`** en lugar de buscar en `/opt/homebrew`, `/usr/local` y `PATH` (`lib.rs::start`).
+- **P2 — Ruta absoluta configurable de `cloudflared`** en lugar de buscar en `/opt/homebrew`, `/usr/local` y `PATH` (`app.rs::start`).
 - **P2 — Log local rotativo** con los mismos eventos fijos que ya emite `tracing`, para diagnosticar tras un cierre del host (hoy solo hay tabla `events`).
 - **P3 — Rotación guiada de `STATE_ENCRYPTION_KEY`** (re-cifrado de `vault`) y de `GRAPH_WEBHOOK_SECRET` (recrear suscripciones propias).
 
 ## 6. Calidad y pruebas
 
-- **P1 — Comprobar el JavaScript en CI** (`node --check desktop/src-tauri/ui/app.js` como mínimo).
+- **P1 — Comprobar el JavaScript en CI** (`node --check desktop/ui/app.js` como mínimo).
 - **P2 — Pruebas del host sin Tauri** una vez extraídas las operaciones (arranque/parada, revisión, journal de ajustes, protección de identidad y clave).
 - **P2 — Pruebas de propiedades** (`proptest`) para `teams::canonical_resource`, `knowledge` (rutas) y `Redactor`.
 - **P2 — Prueba de punta a punta en Linux real** del host sin interfaz con systemd, túnel y una pregunta nueva en Teams (CI solo compila y ejecuta pruebas unitarias en Ubuntu).
 
 ## 7. Distribución
 
-- **Publicación.** 0.4.0 se publica en crates.io (cadena de modelos, registro de mensajes, actualización al primer uso). Orden: `personal-teams-assistant` y luego `personal-teams-desktop`; revisar los paquetes con `cargo package --list` y gitleaks antes de publicar.
+- **Publicación.** Un solo crate, `personal-teams-assistant` (0.5.0: biblioteca, GUI/host y `pta`). El crate anterior `personal-teams-desktop` queda obsoleto. Revisar el paquete con `cargo package --list` y gitleaks antes de publicar.
 - **P2 — Linux con Secret Service** opcional (cuando exista D-Bus) en lugar del almacén de archivos.
 - **P2 — Windows funcional:** probar bandeja, Credential Manager, ACL e inicio/parada antes de anunciarlo.

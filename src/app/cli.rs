@@ -1,6 +1,6 @@
-use crate::control::{self, Reply, Request};
+use crate::app::control::{self, Reply, Request};
+use crate::{config::Config, knowledge::KnowledgeMap};
 use anyhow::{Context, Result, ensure};
-use personal_teams_assistant::{config::Config, knowledge::KnowledgeMap};
 use serde_json::{Value, json};
 use std::{
     io::{IsTerminal, Read},
@@ -76,7 +76,7 @@ Opciones
   --json                   Respuesta JSON {contract, version, ok, code, exit_code, message, data, revision}.
   --non-interactive        Nunca pregunta ni abre el navegador.
 
-Actualizar: cargo install personal-teams-desktop --locked. El primer comando pta (o abrir la app) detiene
+Actualizar: cargo install personal-teams-assistant --locked. El primer comando pta (o abrir la app) detiene
 el host anterior (asistente y túnel) y pregunta si dejar el asistente corriendo con la versión nueva.
 Fuentes nuevas nacen deshabilitadas y sin audiencias. Credenciales solo por stdin.
 Salida: 0 ok, 1 falló, 2 entrada inválida, 3 no listo, 4 autorización pendiente, 5 dependencia o red, 6 conflicto o versión.
@@ -270,7 +270,7 @@ async fn retire_outdated_host(command: &str, action: &str, interactive: bool) ->
         eprintln!("El asistente estaba detenido; inícialo con `pta start` cuando quieras.");
         return Ok(());
     }
-    if !crate::keep_running_after_update(interactive) {
+    if !crate::app::keep_running_after_update(interactive) {
         eprintln!("El asistente queda detenido; inícialo con `pta start` cuando quieras.");
         return Ok(());
     }
@@ -302,7 +302,7 @@ async fn execute(mut args: Vec<String>) -> Result<Reply> {
                 json!({"contract":control::CONTRACT,"commands":HELP,"skill_version":env!("CARGO_PKG_VERSION")}),
             ));
         }
-        "skill" => return crate::skill::command(action, args.get(2).map(String::as_str)),
+        "skill" => return crate::app::skill::command(action, args.get(2).map(String::as_str)),
         "status" if control::existing_host().is_err() => return safe_status_stopped(),
         "stop" if control::existing_host().is_err() => {
             return Ok(Reply::success(json!({"running":false})));
@@ -318,7 +318,7 @@ async fn execute(mut args: Vec<String>) -> Result<Reply> {
         let dir = control::profile_dir()?;
         let config: Config = toml::from_str(&std::fs::read_to_string(dir.join("config.toml"))?)?;
         let map = KnowledgeMap::load(&config.knowledge_map)?;
-        crate::validate_local(&config, &map)?;
+        crate::app::validate_local(&config, &map)?;
         return Ok(Reply::success(
             json!({"offline_valid":true,"network_checked":false,"host_running":control::existing_host().is_ok()}),
         ));
@@ -331,16 +331,12 @@ async fn execute(mut args: Vec<String>) -> Result<Reply> {
             serde_json::from_str::<Value>(&stdin_text()?).context("input must be Wiki JSON")?
         };
         match operation {
-            "search" => serde_json::from_value::<personal_teams_assistant::ado::wiki::SearchInput>(
-                value.clone(),
-            )
-            .context("invalid Wiki search input")?
-            .validate()?,
-            "read" => serde_json::from_value::<personal_teams_assistant::ado::wiki::ReadInput>(
-                value.clone(),
-            )
-            .context("invalid Wiki read input")?
-            .validate()?,
+            "search" => serde_json::from_value::<crate::ado::wiki::SearchInput>(value.clone())
+                .context("invalid Wiki search input")?
+                .validate()?,
+            "read" => serde_json::from_value::<crate::ado::wiki::ReadInput>(value.clone())
+                .context("invalid Wiki read input")?
+                .validate()?,
             _ => {}
         }
         return call(
@@ -876,13 +872,13 @@ mod wiki_tests {
             );
         }
         assert!(
-            serde_json::from_value::<personal_teams_assistant::ado::wiki::SearchInput>(
+            serde_json::from_value::<crate::ado::wiki::SearchInput>(
                 json!({"query":"deploy","organization":"https://evil.test"})
             )
             .is_err()
         );
         assert!(
-            serde_json::from_value::<personal_teams_assistant::ado::wiki::SearchInput>(
+            serde_json::from_value::<crate::ado::wiki::SearchInput>(
                 json!({"query":"deploy","author_mode":"infer_mine"})
             )
             .is_err()

@@ -71,6 +71,11 @@ fn start_host(app: &tauri::App, host_lock: fs::File) -> Result<Arc<Host>> {
     Ok(host)
 }
 
+/// Window configuration and UI assets, embedded from `desktop/` (generated once per binary).
+fn context() -> tauri::Context<tauri::Wry> {
+    tauri::generate_context!("desktop/tauri.conf.json")
+}
+
 pub(crate) fn run(host_lock: fs::File, restart_offer: bool) {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
@@ -121,7 +126,7 @@ pub(crate) fn run(host_lock: fs::File, restart_offer: bool) {
                 let _ = window.hide();
             }
         })
-        .build(tauri::generate_context!())
+        .build(context())
         .expect("cannot build desktop application")
         .run(|app, event| match event {
             // Native macOS Quit/termination may bypass ExitRequested and deliver Exit directly.
@@ -144,4 +149,19 @@ pub(crate) fn run(host_lock: fs::File, restart_offer: bool) {
             tauri::RunEvent::Reopen { .. } => show_main(app),
             _ => {}
         });
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn window_assets_are_embedded_from_the_desktop_directory() {
+        let context = super::context();
+        for asset in ["index.html", "app.js", "style.css"] {
+            assert!(
+                context.assets().get(&asset.into()).is_some(),
+                "{asset} is not embedded"
+            );
+        }
+        assert_eq!(context.config().identifier, "dev.personalteams.assistant");
+    }
 }

@@ -24,10 +24,17 @@ fn main() {
 fn tauri_main() {
     // Tauri emits editor schemas relative to cwd. Keep generated files in OUT_DIR
     // so Cargo's package verification sees an immutable source tree.
-    let source = env::current_dir().unwrap();
+    // The app's Tauri sources live under desktop/; the manifest at the package root.
+    let root = env::current_dir().unwrap();
+    let source = root.join("desktop");
     let staging = std::path::PathBuf::from(env::var_os("OUT_DIR").unwrap()).join("tauri-source");
     fs::create_dir_all(&staging).unwrap();
-    for name in ["Cargo.toml", "tauri.conf.json", "Info.plist"] {
+    println!(
+        "cargo:rerun-if-changed={}",
+        root.join("Cargo.toml").display()
+    );
+    fs::copy(root.join("Cargo.toml"), staging.join("Cargo.toml")).unwrap();
+    for name in ["tauri.conf.json", "Info.plist"] {
         println!("cargo:rerun-if-changed={}", source.join(name).display());
         fs::copy(source.join(name), staging.join(name)).unwrap();
     }

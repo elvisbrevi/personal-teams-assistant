@@ -1,11 +1,4 @@
-use anyhow::{Context, Result, ensure};
-use axum::{
-    Router,
-    extract::{Query, State},
-    http::StatusCode,
-    routing::get,
-};
-use personal_teams_assistant::{
+use crate::{
     adapters::oauth::OAuth,
     config::Config,
     knowledge::{Access, KnowledgeMap},
@@ -13,6 +6,13 @@ use personal_teams_assistant::{
     security::Vault,
     simulation::{SimulationRequest, SimulationResult},
     state::Store,
+};
+use anyhow::{Context, Result, ensure};
+use axum::{
+    Router,
+    extract::{Query, State},
+    http::StatusCode,
+    routing::get,
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -54,7 +54,7 @@ struct Running {
     tunnel: Option<tokio::process::Child>,
 }
 
-struct DesktopState {
+pub(crate) struct DesktopState {
     operations: Mutex<()>,
     loaded_config: Mutex<Option<Config>>,
     config_path: PathBuf,
@@ -179,11 +179,7 @@ fn validate_local(config: &Config, map: &KnowledgeMap) -> Result<()> {
     }
     for resource in &map.resources {
         if let Access::File { repository, path } = &resource.access {
-            personal_teams_assistant::knowledge::read_repository_file(
-                &map.repositories,
-                repository,
-                path,
-            )?;
+            crate::knowledge::read_repository_file(&map.repositories, repository, path)?;
         }
     }
     Ok(())
@@ -366,7 +362,7 @@ fn credential_names(config: &Config) -> Vec<String> {
 /// only while DeepSeek is in the LLM chain; Codex and Claude use their own CLI login.
 fn required_credentials(config: &Config) -> Vec<String> {
     let mut names = credential_names(config);
-    if !personal_teams_assistant::llm::uses_deepseek(&config.llm) {
+    if !crate::llm::uses_deepseek(&config.llm) {
         names.retain(|name| name != "DEEPSEEK_API_KEY");
     }
     names
@@ -965,11 +961,11 @@ fn commit_settings(
     Ok(())
 }
 struct ProfileGraph {
-    graph: personal_teams_assistant::adapters::graph::Graph,
+    graph: crate::adapters::graph::Graph,
     _lock: fs::File,
 }
 impl std::ops::Deref for ProfileGraph {
-    type Target = personal_teams_assistant::adapters::graph::Graph;
+    type Target = crate::adapters::graph::Graph;
     fn deref(&self) -> &Self::Target {
         &self.graph
     }
@@ -1008,7 +1004,7 @@ async fn profile_graph(state: &DesktopState) -> Result<ProfileGraph> {
     )?);
     Ok(ProfileGraph {
         _lock: dataset_lock,
-        graph: personal_teams_assistant::adapters::graph::Graph {
+        graph: crate::adapters::graph::Graph {
             client,
             token,
             config,
@@ -1050,7 +1046,7 @@ async fn enable_self_chat(state: &DesktopState, id: Option<&str>) -> Result<serd
             .filter(|c| c.id == id)
             .map(|c| c.enabled_at)
             .unwrap_or_else(|| chrono::Utc::now().timestamp_millis());
-        config.graph.self_chat = Some(personal_teams_assistant::config::SelfChat {
+        config.graph.self_chat = Some(crate::config::SelfChat {
             id,
             user_id: config.graph.user_id.clone(),
             enabled_at,
@@ -1107,7 +1103,7 @@ fn import_secret_from_stdin(name: &str) -> Result<()> {
     security::put_desktop_secret("default", name, value)
 }
 
-/// Entry point of `personal-teams-desktop`. Without the `gui` feature, or with `--headless`
+/// Entry point of the `personal-teams-assistant` binary. Without the `gui` feature, or with `--headless`
 /// (or `PTA_HEADLESS=1`), the host runs without a window and is operated only through `pta`.
 /// After an update stopped a running assistant, ask on the terminal whether to keep it
 /// running with the new build. Without a terminal (or when asked not to prompt) the previous
@@ -1189,7 +1185,7 @@ pub fn run() {
     };
     // Provider crates must never log prompts or content.
     tracing_subscriber::fmt()
-        .with_env_filter("personal_teams_assistant=info,personal_teams_desktop=info")
+        .with_env_filter("personal_teams_assistant=info")
         .with_writer(std::io::stderr)
         .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stderr()))
         .try_init()
@@ -1215,7 +1211,7 @@ async fn azure_wiki(
     operation: String,
     input: serde_json::Value,
 ) -> std::result::Result<serde_json::Value, String> {
-    use personal_teams_assistant::{ado::wiki, tools::ToolSpec};
+    use crate::{ado::wiki, tools::ToolSpec};
     let config = read_config(&state.config_path).map_err(fail)?;
     let map = KnowledgeMap::load(&state.map_path).map_err(fail)?;
     let source = map
@@ -1239,12 +1235,8 @@ async fn azure_wiki(
     else {
         return Err("[invalid_input] Source is not an Azure DevOps Wiki tool.".into());
     };
-    let catalog = personal_teams_assistant::knowledge::read_repository_file(
-        &map.repositories,
-        repository,
-        path,
-    )
-    .map_err(fail)?;
+    let catalog = crate::knowledge::read_repository_file(&map.repositories, repository, path)
+        .map_err(fail)?;
     let key = security::resolve(secret_ref, &config.secrets).map_err(|_| {
         "[not_ready] Azure credential unavailable; inspect credentials list.".to_owned()
     })?;

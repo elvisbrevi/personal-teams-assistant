@@ -131,12 +131,31 @@ fn fingerprint(path: &Path) -> Option<String> {
         .as_nanos();
     Some(format!("{}-{modified}", metadata.len()))
 }
-/// A running host started from `installed` before that file was replaced (a new install).
-/// A host started from another path (e.g. a development build) is never considered outdated.
+/// Host binary installed by this package, and the one installed beside `pta` by the former
+/// `personal-teams-desktop` package (0.4.0 and earlier).
+const HOST_BINARY: &str = "personal-teams-assistant";
+const LEGACY_HOST_BINARY: &str = "personal-teams-desktop";
+/// A running host started from `installed` before that file was replaced (a new install),
+/// the former package's host installed beside it, or a host whose executable was
+/// uninstalled. A host started from another path (e.g. a development build) is never
+/// considered outdated.
 fn outdated_at(dir: &Path, installed: &Path) -> Result<bool> {
     existing_host_at(dir)?;
     let endpoint: Endpoint = serde_json::from_slice(&fs::read(dir.join("control.json"))?)?;
     let running = PathBuf::from(fs::read_to_string(dir.join("host-path.txt"))?.trim());
+    if !running.is_file() {
+        return Ok(true);
+    }
+    let same_directory = running
+        .parent()
+        .zip(installed.parent())
+        .is_some_and(|(a, b)| fs::canonicalize(a).ok() == fs::canonicalize(b).ok());
+    if same_directory
+        && running.file_stem().and_then(|n| n.to_str()) == Some(LEGACY_HOST_BINARY)
+        && installed.file_stem().and_then(|n| n.to_str()) == Some(HOST_BINARY)
+    {
+        return Ok(true);
+    }
     if fs::canonicalize(&running)? != fs::canonicalize(installed)? {
         return Ok(false);
     }
@@ -169,13 +188,14 @@ pub async fn retire_outdated_host() -> Result<bool> {
 pub fn installed_host() -> Result<PathBuf> {
     host_executable()
 }
-/// `cargo install` places `pta` beside `personal-teams-desktop`; the host also registers its path.
+/// `cargo install` places `pta` beside `personal-teams-assistant`; the host also registers
+/// its path.
 fn host_executable() -> Result<PathBuf> {
     let exe = std::env::current_exe()?;
     let sibling = exe.with_file_name(if cfg!(windows) {
-        "personal-teams-desktop.exe"
+        format!("{HOST_BINARY}.exe")
     } else {
-        "personal-teams-desktop"
+        HOST_BINARY.to_owned()
     });
     if sibling.is_file() {
         return Ok(sibling);
@@ -252,8 +272,7 @@ pub async fn client(request: Request, start_host: bool) -> Result<Reply> {
             response.status().is_success(),
             "control endpoint rejected the request"
         );
-        let reply: Reply =
-            personal_teams_assistant::adapters::bounded_json(response, 2_000_000).await?;
+        let reply: Reply = crate::adapters::bounded_json(response, 2_000_000).await?;
         ensure!(reply.contract == CONTRACT, "incompatible reply contract");
         return Ok(reply);
     }
@@ -667,13 +686,11 @@ async fn operate(
         }
         "llm_providers" => {
             // Installed CLIs, their models and efforts; probes only local commands.
-            serde_json::to_value(personal_teams_assistant::llm::catalog().await).map_err(fail)?
+            serde_json::to_value(crate::llm::catalog().await).map_err(fail)?
         }
         "test_providers" => {
             let config = read_config(&state.config_path).map_err(fail)?;
-            personal_teams_assistant::diagnostics::providers(&config)
-                .await
-                .map_err(fail)?
+            crate::diagnostics::providers(&config).await.map_err(fail)?
         }
         "test_connectivity" => {
             let was_running = state.running.lock().await.is_some();
@@ -832,7 +849,7 @@ mod tests {
     #[test]
     fn only_a_replaced_installed_executable_marks_the_running_host_outdated() {
         let dir = tempfile::tempdir().unwrap();
-        let installed = dir.path().join("personal-teams-desktop");
+        let installed = dir.path().join(HOST_BINARY);
         let other = dir.path().join("development-build");
         fs::write(&installed, b"old build").unwrap();
         fs::write(&other, b"dev build").unwrap();
@@ -866,6 +883,13 @@ mod tests {
         // A host started from another path is never retired by this install.
         publish(None, &other);
         assert!(!outdated_at(dir.path(), &installed).unwrap());
+        // The former package's host beside the new one, or an uninstalled host, is outdated.
+        let legacy = dir.path().join(LEGACY_HOST_BINARY);
+        fs::write(&legacy, b"0.4.0 host").unwrap();
+        publish(fingerprint(&legacy), &legacy);
+        assert!(outdated_at(dir.path(), &installed).unwrap());
+        fs::remove_file(&legacy).unwrap();
+        assert!(outdated_at(dir.path(), &installed).unwrap());
     }
     #[test]
     fn local_control_requires_instance_auth_and_rejects_browser_origins() {
