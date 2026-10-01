@@ -1139,6 +1139,16 @@ pub fn question_query(question: &str) -> Result<String> {
         "amplía",
         "amplia",
         "eso",
+        "invoca",
+        "invocar",
+        "llama",
+        "llamar",
+        "consume",
+        "consumir",
+        "si",
+        "quiero",
+        "necesito",
+        "puedo",
     ];
     let question = question.split(['.', '\n']).next().unwrap_or(question);
     let terms: Vec<_> = question
@@ -1619,6 +1629,10 @@ mod tests {
         assert_eq!(
             question_query("¿Cómo se usa el microservicio Crear SPS?").unwrap(),
             "Crear SPS"
+        );
+        assert_eq!(
+            question_query("¿Cómo se invoca el microservicio Crear SPS si quiero pagar?").unwrap(),
+            "Crear SPS pagar"
         );
         assert!(question_query("busca en la wiki").is_err());
         assert!(question_query("Según la wiki, dame más detalles").is_err());

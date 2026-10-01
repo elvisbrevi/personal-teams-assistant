@@ -93,7 +93,7 @@ async fn deterministic_greeting_sends_without_jev_or_llm() {
     Mock::given(method("POST"))
         .and(path("/chats/chat1/messages"))
         .and(body_partial_json(
-            json!({"body":{"contentType":"text","content":"¡Hola!"}}),
+            json!({"body":{"contentType":"html","content":"<p>¡Hola!</p>"}}),
         ))
         .respond_with(ResponseTemplate::new(201).set_body_json(json!({"id":"sent1"})))
         .expect(1)
@@ -1396,6 +1396,144 @@ async fn wiki_priority_current_request_mixed_citations_and_complete_gate_without
             );
             assert!(server.received_requests().await.unwrap().is_empty());
         }
+    }
+}
+struct FollowUpLlm {
+    resolve: bool,
+}
+#[async_trait]
+impl LlmProvider for FollowUpLlm {
+    fn name(&self) -> &str {
+        "synthetic-follow-up"
+    }
+    async fn standalone_request(
+        &self,
+        previous_question: &str,
+        previous_answer: &str,
+        current: &str,
+    ) -> Result<Option<personal_teams_assistant::llm::StandaloneRequest>> {
+        assert_eq!(previous_question, "como se usa el microservicio crearsps");
+        assert!(!previous_answer.contains("Fuentes"));
+        assert_eq!(current, "como se invoca si quiero pagar 2 servicios?");
+        anyhow::ensure!(self.resolve, "provider unavailable");
+        Ok(Some(personal_teams_assistant::llm::StandaloneRequest {
+            question: "¿Cómo se invoca el microservicio Crear SPS para pagar 2 servicios?".into(),
+            topic: "Crear SPS".into(),
+        }))
+    }
+    async fn generate(&self, _: GenerationInput<'_>) -> Result<String> {
+        unreachable!()
+    }
+    async fn generate_response(
+        &self,
+        input: GenerationInput<'_>,
+    ) -> Result<personal_teams_assistant::llm::GeneratedAnswer> {
+        assert!(input.question.contains(
+            "Solicitud actual (tiene prioridad): como se invoca si quiero pagar 2 servicios?"
+        ));
+        assert_eq!(
+            input.question.contains(
+                "interpretada con el contexto: ¿Cómo se invoca el microservicio Crear SPS"
+            ),
+            self.resolve
+        );
+        Ok(personal_teams_assistant::llm::GeneratedAnswer {
+            answer: "Envía un `POST` con **dos elementos** en `Servicios`:\n\n```json\n{\"Servicios\": [{}, {}]}\n```".into(),
+            detailed: false,
+            used_sources: vec![],
+        })
+    }
+}
+struct AllowFinal;
+#[async_trait]
+impl DecisionGate for AllowFinal {
+    async fn evaluate(
+        &self,
+        stage: Stage,
+        _: serde_json::Value,
+    ) -> Result<personal_teams_assistant::decision::Verdict> {
+        assert!(matches!(stage, Stage::Final));
+        Ok(personal_teams_assistant::decision::Verdict {
+            selected: "allow".into(),
+            confidence: 0.99,
+        })
+    }
+    async fn select_references(
+        &self,
+        _: &str,
+        _: &str,
+        references: &[personal_teams_assistant::evidence::Reference],
+        _: &[String],
+    ) -> Result<Vec<String>> {
+        Ok(references.iter().map(|r| r.id.clone()).collect())
+    }
+}
+#[tokio::test]
+async fn follow_up_without_subject_searches_the_previous_topic_and_keeps_it_for_the_next_turn() {
+    for resolve in [true, false] {
+        let server = MockServer::start().await;
+        let dir = tempfile::tempdir().unwrap();
+        let store = support::store(&dir);
+        let graph = support::graph(&server, store.clone());
+        let mut cfg = (*graph.config).clone();
+        cfg.policy.dry_run = true;
+        store
+            .save_context(
+                "chats/simulation-follow",
+                "como se usa el microservicio crearsps",
+                "El Microservicio Crear SPS recibe un POST con Servicios[].",
+            )
+            .unwrap();
+        let pipeline = Pipeline {
+            config: Arc::new(cfg),
+            store: store.clone(),
+            adapter: graph,
+            gate: Arc::new(AllowFinal),
+            knowledge: KnowledgeMap {
+                repositories: BTreeMap::new(),
+                resources: vec![wiki_resource()],
+            },
+            llm: Arc::new(FollowUpLlm { resolve }),
+            tools: Arc::new(WikiTools {
+                result: synthetic_wiki_result(),
+                // Without a resolution the literal request is kept (previous behavior).
+                question: if resolve {
+                    "Crear SPS"
+                } else {
+                    "como se invoca si quiero pagar 2 servicios?"
+                },
+            }),
+            redactor: redactor(),
+        };
+        let sources = vec!["manuals".into()];
+        let result = simulation::run(
+            &pipeline,
+            SimulationRequest {
+                session: "follow".into(),
+                text: "como se invoca si quiero pagar 2 servicios?".into(),
+                group: false,
+                mentioned: false,
+                sources: sources.clone(),
+            },
+            Some(&sources),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.status, "dry_run", "{}", result.reason);
+        let answer = result.answer.unwrap();
+        assert!(answer.contains("\n\n**Fuentes**\n- [page1]("));
+        let context = store.context("chats/simulation-follow").unwrap().unwrap();
+        assert_eq!(
+            context.question,
+            if resolve {
+                "¿Cómo se invoca el microservicio Crear SPS para pagar 2 servicios?"
+            } else {
+                "como se invoca si quiero pagar 2 servicios?"
+            }
+        );
+        assert!(context.answer.starts_with("Envía un `POST`"));
+        assert!(!context.answer.contains("Fuentes"));
+        assert!(server.received_requests().await.unwrap().is_empty());
     }
 }
 #[tokio::test]

@@ -88,12 +88,14 @@ impl Pipeline {
             intent.selected == "greeting"
         };
         let mut context_question = None;
+        let mut context_answer = None;
         let mut answer_limit = self.config.policy.max_answer_chars;
         let proposal = if is_greeting {
             audit.reason = "deterministic_greeting".into();
             self.config.policy.greeting.clone()
         } else {
-            let tool_question = if matches!(
+            let previous = self.store.context(&message.conversation)?;
+            let more_details = matches!(
                 current
                     .to_lowercase()
                     .trim_matches(['¿', '?', '.', '!'])
@@ -105,16 +107,13 @@ impl Pipeline {
                     | "explica más"
                     | "y eso"
                     | "amplía"
-            ) {
-                self.store
-                    .context(&message.conversation)?
-                    .map(|p| p.question)
-                    .unwrap_or_else(|| current.clone())
-            } else {
-                current.clone()
+            );
+            let mut tool_question = match &previous {
+                Some(previous) if more_details => previous.question.clone(),
+                _ => current.clone(),
             };
             // History helps interpret the request; a classifier cannot veto a new topic.
-            let question = if let Some(previous) = self.store.context(&message.conversation)? {
+            let question = if let Some(previous) = &previous {
                 format!(
                     "Contexto anterior (solo referencia, no evidencia):\nPregunta: {}\nRespuesta: {}\nSolicitud actual (tiene prioridad): {}",
                     previous.question, previous.answer, current
@@ -127,7 +126,6 @@ impl Pipeline {
                 audit.reason = "sensitive_question".into();
                 return self.store.record(resource, &audit);
             }
-            context_question = Some(current.chars().take(1800).collect::<String>());
             if available.is_empty() {
                 audit.reason = "no_authorized_resource".into();
                 return self.store.record(resource, &audit);
@@ -153,6 +151,44 @@ impl Pipeline {
                     )
                 })
                 .collect();
+            // A follow-up often omits its subject («¿y si quiero pagar 2 servicios?»): searching
+            // those words alone misses the page. Resolve it against the previous exchange first;
+            // the rewrite only shapes the query inside sources already authorized by code.
+            let mut wiki_topic = None;
+            if let Some(previous) = previous.as_ref().filter(|_| !more_details)
+                && !tool_candidates.is_empty()
+            {
+                match self
+                    .llm
+                    .standalone_request(&previous.question, &previous.answer, &current)
+                    .await
+                {
+                    Ok(Some(resolved)) => {
+                        let question = resolved.question.trim();
+                        let topic = resolved.topic.trim();
+                        if [(question, 500), (topic, 120)].iter().all(|(text, max)| {
+                            !text.is_empty()
+                                && text.chars().count() <= *max
+                                && !text.chars().any(char::is_control)
+                                && self.redactor.clean(text)
+                        }) {
+                            tool_question = question.to_owned();
+                            wiki_topic = Some(topic.to_owned());
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(_) => tracing::warn!(event = "follow_up_resolution_unavailable"),
+                }
+            }
+            // Chained follow-ups keep the resolved topic instead of the bare follow-up.
+            context_question = Some(tool_question.chars().take(1800).collect::<String>());
+            let question = if wiki_topic.is_some() {
+                format!(
+                    "{question}\nSolicitud actual interpretada con el contexto: {tool_question}"
+                )
+            } else {
+                question
+            };
             let wiki_requested =
                 explicit_wiki(&tool_question) || documentation_question(&tool_question);
             let wiki_ids: Vec<_> = available
@@ -244,7 +280,13 @@ impl Pipeline {
                             conversation: message.conversation.clone(),
                         }
                         .call(ToolArgs {
-                            question: tool_question.clone(),
+                            // Wiki search needs the topic; other tools read the whole request.
+                            question: match (tool, &wiki_topic) {
+                                (crate::tools::ToolSpec::AzureDevopsWiki { .. }, Some(topic)) => {
+                                    topic.clone()
+                                }
+                                _ => tool_question.clone(),
+                            },
                         })
                         .await?
                     }
@@ -264,7 +306,7 @@ impl Pipeline {
                                 .filter(|n| self.redactor.clean(n));
                             page.reference.label = self.redactor.redact(&page.reference.label);
                         }
-                        Some(result.evidence(&current, budget.saturating_sub(200)))
+                        Some(result.evidence(&tool_question, budget.saturating_sub(200)))
                     }
                     Access::Tool {
                         tool:
@@ -326,6 +368,7 @@ impl Pipeline {
                         .saturating_sub(citation_reserve(&registry)),
                 })
                 .await?;
+            context_answer = Some(generated.answer.clone());
             answer_limit = if generated.detailed {
                 self.config.policy.max_detailed_answer_chars
             } else {
@@ -416,10 +459,13 @@ impl Pipeline {
             if resource.starts_with("simulation:")
                 && let Some(question) = context_question
             {
+                // The body without appended sources: copied citation URLs would fail verification.
                 self.store.save_context(
                     &message.conversation,
                     &self.redactor.redact(&question),
-                    &self.redactor.redact(&proposal),
+                    &self
+                        .redactor
+                        .redact(context_answer.as_deref().unwrap_or(&proposal)),
                 )?;
             }
             return Ok(());
@@ -457,7 +503,12 @@ impl Pipeline {
             self.store.save_context(
                 &message.conversation,
                 &self.redactor.redact(&question),
-                &self.redactor.redact(audit.sent.as_deref().unwrap_or("")),
+                &self.redactor.redact(
+                    context_answer
+                        .as_deref()
+                        .or(audit.sent.as_deref())
+                        .unwrap_or(""),
+                ),
             )?;
         }
         Ok(())
@@ -469,7 +520,11 @@ impl Pipeline {
         self.store.record(resource, &saved)
     }
     fn valid_answer(&self, answer: &str, limit: usize) -> bool {
-        !answer.trim().is_empty() && answer.chars().count() <= limit && self.redactor.clean(answer)
+        // The rendered Teams HTML must also fit Graph's body limit, checked before `sending`.
+        !answer.trim().is_empty()
+            && answer.chars().count() <= limit
+            && crate::adapters::teams::html(answer).len() <= 27_800
+            && self.redactor.clean(answer)
     }
 }
 
@@ -561,6 +616,14 @@ fn documentation_question(question: &str) -> bool {
         "como configurar ",
         "como se instala ",
         "como instalar ",
+        "como se invoca ",
+        "como invocar ",
+        "como se llama a ",
+        "como llamar a ",
+        "como se consume ",
+        "como consumir ",
+        "como se integra ",
+        "como integrar ",
         "que hace ",
         "que es ",
         "que parametros ",
@@ -640,6 +703,7 @@ mod tests {
     fn documentation_routes_read_requests_with_a_topic() {
         for question in [
             "como se usa el microservicio crearsps",
+            "¿Cómo se invoca el microservicio Crear SPS para pagar 2 servicios?",
             "¿Cómo se configura el pipeline?",
             "Explícame la configuración del pipeline",
             "¿Qué parámetros necesita el pipeline?",

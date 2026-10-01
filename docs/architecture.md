@@ -148,17 +148,17 @@ Detalles que importan al modificar:
 
 1. **Elegibilidad** (`teams::IncomingMessage::eligible_in`): mensaje de usuario no borrado, no propio (salvo chat personal validado y posterior a `enabled_at`), ≤16 000 bytes, dentro de `max_message_age_seconds`, `allowed_senders` global, y en grupos solo con mención real por ID de Graph (nunca por texto `@nombre`).
 2. **Intención.** Saludo exacto (`teams::greeting`) → saludo configurado. Pregunta clara (`question_request`: `?`/`¿` o prefijos interrogativos) → recuperación. Lo ambiguo va a Jev `Stage::Intent` (sin catálogo de fuentes; confianza ≥0.5) y solo si hay alguna fuente autorizada.
-3. **Seguimientos.** «dame más detalles» y equivalentes reutilizan la última pregunta de `conversation_context` (último intercambio por conversación, caduca a los 30 min) como consulta de herramienta. El contexto anterior se pasa como referencia, nunca como evidencia; la solicitud actual manda.
+3. **Seguimientos.** `conversation_context` guarda el último intercambio por conversación (caduca a los 30 min): la pregunta ya resuelta y la respuesta **sin** la sección de fuentes (las URLs copiadas fallarían la verificación). «dame más detalles» y equivalentes reutilizan esa pregunta como consulta de herramienta. Con otro mensaje y alguna herramienta autorizada, `LlmProvider::standalone_request` reescribe la solicitud de forma autónoma (`question`) y extrae el tema a buscar (`topic`), p. ej. «¿cómo se invoca si quiero pagar 2 servicios?» → tema «Crear SPS». `question` decide la herramienta, elige pasajes y se guarda como pregunta del contexto; `topic` es la consulta de Search de la Wiki. Ambos se validan (longitud, sin control, `Redactor::clean`); si el proveedor falla o no aplica, se usa la solicitud literal. Solo da forma a la consulta dentro de fuentes ya autorizadas por código. El contexto anterior se pasa como referencia, nunca como evidencia; la solicitud actual manda.
 4. **Fuentes.** `KnowledgeMap::available` exige `enabled`, `external_processing`, conversación exacta o `*`, y `allowed_senders` de la fuente. En simulación local se seleccionan IDs explícitos (siguen exigiendo `enabled` y `external_processing`) sin ampliar audiencias Teams. Todos los archivos/URLs autorizados se leen; las herramientas se limitan a **una por mensaje**:
    - pregunta con «wiki» o documental (`documentation_question`) → la Wiki si hay una sola;
    - pregunta de actividad (`status_question`) → `azure-devops-status` (ID fijo);
    - Wiki única y solo herramientas Wiki/actividad → Wiki;
    - una sola candidata → esa; varias → `LlmProvider::select_tool` con IDs cerrados (fallo = ninguna).
 5. **Evidencia.** Redacción antes de recortar. Presupuesto `max_context_chars / nº fuentes`. Wiki y Azure devuelven JSON tipado (`ado::wiki::WikiResult`, `evidence::Evidence`) con un registro de referencias (ID, URL verificada, autoría) y mensajes Teams con autor; el resto se recorta con `knowledge::excerpt`.
-6. **Generación.** `DeepSeek::generate_response` devuelve JSON `{answer, detailed}`; el modelo elige el modo. Se reserva espacio para citas (`citation_reserve`). Sin herramientas autónomas, temperatura 0, timeout 45 s.
-7. **Referencias.** Si hay registro, Jev decide por entrada (`source_i`) qué referencias usa el texto; el código las mapea a IDs exactos y `evidence::complete_answer` añade enlaces/atribución y comprueba el límite **con las citas incluidas**. Un ID inventado o faltante bloquea (`invalid_references`).
+6. **Generación.** `DeepSeek::generate_response` devuelve JSON `{answer, detailed}`; el modelo elige el modo. `answer` es Markdown acotado (frase inicial directa, **negritas**, listas `-`/`1.`, `código`, bloques ```json), sin URLs ni sección de fuentes; los ejemplos usan marcadores (`<URL_BASE>`, `<RUT_TRAMITADOR>`) para no chocar con la verificación de URLs ni con el `Redactor`. Se reserva espacio para citas (`citation_reserve`). Sin herramientas autónomas, temperatura 0, timeout 45 s.
+7. **Referencias.** Si hay registro, Jev decide por entrada (`source_i`) qué referencias usa el texto; el código las mapea a IDs exactos y `evidence::complete_answer` añade al final una sección `**Fuentes**` con una viñeta por referencia (`[título de la página](url): wiki del proyecto P; atribución`) y comprueba el límite **con las citas incluidas**. Un ID inventado o faltante bloquea (`invalid_references`).
 8. **Control final.** Jev `Stage::Final` con varias comprobaciones `noul`; la confianza es el mínimo y debe superar `final_threshold`. Cuando solo hay Wiki (sin Teams) se omite `attribution` porque la atribución la construye el código.
-9. **Envío.** Releer el mensaje; persistir `sending` con `synchronous=FULL` antes del POST; nunca reintentar un envío. Fallo o reinicio durante el envío = `uncertain` (revisión manual).
+9. **Envío.** `teams::html` convierte el Markdown en HTML de Teams (texto escapado; solo enlaces `https` como `<a>`, bloques como `<codeblock>`); todos los chats se envían con `contentType: html` y el chat personal añade su marca de salida. `valid_answer` exige además que el HTML quepa en el límite de Graph (27 800 bytes) antes de `sending`. Releer el mensaje; persistir `sending` con `synchronous=FULL` antes del POST; nunca reintentar un envío. Fallo o reinicio durante el envío = `uncertain` (revisión manual).
 
 Estados de `jobs`: `pending → processing → ignored | dry_run | failed | sending → sent | uncertain`. Lecturas/proveedores fallidos reintentan con backoff 2^n s hasta 5 intentos. Al abrir la base, `processing` vuelve a `pending` y `sending` pasa a `uncertain`. La auditoría (`jobs.audit`, JSON redactado) guarda motivo, fuentes, herramientas, confianzas, referencias y propuesta; `pta audit` la consulta.
 
@@ -220,7 +220,7 @@ Para añadir una operación: método en `control::operate` (ventana o navegador 
 
 ## 11. GUI
 
-`ui/` es HTML/JS plano sin build. Tres pestañas: Configuración (servicio, credenciales, proveedores/Teams, chat personal, importación), Conocimiento (repositorios, GitHub, fuentes) y Chat de prueba. Todo pasa por `invoke('command', {request})` con los mismos métodos que el CLI. Desfase conocido: la GUI solo lista y crea fuentes `kind=file`; Wiki y otras herramientas se administran por CLI.
+`ui/` es HTML/JS plano sin build. Tres pestañas: Configuración (servicio, credenciales, proveedores/Teams, chat personal, importación), Conocimiento (repositorios, GitHub, fuentes) y Chat de prueba. Todo pasa por `invoke('command', {request})` con los mismos métodos que el CLI. Desfase conocido: la GUI solo lista y crea fuentes `kind=file`; Wiki y otras herramientas se administran por CLI. El chat de prueba muestra la respuesta como Markdown sin convertir (Teams la recibe en HTML).
 
 ## 12. Pruebas y verificación
 
@@ -248,6 +248,8 @@ cargo test --workspace
 - **Jev no veta la recuperación.** Antes un selector Jev decidía la fuente antes de leerla; en una muestra real (2026-10-01) rechazó la mitad de las preguntas documentales con confianza 0.29–0.38 y la Wiki nunca se consultó. Ahora Jev solo clasifica intención ambigua, selecciona referencias después de redactar y valida la respuesta final. No reintroducir un filtro previo por tema o pertinencia.
 - **La atribución Wiki la construye el código** desde metadatos verificados; la comprobación probabilística `attribution` se omite cuando no hay mensajes Teams porque producía falsos rechazos (p. ej. `edited_by_me` con `author=null`). `supported` sigue rechazando autorías o ejecuciones inventadas.
 - **El modelo no copia IDs ni URLs.** DeepSeek devuelve solo texto y modo; las citas salen del registro verificado.
+- **El formato se decide en código.** El modelo escribe Markdown acotado y el código lo convierte a HTML de Teams; la sección de fuentes se construye desde el registro. Antes, la respuesta se escapaba como texto y Teams mostraba `[etiqueta](url)` literal.
+- **Los seguimientos se resuelven antes de buscar, no se vetan.** Buscar solo las palabras de «¿y si quiero pagar 2 servicios?» no encontraba la página y el control final rechazaba la respuesta en silencio. La reescritura autónoma solo cambia la consulta; la selección de herramientas y las audiencias siguen en código.
 - **Una herramienta por mensaje**, para acotar coste, latencia y superficie; combinar fuentes es una mejora pendiente.
 - **Ningún envío se reintenta**: Graph no ofrece idempotencia; se prefiere omitir una respuesta antes que duplicarla.
 - **OAuth público de escritorio con los scopes ya concedidos**; el registro Entra existente admite `http://localhost` y otras organizaciones. Pedir nuevos permisos obligaría a un consentimiento nuevo.
@@ -258,6 +260,7 @@ cargo test --workspace
 - Una identidad Teams por perfil. Canales de equipo no soportados.
 - La recepción exige equipo encendido y una URL HTTPS estable hasta el listener (túnel Cloudflare con token, archivo `cloudflared` propio o túnel externo).
 - Una sola herramienta por respuesta (no combina Wiki y actividad).
+- El chat de prueba de la GUI muestra el Markdown de la respuesta sin convertir; `pta chat` también lo devuelve como texto.
 - La recuperación de `missed` cubre solo la página reciente; no hay garantía de procesar mensajes durante apagones.
 - No detecta si el usuario respondió manualmente mientras se generaba la propuesta.
 - Windows compila en CI pero no tiene validación funcional. Linux solo como host sin interfaz (la GUI en Linux no se prueba).

@@ -177,31 +177,31 @@ impl Reference {
         );
         Ok(())
     }
+    /// One bullet of the appended sources list. Wiki links show the page title; project and
+    /// verified attribution follow the link so the reader sees provenance without the URL.
     fn citation(&self) -> String {
         let label = self.label.replace(['[', ']', '\n', '\r'], " ");
-        let link = format!("[{label}]({})", self.url);
-        if self.kind == "wiki" {
-            match self.authority.as_deref() {
-                Some("created_by_me" | "edited_by_me") => {
-                    format!("Fuente: {link} (documentación con contribución propia verificada).")
-                }
-                _ => match &self.author {
-                    Some(name) => format!(
-                        "Fuente: {link}, wiki del proyecto {}; {}: {}.",
-                        self.label.split(" / ").next().unwrap_or(&self.project),
-                        self.author_role
-                            .as_deref()
-                            .unwrap_or("último editor registrado"),
-                        name
-                    ),
-                    None => format!(
-                        "Fuente: {link}, wiki del proyecto {}; no se pudo verificar quién la documentó.",
-                        self.label.split(" / ").next().unwrap_or(&self.project)
-                    ),
-                },
-            }
-        } else {
-            format!("Referencia: {link}.")
+        if self.kind != "wiki" {
+            return format!("- [{label}]({})", self.url);
+        }
+        let title = label.rsplit(" / ").next().unwrap_or(&label).trim();
+        let project = label.split(" / ").next().unwrap_or(&self.project).trim();
+        let link = format!("[{title}]({})", self.url);
+        match self.authority.as_deref() {
+            Some("created_by_me" | "edited_by_me") => format!(
+                "- {link}: wiki del proyecto {project}; documentación con contribución propia verificada."
+            ),
+            _ => match &self.author {
+                Some(name) => format!(
+                    "- {link}: wiki del proyecto {project}; {}: {name}.",
+                    self.author_role
+                        .as_deref()
+                        .unwrap_or("último editor registrado"),
+                ),
+                None => format!(
+                    "- {link}: wiki del proyecto {project}; no se pudo verificar quién la documentó."
+                ),
+            },
         }
     }
 }
@@ -289,13 +289,16 @@ pub fn complete_answer(
             "unverified answer URL"
         );
     }
-    let mut answer = body.to_owned();
+    let mut answer = body.trim_end().to_owned();
     let mut linked = BTreeSet::new();
     for r in &evidence.references {
         if selected.contains(&r.id) {
             r.validate()?;
             if linked.insert((r.url.clone(), r.label.clone())) {
-                answer.push_str(&format!("\n\n{}", r.citation()));
+                if linked.len() == 1 {
+                    answer.push_str("\n\n**Fuentes**");
+                }
+                answer.push_str(&format!("\n{}", r.citation()));
             }
         }
     }
@@ -354,6 +357,9 @@ mod tests {
             )
             .unwrap();
             assert!(a.contains("pagePath=%2FProcedure"));
+            // One sources section; the link text is the page title, not the full location.
+            assert!(a.starts_with("El procedimiento documentado exige revisar.\n\n**Fuentes**\n- [Procedure](https://dev.azure.com/test/Project/_wiki/wikis/wiki?pagePath=%2FProcedure): wiki del proyecto Project; "));
+            assert_eq!(a.matches("**Fuentes**").count(), 1);
             if mode == "other" {
                 assert!(a.contains("último editor registrado: Ana"));
                 assert!(!a.contains("creador"));
