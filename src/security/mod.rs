@@ -306,7 +306,7 @@ impl Redactor {
         let mut patterns = vec![
             r"(?s)-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----".to_owned(),
             r"(?i)\b(?:bearer|basic)\s+[a-z0-9+/_.=-]+".to_owned(),
-            r#"(?i)\b(?:password|pwd|api[_-]?key|client[_-]?secret|access[_-]?token|refresh[_-]?token|connection[_-]?string)\b[\s\"']*[:=]\s*[\"']?[^\s\"'<>]+"#.to_owned(),
+            r#"(?i)\b(?:password|pwd|token|api[_-]?key|client[_-]?secret|access[_-]?token|refresh[_-]?token|connection[_-]?string)\b[\s\"']*[:=]\s*[\"']?[^\s\"'<>]+"#.to_owned(),
             r"\b(?:sk-|tsf_|apikey_|gh[pousr]_)[A-Za-z0-9_-]{8,}\b".to_owned(),
             r"\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b".to_owned(),
             r"(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b".to_owned(),
@@ -356,6 +356,7 @@ mod tests {
         for s in [
             "mail alice@example.com",
             "password=hunter2",
+            r#"{"Token":"synthetic-example-token"}"#,
             "Bearer abcdef123",
             "an-exact-test-secret",
             "+56 9 1234 5678",

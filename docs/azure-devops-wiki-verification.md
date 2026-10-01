@@ -42,6 +42,28 @@ Los umbrales y los controles de privacidad/promesas no se relajaron. La respuest
 
 El 2026-10-01, al operar el servicio para una prueba de chat propio, se encontró además un fallo de cancelación del arranque: si desaparecía el emisor del canal de parada sin publicar `true`, el servidor cerraba pero sus tareas podían seguir reintentando consultas y conservar el bloqueo del directorio de estado. Se añadió una regresión que falla con ese comportamiento y pasa al tratar el cierre del canal como petición de parada en todas las tareas. La suite completa pasa ahora 71 pruebas; Clippy y la compilación CLI/host también pasan. Esta regresión no sustituye la comprobación de recepción/envío real en Teams.
 
+## Corrección de selección y operación del 2026-10-01
+
+Una pregunta real de chat propio recibió una aclaración basada en la documentación operativa: la auditoría confirmó `tools=[]`, por lo que no se había consultado Wiki. La [evaluación de Jev](jev-evaluation.md) reproduce el veto previo y registra su sustitución por clasificación de intención, recuperación autorizada y selección tipada de referencias después de redactar. El cambio sirve para consultas documentales generales, sin una regla especial para el nombre del microservicio.
+
+La suite final pasa 79 pruebas (41 del núcleo, 30 de integración y ocho del host/CLI), además de Clippy con advertencias como errores, formato y `git diff --check`. Las nuevas regresiones cubren intención sin catálogo, preguntas documentales implícitas, contexto previo que no altera la consulta actual, audiencias de Teams, selección de herramientas con esquema cerrado, selección tipada de referencias frente a sugerencias malformadas, rechazo de contratos inválidos y respaldo semántico/atribución de Teams. La ejecución real de `wiki_gate_smoke` pasó sus 12 casos sintéticos: una selección tipada, ocho controles finales y tres intenciones.
+
+Se recompilaron juntos CLI y host 0.3.0 y se reinició el servicio con esos ejecutables. El recorrido final desde el CLI observó:
+
+| Operación | Resultado con la compilación final |
+| --- | --- |
+| `azure wiki list` | 82 wikis, sin cobertura parcial. |
+| `azure wiki search` | Cuatro páginas para el identificador compacto solicitado; encontró la página propia con título espaciado. Cobertura parcial declarada. |
+| `azure wiki read` | Página propia `edited_by_me`, contenido, enlace, ETag y commit Git verificados; mismo ID compacto que Search y `partial=false`. |
+| `test simulate`: uso de microservicio | `supported_answer`, confianza 0.66; 3358 caracteres dentro del límite detallado 8000; tres páginas usadas, enlaces presentes y atribución verificada de terceros. |
+| `test simulate`: notificaciones de pago | `supported_answer`, confianza 0.72; 1205 caracteres dentro del límite normal 3000; una página propia usada con su enlace. |
+
+Ambas simulaciones registran `search_azure_devops_wiki`, cobertura parcial explícita y todos los IDs usados dentro del registro verificado. El estado `sent` es exclusivamente local, del adaptador `simulation-only`. No se enviaron mensajes de prueba a Graph/Teams ni se modificó una Wiki.
+
+La autorización posterior del usuario habilitó las tres fuentes existentes para el chat propio, conversaciones directas y menciones en grupos. Este ajuste corrige el estado inicial de audiencias vacías descrito arriba: fue una operación separada solicitada expresamente. La corrección de Jev conservó íntegra la configuración de esas fuentes antes/después, sin copiar permisos globales ni ampliar el catálogo. La skill de operación del repositorio, su versión incorporada y la copia local del agente incluyen el comportamiento nuevo.
+
+Tras el reinicio, `status` confirmó host 0.3.0, `running=true`, túnel activo y una suscripción Graph activa; `self-chat status` confirmó recepción por webhook/polling acotado, sin salidas pendientes. El servicio local `/healthz` respondió 200 y el endpoint público devolvió 200 y el token de validación sintético exacto. El servicio queda activo para una nueva pregunta del usuario. La recepción/envío anteriores en chat propio constan en auditoría, pero todavía no hay una nueva pregunta de Teams procesada con esta compilación: las simulaciones no sustituyen esa observación. La modalidad de escritorio admite chats directos y grupos con mención; no se suscribe a publicaciones de canales de un equipo, como General.
+
 ## Límite pendiente y operación
 
 No se modificó una Wiki real para probar invalidación. La regresión controlada devuelve contenido y revisión distintos en dos lecturas, vuelve a comprobar acceso y evita conservar autoría anterior. Para completar la observación externa, el operador debe editar de forma inocua una página autorizada y repetir `pta --json azure wiki read SOURCE_ID` con el mismo `wiki_id/path`: comprobar el nuevo contenido/ETag y atribución coherente. Se solicitó esa edición opcional; no se recibió confirmación ni se afirma que ocurrió.

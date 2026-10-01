@@ -121,16 +121,30 @@ impl WikiResult {
         let each = budget / self.pages.len().max(1);
         for p in &self.pages {
             let header = format!(
-                "\nPágina Wiki {}: {}\n",
-                p.reference.id,
-                serde_json::to_string(&(&p.reference, &p.entities)).unwrap()
+                "\nPágina Wiki: {}\n",
+                serde_json::to_string(&json!({
+                    "id": p.reference.id,
+                    "location": p.reference.label,
+                    "version": p.version,
+                    "authority": p.reference.authority,
+                    "author": p.reference.author,
+                    "author_role": p.reference.author_role,
+                    "entities": p.entities,
+                }))
+                .unwrap()
             );
             if header.chars().count() + 50 > each {
                 evidence.partial = true;
                 continue;
             }
-            let excerpt =
-                crate::knowledge::excerpt(&p.content, question, each - header.chars().count() - 1);
+            // Canonical titles preserve spaced names such as "Crear SPS" when the
+            // caller used an identifier such as "crearsps". URLs/revisions stay in
+            // the verified registry instead of consuming the model's text budget.
+            let excerpt = crate::knowledge::excerpt(
+                &p.content,
+                &format!("{question} {}", p.title),
+                each - header.chars().count() - 1,
+            );
             if excerpt.trim().is_empty() {
                 continue;
             }
@@ -429,10 +443,7 @@ impl<'a> Reader<'a> {
             .to_owned();
         let title = path.rsplit('/').next().unwrap_or("Wiki").to_owned();
         let reference = Reference {
-            id: format!(
-                "wiki:{}:{}:{}:{}:{}",
-                wiki.organization, wiki.project_id, wiki.id, version, path
-            ),
+            id: page_reference_id(wiki, version, path),
             kind: "wiki".into(),
             label: format!("{} / {} / {}", wiki.project, wiki.name, title),
             url: Url::parse(remote)?
@@ -970,11 +981,14 @@ impl<'a> Reader<'a> {
                 .map(str::to_lowercase)
                 .collect();
             result.pages.sort_by_key(|p| {
+                let title: String = p
+                    .title
+                    .chars()
+                    .filter(|c| c.is_alphanumeric())
+                    .flat_map(char::to_lowercase)
+                    .collect();
                 std::cmp::Reverse((
-                    terms
-                        .iter()
-                        .filter(|t| p.title.to_lowercase().contains(t.as_str()))
-                        .count(),
+                    terms.iter().filter(|t| title.contains(t.as_str())).count(),
                     is_mine(p),
                 ))
             });
@@ -991,6 +1005,20 @@ fn is_mine(p: &Page) -> bool {
         p.reference.authority.as_deref(),
         Some("created_by_me" | "edited_by_me")
     )
+}
+fn page_reference_id(wiki: &Wiki, version: &str, path: &str) -> String {
+    use sha2::{Digest, Sha256};
+    // A short opaque ID is easier for the provider to copy exactly. Scope, URL,
+    // path, published version and revision remain explicit in the typed registry.
+    let identity = serde_json::to_vec(&(
+        &wiki.organization,
+        &wiki.project_id,
+        &wiki.id,
+        version,
+        path,
+    ))
+    .unwrap();
+    format!("wiki:{:x}", Sha256::digest(identity))
 }
 fn under_mapped(path: &str, mapped: &str) -> bool {
     validate_path(path).is_ok()
@@ -1092,6 +1120,16 @@ pub fn question_query(question: &str) -> Result<String> {
         "documentados",
         "configura",
         "configurar",
+        "usa",
+        "usar",
+        "utiliza",
+        "utilizar",
+        "funciona",
+        "funcionar",
+        "instala",
+        "instalar",
+        "microservicio",
+        "microservicios",
         "dame",
         "más",
         "mas",
@@ -1574,6 +1612,14 @@ mod tests {
             question_query("Según la wiki, ¿cómo se configura el pipeline?").unwrap(),
             "pipeline"
         );
+        assert_eq!(
+            question_query("como se usa el microservicio crearsps").unwrap(),
+            "crearsps"
+        );
+        assert_eq!(
+            question_query("¿Cómo se usa el microservicio Crear SPS?").unwrap(),
+            "Crear SPS"
+        );
         assert!(question_query("busca en la wiki").is_err());
         assert!(question_query("Según la wiki, dame más detalles").is_err());
         assert_eq!(
@@ -1591,6 +1637,86 @@ mod tests {
                 None
             )
             .is_err()
+        );
+    }
+    #[tokio::test]
+    async fn compact_identifiers_and_spaced_titles_share_topical_priority() {
+        let server = MockServer::start().await;
+        fixture(
+            &server,
+            "/",
+            "projectWiki",
+            "/Notify-Payment.md",
+            "/Notify Payment",
+            true,
+        )
+        .await;
+        fixture(
+            &server,
+            "/",
+            "projectWiki",
+            "/notifypayment.md",
+            "/notifypayment",
+            false,
+        )
+        .await;
+        Mock::given(method("GET"))
+            .and(path(format!("/test/{PID}/_apis/wiki/wikis/{WID}/pages")))
+            .and(query_param("recursionLevel", "full"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"path":"/","gitItemPath":"/","subPages":[page_value("/notifypayment.md","/notifypayment",""),page_value("/Notify-Payment.md","/Notify Payment","")]})))
+            .with_priority(1).mount(&server).await;
+        Mock::given(method("GET"))
+            .and(path(format!(
+                "/test/{PID}/_apis/git/repositories/{RID}/commits"
+            )))
+            .and(query_param("searchCriteria.author", "me@example.test"))
+            .and(query_param("searchCriteria.itemPath", "/notifypayment.md"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"value":[]})))
+            .with_priority(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/test/_apis/search/wikisearchresults"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"infoCode":0,"count":2,"results":[hit("/notifypayment.md"),hit("/Notify-Payment.md")]})))
+            .mount(&server).await;
+        let c = Client::new();
+        let mut r = Reader::new(&c, "test-key", &catalog(true), &[]).unwrap();
+        r.base = Some(server.uri());
+        let result = r
+            .search(
+                &SearchInput {
+                    query: "notifypayment".into(),
+                    wiki_id: None,
+                    author_mode: None,
+                },
+                AuthorMode::PreferMine,
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.pages.len(), 2);
+        assert_eq!(result.pages[0].path, "/Notify Payment");
+        assert_eq!(result.pages[0].reference.id.len(), 69);
+        assert_eq!(
+            page_reference_id(&result.pages[0].wiki, "published", "/Notify Payment"),
+            result.pages[0].reference.id
+        );
+        assert_ne!(
+            page_reference_id(&result.pages[0].wiki, "another-version", "/Notify Payment"),
+            result.pages[0].reference.id
+        );
+        assert_eq!(
+            result.pages[0].reference.authority.as_deref(),
+            Some("edited_by_me")
+        );
+        let evidence = result.evidence("Cómo funciona notifypayment", 2000);
+        assert_eq!(evidence.references.len(), 2);
+        assert!(evidence.text.contains("Procedimiento vigente"));
+        assert!(!evidence.text.contains("pagePath="));
+        assert!(
+            evidence
+                .references
+                .iter()
+                .all(|r| r.url.starts_with("https://dev.azure.com/"))
         );
     }
 

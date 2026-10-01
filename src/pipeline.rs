@@ -52,13 +52,47 @@ impl Pipeline {
         ) {
             return self.store.record(resource, &audit);
         }
+        let current = self.redactor.redact(&message.text);
+        if !self.redactor.clean(&current) {
+            audit.reason = "sensitive_question".into();
+            return self.store.record(resource, &audit);
+        }
+        let available = if let Some(ids) = local_sources {
+            self.knowledge
+                .resources
+                .iter()
+                .filter(|r| r.enabled && r.external_processing && ids.contains(&r.id))
+                .collect()
+        } else {
+            self.knowledge
+                .available(&message.conversation, &message.sender)
+        };
+        let is_greeting = if greeting(&current) {
+            true
+        } else if question_request(&current) {
+            false
+        } else {
+            if available.is_empty() {
+                audit.reason = "no_authorized_resource".into();
+                return self.store.record(resource, &audit);
+            }
+            let intent = self
+                .gate
+                .evaluate(Stage::Intent, json!({"message":current}), BTreeMap::new())
+                .await?;
+            audit.confidences.push(intent.confidence);
+            if !intent.allows(0.5) || !matches!(intent.selected.as_str(), "question" | "greeting") {
+                audit.reason = "informational_message".into();
+                return self.store.record(resource, &audit);
+            }
+            intent.selected == "greeting"
+        };
         let mut context_question = None;
         let mut answer_limit = self.config.policy.max_answer_chars;
-        let proposal = if greeting(&message.text) {
+        let proposal = if is_greeting {
             audit.reason = "deterministic_greeting".into();
             self.config.policy.greeting.clone()
         } else {
-            let current = self.redactor.redact(&message.text);
             let tool_question = if matches!(
                 current
                     .to_lowercase()
@@ -94,22 +128,12 @@ impl Pipeline {
                 return self.store.record(resource, &audit);
             }
             context_question = Some(current.chars().take(1800).collect::<String>());
-            let available = if let Some(ids) = local_sources {
-                self.knowledge
-                    .resources
-                    .iter()
-                    .filter(|r| r.enabled && r.external_processing && ids.contains(&r.id))
-                    .collect()
-            } else {
-                self.knowledge
-                    .available(&message.conversation, &message.sender)
-            };
             if available.is_empty() {
                 audit.reason = "no_authorized_resource".into();
                 return self.store.record(resource, &audit);
             }
             // Read every authorized document: choosing one descriptor loses compound questions.
-            // Tools still require an explicit known route or a confident allowlisted selection.
+            // Read tools are selected from this authorized set; Jev does not veto retrieval.
             let mut sources: Vec<_> = available
                 .iter()
                 .copied()
@@ -129,7 +153,8 @@ impl Pipeline {
                     )
                 })
                 .collect();
-            let wiki_requested = explicit_wiki(&tool_question);
+            let wiki_requested =
+                explicit_wiki(&tool_question) || documentation_question(&tool_question);
             let wiki_ids: Vec<_> = available
                 .iter()
                 .filter(|r| {
@@ -153,28 +178,33 @@ impl Pipeline {
             let selected_tool = if wiki_requested && wiki_ids.len() == 1 {
                 Some(wiki_ids[0].clone())
             } else if !wiki_requested
-                && status_question(&current)
+                && status_question(&tool_question)
                 && tool_candidates.contains_key("azure-devops-status")
             {
                 Some("azure-devops-status".to_owned())
+            } else if wiki_ids.len() == 1
+                && available.iter().all(|r| {
+                    !matches!(r.access, Access::Tool { .. })
+                        || matches!(
+                            r.access,
+                            Access::Tool {
+                                tool: crate::tools::ToolSpec::AzureDevopsWiki { .. }
+                                    | crate::tools::ToolSpec::AzureDevopsStatus { .. }
+                            }
+                        )
+                })
+            {
+                // A bounded Wiki read retrieves facts; it does not need a model to assert
+                // that an unseen page already answers the question. Final checks still apply.
+                Some(wiki_ids[0].clone())
             } else if tool_candidates.is_empty() {
                 None
+            } else if tool_candidates.len() == 1 {
+                tool_candidates.keys().next().cloned()
             } else {
-                match self
-                    .gate
-                    .evaluate(
-                        Stage::Routing,
-                        json!({"question":question,"sources":tool_candidates}),
-                        tool_candidates.clone(),
-                    )
-                    .await
-                {
-                    Ok(routing) => {
-                        audit.confidences.push(routing.confidence);
-                        routing
-                            .allows(self.config.jev.routing_threshold)
-                            .then_some(routing.selected)
-                    }
+                match self.llm.select_tool(&tool_question, &tool_candidates).await {
+                    Ok(Some(id)) if tool_candidates.contains_key(&id) => Some(id),
+                    Ok(_) => None,
                     Err(_) => {
                         tracing::warn!(event = "tool_routing_unavailable");
                         None
@@ -303,15 +333,41 @@ impl Pipeline {
             };
             audit.partial = registry.partial;
             audit.coverage_warnings = registry.warnings.clone();
-            audit.used_sources = generated.used_sources.clone();
             audit.references = registry.references.clone();
             audit.teams_messages = registry.teams.clone();
             audit.detailed = Some(generated.detailed);
             audit.answer_limit = Some(answer_limit);
+            if !self.valid_answer(&generated.answer, answer_limit) {
+                audit.proposed = Some(self.redactor.redact(&generated.answer));
+                audit.reason = "unsafe_proposal".into();
+                return self.store.record(resource, &audit);
+            }
+            let used_sources = if registry.references.is_empty() {
+                Vec::new()
+            } else {
+                self.checkpoint(resource, &audit, "selecting_references")?;
+                match self
+                    .gate
+                    .select_references(
+                        &generated.answer,
+                        &evidence,
+                        &registry.references,
+                        &generated.used_sources,
+                    )
+                    .await
+                {
+                    Ok(ids) => ids,
+                    Err(_) => {
+                        audit.reason = "reference_selection_failed".into();
+                        return self.store.record(resource, &audit);
+                    }
+                }
+            };
+            audit.used_sources = used_sources.clone();
             let answer = if !registry.references.is_empty() {
                 match crate::evidence::complete_answer(
                     &generated.answer,
-                    &generated.used_sources,
+                    &used_sources,
                     &registry,
                     answer_limit,
                 ) {
@@ -337,7 +393,7 @@ impl Pipeline {
                 .gate
                 .evaluate(
                     Stage::Final,
-                    json!({"question":question,"evidence":evidence,"answer":answer,"used_sources":generated.used_sources,"references":registry.references,"teams_messages":registry.teams,"partial":registry.partial,"coverage_warnings":registry.warnings}),
+                    json!({"question":question,"evidence":evidence,"answer":answer,"used_sources":used_sources,"references":registry.references,"teams_messages":registry.teams,"partial":registry.partial,"coverage_warnings":registry.warnings}),
                     BTreeMap::new(),
                 )
                 .await?;
@@ -437,6 +493,89 @@ fn explicit_wiki(question: &str) -> bool {
         .split(|c: char| !c.is_alphanumeric())
         .any(|w| w.eq_ignore_ascii_case("wiki") || w.eq_ignore_ascii_case("wikis"))
 }
+fn question_request(question: &str) -> bool {
+    if question.contains(['?', '¿']) {
+        return true;
+    }
+    let normalized = question
+        .to_lowercase()
+        .replace('ó', "o")
+        .replace('é', "e")
+        .replace('í', "i")
+        .replace('á', "a")
+        .replace('ú', "u");
+    let normalized = normalized.trim_start_matches(|c: char| !c.is_alphanumeric());
+    [
+        "como ",
+        "que ",
+        "cual ",
+        "cuales ",
+        "cuando ",
+        "donde ",
+        "por que ",
+        "para que ",
+        "quien ",
+        "cuanto ",
+        "explica ",
+        "explicame ",
+        "dime ",
+        "dame ",
+        "muestra ",
+        "necesito ",
+        "busca ",
+        "resume ",
+        "detalla ",
+        "amplia ",
+        "continua ",
+        "mas detalles",
+        "how ",
+        "what ",
+        "where ",
+        "when ",
+        "why ",
+        "who ",
+        "explain ",
+        "tell me ",
+    ]
+    .iter()
+    .any(|prefix| normalized.starts_with(prefix))
+}
+fn documentation_question(question: &str) -> bool {
+    let normalized = question
+        .to_lowercase()
+        .replace('ó', "o")
+        .replace('é', "e")
+        .replace('í', "i")
+        .replace('á', "a")
+        .replace('ú', "u")
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    // These requests ask for existing instructions, not execution or current activity.
+    [
+        "como se usa ",
+        "como usar ",
+        "como se utiliza ",
+        "como utilizar ",
+        "como funciona ",
+        "como se configura ",
+        "como configurar ",
+        "como se instala ",
+        "como instalar ",
+        "que hace ",
+        "que es ",
+        "que parametros ",
+        "que requisitos ",
+        "para que sirve ",
+        "explica ",
+        "explicame ",
+        "how to use ",
+        "how to configure ",
+    ]
+    .iter()
+    .any(|p| normalized.starts_with(p))
+}
 fn status_question(question: &str) -> bool {
     let q = question.to_lowercase();
     let words: Vec<&str> = q.split(|c: char| !c.is_alphanumeric()).collect();
@@ -476,7 +615,53 @@ fn status_question(question: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::status_question;
+    use super::{documentation_question, question_request, status_question};
+
+    #[test]
+    fn clear_information_requests_do_not_need_a_model_to_allow_retrieval() {
+        for q in [
+            "como funciona la notificacion de pagos",
+            "Explícame la integración",
+            "¿Qué requisitos tiene?",
+            "Necesito los parámetros",
+            "dame más detalles",
+            "Como se usa un componente desconocido",
+        ] {
+            assert!(question_request(q), "{q}");
+        }
+        for q in [
+            "El despliegue terminó",
+            "He añadido una Wiki",
+            "Crea una HU mañana",
+        ] {
+            assert!(!question_request(q), "{q}");
+        }
+    }
+
+    #[test]
+    fn documentation_routes_read_requests_with_a_topic() {
+        for question in [
+            "como se usa el microservicio crearsps",
+            "¿Cómo se configura el pipeline?",
+            "Explícame la configuración del pipeline",
+            "¿Qué parámetros necesita el pipeline?",
+            "¿Qué hace este servicio?",
+            "Cómo instalar el componente",
+            "How to use this service?",
+        ] {
+            assert!(documentation_question(question), "{question}");
+        }
+        for question in [
+            "Crea una HU para mañana",
+            "Ejecuta el pipeline",
+            "¿Qué he hecho esta semana?",
+            "¿Cómo está el pipeline?",
+            "¿Cómo se usa?",
+            "Confirma que funciona y despliega el servicio",
+        ] {
+            assert!(!documentation_question(question), "{question}");
+        }
+    }
 
     #[test]
     fn explicit_status_routes_only_reads() {

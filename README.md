@@ -1,6 +1,6 @@
 # Asistente personal de Teams
 
-Servicio Rust que lee y responde con la identidad del usuario mediante Microsoft Graph y OAuth delegado. Jev toma decisiones tipadas; Rig y DeepSeek redactan únicamente cuando existe evidencia suficiente. Las consultas se intentan responder con hechos verificables; los datos faltantes se señalan o se pide aclaración. Una respuesta insegura o sin respaldo queda para revisión humana.
+Servicio Rust que lee y responde con la identidad del usuario mediante Microsoft Graph y OAuth delegado. Jev clasifica mensajes ambiguos, selecciona referencias tipadas y valida respuestas finales; Rig y DeepSeek redactan únicamente cuando existe evidencia suficiente. Las consultas se intentan responder con hechos verificables; los datos faltantes se señalan o se pide aclaración. Una respuesta insegura o sin respaldo queda para revisión humana.
 
 ## App de escritorio (macOS; Windows en roadmap)
 
@@ -94,11 +94,18 @@ flowchart TD
   E -->|No| Z[Ignorar]
   E -->|Sí| F{Saludo simple}
   F -->|Sí| G[Respuesta determinista]
-  F -->|No| H[Fuentes autorizadas por conversación]
+  F -->|No| T{Pregunta o solicitud de información}
+  T -->|Ambiguo| U[Jev clasifica intención sin evaluar fuentes]
+  U -->|Pregunta| H[Fuentes autorizadas por conversación]
+  U -->|Saludo| G
+  U -->|Información| Z
+  T -->|Sí| H
   H --> I[Documentos autorizados y herramienta de lectura seleccionada]
   I --> J[Recuperar y redactar evidencia con límite total]
   J --> L[Rig y DeepSeek responden cada parte o piden aclaración]
-  L --> M[Jev valida respuesta y seguridad]
+  L --> R[Jev selecciona referencias tipadas del registro verificado]
+  R --> S[El código añade citas y valida permisos y longitud]
+  S --> M[Jev valida respaldo y seguridad]
   M --> N[Verificar que el mensaje no cambió]
   G --> N
   N --> O{Modo activo y controles aprobados}
