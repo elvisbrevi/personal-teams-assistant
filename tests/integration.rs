@@ -1099,24 +1099,23 @@ impl LlmProvider for LengthChoice {
     }
     async fn generate_response(
         &self,
-        input: GenerationInput<'_>,
+        _: GenerationInput<'_>,
     ) -> Result<personal_teams_assistant::llm::GeneratedAnswer> {
-        assert_eq!(input.max_answer_chars, 30);
-        assert_eq!(input.max_detailed_answer_chars, 100);
         Ok(personal_teams_assistant::llm::GeneratedAnswer {
             used_sources: Vec::new(),
-            answer: "á".repeat(60),
+            answer: "á".repeat(5000),
             detailed: self.detailed,
         })
     }
 }
 #[tokio::test]
-async fn agent_selected_character_limits_are_enforced_before_sending() {
+async fn answers_are_not_capped_by_character_count() {
     for detailed in [false, true] {
         let server = MockServer::start().await;
         let dir = tempfile::tempdir().unwrap();
         let store = support::store(&dir);
         let mut config = support::config();
+        // Legacy limits stay in the schema but no longer cap answers.
         config.policy.max_answer_chars = 30;
         config.policy.max_detailed_answer_chars = 100;
         config.validate().unwrap();
@@ -1128,7 +1127,7 @@ async fn agent_selected_character_limits_are_enforced_before_sending() {
         Mock::given(method("POST"))
             .and(path("/chats/chat1/messages"))
             .respond_with(ResponseTemplate::new(201).set_body_json(json!({"id":"sent-limit"})))
-            .expect(if detailed { 1 } else { 0 })
+            .expect(1)
             .mount(&server)
             .await;
         let pipeline = Pipeline {
@@ -1145,8 +1144,8 @@ async fn agent_selected_character_limits_are_enforced_before_sending() {
         pipeline.process("chats/chat1/messages/123").await.unwrap();
         let audit = store.audit("chats/chat1/messages/123").unwrap().unwrap();
         assert_eq!(audit.detailed, Some(detailed));
-        assert_eq!(audit.answer_limit, Some(if detailed { 100 } else { 30 }));
-        assert_eq!(audit.status, if detailed { "sent" } else { "ignored" });
+        assert_eq!(audit.answer_limit, None);
+        assert_eq!(audit.status, "sent");
     }
 }
 

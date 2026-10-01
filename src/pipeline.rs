@@ -9,7 +9,6 @@ use crate::{
     tools::{ReadOnlyTool, ScopedTool, ToolArgs},
 };
 use anyhow::Result;
-use rig::tool::Tool;
 use serde_json::json;
 use std::{collections::BTreeMap, sync::Arc};
 
@@ -89,7 +88,6 @@ impl Pipeline {
         };
         let mut context_question = None;
         let mut context_answer = None;
-        let mut answer_limit = self.config.policy.max_answer_chars;
         let proposal = if is_greeting {
             audit.reason = "deterministic_greeting".into();
             self.config.policy.greeting.clone()
@@ -356,31 +354,15 @@ impl Pipeline {
                     question: &question,
                     evidence: &evidence,
                     detail_requested: false,
-                    max_answer_chars: self
-                        .config
-                        .policy
-                        .max_answer_chars
-                        .saturating_sub(citation_reserve(&registry)),
-                    max_detailed_answer_chars: self
-                        .config
-                        .policy
-                        .max_detailed_answer_chars
-                        .saturating_sub(citation_reserve(&registry)),
                 })
                 .await?;
             context_answer = Some(generated.answer.clone());
-            answer_limit = if generated.detailed {
-                self.config.policy.max_detailed_answer_chars
-            } else {
-                self.config.policy.max_answer_chars
-            };
             audit.partial = registry.partial;
             audit.coverage_warnings = registry.warnings.clone();
             audit.references = registry.references.clone();
             audit.teams_messages = registry.teams.clone();
             audit.detailed = Some(generated.detailed);
-            audit.answer_limit = Some(answer_limit);
-            if !self.valid_answer(&generated.answer, answer_limit) {
+            if !self.valid_answer(&generated.answer) {
                 audit.proposed = Some(self.redactor.redact(&generated.answer));
                 audit.reason = "unsafe_proposal".into();
                 return self.store.record(resource, &audit);
@@ -408,12 +390,8 @@ impl Pipeline {
             };
             audit.used_sources = used_sources.clone();
             let answer = if !registry.references.is_empty() {
-                match crate::evidence::complete_answer(
-                    &generated.answer,
-                    &used_sources,
-                    &registry,
-                    answer_limit,
-                ) {
+                match crate::evidence::complete_answer(&generated.answer, &used_sources, &registry)
+                {
                     Ok(answer) => answer,
                     Err(error) => {
                         audit.reason = format!("invalid_references: {error}");
@@ -427,7 +405,7 @@ impl Pipeline {
                 generated.answer
             };
             audit.proposed = Some(self.redactor.redact(&answer));
-            if !self.valid_answer(&answer, answer_limit) {
+            if !self.valid_answer(&answer) {
                 audit.reason = "unsafe_proposal".into();
                 return self.store.record(resource, &audit);
             }
@@ -449,7 +427,7 @@ impl Pipeline {
             answer
         };
         audit.proposed = Some(self.redactor.redact(&proposal));
-        if !self.valid_answer(&proposal, answer_limit) {
+        if !self.valid_answer(&proposal) {
             audit.reason = "unsafe_answer".into();
             return self.store.record(resource, &audit);
         }
@@ -519,28 +497,14 @@ impl Pipeline {
         saved.reason = stage.into();
         self.store.record(resource, &saved)
     }
-    fn valid_answer(&self, answer: &str, limit: usize) -> bool {
-        // The rendered Teams HTML must also fit Graph's body limit, checked before `sending`.
+    fn valid_answer(&self, answer: &str) -> bool {
+        // No character cap; the rendered Teams HTML must still fit Graph's body limit.
         !answer.trim().is_empty()
-            && answer.chars().count() <= limit
             && crate::adapters::teams::html(answer).len() <= 27_800
             && self.redactor.clean(answer)
     }
 }
 
-fn citation_reserve(e: &crate::evidence::Evidence) -> usize {
-    // Reserve for up to four selected references. Complete rendering remains fail-closed.
-    e.references
-        .iter()
-        .map(|r| {
-            r.url.chars().count()
-                + r.label.chars().count()
-                + r.author.as_ref().map_or(0, |n| n.chars().count())
-                + 160
-        })
-        .take(4)
-        .sum()
-}
 fn explicit_wiki(question: &str) -> bool {
     question
         .split(|c: char| !c.is_alphanumeric())

@@ -162,10 +162,16 @@ pub async fn client(request: Request, start_host: bool) -> Result<Reply> {
         }
         ensure!(ready, "desktop host did not become ready");
     }
+    // Model-backed operations chain several provider calls of up to five minutes each.
+    let timeout = if matches!(request.method.as_str(), "chat" | "test_providers") {
+        Duration::from_secs(1200)
+    } else {
+        Duration::from_secs(120)
+    };
     let client = reqwest::Client::builder()
         .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
-        .timeout(Duration::from_secs(120))
+        .timeout(timeout)
         .build()?;
     for attempt in 0..20 {
         // A newly claimed lock can precede descriptor replacement. Retry only

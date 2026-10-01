@@ -25,13 +25,14 @@ final_threshold = 0.65
 
 [llm]
 provider = "deepseek"
-model = "deepseek-v4-flash"
+model = "deepseek-flash"
 style = "Español natural y claro. Resume por proyecto y explica lo que sugieren los cambios técnicos. Sin promesas ni opiniones personales."
 
 [policy]
 dry_run = true
 greeting = "¡Hola!"
 max_context_chars = 16000
+# Legacy: kept for compatibility, no longer limits answers.
 max_answer_chars = 3000
 max_detailed_answer_chars = 8000
 max_message_age_seconds = 300

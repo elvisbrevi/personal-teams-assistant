@@ -648,15 +648,10 @@ async fn chat(
     state: &DesktopState,
     input: SimulationRequest,
 ) -> std::result::Result<SimulationResult, String> {
-    tokio::time::timeout(
-        std::time::Duration::from_secs(110),
-        local_chat::chat(&state.config_path, input),
-    )
-    .await
-    .map_err(|_| {
-        "[network] Local simulation deadline exceeded; no Graph message was sent.".to_owned()
-    })?
-    .map_err(fail)
+    // Every provider call carries its own deadline; maximum-effort reasoning takes minutes.
+    local_chat::chat(&state.config_path, input)
+        .await
+        .map_err(fail)
 }
 
 async fn begin_github_login(

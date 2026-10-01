@@ -81,7 +81,9 @@ pub struct Policy {
     pub dry_run: bool,
     pub greeting: String,
     pub max_context_chars: usize,
+    /// No longer enforced; kept so existing profiles still load.
     pub max_answer_chars: usize,
+    /// No longer enforced; kept so existing profiles still load.
     #[serde(default = "default_detailed_answer_chars")]
     pub max_detailed_answer_chars: usize,
     pub max_message_age_seconds: i64,
@@ -150,22 +152,10 @@ impl Config {
             "invalid context limit"
         );
         ensure!(
-            (1..=4000).contains(&self.policy.max_answer_chars),
-            "invalid answer limit"
-        );
-        ensure!(
-            (self.policy.max_answer_chars..=16000).contains(&self.policy.max_detailed_answer_chars),
-            "invalid detailed answer limit (must be >= normal limit, at most 16000)"
-        );
-        ensure!(
             (30..=3600).contains(&self.policy.max_message_age_seconds),
             "invalid age limit"
         );
-        ensure!(
-            !self.policy.greeting.trim().is_empty()
-                && self.policy.greeting.chars().count() <= self.policy.max_answer_chars,
-            "invalid greeting"
-        );
+        ensure!(!self.policy.greeting.trim().is_empty(), "invalid greeting");
         crate::llm::validate_provider(&self.llm.provider)?;
         Ok(())
     }

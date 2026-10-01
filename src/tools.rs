@@ -379,7 +379,7 @@ impl ReadOnlyTool for Tools {
     }
 }
 
-/// Rig tool facade scoped to the resource already authorized by the pipeline.
+/// Tool facade scoped to the resource already authorized by the pipeline.
 /// It is invoked by code after Jev routing, never exposed for autonomous LLM use.
 pub struct ScopedTool {
     pub executor: Arc<dyn ReadOnlyTool>,
@@ -398,19 +398,8 @@ impl std::fmt::Display for ToolError {
     }
 }
 impl std::error::Error for ToolError {}
-impl rig::tool::Tool for ScopedTool {
-    const NAME: &'static str = "authorized_read";
-    type Error = ToolError;
-    type Args = ToolArgs;
-    type Output = String;
-    async fn definition(&self, _prompt: String) -> rig::completion::ToolDefinition {
-        rig::completion::ToolDefinition {
-            name: Self::NAME.into(),
-            description: "Execute the single authorized read-only resource".into(),
-            parameters: json!({"type":"object","properties":{"question":{"type":"string"}},"required":["question"],"additionalProperties":false}),
-        }
-    }
-    async fn call(&self, args: ToolArgs) -> std::result::Result<String, ToolError> {
+impl ScopedTool {
+    pub async fn call(&self, args: ToolArgs) -> std::result::Result<String, ToolError> {
         self.executor
             .execute(&self.spec, &args.question, &self.conversation)
             .await
