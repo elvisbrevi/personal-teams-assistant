@@ -10,7 +10,7 @@ Se distribuye exclusivamente por Cargo. Un paquete (`personal-teams-desktop`) in
 
 | Pieza | Binario / ruta | Rol |
 | --- | --- | --- |
-| GUI + host | `personal-teams-desktop` | App Tauri de bandeja/barra de menús. Es el **único dueño** del perfil, las credenciales y el servicio Teams. Puede correr oculta (`--host`). |
+| GUI + host | `personal-teams-desktop` | App Tauri de bandeja/barra de menús. Es el **único dueño** del perfil, las credenciales y el servicio Teams. Puede correr oculta (`--host`) o **sin interfaz** (`--headless`, o compilada sin la feature `gui` para Linux/servidores). |
 | CLI | `pta` | Cliente administrativo. Habla con el host por IPC loopback autenticado; lo arranca oculto si no existe. |
 | Skill | `desktop/src-tauri/skills/personal-teams-assistant/` | Manual para agentes, compilado dentro de `pta` (`pta skill show/path/install`). |
 
@@ -22,8 +22,10 @@ src/                          núcleo: pipeline, adaptadores Graph, Jev, LLM, co
 tests/integration.rs          integración con wiremock (Graph, Jev, DeepSeek simulados)
 examples/wiki_gate_smoke.rs   regresión opcional contra Jev real con hechos sintéticos
 desktop/src-tauri/            crate `personal-teams-desktop` (GUI, host, CLI, skill)
-  src/lib.rs                  host Tauri: estado, arranque/parada, OAuth de escritorio, túnel, ajustes
-  src/control.rs              canal IPC (contrato 1), despachador único de operaciones
+  src/lib.rs                  host: Host/Shell, estado, arranque/parada, OAuth, túnel, ajustes, entrada `run`
+  src/gui.rs                  shell Tauri (feature `gui`): ventana, bandeja, comando `command` del WebView
+  src/headless.rs             shell sin interfaz: primer plano, SIGTERM/Ctrl-C, `--start`
+  src/control.rs              rutas del perfil, canal IPC (contrato 1), despachador único de operaciones
   src/cli.rs                  `pta`: parseo, validación de argumentos, traducción a métodos IPC
   src/github.rs               GitHub App con Device Flow, clonado/sync sin token en URL/argv
   src/skill.rs                textos de la skill incorporados con include_str!
@@ -51,11 +53,25 @@ flowchart LR
   Graph[Microsoft Graph] --> T
 ```
 
+- **Host y shell.** `Host` = `DesktopState` (operaciones) + `Shell` (lo que puede hacer el proceso dueño: mostrar/ocultar ventana, abrir URL, salir). `gui::TauriShell` lo implementa con Tauri; `headless::HeadlessShell` responde `not_ready` a `app open/hide`, devuelve las URLs al llamador y termina el proceso con `app quit`. Ninguna operación depende de Tauri.
 - **Un host por perfil.** `control.lock` (flock) prueba propiedad; `control.json` publica puerto, token aleatorio y `wiki_support`. Un descriptor sin lock es obsoleto. Nunca se señaliza un proceso por PID.
 - **IPC.** `POST /control` en un puerto loopback efímero, bearer constante en tiempo, rechaza cualquier `Origin` (navegadores). Cuerpo máx. 1 MB, timeout de cliente 120 s.
 - **Despachador único.** GUI y CLI pasan por `control::dispatch`, que serializa con `operations` y verifica `revision` (SHA-256 de config + mapa + túnel) para escrituras basadas en un snapshot. Mientras hay un login Microsoft/GitHub pendiente solo se permiten lecturas.
-- **El CLI lanza el host** (`host_executable`: binario hermano o `host-path.txt`) con `--host` en su propio grupo de procesos y espera el descriptor.
+- **El CLI lanza el host** (`host_executable`: binario hermano o `host-path.txt`) con `--host` en su propio grupo de procesos y espera el descriptor. El host hereda el entorno de `pta` (credenciales `NAME`/`NAME_FILE`, `PTA_HEADLESS`).
 - **Servicio.** `runtime::serve` corre como tarea Tokio dentro del host. `lib.rs::start` lo lanza, espera `ready` (60 s) y luego arranca `cloudflared` si corresponde. `stop` mata el túnel, envía `true` por el `watch` y espera 20 s antes de abortar. Cerrar el canal también cuenta como parada.
+
+### Host sin interfaz (Linux y servidores)
+
+```sh
+cargo install personal-teams-desktop --no-default-features --locked   # sin Tauri/WebKit
+personal-teams-desktop --headless --start                              # primer plano; `--start` inicia el servicio
+```
+
+- Sin la feature `gui` el binario siempre es headless; con ella, `--headless` o `PTA_HEADLESS=1` lo fuerzan. Mismo perfil, contrato y operaciones que la GUI; se opera solo con `pta`.
+- Corre en primer plano: `pta app quit`, SIGTERM o Ctrl-C detienen servicio y túnel antes de salir. Un segundo host sobre el mismo perfil sale con código 1. Logs a stderr (sin ANSI fuera de una terminal), aptos para journald.
+- `--start` intenta iniciar el servicio; si falla, el host sigue vivo para diagnosticar con `pta status/doctor/audit`.
+- Login Microsoft remoto: `pta auth microsoft login --no-browser` devuelve la URL; tras autorizar en cualquier dispositivo, el navegador no podrá abrir `http://localhost:PUERTO/?code=…`; esa URL se pega en `pta auth microsoft finish --redirect 'URL'` y el host la reenvía a su propio listener loopback (`forward_microsoft_redirect`: mismo puerto pendiente, se rechaza al instante si el callback no la acepta). Alternativa: migrar un perfil existente con `pta config import` más `STATE_ENCRYPTION_KEY`.
+- El servidor necesita igualmente una URL HTTPS estable hacia el listener (túnel Cloudflare con token) y no debe coexistir con otra instancia activa de la misma cuenta: duplicaría respuestas y provocaría bucles en el chat personal.
 
 ## 4. Perfil, datos y credenciales
 
@@ -63,13 +79,13 @@ flowchart LR
 
 | Elemento | Ubicación |
 | --- | --- |
-| Perfil (identificador Tauri `dev.personalteams.assistant`) | macOS `~/Library/Application Support/dev.personalteams.assistant/`; Windows `%APPDATA%\dev.personalteams.assistant\` |
+| Perfil (identificador Tauri `dev.personalteams.assistant`) | macOS `~/Library/Application Support/dev.personalteams.assistant/`; Windows `%APPDATA%\dev.personalteams.assistant\`; Linux `${XDG_CONFIG_HOME:-~/.config}/dev.personalteams.assistant/` |
 | Archivos del perfil | `config.toml`, `knowledge-map.toml`, `cloudflared-path.txt`, `control.json`, `control.lock`, `host-path.txt`, `settings-rollback.json` (journal transitorio), `skills/` |
-| Directorio de datos | `config.server.data_dir` (se conserva el importado; puede estar fuera del perfil) |
+| Directorio de datos | `config.server.data_dir` (se conserva el importado; puede estar fuera del perfil). En un perfil nuevo: el del perfil en macOS/Windows, `${XDG_DATA_HOME:-~/.local/share}/dev.personalteams.assistant/` en Linux |
 | Datos | `assistant.db` (servicio), `desktop-chat.db` (chat local/simulación), `instance.lock`, `repositories/` (clones GitHub) |
-| Credenciales | Llavero macOS / Credential Manager, servicio `personal-teams-assistant.default`, cuenta = nombre de la credencial |
+| Credenciales | Llavero macOS / Credential Manager, servicio `personal-teams-assistant.default`, cuenta = nombre de la credencial. Linux: archivos `<perfil>/credentials/default/NOMBRE` (0600, directorio 0700) |
 
-Resolución de un secreto (`security::secret`): `NAME_FILE` → variable `NAME` → almacén del sistema. `secret_source` solo inspecciona metadatos (en macOS usa `/usr/bin/security find-generic-password` sin descifrar). Credenciales conocidas: `TYPESAFE_API_KEY`, `DEEPSEEK_API_KEY`, `GRAPH_WEBHOOK_SECRET` y `STATE_ENCRYPTION_KEY` (ambas se generan al primer arranque si faltan), `CLOUDFLARE_TUNNEL_TOKEN` (modo túnel con token), `GITHUB_OAUTH_TOKENS`, y las mapeadas en `[secrets]` (p. ej. `AZURE_DEVOPS_TOKEN`).
+Resolución de un secreto (`security::secret`): `NAME_FILE` → variable `NAME` → almacén del sistema (Llavero/Credential Manager, o el almacén de archivos en Linux, configurado por `configure_credentials`). `secret_source` solo inspecciona metadatos (en macOS usa `/usr/bin/security find-generic-password` sin descifrar). Credenciales conocidas: `TYPESAFE_API_KEY`, `DEEPSEEK_API_KEY`, `GRAPH_WEBHOOK_SECRET` y `STATE_ENCRYPTION_KEY` (ambas se generan al primer arranque si faltan), `CLOUDFLARE_TUNNEL_TOKEN` (modo túnel con token), `GITHUB_OAUTH_TOKENS`, y las mapeadas en `[secrets]` (p. ej. `AZURE_DEVOPS_TOKEN`).
 
 Invariantes:
 
@@ -77,6 +93,7 @@ Invariantes:
 - Una base no se reutiliza con otro tenant/client/usuario (`protect_identity`).
 - Escrituras del perfil: archivo temporal 0600 + rename atómico; `commit_settings` escribe un journal y lo revierte si falla; el siguiente host recupera un journal pendiente.
 - Directorios 0700 / ACL de la cuenta en Windows.
+- En Linux el almacén de archivos guarda los valores en claro (protegidos solo por permisos), junto a la base cuyos tokens cifra `STATE_ENCRYPTION_KEY`. En un servidor, preferir credenciales de systemd o un gestor de secretos montado vía `NAME_FILE`.
 
 ## 5. Configuración
 
@@ -199,7 +216,7 @@ Reglas de respuesta (también en `AGENTS.md`): documentación Wiki propia puede 
 | 5 | `dependency_or_network` | Red, proveedor o instalación |
 | 6 | `state_conflict` / `revision_conflict` / `contract_mismatch` | Revisión, contrato o versión incompatible |
 
-Para añadir una operación: método en `control::operate` (y en las listas permitidas durante login si es de lectura) → comando en `cli.rs` (`HELP`, `validate_args`, mapeo) → si cambia el esquema que un host antiguo no entiende, anunciarlo en `Endpoint` como `wiki_support` → documentar en la skill.
+Para añadir una operación: método en `control::operate` (ventana o navegador solo a través de `host.shell`, para que funcione sin interfaz) (y en las listas permitidas durante login si es de lectura) → comando en `cli.rs` (`HELP`, `validate_args`, mapeo) → si cambia el esquema que un host antiguo no entiende, anunciarlo en `Endpoint` como `wiki_support` → documentar en la skill.
 
 ## 11. GUI
 
@@ -216,7 +233,8 @@ cargo test --workspace
 - Unitarias junto al código; integración en `tests/integration.rs` con `wiremock` y dobles (`NoGate`, `NoLlm`, `NoTools`, `IntentGate`…). Ninguna prueba usa red ni credenciales reales.
 - `pta test simulate` / `pta chat` ejecutan el pipeline real con un adaptador que nunca envía a Graph (`simulation::TestAdapter`, estado `sent` = `simulation-only`). `pta test providers` usa hechos sintéticos y consume API.
 - `cargo run --example wiki_gate_smoke` (credencial Jev existente) evalúa el control final con hechos sintéticos.
-- CI (`.github/workflows/ci.yml`): núcleo en Ubuntu; GUI/CLI en macOS (check, clippy, test) y Windows (check).
+- CI (`.github/workflows/ci.yml`): núcleo en Ubuntu; host sin interfaz y CLI en Ubuntu con `--no-default-features` (clippy, test); GUI/CLI en macOS (check, clippy, test) y Windows (check).
+- Toda operación nueva debe compilar en ambas variantes: `cargo clippy -p personal-teams-desktop --all-targets [--no-default-features] -- -D warnings`. El código de Tauri solo vive en `gui.rs`.
 
 ## 13. Recetas de cambio
 
@@ -233,7 +251,7 @@ cargo test --workspace
 - **Una herramienta por mensaje**, para acotar coste, latencia y superficie; combinar fuentes es una mejora pendiente.
 - **Ningún envío se reintenta**: Graph no ofrece idempotencia; se prefiere omitir una respuesta antes que duplicarla.
 - **OAuth público de escritorio con los scopes ya concedidos**; el registro Entra existente admite `http://localhost` y otras organizaciones. Pedir nuevos permisos obligaría a un consentimiento nuevo.
-- **Solo Cargo**: sin bundles firmados/notarizados ni servidor Docker; el host de escritorio es el único runtime.
+- **Solo Cargo**: sin bundles firmados/notarizados ni servidor Docker; el host (con GUI o sin interfaz) es el único runtime.
 
 ## 15. Límites conocidos
 
@@ -242,5 +260,5 @@ cargo test --workspace
 - Una sola herramienta por respuesta (no combina Wiki y actividad).
 - La recuperación de `missed` cubre solo la página reciente; no hay garantía de procesar mensajes durante apagones.
 - No detecta si el usuario respondió manualmente mientras se generaba la propuesta.
-- Windows compila en CI pero no tiene validación funcional.
+- Windows compila en CI pero no tiene validación funcional. Linux solo como host sin interfaz (la GUI en Linux no se prueba).
 - La versión publicada en crates.io puede ir por detrás del repositorio; GUI y CLI deben ser de la misma compilación (el CLI rechaza esquemas Wiki contra un host sin `wiki_support`).

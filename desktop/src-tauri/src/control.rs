@@ -70,6 +70,9 @@ struct Endpoint {
     token: String,
 }
 
+const IDENTIFIER: &str = "dev.personalteams.assistant";
+
+/// Profile directory shared by GUI, headless host and CLI; matches Tauri's app_config_dir.
 pub fn profile_dir() -> Result<PathBuf> {
     #[cfg(target_os = "macos")]
     let base = PathBuf::from(std::env::var_os("HOME").context("home directory unavailable")?)
@@ -77,9 +80,26 @@ pub fn profile_dir() -> Result<PathBuf> {
     #[cfg(target_os = "windows")]
     let base = PathBuf::from(std::env::var_os("APPDATA").context("AppData unavailable")?);
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    let base = PathBuf::from(std::env::var_os("HOME").context("home directory unavailable")?)
-        .join(".config");
-    Ok(base.join("dev.personalteams.assistant"))
+    let base = xdg_dir("XDG_CONFIG_HOME", ".config")?;
+    Ok(base.join(IDENTIFIER))
+}
+/// Data directory for a new profile; matches Tauri's app_data_dir. Existing profiles keep
+/// `server.data_dir`.
+pub fn default_data_dir() -> Result<PathBuf> {
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    return Ok(xdg_dir("XDG_DATA_HOME", ".local/share")?.join(IDENTIFIER));
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    profile_dir()
+}
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn xdg_dir(variable: &str, fallback: &str) -> Result<PathBuf> {
+    match std::env::var_os(variable).map(PathBuf::from) {
+        Some(path) if path.is_absolute() => Ok(path),
+        _ => Ok(
+            PathBuf::from(std::env::var_os("HOME").context("home directory unavailable")?)
+                .join(fallback),
+        ),
+    }
 }
 pub fn existing_host() -> Result<()> {
     // The lock proves ownership. A stale descriptor or reused PID does not.
@@ -184,7 +204,7 @@ pub async fn client(request: Request, start_host: bool) -> Result<Reply> {
     anyhow::bail!("desktop host did not accept a connection")
 }
 struct LocalState {
-    app: tauri::AppHandle,
+    host: Arc<Host>,
     token: String,
     _lock: fs::File,
 }
@@ -208,12 +228,13 @@ fn claim_at(dir: &Path) -> Result<fs::File> {
     let _ = fs::remove_file(dir.join("control.json"));
     Ok(lock)
 }
-pub fn launch(app: tauri::AppHandle, lock: fs::File) -> Result<()> {
-    let dir = app.path().app_config_dir()?;
-    ensure!(
-        dir == profile_dir()?,
-        "profile path differs between GUI and CLI"
-    );
+/// Publish the control endpoint and return the server future; the caller spawns it on
+/// its runtime (Tauri's or the headless Tokio runtime).
+pub(crate) fn launch(
+    host: Arc<Host>,
+    lock: fs::File,
+) -> Result<impl std::future::Future<Output = ()> + Send + 'static> {
+    let dir = profile_dir()?;
     let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
     listener.set_nonblocking(true)?;
     write_private(
@@ -234,16 +255,15 @@ pub fn launch(app: tauri::AppHandle, lock: fs::File) -> Result<()> {
         .route("/control", post(endpoint))
         .layer(DefaultBodyLimit::max(1_000_000))
         .with_state(Arc::new(LocalState {
-            app,
+            host,
             token,
             _lock: lock,
         }));
-    tauri::async_runtime::spawn(async move {
+    Ok(async move {
         if let Ok(listener) = tokio::net::TcpListener::from_std(listener) {
             let _ = axum::serve(listener, router).await;
         }
-    });
-    Ok(())
+    })
 }
 async fn endpoint(
     State(local): State<Arc<LocalState>>,
@@ -254,7 +274,7 @@ async fn endpoint(
     if !authorized(&headers, &local.token) {
         return Err(StatusCode::FORBIDDEN);
     }
-    Ok(Json(dispatch(&local.app, request).await))
+    Ok(Json(dispatch(&local.host, request).await))
 }
 fn authorized(headers: &HeaderMap, token: &str) -> bool {
     !headers.contains_key("origin")
@@ -262,10 +282,6 @@ fn authorized(headers: &HeaderMap, token: &str) -> bool {
             .get("authorization")
             .and_then(|h| h.to_str().ok())
             .is_some_and(|h| security::constant_eq(h, &format!("Bearer {token}")))
-}
-#[tauri::command]
-pub async fn command(app: tauri::AppHandle, request: Request) -> Reply {
-    dispatch(&app, request).await
 }
 pub(super) fn revision(state: &DesktopState) -> Result<String> {
     let mut hash = Sha256::new();
@@ -282,7 +298,7 @@ fn arg<T: serde::de::DeserializeOwned>(
     serde_json::from_value(value.get(name).cloned().unwrap_or(Value::Null))
         .map_err(|_| format!("invalid argument: {name}"))
 }
-pub async fn dispatch(app: &tauri::AppHandle, request: Request) -> Reply {
+pub(crate) async fn dispatch(host: &Arc<Host>, request: Request) -> Reply {
     if request.contract != CONTRACT {
         return Reply::error(
             "contract_mismatch",
@@ -290,10 +306,10 @@ pub async fn dispatch(app: &tauri::AppHandle, request: Request) -> Reply {
             "Update the CLI and host to compatible versions.",
         );
     }
-    let state = app.state::<DesktopState>();
+    let state = &host.state;
     let _guard = state.operations.lock().await;
     if let Some(expected) = &request.revision
-        && revision(&state).ok().as_ref() != Some(expected)
+        && revision(state).ok().as_ref() != Some(expected)
     {
         return Reply::error(
             "revision_conflict",
@@ -356,7 +372,7 @@ pub async fn dispatch(app: &tauri::AppHandle, request: Request) -> Reply {
     }
     let args = request.args;
     let method = request.method.as_str();
-    let result = operate(app, &state, method, &args).await;
+    let result = operate(host, method, &args).await;
     let mut reply = match result {
         Ok(data) => Reply::success(data),
         Err(message) => {
@@ -396,24 +412,24 @@ pub async fn dispatch(app: &tauri::AppHandle, request: Request) -> Reply {
         reply.message =
             Some("Complete authorization, then use login finish to check the result.".into());
     }
-    reply.revision = revision(&state).ok();
+    reply.revision = revision(state).ok();
     reply
 }
 
 async fn operate(
-    app: &tauri::AppHandle,
-    state: &DesktopState,
+    host: &Arc<Host>,
     method: &str,
     args: &Value,
 ) -> std::result::Result<Value, String> {
+    let state = &host.state;
     let value = match method {
-        "snapshot" => serde_json::to_value(snapshot(app.state()).await?).map_err(fail)?,
+        "snapshot" => serde_json::to_value(snapshot(host).await?).map_err(fail)?,
         "start_assistant" => {
-            start_assistant(app.state()).await?;
+            start(state).await.map_err(fail)?;
             json!({"running":true})
         }
         "stop_assistant" => {
-            stop_assistant(app.state()).await?;
+            stop(state).await.map_err(fail)?;
             json!({"running":false})
         }
         "restart" => {
@@ -423,7 +439,7 @@ async fn operate(
         }
         "save_settings" => {
             save_settings(
-                app.state(),
+                state,
                 arg(args, "config")?,
                 arg(args, "map")?,
                 arg(args, "tunnel_config").or_else(|_| arg(args, "tunnelConfig"))?,
@@ -449,15 +465,15 @@ async fn operate(
             json!({"valid":true})
         }
         "import_existing" => {
-            import_existing(app.state(), arg(args, "path")?).await?;
+            import_existing(state, arg(args, "path")?).await?;
             json!({"imported":true})
         }
         "set_credential" => {
-            set_credential(app.state(), arg(args, "name")?, arg(args, "value")?).await?;
+            set_credential(state, arg(args, "name")?, arg(args, "value")?).await?;
             json!({"stored":true})
         }
         "delete_credential" => {
-            delete_credential(app.state(), arg(args, "name")?).await?;
+            delete_credential(state, arg(args, "name")?).await?;
             json!({"deleted":true})
         }
         "azure_wiki" => {
@@ -469,19 +485,19 @@ async fn operate(
             )
             .await?
         }
-        "chat" => {
-            serde_json::to_value(chat(app.state(), arg(args, "input")?).await?).map_err(fail)?
-        }
+        "chat" => serde_json::to_value(chat(state, arg(args, "input")?).await?).map_err(fail)?,
         "begin_github_login" => serde_json::to_value(
             begin_github_login(
-                app.state(),
+                state,
                 arg(args, "client_id").or_else(|_| arg(args, "clientId"))?,
             )
             .await?,
         )
         .map_err(fail)?,
         "open_github_login" => {
-            open_github_login(app.clone()).await?;
+            host.shell
+                .open_url("https://github.com/login/device")
+                .map_err(fail)?;
             Value::Null
         }
         "finish_github_login" => {
@@ -512,7 +528,7 @@ async fn operate(
             json!({"cancelled":true})
         }
         "github_repositories" => {
-            serde_json::to_value(github_repositories(app.state()).await?).map_err(fail)?
+            serde_json::to_value(github_repositories(state).await?).map_err(fail)?
         }
         "disconnect_github" => {
             if let Some(task) = state.github_finish.lock().await.take() {
@@ -524,7 +540,7 @@ async fn operate(
         }
         "clone_github_repository" => {
             clone_github_repository(
-                app.state(),
+                state,
                 arg(args, "full_name").or_else(|_| arg(args, "fullName"))?,
                 arg(args, "alias")?,
             )
@@ -532,18 +548,27 @@ async fn operate(
             json!({"cloned":true})
         }
         "update_github_repository" => {
-            update_github_repository(app.state(), arg(args, "alias")?).await?;
+            update_github_repository(state, arg(args, "alias")?).await?;
             json!({"synced":true})
         }
         "connect_microsoft" => {
             let url = begin_microsoft(
-                app,
+                host,
                 args.get("open").and_then(Value::as_bool).unwrap_or(true),
             )
             .await?;
-            json!({"pending":true,"authorization_url":url,"provider":"microsoft"})
+            let mut reply = json!({"pending":true,"authorization_url":url,"provider":"microsoft"});
+            if host.shell.headless() {
+                reply["remote_browser"] = json!(
+                    "If the browser runs on another machine, copy the final http://localhost address it fails to open and run: pta auth microsoft finish --redirect 'URL'"
+                );
+            }
+            reply
         }
         "finish_microsoft" => {
+            if let Some(url) = args.get("redirect_url").and_then(Value::as_str) {
+                forward_microsoft_redirect(state, url).await?;
+            }
             let mut task = state.microsoft_login.lock().await;
             if let Some(job) = task.as_ref() {
                 if job.is_finished() {
@@ -560,6 +585,7 @@ async fn operate(
             if let Some(task) = state.microsoft_login.lock().await.take() {
                 task.abort();
             }
+            *state.microsoft_redirect.lock().await = None;
             json!({"cancelled":true,"running":state.running.lock().await.is_some()})
         }
         "microsoft_logout" => {
@@ -631,7 +657,7 @@ async fn operate(
             config.graph.self_chat = None;
             let map = KnowledgeMap::load(&state.map_path).map_err(fail)?;
             let tunnel = fs::read_to_string(&state.tunnel_path).unwrap_or_default();
-            save_settings(app.state(), config, map, tunnel).await?;
+            save_settings(state, config, map, tunnel).await?;
             json!({"enabled":false})
         }
         "audit" | "logs" => {
@@ -651,13 +677,11 @@ async fn operate(
             )
         }
         "app_open" => {
-            show_main(app);
+            host.shell.show().map_err(fail)?;
             json!({"visible":true})
         }
         "app_hide" => {
-            if let Some(window) = app.get_webview_window("main") {
-                window.hide().map_err(fail)?;
-            }
+            host.shell.hide().map_err(fail)?;
             json!({"visible":false})
         }
         "app_quit" => {
@@ -668,10 +692,11 @@ async fn operate(
                 task.abort();
             }
             stop(state).await.map_err(fail)?;
-            let app = app.clone();
-            tauri::async_runtime::spawn(async move {
+            let host = host.clone();
+            tokio::spawn(async move {
+                // Let the reply reach the client before the process exits.
                 tokio::time::sleep(Duration::from_millis(150)).await;
-                app.exit(0);
+                host.shell.exit();
             });
             json!({"quitting":true})
         }

@@ -9,7 +9,8 @@ Lee primero [la arquitectura](docs/architecture.md): explica componentes, pipeli
 
 ## Prioridades
 
-- El producto es el CLI `pta`, la GUI `personal-teams-desktop` y su skill, todo instalado con Cargo desde `desktop/src-tauri`. El núcleo `personal-teams-assistant` es solo biblioteca. No hay bundles `.app`/`.dmg`/instaladores ni servidor independiente.
+- El producto es el CLI `pta`, la GUI `personal-teams-desktop` y su skill, todo instalado con Cargo desde `desktop/src-tauri`. El mismo binario corre sin interfaz (`--headless`, o compilado con `--no-default-features` para Linux). El núcleo `personal-teams-assistant` es solo biblioteca. No hay bundles `.app`/`.dmg`/instaladores ni servidor independiente.
+- Tauri solo se usa en `desktop/src-tauri/src/gui.rs`; las operaciones usan `Host`/`Shell` y deben compilar con y sin la feature `gui`.
 - La prioridad de entrega es el CLI y su núcleo compartido. Si la GUI queda desfasada, anótalo en «Límites conocidos» de la arquitectura; su paridad no bloquea el trabajo del CLI. No reinstales, publiques ni actualices la GUI salvo que el usuario lo pida.
 
 ## Invariantes que no se pueden romper
@@ -33,7 +34,9 @@ Lee primero [la arquitectura](docs/architecture.md): explica componentes, pipeli
 ```sh
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
+cargo clippy -p personal-teams-desktop --all-targets --no-default-features -- -D warnings
 cargo test --workspace
+cargo test -p personal-teams-desktop --no-default-features
 ```
 
 Actualiza la arquitectura y la skill si cambias comportamiento, comandos o esquemas.

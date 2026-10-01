@@ -13,6 +13,15 @@ cargo install --path desktop/src-tauri --locked        # desde este checkout
 
 Requisitos: Rust (versión fijada en `rust-toolchain.toml`), prerrequisitos nativos de Tauri 2, Git y `~/.cargo/bin` en `PATH`. Para recibir mensajes de Teams además necesitas una URL HTTPS estable que llegue al puerto local (p. ej. `cloudflared` con token) y el equipo encendido.
 
+En Linux o en un servidor, instala la variante **sin interfaz** (no necesita Tauri ni WebKit) y opérala solo con `pta`:
+
+```sh
+cargo install personal-teams-desktop --no-default-features --locked
+personal-teams-desktop --headless --start      # primer plano; apto para un servicio systemd
+```
+
+Sus credenciales se guardan con `pta credentials set` en archivos privados del perfil o llegan por variables `NOMBRE`/`NOMBRE_FILE`. El login de Microsoft se completa desde cualquier dispositivo con `pta auth microsoft finish --redirect 'URL'`. Detalles en la [arquitectura](docs/architecture.md#host-sin-interfaz-linux-y-servidores). No mantengas dos instancias activas de la misma cuenta.
+
 GUI y CLI comparten el mismo perfil, credenciales del Llavero/Credential Manager y servicio. Reinstalar no pide credenciales de nuevo: se conservan el perfil `dev.personalteams.assistant`, el directorio de datos y la cuenta Microsoft conectada.
 
 ## Uso rápido

@@ -12,6 +12,6 @@ personal-teams-desktop
 pta --help
 ```
 
-Requiere Rust, los prerrequisitos nativos de Tauri y el directorio `bin` de Cargo en `PATH`. GUI y CLI comparten el perfil `dev.personalteams.assistant`, el directorio de datos y las credenciales del almacén del sistema; reinstalar los conserva.
+Requiere Rust, los prerrequisitos nativos de Tauri y el directorio `bin` de Cargo en `PATH`. Para Linux o servidores, `cargo install personal-teams-desktop --no-default-features --locked` instala el host sin interfaz (`personal-teams-desktop --headless --start`) y `pta`, sin Tauri ni WebKit. GUI y CLI comparten el perfil `dev.personalteams.assistant`, el directorio de datos y las credenciales del almacén del sistema; reinstalar los conserva.
 
 Arquitectura y configuración: README y `docs/architecture.md` del repositorio.
