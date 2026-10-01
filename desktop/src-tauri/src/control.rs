@@ -329,6 +329,7 @@ pub(crate) async fn dispatch(host: &Arc<Host>, request: Request) -> Reply {
     if microsoft_pending
         && ![
             "snapshot",
+            "llm_providers",
             "app_quit",
             "self_chat_status",
             "audit",
@@ -355,6 +356,7 @@ pub(crate) async fn dispatch(host: &Arc<Host>, request: Request) -> Reply {
     if github_pending
         && ![
             "snapshot",
+            "llm_providers",
             "self_chat_status",
             "audit",
             "logs",
@@ -596,6 +598,10 @@ async fn operate(
             let config = read_config(&state.config_path).map_err(fail)?;
             Store::logout(&config.server.data_dir.join("assistant.db")).map_err(fail)?;
             json!({"local_logout":true,"remote_revoked":false,"running":false})
+        }
+        "llm_providers" => {
+            // Installed CLIs, their models and efforts; probes only local commands.
+            serde_json::to_value(personal_teams_assistant::llm::catalog().await).map_err(fail)?
         }
         "test_providers" => {
             let config = read_config(&state.config_path).map_err(fail)?;

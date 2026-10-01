@@ -35,10 +35,15 @@
         <div id="credentials"></div>
       </div>
       <div class="panel">
+        <h2>Modelos de lenguaje</h2>
+        <p>Analizan las preguntas y redactan las respuestas. Responde el primero activo; si falla (por ejemplo, sin créditos o con el límite de uso agotado) responde el siguiente. El orden se evalúa de nuevo en cada llamada: el predeterminado vuelve a responder en cuanto recupera su uso. Codex y Claude usan su CLI instalada con su propia sesión; DeepSeek usa su API con <code>DEEPSEEK_API_KEY</code>.</p>
+        <ol id="llm-chain" class="chain" aria-label="Orden de prioridad de los modelos"></ol>
+        <div class="actions"><button id="save-llm">Guardar modelos</button><button id="detect-llm" class="secondary">Volver a detectar CLI</button></div>
+      </div>
+      <div class="panel">
         <h2>Proveedores y Teams</h2>
         <div class="grid">
           <label>Modelo de Jev<input id="jev-model"></label>
-          <label>Modelo de DeepSeek<input id="llm-model"></label>
           <label>Máximo de caracteres: respuesta normal<input id="max-answer-chars" type="number" min="1" max="4000"></label>
           <label>Máximo de caracteres: respuesta detallada<input id="max-detailed-answer-chars" type="number" min="1" max="16000"></label>
           <label>ID de tenant Entra<input id="tenant-id"></label>
@@ -109,7 +114,7 @@
     <section id="chat" hidden>
       <div class="panel">
         <h2>Chat de prueba</h2>
-        <p>Usa los mismos controles de Jev y DeepSeek. Las respuestas aparecen aquí y nunca se envían a Teams. Selecciona las fuentes cuyo procesamiento externo autorizas para esta prueba.</p>
+        <p>Usa los mismos controles de Jev y la misma cadena de modelos de lenguaje. Las respuestas aparecen aquí y nunca se envían a Teams. Selecciona las fuentes cuyo procesamiento externo autorizas para esta prueba.</p>
         <div id="chat-sources"></div>
         <div id="history" aria-live="polite"></div>
         <form id="chat-form">

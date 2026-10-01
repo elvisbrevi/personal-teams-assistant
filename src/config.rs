@@ -71,9 +71,41 @@ fn default_follow_up_threshold() -> f64 {
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Llm {
+    /// Legacy single provider; used only while `chain` is empty.
     pub provider: String,
     pub model: String,
     pub style: String,
+    /// Providers in priority order. Every model call starts again from the first enabled one
+    /// and falls back to the next only when it fails (for example, without usage credits).
+    #[serde(default)]
+    pub chain: Vec<LlmChoice>,
+}
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct LlmChoice {
+    /// `codex` or `claude` (installed CLI, its own login) or `deepseek` (API key).
+    pub provider: String,
+    pub model: String,
+    pub effort: String,
+    #[serde(default = "enabled")]
+    pub enabled: bool,
+}
+fn enabled() -> bool {
+    true
+}
+impl Llm {
+    /// Enabled providers in order; an empty chain keeps the legacy DeepSeek profile working.
+    pub fn active(&self) -> Vec<LlmChoice> {
+        if self.chain.is_empty() {
+            return vec![LlmChoice {
+                provider: self.provider.clone(),
+                model: self.model.clone(),
+                effort: "max".into(),
+                enabled: true,
+            }];
+        }
+        self.chain.iter().filter(|c| c.enabled).cloned().collect()
+    }
 }
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -156,7 +188,7 @@ impl Config {
             "invalid age limit"
         );
         ensure!(!self.policy.greeting.trim().is_empty(), "invalid greeting");
-        crate::llm::validate_provider(&self.llm.provider)?;
+        crate::llm::validate(&self.llm)?;
         Ok(())
     }
     /// The delegated Graph scopes already consented for this Entra registration. Never widen.

@@ -36,3 +36,16 @@ button.secondary { background: #e7eee9; color: #23523b; }
 .turn { padding: .8rem; border-radius: 9px; white-space: pre-wrap; overflow-wrap: anywhere; background: #f0f4f0; }
 .turn.you { background: #e7f0fb; } .turn.answer { background: #e4f4e7; }
 code { background: #eef2ee; padding: .1rem .3rem; border-radius: 4px; }
+.chain { list-style: none; padding: 0; margin: 1rem 0 0; display: grid; gap: .6rem; }
+.chain-row { display: grid; grid-template-columns: 7.2rem minmax(10rem, 1.1fr) minmax(9rem, 1fr) minmax(7rem, .6fr) auto; gap: .65rem; align-items: center; border: 1px solid #dce4de; border-radius: 10px; padding: .7rem .8rem; }
+.chain-row .field { margin: 0; font-weight: 400; }
+.chain-row .field select { margin-top: .15rem; padding: .45rem .5rem; }
+.chain-row.off { background: #f7f9f7; color: #586b60; }
+.chain-row select { margin: 0; }
+.chain-row .check { margin: 0; }
+.chain-row small { display: block; color: #586b60; }
+.rank { font-size: .85rem; font-weight: 700; border-radius: 100px; padding: .25rem .6rem; background: #dceee2; color: #23523b; text-align: center; }
+.chain-row.off .rank { background: #e9ece9; color: #6b7b71; }
+.order { display: flex; gap: .3rem; }
+.order button { padding: .4rem .6rem; }
+@media (max-width: 760px) { .chain-row { grid-template-columns: 1fr 1fr; } .chain-row .rank { grid-column: 1 / -1; justify-self: start; } }

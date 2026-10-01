@@ -3,7 +3,6 @@ use crate::{
     config::Config,
     decision::Jev,
     knowledge::KnowledgeMap,
-    llm::DeepSeek,
     pipeline::Pipeline,
     security::{self, Redactor},
     simulation::{self, SimulationRequest, SimulationResult},
@@ -43,8 +42,9 @@ pub async fn chat(config_path: &Path, input: SimulationRequest) -> Result<Simula
         "selected source is unavailable"
     );
     let jev_key = security::secret("TYPESAFE_API_KEY")?;
-    let llm_key = security::secret("DEEPSEEK_API_KEY")?;
-    let mut exact_secrets = vec![jev_key.clone(), llm_key.clone()];
+    let (llm, llm_secrets) = crate::llm::from_config(&config.llm)?;
+    let mut exact_secrets = vec![jev_key.clone()];
+    exact_secrets.extend(llm_secrets);
     for name in config.secrets.values() {
         exact_secrets.push(security::secret(name)?);
     }
@@ -82,12 +82,7 @@ pub async fn chat(config_path: &Path, input: SimulationRequest) -> Result<Simula
             model: config.jev.model.clone(),
         }),
         knowledge,
-        llm: Arc::new(DeepSeek::new(
-            &llm_key,
-            &config.llm.model,
-            &config.llm.style,
-            "https://api.deepseek.com",
-        )?),
+        llm: Arc::new(llm),
         tools: Arc::new(Tools {
             bindings: config.secrets.clone(),
             repositories,

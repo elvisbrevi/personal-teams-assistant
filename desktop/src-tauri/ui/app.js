@@ -1,6 +1,6 @@
 const rawInvoke = window.__TAURI__.core.invoke;
 async function invoke(method, args = {}) {
-  const read = ['snapshot', 'chat', 'github_repositories', 'self_chat_status'].includes(method);
+  const read = ['snapshot', 'chat', 'github_repositories', 'self_chat_status', 'llm_providers'].includes(method);
   let result = await rawInvoke('command', { request: {
     method, args, revision: read ? null : current?.revision ?? null, contract: 1
   }});
@@ -56,14 +56,15 @@ function renderCredentials() {
   for (const [name, source] of Object.entries(current.credentials)) {
     const row = document.createElement('div');
     row.className = 'row';
-    const origins = { system: 'Configurada en el almacén del sistema', environment: 'Configurada mediante variable de entorno', file: 'Configurada mediante archivo privado' };
-    row.append(rowText(name, source === 'missing' ? 'Sin configurar' : origins[source] || 'Configurada'));
+    const origins = { system: 'Configurada en el almacén del sistema', environment: 'Configurada mediante variable de entorno', file: 'Configurada mediante archivo privado', missing: 'Sin configurar', unused: 'Sin configurar · la cadena de modelos actual no la usa' };
+    const empty = source === 'missing' || source === 'unused';
+    row.append(rowText(name, origins[source] || 'Configurada'));
     const input = document.createElement('input');
     input.type = 'password'; input.autocomplete = 'new-password';
-    input.placeholder = source === 'missing' ? 'Introduce la credencial' : 'Guardada; escribe aquí solo para reemplazarla';
+    input.placeholder = empty ? 'Introduce la credencial' : 'Guardada; escribe aquí solo para reemplazarla';
     input.setAttribute('aria-label', `Nuevo valor de ${name}`);
     const save = document.createElement('button');
-    save.textContent = source === 'missing' ? 'Guardar' : 'Reemplazar';
+    save.textContent = empty ? 'Guardar' : 'Reemplazar';
     save.disabled = true;
     input.oninput = () => { save.disabled = !input.value.trim(); };
     save.onclick = async () => {
@@ -83,6 +84,104 @@ function renderCredentials() {
     row.append(input, save, remove);
     container.append(row);
   }
+}
+
+const providerNames = { codex: 'Codex', claude: 'Claude Code', deepseek: 'DeepSeek' };
+const effortNames = { none: 'Sin razonamiento', minimal: 'Mínimo', low: 'Bajo', medium: 'Medio', high: 'Alto', xhigh: 'Muy alto', max: 'Máximo' };
+let llmCatalog = { providers: [] };
+let llmRows = [];
+
+/** Configured order first (legacy profiles: their single DeepSeek model), then the rest inactive. */
+function chainRows(config) {
+  const rows = config.llm.chain.length
+    ? config.llm.chain.map(choice => ({ ...choice }))
+    : [{ provider: config.llm.provider, model: config.llm.model, effort: 'max', enabled: true }];
+  for (const info of llmCatalog.providers) {
+    if (rows.some(row => row.provider === info.id)) continue;
+    const model = info.models[0];
+    rows.push({ provider: info.id, model: model?.id ?? '', effort: model?.default_effort ?? info.efforts[0], enabled: false });
+  }
+  return rows;
+}
+
+function providerStatus(info) {
+  if (!info) return 'Proveedor no disponible en esta versión';
+  if (info.transport === 'cli') return info.available ? `CLI instalada${info.version ? ' · ' + info.version : ''}` : 'CLI no instalada en este equipo';
+  const source = current.credentials[info.credential];
+  return source && source !== 'missing' && source !== 'unused' ? `API · ${info.credential} configurada` : `API · falta ${info.credential} en Credenciales`;
+}
+
+function select(caption, label, options, value) {
+  const field = document.createElement('label'); field.className = 'field';
+  const small = document.createElement('small'); small.textContent = caption;
+  const element = document.createElement('select');
+  element.setAttribute('aria-label', label);
+  for (const [optionValue, text] of options) element.append(new Option(text, optionValue));
+  element.value = value;
+  field.append(small, element);
+  return [field, element];
+}
+
+function renderChain() {
+  const list = $('#llm-chain');
+  list.replaceChildren();
+  let active = 0;
+  llmRows.forEach((row, index) => {
+    const info = llmCatalog.providers.find(provider => provider.id === row.provider);
+    const name = providerNames[row.provider] || row.provider;
+    const item = document.createElement('li');
+    item.className = 'chain-row' + (row.enabled ? '' : ' off');
+    const rank = document.createElement('span'); rank.className = 'rank';
+    rank.textContent = !row.enabled ? 'Inactivo' : active++ === 0 ? 'Predeterminado' : `Respaldo ${active - 1}`;
+    const label = document.createElement('label'); label.className = 'check';
+    const toggle = document.createElement('input'); toggle.type = 'checkbox'; toggle.checked = row.enabled;
+    toggle.disabled = !row.enabled && !(info?.available);
+    toggle.setAttribute('aria-label', `Activar ${name}`);
+    toggle.onchange = () => { row.enabled = toggle.checked; renderChain(); };
+    const title = document.createElement('div');
+    const strong = document.createElement('strong'); strong.textContent = name;
+    const small = document.createElement('small'); small.textContent = providerStatus(info);
+    title.append(strong, small);
+    label.append(toggle, title);
+    const models = (info?.models ?? []).map(model => [model.id, model.name]);
+    if (row.model && !models.some(([id]) => id === row.model)) models.unshift([row.model, `${row.model} (actual)`]);
+    const [modelField, model] = select('Modelo', `Modelo de ${name}`, models, row.model);
+    model.title = row.model;
+    const efforts = () => info?.models.find(m => m.id === row.model)?.efforts ?? info?.efforts ?? [row.effort];
+    const effortOptions = () => {
+      const values = efforts();
+      return (values.includes(row.effort) ? values : [row.effort, ...values]).map(value => [value, effortNames[value] || value]);
+    };
+    const [effortField, effort] = select('Esfuerzo', `Esfuerzo de ${name}`, effortOptions(), row.effort);
+    model.onchange = () => {
+      row.model = model.value;
+      const supported = efforts();
+      if (!supported.includes(row.effort)) row.effort = info?.models.find(m => m.id === row.model)?.default_effort ?? supported[0];
+      renderChain();
+    };
+    effort.onchange = () => { row.effort = effort.value; };
+    const order = document.createElement('div'); order.className = 'order';
+    for (const [text, offset, aria] of [['↑', -1, 'Subir prioridad'], ['↓', 1, 'Bajar prioridad']]) {
+      const button = document.createElement('button'); button.className = 'secondary'; button.textContent = text;
+      button.setAttribute('aria-label', `${aria} de ${name}`);
+      button.disabled = !llmRows[index + offset];
+      button.onclick = () => {
+        [llmRows[index], llmRows[index + offset]] = [llmRows[index + offset], llmRows[index]];
+        renderChain();
+      };
+      order.append(button);
+    }
+    item.append(rank, label, modelField, effortField, order);
+    list.append(item);
+  });
+}
+
+async function loadChain() {
+  // Without detection the configured order still loads, so saving never drops it.
+  try { llmCatalog = await invoke('llm_providers'); }
+  catch (error) { message(error); }
+  llmRows = chainRows(current.config);
+  renderChain();
 }
 
 function renderRepositories() {
@@ -183,7 +282,7 @@ async function reload() {
   $('#github-list').disabled = !current.github_connected;
   $('#github-disconnect').disabled = !current.github_connected;
   const config = current.config;
-  field('#jev-model', config.jev.model); field('#llm-model', config.llm.model);
+  field('#jev-model', config.jev.model);
   field('#max-answer-chars', config.policy.max_answer_chars);
   field('#max-detailed-answer-chars', config.policy.max_detailed_answer_chars);
   field('#tenant-id', config.graph.tenant_id); field('#client-id', config.graph.client_id);
@@ -200,6 +299,7 @@ async function reload() {
     : 'Deshabilitado';
   $('#discover-chats').checked = config.graph.discover_all_chats;
   renderCredentials(); renderRepositories(); renderResources();
+  await loadChain();
 }
 setInterval(() => {
   if (current) invoke('snapshot').then(renderStatus).catch(() => {});
@@ -210,7 +310,7 @@ function collectSettings() {
   config.policy.max_answer_chars = Number($('#max-answer-chars').value);
   config.policy.max_detailed_answer_chars = Number($('#max-detailed-answer-chars').value);
   config.jev.model = $('#jev-model').value.trim();
-  config.llm.model = $('#llm-model').value.trim();
+  config.llm.chain = llmRows.map(({ provider, model, effort, enabled }) => ({ provider, model, effort, enabled }));
   config.llm.style = $('#llm-style').value.trim();
   config.graph.tenant_id = $('#tenant-id').value.trim();
   config.graph.client_id = $('#client-id').value.trim();
@@ -224,6 +324,7 @@ function collectSettings() {
 }
 
 async function save() {
+  if (!llmRows.some(row => row.enabled)) throw 'Activa al menos un modelo de lenguaje.';
   collectSettings();
   await invoke('save_settings', { config: current.config, map: current.map, tunnelConfig: $('#tunnel-config').value.trim() });
   await reload();
@@ -239,6 +340,11 @@ function addTurn(kind, label, text) {
 document.querySelectorAll('nav button').forEach(button => button.onclick = () => showTab(button.dataset.tab));
 $('#save-settings').onclick = () => save().catch(message);
 $('#save-knowledge').onclick = () => save().catch(message);
+$('#save-llm').onclick = () => save().catch(message);
+$('#detect-llm').onclick = async () => {
+  try { llmCatalog = await invoke('llm_providers'); renderChain(); message('CLI detectadas de nuevo.'); }
+  catch (error) { message(error); }
+};
 $('#start').onclick = async () => {
   try { await save(); await invoke('start_assistant'); await reload(); }
   catch (error) { message(error); }
