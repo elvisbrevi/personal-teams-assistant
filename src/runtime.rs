@@ -17,6 +17,10 @@ use anyhow::{Result, ensure};
 use fs2::FileExt;
 use std::{sync::Arc, time::Duration};
 
+fn stop_requested(stop: &tokio::sync::watch::Receiver<bool>) -> bool {
+    *stop.borrow() || stop.has_changed().is_err()
+}
+
 pub async fn serve(path: &str, stop_rx: tokio::sync::watch::Receiver<bool>) -> Result<()> {
     serve_mode(path, stop_rx, false, None).await
 }
@@ -167,7 +171,7 @@ async fn serve_mode(
         let mut stop = stop_rx.clone();
         tokio::spawn(async move {
             loop {
-                if *stop.borrow() {
+                if stop_requested(&stop) {
                     break;
                 }
                 match store.next_job() {
@@ -216,7 +220,7 @@ async fn serve_mode(
         let mut stop = stop_rx.clone();
         tokio::spawn(async move {
             loop {
-                if *stop.borrow() {
+                if stop_requested(&stop) {
                     break;
                 }
                 if graph.poll_self_chat().await.is_err() {
@@ -231,7 +235,7 @@ async fn serve_mode(
         let mut stop = stop_rx.clone();
         tokio::spawn(async move {
             loop {
-                if *stop.borrow() {
+                if stop_requested(&stop) {
                     break;
                 }
                 if let Err(error) = graph.reconcile_subscriptions().await {
@@ -276,7 +280,7 @@ async fn serve_mode(
     axum::serve(listener, app)
         .with_graceful_shutdown(async move {
             let mut stop = stop_rx;
-            if !*stop.borrow() {
+            if !stop_requested(&stop) {
                 let _ = stop.changed().await;
             }
         })
@@ -286,4 +290,21 @@ async fn serve_mode(
     personal_poller.await?;
     drop(lock);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::stop_requested;
+
+    #[test]
+    fn cancelled_startup_closes_stop_channel_and_terminates_background_tasks() {
+        let (sender, receiver) = tokio::sync::watch::channel(false);
+        assert!(!stop_requested(&receiver));
+        sender.send(true).unwrap();
+        assert!(stop_requested(&receiver));
+
+        let (sender, receiver) = tokio::sync::watch::channel(false);
+        drop(sender);
+        assert!(stop_requested(&receiver));
+    }
 }

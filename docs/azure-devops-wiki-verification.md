@@ -40,6 +40,8 @@ El ejemplo `cargo run --example wiki_gate_smoke`, con la credencial existente de
 
 Los umbrales y los controles de privacidad/promesas no se relajaron. La respuesta se valida completa, con citas y atribución ya incorporadas. Las simulaciones reales que introdujeron un stage sin vínculo se rechazaron y no enviaron mensajes.
 
+El 2026-10-01, al operar el servicio para una prueba de chat propio, se encontró además un fallo de cancelación del arranque: si desaparecía el emisor del canal de parada sin publicar `true`, el servidor cerraba pero sus tareas podían seguir reintentando consultas y conservar el bloqueo del directorio de estado. Se añadió una regresión que falla con ese comportamiento y pasa al tratar el cierre del canal como petición de parada en todas las tareas. La suite completa pasa ahora 71 pruebas; Clippy y la compilación CLI/host también pasan. Esta regresión no sustituye la comprobación de recepción/envío real en Teams.
+
 ## Límite pendiente y operación
 
 No se modificó una Wiki real para probar invalidación. La regresión controlada devuelve contenido y revisión distintos en dos lecturas, vuelve a comprobar acceso y evita conservar autoría anterior. Para completar la observación externa, el operador debe editar de forma inocua una página autorizada y repetir `pta --json azure wiki read SOURCE_ID` con el mismo `wiki_id/path`: comprobar el nuevo contenido/ETag y atribución coherente. Se solicitó esa edición opcional; no se recibió confirmación ni se afirma que ocurrió.
