@@ -1,31 +1,35 @@
-use crate::control::Reply;
+use crate::app::control::Reply;
 use anyhow::{Result, ensure};
 use serde_json::json;
 use std::{fs, io::Write, path::Path};
 const FILES: &[(&str, &str)] = &[
     (
         "SKILL.md",
-        include_str!("../skills/personal-teams-assistant/SKILL.md"),
+        include_str!("../../desktop/skills/personal-teams-assistant/SKILL.md"),
     ),
     (
         "references/configuration.md",
-        include_str!("../skills/personal-teams-assistant/references/configuration.md"),
+        include_str!("../../desktop/skills/personal-teams-assistant/references/configuration.md"),
     ),
     (
         "references/lifecycle.md",
-        include_str!("../skills/personal-teams-assistant/references/lifecycle.md"),
+        include_str!("../../desktop/skills/personal-teams-assistant/references/lifecycle.md"),
     ),
     (
         "references/auth-and-knowledge.md",
-        include_str!("../skills/personal-teams-assistant/references/auth-and-knowledge.md"),
+        include_str!(
+            "../../desktop/skills/personal-teams-assistant/references/auth-and-knowledge.md"
+        ),
     ),
     (
         "references/tests-and-diagnostics.md",
-        include_str!("../skills/personal-teams-assistant/references/tests-and-diagnostics.md"),
+        include_str!(
+            "../../desktop/skills/personal-teams-assistant/references/tests-and-diagnostics.md"
+        ),
     ),
     (
         "references/azure-wiki.md",
-        include_str!("../skills/personal-teams-assistant/references/azure-wiki.md"),
+        include_str!("../../desktop/skills/personal-teams-assistant/references/azure-wiki.md"),
     ),
 ];
 fn install(target: &Path) -> Result<()> {
@@ -65,7 +69,7 @@ pub fn command(action: &str, destination: Option<&str>) -> Result<Reply> {
             Reply::success(json!({"path":path,"version":env!("CARGO_PKG_VERSION")}))
         }
         "path" => {
-            let parent = crate::control::profile_dir()?.join("skills");
+            let parent = crate::app::control::profile_dir()?.join("skills");
             fs::create_dir_all(&parent)?;
             let path = parent.join(format!(
                 "personal-teams-assistant-{}",

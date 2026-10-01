@@ -1,5 +1,5 @@
+use crate::security;
 use anyhow::{Context, Result, ensure};
-use personal_teams_assistant::security;
 use regex::Regex;
 use reqwest::{Client, Response};
 use serde::{Deserialize, Serialize};

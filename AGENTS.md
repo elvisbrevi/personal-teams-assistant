@@ -5,12 +5,12 @@ Lee primero [la arquitectura](docs/architecture.md): explica componentes, pipeli
 ## Qué skill usar
 
 - Guardar, corregir u organizar hechos de la base de conocimiento: [save-knowledge](.agents/skills/save-knowledge/SKILL.md).
-- Configurar, operar o diagnosticar la aplicación instalada: [personal-teams-assistant](desktop/src-tauri/skills/personal-teams-assistant/SKILL.md) (también `pta skill show`).
+- Configurar, operar o diagnosticar la aplicación instalada: [personal-teams-assistant](desktop/skills/personal-teams-assistant/SKILL.md) (también `pta skill show`).
 
 ## Prioridades
 
-- El producto es el CLI `pta`, la GUI `personal-teams-desktop` y su skill, todo instalado con Cargo desde `desktop/src-tauri`. El mismo binario corre sin interfaz (`--headless`, o compilado con `--no-default-features` para Linux). El núcleo `personal-teams-assistant` es solo biblioteca. No hay bundles `.app`/`.dmg`/instaladores ni servidor independiente.
-- Tauri solo se usa en `desktop/src-tauri/src/gui.rs`; las operaciones usan `Host`/`Shell` y deben compilar con y sin la feature `gui`.
+- El producto es un solo paquete de Cargo, `personal-teams-assistant`: la GUI y host `personal-teams-assistant`, el CLI `pta` y su skill. El mismo binario corre sin interfaz (`--headless`, o compilado con `--no-default-features` para Linux). No hay otros crates, bundles `.app`/`.dmg`/instaladores ni servidor independiente.
+- Tauri solo se usa en `src/app/gui.rs` (recursos en `desktop/`); las operaciones usan `Host`/`Shell` y deben compilar con y sin la feature `gui`.
 - La prioridad de entrega es el CLI y su núcleo compartido. Si la GUI queda desfasada, anótalo en «Límites conocidos» de la arquitectura; su paridad no bloquea el trabajo del CLI. No reinstales, publiques ni actualices la GUI salvo que el usuario lo pida.
 
 ## Invariantes que no se pueden romper
@@ -33,10 +33,10 @@ Lee primero [la arquitectura](docs/architecture.md): explica componentes, pipeli
 
 ```sh
 cargo fmt --all --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo clippy -p personal-teams-desktop --all-targets --no-default-features -- -D warnings
-cargo test --workspace
-cargo test -p personal-teams-desktop --no-default-features
+cargo clippy --all-targets -- -D warnings
+cargo clippy --all-targets --no-default-features -- -D warnings
+cargo test
+cargo test --no-default-features
 ```
 
 Actualiza la arquitectura y la skill si cambias comportamiento, comandos o esquemas.

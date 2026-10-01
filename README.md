@@ -4,11 +4,19 @@ Asistente personal de Microsoft Teams escrito en Rust. Lee y responde **con tu p
 
 ## Instalación
 
-Todo se instala con Cargo: la app de bandeja/barra de menús `personal-teams-desktop`, el CLI `pta` y la skill para agentes incorporada en `pta`.
+Un solo paquete de Cargo, `personal-teams-assistant`, instala todo: la app de bandeja/barra de menús y host `personal-teams-assistant`, el CLI `pta` y la skill para agentes incorporada en `pta`.
 
 ```sh
-cargo install personal-teams-desktop --locked          # desde crates.io
-cargo install --path desktop/src-tauri --locked        # desde este checkout
+cargo install personal-teams-assistant --locked   # desde crates.io
+cargo install --path . --locked                   # desde este checkout
+```
+
+Si tenías el paquete anterior `personal-teams-desktop` (0.4.0 o antes), desinstálalo primero: ambos instalan `pta` y Cargo no sobrescribe un binario de otro paquete. Tu perfil, credenciales y cuenta se conservan.
+
+```sh
+cargo uninstall personal-teams-desktop
+cargo install personal-teams-assistant --locked
+pta status
 ```
 
 Requisitos: Rust (versión fijada en `rust-toolchain.toml`), prerrequisitos nativos de Tauri 2, Git y `~/.cargo/bin` en `PATH`. Para recibir mensajes de Teams además necesitas una URL HTTPS estable que llegue al puerto local (p. ej. `cloudflared` con token) y el equipo encendido.
@@ -16,8 +24,8 @@ Requisitos: Rust (versión fijada en `rust-toolchain.toml`), prerrequisitos nati
 En Linux o en un servidor, instala la variante **sin interfaz** (no necesita Tauri ni WebKit) y opérala solo con `pta`:
 
 ```sh
-cargo install personal-teams-desktop --no-default-features --locked
-personal-teams-desktop --headless --start      # primer plano; apto para un servicio systemd
+cargo install personal-teams-assistant --no-default-features --locked
+personal-teams-assistant --headless --start    # primer plano; apto para un servicio systemd
 ```
 
 Sus credenciales se guardan con `pta credentials set` en archivos privados del perfil o llegan por variables `NOMBRE`/`NOMBRE_FILE`. El login de Microsoft se completa desde cualquier dispositivo con `pta auth microsoft finish --redirect 'URL'`. Detalles en la [arquitectura](docs/architecture.md#host-sin-interfaz-linux-y-servidores). No mantengas dos instancias activas de la misma cuenta.
@@ -27,7 +35,7 @@ GUI y CLI comparten el mismo perfil, credenciales del Llavero/Credential Manager
 ### Actualizar
 
 ```sh
-cargo install personal-teams-desktop --locked
+cargo install personal-teams-assistant --locked
 pta status
 ```
 
@@ -36,7 +44,7 @@ Cargo no ejecuta nada después de instalar, así que la versión anterior sigue 
 ## Uso rápido
 
 ```sh
-personal-teams-desktop            # abre la ventana (o pta app open)
+personal-teams-assistant          # abre la ventana (o pta app open)
 pta help                          # todos los comandos, con su descripción
 pta status                        # ¿está corriendo? host, asistente, modo, Teams y modelos
 pta start                         # inicia el asistente
@@ -61,7 +69,7 @@ pta test simulate <<< '{"session":"demo","text":"¿Qué hice esta semana?","sour
 
 - [Arquitectura](docs/architecture.md): componentes, pipeline, datos, seguridad, contrato del CLI y recetas de cambio.
 - [Mejoras propuestas](docs/mejoras-propuestas.md).
-- [Skill operativa](desktop/src-tauri/skills/personal-teams-assistant/SKILL.md) y [guía para agentes](AGENTS.md).
+- [Skill operativa](desktop/skills/personal-teams-assistant/SKILL.md) y [guía para agentes](AGENTS.md).
 
 ## Licencia
 

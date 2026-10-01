@@ -1,5 +1,6 @@
 pub mod adapters;
 pub mod ado;
+pub mod app;
 pub mod config;
 pub mod decision;
 pub mod diagnostics;
