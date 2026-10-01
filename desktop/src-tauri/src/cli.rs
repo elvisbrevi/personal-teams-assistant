@@ -24,6 +24,7 @@ Usage: pta [--json] [--non-interactive] COMMAND ...
   repos list|add ALIAS PATH|edit ALIAS PATH|remove ALIAS|clone OWNER/REPO ALIAS|sync ALIAS
   sources list|show ID|add|edit ID|remove ID|enable ID|disable ID
   sources audience ID (JSON object on stdin: allowed_conversations, allowed_senders, external_processing)
+  azure wiki list|search|read SOURCE_ID (search/read: JSON on stdin; local reads only)
   tunnel status|configure token|configure external|configure file PATH|validate
   chat | test simulate (SimulationRequest JSON on stdin; never sends to Graph)
   test providers (paid API calls, synthetic facts only) | test connectivity (Graph account read)
@@ -150,6 +151,7 @@ fn validate_args(args: &[String]) -> Result<()> {
                 "show" | "edit" | "remove" | "enable" | "disable" | "audience",
                 _
             ]
+            | ["azure", "wiki", "list" | "search" | "read", _]
             | ["tunnel", "status" | "validate"]
             | ["tunnel", "configure", "token" | "external"]
             | ["tunnel", "configure", "file", _]
@@ -229,6 +231,34 @@ async fn execute(mut args: Vec<String>) -> Result<Reply> {
         return Ok(Reply::success(
             json!({"offline_valid":true,"network_checked":false,"host_running":control::existing_host().is_ok()}),
         ));
+    }
+    if command == "azure" {
+        let operation = positional(&args, 2)?;
+        let value = if operation == "list" {
+            json!({})
+        } else {
+            serde_json::from_str::<Value>(&stdin_text()?).context("input must be Wiki JSON")?
+        };
+        match operation {
+            "search" => serde_json::from_value::<personal_teams_assistant::ado::wiki::SearchInput>(
+                value.clone(),
+            )
+            .context("invalid Wiki search input")?
+            .validate()?,
+            "read" => serde_json::from_value::<personal_teams_assistant::ado::wiki::ReadInput>(
+                value.clone(),
+            )
+            .context("invalid Wiki read input")?
+            .validate()?,
+            _ => {}
+        }
+        return call(
+            "azure_wiki",
+            json!({"operation":operation,"source":positional(&args,3)?,"input":value}),
+            None,
+            true,
+        )
+        .await;
     }
     let direct = match (command, action) {
         ("status", _) => Some("snapshot"),
@@ -429,9 +459,12 @@ async fn execute(mut args: Vec<String>) -> Result<Reply> {
         ("sources", "add") => {
             let resource = input()?;
             ensure!(
-                resource["allowed_conversations"]
+                resource["allowed_senders"]
                     .as_array()
-                    .is_some_and(Vec::is_empty)
+                    .is_none_or(|a| a.is_empty())
+                    && resource["allowed_conversations"]
+                        .as_array()
+                        .is_some_and(Vec::is_empty)
                     && resource["enabled"] == false
                     && resource["external_processing"] == false,
                 "add sources disabled, without audiences or external processing; authorize explicitly afterward"
@@ -550,7 +583,13 @@ pub async fn run() -> i32 {
         Err(error) => {
             // Never serialize dependency/provider error chains or user input (which may contain secrets).
             let input = error.to_string();
-            if [
+            if input.starts_with("incompatible") {
+                Reply::error(
+                    "state_conflict",
+                    6,
+                    "CLI/host incompatibles. Use a Wiki-capable host before applying the Wiki schema.",
+                )
+            } else if [
                 "missing argument",
                 "unknown",
                 "invalid",
@@ -596,4 +635,35 @@ pub async fn run() -> i32 {
         );
     }
     reply.exit_code
+}
+
+#[cfg(test)]
+mod wiki_tests {
+    use super::*;
+    #[test]
+    fn wiki_commands_require_exact_local_source_argument_and_closed_stdin_schema() {
+        for operation in ["list", "search", "read"] {
+            assert!(
+                validate_args(&["--json", "azure", "wiki", operation, "source"].map(str::to_owned))
+                    .is_ok()
+            );
+            assert!(validate_args(&["azure", "wiki", operation].map(str::to_owned)).is_err());
+            assert!(
+                validate_args(&["azure", "wiki", operation, "source", "url"].map(str::to_owned))
+                    .is_err()
+            );
+        }
+        assert!(
+            serde_json::from_value::<personal_teams_assistant::ado::wiki::SearchInput>(
+                json!({"query":"deploy","organization":"https://evil.test"})
+            )
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<personal_teams_assistant::ado::wiki::SearchInput>(
+                json!({"query":"deploy","author_mode":"infer_mine"})
+            )
+            .is_err()
+        );
+    }
 }

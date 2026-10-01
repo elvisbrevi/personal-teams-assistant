@@ -104,7 +104,29 @@ pub fn secret_source(name: &str) -> Result<Option<&'static str>> {
     if std::env::var_os(name).is_some() {
         return Ok(Some("environment"));
     }
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[cfg(target_os = "macos")]
+    if let Some(profile) = active_profile() {
+        // Metadata audit must not decrypt a password or open a Keychain permission dialog.
+        let status = std::process::Command::new("/usr/bin/security")
+            .args([
+                "find-generic-password",
+                "-s",
+                &format!("personal-teams-assistant.{profile}"),
+                "-a",
+                name,
+            ])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()?;
+        if status.success() {
+            return Ok(Some("system"));
+        }
+        ensure!(
+            status.code() == Some(44),
+            "credential metadata audit failed"
+        );
+    }
+    #[cfg(target_os = "windows")]
     if let Some(profile) = active_profile() {
         match keyring_entry(&profile, name)?.get_password() {
             Ok(_) => return Ok(Some("system")),

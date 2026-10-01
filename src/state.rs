@@ -36,6 +36,11 @@ pub struct Audit {
     pub graph_message_id: Option<String>,
     pub detailed: Option<bool>,
     pub answer_limit: Option<usize>,
+    pub used_sources: Vec<String>,
+    pub partial: bool,
+    pub coverage_warnings: Vec<String>,
+    pub references: Vec<crate::evidence::Reference>,
+    pub teams_messages: Vec<crate::evidence::TeamsMessage>,
 }
 impl Store {
     /// Attach to an existing database without recovering jobs. Used by account probes.
@@ -160,6 +165,16 @@ impl Store {
                 if !content && let Some(obj) = audit.as_object_mut() {
                     obj.remove("proposed");
                     obj.remove("sent");
+                    if let Some(messages) = obj
+                        .get_mut("teams_messages")
+                        .and_then(serde_json::Value::as_array_mut)
+                    {
+                        for message in messages {
+                            if let Some(m) = message.as_object_mut() {
+                                m.remove("text");
+                            }
+                        }
+                    }
                 }
                 out.push(serde_json::json!({"resource":resource,"status":status,"audit":audit}));
             }

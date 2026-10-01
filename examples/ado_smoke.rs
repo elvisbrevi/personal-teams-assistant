@@ -28,15 +28,15 @@ async fn main() -> Result<()> {
     let evidence = ado::status(&client, &key, &catalog, &question, store).await?;
     println!(
         "Azure DevOps read succeeded: {} characters, {} active projects, {} work items, {} commits, {} pipelines, {} stages, {} release definitions, {} releases; partial coverage: {}",
-        evidence.chars().count(),
-        evidence.matches("Proyecto: ").count(),
-        evidence.matches("Work item ").count(),
-        evidence.matches("Commit personal").count(),
-        evidence.matches("Pipeline ").count(),
-        evidence.matches("Etapa ").count(),
-        evidence.matches("Definición de release ").count(),
-        evidence.matches("Release ").count(),
-        evidence.contains("Cobertura parcial")
+        evidence.text.chars().count(),
+        evidence.text.matches("Proyecto: ").count(),
+        evidence.text.matches("Work item ").count(),
+        evidence.text.matches("Commit personal").count(),
+        evidence.text.matches("Pipeline ").count(),
+        evidence.text.matches("Etapa ").count(),
+        evidence.text.matches("Definición de release ").count(),
+        evidence.text.matches("Release ").count(),
+        evidence.text.contains("Cobertura parcial")
     );
     if std::env::var_os("ADO_SMOKE_GENERATE").is_some() {
         let config = Config::load("config.toml")?;
@@ -45,7 +45,7 @@ async fn main() -> Result<()> {
             &config.policy.sensitive_patterns,
             vec![key, llm_key.clone()],
         )?;
-        let sanitized = redactor.redact(&evidence);
+        let sanitized = redactor.redact(&evidence.text);
         let llm = DeepSeek::new(
             &llm_key,
             &config.llm.model,

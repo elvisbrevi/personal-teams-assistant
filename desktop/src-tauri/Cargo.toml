@@ -1,6 +1,6 @@
 [package]
 name = "personal-teams-desktop"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.95"
 build = "build.rs"
@@ -20,7 +20,7 @@ sha2 = "0.10"
 anyhow = "1"
 axum = "0.8"
 chrono = "0.4"
-personal-teams-assistant = { version = "0.2.0", path = "../.." }
+personal-teams-assistant = { version = "0.3.0", path = "../.." }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

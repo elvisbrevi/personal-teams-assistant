@@ -3,6 +3,7 @@ pub mod ado;
 pub mod config;
 pub mod decision;
 pub mod diagnostics;
+pub mod evidence;
 pub mod knowledge;
 pub mod llm;
 pub mod local_chat;

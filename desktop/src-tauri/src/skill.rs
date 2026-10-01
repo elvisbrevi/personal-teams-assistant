@@ -23,6 +23,10 @@ const FILES: &[(&str, &str)] = &[
         "references/tests-and-diagnostics.md",
         include_str!("../skills/personal-teams-assistant/references/tests-and-diagnostics.md"),
     ),
+    (
+        "references/azure-wiki.md",
+        include_str!("../skills/personal-teams-assistant/references/azure-wiki.md"),
+    ),
 ];
 fn install(target: &Path) -> Result<()> {
     ensure!(

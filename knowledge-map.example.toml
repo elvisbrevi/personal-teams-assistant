@@ -38,3 +38,21 @@ path = "temas/asistente/operacion.md"
 # type = "sql_server"
 # operation = "get_payment_status"
 # secret_ref = "secret://sqlserver/payments-readonly"
+
+# Wiki is independent from activity. Start disabled, without audiences/external processing.
+# [[resources]]
+# id = "azure-devops-wikis"
+# description = "Procedimientos documentados en Wiki, con autoría y fuentes verificadas"
+# topics = ["wiki", "documentación", "procedimientos"]
+# enabled = false
+# external_processing = false
+# allowed_conversations = []
+# allowed_senders = []
+# kind = "tool"
+# [resources.tool]
+# type = "azure_devops_wiki"
+# repository = "personal"
+# path = "integrations/azure-devops.toml"
+# secret_ref = "secret://azure-devops/reader"
+# wiki_ids = []
+# author_mode = "prefer_mine"

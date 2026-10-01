@@ -72,6 +72,22 @@ impl KnowledgeMap {
                 }
                 Access::Tool { tool } => {
                     tool.validate()?;
+                    if let crate::tools::ToolSpec::AzureDevopsWiki {
+                        repository, path, ..
+                    }
+                    | crate::tools::ToolSpec::AzureDevopsStatus {
+                        repository, path, ..
+                    } = tool
+                    {
+                        ensure!(
+                            map.repositories.contains_key(repository)
+                                && !path.is_absolute()
+                                && path
+                                    .components()
+                                    .all(|c| matches!(c, std::path::Component::Normal(_))),
+                            "invalid tool repository or path"
+                        );
+                    }
                 }
             }
         }

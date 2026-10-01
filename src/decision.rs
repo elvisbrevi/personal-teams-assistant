@@ -141,6 +141,14 @@ impl Jev {
             ]),
             Stage::Final => BTreeMap::from([
                 (
+                    "references",
+                    "The application already verified used_sources IDs, URL scopes, constructed citations and the COMPLETE answer's character limit. No external lookup is needed. Does the answer use ONLY its selected Wiki pages for documentary claims, and avoid introducing concrete Azure artifact names/IDs without a selected artifact reference? A Wiki document title is not a pipeline artifact. Generic instructions about creating/configuring a pipeline, release or stage need only the Wiki citation. A named stage or an identified work item/pipeline needs its exact reference, distinguishing execution from configuration. Judge coverage of factual claims and named entities, not generic concepts.",
+                ),
+                (
+                    "attribution",
+                    "Does the COMPLETE answer preserve documentary authority and attribution? created_by_me OR edited_by_me permits documentary authority, never proof the user executed the procedure. For third-party Wiki facts require verified author/role (last editor is not creator), location and link; unknown author must be explicitly stated without guessing. Relevant colleagues' names are permitted, contact data is not. Teams claims must name relevant verified interlocutors and preserve who said/did what using teams_messages; do not infer user interaction from group membership, swap authors, turn others' requests/comments into the user's actions, or infer deployment from conversation alone. If names are absent/redacted use limited attribution, never invent.",
+                ),
+                (
                     "supported",
                     "Does the answer faithfully summarize the relevant evidence? Treat concise paraphrases of commit messages and pipeline results as supported even when the wording differs. A statement that code was actually deployed or a defect resolved needs separate proof, and broader interpretations must be marked as such. Qualified missing facts are supported; do not infer commitments from target dates or manual actions from automatic pipeline runs.",
                 ),

@@ -127,7 +127,7 @@ async fn graph_jev_deepseek_end_to_end_and_final_gate() {
         let graph = support::graph(&server, store.clone());
         support::mock_message(&server, "¿Cuál es el horario del soporte?").await;
         Mock::given(method("POST")).and(path("/v1/systemone")).respond_with(move |_req:&wiremock::Request| {
-            let answers = json!({"supported":{"type":"noul","noul":if allow {0.99} else {0.01}},"no_new_promise":{"type":"noul","noul":0.99},"privacy":{"type":"noul","noul":0.99},"relevant":{"type":"noul","noul":0.99}});
+            let answers = json!({"references":{"type":"noul","noul":0.99},"attribution":{"type":"noul","noul":0.99},"supported":{"type":"noul","noul":if allow {0.99} else {0.01}},"no_new_promise":{"type":"noul","noul":0.99},"privacy":{"type":"noul","noul":0.99},"relevant":{"type":"noul","noul":0.99}});
             ResponseTemplate::new(200).set_body_json(json!({"model":"jev-test","answers":answers}))
         }).expect(1).mount(&server).await;
         Mock::given(method("POST")).and(path("/chat/completions")).respond_with(ResponseTemplate::new(200).set_body_json(json!({"id":"gen1","object":"chat.completion","created":1,"model":"deepseek-test","choices":[{"index":0,"message":{"role":"assistant","content":"{\"answer\":\"El soporte atiende de lunes a viernes de 09:00 a 18:00.\",\"detailed\":false}"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":10,"total_tokens":20,"prompt_cache_hit_tokens":0,"prompt_cache_miss_tokens":10}}))).expect(1).mount(&server).await;
@@ -1115,6 +1115,7 @@ impl LlmProvider for LengthChoice {
         assert_eq!(input.max_answer_chars, 30);
         assert_eq!(input.max_detailed_answer_chars, 100);
         Ok(personal_teams_assistant::llm::GeneratedAnswer {
+            used_sources: Vec::new(),
             answer: "á".repeat(60),
             detailed: self.detailed,
         })
@@ -1219,4 +1220,384 @@ async fn reserved_notes_require_delegated_account_authorship_without_chat_metada
         .await;
     assert!(graph.validate_self_chat("48:notes").await.is_err());
     assert!(!server.received_requests().await.unwrap().iter().any(|r| r.url.path()=="/chats/48:notes" || r.url.path()=="/chats/48:notes/members"));
+}
+
+struct WikiTools {
+    result: serde_json::Value,
+}
+#[async_trait]
+impl ReadOnlyTool for WikiTools {
+    async fn execute(&self, spec: &ToolSpec, question: &str, _: &str) -> Result<String> {
+        assert!(
+            matches!(spec, ToolSpec::AzureDevopsWiki { .. }),
+            "explicit Wiki must beat activity routing"
+        );
+        assert_eq!(question, "Según la wiki, ¿cómo se configura el pipeline?");
+        assert!(!question.contains("Contexto anterior"));
+        Ok(self.result.to_string())
+    }
+}
+struct WikiLlm {
+    used: Vec<String>,
+}
+#[async_trait]
+impl LlmProvider for WikiLlm {
+    fn name(&self) -> &str {
+        "synthetic-wiki"
+    }
+    async fn generate(&self, _: GenerationInput<'_>) -> Result<String> {
+        unreachable!()
+    }
+    async fn generate_response(
+        &self,
+        input: GenerationInput<'_>,
+    ) -> Result<personal_teams_assistant::llm::GeneratedAnswer> {
+        assert!(input.evidence.contains("Procedimiento verificable"));
+        assert!(input.evidence.contains("wiki:test:page1"));
+        Ok(personal_teams_assistant::llm::GeneratedAnswer {
+            answer: "El procedimiento documentado exige validar la configuración.".into(),
+            detailed: false,
+            used_sources: self.used.clone(),
+        })
+    }
+}
+struct WikiGate;
+#[async_trait]
+impl DecisionGate for WikiGate {
+    async fn evaluate(
+        &self,
+        stage: Stage,
+        state: serde_json::Value,
+        _: BTreeMap<String, String>,
+    ) -> Result<personal_teams_assistant::decision::Verdict> {
+        assert!(matches!(stage, Stage::Final));
+        let answer = state["answer"].as_str().unwrap();
+        assert!(answer.contains("pagePath=%2FProcedure"));
+        assert!(answer.contains("último editor registrado: Ana"));
+        assert!(answer.chars().count() <= 3000);
+        assert_eq!(state["used_sources"].as_array().unwrap().len(), 2);
+        assert_eq!(state["references"].as_array().unwrap().len(), 2);
+        Ok(personal_teams_assistant::decision::Verdict {
+            selected: "allow".into(),
+            confidence: 0.99,
+        })
+    }
+}
+fn synthetic_wiki_result() -> serde_json::Value {
+    let wiki = json!({"organization":"https://dev.azure.com/test","project":"Project","project_id":"abcdeabc-abcd-abcd-abcd-abcdeabcdea1","id":"abcdeabc-abcd-abcd-abcd-abcdeabcdea2","name":"Wiki","kind":"projectWiki","repository_id":"abcdeabc-abcd-abcd-abcd-abcdeabcdea3","mapped_path":"/","versions":["published"]});
+    let pages:Vec<_>=[("page1","edited_by_me",None),("page2","other",Some("Ana"))].into_iter().map(|(id,authority,author)|json!({"wiki":wiki,"title":id,"path":"/Procedure","git_item_path":"/Procedure.md","version":"published","revision":"1111111111111111111111111111111111111111","content":"Procedimiento verificable: validar configuración.","reference":{"id":format!("wiki:test:{id}"),"kind":"wiki","label":format!("Project / Wiki / {id}"),"url":format!("https://dev.azure.com/test/abcdeabc-abcd-abcd-abcd-abcdeabcdea1/_wiki/wikis/abcdeabc-abcd-abcd-abcd-abcdeabcdea2?pagePath=%2FProcedure&anchor={id}"),"organization":"https://dev.azure.com/test","project":"abcdeabc-abcd-abcd-abcd-abcdeabcdea1","aliases":[],"parent":null,"revision":"1111111111111111111111111111111111111111","authority":authority,"author":author,"author_role":"último editor registrado"}})).collect();
+    json!({"query":"configuración pipeline","wikis":[],"pages":pages,"candidates":2,"histories_checked":2,"partial":false,"warnings":[]})
+}
+fn wiki_resource() -> Resource {
+    Resource {
+        id: "manuals".into(),
+        description: "Wiki knowledge".into(),
+        topics: vec!["wiki".into()],
+        enabled: true,
+        external_processing: true,
+        allowed_conversations: vec![],
+        allowed_senders: vec![],
+        access: Access::Tool {
+            tool: ToolSpec::AzureDevopsWiki {
+                repository: "private".into(),
+                path: "catalog.toml".into(),
+                secret_ref: "secret://ado/read".into(),
+                wiki_ids: vec![],
+                author_mode: personal_teams_assistant::ado::wiki::AuthorMode::PreferMine,
+            },
+        },
+    }
+}
+#[tokio::test]
+async fn wiki_priority_current_request_mixed_citations_and_complete_gate_without_graph_send() {
+    for ids in [
+        vec!["wiki:test:page1".into(), "wiki:test:page2".into()],
+        vec![],
+        vec!["invented".into()],
+    ] {
+        let server = MockServer::start().await;
+        let dir = tempfile::tempdir().unwrap();
+        let store = support::store(&dir);
+        let graph = support::graph(&server, store.clone());
+        let mut cfg = (*graph.config).clone();
+        cfg.policy.dry_run = true;
+        store
+            .save_context(
+                "chats/simulation-wiki",
+                "Pregunta anterior secreta diferente",
+                "Respuesta anterior no es evidencia",
+            )
+            .unwrap();
+        let pipeline = Pipeline {
+            config: Arc::new(cfg),
+            store: store.clone(),
+            adapter: graph,
+            gate: if ids.len() == 2 {
+                Arc::new(WikiGate)
+            } else {
+                Arc::new(NoGate)
+            },
+            knowledge: KnowledgeMap {
+                repositories: BTreeMap::new(),
+                resources: vec![
+                    wiki_resource(),
+                    Resource {
+                        id: "azure-devops-status".into(),
+                        description: "Activity".into(),
+                        topics: vec![],
+                        enabled: true,
+                        external_processing: true,
+                        allowed_conversations: vec![],
+                        allowed_senders: vec![],
+                        access: Access::Tool {
+                            tool: ToolSpec::AzureDevopsStatus {
+                                repository: "private".into(),
+                                path: "catalog.toml".into(),
+                                secret_ref: "secret://ado/read".into(),
+                            },
+                        },
+                    },
+                ],
+            },
+            llm: Arc::new(WikiLlm { used: ids.clone() }),
+            tools: Arc::new(WikiTools {
+                result: synthetic_wiki_result(),
+            }),
+            redactor: redactor(),
+        };
+        let sources = vec!["manuals".into(), "azure-devops-status".into()];
+        let result = personal_teams_assistant::simulation::run(
+            &pipeline,
+            personal_teams_assistant::simulation::SimulationRequest {
+                session: "wiki".into(),
+                text: "Según la wiki, ¿cómo se configura el pipeline?".into(),
+                group: false,
+                mentioned: false,
+                sources: sources.clone(),
+            },
+            Some(&sources),
+        )
+        .await
+        .unwrap();
+        if ids.len() == 2 {
+            assert_eq!(result.status, "dry_run", "{}", result.reason);
+            assert!(
+                result
+                    .answer
+                    .unwrap()
+                    .contains("contribución propia verificada")
+            );
+        } else {
+            assert_eq!(result.status, "ignored");
+            assert!(result.reason.starts_with("invalid_references"));
+        }
+        assert!(
+            pipeline.knowledge.resources[0]
+                .allowed_conversations
+                .is_empty()
+        );
+        assert!(server.received_requests().await.unwrap().is_empty());
+    }
+}
+#[tokio::test]
+async fn explicit_local_selection_still_requires_enabled_and_external_processing() {
+    let server = MockServer::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let store = support::store(&dir);
+    let graph = support::graph(&server, store.clone());
+    for (enabled, external) in [(false, true), (true, false)] {
+        let mut source = wiki_resource();
+        source.enabled = enabled;
+        source.external_processing = external;
+        let pipeline = Pipeline {
+            config: graph.config.clone(),
+            store: store.clone(),
+            adapter: graph.clone(),
+            gate: Arc::new(NoGate),
+            knowledge: KnowledgeMap {
+                repositories: BTreeMap::new(),
+                resources: vec![source],
+            },
+            llm: Arc::new(NoLlm),
+            tools: Arc::new(NoTools),
+            redactor: redactor(),
+        };
+        let sources = vec!["manuals".into()];
+        let result = personal_teams_assistant::simulation::run(
+            &pipeline,
+            personal_teams_assistant::simulation::SimulationRequest {
+                session: "permissions".into(),
+                text: "Según la wiki, ¿cómo se configura el pipeline?".into(),
+                group: false,
+                mentioned: false,
+                sources: sources.clone(),
+            },
+            Some(&sources),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.reason, "no_authorized_resource");
+    }
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
+#[tokio::test]
+async fn teams_context_preserves_two_interlocutors_own_messages_and_omits_unrelated_members() {
+    let server = MockServer::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let store = support::store(&dir);
+    let graph = support::graph(&server, store);
+    let date = chrono::Utc::now().to_rfc3339();
+    let messages:Vec<_>=[("3","Luis","third","Falta validar el pipeline."),("2","Self",graph.config.graph.user_id.as_str(),"Ana, revisé el pipeline del Project."),("1","Ana","second","Revisa el pipeline del Project, por favor.")].into_iter().map(|(id,name,sender,body)|json!({"id":id,"messageType":"message","createdDateTime":date,"deletedDateTime":null,"from":{"user":{"id":sender,"displayName":name}},"body":{"contentType":"text","content":body}})).collect();
+    Mock::given(method("GET"))
+        .and(path("/chats/chat1/messages"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"value":messages})))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let context = graph
+        .recent_project_context(
+            &["Project".into()],
+            "chats/chat1",
+            chrono::Utc::now() - chrono::Duration::days(7),
+        )
+        .await
+        .unwrap();
+    assert_eq!(context.len(), 3);
+    assert_eq!(context[0].name.as_deref(), Some("Ana"));
+    assert!(context[0].text.contains("Revisa"));
+    assert!(!context[0].mine);
+    assert!(context[1].mine);
+    assert_eq!(context[1].name.as_deref(), Some("Self"));
+    assert_eq!(context[2].name.as_deref(), Some("Luis"));
+    assert!(context[2].text.contains("Falta validar"));
+    assert!(
+        server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .all(|r| !r.url.path().contains("members"))
+    );
+}
+
+struct TeamsEvidenceTool;
+#[async_trait]
+impl ReadOnlyTool for TeamsEvidenceTool {
+    async fn execute(&self, _: &ToolSpec, _: &str, _: &str) -> Result<String> {
+        use personal_teams_assistant::evidence::{Evidence, TeamsMessage};
+        let messages = [
+            ("a", "Ana", false, "Pidió revisar el pipeline"),
+            (
+                "self",
+                "Self",
+                true,
+                "Respondí que revisaría la configuración",
+            ),
+            ("l", "Luis", false, "Indicó que faltaba validar"),
+        ]
+        .into_iter()
+        .map(|(id, name, mine, text)| TeamsMessage {
+            conversation: "chat".into(),
+            message: id.into(),
+            sender: id.into(),
+            name: Some(name.into()),
+            mine,
+            date: "2026-09-30T10:00:00Z".into(),
+            text: text.into(),
+        })
+        .collect();
+        Ok(serde_json::to_string(&Evidence {
+            text: "Coordinación registrada; no prueba ejecución.".into(),
+            teams: messages,
+            ..Default::default()
+        })?)
+    }
+}
+struct TeamsAttributionLlm(bool);
+#[async_trait]
+impl LlmProvider for TeamsAttributionLlm {
+    fn name(&self) -> &str {
+        "synthetic-teams"
+    }
+    async fn generate(&self, input: GenerationInput<'_>) -> Result<String> {
+        assert!(input.evidence.contains("\"name\":\"Ana\""));
+        assert!(input.evidence.contains("\"name\":\"Luis\""));
+        assert!(input.evidence.contains("\"mine\":true"));
+        Ok(if self.0 {
+            "Luis pidió revisar y Ana indicó que faltaba validar."
+        } else {
+            "Ana pidió revisar y Luis indicó que faltaba validar."
+        }
+        .into())
+    }
+}
+#[tokio::test]
+async fn teams_simulation_preserves_attribution_and_final_gate_rejects_swapped_authors() {
+    for swapped in [false, true] {
+        let server = MockServer::start().await;
+        let dir = tempfile::tempdir().unwrap();
+        let store = support::store(&dir);
+        let graph = support::graph(&server, store.clone());
+        Mock::given(method("POST")).and(path("/jev")).respond_with(move |req:&wiremock::Request| {
+            let input=req.body_json::<serde_json::Value>().unwrap();
+            assert!(input["state"]["teams_messages"].as_array().unwrap().iter().any(|m|m["name"]=="Ana" && m["text"]=="Pidió revisar el pipeline"));
+            let answers:serde_json::Map<String,serde_json::Value>=["references","attribution","supported","privacy","relevant","no_new_promise"].into_iter().map(|name|(name.into(),json!({"type":"noul","noul":if name=="attribution" && swapped {0.01} else {0.99}}))).collect();
+            ResponseTemplate::new(200).set_body_json(json!({"answers":answers}))
+        }).expect(1).mount(&server).await;
+        let mut cfg = (*graph.config).clone();
+        cfg.policy.dry_run = true;
+        let mut resource = wiki_resource();
+        resource.id = "azure-devops-status".into();
+        resource.access = Access::Tool {
+            tool: ToolSpec::AzureDevopsStatus {
+                repository: "private".into(),
+                path: "catalog.toml".into(),
+                secret_ref: "secret://ado/read".into(),
+            },
+        };
+        let pipeline = Pipeline {
+            config: Arc::new(cfg),
+            store: store.clone(),
+            adapter: graph,
+            gate: Arc::new(Jev {
+                client: reqwest::Client::new(),
+                endpoint: format!("{}/jev", server.uri()),
+                api_key: "synthetic".into(),
+                model: "synthetic".into(),
+            }),
+            knowledge: KnowledgeMap {
+                repositories: BTreeMap::new(),
+                resources: vec![resource],
+            },
+            llm: Arc::new(TeamsAttributionLlm(swapped)),
+            tools: Arc::new(TeamsEvidenceTool),
+            redactor: redactor(),
+        };
+        let sources = vec!["azure-devops-status".into()];
+        let result = personal_teams_assistant::simulation::run(
+            &pipeline,
+            personal_teams_assistant::simulation::SimulationRequest {
+                session: "team-attribution".into(),
+                text: "¿Qué coordinación hubo sobre el pipeline?".into(),
+                group: false,
+                mentioned: false,
+                sources: sources.clone(),
+            },
+            Some(&sources),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.status, if swapped { "ignored" } else { "dry_run" });
+        if swapped {
+            assert_eq!(result.reason, "final_gate");
+        }
+        assert!(
+            server
+                .received_requests()
+                .await
+                .unwrap()
+                .iter()
+                .all(|r| r.url.path() == "/jev")
+        );
+    }
 }

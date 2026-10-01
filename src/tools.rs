@@ -23,6 +23,15 @@ pub enum ToolSpec {
         path: PathBuf,
         secret_ref: String,
     },
+    AzureDevopsWiki {
+        repository: String,
+        path: PathBuf,
+        secret_ref: String,
+        #[serde(default)]
+        wiki_ids: Vec<String>,
+        #[serde(default)]
+        author_mode: crate::ado::wiki::AuthorMode,
+    },
     Rabbitmq {
         url: String,
         secret_ref: String,
@@ -74,6 +83,24 @@ impl ToolSpec {
                     "invalid ADO status catalog reference"
                 );
             }
+            Self::AzureDevopsWiki {
+                repository,
+                path,
+                secret_ref,
+                wiki_ids,
+                ..
+            } => {
+                ensure!(
+                    !repository.is_empty()
+                        && path.extension().is_some_and(|e| e == "toml")
+                        && secret_ref.starts_with("secret://")
+                        && wiki_ids.len() <= 100,
+                    "invalid Wiki catalog reference"
+                );
+                for id in wiki_ids {
+                    crate::ado::wiki::validate_id(id)?;
+                }
+            }
             Self::Rabbitmq { url, secret_ref } => {
                 let u = crate::knowledge::validate_url(url)?;
                 ensure!(
@@ -106,6 +133,7 @@ impl ToolSpec {
             },
             Self::AzureDevops { .. } => "get_work_item",
             Self::AzureDevopsStatus { .. } => "get_azure_devops_status",
+            Self::AzureDevopsWiki { .. } => "search_azure_devops_wiki",
             Self::Rabbitmq { .. } => "get_queue_status",
             Self::Http { .. } => "http_get",
         }
@@ -197,7 +225,7 @@ impl ReadOnlyTool for Tools {
                     );
                     let key = crate::security::resolve(secret_ref, &self.bindings)?;
                     let url = format!(
-                        "https://dev.azure.com/{organization}/{project}/_apis/wit/workitems/{id}?fields=System.Id,System.Title,System.State&api-version=7.1"
+                        "https://dev.azure.com/{organization}/{project}/_apis/wit/workitems/{id}?fields=System.Id,System.Title,System.State,System.TeamProject&api-version=7.1"
                     );
                     let response = self
                         .client
@@ -207,7 +235,34 @@ impl ReadOnlyTool for Tools {
                         .await?;
                     ensure!(response.status().is_success(), "Azure DevOps read failed");
                     let v: Value = crate::adapters::bounded_json(response, 64_000).await?;
-                    Ok(serde_json::to_string(&v["fields"])?)
+                    ensure!(
+                        v["fields"]["System.TeamProject"]
+                            .as_str()
+                            .is_some_and(|p| p.eq_ignore_ascii_case(project)),
+                        "work item outside configured project"
+                    );
+                    let reference = crate::evidence::Reference {
+                        id: format!("work_item:{organization}:{project}:{id}"),
+                        kind: "work_item".into(),
+                        label: format!("Work item #{id}"),
+                        url: format!(
+                            "https://dev.azure.com/{organization}/{project}/_workitems/edit/{id}"
+                        ),
+                        organization: format!("https://dev.azure.com/{organization}"),
+                        project: project.clone(),
+                        aliases: vec![format!("#{id}"), format!("work item {id}")],
+                        parent: None,
+                        revision: None,
+                        authority: None,
+                        author: None,
+                        author_role: None,
+                    };
+                    reference.validate()?;
+                    Ok(serde_json::to_string(&crate::evidence::Evidence {
+                        text: serde_json::to_string(&v["fields"])?,
+                        references: vec![reference],
+                        ..Default::default()
+                    })?)
                 }
                 ToolSpec::AzureDevopsStatus {
                     repository,
@@ -229,6 +284,7 @@ impl ReadOnlyTool for Tools {
                     )
                     .await?;
                     let projects: Vec<String> = evidence
+                        .text
                         .lines()
                         .filter_map(|line| {
                             line.strip_prefix("Proyecto: ")?
@@ -244,10 +300,45 @@ impl ReadOnlyTool for Tools {
                         .await
                         && !context.is_empty()
                     {
-                        evidence.push_str("\nConversaciones recientes de Teams relacionadas con esos proyectos (contexto, no prueba de ejecución por sí solas):\n");
-                        evidence.push_str(&context);
+                        if let Ok(Ok(refs)) = tokio::time::timeout(
+                            std::time::Duration::from_secs(10),
+                            crate::ado::team_references(&self.client, &key, &catalog, &context),
+                        )
+                        .await
+                        {
+                            evidence.references.extend(refs);
+                        }
+                        evidence.teams = context;
                     }
-                    Ok(evidence)
+                    Ok(serde_json::to_string(&evidence)?)
+                }
+                ToolSpec::AzureDevopsWiki {
+                    repository,
+                    path,
+                    secret_ref,
+                    wiki_ids,
+                    author_mode,
+                } => {
+                    let query = match crate::ado::wiki::question_query(question) {
+                        Ok(query)=>query,
+                        Err(_)=>return Ok(serde_json::to_string(&crate::ado::wiki::WikiResult{partial:true,warnings:vec!["Falta el tema de búsqueda Wiki; pide concretar procedimiento o proyecto.".into()],..Default::default()})?),
+                    };
+                    let catalog = crate::knowledge::read_repository_file(
+                        &self.repositories,
+                        repository,
+                        path,
+                    )?;
+                    let key = crate::security::resolve(secret_ref, &self.bindings)?;
+                    let reader =
+                        crate::ado::wiki::Reader::new(&self.client, &key, &catalog, wiki_ids)?;
+                    let input = crate::ado::wiki::SearchInput {
+                        query,
+                        wiki_id: None,
+                        author_mode: None,
+                    };
+                    Ok(serde_json::to_string(
+                        &reader.search(&input, *author_mode).await?,
+                    )?)
                 }
                 ToolSpec::Rabbitmq { url, secret_ref } => {
                     let auth = crate::security::resolve(secret_ref, &self.bindings)?;
@@ -279,6 +370,8 @@ impl ReadOnlyTool for Tools {
         };
         let seconds = if matches!(spec, ToolSpec::AzureDevopsStatus { .. }) {
             180
+        } else if matches!(spec, ToolSpec::AzureDevopsWiki { .. }) {
+            32
         } else {
             5
         };

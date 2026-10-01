@@ -1,4 +1,4 @@
-# Inventario GUI/CLI 0.2.0
+# Inventario GUI/CLI 0.3.0
 
 La GUI invoca `command` con contrato 1; la consola invoca el mismo despachador por loopback autenticado. El mutex de operaciones serializa ambos adaptadores. La columna de verificación identifica regresiones ejecutables, sin convertirlas en una afirmación de prueba funcional de cada proveedor o plataforma.
 
@@ -27,3 +27,5 @@ La GUI invoca `command` con contrato 1; la consola invoca el mismo despachador p
 Las pruebas de integración cubren Graph/Jev/DeepSeek, observación, relectura antes de enviar, error de envío sin reintento, mensajes propios a terceros, historial previo, salida adelantada, restart y texto humano igual al de una respuesta. La regresión de notas prueba el endpoint delegado sin consultar metadata ChatThread y rechaza autores de otra cuenta. Las pruebas de control rechazan autenticación ausente/incorrecta y Origin de navegador.
 
 La evidencia de instalación, operaciones reales y publicación de cada release se registra con los artefactos en REVIEW.md. La firma ad hoc no acredita notarización. Windows permanece en roadmap para la siguiente versión; su check de compilación no acredita funcionamiento.
+
+Wiki: `azure wiki list/search/read` despacha `azure_wiki` en el host compartido, sin Graph ni modelos. Configuración por `sources`/`config` con el esquema compartido. La GUI sigue filtrando recursos `kind=file`; no tiene formularios Wiki. La selección local de Wiki, referencias completas y atribución se verifican por CLI y regresiones; ver [roadmap](roadmap.md) y [evidencia](azure-devops-wiki-verification.md). La distribución publicada 0.2.0 permanece sin soporte Wiki.

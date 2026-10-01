@@ -63,6 +63,8 @@ impl Reply {
 }
 #[derive(Serialize, Deserialize)]
 struct Endpoint {
+    #[serde(default)]
+    wiki_support: bool,
     contract: u32,
     port: u16,
     token: String,
@@ -159,6 +161,12 @@ pub async fn client(request: Request, start_host: bool) -> Result<Reply> {
         let endpoint: Endpoint =
             serde_json::from_slice(&fs::read(profile_dir()?.join("control.json"))?)?;
         ensure!(endpoint.contract == CONTRACT, "incompatible host contract");
+        ensure!(
+            endpoint.wiki_support
+                || (request.method != "azure_wiki"
+                    && !request.args.to_string().contains("azure_devops_wiki")),
+            "incompatible Wiki host: use a CLI/host build supporting Wiki before applying its schema"
+        );
         let response = client
             .post(format!("http://127.0.0.1:{}/control", endpoint.port))
             .bearer_auth(endpoint.token)
@@ -224,6 +232,7 @@ pub fn launch(app: tauri::AppHandle, lock: fs::File) -> Result<()> {
     write_private(
         &dir.join("control.json"),
         &serde_json::to_string(&Endpoint {
+            wiki_support: true,
             contract: CONTRACT,
             port: listener.local_addr()?.port(),
             token: token.clone(),
@@ -459,6 +468,15 @@ async fn operate(
             delete_credential(app.state(), arg(args, "name")?).await?;
             json!({"deleted":true})
         }
+        "azure_wiki" => {
+            azure_wiki(
+                state,
+                arg(args, "source")?,
+                arg(args, "operation")?,
+                args.get("input").cloned().unwrap_or(json!({})),
+            )
+            .await?
+        }
         "chat" => {
             serde_json::to_value(chat(app.state(), arg(args, "input")?).await?).map_err(fail)?
         }
@@ -674,12 +692,24 @@ async fn operate(
 mod tests {
     use super::*;
     #[test]
+    fn legacy_descriptor_does_not_advertise_wiki_schema_support() {
+        let legacy: Endpoint =
+            serde_json::from_value(json!({"contract":1,"port":1,"token":"synthetic"})).unwrap();
+        assert!(!legacy.wiki_support);
+        let new: Endpoint = serde_json::from_value(
+            json!({"contract":1,"port":1,"token":"synthetic","wiki_support":true}),
+        )
+        .unwrap();
+        assert!(new.wiki_support);
+    }
+    #[test]
     fn host_lock_does_not_make_a_stale_descriptor_ready() {
         let dir = tempfile::tempdir().unwrap();
         let descriptor = dir.path().join("control.json");
         write_private(
             &descriptor,
             &serde_json::to_string(&Endpoint {
+                wiki_support: true,
                 contract: CONTRACT,
                 port: 1,
                 token: "stale-token".into(),
@@ -693,6 +723,7 @@ mod tests {
         write_private(
             &descriptor,
             &serde_json::to_string(&Endpoint {
+                wiki_support: true,
                 contract: CONTRACT,
                 port: 2,
                 token: "new-instance".into(),

@@ -177,10 +177,10 @@ impl Graph {
         projects: &[String],
         conversation: &str,
         since: chrono::DateTime<chrono::Utc>,
-    ) -> Result<String> {
+    ) -> Result<Vec<crate::evidence::TeamsMessage>> {
         let broad = conversation.starts_with("chats/simulation-");
         if projects.is_empty() && !broad {
-            return Ok(String::new());
+            return Ok(Vec::new());
         }
         let chats = if broad {
             let mut url = self.url("me/chats")?;
@@ -272,7 +272,19 @@ impl Graph {
                     }
                     let raw = message["body"]["content"].as_str().unwrap_or("");
                     let body = if message["body"]["contentType"].as_str() == Some("html") {
-                        teams::plain_text(raw)
+                        let mut body = teams::plain_text(raw);
+                        let fragment = scraper::Html::parse_fragment(raw);
+                        let selector = scraper::Selector::parse("a[href]").unwrap();
+                        for link in fragment
+                            .select(&selector)
+                            .filter_map(|e| e.value().attr("href"))
+                            .filter(|s| s.starts_with("https://dev.azure.com/"))
+                            .take(8)
+                        {
+                            body.push(' ');
+                            body.push_str(link);
+                        }
+                        body
                     } else {
                         raw.into()
                     };
@@ -284,7 +296,16 @@ impl Graph {
                         .unwrap_or("Participante");
                     let mine = message["from"]["user"]["id"].as_str()
                         == Some(graph.config.graph.user_id.as_str());
-                    found.push((body, format!("{date} {sender}: "), mine));
+                    let metadata = crate::evidence::TeamsMessage {
+                        conversation: collection.clone(),
+                        message: message["id"].as_str().unwrap_or("").into(),
+                        sender: message["from"]["user"]["id"].as_str().unwrap_or("").into(),
+                        name: (sender != "Participante").then(|| sender.to_owned()),
+                        mine,
+                        date: date.into(),
+                        text: body.clone(),
+                    };
+                    found.push((body, metadata, mine));
                 }
                 let project_matches = topic_matches
                     || found.iter().any(|(body, _, _)| {
@@ -316,17 +337,9 @@ impl Graph {
                     })
                     .collect();
                 if !project_matches && own_work.is_empty() {
-                    return Ok::<_, anyhow::Error>((0u8, String::new()));
+                    return Ok::<_, anyhow::Error>((0u8, Vec::new()));
                 }
-                let mut out = format!(
-                    "{}: {}.\n",
-                    if project_matches {
-                        "Chat de proyecto relevante"
-                    } else {
-                        "Gestión de trabajo en Teams"
-                    },
-                    topic.chars().take(100).collect::<String>()
-                );
+                let mut out = Vec::new();
                 let matching: Vec<usize> = found
                     .iter()
                     .enumerate()
@@ -353,7 +366,7 @@ impl Graph {
                     .map(|(_, message)| message)
                     .collect();
                 if selected.is_empty() {
-                    return Ok((0u8, String::new()));
+                    return Ok((0u8, Vec::new()));
                 }
                 let schedule = selected
                     .iter()
@@ -366,16 +379,13 @@ impl Graph {
                     selected.drain(..selected.len() - 6);
                 }
                 if let Some(schedule) = schedule
-                    && !selected.iter().any(|m| m.1 == schedule.1)
+                    && !selected.iter().any(|m| m.1.message == schedule.1.message)
                 {
                     selected.insert(0, schedule);
                 }
-                for (body, header, _) in selected {
-                    out.push_str(&format!(
-                        "{}{}\n",
-                        header,
-                        body.chars().take(400).collect::<String>()
-                    ));
+                for (body, mut metadata, _) in selected {
+                    metadata.text = body.chars().take(400).collect();
+                    out.push(metadata);
                 }
                 Ok((
                     if deployment_chat {
@@ -387,7 +397,7 @@ impl Graph {
                     } else {
                         1
                     },
-                    out.chars().take(2300).collect(),
+                    out,
                 ))
             });
         }
@@ -400,8 +410,11 @@ impl Graph {
             }
         }
         sections.sort_by_key(|a| std::cmp::Reverse(a.0));
-        let output: String = sections.into_iter().map(|(_, section)| section).collect();
-        Ok(output.chars().take(3000).collect())
+        Ok(sections
+            .into_iter()
+            .flat_map(|(_, section)| section)
+            .take(12)
+            .collect())
     }
     pub fn user_messages_resource(&self) -> String {
         format!("users/{}/chats/getAllMessages", self.config.graph.user_id)

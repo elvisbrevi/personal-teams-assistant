@@ -1,6 +1,6 @@
 # Wikis de Azure DevOps y referencias de actividad Azure/Teams
 
-Estado: plan de implementación, registrado el 2026-09-30. No implica que la funcionalidad esté implementada, configurada o probada contra la cuenta real.
+Estado: implementado en núcleo, CLI y host compartido 0.3.0 el 2026-09-30. Descubrimiento, búsqueda, lectura y simulación con una página real verificados sin enviar mensajes a Teams. [Informe de verificación](azure-devops-wiki-verification.md), incluidos resultados, compilación usada y limitación pendiente: no se observó una edición humana de una página real; el cambio de revisión/contenido se cubre mediante regresión controlada. GUI y distribución 0.2.0 conservan los desfases registrados en [el roadmap](roadmap.md).
 
 ## Objetivo y decisiones
 

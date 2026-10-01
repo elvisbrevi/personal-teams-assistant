@@ -59,6 +59,26 @@ impl Pipeline {
             self.config.policy.greeting.clone()
         } else {
             let current = self.redactor.redact(&message.text);
+            let tool_question = if matches!(
+                current
+                    .to_lowercase()
+                    .trim_matches(['¿', '?', '.', '!'])
+                    .trim(),
+                "dame más detalles"
+                    | "más detalles"
+                    | "continúa"
+                    | "continua"
+                    | "explica más"
+                    | "y eso"
+                    | "amplía"
+            ) {
+                self.store
+                    .context(&message.conversation)?
+                    .map(|p| p.question)
+                    .unwrap_or_else(|| current.clone())
+            } else {
+                current.clone()
+            };
             // History helps interpret the request; a classifier cannot veto a new topic.
             let question = if let Some(previous) = self.store.context(&message.conversation)? {
                 format!(
@@ -109,7 +129,31 @@ impl Pipeline {
                     )
                 })
                 .collect();
-            let selected_tool = if status_question(&current)
+            let wiki_requested = explicit_wiki(&tool_question);
+            let wiki_ids: Vec<_> = available
+                .iter()
+                .filter(|r| {
+                    matches!(
+                        &r.access,
+                        Access::Tool {
+                            tool: crate::tools::ToolSpec::AzureDevopsWiki { .. }
+                        }
+                    )
+                })
+                .map(|r| r.id.clone())
+                .collect();
+            let tool_candidates = if wiki_requested {
+                tool_candidates
+                    .into_iter()
+                    .filter(|(id, _)| wiki_ids.contains(id))
+                    .collect()
+            } else {
+                tool_candidates
+            };
+            let selected_tool = if wiki_requested && wiki_ids.len() == 1 {
+                Some(wiki_ids[0].clone())
+            } else if !wiki_requested
+                && status_question(&current)
                 && tool_candidates.contains_key("azure-devops-status")
             {
                 Some("azure-devops-status".to_owned())
@@ -153,6 +197,7 @@ impl Pipeline {
             });
             self.checkpoint(resource, &audit, "retrieving")?;
             let mut evidence = String::new();
+            let mut registry = crate::evidence::Evidence::default();
             // ponytail: divide the existing total budget between authorized sources; many sources
             // reduce detail per source. Add local passage ranking across sources if that becomes limiting.
             let budget = self.config.policy.max_context_chars / sources.len().max(1);
@@ -169,22 +214,61 @@ impl Pipeline {
                             conversation: message.conversation.clone(),
                         }
                         .call(ToolArgs {
-                            question: question.clone(),
+                            question: tool_question.clone(),
                         })
                         .await?
                     }
                     _ => self.knowledge.retrieve(source, &question, budget).await?,
                 };
-                let sanitized = self.redactor.redact(&raw);
-                let header = format!("[source {}]\n", source.id);
-                let passage_budget = budget.saturating_sub(header.chars().count() + 1);
-                let passages = if source.id == "azure-devops-status" {
-                    sanitized.chars().take(passage_budget).collect()
-                } else {
-                    crate::knowledge::excerpt(&sanitized, &question, passage_budget)
+                let typed = match &source.access {
+                    Access::Tool {
+                        tool: crate::tools::ToolSpec::AzureDevopsWiki { .. },
+                    } => {
+                        let mut result: crate::ado::wiki::WikiResult = serde_json::from_str(&raw)?;
+                        for page in &mut result.pages {
+                            page.content = self.redactor.redact(&page.content);
+                            page.reference.author = page
+                                .reference
+                                .author
+                                .take()
+                                .filter(|n| self.redactor.clean(n));
+                            page.reference.label = self.redactor.redact(&page.reference.label);
+                        }
+                        Some(result.evidence(&current, budget.saturating_sub(200)))
+                    }
+                    Access::Tool {
+                        tool:
+                            crate::tools::ToolSpec::AzureDevopsStatus { .. }
+                            | crate::tools::ToolSpec::AzureDevops { .. },
+                    } => Some(serde_json::from_str::<crate::evidence::Evidence>(&raw)?),
+                    _ => None,
                 };
-                let part = format!("{header}{passages}\n");
-                evidence.extend(part.chars().take(budget));
+                if let Some(mut data) = typed {
+                    data.sanitize(&self.redactor);
+                    let context = if matches!(
+                        &source.access,
+                        Access::Tool {
+                            tool: crate::tools::ToolSpec::AzureDevopsWiki { .. }
+                        }
+                    ) {
+                        data.text.clone()
+                    } else {
+                        data.context(&current, budget)
+                    };
+                    if context.chars().count() <= budget && !context.trim().is_empty() {
+                        evidence.push_str(&context);
+                        registry.references.extend(data.references);
+                        registry.teams.extend(data.teams);
+                        registry.partial |= data.partial;
+                        registry.warnings.extend(data.warnings);
+                    }
+                } else {
+                    let sanitized = self.redactor.redact(&raw);
+                    let header = format!("[source {}]\n", source.id);
+                    let passage_budget = budget.saturating_sub(header.chars().count() + 1);
+                    let passages = crate::knowledge::excerpt(&sanitized, &question, passage_budget);
+                    evidence.extend(format!("{header}{passages}\n").chars().take(budget));
+                }
             }
             if evidence.trim().is_empty() {
                 evidence = "No se recuperaron hechos verificables. Explica la limitación y pide concretar la fuente o el proyecto; no inventes una respuesta.".chars().take(self.config.policy.max_context_chars).collect();
@@ -200,8 +284,16 @@ impl Pipeline {
                     question: &question,
                     evidence: &evidence,
                     detail_requested: false,
-                    max_answer_chars: self.config.policy.max_answer_chars,
-                    max_detailed_answer_chars: self.config.policy.max_detailed_answer_chars,
+                    max_answer_chars: self
+                        .config
+                        .policy
+                        .max_answer_chars
+                        .saturating_sub(citation_reserve(&registry)),
+                    max_detailed_answer_chars: self
+                        .config
+                        .policy
+                        .max_detailed_answer_chars
+                        .saturating_sub(citation_reserve(&registry)),
                 })
                 .await?;
             answer_limit = if generated.detailed {
@@ -209,9 +301,32 @@ impl Pipeline {
             } else {
                 self.config.policy.max_answer_chars
             };
+            audit.partial = registry.partial;
+            audit.coverage_warnings = registry.warnings.clone();
+            audit.used_sources = generated.used_sources.clone();
+            audit.references = registry.references.clone();
+            audit.teams_messages = registry.teams.clone();
             audit.detailed = Some(generated.detailed);
             audit.answer_limit = Some(answer_limit);
-            let answer = generated.answer;
+            let answer = if !registry.references.is_empty() {
+                match crate::evidence::complete_answer(
+                    &generated.answer,
+                    &generated.used_sources,
+                    &registry,
+                    answer_limit,
+                ) {
+                    Ok(answer) => answer,
+                    Err(error) => {
+                        audit.reason = format!("invalid_references: {error}");
+                        return self.store.record(resource, &audit);
+                    }
+                }
+            } else if !generated.used_sources.is_empty() {
+                audit.reason = "invalid_references: no authorized evidence".into();
+                return self.store.record(resource, &audit);
+            } else {
+                generated.answer
+            };
             audit.proposed = Some(self.redactor.redact(&answer));
             if !self.valid_answer(&answer, answer_limit) {
                 audit.reason = "unsafe_proposal".into();
@@ -222,7 +337,7 @@ impl Pipeline {
                 .gate
                 .evaluate(
                     Stage::Final,
-                    json!({"question":question,"evidence":evidence,"answer":answer}),
+                    json!({"question":question,"evidence":evidence,"answer":answer,"used_sources":generated.used_sources,"references":registry.references,"teams_messages":registry.teams,"partial":registry.partial,"coverage_warnings":registry.warnings}),
                     BTreeMap::new(),
                 )
                 .await?;
@@ -304,6 +419,24 @@ impl Pipeline {
     }
 }
 
+fn citation_reserve(e: &crate::evidence::Evidence) -> usize {
+    // Reserve for up to four selected references. Complete rendering remains fail-closed.
+    e.references
+        .iter()
+        .map(|r| {
+            r.url.chars().count()
+                + r.label.chars().count()
+                + r.author.as_ref().map_or(0, |n| n.chars().count())
+                + 160
+        })
+        .take(4)
+        .sum()
+}
+fn explicit_wiki(question: &str) -> bool {
+    question
+        .split(|c: char| !c.is_alphanumeric())
+        .any(|w| w.eq_ignore_ascii_case("wiki") || w.eq_ignore_ascii_case("wikis"))
+}
 fn status_question(question: &str) -> bool {
     let q = question.to_lowercase();
     let words: Vec<&str> = q.split(|c: char| !c.is_alphanumeric()).collect();

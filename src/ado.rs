@@ -1,4 +1,6 @@
 //! Bounded, read-only evidence from Azure DevOps. The catalog lives in the private knowledge repo.
+pub mod wiki;
+use crate::evidence::{Block, Evidence, Reference};
 use crate::state::Store;
 use anyhow::{Context, Result, ensure};
 use chrono::{Duration, Utc};
@@ -218,7 +220,18 @@ async fn work_items(
     Ok(value["value"]
         .as_array()
         .context("invalid ADO work items")?
-        .clone())
+        .iter()
+        .filter(|item| {
+            let project = item["fields"]["System.TeamProject"].as_str().unwrap_or("");
+            !project.is_empty()
+                && (source.projects == ["*"]
+                    || source
+                        .projects
+                        .iter()
+                        .any(|p| p.eq_ignore_ascii_case(project)))
+        })
+        .cloned()
+        .collect())
 }
 fn field<'a>(item: &'a Value, name: &str) -> &'a str {
     item["fields"][name].as_str().unwrap_or("")
@@ -348,13 +361,326 @@ async fn file_content(
         .collect())
 }
 
+pub(super) struct EntityLink {
+    pub kind: String,
+    pub id: String,
+    pub project: String,
+    pub url: String,
+    pub stage: Option<String>,
+}
+/// Interpret only known UI routes in the already authorized organization/project.
+pub(super) fn entity_link(raw: &str, organization: &str, projects: &[&str]) -> Option<EntityLink> {
+    let url = Url::parse(raw.trim_end_matches(['.', ',', ';', '!'])).ok()?;
+    let org = Url::parse(organization).ok()?;
+    if url.scheme() != "https"
+        || url.host_str() != Some("dev.azure.com")
+        || url.port_or_known_default() != Some(443)
+        || !url.username().is_empty()
+        || url.password().is_some()
+    {
+        return None;
+    }
+    let project = projects.iter().find(|project| {
+        let mut prefix = org.clone();
+        prefix
+            .path_segments_mut()
+            .unwrap()
+            .pop_if_empty()
+            .push(project);
+        url.path()
+            .starts_with(&format!("{}/", prefix.path().trim_end_matches('/')))
+    })?;
+    let segments: Vec<_> = url.path_segments()?.collect();
+    let (kind, id) = if segments.get(2) == Some(&"_workitems")
+        && segments.get(3) == Some(&"edit")
+        && segments.len() == 5
+    {
+        ("work_item", segments[4].to_owned())
+    } else if segments.get(2) == Some(&"_build")
+        && segments.get(3) == Some(&"results")
+        && segments.len() == 4
+    {
+        (
+            "pipeline_run",
+            url.query_pairs()
+                .find(|(k, _)| k == "buildId")?
+                .1
+                .into_owned(),
+        )
+    } else if segments.get(2) == Some(&"_build") && segments.len() == 3 {
+        (
+            "pipeline_definition",
+            url.query_pairs()
+                .find(|(k, _)| k == "definitionId")?
+                .1
+                .into_owned(),
+        )
+    } else {
+        return None;
+    };
+    if id.parse::<u64>().ok().is_none_or(|id| id == 0) {
+        return None;
+    }
+    let stage = url
+        .query_pairs()
+        .find(|(k, _)| k == "j")
+        .map(|(_, v)| v.into_owned())
+        .filter(|v| uuid::Uuid::parse_str(v).is_ok());
+    let mut canonical = org.clone();
+    canonical
+        .path_segments_mut()
+        .unwrap()
+        .pop_if_empty()
+        .push(project);
+    match kind {
+        "work_item" => {
+            canonical
+                .path_segments_mut()
+                .unwrap()
+                .extend(["_workitems", "edit", &id]);
+        }
+        "pipeline_run" => {
+            canonical
+                .path_segments_mut()
+                .unwrap()
+                .extend(["_build", "results"]);
+            canonical.query_pairs_mut().append_pair("buildId", &id);
+        }
+        _ => {
+            canonical.path_segments_mut().unwrap().push("_build");
+            canonical.query_pairs_mut().append_pair("definitionId", &id);
+        }
+    }
+    Some(EntityLink {
+        kind: kind.into(),
+        id,
+        project: (*project).into(),
+        url: canonical.into(),
+        stage,
+    })
+}
+
+pub async fn team_references(
+    client: &Client,
+    key: &str,
+    catalog: &str,
+    messages: &[crate::evidence::TeamsMessage],
+) -> Result<Vec<Reference>> {
+    let catalog = Catalog::parse(catalog)?;
+    let urls = regex::Regex::new(r"https://dev\.azure\.com/[^\s<>)\]]+")?;
+    let mut refs = Vec::new();
+    let mut seen = BTreeSet::new();
+    for message in messages {
+        for raw in urls.find_iter(&message.text).take(8) {
+            for source in &catalog.sources {
+                let url = Url::parse(raw.as_str())?;
+                let mut org = Url::parse(&source.organization)?;
+                org.set_query(None);
+                if url.host_str() != Some("dev.azure.com")
+                    || url
+                        .path_segments()
+                        .and_then(|mut p| p.next())
+                        .map(str::to_owned)
+                        != org
+                            .path_segments()
+                            .and_then(|mut p| p.next())
+                            .map(str::to_owned)
+                {
+                    continue;
+                }
+                let project = if source.projects == ["*"] {
+                    let encoded = url.path_segments().and_then(|mut p| p.nth(1)).unwrap_or("");
+                    // URL path '+' is literal, unlike query-form decoding.
+                    url::form_urlencoded::parse(
+                        format!("p={}", encoded.replace('+', "%2B")).as_bytes(),
+                    )
+                    .next()
+                    .map(|(_, v)| v.into_owned())
+                    .unwrap_or_default()
+                } else {
+                    let Some(p) = source.projects.iter().find(|p| {
+                        entity_link(raw.as_str(), &source.organization, &[p.as_str()]).is_some()
+                    }) else {
+                        continue;
+                    };
+                    p.clone()
+                };
+                let Some(entity) = entity_link(raw.as_str(), &source.organization, &[&project])
+                else {
+                    continue;
+                };
+                if !seen.insert(entity.url.clone()) || seen.len() > 16 {
+                    continue;
+                }
+                let segments = match entity.kind.as_str() {
+                    "work_item" => vec!["_apis", "wit", "workitems", &entity.id],
+                    "pipeline_run" => vec!["_apis", "build", "builds", &entity.id],
+                    _ => vec!["_apis", "build", "definitions", &entity.id],
+                };
+                let v = match request(
+                    client,
+                    key,
+                    Method::GET,
+                    project_url(source, &project, "dev.azure.com", &segments)?,
+                    None,
+                )
+                .await
+                {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+                if !v["id"]
+                    .as_u64()
+                    .is_some_and(|id| id.to_string() == entity.id)
+                {
+                    continue;
+                }
+                if entity.kind == "work_item" {
+                    let actual = field(&v, "System.TeamProject");
+                    if actual.is_empty()
+                        || (source.projects != ["*"]
+                            && !source
+                                .projects
+                                .iter()
+                                .any(|p| p.eq_ignore_ascii_case(actual)))
+                    {
+                        continue;
+                    }
+                    let Ok(project_data) = request(
+                        client,
+                        key,
+                        Method::GET,
+                        organization_url(source, &["_apis", "projects", &project])?,
+                        None,
+                    )
+                    .await
+                    else {
+                        continue;
+                    };
+                    if !project_data["name"]
+                        .as_str()
+                        .is_some_and(|name| name.eq_ignore_ascii_case(actual))
+                    {
+                        continue;
+                    }
+                } else if !v["project"]["name"]
+                    .as_str()
+                    .is_some_and(|name| name.eq_ignore_ascii_case(&project))
+                    && v["project"]["id"].as_str() != Some(&project)
+                {
+                    continue;
+                }
+                let title = if entity.kind == "work_item" {
+                    field(&v, "System.Title")
+                } else {
+                    v["name"]
+                        .as_str()
+                        .or_else(|| v["definition"]["name"].as_str())
+                        .unwrap_or("Pipeline")
+                };
+                let reference = Reference {
+                    id: format!(
+                        "{}:{}:{project}:{}",
+                        entity.kind, source.organization, entity.id
+                    ),
+                    kind: entity.kind,
+                    label: format!("{title} #{}", entity.id),
+                    url: entity.url,
+                    organization: source.organization.clone(),
+                    project: project.clone(),
+                    aliases: vec![format!("#{}", entity.id), title.into()],
+                    parent: None,
+                    revision: None,
+                    authority: None,
+                    author: None,
+                    author_role: None,
+                };
+                reference.validate()?;
+                refs.push(reference);
+            }
+        }
+    }
+    Ok(refs)
+}
+
+#[allow(clippy::too_many_arguments)] // A captured reference keeps scope, parent and revision explicit.
+fn artifact(
+    source: &Source,
+    project: &str,
+    kind: &str,
+    identity: &str,
+    label: String,
+    aliases: Vec<String>,
+    segments: &[&str],
+    query: &[(&str, String)],
+    parent: Option<String>,
+    revision: Option<String>,
+) -> Result<Reference> {
+    let mut url = project_url(source, project, "dev.azure.com", segments)?;
+    url.set_query(None);
+    for (key, value) in query {
+        url.query_pairs_mut().append_pair(key, value);
+    }
+    let r = Reference {
+        id: format!("{kind}:{}:{project}:{identity}", source.organization),
+        kind: kind.into(),
+        label,
+        url: url.into(),
+        organization: source.organization.clone(),
+        project: project.into(),
+        aliases,
+        parent,
+        revision,
+        authority: None,
+        author: None,
+        author_role: None,
+    };
+    r.validate()?;
+    Ok(r)
+}
+fn item_reference(source: &Source, project: &str, item: &Value) -> Result<Reference> {
+    let id = item["id"]
+        .as_u64()
+        .context("missing work item ID")?
+        .to_string();
+    let actual_project = field(item, "System.TeamProject");
+    ensure!(
+        !actual_project.is_empty()
+            && (source.projects == ["*"]
+                || source
+                    .projects
+                    .iter()
+                    .any(|p| p.eq_ignore_ascii_case(actual_project))),
+        "work item outside authorized project"
+    );
+    let _ = project;
+    artifact(
+        source,
+        actual_project,
+        "work_item",
+        &id,
+        label(item),
+        vec![
+            format!("#{id}"),
+            format!("HU {id}"),
+            format!("work item {id}"),
+            field(item, "System.Title").to_owned(),
+        ],
+        &["_workitems", "edit", &id],
+        &[],
+        None,
+        None,
+    )
+}
+
 async fn commit_detail(
     client: &Client,
     key: &str,
     source: &Source,
     project: &str,
     commit: &CommitRef,
-) -> Result<String> {
+) -> Result<(String, Vec<Reference>)> {
+    let mut references = Vec::new();
     let segments = [
         "_apis",
         "git",
@@ -418,6 +744,7 @@ async fn commit_detail(
             1
         }
     });
+    let stages = regex::Regex::new(r"(?m)^\s*-?\s*stage:\s*([A-Za-z0-9_-]+)")?;
     for change in changed {
         let path = change["item"]["path"].as_str().unwrap_or("");
         let lower = path.to_ascii_lowercase();
@@ -472,6 +799,26 @@ async fn commit_detail(
             } else {
                 String::new()
             };
+            if path.ends_with(".yml") || path.ends_with(".yaml") {
+                for stage in stages.captures_iter(&after).take(10) {
+                    let name = &stage[1];
+                    references.push(artifact(
+                        source,
+                        project,
+                        "stage_configuration",
+                        &format!("{}:{}:{path}:{name}", commit.repo_id, commit.sha),
+                        format!("Stage {name}, configuración versionada en {path}"),
+                        vec![name.into()],
+                        &["_git", &commit.repo_id],
+                        &[
+                            ("path", path.into()),
+                            ("version", format!("GC{}", commit.sha)),
+                        ],
+                        None,
+                        Some(commit.sha.clone()),
+                    )?);
+                }
+            }
             output.push_str(&format!(
                 "Cambio de contenido: {}. ",
                 changed_excerpt(&before, &after)
@@ -523,6 +870,7 @@ async fn commit_detail(
                 .collect();
             if let Ok(items) = work_items(client, key, source, project, &ids).await {
                 for item in items {
+                    references.push(item_reference(source, project, &item)?);
                     output.push_str(&format!(
                         "Work item relacionado {} {}. ",
                         field(&item, "System.WorkItemType"),
@@ -532,7 +880,7 @@ async fn commit_detail(
             }
         }
     }
-    Ok(output.chars().take(1200).collect())
+    Ok((output.chars().take(1200).collect(), references))
 }
 
 async fn work_item_activity(
@@ -541,7 +889,7 @@ async fn work_item_activity(
     source: &Source,
     project: &str,
     since: chrono::DateTime<Utc>,
-) -> Result<(String, usize, bool)> {
+) -> Result<(String, usize, bool, Vec<Reference>)> {
     let email = &source.author_email;
     let active_query = format!(
         "SELECT [System.Id] FROM WorkItems WHERE [System.TeamProject] = @project AND [System.AssignedTo] = '{email}' AND [System.State] <> 'Done' AND [System.State] <> 'Removido' ORDER BY [System.ChangedDate] DESC"
@@ -577,8 +925,10 @@ async fn work_item_activity(
     selected.sort_by(|a, b| field(b, "System.ChangedDate").cmp(field(a, "System.ChangedDate")));
     selected.truncate(8);
     let mut output = String::new();
+    let mut references = Vec::new();
     let mut blocked = false;
     for item in &selected {
+        references.push(item_reference(source, project, item)?);
         output.push_str(&format!(
             "Work item {} {} (última modificación registrada {}). ",
             field(item, "System.WorkItemType"),
@@ -589,6 +939,7 @@ async fn work_item_activity(
             .first()
             .and_then(|id| by_id.get(id))
         {
+            references.push(item_reference(source, project, parent)?);
             output.push_str(&format!("Contexto padre: {}. ", label(parent)));
         }
         let due = field(item, "Microsoft.VSTS.Scheduling.TargetDate");
@@ -607,7 +958,7 @@ async fn work_item_activity(
         }
         output.push('\n');
     }
-    Ok((output, selected.len(), blocked))
+    Ok((output, selected.len(), blocked, references))
 }
 
 async fn repository_activity(
@@ -746,7 +1097,7 @@ async fn pipeline_activity(
     project: &str,
     since: chrono::DateTime<Utc>,
     commit_ids: &BTreeSet<(String, String)>,
-) -> Result<(String, usize)> {
+) -> Result<(String, usize, Vec<Reference>)> {
     let mut url = project_url(
         source,
         project,
@@ -759,6 +1110,7 @@ async fn pipeline_activity(
         .append_pair("$top", "100");
     let value = request(client, key, Method::GET, url, None).await?;
     let mut output = String::new();
+    let mut references = Vec::new();
     let mut count = 0;
     let mut build_ids = BTreeSet::new();
     for build in value["value"].as_array().context("invalid ADO builds")? {
@@ -779,6 +1131,20 @@ async fn pipeline_activity(
         let Some(id) = build["id"].as_u64() else {
             continue;
         };
+        let name = build["definition"]["name"].as_str().unwrap_or("sin nombre");
+        let run = artifact(
+            source,
+            project,
+            "pipeline_run",
+            &id.to_string(),
+            format!("Pipeline {name}, ejecución #{id}"),
+            vec![name.into(), format!("build #{id}")],
+            &["_build", "results"],
+            &[("buildId", id.to_string())],
+            None,
+            None,
+        )?;
+        references.push(run.clone());
         count += 1;
         build_ids.insert(id);
         let relationship = if requested_by {
@@ -820,6 +1186,24 @@ async fn pipeline_activity(
                     .filter(|record| record["type"].as_str() == Some("Stage"))
                     .take(10)
                 {
+                    if stage["id"].as_str().is_none() {
+                        continue;
+                    }
+                    if let Some(stage_id) = stage["id"].as_str() {
+                        let name = stage["name"].as_str().unwrap_or("sin nombre");
+                        references.push(artifact(
+                            source,
+                            project,
+                            "stage_run",
+                            &format!("{id}:{stage_id}"),
+                            format!("Stage {name}, ejecución #{id} que lo contiene"),
+                            vec![name.into()],
+                            &["_build", "results"],
+                            &[("buildId", id.to_string())],
+                            Some(run.id.clone()),
+                            None,
+                        )?);
+                    }
                     output.push_str(&format!(
                         "Etapa {}: {}.\n",
                         stage["name"]
@@ -878,7 +1262,7 @@ async fn pipeline_activity(
             }
         }
     }
-    Ok((output, count))
+    Ok((output, count, references))
 }
 
 async fn release_definition_activity(
@@ -887,7 +1271,7 @@ async fn release_definition_activity(
     source: &Source,
     project: &str,
     since: chrono::DateTime<Utc>,
-) -> Result<(String, usize)> {
+) -> Result<(String, usize, Vec<Reference>)> {
     let mut url = project_url(
         source,
         project,
@@ -897,6 +1281,7 @@ async fn release_definition_activity(
     url.query_pairs_mut().append_pair("$top", "100");
     let list = request(client, key, Method::GET, url, None).await?;
     let mut output = String::new();
+    let mut references = Vec::new();
     let mut count = 0;
     for definition in list["value"]
         .as_array()
@@ -925,6 +1310,23 @@ async fn release_definition_activity(
         )
         .await?;
         let revision = detail["revision"].as_u64().unwrap_or(0);
+        let name = detail["name"].as_str().unwrap_or("sin nombre");
+        let definition = artifact(
+            source,
+            project,
+            "pipeline_definition",
+            &id.to_string(),
+            format!("Configuración de release {name} #{id}"),
+            vec![name.into(), format!("release #{id}")],
+            &["_release"],
+            &[
+                ("definitionId", id.to_string()),
+                ("_a", "definition-tasks".into()),
+            ],
+            None,
+            Some(revision.to_string()),
+        )?;
+        references.push(definition.clone());
         output.push_str(&format!(
             "Definición de release #{} {} (modificada por el usuario {}, revisión {}). ",
             id,
@@ -946,6 +1348,27 @@ async fn release_definition_activity(
             .flatten()
             .take(4)
         {
+            if stage["id"].as_u64().is_none() {
+                continue;
+            }
+            if let Some(stage_id) = stage["id"].as_u64() {
+                let name = stage["name"].as_str().unwrap_or("sin nombre");
+                references.push(artifact(
+                    source,
+                    project,
+                    "stage_configuration",
+                    &format!("{id}:{stage_id}:{revision}"),
+                    format!("Stage {name}, configuración en release #{id}"),
+                    vec![name.into()],
+                    &["_release"],
+                    &[
+                        ("definitionId", id.to_string()),
+                        ("_a", "definition-tasks".into()),
+                    ],
+                    Some(definition.id.clone()),
+                    Some(revision.to_string()),
+                )?);
+            }
             output.push_str(&format!(
                 "Stage configurado {}. ",
                 stage["name"]
@@ -995,7 +1418,7 @@ async fn release_definition_activity(
             break;
         }
     }
-    Ok((output, count))
+    Ok((output, count, references))
 }
 
 pub async fn status(
@@ -1004,11 +1427,12 @@ pub async fn status(
     catalog_text: &str,
     question: &str,
     store: Arc<Store>,
-) -> Result<String> {
+) -> Result<Evidence> {
     let catalog = Catalog::parse(catalog_text)?;
     let days = recent_window(question);
     let since = Utc::now() - Duration::days(days);
     let mut sections = Vec::new();
+    let mut references = Vec::new();
     let mut blocked = false;
     let mut partial_projects = 0;
     let mut jobs = tokio::task::JoinSet::new();
@@ -1025,20 +1449,24 @@ pub async fn status(
                     release_definition_activity(&client, &key, &source, &project, since)
                 );
                 let incomplete = items.is_err() || commits.is_err();
-                let (items, item_count, item_blocked) = items.unwrap_or_default();
+                let (items, item_count, item_blocked, mut refs) = items.unwrap_or_default();
                 let (commits, commit_count, commit_ids, mut commit_refs, repo_incomplete) =
                     commits.unwrap_or_default();
                 let pipelines =
                     pipeline_activity(&client, &key, &source, &project, since, &commit_ids).await;
                 let incomplete = incomplete || repo_incomplete || pipelines.is_err();
-                let (pipelines, pipeline_count) = pipelines.unwrap_or_default();
-                let (definitions, definition_count) = definitions.unwrap_or_default();
+                let (pipelines, pipeline_count, pipeline_refs) = pipelines.unwrap_or_default();
+                let (definitions, definition_count, definition_refs) =
+                    definitions.unwrap_or_default();
+                refs.extend(pipeline_refs);
+                refs.extend(definition_refs);
                 commit_refs.sort_by(|a, b| b.date.cmp(&a.date));
                 let mut details = String::new();
                 for commit in commit_refs.iter().take(4) {
-                    if let Ok(detail) =
+                    if let Ok((detail, detail_refs)) =
                         commit_detail(&client, &key, &source, &project, commit).await
                     {
+                        refs.extend(detail_refs);
                         details.push_str(&detail);
                         details.push('\n');
                     }
@@ -1050,17 +1478,19 @@ pub async fn status(
                     format!("{commits}{details}{definitions}{pipelines}{items}"),
                     item_blocked,
                     incomplete,
+                    refs,
                 )
             });
             if jobs.len() >= 8 {
-                let (project, score, content, item_blocked, incomplete) =
-                    jobs.join_next()
-                        .await
-                        .context("ADO project worker missing")??;
+                let (project, score, content, item_blocked, incomplete, refs) = jobs
+                    .join_next()
+                    .await
+                    .context("ADO project worker missing")??;
                 if score > 0 {
                     sections.push((
                         score,
                         format!("Proyecto: {project}.\n{}", bounded_lines(&content, 5_000)),
+                        refs,
                     ));
                 }
                 blocked |= item_blocked;
@@ -1069,11 +1499,12 @@ pub async fn status(
         }
     }
     while let Some(result) = jobs.join_next().await {
-        let (project, score, content, item_blocked, incomplete) = result?;
+        let (project, score, content, item_blocked, incomplete, refs) = result?;
         if score > 0 {
             sections.push((
                 score,
                 format!("Proyecto: {project}.\n{}", bounded_lines(&content, 5_000)),
+                refs,
             ));
         }
         blocked |= item_blocked;
@@ -1084,12 +1515,37 @@ pub async fn status(
         "Actividad de Azure DevOps desde {} (últimos {days} días).\n",
         since.format("%Y-%m-%d")
     );
+    let mut blocks = Vec::new();
     if sections.is_empty() {
         output.push_str(
             "No se pudo verificar actividad personal reciente en los proyectos consultados.\n",
         );
     } else {
-        for (_, section) in sections {
+        for (_, section, refs) in sections {
+            let project_header = section.lines().next().unwrap_or("");
+            for line in section.lines().skip(1) {
+                let lower = line.to_lowercase();
+                let mut ids: Vec<String> = refs
+                    .iter()
+                    .filter(|r| {
+                        r.aliases
+                            .iter()
+                            .any(|a| !a.is_empty() && lower.contains(&a.to_lowercase()))
+                    })
+                    .map(|r| r.id.clone())
+                    .collect();
+                let parents: Vec<String> = refs
+                    .iter()
+                    .filter(|r| ids.contains(&r.id))
+                    .filter_map(|r| r.parent.clone())
+                    .collect();
+                ids.extend(parents);
+                blocks.push(Block {
+                    text: format!("{project_header}\n{line}"),
+                    source_ids: ids,
+                });
+            }
+            references.extend(refs);
             output.push_str(&section);
             output.push('\n');
         }
@@ -1100,7 +1556,28 @@ pub async fn status(
     if partial_projects > 0 {
         output.push_str(&format!("Cobertura parcial: falló al menos una consulta en {partial_projects} proyecto(s); no inferir ausencia de actividad en ellos.\n"));
     }
-    Ok(bounded_lines(&output, 11_000))
+    blocks.push(Block {
+        text: output
+            .lines()
+            .filter(|l| {
+                l.starts_with("Impedimentos:")
+                    || l.starts_with("Cobertura parcial:")
+                    || l.starts_with("Actividad de Azure")
+                    || l.starts_with("No se pudo verificar")
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+        source_ids: Vec::new(),
+    });
+    let mut ids = BTreeSet::new();
+    references.retain(|r| ids.insert(r.id.clone()));
+    Ok(Evidence {
+        text: bounded_lines(&output, 11_000),
+        blocks,
+        references,
+        partial: partial_projects > 0,
+        ..Default::default()
+    })
 }
 
 #[cfg(test)]

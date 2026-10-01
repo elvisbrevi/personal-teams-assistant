@@ -75,3 +75,40 @@ Cada salida personal tiene ID y un enlace PTA con nonce registrado antes de envi
 Windows queda fuera de esta entrega por decisión del usuario. Se conserva su compilación existente en CI; quedan para la próxima versión el instalador conjunto, actualización de CLI/PATH, pruebas funcionales de consola/bandeja/Credential Manager/ACL, inicio-parada-reinicio, desinstalación sin pérdida de datos y firma según los medios disponibles. El código común conserva los puntos de integración, sin declarar validación funcional ni distribución estable Windows.
 
 Ante una salida ambigua sin marca recuperable, `self-chat status` lista pending_outputs con nonce y fecha. Tras identificar personalmente su mensaje en Teams/Graph, `pta self-chat reconcile NONCE MESSAGE_ID` registra la correspondencia explícita; valida cuenta, conversación y fecha y no reenvía nada. El agente necesita que la persona identifique esa salida si Graph no conservó la marca.
+
+## Azure DevOps Wiki (núcleo y host 0.3.0)
+
+La compilación del repositorio incorpora Wiki; la distribución 0.2.0 indicada arriba todavía no la incorpora. Compila y usa ambos ejecutables juntos:
+
+```sh
+cargo build -p personal-teams-desktop --bins
+./target/debug/pta --version
+./target/debug/pta --json capabilities
+```
+
+Cierra antes un host antiguo con su propio `pta app quit`. El descriptor del host anuncia soporte Wiki: el CLI nuevo rechaza operaciones/esquemas Wiki si el host no lo anuncia, con exit 6. No reinstales ni publiques para probar esta compilación.
+
+Registra un recurso `kind=tool`, inicialmente `enabled=false`, `external_processing=false`, `allowed_conversations=[]` y `allowed_senders=[]`, mediante `sources add`. Usa un repositorio/catálogo existente y su `secret_ref` (ver [mapa de ejemplo](../knowledge-map.example.toml)). El catálogo conserva `organization`, `projects` y `author_email`; no tiene nuevos campos. `wiki_ids=[]` admite las wikis de esos proyectos; una lista de UUID restringe más. `author_mode` admite `prefer_mine`, `mine_only` y `all`; `mine_only` acepta creación **o edición** propia verificadas por página/revisión.
+
+```sh
+pta --json azure wiki list SOURCE_ID
+pta --json sources enable SOURCE_ID
+pta --json azure wiki search SOURCE_ID <<'JSON'
+{"query":"despliegue continuo","wiki_id":null,"author_mode":"prefer_mine"}
+JSON
+pta --json azure wiki read SOURCE_ID <<'JSON'
+{"wiki_id":"11111111-abcd-abcd-abcd-111111111111","path":"/Procedimiento de despliegue"}
+JSON
+```
+
+`list` funciona con una fuente deshabilitada. `search/read` requieren habilitarla y seleccionarla explícitamente. Reciben JSON cerrado por stdin: no aceptan organizaciones ni URLs arbitrarias. La ruta de lectura es la **ruta canónica** de Wiki devuelta por Search/Pages, no la ruta Git `.md`. Cero coincidencias es éxito; consulta inválida usa exit 2, fuente deshabilitada exit 3 y permisos/red/API exit 5. Un 403 explica `vso.wiki`; la atribución Git requiere `vso.code`. Los cuerpos privados de errores y los correos no se imprimen.
+
+La salida conserva el envelope de contrato 1 y añade en `data`: `query`, `wikis`, `pages`, `candidates`, `histories_checked`, `partial` y `warnings`. Cada página incluye wiki/proyecto/repositorio/carpeta/versión, título, rutas Wiki/Git, contenido redactado y `reference` (ID, URL verificada, autoridad, nombre y rol cuando estén disponibles). `revision` es el ETag del contenido; `git_revision` y la revisión de la referencia son el commit del repositorio comprobado contra ese contenido mediante Git Items. Una modificación concurrente impide reutilizar la atribución anterior. No hay caché de Markdown ni de autoría.
+
+Search pagina de 25 en 25, con hasta 100 candidatos globales; resuelve hasta 10 candidatos/historias y entrega hasta cuatro páginas para contexto. Las lecturas son secuenciales (concurrencia ≤4), con 1 MB por respuesta y plazo Wiki global de 30 segundos. La simulación local tiene 110 segundos, por debajo del IPC de 120. Indexación pendiente, recortes, páginas ilegibles y errores Git se explican con `partial/warnings`; no equivalen a ausencia de información. Un fallo Git permite contenido con autoría desconocida; un fallo Pages excluye la página.
+
+Estos comandos locales no invocan modelos ni Graph, y no conceden audiencias. Para `chat/test simulate` autoriza `external_processing` **en esa fuente** mediante `sources audience`, conservando las listas de audiencias vacías si el uso es solo local. Una pregunta explícita sobre Wiki tiene prioridad incluso si contiene «pipeline». Conviene formular el tema en la primera frase; no se envía historial ni instrucciones posteriores como búsqueda. Varias fuentes Wiki usan el enrutamiento autorizado existente.
+
+Las simulaciones añaden `used_sources`, `references`, `partial` y `warnings` a `data`; las respuestas conservan también remitentes Teams en la auditoría. El pipeline añade las citas antes de validar privacidad, longitud y Jev: toda página utilizada y todo work item/pipeline/stage concreto mencionado necesita referencia verificable. Las etapas sin enlace propio usan la ejecución o configuración contenedora con etiqueta precisa. La documentación propia permite autoridad documental, sin probar ejecución; terceros llevan ubicación y autor/último editor, o se declara autor desconocido. Teams conserva autor, fecha, mensaje e intervención, sin inferir interacción por pertenencia al grupo. `audit show --content` permite inspeccionar texto; sin él se omiten respuestas y texto de mensajes Teams.
+
+Ver [verificación Wiki](azure-devops-wiki-verification.md) y [roadmap](roadmap.md) para evidencia real y diferencias de GUI/distribución.

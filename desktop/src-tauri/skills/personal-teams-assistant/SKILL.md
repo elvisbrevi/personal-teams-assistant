@@ -9,6 +9,7 @@ description: Operación de Personal Teams Assistant. Usa esta skill para configu
    - Configuración, credenciales, modo o importación: [configuration.md](references/configuration.md).
    - Inicio, parada, ventanas, túnel o recuperación del host: [lifecycle.md](references/lifecycle.md).
    - OAuth, repositorios, fuentes o chat personal: [auth-and-knowledge.md](references/auth-and-knowledge.md).
+   - Wiki de Azure DevOps (list/search/read, fuente y permisos independientes): [azure-wiki.md](references/azure-wiki.md). Requiere CLI/host 0.3.0 compatibles; no aplicar este esquema a un host 0.2.0.
    - Simulación, diagnóstico y auditoría: [tests-and-diagnostics.md](references/tests-and-diagnostics.md).
    La ayuda instalada es la autoridad de argumentos. Los comandos JSON devuelven `ok`, `code`, `exit_code`, `data` y `revision`; autorización pendiente devuelve código 4 con instrucciones/URL, sin tokens. Cierre: cada operación solicitada aplicada o requisito humano concreto identificado. Un timeout requiere nueva inspección antes de repetir una mutación.
 4. **Verificar.** Consulta nuevamente estado y ejecuta la prueba pertinente. Cierre: persistencia y configuración cargada coinciden con la solicitud; una parada deja `running=false`; una respuesta de Teams tiene auditoría de envío y respuesta visible en el destino autorizado.

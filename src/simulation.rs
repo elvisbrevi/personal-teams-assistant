@@ -24,6 +24,10 @@ pub struct SimulationResult {
     pub status: String,
     pub reason: String,
     pub answer: Option<String>,
+    pub used_sources: Vec<String>,
+    pub references: Vec<crate::evidence::Reference>,
+    pub partial: bool,
+    pub warnings: Vec<String>,
 }
 
 pub fn validate_request(input: &SimulationRequest) -> Result<()> {
@@ -108,5 +112,9 @@ pub async fn run(
         status: audit.status,
         reason: audit.reason,
         answer,
+        used_sources: audit.used_sources,
+        references: audit.references,
+        partial: audit.partial,
+        warnings: audit.coverage_warnings,
     })
 }

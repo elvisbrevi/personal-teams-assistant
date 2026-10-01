@@ -648,9 +648,15 @@ async fn chat(
     state: tauri::State<'_, DesktopState>,
     input: SimulationRequest,
 ) -> std::result::Result<SimulationResult, String> {
-    local_chat::chat(&state.config_path, input)
-        .await
-        .map_err(fail)
+    tokio::time::timeout(
+        std::time::Duration::from_secs(110),
+        local_chat::chat(&state.config_path, input),
+    )
+    .await
+    .map_err(|_| {
+        "[network] Local simulation deadline exceeded; no Graph message was sent.".to_owned()
+    })?
+    .map_err(fail)
 }
 
 async fn begin_github_login(
@@ -1181,6 +1187,87 @@ pub fn run() {
             tauri::RunEvent::Reopen { .. } => show_main(app),
             _ => {}
         });
+}
+
+/// Operator-local Wiki queries use no Graph client or model and grant no audience permissions.
+async fn azure_wiki(
+    state: &DesktopState,
+    id: String,
+    operation: String,
+    input: serde_json::Value,
+) -> std::result::Result<serde_json::Value, String> {
+    use personal_teams_assistant::{ado::wiki, tools::ToolSpec};
+    let config = read_config(&state.config_path).map_err(fail)?;
+    let map = KnowledgeMap::load(&state.map_path).map_err(fail)?;
+    let source = map
+        .resources
+        .iter()
+        .find(|r| r.id == id)
+        .ok_or("[invalid_input] Unknown Wiki source.")?;
+    if operation != "list" && !source.enabled {
+        return Err("[not_ready] Enable the selected Wiki source before search/read.".into());
+    }
+    let Access::Tool {
+        tool:
+            ToolSpec::AzureDevopsWiki {
+                repository,
+                path,
+                secret_ref,
+                wiki_ids,
+                author_mode,
+            },
+    } = &source.access
+    else {
+        return Err("[invalid_input] Source is not an Azure DevOps Wiki tool.".into());
+    };
+    let catalog = personal_teams_assistant::knowledge::read_repository_file(
+        &map.repositories,
+        repository,
+        path,
+    )
+    .map_err(fail)?;
+    let key = security::resolve(secret_ref, &config.secrets).map_err(|_| {
+        "[not_ready] Azure credential unavailable; inspect credentials list.".to_owned()
+    })?;
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(fail)?;
+    let reader = wiki::Reader::new(&client, &key, &catalog, wiki_ids)
+        .map_err(|_| "[invalid_input] Invalid Wiki catalog or scope.".to_owned())?;
+    let result = match operation.as_str() {
+        "list" => reader.list().await,
+        "search" => {
+            let input: wiki::SearchInput = serde_json::from_value(input).map_err(|_| "[invalid_input] Invalid Wiki search JSON.".to_owned())?;
+            input.validate().map_err(|e| format!("[invalid_input] {e}"))?;
+            reader.search(&input, *author_mode).await
+        }
+        "read" => {
+            let input: wiki::ReadInput = serde_json::from_value(input).map_err(|_| "[invalid_input] Invalid Wiki read JSON.".to_owned())?;
+            input.validate().map_err(|e| format!("[invalid_input] {e}"))?;
+            reader.read(&input).await
+        }
+        _ => return Err("[invalid_input] Unknown Wiki operation.".into()),
+    }.map_err(|e| {
+        let safe = e.to_string();
+        if safe.starts_with("invalid") { format!("[invalid_input] {safe}") }
+        else if safe.starts_with("Wiki API") || safe.starts_with("Wiki operation timeout") { format!("[network] {safe}") }
+        else { "[network] Wiki read could not complete; check catalog, published version and connectivity.".into() }
+    })?;
+    let redactor =
+        security::Redactor::new(&config.policy.sensitive_patterns, vec![key]).map_err(fail)?;
+    let mut value = serde_json::to_value(result).map_err(fail)?;
+    // Redact strings recursively; retain schema/types and never serialize author emails.
+    fn redact(value: &mut serde_json::Value, r: &security::Redactor) {
+        match value {
+            serde_json::Value::String(s) => *s = r.redact(s),
+            serde_json::Value::Array(a) => a.iter_mut().for_each(|v| redact(v, r)),
+            serde_json::Value::Object(o) => o.values_mut().for_each(|v| redact(v, r)),
+            _ => {}
+        }
+    }
+    redact(&mut value, &redactor);
+    Ok(value)
 }
 
 #[cfg(test)]
