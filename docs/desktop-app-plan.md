@@ -1,5 +1,7 @@
 # Plan: aplicación de escritorio con Cargo
 
+La prioridad vigente es el CLI y su núcleo compartido. La paridad de la GUI y de los binarios distribuidos se mantiene como trabajo posterior en [el roadmap](roadmap.md); las fases de escritorio de este documento no bloquean nuevas funcionalidades del CLI. La integración de wikis de Azure DevOps tiene [su propio plan](azure-devops-wiki-plan.md).
+
 ## Decisión de arquitectura
 
 Empaquetar el núcleo Rust actual con **Tauri 2**: un ejecutable de escritorio para macOS y Windows, construido con `cargo tauri`, con icono de barra de menús o bandeja y dos ventanas pequeñas (Configuración y Chat de prueba). Mantener el binario CLI y Docker para los usos actuales. El código de Teams, decisiones, conocimiento y SQLite sigue en la biblioteca Rust; la GUI llama a comandos Rust de alcance limitado. No crear un segundo servidor ni duplicar el pipeline. Tauri ofrece bandeja en Rust y empaquetado `.app`/`.dmg` y Windows ([bandeja](https://v2.tauri.app/learn/system-tray/), [macOS](https://v2.tauri.app/distribute/macos-application-bundle/)).
