@@ -403,6 +403,10 @@ impl Pipeline {
                     }),
                 )
                 .await??;
+            // A provider chain names the member that actually wrote the answer.
+            if let Some(provider) = &generated.provider {
+                audit.provider = Some(provider.clone());
+            }
             context_answer = Some(generated.answer.clone());
             audit.partial = registry.partial;
             audit.coverage_warnings = registry.warnings.clone();

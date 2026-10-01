@@ -13,7 +13,7 @@ use personal_teams_assistant::{
     },
     decision::{DecisionGate, Jev, Stage},
     knowledge::{Access, KnowledgeMap, Resource},
-    llm::{DeepSeek, GenerationInput, LlmProvider},
+    llm::{DeepSeek, GenerationInput, LlmProvider, Model},
     pipeline::Pipeline,
     security::Redactor,
     simulation::{self, SimulationRequest},
@@ -141,15 +141,10 @@ async fn graph_jev_deepseek_end_to_end_and_final_gate() {
             api_key: "test-typesafe-key".into(),
             model: "jev-test".into(),
         });
-        let llm = Arc::new(
-            DeepSeek::new(
-                "test-deepseek-key",
-                "deepseek-test",
-                "Brief Spanish",
-                &server.uri(),
-            )
-            .unwrap(),
-        );
+        let llm = Arc::new(Model::new(
+            DeepSeek::new("test-deepseek-key", "deepseek-test", "max", &server.uri()).unwrap(),
+            "Brief Spanish",
+        ));
         let pipeline = Pipeline {
             config: graph.config.clone(),
             store: store.clone(),
@@ -367,13 +362,10 @@ async fn assistant_tool_selection_rejects_unknown_ids_and_closed_schema_changes(
     ] {
         let server = MockServer::start().await;
         Mock::given(method("POST")).and(path("/chat/completions")).respond_with(ResponseTemplate::new(200).set_body_json(json!({"id":"select1","object":"chat.completion","created":1,"model":"deepseek-test","choices":[{"index":0,"message":{"role":"assistant","content":response.to_string()},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":10,"total_tokens":20,"prompt_cache_hit_tokens":0,"prompt_cache_miss_tokens":10}}))).expect(1).mount(&server).await;
-        let llm = DeepSeek::new(
-            "synthetic-key",
-            "deepseek-test",
+        let llm = Model::new(
+            DeepSeek::new("synthetic-key", "deepseek-test", "max", &server.uri()).unwrap(),
             "Brief Spanish",
-            &server.uri(),
-        )
-        .unwrap();
+        );
         let result = llm
             .select_tool(
                 "Explica un componente desconocido",
@@ -1105,6 +1097,7 @@ impl LlmProvider for LengthChoice {
             used_sources: Vec::new(),
             answer: "á".repeat(5000),
             detailed: self.detailed,
+            provider: None,
         })
     }
 }
@@ -1247,6 +1240,7 @@ impl LlmProvider for WikiLlm {
             answer: "El procedimiento documentado exige validar la configuración.".into(),
             detailed: false,
             used_sources: self.used.clone(),
+            provider: None,
         })
     }
 }
@@ -1440,6 +1434,7 @@ impl LlmProvider for FollowUpLlm {
             answer: "Envía un `POST` con **dos elementos** en `Servicios`:\n\n```json\n{\"Servicios\": [{}, {}]}\n```".into(),
             detailed: false,
             used_sources: vec![],
+            provider: None,
         })
     }
 }
@@ -1824,6 +1819,7 @@ impl LlmProvider for SlowLlm {
             used_sources: Vec::new(),
             answer: "El soporte atiende de lunes a viernes de 09:00 a 18:00.".into(),
             detailed: false,
+            provider: None,
         })
     }
 }

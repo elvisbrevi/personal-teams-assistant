@@ -7,7 +7,6 @@ use crate::{
     config::Config,
     decision::Jev,
     knowledge::KnowledgeMap,
-    llm::DeepSeek,
     pipeline::Pipeline,
     security::{self, Redactor, Vault},
     state::{Audit, Store},
@@ -31,7 +30,7 @@ pub async fn serve(
     let config = Arc::new(Config::load(path)?);
     let knowledge = KnowledgeMap::load(&config.knowledge_map)?;
     let jev_key = security::secret("TYPESAFE_API_KEY")?;
-    let llm_key = security::secret("DEEPSEEK_API_KEY")?;
+    let (llm, llm_secrets) = crate::llm::from_config(&config.llm)?;
     let client_state = security::secret("GRAPH_WEBHOOK_SECRET")?;
     let encryption_key = security::secret("STATE_ENCRYPTION_KEY")?;
     ensure!(
@@ -40,10 +39,10 @@ pub async fn serve(
     );
     let mut exact_secrets = vec![
         jev_key.clone(),
-        llm_key.clone(),
         client_state.clone(),
         encryption_key.clone(),
     ];
+    exact_secrets.extend(llm_secrets);
     for name in config.secrets.values() {
         exact_secrets.push(security::secret(name)?);
     }
@@ -89,12 +88,7 @@ pub async fn serve(
         api_key: jev_key,
         model: config.jev.model.clone(),
     });
-    let llm = Arc::new(DeepSeek::new(
-        &llm_key,
-        &config.llm.model,
-        &config.llm.style,
-        "https://api.deepseek.com",
-    )?);
+    let llm = Arc::new(llm);
     let tools = Arc::new(Tools {
         bindings: config.secrets.clone(),
         repositories: knowledge.repositories.clone(),

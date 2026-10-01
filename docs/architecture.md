@@ -4,7 +4,7 @@ Referencia técnica para agentes de código. Describe cómo está construido el 
 
 ## 1. Qué es
 
-Asistente personal de Microsoft Teams que responde **con la identidad del propio usuario** (OAuth delegado, sin bot). Recibe mensajes por webhooks de Microsoft Graph, decide si corresponde intervenir, recupera evidencia solo de fuentes autorizadas para esa conversación, redacta con DeepSeek, valida con Jev (TypeSafe) y envía una sola vez. Ante duda, no envía: la respuesta queda para la persona.
+Asistente personal de Microsoft Teams que responde **con la identidad del propio usuario** (OAuth delegado, sin bot). Recibe mensajes por webhooks de Microsoft Graph, decide si corresponde intervenir, recupera evidencia solo de fuentes autorizadas para esa conversación, redacta con un modelo de lenguaje (Codex o Claude Code mediante su CLI instalada, o la API de DeepSeek, en una cadena de respaldo), valida con Jev (TypeSafe) y envía una sola vez. Ante duda, no envía: la respuesta queda para la persona.
 
 Se distribuye exclusivamente por Cargo. Un paquete (`personal-teams-desktop`) instala tres piezas:
 
@@ -19,6 +19,9 @@ Se distribuye exclusivamente por Cargo. Un paquete (`personal-teams-desktop`) in
 ```text
 Cargo.toml                    workspace + crate núcleo `personal-teams-assistant` (solo biblioteca)
 src/                          núcleo: pipeline, adaptadores Graph, Jev, LLM, conocimiento, herramientas, SQLite
+  llm.rs                      contrato LlmProvider, prompts (`Model`), cadena de respaldo (`Chain`), validación
+  llm/deepseek.rs             API DeepSeek (`/chat/completions`)
+  llm/agent.rs                Codex (`codex exec`) y Claude Code (`claude -p`) como CLI sin herramientas; catálogo
 tests/integration.rs          integración con wiremock (Graph, Jev, DeepSeek simulados)
 examples/wiki_gate_smoke.rs   regresión opcional contra Jev real con hechos sintéticos
 desktop/src-tauri/            crate `personal-teams-desktop` (GUI, host, CLI, skill)
@@ -85,7 +88,7 @@ personal-teams-desktop --headless --start                              # primer 
 | Datos | `assistant.db` (servicio), `desktop-chat.db` (chat local/simulación), `instance.lock`, `repositories/` (clones GitHub) |
 | Credenciales | Llavero macOS / Credential Manager, servicio `personal-teams-assistant.default`, cuenta = nombre de la credencial. Linux: archivos `<perfil>/credentials/default/NOMBRE` (0600, directorio 0700) |
 
-Resolución de un secreto (`security::secret`): `NAME_FILE` → variable `NAME` → almacén del sistema (Llavero/Credential Manager, o el almacén de archivos en Linux, configurado por `configure_credentials`). `secret_source` solo inspecciona metadatos (en macOS usa `/usr/bin/security find-generic-password` sin descifrar). Credenciales conocidas: `TYPESAFE_API_KEY`, `DEEPSEEK_API_KEY`, `GRAPH_WEBHOOK_SECRET` y `STATE_ENCRYPTION_KEY` (ambas se generan al primer arranque si faltan), `CLOUDFLARE_TUNNEL_TOKEN` (modo túnel con token), `GITHUB_OAUTH_TOKENS`, y las mapeadas en `[secrets]` (p. ej. `AZURE_DEVOPS_TOKEN`).
+Resolución de un secreto (`security::secret`): `NAME_FILE` → variable `NAME` → almacén del sistema (Llavero/Credential Manager, o el almacén de archivos en Linux, configurado por `configure_credentials`). `secret_source` solo inspecciona metadatos (en macOS usa `/usr/bin/security find-generic-password` sin descifrar). Credenciales conocidas: `TYPESAFE_API_KEY`, `DEEPSEEK_API_KEY` (exigida al iniciar solo si DeepSeek está activo en `llm.chain`; si no, `credentials list` la muestra como `unused`), `GRAPH_WEBHOOK_SECRET` y `STATE_ENCRYPTION_KEY` (ambas se generan al primer arranque si faltan), `CLOUDFLARE_TUNNEL_TOKEN` (modo túnel con token), `GITHUB_OAUTH_TOKENS`, y las mapeadas en `[secrets]` (p. ej. `AZURE_DEVOPS_TOKEN`).
 
 Invariantes:
 
@@ -104,7 +107,7 @@ Invariantes:
 | `server` | `bind` (debe ser loopback), `public_url` (origen HTTPS), `data_dir`, `cloudflare_tunnel` |
 | `graph` | `tenant_id`, `client_id`, `user_id` (UUID; nil hasta el login), `discover_all_chats` o `allowed_chats`, `self_chat {id,user_id,enabled_at}`, `channels` (heredado, debe estar vacío) |
 | `jev` | `model`, `final_threshold` (activo, 0.5–1). `follow_up_threshold`, `routing_threshold`, `evidence_threshold`: heredados, sin uso, se conservan por compatibilidad |
-| `llm` | `provider` (solo `deepseek`), `model`, `style` |
+| `llm` | `style`; `chain`: lista ordenada `{provider, model, effort, enabled}` (`codex`, `claude`, `deepseek`; uno de cada uno, al menos uno activo). `provider`/`model` heredados: solo rigen con `chain` vacío (DeepSeek, esfuerzo `max`) |
 | `policy` | `dry_run`, `greeting`, `max_context_chars` (256–32000), `max_message_age_seconds` (30–3600), `sensitive_patterns`, `allowed_senders`; `max_answer_chars` y `max_detailed_answer_chars` se conservan por compatibilidad pero ya no se aplican |
 | `secrets` | `"secret://..." = "NOMBRE_CREDENCIAL"` (allowlist de referencias; nunca valores) |
 
@@ -130,9 +133,9 @@ flowchart TD
   JI -- statement o baja confianza --> I
   QR -- sí --> A[fuentes disponibles para conversación y remitente]
   JI -- question --> A
-  A --> T[selección de UNA herramienta:<br/>wiki explícita/documental, actividad, única o DeepSeek select_tool]
+  A --> T[selección de UNA herramienta:<br/>wiki explícita/documental, actividad, única o LLM select_tool]
   T --> R[leer archivos/URLs + herramienta,<br/>redactar, repartir max_context_chars]
-  R --> D[DeepSeek generate_response: answer + detailed]
+  R --> D[LLM generate_response: answer + detailed<br/>cadena Codex → Claude → DeepSeek]
   D --> RS[Jev select_references por entrada del registro]
   RS --> C[complete_answer: citas verificadas y límite]
   C --> FG[Jev Final: references, attribution, supported,<br/>no_new_promise, privacy, relevant]
@@ -155,9 +158,13 @@ Detalles que importan al modificar:
    - Wiki única y solo herramientas Wiki/actividad → Wiki;
    - una sola candidata → esa; varias → `LlmProvider::select_tool` con IDs cerrados (fallo = ninguna).
 5. **Evidencia.** Redacción antes de recortar. Presupuesto `max_context_chars / nº fuentes`. Wiki y Azure devuelven JSON tipado (`ado::wiki::WikiResult`, `evidence::Evidence`) con un registro de referencias (ID, URL verificada, autoría) y mensajes Teams con autor; el resto se recorta con `knowledge::excerpt`.
-6. **Generación.** `DeepSeek::generate_response` devuelve JSON `{answer, detailed}`; el modelo elige el modo. `answer` es Markdown acotado (frase inicial directa, **negritas**, listas `-`/`1.`, `código`, bloques ```json), sin URLs ni sección de fuentes; los ejemplos usan marcadores (`<URL_BASE>`, `<RUT_TRAMITADOR>`) para no chocar con la verificación de URLs ni con el `Redactor`. Sin límite de caracteres: solo se exige que el HTML quepa en un mensaje de Teams (27 800 bytes). Sin herramientas autónomas.
+6. **Generación.** `LlmProvider::generate_response` devuelve JSON `{answer, detailed}`; el modelo elige el modo. `answer` es Markdown acotado (frase inicial directa, **negritas**, listas `-`/`1.`, `código`, bloques ```json), sin URLs ni sección de fuentes; los ejemplos usan marcadores (`<URL_BASE>`, `<RUT_TRAMITADOR>`) para no chocar con la verificación de URLs ni con el `Redactor`. Sin límite de caracteres: solo se exige que el HTML quepa en un mensaje de Teams (27 800 bytes). Sin herramientas autónomas.
 
-   Todas las llamadas a DeepSeek (`standalone_request`, `select_tool`, `generate_response`) van por HTTP directo a `/chat/completions` (sin SDK): modo JSON, razonamiento `thinking` habilitado con `reasoning_effort: "max"`, sin `max_tokens` (rige el valor por defecto del proveedor) ni temperatura, y **sin plazo**: solo se acota el establecimiento de la conexión (30 s, con keepalive TCP). Solo se usa `content`; `reasoning_content` se descarta y nunca se registra.
+   **Proveedores y respaldo** (`src/llm.rs`). Los prompts y contratos viven en `Model` y son idénticos para todos; cada transporte implementa `Backend::complete_json(system, user, schema)`. `llm::from_config` construye una `Chain` con los proveedores activos de `llm.chain` en orden. **Cada llamada** (`standalone_request`, `select_tool`, `generate_response`) empieza por el primero y pasa al siguiente solo si falla; la siguiente llamada vuelve a empezar por el primero, así que el predeterminado retoma en cuanto recupera su uso. Los fallos llevan solo una clase (`usage_limit`, `not_installed`, `failed`; `llm::Unavailable`), nunca texto del proveedor, y se registran como `llm_provider_unavailable`/`llm_fallback_used`. `audit.provider` guarda `proveedor:modelo:esfuerzo` del que redactó. Respaldar es seguro porque solo repite una llamada al modelo; ningún envío a Graph se reintenta.
+
+   - **DeepSeek** (`llm/deepseek.rs`): HTTP directo a `/chat/completions` (sin SDK), modo JSON, `reasoning_effort` configurado (`none` desactiva `thinking`), sin `max_tokens` ni temperatura y **sin plazo** (solo se acotan la conexión, 30 s, y keepalive TCP). 402/429 = `usage_limit`. Solo se usa `content`; `reasoning_content` se descarta y nunca se registra.
+   - **Codex y Claude Code** (`llm/agent.rs`): la CLI instalada con **su propia sesión** (la app no guarda credenciales de OpenAI/Anthropic). Se localiza en `PATH` o en ubicaciones habituales (`~/.local/bin`, Homebrew…), porque una GUI abierta desde Finder tiene un PATH mínimo; se buscan en cada llamada, así que instalar una CLI no requiere reiniciar. Cada llamada corre en un directorio temporal privado y vacío, con entorno mínimo (`HOME`, `USER`, locale, proxy, `CODEX_HOME`/`CLAUDE_CONFIG_DIR`; **nunca** `NAME`/`NAME_FILE` del host), la solicitud y la evidencia por **stdin** (no en argv) y el esquema JSON del contrato. Codex: `codex exec --ephemeral --ignore-user-config --ignore-rules --sandbox read-only --json --output-schema`, instrucciones como `developer_instructions` y `-c features.X=false` para shell, exec/código, apps, plugins, navegador, computer use, subagentes, skills, memorias, hooks y búsqueda web (la forma `-c` tolera versiones que no conocen una feature); se usa el último `agent_message` de un turno `turn.completed`. Claude: `claude -p --output-format json --tools "" --safe-mode --strict-mcp-config --no-session-persistence --system-prompt --json-schema`; se usa `structured_output`, y `is_error` con HTTP 402/429 o texto de créditos/límite = `usage_limit`. Plazo de 20 min por llamada (las CLI reintentan por su cuenta); al vencer se mata el proceso y responde el siguiente.
+   - **Catálogo** (`llm::catalog`, IPC `llm_providers`, `pta llm providers`): CLI detectadas y su versión; modelos de Codex desde `codex debug models` (visibles, sin el esfuerzo `ultra`, que delega en subagentes); Claude y DeepSeek con lista fija. Esfuerzos validados en `llm::efforts`; IDs de modelo con alfabeto cerrado y sin guion inicial porque llegan a argv.
 
    **Aviso de espera** (`Pipeline::awaiting_model`): si a los 5 min de empezar a procesar un mensaje de Teams el modelo sigue trabajando, se envía una vez el texto fijo `HOLDING_REPLY` («Déjame revisarlo.») y se sigue esperando la respuesta. `audit.holding_reply` registra `sending` antes del POST y luego `sent` o `uncertain`; un reintento del job con ese campo nunca vuelve a enviarlo, y un fallo no se reintenta. No aplica a `dry_run` ni a simulaciones (`pta chat`). En el chat personal lleva la misma marca de salida, así que no se procesa como pregunta.
 7. **Referencias.** Si hay registro, Jev decide por entrada (`source_i`) qué referencias usa el texto; el código las mapea a IDs exactos y `evidence::complete_answer` añade al final una sección `**Fuentes**` con una viñeta por referencia (`[título de la página](url): wiki del proyecto P; atribución`) y comprueba el límite **con las citas incluidas**. Un ID inventado o faltante bloquea (`invalid_references`).
@@ -200,6 +207,7 @@ Reglas de respuesta (también en `AGENTS.md`): documentación Wiki propia puede 
 ## 9. Seguridad transversal
 
 - Toda decisión de modelo es consultiva: audiencias, rutas, URLs, herramientas y límites se verifican en código. Pregunta, documentos y resultados se presentan a los modelos como datos no confiables.
+- Las CLI de modelos corren sin herramientas (ni shell, ni lectura de archivos, ni web, ni subagentes), sin configuración de usuario ni sesión persistente, en un directorio vacío y sin las credenciales del host; su salida pasa por los mismos controles (`Redactor`, Jev final, límites) que la de DeepSeek.
 - `security::Redactor`: secretos cargados (coincidencia exacta), tokens/JWT/claves, credenciales en URL, correos, teléfonos, RUT, `secret://` y `sensitive_patterns`. Se aplica a pregunta, evidencia, propuesta y auditoría; una propuesta con patrones sensibles se bloquea.
 - Logs: solo eventos fijos propios (`tracing`, filtro `personal_teams_assistant=info,personal_teams_desktop=info`); no se registran prompts, cuerpos HTTP ni errores de proveedores. Los errores hacia GUI/CLI se traducen a mensajes saneados (`lib.rs::fail`, `cli.rs::run`).
 - Clientes HTTP sin redirects; tamaños de respuesta acotados (`adapters::bounded_json`).
@@ -224,7 +232,7 @@ Para añadir una operación: método en `control::operate` (ventana o navegador 
 
 ## 11. GUI
 
-`ui/` es HTML/JS plano sin build. Tres pestañas: Configuración (servicio, credenciales, proveedores/Teams, chat personal, importación), Conocimiento (repositorios, GitHub, fuentes) y Chat de prueba. Todo pasa por `invoke('command', {request})` con los mismos métodos que el CLI. Desfase conocido: la GUI solo lista y crea fuentes `kind=file`; Wiki y otras herramientas se administran por CLI. El chat de prueba muestra la respuesta como Markdown sin convertir (Teams la recibe en HTML).
+`ui/` es HTML/JS plano sin build. Tres pestañas: Configuración (servicio, credenciales, modelos de lenguaje, proveedores/Teams, chat personal, importación), Conocimiento (repositorios, GitHub, fuentes) y Chat de prueba. Todo pasa por `invoke('command', {request})` con los mismos métodos que el CLI. El panel «Modelos de lenguaje» muestra una fila por proveedor (CLI instalada o no, credencial de DeepSeek), con activación, desplegables de modelo y esfuerzo (del catálogo) y botones para ordenar; guarda `llm.chain`. Desfase conocido: la GUI solo lista y crea fuentes `kind=file`; Wiki y otras herramientas se administran por CLI. El chat de prueba muestra la respuesta como Markdown sin convertir (Teams la recibe en HTML).
 
 ## 12. Pruebas y verificación
 
@@ -234,7 +242,8 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```
 
-- Unitarias junto al código; integración en `tests/integration.rs` con `wiremock` y dobles (`NoGate`, `NoLlm`, `NoTools`, `IntentGate`…). Ninguna prueba usa red ni credenciales reales.
+- Unitarias junto al código; integración en `tests/integration.rs` con `wiremock` y dobles (`NoGate`, `NoLlm`, `NoTools`, `IntentGate`…). Ninguna prueba usa red ni credenciales reales. La cadena se prueba con backends falsos (respaldo y regreso al predeterminado llamada a llamada) y las CLI con un script falso que registra stdin, argv y entorno (Unix).
+- `pta test providers` prueba cada proveedor activo por separado (un respaldo no oculta un predeterminado roto); consume API/uso de suscripción.
 - `pta test simulate` / `pta chat` ejecutan el pipeline real con un adaptador que nunca envía a Graph (`simulation::TestAdapter`, estado `sent` = `simulation-only`). `pta test providers` usa hechos sintéticos y consume API.
 - `cargo run --example wiki_gate_smoke` (credencial Jev existente) evalúa el control final con hechos sintéticos.
 - CI (`.github/workflows/ci.yml`): núcleo en Ubuntu; host sin interfaz y CLI en Ubuntu con `--no-default-features` (clippy, test); GUI/CLI en macOS (check, clippy, test) y Windows (check).
@@ -243,7 +252,7 @@ cargo test --workspace
 ## 13. Recetas de cambio
 
 - **Nuevo tipo de herramienta:** variante en `ToolSpec` + `validate` + `name` + rama en `Tools::execute` (con timeout) → si devuelve evidencia tipada, deserializarla en el pipeline y registrar referencias → pruebas con wiremock → documentar el esquema en la skill y en `knowledge-map.example.toml`.
-- **Nuevo proveedor LLM:** implementar `LlmProvider` (`generate_response` con JSON `{answer, detailed}`, `select_tool` opcional), añadirlo a `validate_provider` y construirlo en `runtime::serve`, `local_chat::chat` y `diagnostics::providers`.
+- **Nuevo proveedor LLM:** implementar `Backend` (un objeto JSON por llamada; fallos de crédito/límite como `Unavailable(Failure::UsageLimit)`, sin texto del proveedor), añadirlo a `PROVIDERS`, `efforts` y `llm::model_for`, y al catálogo (`llm::catalog`) para la GUI. Los prompts, la cadena y `runtime`/`local_chat`/`diagnostics` no cambian.
 - **Cambiar decisiones de Jev:** `decision.rs` (`Stage::Intent`, `Stage::Final`, `select_references`). Los contratos rechazan campos ausentes/extra y probabilidades inválidas; mantener el fallo cerrado.
 - **Campo de configuración nuevo:** `#[serde(default)]`, validación en `Config::validate`, exposición en GUI si aplica; `pta config set` lo admite automáticamente por ruta.
 
@@ -251,7 +260,9 @@ cargo test --workspace
 
 - **Jev no veta la recuperación.** Antes un selector Jev decidía la fuente antes de leerla; en una muestra real (2026-10-01) rechazó la mitad de las preguntas documentales con confianza 0.29–0.38 y la Wiki nunca se consultó. Ahora Jev solo clasifica intención ambigua, selecciona referencias después de redactar y valida la respuesta final. No reintroducir un filtro previo por tema o pertinencia.
 - **La atribución Wiki la construye el código** desde metadatos verificados; la comprobación probabilística `attribution` se omite cuando no hay mensajes Teams porque producía falsos rechazos (p. ej. `edited_by_me` con `author=null`). `supported` sigue rechazando autorías o ejecuciones inventadas.
-- **El modelo no copia IDs ni URLs.** DeepSeek devuelve solo texto y modo; las citas salen del registro verificado.
+- **El modelo no copia IDs ni URLs.** El modelo devuelve solo texto y modo; las citas salen del registro verificado.
+- **Respaldo por llamada, sin memoria.** Cada llamada empieza por el proveedor predeterminado; no se recuerda que estaba sin créditos. Cuesta un intento fallido rápido mientras dure el agotamiento, a cambio de volver al predeterminado en cuanto recupera su uso. Se respalda ante cualquier fallo, no solo créditos: un contrato inválido o una CLI ausente tampoco deben dejar la pregunta sin respuesta.
+- **CLI en lugar de API para Codex y Claude**: usan la suscripción ya iniciada en esas CLI, sin claves nuevas en la app. A cambio, se invocan sin herramientas ni personalizaciones para que se comporten como una llamada de modelo, igual que la API.
 - **El formato se decide en código.** El modelo escribe Markdown acotado y el código lo convierte a HTML de Teams; la sección de fuentes se construye desde el registro. Antes, la respuesta se escapaba como texto y Teams mostraba `[etiqueta](url)` literal.
 - **Los seguimientos se resuelven antes de buscar, no se vetan.** Buscar solo las palabras de «¿y si quiero pagar 2 servicios?» no encontraba la página y el control final rechazaba la respuesta en silencio. La reescritura autónoma solo cambia la consulta; la selección de herramientas y las audiencias siguen en código.
 - **Una herramienta por mensaje**, para acotar coste, latencia y superficie; combinar fuentes es una mejora pendiente.
@@ -267,6 +278,7 @@ cargo test --workspace
 - El chat de prueba de la GUI muestra el Markdown de la respuesta sin convertir; `pta chat` también lo devuelve como texto.
 - La recuperación de `missed` cubre solo la página reciente; no hay garantía de procesar mensajes durante apagones.
 - No detecta si el usuario respondió manualmente mientras se generaba la propuesta.
-- Con razonamiento al máximo una respuesta puede tardar varios minutos, y el worker procesa un mensaje a la vez: los siguientes esperan en cola.
+- Con razonamiento al máximo una respuesta puede tardar varios minutos, y el worker procesa un mensaje a la vez: los siguientes esperan en cola. Si el predeterminado falla lento (p. ej. una CLI que agota su plazo de 20 min), el respaldo suma esa espera.
+- Los modelos de Claude y DeepSeek del catálogo son una lista fija (sus CLI/API no publican catálogo local); otros IDs válidos se configuran con `pta config set llm.chain`. Las CLI de Codex/Claude no se prueban en Windows (se buscan como `.exe`).
 - Windows compila en CI pero no tiene validación funcional. Linux solo como host sin interfaz (la GUI en Linux no se prueba).
 - La versión publicada en crates.io puede ir por detrás del repositorio; GUI y CLI deben ser de la misma compilación (el CLI rechaza esquemas Wiki contra un host sin `wiki_support`).

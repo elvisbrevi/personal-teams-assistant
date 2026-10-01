@@ -357,6 +357,16 @@ fn credential_names(config: &Config) -> Vec<String> {
     names
 }
 
+/// Credentials the service needs to start. `DEEPSEEK_API_KEY` stays settable but is required
+/// only while DeepSeek is in the LLM chain; Codex and Claude use their own CLI login.
+fn required_credentials(config: &Config) -> Vec<String> {
+    let mut names = credential_names(config);
+    if !personal_teams_assistant::llm::uses_deepseek(&config.llm) {
+        names.retain(|name| name != "DEEPSEEK_API_KEY");
+    }
+    names
+}
+
 async fn snapshot(host: &Host) -> std::result::Result<Snapshot, String> {
     let state = &host.state;
     let config = read_config(&state.config_path).map_err(fail)?;
@@ -364,9 +374,15 @@ async fn snapshot(host: &Host) -> std::result::Result<Snapshot, String> {
     let (active_subscriptions, subscription_issue) =
         Store::subscription_health(&config.server.data_dir.join("assistant.db")).map_err(fail)?;
     let mut credentials = BTreeMap::new();
+    let required = required_credentials(&config);
     for name in credential_names(&config) {
         let source = security::secret_source(&name).map_err(fail)?;
-        credentials.insert(name, source.unwrap_or("missing").into());
+        let missing = if required.contains(&name) {
+            "missing"
+        } else {
+            "unused"
+        };
+        credentials.insert(name, source.unwrap_or(missing).into());
     }
     let mut running = state.running.lock().await;
     if running.as_mut().is_some_and(|r| {
@@ -444,7 +460,7 @@ async fn start(state: &DesktopState) -> Result<()> {
             security::put_desktop_secret("default", name, &security::random_secret())?;
         }
     }
-    for name in credential_names(&config) {
+    for name in required_credentials(&config) {
         security::secret(&name)?;
     }
     let tunnel_path = if state.tunnel_path.exists() {
@@ -1262,6 +1278,19 @@ mod tests {
         );
         assert!(validate_tunnel_mode(&config, "").is_ok());
         assert!(validate_tunnel_mode(&config, "private.yml").is_err());
+    }
+
+    #[test]
+    fn deepseek_key_is_required_only_while_deepseek_is_in_the_chain() {
+        let mut config = Config::desktop_template().unwrap();
+        assert_eq!(config.llm.active()[0].provider, "codex");
+        assert!(required_credentials(&config).contains(&"DEEPSEEK_API_KEY".to_string()));
+        for choice in &mut config.llm.chain {
+            choice.enabled = choice.provider != "deepseek";
+        }
+        assert!(!required_credentials(&config).contains(&"DEEPSEEK_API_KEY".to_string()));
+        // Still settable, so it can be stored before re-enabling DeepSeek.
+        assert!(credential_names(&config).contains(&"DEEPSEEK_API_KEY".to_string()));
     }
 
     #[test]

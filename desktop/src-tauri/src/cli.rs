@@ -27,7 +27,8 @@ Usage: pta [--json] [--non-interactive] COMMAND ...
   azure wiki list|search|read SOURCE_ID (search/read: JSON on stdin; local reads only)
   tunnel status|configure token|configure external|configure file PATH|validate
   chat | test simulate (SimulationRequest JSON on stdin; never sends to Graph)
-  test providers (paid API calls, synthetic facts only) | test connectivity (Graph account read)
+  llm providers (installed Codex/Claude CLIs, models and efforts; set the order with config set llm.chain JSON)
+  test providers (paid model calls per enabled LLM provider, synthetic facts only) | test connectivity (Graph account read)
   test self-chat (validates membership; audit confirms actual reception/sending)
   audit list|show RESOURCE [--content] [--limit N] | logs [--limit N]
   skill show|path|install DIRECTORY
@@ -154,6 +155,7 @@ fn validate_args(args: &[String]) -> Result<()> {
             | ["auth", "github", "status" | "finish" | "cancel" | "logout"]
             | ["auth", "github", "login", _]
             | ["github", "repos"]
+            | ["llm", "providers"]
             | ["repos", "list"]
             | ["repos", "add" | "edit" | "clone", _, _]
             | ["repos", "remove" | "sync", _]
@@ -263,6 +265,7 @@ async fn execute(mut args: Vec<String>) -> Result<Reply> {
         ("app", "hide") => Some("app_hide"),
         ("app", "quit") => Some("app_quit"),
         ("github", "repos") => Some("github_repositories"),
+        ("llm", "providers") => Some("llm_providers"),
         ("chat", _) | ("test", "simulate") => Some("chat"),
         ("self-chat", "status") => Some("self_chat_status"),
         ("self-chat", "enable") => Some("self_chat_enable"),

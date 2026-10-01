@@ -1,6 +1,6 @@
 # Personal Teams Assistant
 
-Asistente personal de Microsoft Teams escrito en Rust. Lee y responde **con tu propia identidad** (OAuth delegado de Microsoft Graph, sin bot) cuando alguien te escribe directamente, te menciona en un grupo o le preguntas en tu chat personal. Responde solo con evidencia de fuentes que autorizaste para esa conversación —archivos de repositorios Git, URLs, Azure DevOps (actividad y Wiki) y otras herramientas de solo lectura—, redacta con DeepSeek y valida con Jev (TypeSafe). Si una respuesta no está respaldada o es insegura, no se envía.
+Asistente personal de Microsoft Teams escrito en Rust. Lee y responde **con tu propia identidad** (OAuth delegado de Microsoft Graph, sin bot) cuando alguien te escribe directamente, te menciona en un grupo o le preguntas en tu chat personal. Responde solo con evidencia de fuentes que autorizaste para esa conversación —archivos de repositorios Git, URLs, Azure DevOps (actividad y Wiki) y otras herramientas de solo lectura—, redacta con el modelo de lenguaje que elijas —Codex o Claude Code a través de sus CLI instaladas, o la API de DeepSeek, en un orden de respaldo configurable— y valida con Jev (TypeSafe). Si una respuesta no está respaldada o es insegura, no se envía.
 
 ## Instalación
 
@@ -40,10 +40,11 @@ pta test simulate <<< '{"session":"demo","text":"¿Qué hice esta semana?","sour
 
 ## Configuración mínima
 
-1. Credenciales (por stdin, nunca como argumento): `TYPESAFE_API_KEY`, `DEEPSEEK_API_KEY` y las referenciadas por tus fuentes, p. ej. `pta credentials set DEEPSEEK_API_KEY < archivo`. `GRAPH_WEBHOOK_SECRET` y `STATE_ENCRYPTION_KEY` se generan solas.
-2. Registro Entra con plataforma *Mobile and desktop* (`http://localhost`) y permisos delegados `User.Read`, `Chat.Read`, `ChatMessage.Send`, `offline_access`. Configura `graph.tenant_id` y `graph.client_id`.
-3. URL pública (`server.public_url`) y túnel: `pta tunnel configure token|file PATH|external`.
-4. Conocimiento: agrega repositorios (`pta repos add`, o GitHub con `pta auth github login`), registra fuentes con `pta sources add` (nacen deshabilitadas y sin audiencias) y autorízalas por conversación con `pta sources audience`.
+1. Credenciales (por stdin, nunca como argumento): `TYPESAFE_API_KEY`, `DEEPSEEK_API_KEY` si usas DeepSeek y las referenciadas por tus fuentes, p. ej. `pta credentials set DEEPSEEK_API_KEY < archivo`. `GRAPH_WEBHOOK_SECRET` y `STATE_ENCRYPTION_KEY` se generan solas.
+2. Modelos de lenguaje: en la GUI (Configuración → Modelos de lenguaje) activa y ordena Codex, Claude Code y DeepSeek, con su modelo y esfuerzo. Codex y Claude usan la CLI instalada (`codex`, `claude`) con su propia sesión. Por defecto: Codex `gpt-6.1-sol` (medio) → Claude `claude-opus-5-5` (medio) → DeepSeek `deepseek-flash` (máximo). Cada respuesta empieza por el primero y pasa al siguiente solo si falla (p. ej. sin créditos). Desde el CLI: `pta llm providers` y `pta config set llm.chain JSON`.
+3. Registro Entra con plataforma *Mobile and desktop* (`http://localhost`) y permisos delegados `User.Read`, `Chat.Read`, `ChatMessage.Send`, `offline_access`. Configura `graph.tenant_id` y `graph.client_id`.
+4. URL pública (`server.public_url`) y túnel: `pta tunnel configure token|file PATH|external`.
+5. Conocimiento: agrega repositorios (`pta repos add`, o GitHub con `pta auth github login`), registra fuentes con `pta sources add` (nacen deshabilitadas y sin audiencias) y autorízalas por conversación con `pta sources audience`.
 
 ## Documentación
 
