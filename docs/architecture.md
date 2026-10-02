@@ -132,9 +132,11 @@ flowchart TD
   S -- no --> I
   S -- sí --> G{saludo exacto?}
   G -- sí --> GR[respuesta determinista]
-  G -- no --> QR{pregunta clara?}
-  QR -- no --> JI[Jev Intent: question/greeting/statement]
-  JI -- statement o baja confianza --> I
+  G -- no --> PR{pedido a la persona?<br/>llamada, reunión, disponibilidad}
+  PR -- sí, fuera del chat personal --> I
+  PR -- no --> QR{pregunta clara?}
+  QR -- no --> JI[Jev Intent: question/personal/greeting/statement]
+  JI -- statement, personal o baja confianza --> I
   QR -- sí --> A[fuentes disponibles para conversación y remitente]
   JI -- question --> A
   A --> H[contexto: 10 mensajes previos<br/>con autor y fecha/hora]
@@ -155,7 +157,7 @@ flowchart TD
 Detalles que importan al modificar:
 
 1. **Elegibilidad** (`teams::IncomingMessage::eligible_in`): mensaje de usuario no borrado, no propio (salvo chat personal validado y posterior a `enabled_at`), ≤16 000 bytes, dentro de `max_message_age_seconds`, `allowed_senders` global, y en grupos solo con mención real por ID de Graph (nunca por texto `@nombre`).
-2. **Intención.** Saludo exacto (`teams::greeting`) → saludo configurado. Pregunta clara (`question_request`: `?`/`¿` o prefijos interrogativos) → recuperación. Lo ambiguo va a Jev `Stage::Intent` (sin catálogo de fuentes; confianza ≥0.5) y solo si hay alguna fuente autorizada.
+2. **Intención.** Saludo exacto (`teams::greeting`) → saludo configurado. Pedido a la persona (`personal_request`: llamarla, reunirse, revisar algo en conjunto o su disponibilidad, p. ej. «te puedo llamar», «necesito llamarte», «revisemos…», «¿tienes un minuto?») → sin respuesta (`personal_request`), aunque lleve `?`. Pregunta clara (`question_request`: `?`/`¿` o prefijos interrogativos; «necesito que…» y «cuando puedas…» no cuentan porque piden a alguien que actúe) → recuperación. Lo ambiguo va a Jev `Stage::Intent` (`question`, `personal`, `greeting`, `statement`; sin catálogo de fuentes; confianza ≥0.5) y solo si hay alguna fuente autorizada; solo `question` y `greeting` se responden. En el chat personal quien pide es el propio usuario: ahí no se aplica el filtro de pedidos a la persona y `personal` se trata como pregunta.
 3. **Contexto y seguimientos.** `MessageAdapter::history` lee los `HISTORY_MESSAGES` (10) mensajes anteriores de la misma conversación (Graph: página reciente de `chats/{id}/messages` por `createdDateTime desc`; excluye borrados, eventos de sistema y los posteriores al actual). Cada uno lleva autor (`yo`, `asistente` si es una salida registrada de la app, o el nombre visible) y fecha/hora local; se redacta, se acota a 6000 caracteres (se conservan los más recientes) y termina con la hora de la solicitud actual. Se entrega como `conversation_history` a `standalone_request` y a `generate_response`: sirve para interpretar la solicitud, nunca como evidencia. Si Graph falla, se sigue sin historial (`conversation_history_unavailable`). Además, `conversation_context` guarda el último intercambio por conversación (caduca a los 30 min): la pregunta ya resuelta y la respuesta **sin** la sección de fuentes (las URLs copiadas fallarían la verificación). «dame más detalles» y equivalentes reutilizan esa pregunta como consulta de herramienta. Con otro mensaje, alguna herramienta autorizada y contexto (historial o último intercambio), `LlmProvider::standalone_request` reescribe la solicitud de forma autónoma (`question`) y extrae el tema a buscar (`topic`), p. ej. «¿cómo se invoca si quiero pagar 2 servicios?» → tema «Crear SPS». `question` decide la herramienta, elige pasajes y se guarda como pregunta del contexto; `topic` es la consulta de Search de la Wiki. Ambos se validan (longitud, sin control, `Redactor::clean`); si el proveedor falla o no aplica, se usa la solicitud literal. Solo da forma a la consulta dentro de fuentes ya autorizadas por código. El contexto anterior se pasa como referencia, nunca como evidencia; la solicitud actual manda.
 4. **Fuentes.** `KnowledgeMap::available` exige `enabled`, `external_processing`, conversación exacta o `*`, y `allowed_senders` de la fuente. En simulación local se seleccionan IDs explícitos (siguen exigiendo `enabled` y `external_processing`) sin ampliar audiencias Teams. Todos los archivos/URLs autorizados se leen; las herramientas se limitan a **una por mensaje**:
    - pregunta con «wiki» o documental (`documentation_question`) → la Wiki si hay una sola;
@@ -182,7 +184,7 @@ Detalles que importan al modificar:
 
 Estados de `jobs`: `pending → processing → ignored | dry_run | failed | sending → sent | uncertain`. Lecturas/proveedores fallidos reintentan con backoff 2^n s hasta 5 intentos. Al abrir la base, `processing` vuelve a `pending` y `sending` pasa a `uncertain`. La auditoría (`jobs.audit`, JSON redactado) guarda motivo, fuentes, herramientas, confianzas, referencias y propuesta; `pta audit` la consulta.
 
-Motivos frecuentes: `ineligible_message`, `sensitive_question`, `no_authorized_resource`, `informational_message`, `deterministic_greeting`, `unsafe_proposal`, `invalid_references: …`, `supported_answer`, `message_changed`, `send_result_unknown_manual_review`. `reference_selection_failed` y `final_gate` solo aparecen en auditorías anteriores a que Jev dejara de bloquear.
+Motivos frecuentes: `ineligible_message`, `sensitive_question`, `no_authorized_resource`, `informational_message`, `personal_request`, `deterministic_greeting`, `unsafe_proposal`, `invalid_references: …`, `supported_answer`, `message_changed`, `send_result_unknown_manual_review`. `reference_selection_failed` y `final_gate` solo aparecen en auditorías anteriores a que Jev dejara de bloquear.
 
 ## 7. Microsoft Graph y Entra
 
@@ -273,6 +275,7 @@ cargo test --no-default-features
 
 - **Jev no veta la recuperación.** Antes un selector Jev decidía la fuente antes de leerla; en una muestra real (2026-10-01) rechazó la mitad de las preguntas documentales con confianza 0.29–0.38 y la Wiki nunca se consultó. No reintroducir un filtro previo por tema o pertinencia.
 - **Jev tampoco retiene respuestas.** El 2026-10-01 una pregunta de seguimiento («cuál es el endpoint para el ambiente de test») se redactó bien pero Jev no asoció la respuesta a ninguna página y la regla «toda respuesta Wiki cita una página» la descartó en silencio. Ahora la selección de referencias y la revisión final son informativas; si no hay página elegida se listan las consultadas. Lo que sí retiene una respuesta lo decide el código, y en el chat personal se avisa.
+- **Los pedidos a la persona no se responden.** El 2026-10-02 el asistente contestó «te puedo llamar» (Jev: `question` 0.79), «necesito llamarte» y «necesito que revisemos lo que se debe subir…» (atajo `necesito `) con páginas Wiki sin relación. Llamadas, reuniones, revisiones conjuntas y disponibilidad solo las puede responder la persona: el código las descarta antes del atajo de preguntas y Jev tiene la categoría `personal` para las que no reconoce el código.
 - **Contexto de la conversación, no solo el último intercambio.** Los 10 mensajes anteriores con autor y hora permiten entender seguimientos cortos; se pasan como contexto, no como evidencia.
 - **La atribución Wiki la construye el código** desde metadatos verificados; la comprobación probabilística `attribution` se omite cuando no hay mensajes Teams porque producía falsos rechazos (p. ej. `edited_by_me` con `author=null`). `supported` sigue rechazando autorías o ejecuciones inventadas.
 - **El modelo no copia IDs ni enlaces de páginas.** El modelo devuelve solo texto y modo; las citas salen del registro verificado. Puede copiar una URL que aparece literalmente en la evidencia (un endpoint documentado), porque prohibirlo impedía responder preguntas como «¿cuál es el endpoint de test?».
