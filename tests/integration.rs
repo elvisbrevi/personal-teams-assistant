@@ -459,12 +459,17 @@ async fn jev_typed_reference_selection_maps_only_known_registry_entries() {
     }
 }
 #[tokio::test]
-async fn ambiguous_messages_triage_only_question_greeting_or_statement() {
+async fn ambiguous_messages_triage_question_personal_greeting_or_statement() {
     for (text, intent, reason) in [
         (
             "Me ayudarías a entender el horario de soporte",
             "question",
             "supported_answer",
+        ),
+        (
+            "Cuando puedas lo vemos por teléfono",
+            "personal",
+            "personal_request",
         ),
         ("Buen día para todos", "greeting", "deterministic_greeting"),
         (
@@ -496,7 +501,7 @@ async fn ambiguous_messages_triage_only_question_greeting_or_statement() {
         assert_eq!(audit.reason, reason);
         assert_eq!(
             audit.status,
-            if intent == "statement" {
+            if matches!(intent, "statement" | "personal") {
                 "ignored"
             } else {
                 "dry_run"
@@ -1993,6 +1998,7 @@ async fn graph_history_returns_earlier_messages_oldest_first_with_author_and_tim
 struct HistoryTeams {
     conversation: String,
     sender: String,
+    text: &'static str,
     sent: std::sync::Mutex<Vec<String>>,
 }
 #[async_trait]
@@ -2007,7 +2013,7 @@ impl MessageAdapter for HistoryTeams {
             sender: self.sender.clone(),
             kind: personal_teams_assistant::adapters::teams::ConversationKind::Direct,
             mentions: vec![],
-            text: "cual es el endpoint para el ambiente de test".into(),
+            text: self.text.into(),
             created_at: chrono::Utc::now().timestamp(),
             created_at_millis: chrono::Utc::now().timestamp_millis(),
             is_user_message: true,
@@ -2080,6 +2086,7 @@ async fn earlier_messages_with_time_reach_the_model_and_the_log() {
     let teams = Arc::new(HistoryTeams {
         conversation: "chats/chat1".into(),
         sender: "sender".into(),
+        text: "cual es el endpoint para el ambiente de test",
         sent: Default::default(),
     });
     let llm = Arc::new(HistoryLlm {
@@ -2165,6 +2172,7 @@ async fn withheld_answer_in_the_personal_chat_is_reported_once() {
             } else {
                 "sender".into()
             },
+            text: "cual es el endpoint para el ambiente de test",
             sent: Default::default(),
         });
         let pipeline = Pipeline {
@@ -2216,6 +2224,61 @@ async fn withheld_answer_in_the_personal_chat_is_reported_once() {
             // Never notify other people.
             assert!(audit.withheld_notice.is_none());
             assert!(sent.is_empty());
+        }
+    }
+}
+#[tokio::test]
+async fn requests_for_the_person_stay_unanswered_outside_the_personal_chat() {
+    for chat in ["chats/48:notes", "chats/chat1"] {
+        let dir = tempfile::tempdir().unwrap();
+        let store = support::store(&dir);
+        let mut cfg = support::config();
+        cfg.graph.self_chat = Some(personal_teams_assistant::config::SelfChat {
+            id: "48:notes".into(),
+            user_id: cfg.graph.user_id.clone(),
+            enabled_at: 1,
+        });
+        let own = chat == "chats/48:notes";
+        let teams = Arc::new(HistoryTeams {
+            conversation: chat.into(),
+            sender: if own {
+                cfg.graph.user_id.clone()
+            } else {
+                "sender".into()
+            },
+            text: "necesito que revisemos lo que se debe subir en el próximo paso a prod",
+            sent: Default::default(),
+        });
+        let llm = Arc::new(HistoryLlm {
+            seen: Default::default(),
+            invent_reference: false,
+        });
+        let mut map = knowledge(&dir);
+        map.resources[0].allowed_conversations = vec![chat.into()];
+        let pipeline = Pipeline {
+            config: Arc::new(cfg),
+            store: store.clone(),
+            adapter: teams.clone(),
+            gate: Arc::new(IntentQuestionGate),
+            knowledge: map,
+            llm: llm.clone(),
+            tools: Arc::new(NoTools),
+            redactor: redactor(),
+        };
+        let resource = format!("{chat}/messages/123");
+        store.enqueue(&resource).unwrap();
+        pipeline.process(&resource).await.unwrap();
+        let audit = store.audit(&resource).unwrap().unwrap();
+        if own {
+            // The user asks the assistant to review with them: answered as before.
+            assert_eq!(audit.status, "sent", "{}", audit.reason);
+            assert_eq!(llm.seen.lock().unwrap().len(), 1);
+        } else {
+            // Someone asks the user for a joint review: neither Jev nor a model is consulted.
+            assert_eq!(audit.status, "ignored");
+            assert_eq!(audit.reason, "personal_request");
+            assert!(llm.seen.lock().unwrap().is_empty());
+            assert!(teams.sent.lock().unwrap().is_empty());
         }
     }
 }

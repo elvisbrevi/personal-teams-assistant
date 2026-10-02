@@ -145,6 +145,7 @@ async fn main() -> Result<()> {
             "Me ayudarías a entender cómo funciona un componente desconocido",
             "question",
         ),
+        ("intent_personal_request", "te puedo llamar", "personal"),
         ("intent_greeting", "Buenos días para todos", "greeting"),
         (
             "intent_statement",

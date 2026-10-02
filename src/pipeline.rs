@@ -124,6 +124,10 @@ impl Pipeline {
         let is_greeting = if greeting(&current) {
             audit.step("intención", "saludo");
             true
+        } else if !own_chat && personal_request(&current) {
+            audit.step("intención", "pedido a la persona");
+            leave_to_person(&mut audit);
+            return self.store.record(resource, &audit);
         } else if question_request(&current) {
             audit.step("intención", "pregunta");
             false
@@ -145,9 +149,19 @@ impl Pipeline {
                 "intención",
                 format!("Jev: {} ({:.2})", intent.selected, intent.confidence),
             );
-            if !intent.allows(0.5) || !matches!(intent.selected.as_str(), "question" | "greeting") {
-                audit.reason = "informational_message".into();
-                audit.step("sin respuesta", "mensaje informativo: no pide respuesta");
+            let answers = match intent.selected.as_str() {
+                "question" | "greeting" => true,
+                // In the personal chat the user is the one asking the assistant.
+                "personal" => own_chat,
+                _ => false,
+            };
+            if !intent.allows(0.5) || !answers {
+                if intent.selected == "personal" {
+                    leave_to_person(&mut audit);
+                } else {
+                    audit.reason = "informational_message".into();
+                    audit.step("sin respuesta", "mensaje informativo: no pide respuesta");
+                }
                 return self.store.record(resource, &audit);
             }
             intent.selected == "greeting"
@@ -875,6 +889,13 @@ fn question_request(question: &str) -> bool {
         .replace('á', "a")
         .replace('ú', "u");
     let normalized = normalized.trim_start_matches(|c: char| !c.is_alphanumeric());
+    // «necesito que…», «cuando puedas…» ask someone to act; the intent classifier decides who.
+    if ["necesito que ", "cuando puedas"]
+        .iter()
+        .any(|p| normalized.starts_with(p))
+    {
+        return false;
+    }
     [
         "como ",
         "que ",
@@ -909,6 +930,80 @@ fn question_request(question: &str) -> bool {
     ]
     .iter()
     .any(|prefix| normalized.starts_with(prefix))
+}
+fn leave_to_person(audit: &mut Audit) {
+    audit.reason = "personal_request".into();
+    audit.step(
+        "sin respuesta",
+        "pide una llamada, reunión, revisión conjunta o disponibilidad: lo responde la persona",
+    );
+}
+/// A call, meeting, joint review or the person's availability. Only the person can answer
+/// it, even when it is phrased as a question («¿te puedo llamar?»).
+fn personal_request(text: &str) -> bool {
+    let normalized = text
+        .to_lowercase()
+        .replace('ó', "o")
+        .replace('é', "e")
+        .replace('í', "i")
+        .replace('á', "a")
+        .replace('ú', "u");
+    let words: Vec<&str> = normalized
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .collect();
+    // «te llamo», «me puedes llamar»; not «cómo se llama a…» nor «me llamo Juan».
+    let call = |w: &str| w.starts_with("llam");
+    let call_between_us = words
+        .windows(2)
+        .any(|w| matches!(w[0], "te" | "me") && call(w[1]) && w != ["me", "llamo"])
+        || words.windows(3).any(|w| {
+            matches!(w[0], "te" | "me")
+                && matches!(w[1], "puedo" | "puedes" | "podria" | "podrias")
+                && call(w[2])
+        });
+    let phrase = format!(" {} ", words.join(" "));
+    call_between_us
+        || words.iter().any(|w| {
+            matches!(
+                *w,
+                "llamarte"
+                    | "llamarme"
+                    | "llamame"
+                    | "videollamada"
+                    | "contigo"
+                    | "hablemos"
+                    | "conversemos"
+                    | "revisemos"
+                    | "coordinemos"
+                    | "agendemos"
+                    | "juntemonos"
+                    | "reunamonos"
+                    | "conectemonos"
+                    | "juntarnos"
+                    | "reunirnos"
+                    | "conectarte"
+                    | "conectate"
+            )
+        })
+        || [
+            " tienes un minuto ",
+            " tienes un momento ",
+            " tienes un rato ",
+            " tienes unos minutos ",
+            " tienes tiempo ",
+            " estas disponible ",
+            " estas libre ",
+            " estas ahi ",
+            " puedes hablar ",
+            " podemos hablar ",
+            " call me ",
+            " call you ",
+            " are you available ",
+            " can we talk ",
+        ]
+        .iter()
+        .any(|p| phrase.contains(p))
 }
 fn documentation_question(question: &str) -> bool {
     let normalized = question
@@ -993,7 +1088,7 @@ fn status_question(question: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{documentation_question, question_request, status_question};
+    use super::{documentation_question, personal_request, question_request, status_question};
 
     #[test]
     fn clear_information_requests_do_not_need_a_model_to_allow_retrieval() {
@@ -1011,8 +1106,41 @@ mod tests {
             "El despliegue terminó",
             "He añadido una Wiki",
             "Crea una HU mañana",
+            "Necesito que me envíes el documento",
+            "Cuando puedas lo revisamos",
         ] {
             assert!(!question_request(q), "{q}");
+        }
+    }
+
+    #[test]
+    fn requests_for_the_person_are_not_information_requests() {
+        for q in [
+            // Real messages answered by mistake on 2026-10-02.
+            "te puedo llamar",
+            "necesito llamarte",
+            "necesito que revisemos lo que se debe subir en el próximo paso a prod",
+            "¿Me puedes llamar cuando puedas?",
+            "Llámame",
+            "¿Tienes un minuto?",
+            "¿Estás disponible?",
+            "Hablemos mañana del despliegue",
+            "¿Lo vemos contigo en la tarde?",
+            "¿Juntémonos a las 3?",
+            "Can we talk?",
+        ] {
+            assert!(personal_request(q), "{q}");
+        }
+        for q in [
+            "¿Cómo se llama al servicio de pagos?",
+            "¿Cómo hago una llamada al endpoint de test?",
+            "¿Me explicas cómo llamar al microservicio?",
+            "Hola, me llamo Juan: ¿cómo configuro el pipeline?",
+            "Necesito los parámetros",
+            "¿Qué se debe subir a prod en el próximo paso?",
+            "en test y desa se cae",
+        ] {
+            assert!(!personal_request(q), "{q}");
         }
     }
 

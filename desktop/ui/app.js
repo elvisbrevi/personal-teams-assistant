@@ -195,6 +195,7 @@ const reasonLabels = {
   sensitive_question: 'La pregunta contiene datos sensibles; queda para ti.',
   no_authorized_resource: 'No hay fuentes autorizadas para esta conversación.',
   informational_message: 'Mensaje informativo: no pide respuesta.',
+  personal_request: 'Te pide una llamada, reunión, revisión conjunta o tu disponibilidad: queda para ti.',
   deterministic_greeting: 'Saludo respondido con el texto configurado.',
   supported_answer: 'Respuesta generada.',
   unsafe_proposal: 'Retenida: contenía datos sensibles o no cabía en un mensaje de Teams.',
