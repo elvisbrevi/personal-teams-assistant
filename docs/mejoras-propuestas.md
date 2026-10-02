@@ -95,6 +95,6 @@ Propuestas surgidas al revisar el código completo (2026-10-01). Salvo lo indica
 
 ## 7. Distribución
 
-- **Publicación.** Un solo crate, `personal-teams-assistant` (0.5.1: biblioteca, GUI/host y `pta`). El crate anterior `personal-teams-desktop` queda obsoleto. Revisar el paquete con `cargo package --list` y gitleaks antes de publicar.
+- **Publicación.** Un solo crate, `personal-teams-assistant` (0.5.1: biblioteca, GUI/host y `pta`). El crate anterior `personal-teams-desktop` queda obsoleto. Revisar el paquete con `cargo package --list` y gitleaks antes de publicar. La publicación la hace `.github/workflows/publish.yml` al fusionar a `main` una versión nueva.
 - **P2 — Linux con Secret Service** opcional (cuando exista D-Bus) en lugar del almacén de archivos.
 - **P2 — Windows funcional:** probar bandeja, Credential Manager, ACL e inicio/parada antes de anunciarlo.

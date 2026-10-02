@@ -260,6 +260,7 @@ cargo test --no-default-features
 - `pta test providers` prueba cada proveedor activo por separado (un respaldo no oculta un predeterminado roto); consume API/uso de suscripción.
 - `pta test simulate` / `pta chat` ejecutan el pipeline real con un adaptador que nunca envía a Graph (`simulation::TestAdapter`, estado `sent` = `simulation-only`). `pta test providers` usa hechos sintéticos y consume API.
 - `cargo run --example wiki_gate_smoke` (credencial Jev existente) evalúa el control final con hechos sintéticos.
+- Publicación (`.github/workflows/publish.yml`): en cada push a `main`, si la versión del `Cargo.toml` no existe en crates.io, prueba con la GUI en macOS y ejecuta `cargo publish` con el secreto `CARGO_REGISTRY_TOKEN`; si ya existe no hace nada. Publicar = fusionar a `main` un cambio de versión (`Cargo.toml`, `Cargo.lock`, `desktop/tauri.conf.json`).
 - CI (`.github/workflows/ci.yml`): en Ubuntu, fmt y el paquete sin la GUI (`--no-default-features`: biblioteca, host sin interfaz y CLI; clippy, test); con la GUI en macOS (check, clippy, test) y Windows (check).
 - Toda operación nueva debe compilar en ambas variantes: `cargo clippy --all-targets [--no-default-features] -- -D warnings`. El código de Tauri solo vive en `src/app/gui.rs` (una prueba comprueba que la UI de `desktop/ui` queda incrustada).
 
