@@ -3,8 +3,8 @@ personal = "../knowledge-repo"
 
 [[resources]]
 id = "assistant-operations"
-description = "Documentación de operación del asistente: controles, permisos y comportamiento."
-topics = ["asistente", "operación", "Teams"]
+description = "How the assistant is operated: controls, permissions and behavior."
+topics = ["assistant", "operations", "Teams"]
 enabled = true
 external_processing = true
 # Grant access to the entire conversation, not just the person asking.
@@ -13,7 +13,7 @@ allowed_conversations = []
 allowed_senders = []
 kind = "file"
 repository = "personal"
-path = "temas/asistente/operacion.md"
+path = "topics/assistant/operations.md"
 
 # A website must be an exact HTTPS URL. Redirects, private IPs and credentials are blocked.
 # [[resources]]
@@ -42,8 +42,8 @@ path = "temas/asistente/operacion.md"
 # Wiki is independent from activity. Start disabled, without audiences/external processing.
 # [[resources]]
 # id = "azure-devops-wikis"
-# description = "Procedimientos documentados en Wiki, con autoría y fuentes verificadas"
-# topics = ["wiki", "documentación", "procedimientos"]
+# description = "Procedures documented in the Wiki, with verified authorship and sources"
+# topics = ["wiki", "documentation", "procedures"]
 # enabled = false
 # external_processing = false
 # allowed_conversations = []

@@ -121,7 +121,7 @@ impl WikiResult {
         let each = budget / self.pages.len().max(1);
         for p in &self.pages {
             let header = format!(
-                "\nPágina Wiki: {}\n",
+                "\nWiki page: {}\n",
                 serde_json::to_string(&json!({
                     "id": p.reference.id,
                     "location": p.reference.label,
@@ -155,7 +155,7 @@ impl WikiResult {
             evidence.references.extend(p.entities.clone());
         }
         if self.partial {
-            evidence.text.push_str("\nCobertura Wiki parcial: ");
+            evidence.text.push_str("\nPartial Wiki coverage: ");
             evidence.text.push_str(&self.warnings.join("; "));
         }
         evidence
@@ -668,7 +668,7 @@ impl<'a> Reader<'a> {
                 .as_str()
                 .filter(|n| !n.trim().is_empty())
                 .map(str::to_owned);
-            page.reference.author_role = Some("último editor registrado".into());
+            page.reference.author_role = Some("last recorded editor".into());
             // A bounded/filtered history cannot prove the absence of earlier own contributions.
             if page.reference.author.is_some() && commit["author"]["email"].as_str().is_some() {
                 page.reference.authority = Some("other".into());
@@ -746,9 +746,9 @@ impl<'a> Reader<'a> {
                         entity.kind,
                         entity.id,
                         if entity.kind == "pipeline_definition" {
-                            "configuración"
+                            "configuration"
                         } else if entity.kind == "pipeline_run" {
-                            "ejecución"
+                            "run"
                         } else {
                             "work item"
                         }
@@ -787,14 +787,11 @@ impl<'a> Reader<'a> {
                                     })
                                 })
                             {
-                                let name = stage["name"].as_str().unwrap_or("sin nombre");
+                                let name = stage["name"].as_str().unwrap_or("unnamed");
                                 let mut sr = reference.clone();
                                 sr.id = format!("stage:{}:{}", reference.id, stage_id);
                                 sr.kind = "stage_run".into();
-                                sr.label = format!(
-                                    "Stage {name}, ejecución #{} que lo contiene",
-                                    entity.id
-                                );
+                                sr.label = format!("Stage {name}, in run #{}", entity.id);
                                 sr.aliases = vec![name.into()];
                                 sr.parent = Some(reference.id.clone());
                                 page.entities.push(sr);
@@ -1438,6 +1435,43 @@ pub fn question_query(question: &str) -> Result<String> {
         "quiero",
         "necesito",
         "puedo",
+        "according",
+        "to",
+        "the",
+        "how",
+        "do",
+        "does",
+        "i",
+        "what",
+        "is",
+        "are",
+        "in",
+        "of",
+        "a",
+        "an",
+        "and",
+        "for",
+        "about",
+        "please",
+        "show",
+        "tell",
+        "explain",
+        "documentation",
+        "documented",
+        "use",
+        "configure",
+        "install",
+        "work",
+        "works",
+        "call",
+        "invoke",
+        "more",
+        "details",
+        "can",
+        "you",
+        "want",
+        "need",
+        "if",
     ];
     let question = question.split(['.', '\n']).next().unwrap_or(question);
     let terms: Vec<_> = question
@@ -2235,7 +2269,7 @@ mod entity_tests {
         assert_eq!(refs.len(), 5);
         assert!(refs.iter().any(|r| r.kind == "stage_run"
             && r.parent.is_some()
-            && r.label.contains("ejecución #40")));
+            && r.label.contains("in run #40")));
         assert!(
             refs.iter()
                 .any(|r| r.kind == "pipeline_definition" && r.url.contains("definitionId=5"))

@@ -91,7 +91,7 @@ impl Evidence {
                 .filter(|r| block.source_ids.contains(&r.id) && !included.contains(&r.id))
                 .collect();
             let metadata = serde_json::to_string(&refs).unwrap();
-            let part = format!("\nReferencias autorizadas: {metadata}\n{}\n", block.text);
+            let part = format!("\nAuthorized references: {metadata}\n{}\n", block.text);
             if out.chars().count() + part.chars().count() <= facts_budget {
                 included.extend(block.source_ids);
                 out.push_str(&part);
@@ -111,7 +111,7 @@ impl Evidence {
                 })
                 .collect();
             let block = format!(
-                "\nMensaje Teams: {}\nReferencias de ese mensaje: {}\n",
+                "\nTeams message: {}\nReferences in that message: {}\n",
                 serde_json::to_string(message).unwrap(),
                 serde_json::to_string(&refs).unwrap()
             );
@@ -126,7 +126,7 @@ impl Evidence {
         self.references.retain(|r| included.contains(&r.id));
         self.teams = teams;
         if self.partial {
-            let notice = "\nCobertura parcial: se aplicaron límites de recuperación/contexto; no inferir ausencia de hechos.\n";
+            let notice = "\nPartial coverage: retrieval or context limits applied; do not infer that facts are missing.\n";
             if out.chars().count() + notice.chars().count() <= budget {
                 out.push_str(notice);
             }
@@ -206,11 +206,15 @@ impl Reference {
             self.authority.as_deref(),
             Some("created_by_me" | "edited_by_me")
         );
-        // The Wiki reader records "último editor registrado" as the only author role.
-        let role = self
-            .author_role
-            .as_deref()
-            .unwrap_or("último editor registrado");
+        // The Wiki reader records "last recorded editor" as the only author role; audits
+        // before 0.6.1 hold its Spanish form.
+        let role = match self.author_role.as_deref() {
+            None | Some("last recorded editor" | "último editor registrado") => match language {
+                Language::Es => "último editor registrado",
+                Language::En => "last recorded editor",
+            },
+            Some(other) => other,
+        };
         match (language, &self.author) {
             (Language::Es, _) if own => format!(
                 "- {link}: wiki del proyecto {project}; documentación con contribución propia verificada."
@@ -227,11 +231,6 @@ impl Reference {
                 )
             }
             (Language::En, Some(name)) => {
-                let role = if role == "último editor registrado" {
-                    "last recorded editor"
-                } else {
-                    role
-                };
                 format!("- {link}: {project} project wiki; {role}: {name}.")
             }
             (Language::En, None) => format!(
@@ -240,9 +239,9 @@ impl Reference {
         }
     }
 }
-/// Non-Wiki references the code sees named in the answer (aliases or `#id`). Added to Jev's
-/// selection, and the whole selection when Jev is unavailable, so a named work item, pipeline
-/// or stage always gets its verified link.
+/// Non-Wiki references the code sees named in the answer (aliases or `#id`). Added to the
+/// model's selection, and the whole selection when no model can choose, so a named work item,
+/// pipeline or stage always gets its verified link.
 pub fn named_references(body: &str, evidence: &Evidence) -> Vec<String> {
     let lower = body.to_lowercase();
     let ids: Vec<String> = regex::Regex::new(r"#(\d+)\b")
@@ -421,7 +420,7 @@ mod tests {
             r.authority = Some(mode.into());
             if mode == "other" {
                 r.author = Some("Ana".into());
-                r.author_role = Some("último editor registrado".into());
+                r.author_role = Some("last recorded editor".into());
             }
             let e = Evidence {
                 references: vec![r],
@@ -453,7 +452,7 @@ mod tests {
         let mut other = reference("p", "wiki");
         other.authority = Some("other".into());
         other.author = Some("Ana".into());
-        other.author_role = Some("último editor registrado".into());
+        other.author_role = Some("last recorded editor".into());
         let e = Evidence {
             references: vec![other],
             ..Default::default()
@@ -593,14 +592,14 @@ mod tests {
     #[test]
     fn homonymous_stages_preserve_execution_definition_and_parent_identity() {
         let mut run = reference("stage:run:40", "stage_run");
-        run.label = "Stage Deploy, ejecución #40 que lo contiene".into();
+        run.label = "Stage Deploy, in run #40".into();
         run.aliases = vec!["Deploy".into()];
         run.url = "https://dev.azure.com/test/Project/_build/results?buildId=40".into();
         run.parent = Some("run:40".into());
         let mut config = run.clone();
         config.id = "stage:config:5:2".into();
         config.kind = "stage_configuration".into();
-        config.label = "Stage Deploy, configuración en release #5".into();
+        config.label = "Stage Deploy, configured in release #5".into();
         config.url =
             "https://dev.azure.com/test/Project/_release?definitionId=5&_a=definition-tasks".into();
         config.parent = Some("definition:5".into());
@@ -626,7 +625,7 @@ mod tests {
             Language::Es,
         )
         .unwrap();
-        assert!(b.contains("configuración en release #5"));
+        assert!(b.contains("configured in release #5"));
     }
     #[test]
     fn redacted_names_become_unavailable_and_message_authors_stay_attached() {

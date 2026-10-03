@@ -363,7 +363,7 @@ fn changed_excerpt(before: &str, after: &str) -> String {
         .collect::<Vec<_>>()
         .join("\n");
     format!(
-        "Antes (desde línea {}): {}. Después: {}",
+        "Before (from line {}): {}. After: {}",
         start + 1,
         old_part.chars().take(600).collect::<String>(),
         new_part.chars().take(900).collect::<String>()
@@ -769,7 +769,7 @@ async fn commit_detail(
     changes_url.query_pairs_mut().append_pair("top", "100");
     let changes = request(client, key, Method::GET, changes_url, None).await?;
     let mut output = format!(
-        "Detalle del commit {} ({}): {}. ",
+        "Commit detail {} ({}): {}. ",
         &commit.sha[..commit.sha.len().min(8)],
         commit.date,
         commit.message.chars().take(220).collect::<String>()
@@ -815,9 +815,9 @@ async fn commit_detail(
         {
             continue;
         }
-        let kind = change["changeType"].as_str().unwrap_or("cambio");
+        let kind = change["changeType"].as_str().unwrap_or("change");
         output.push_str(&format!(
-            "Archivo {}: {}. ",
+            "File {}: {}. ",
             path.chars().take(160).collect::<String>(),
             kind
         ));
@@ -858,7 +858,7 @@ async fn commit_detail(
                         project,
                         "stage_configuration",
                         &format!("{}:{}:{path}:{name}", commit.repo_id, commit.sha),
-                        format!("Stage {name}, configuración versionada en {path}"),
+                        format!("Stage {name}, configuration versioned in {path}"),
                         vec![name.into()],
                         &["_git", &commit.repo_id],
                         &[
@@ -871,7 +871,7 @@ async fn commit_detail(
                 }
             }
             output.push_str(&format!(
-                "Cambio de contenido: {}. ",
+                "Content change: {}. ",
                 changed_excerpt(&before, &after)
             ));
         }
@@ -903,14 +903,14 @@ async fn commit_detail(
             .append_pair("includeWorkItemRefs", "true");
         if let Ok(pr) = request(client, key, Method::GET, url, None).await {
             output.push_str(&format!(
-                "PR #{pr_id}: {} (estado {}). ",
+                "PR #{pr_id}: {} (status {}). ",
                 pr["title"]
                     .as_str()
                     .unwrap_or("")
                     .chars()
                     .take(160)
                     .collect::<String>(),
-                pr["status"].as_str().unwrap_or("desconocido")
+                pr["status"].as_str().unwrap_or("unknown")
             ));
             let ids: BTreeSet<u64> = pr["workItemRefs"]
                 .as_array()
@@ -923,7 +923,7 @@ async fn commit_detail(
                 for item in items {
                     references.push(item_reference(source, project, &item)?);
                     output.push_str(&format!(
-                        "Work item relacionado {} {}. ",
+                        "Related work item {} {}. ",
                         field(&item, "System.WorkItemType"),
                         label(&item)
                     ));
@@ -981,7 +981,7 @@ async fn work_item_activity(
     for item in &selected {
         references.push(item_reference(source, project, item)?);
         output.push_str(&format!(
-            "Work item {} {} (última modificación registrada {}). ",
+            "Work item {} {} (last recorded change {}). ",
             field(item, "System.WorkItemType"),
             label(item),
             field(item, "System.ChangedDate")
@@ -991,19 +991,22 @@ async fn work_item_activity(
             .and_then(|id| by_id.get(id))
         {
             references.push(item_reference(source, project, parent)?);
-            output.push_str(&format!("Contexto padre: {}. ", label(parent)));
+            output.push_str(&format!("Parent: {}. ", label(parent)));
         }
         let due = field(item, "Microsoft.VSTS.Scheduling.TargetDate");
         if !due.is_empty() {
             output.push_str(&format!(
-                "Fecha objetivo registrada: {due}; no es compromiso personal. "
+                "Recorded target date: {due}; not a personal commitment. "
             ));
         }
         let tags = field(item, "System.Tags");
-        if tags.to_lowercase().contains("bloque") || tags.to_lowercase().contains("imped") {
+        if ["bloque", "imped", "block"]
+            .iter()
+            .any(|w| tags.to_lowercase().contains(w))
+        {
             blocked = true;
             output.push_str(&format!(
-                "Impedimento etiquetado: {}. ",
+                "Tagged impediment: {}. ",
                 tags.chars().take(100).collect::<String>()
             ));
         }
@@ -1120,7 +1123,7 @@ async fn repository_activity(
             count += 1;
             let message = commit["comment"]
                 .as_str()
-                .unwrap_or("sin mensaje")
+                .unwrap_or("no message")
                 .lines()
                 .next()
                 .unwrap_or("");
@@ -1131,7 +1134,7 @@ async fn repository_activity(
                 message: message.into(),
             });
             output.push_str(&format!(
-                "Commit personal en {name}: {} ({}): {}.\n",
+                "Own commit in {name}: {} ({}): {}.\n",
                 sha.chars().take(8).collect::<String>(),
                 date,
                 message.chars().take(160).collect::<String>()
@@ -1182,13 +1185,13 @@ async fn pipeline_activity(
         let Some(id) = build["id"].as_u64() else {
             continue;
         };
-        let name = build["definition"]["name"].as_str().unwrap_or("sin nombre");
+        let name = build["definition"]["name"].as_str().unwrap_or("unnamed");
         let run = artifact(
             source,
             project,
             "pipeline_run",
             &id.to_string(),
-            format!("Pipeline {name}, ejecución #{id}"),
+            format!("Pipeline {name}, run #{id}"),
             vec![name.into(), format!("build #{id}")],
             &["_build", "results"],
             &[("buildId", id.to_string())],
@@ -1199,28 +1202,28 @@ async fn pipeline_activity(
         count += 1;
         build_ids.insert(id);
         let relationship = if requested_by {
-            "iniciado por el usuario"
+            "started by the user"
         } else if requested_for {
-            "ejecutado a nombre del usuario"
+            "run on behalf of the user"
         } else {
-            "asociado a commit personal"
+            "for an own commit"
         };
         output.push_str(&format!(
-            "Pipeline {} (build #{id}, {relationship}): resultado {}, fecha {}.\n",
+            "Pipeline {} (build #{id}, {relationship}): result {}, date {}.\n",
             build["definition"]["name"]
                 .as_str()
-                .unwrap_or("sin nombre")
+                .unwrap_or("unnamed")
                 .chars()
                 .take(100)
                 .collect::<String>(),
             build["result"]
                 .as_str()
                 .or_else(|| build["status"].as_str())
-                .unwrap_or("desconocido"),
+                .unwrap_or("unknown"),
             build["finishTime"]
                 .as_str()
                 .or_else(|| build["queueTime"].as_str())
-                .unwrap_or("fecha no disponible")
+                .unwrap_or("date unavailable")
         ));
         if count <= 5 {
             let timeline_url = project_url(
@@ -1241,13 +1244,13 @@ async fn pipeline_activity(
                         continue;
                     }
                     if let Some(stage_id) = stage["id"].as_str() {
-                        let name = stage["name"].as_str().unwrap_or("sin nombre");
+                        let name = stage["name"].as_str().unwrap_or("unnamed");
                         references.push(artifact(
                             source,
                             project,
                             "stage_run",
                             &format!("{id}:{stage_id}"),
-                            format!("Stage {name}, ejecución #{id} que lo contiene"),
+                            format!("Stage {name}, in run #{id}"),
                             vec![name.into()],
                             &["_build", "results"],
                             &[("buildId", id.to_string())],
@@ -1256,17 +1259,17 @@ async fn pipeline_activity(
                         )?);
                     }
                     output.push_str(&format!(
-                        "Etapa {}: {}.\n",
+                        "Stage {}: {}.\n",
                         stage["name"]
                             .as_str()
-                            .unwrap_or("sin nombre")
+                            .unwrap_or("unnamed")
                             .chars()
                             .take(80)
                             .collect::<String>(),
                         stage["result"]
                             .as_str()
                             .or_else(|| stage["state"].as_str())
-                            .unwrap_or("desconocida")
+                            .unwrap_or("unknown")
                     ));
                 }
             }
@@ -1300,14 +1303,14 @@ async fn pipeline_activity(
                     });
                 if linked {
                     output.push_str(&format!(
-                        "Release {} asociado a build personal: estado {}.\n",
+                        "Release {} for an own build: status {}.\n",
                         release["name"]
                             .as_str()
-                            .unwrap_or("sin nombre")
+                            .unwrap_or("unnamed")
                             .chars()
                             .take(80)
                             .collect::<String>(),
-                        release["status"].as_str().unwrap_or("desconocido")
+                        release["status"].as_str().unwrap_or("unknown")
                     ));
                 }
             }
@@ -1361,13 +1364,13 @@ async fn release_definition_activity(
         )
         .await?;
         let revision = detail["revision"].as_u64().unwrap_or(0);
-        let name = detail["name"].as_str().unwrap_or("sin nombre");
+        let name = detail["name"].as_str().unwrap_or("unnamed");
         let definition = artifact(
             source,
             project,
             "pipeline_definition",
             &id.to_string(),
-            format!("Configuración de release {name} #{id}"),
+            format!("Release definition {name} #{id}"),
             vec![name.into(), format!("release #{id}")],
             &["_release"],
             &[
@@ -1379,7 +1382,7 @@ async fn release_definition_activity(
         )?;
         references.push(definition.clone());
         output.push_str(&format!(
-            "Definición de release #{} {} (modificada por el usuario {}, revisión {}). ",
+            "Release definition #{} {} (changed by the user {}, revision {}). ",
             id,
             detail["name"]
                 .as_str()
@@ -1391,7 +1394,7 @@ async fn release_definition_activity(
             revision
         ));
         if revision == 1 {
-            output.push_str("Es la primera revisión registrada de esta definición. ");
+            output.push_str("It is the first recorded revision of this definition. ");
         }
         for stage in detail["environments"]
             .as_array()
@@ -1403,13 +1406,13 @@ async fn release_definition_activity(
                 continue;
             }
             if let Some(stage_id) = stage["id"].as_u64() {
-                let name = stage["name"].as_str().unwrap_or("sin nombre");
+                let name = stage["name"].as_str().unwrap_or("unnamed");
                 references.push(artifact(
                     source,
                     project,
                     "stage_configuration",
                     &format!("{id}:{stage_id}:{revision}"),
-                    format!("Stage {name}, configuración en release #{id}"),
+                    format!("Stage {name}, configured in release #{id}"),
                     vec![name.into()],
                     &["_release"],
                     &[
@@ -1421,7 +1424,7 @@ async fn release_definition_activity(
                 )?);
             }
             output.push_str(&format!(
-                "Stage configurado {}. ",
+                "Configured stage {}. ",
                 stage["name"]
                     .as_str()
                     .unwrap_or("")
@@ -1436,7 +1439,7 @@ async fn release_definition_activity(
                 .take(3)
             {
                 output.push_str(&format!(
-                    "Fase {}. ",
+                    "Phase {}. ",
                     phase["name"]
                         .as_str()
                         .unwrap_or("")
@@ -1452,7 +1455,7 @@ async fn release_definition_activity(
                     .take(5)
                 {
                     output.push_str(&format!(
-                        "Tarea configurada: {}. ",
+                        "Configured task: {}. ",
                         task["name"]
                             .as_str()
                             .unwrap_or("")
@@ -1540,7 +1543,7 @@ pub async fn status(
                 if score > 0 {
                     sections.push((
                         score,
-                        format!("Proyecto: {project}.\n{}", bounded_lines(&content, 5_000)),
+                        format!("Project: {project}.\n{}", bounded_lines(&content, 5_000)),
                         refs,
                     ));
                 }
@@ -1554,7 +1557,7 @@ pub async fn status(
         if score > 0 {
             sections.push((
                 score,
-                format!("Proyecto: {project}.\n{}", bounded_lines(&content, 5_000)),
+                format!("Project: {project}.\n{}", bounded_lines(&content, 5_000)),
                 refs,
             ));
         }
@@ -1563,14 +1566,12 @@ pub async fn status(
     }
     sections.sort_by_key(|a| std::cmp::Reverse(a.0));
     let mut output = format!(
-        "Actividad de Azure DevOps desde {} (últimos {days} días).\n",
+        "Azure DevOps activity since {} (last {days} days).\n",
         since.format("%Y-%m-%d")
     );
     let mut blocks = Vec::new();
     if sections.is_empty() {
-        output.push_str(
-            "No se pudo verificar actividad personal reciente en los proyectos consultados.\n",
-        );
+        output.push_str("No recent own activity could be verified in the projects read.\n");
     } else {
         for (_, section, refs) in sections {
             let project_header = section.lines().next().unwrap_or("");
@@ -1601,20 +1602,24 @@ pub async fn status(
             output.push('\n');
         }
     }
-    if question.to_lowercase().contains("imped") && !blocked {
-        output.push_str("Impedimentos: no se encontró un bloqueo explícito en la actividad recuperada; el estado real requiere confirmación personal.\n");
+    if ["imped", "blocker", "blocked"]
+        .iter()
+        .any(|w| question.to_lowercase().contains(w))
+        && !blocked
+    {
+        output.push_str("Impediments: no explicit blocker was found in the activity read; the actual state needs the user's confirmation.\n");
     }
     if partial_projects > 0 {
-        output.push_str(&format!("Cobertura parcial: falló al menos una consulta en {partial_projects} proyecto(s); no inferir ausencia de actividad en ellos.\n"));
+        output.push_str(&format!("Partial coverage: at least one read failed in {partial_projects} project(s); do not infer that there was no activity there.\n"));
     }
     blocks.push(Block {
         text: output
             .lines()
             .filter(|l| {
-                l.starts_with("Impedimentos:")
-                    || l.starts_with("Cobertura parcial:")
-                    || l.starts_with("Actividad de Azure")
-                    || l.starts_with("No se pudo verificar")
+                l.starts_with("Impediments:")
+                    || l.starts_with("Partial coverage:")
+                    || l.starts_with("Azure DevOps activity")
+                    || l.starts_with("No recent own activity")
             })
             .collect::<Vec<_>>()
             .join("\n"),

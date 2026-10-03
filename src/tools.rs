@@ -304,7 +304,7 @@ impl ReadOnlyTool for Tools {
                         .text
                         .lines()
                         .filter_map(|line| {
-                            line.strip_prefix("Proyecto: ")?
+                            line.strip_prefix("Project: ")?
                                 .strip_suffix('.')
                                 .map(str::to_owned)
                         })
@@ -338,7 +338,7 @@ impl ReadOnlyTool for Tools {
                 } => {
                     let query = match crate::ado::wiki::question_query(question) {
                         Ok(query)=>query,
-                        Err(_)=>return Ok(serde_json::to_string(&crate::ado::wiki::WikiResult{partial:true,warnings:vec!["Falta el tema de búsqueda Wiki; pide concretar procedimiento o proyecto.".into()],..Default::default()})?),
+                        Err(_)=>return Ok(serde_json::to_string(&crate::ado::wiki::WikiResult{partial:true,warnings:vec!["The Wiki search topic is missing; ask to specify the procedure or project.".into()],..Default::default()})?),
                     };
                     let catalog = crate::knowledge::read_repository_file(
                         &self.repositories,

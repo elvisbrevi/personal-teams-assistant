@@ -1,17 +1,21 @@
 # Personal Teams Assistant
 
-Asistente personal de Microsoft Teams escrito en Rust. Lee y responde **con tu propia identidad** (OAuth delegado de Microsoft Graph, sin bot) cuando alguien te escribe directamente, te menciona en un grupo o le preguntas en tu chat personal. Responde solo con evidencia de fuentes que autorizaste para esa conversación —archivos de repositorios Git, URLs, Azure DevOps (actividad y Wiki) y otras herramientas de solo lectura—, redacta con el modelo de lenguaje que elijas —Codex o Claude Code a través de sus CLI instaladas, o la API de DeepSeek, en un orden de respaldo configurable— verifica en código referencias, enlaces y datos sensibles, y registra una revisión de Jev (TypeSafe). Si una respuesta cita algo que no se puede verificar o contiene datos sensibles, no se envía (en tu chat personal te avisa) y queda visible en la pestaña Mensajes.
+A personal Microsoft Teams assistant written in Rust. It reads and answers **as you** (delegated Microsoft Graph OAuth, no bot) when someone writes to you directly, mentions you in a group or asks it in your personal chat. It answers only with evidence from sources you authorized for that conversation — files from Git repositories, URLs, Azure DevOps (activity and Wiki), your own Teams messages and other read-only tools — and writes with the language model you choose: Codex or Claude Code through their installed CLIs, or the DeepSeek API, in a configurable fallback order. Code checks references, links and sensitive data; if an answer cites something that cannot be verified or contains sensitive data, it is not sent (in your personal chat you get a notice) and it stays visible in the Messages tab.
 
-## Instalación
+Ask it, for example, which work you did in the last two weeks that no task records: it compares your commits, pull requests, pipeline runs, releases, Wiki edits and (if you authorize them) your Teams messages with your Azure DevOps work items, and answers with concrete candidates, each with its date, a verified link and a proposed task title.
 
-Un solo paquete de Cargo, `personal-teams-assistant`, instala todo: la app de bandeja/barra de menús y host `personal-teams-assistant`, el CLI `pta` y la skill para agentes incorporada en `pta`.
+Answers to Teams are written in Spanish or English (`llm.language`); the app itself — GUI, CLI and audit log — is in English.
+
+## Installation
+
+One Cargo package, `personal-teams-assistant`, installs everything: the tray/menu bar app and host `personal-teams-assistant`, the `pta` CLI and the agent skill built into `pta`.
 
 ```sh
-cargo install personal-teams-assistant --locked   # desde crates.io
-cargo install --path . --locked                   # desde este checkout
+cargo install personal-teams-assistant --locked   # from crates.io
+cargo install --path . --locked                   # from this checkout
 ```
 
-Si tenías el paquete anterior `personal-teams-desktop` (0.4.0 o antes), desinstálalo primero: ambos instalan `pta` y Cargo no sobrescribe un binario de otro paquete. Tu perfil, credenciales y cuenta se conservan.
+If you had the old `personal-teams-desktop` package (0.4.0 or earlier), uninstall it first: both install `pta` and Cargo does not overwrite another package's binary. Your profile, credentials and account are kept.
 
 ```sh
 cargo uninstall personal-teams-desktop
@@ -19,59 +23,61 @@ cargo install personal-teams-assistant --locked
 pta status
 ```
 
-Requisitos: Rust (versión fijada en `rust-toolchain.toml`), prerrequisitos nativos de Tauri 2, Git y `~/.cargo/bin` en `PATH`. Para recibir mensajes de Teams además necesitas una URL HTTPS estable que llegue al puerto local (p. ej. `cloudflared` con token) y el equipo encendido.
+Requirements: Rust (version pinned in `rust-toolchain.toml`), the native prerequisites of Tauri 2, Git and `~/.cargo/bin` in `PATH`. To receive Teams messages you also need a stable HTTPS URL that reaches the local port (e.g. `cloudflared` with a token) and the computer on.
 
-En Linux o en un servidor, instala la variante **sin interfaz** (no necesita Tauri ni WebKit) y opérala solo con `pta`:
+On Linux or a server, install the **headless** variant (no Tauri or WebKit) and operate it only with `pta`:
 
 ```sh
 cargo install personal-teams-assistant --no-default-features --locked
-personal-teams-assistant --headless --start    # primer plano; apto para un servicio systemd
+personal-teams-assistant --headless --start    # foreground; fits a systemd service
 ```
 
-Sus credenciales se guardan con `pta credentials set` en archivos privados del perfil o llegan por variables `NOMBRE`/`NOMBRE_FILE`. El login de Microsoft se completa desde cualquier dispositivo con `pta auth microsoft finish --redirect 'URL'`. Detalles en la [arquitectura](docs/architecture.md#host-sin-interfaz-linux-y-servidores). No mantengas dos instancias activas de la misma cuenta.
+Its credentials are stored with `pta credentials set` in private profile files or come from `NAME`/`NAME_FILE` variables. The Microsoft login is completed from any device with `pta auth microsoft finish --redirect 'URL'`. Details in the [architecture](docs/architecture.md#headless-host-linux-and-servers). Never keep two instances of the same account active.
 
-GUI y CLI comparten el mismo perfil, credenciales del Llavero/Credential Manager y servicio. Reinstalar no pide credenciales de nuevo: se conservan el perfil `dev.personalteams.assistant`, el directorio de datos y la cuenta Microsoft conectada.
+GUI and CLI share the same profile, Keychain/Credential Manager credentials and service. Reinstalling does not ask for credentials again: the `dev.personalteams.assistant` profile, the data directory and the connected Microsoft account are kept.
 
-### Actualizar
+### Update
 
 ```sh
 cargo install personal-teams-assistant --locked
 pta status
 ```
 
-Cargo no ejecuta nada después de instalar, así que la versión anterior sigue corriendo hasta el primer uso de la nueva. El primer comando `pta` (cualquiera; `pta status` sirve) o abrir la app detecta que el binario instalado cambió, detiene el host anterior (asistente y túnel) y, si el asistente estaba corriendo, pregunta si dejarlo corriendo con la versión nueva (en la app, con un aviso en la ventana). Sin terminal interactiva (`--non-interactive`, `--json`, systemd) conserva el estado anterior.
+Cargo runs nothing after installing, so the previous version keeps running until the new one is first used. The first `pta` command (any; `pta status` will do) or opening the app detects that the installed binary changed, stops the previous host (assistant and tunnel) and, if the assistant was running, asks whether to keep it running with the new version (in the app, with a notice in the window). Without an interactive terminal (`--non-interactive`, `--json`, systemd) it keeps the previous state.
 
-## Uso rápido
+From 0.6.1 on, a profile saved by the app no longer has the `[jev]` section that older versions require: do not go back to an older version with the same profile.
+
+## Quick use
 
 ```sh
-personal-teams-assistant          # abre la ventana (o pta app open)
-pta help                          # todos los comandos, con su descripción
-pta status                        # ¿está corriendo? host, asistente, modo, Teams y modelos
-pta start                         # inicia el asistente
-pta stop                          # lo detiene
-pta auth microsoft login          # OAuth PKCE con el navegador del sistema
-pta auth microsoft finish --wait  # espera a que completes el consentimiento
-pta mode active                   # habilita envíos reales tras revisar las propuestas
-pta test simulate <<< '{"session":"demo","text":"¿Qué hice esta semana?","sources":["azure-devops-status"]}'
+personal-teams-assistant          # opens the window (or pta app open)
+pta help                          # every command, with its description
+pta status                        # running? host, assistant, mode, Teams and models
+pta start                         # starts the assistant
+pta stop                          # stops it
+pta auth microsoft login          # OAuth PKCE with the system browser
+pta auth microsoft finish --wait  # waits for you to finish the consent
+pta mode active                   # turns real sends on after reviewing the proposals
+pta test simulate <<< '{"session":"demo","text":"What work did I do that is not registered?","sources":["azure-devops-status","azure-devops-wikis"]}'
 ```
 
-`pta help` (o `pta`, `pta --help`) lista todos los comandos con su descripción; `--json` devuelve el resultado completo en JSON. `pta skill show` entrega el manual operativo para agentes.
+`pta help` (or `pta`, `pta --help`) lists every command with its description; `--json` returns the full result as JSON. `pta skill show` gives the operating manual for agents.
 
-## Configuración mínima
+## Minimal setup
 
-1. Credenciales (por stdin, nunca como argumento): `TYPESAFE_API_KEY`, `DEEPSEEK_API_KEY` si usas DeepSeek y las referenciadas por tus fuentes, p. ej. `pta credentials set DEEPSEEK_API_KEY < archivo`. `GRAPH_WEBHOOK_SECRET` y `STATE_ENCRYPTION_KEY` se generan solas.
-2. Modelos de lenguaje: en la GUI (Configuración → Modelos de lenguaje) activa y ordena Codex, Claude Code y DeepSeek, con su modelo y esfuerzo. Codex y Claude usan la CLI instalada (`codex`, `claude`) con su propia sesión. Por defecto: Codex `gpt-6.1-sol` (medio) → Claude `claude-opus-5-5` (medio) → DeepSeek `deepseek-flash` (máximo). Cada respuesta empieza por el primero y pasa al siguiente solo si falla (p. ej. sin créditos). Desde el CLI: `pta llm providers` y `pta config set llm.chain JSON`.
-3. Registro Entra con plataforma *Mobile and desktop* (`http://localhost`) y permisos delegados `User.Read`, `Chat.Read`, `ChatMessage.Send`, `offline_access`. Configura `graph.tenant_id` y `graph.client_id`.
-4. URL pública (`server.public_url`) y túnel: `pta tunnel configure token|file PATH|external`.
-5. Conocimiento: agrega repositorios (`pta repos add`, o GitHub con `pta auth github login`), registra fuentes con `pta sources add` (nacen deshabilitadas y sin audiencias) y autorízalas por conversación con `pta sources audience`.
+1. Credentials (on stdin, never as an argument): `DEEPSEEK_API_KEY` if you use DeepSeek and the ones your sources reference, e.g. `pta credentials set DEEPSEEK_API_KEY < file`. `GRAPH_WEBHOOK_SECRET` and `STATE_ENCRYPTION_KEY` are generated.
+2. Language models: in the GUI (Settings → Language models) turn on and order Codex, Claude Code and DeepSeek, with their model and effort. Codex and Claude use the installed CLI (`codex`, `claude`) with its own login. Default: Codex `gpt-6.1-sol` (medium) → Claude `claude-opus-5-5` (medium) → DeepSeek `deepseek-flash` (maximum). Every call starts with the first and moves to the next only if it fails (e.g. out of credits). From the CLI: `pta llm providers` and `pta config set llm.chain JSON`.
+3. An Entra registration with the *Mobile and desktop* platform (`http://localhost`) and the delegated permissions `User.Read`, `Chat.Read`, `ChatMessage.Send`, `offline_access`. Set `graph.tenant_id` and `graph.client_id`.
+4. Public URL (`server.public_url`) and tunnel: `pta tunnel configure token|file PATH|external`.
+5. Knowledge: add repositories (`pta repos add`, or GitHub with `pta auth github login`), register sources with `pta sources add` (they start disabled and without audiences) and authorize them per conversation with `pta sources audience`.
 
-## Documentación
+## Documentation
 
-- Sitio del proyecto: [teams-assistant.elvisbrevi.cl](https://teams-assistant.elvisbrevi.cl/), HTML y CSS en [`site/`](site/) publicado como Worker de Cloudflare.
-- [Arquitectura](docs/architecture.md): componentes, pipeline, datos, seguridad, contrato del CLI y recetas de cambio.
-- [Mejoras propuestas](docs/mejoras-propuestas.md).
-- [Skill operativa](desktop/skills/personal-teams-assistant/SKILL.md) y [guía para agentes](AGENTS.md).
+- Project site: [teams-assistant.elvisbrevi.cl](https://teams-assistant.elvisbrevi.cl/), HTML and CSS in [`site/`](site/) published as a Cloudflare Worker.
+- [Architecture](docs/architecture.md): components, pipeline, data, security, CLI contract and change recipes.
+- [Proposed improvements](docs/proposed-improvements.md).
+- [Operating skill](desktop/skills/personal-teams-assistant/SKILL.md) and [guide for agents](AGENTS.md).
 
-## Licencia
+## License
 
 MIT.

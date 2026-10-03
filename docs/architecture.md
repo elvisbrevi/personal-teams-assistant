@@ -1,263 +1,280 @@
-# Arquitectura
+# Architecture
 
-Referencia técnica para agentes de código. Describe cómo está construido el sistema, por dónde fluye un mensaje y qué invariantes no se pueden romper. El manual operativo (comandos `pta`) es la [skill incorporada](../desktop/skills/personal-teams-assistant/SKILL.md).
+Technical reference for coding agents. It describes how the system is built, how a message flows through it and which invariants cannot be broken. The operating manual (`pta` commands) is the [built-in skill](../desktop/skills/personal-teams-assistant/SKILL.md).
 
-## 1. Qué es
+## 1. What it is
 
-Asistente personal de Microsoft Teams que responde **con la identidad del propio usuario** (OAuth delegado, sin bot). Recibe mensajes por webhooks de Microsoft Graph, decide si corresponde intervenir, recupera evidencia solo de fuentes autorizadas para esa conversación, redacta con un modelo de lenguaje (Codex o Claude Code mediante su CLI instalada, o la API de DeepSeek, en una cadena de respaldo), verifica en código referencias, URLs y datos sensibles, registra una revisión informativa de Jev (TypeSafe) y envía una sola vez. Si un control de código la retiene, no envía: la respuesta queda para la persona (y en el chat personal se le avisa).
+A personal Microsoft Teams assistant that answers **as the user** (delegated OAuth, no bot). It receives messages through Microsoft Graph webhooks, decides whether to step in, retrieves evidence only from sources authorized for that conversation, writes with a language model (Codex or Claude Code through their installed CLI, or the DeepSeek API, in a fallback chain), checks references, URLs and sensitive data in code and sends once. If a code check withholds the answer, nothing is sent: the answer is left to the person (and in the personal chat they get a notice). The same model chain classifies ambiguous messages and picks the references an answer uses; no model decision withholds an answer or grants a permission.
 
-Se distribuye exclusivamente por Cargo. Un solo paquete, `personal-teams-assistant`, instala tres piezas (hasta 0.4.0 la app venía en un paquete aparte, `personal-teams-desktop`, ya obsoleto):
+Everything in the repository — code, comments, prompts, documentation, GUI, CLI and audit steps — is in English. What the assistant writes to Teams follows `llm.language` (Spanish by default, or English).
 
-| Pieza | Binario / ruta | Rol |
+It is distributed only through Cargo. One package, `personal-teams-assistant`, installs three pieces (up to 0.4.0 the app came in a separate package, `personal-teams-desktop`, now obsolete):
+
+| Piece | Binary / path | Role |
 | --- | --- | --- |
-| GUI + host | `personal-teams-assistant` | App Tauri de bandeja/barra de menús. Es el **único dueño** del perfil, las credenciales y el servicio Teams. Puede correr oculta (`--host`) o **sin interfaz** (`--headless`, o compilada sin la feature `gui` para Linux/servidores). |
-| CLI | `pta` | Cliente administrativo. Habla con el host por IPC loopback autenticado; lo arranca oculto si no existe. |
-| Skill | `desktop/skills/personal-teams-assistant/` | Manual para agentes, compilado dentro de `pta` (`pta skill show/path/install`). |
+| GUI + host | `personal-teams-assistant` | Tauri tray/menu bar app. It is the **only owner** of the profile, the credentials and the Teams service. It can run hidden (`--host`) or **headless** (`--headless`, or built without the `gui` feature for Linux/servers). |
+| CLI | `pta` | Administrative client. Talks to the host over authenticated loopback IPC; starts it hidden if there is none. |
+| Skill | `desktop/skills/personal-teams-assistant/` | Manual for agents, built into `pta` (`pta skill show/path/install`). |
 
-## 2. Estructura del repositorio
+## 2. Repository layout
 
 ```text
-Cargo.toml                    paquete único `personal-teams-assistant`: biblioteca + binarios
-                              `personal-teams-assistant` (GUI/host) y `pta`; feature `gui` (Tauri)
-build.rs                      tauri-build desde `desktop/` (solo con `gui`), en OUT_DIR
-src/                          núcleo: pipeline, adaptadores Graph, Jev, LLM, conocimiento, herramientas, SQLite
-  llm.rs                      contrato LlmProvider, prompts (`Model`), cadena de respaldo (`Chain`), validación
-  llm/deepseek.rs             API DeepSeek (`/chat/completions`)
-  llm/agent.rs                Codex (`codex exec`) y Claude Code (`claude -p`) como CLI sin herramientas; catálogo
-  app.rs                      host: Host/Shell, estado, arranque/parada, OAuth, túnel, ajustes, entrada `run`
-  app/gui.rs                  shell Tauri (feature `gui`): ventana, bandeja, comando `command` del WebView
-  app/headless.rs             shell sin interfaz: primer plano, SIGTERM/Ctrl-C, `--start`
-  app/control.rs              rutas del perfil, canal IPC (contrato 1), despachador único, actualización
-  app/cli.rs                  `pta`: ayuda, parseo, validación de argumentos, traducción a métodos IPC
-  app/github.rs               GitHub App con Device Flow, clonado/sync sin token en URL/argv
-  app/skill.rs                textos de la skill incorporados con include_str!
-  main.rs, bin/pta.rs         binarios (`app::run`, `app::cli::run`)
-desktop/                      recursos de la app: tauri.conf.json, Info.plist, capabilities/, icons/
-  ui/                         HTML/CSS/JS sin framework; llama a `control::command` vía invoke
-  skills/                     skill operativa (fuente canónica)
-site/                         landing estática fuera del paquete de Cargo: `public/` (HTML y CSS sin
-                              JavaScript ni build, `_headers`, `404.html`, capturas de la GUI con
-                              datos sintéticos) y `wrangler.jsonc` (Cloudflare Workers, solo assets)
-tests/integration.rs          integración con wiremock (Graph, Jev, DeepSeek simulados)
-examples/wiki_gate_smoke.rs   regresión opcional contra Jev real con hechos sintéticos
-config.example.toml           plantilla del perfil (`Config::desktop_template`)
-knowledge-map.example.toml    ejemplo sintético del mapa de fuentes
-scripts/export-public.py      exporta un snapshot sin historial privado (exige gitleaks)
-.agents/skills/save-knowledge para guardar hechos en la base de conocimiento
+Cargo.toml                    single package `personal-teams-assistant`: library + binaries
+                              `personal-teams-assistant` (GUI/host) and `pta`; `gui` feature (Tauri)
+build.rs                      tauri-build from `desktop/` (only with `gui`), into OUT_DIR
+src/                          core: pipeline, Graph adapters, LLM, knowledge, tools, SQLite
+  llm.rs                      LlmProvider contract, prompts (`Model`), fallback chain (`Chain`), validation
+  llm/deepseek.rs             DeepSeek API (`/chat/completions`)
+  llm/agent.rs                Codex (`codex exec`) and Claude Code (`claude -p`) as tool-less CLIs; catalog
+  ado.rs                      Azure DevOps activity for status questions (work items, commits, pipelines)
+  ado/review.rs               activity review: own work compared with work items, verified links
+  ado/wiki.rs                 Wiki search/read with verified authorship; own edits for reviews
+  app.rs                      host: Host/Shell, state, start/stop, OAuth, tunnel, settings, `run` entry
+  app/gui.rs                  Tauri shell (`gui` feature): window, tray, the WebView's `command`
+  app/headless.rs             headless shell: foreground, SIGTERM/Ctrl-C, `--start`
+  app/control.rs              profile paths, IPC channel (contract 1), single dispatcher, update
+  app/cli.rs                  `pta`: help, parsing, argument validation, translation to IPC methods
+  app/github.rs               GitHub App with Device Flow, clone/sync without a token in URL/argv
+  app/skill.rs                skill texts embedded with include_str!
+  main.rs, bin/pta.rs         binaries (`app::run`, `app::cli::run`)
+desktop/                      app resources: tauri.conf.json, Info.plist, capabilities/, icons/
+  ui/                         plain HTML/CSS/JS; calls `control::command` through invoke
+  skills/                     operating skill (canonical source)
+site/                         static landing outside the Cargo package: `public/` (HTML and CSS without
+                              JavaScript or a build, `_headers`, `404.html`, GUI screenshots with
+                              synthetic data) and `wrangler.jsonc` (Cloudflare Workers, assets only)
+tests/integration.rs          integration with wiremock (Graph, DeepSeek) and test doubles
+config.example.toml           profile template (`Config::desktop_template`)
+knowledge-map.example.toml    synthetic example of the source map
+scripts/export-public.py      exports a snapshot without private history (requires gitleaks)
+.agents/skills/save-knowledge to save facts into the knowledge base
 ```
 
-## 3. Modelo de procesos
+## 3. Process model
 
 ```mermaid
 flowchart LR
-  GUI[Ventana Tauri] -- invoke --> D[control::dispatch<br/>mutex de operaciones]
-  CLI[pta] -- HTTP 127.0.0.1 + bearer de instancia --> IPC[/control/] --> D
-  D --> HOST[DesktopState: ajustes, OAuth, túnel, GitHub]
+  GUI[Tauri window] -- invoke --> D[control::dispatch<br/>operations mutex]
+  CLI[pta] -- HTTP 127.0.0.1 + instance bearer --> IPC[/control/] --> D
+  D --> HOST[DesktopState: settings, OAuth, tunnel, GitHub]
   HOST -- start --> RT[runtime::serve]
-  RT --> W[worker de jobs]
-  RT --> R[renovador de suscripciones 60 s]
-  RT --> P[polling chat personal 10 s]
-  RT --> L[listener público :bind<br/>/healthz /graph/notifications /graph/lifecycle]
-  T[cloudflared opcional] --> L
+  RT --> W[job worker]
+  RT --> R[subscription renewer 60 s]
+  RT --> P[personal chat polling 10 s]
+  RT --> L[public listener :bind<br/>/healthz /graph/notifications /graph/lifecycle]
+  T[optional cloudflared] --> L
   Graph[Microsoft Graph] --> T
 ```
 
-- **Host y shell.** `Host` = `DesktopState` (operaciones) + `Shell` (lo que puede hacer el proceso dueño: mostrar/ocultar ventana, abrir URL, salir). `gui::TauriShell` lo implementa con Tauri; `headless::HeadlessShell` responde `not_ready` a `app open/hide`, devuelve las URLs al llamador y termina el proceso con `app quit`. Ninguna operación depende de Tauri.
-- **Un host por perfil.** `control.lock` (flock) prueba propiedad; `control.json` publica puerto, token aleatorio y `wiki_support`. Un descriptor sin lock es obsoleto. Nunca se señaliza un proceso por PID.
-- **IPC.** `POST /control` en un puerto loopback efímero, bearer constante en tiempo, rechaza cualquier `Origin` (navegadores). Cuerpo máx. 1 MB, timeout de cliente 120 s (sin límite para `chat` y `test_providers`, que esperan al modelo).
-- **Despachador único.** GUI y CLI pasan por `control::dispatch`, que serializa con `operations` y verifica `revision` (SHA-256 de config + mapa + túnel) para escrituras basadas en un snapshot. Mientras hay un login Microsoft/GitHub pendiente solo se permiten lecturas.
-- **Actualización.** `cargo install` no ejecuta nada al terminar y reemplaza el archivo mientras el host anterior sigue corriendo. `control.json` publica `binary` (tamaño y fecha del ejecutable al arrancar; los hosts anteriores no lo tienen). Si el host que corre se lanzó desde la **misma ruta** instalada y su huella ya no coincide, está desactualizado (`control::outdated_host`): el primer `pta` (salvo `capabilities`, `skill` y `doctor --offline`) o la app nueva lo retiran (`retire_outdated_host`: lee si el asistente corría, envía `app_quit` —que detiene asistente y túnel— y espera a que libere el lock, 60 s). Si corría, `pta` pregunta en la terminal si dejarlo corriendo con la versión nueva (sin terminal, `--json` o `--non-interactive` conserva el estado); la GUI nueva muestra el aviso `restart_offer` (`start_assistant` o `dismiss_restart_offer`); el host sin interfaz pregunta si hay terminal o conserva el estado. `start`, `restart`, `stop` y `app quit` deciden el estado por sí mismos. Un host lanzado desde otra ruta (p. ej. una compilación de desarrollo) nunca se retira así.
-- **El CLI lanza el host** (`host_executable`: binario hermano o `host-path.txt`) con `--host` en su propio grupo de procesos y espera el descriptor. El host hereda el entorno de `pta` (credenciales `NAME`/`NAME_FILE`, `PTA_HEADLESS`).
-- **Servicio.** `runtime::serve` corre como tarea Tokio dentro del host. `app.rs::start` lo lanza, espera `ready` (60 s) y luego arranca `cloudflared` si corresponde. `stop` mata el túnel, envía `true` por el `watch` y espera 20 s antes de abortar. Cerrar el canal también cuenta como parada.
+- **Host and shell.** `Host` = `DesktopState` (operations) + `Shell` (what the owning process can do: show/hide the window, open a URL, quit). `gui::TauriShell` implements it with Tauri; `headless::HeadlessShell` answers `not_ready` to `app open/hide`, returns URLs to the caller and ends the process on `app quit`. No operation depends on Tauri.
+- **One host per profile.** `control.lock` (flock) proves ownership; `control.json` publishes port, random token and `wiki_support`. A descriptor without a lock is stale. A process is never signaled by PID.
+- **IPC.** `POST /control` on an ephemeral loopback port, constant-time bearer, rejects any `Origin` (browsers). Body at most 1 MB, client timeout 120 s (no limit for `chat` and `test_providers`, which wait for the model).
+- **Single dispatcher.** GUI and CLI go through `control::dispatch`, which serializes with `operations` and checks `revision` (SHA-256 of config + map + tunnel) for writes based on a snapshot. While a Microsoft/GitHub login is pending only reads are allowed.
+- **Update.** `cargo install` runs nothing when it finishes and replaces the file while the previous host keeps running. `control.json` publishes `binary` (size and date of the executable at start; older hosts do not have it). If the running host was started from the **same installed path** and its fingerprint no longer matches, it is outdated (`control::outdated_host`): the first `pta` (except `capabilities`, `skill` and `doctor --offline`) or the new app retires it (`retire_outdated_host`: reads whether the assistant was running, sends `app_quit` — which stops assistant and tunnel — and waits for the lock, 60 s). If it was running, `pta` asks on the terminal whether to keep it running with the new version (without a terminal, `--json` or `--non-interactive` keeps the state); the new GUI shows the `restart_offer` notice (`start_assistant` or `dismiss_restart_offer`); the headless host asks if there is a terminal or keeps the state. `start`, `restart`, `stop` and `app quit` decide the state themselves. A host started from another path (e.g. a development build) is never retired this way.
+- **The CLI starts the host** (`host_executable`: sibling binary or `host-path.txt`) with `--host` in its own process group and waits for the descriptor. The host inherits `pta`'s environment (`NAME`/`NAME_FILE` credentials, `PTA_HEADLESS`).
+- **Service.** `runtime::serve` runs as a Tokio task inside the host. `app.rs::start` launches it, waits for `ready` (60 s) and then starts `cloudflared` if needed. `stop` kills the tunnel, sends `true` on the `watch` and waits 20 s before aborting. Closing the channel also counts as a stop.
 
-### Host sin interfaz (Linux y servidores)
+### Headless host (Linux and servers)
 
 ```sh
-cargo install personal-teams-assistant --no-default-features --locked   # sin Tauri/WebKit
-personal-teams-assistant --headless --start                              # primer plano; `--start` inicia el servicio
+cargo install personal-teams-assistant --no-default-features --locked   # no Tauri/WebKit
+personal-teams-assistant --headless --start                              # foreground; `--start` starts the service
 ```
 
-- Sin la feature `gui` el binario siempre es headless; con ella, `--headless` o `PTA_HEADLESS=1` lo fuerzan. Mismo perfil, contrato y operaciones que la GUI; se opera solo con `pta`.
-- Corre en primer plano: `pta app quit`, SIGTERM o Ctrl-C detienen servicio y túnel antes de salir. Un segundo host sobre el mismo perfil sale con código 1. Logs a stderr (sin ANSI fuera de una terminal), aptos para journald.
-- `--start` intenta iniciar el servicio; si falla, el host sigue vivo para diagnosticar con `pta status/doctor/audit`.
-- Login Microsoft remoto: `pta auth microsoft login --no-browser` devuelve la URL; tras autorizar en cualquier dispositivo, el navegador no podrá abrir `http://localhost:PUERTO/?code=…`; esa URL se pega en `pta auth microsoft finish --redirect 'URL'` y el host la reenvía a su propio listener loopback (`forward_microsoft_redirect`: mismo puerto pendiente, se rechaza al instante si el callback no la acepta). Alternativa: migrar un perfil existente con `pta config import` más `STATE_ENCRYPTION_KEY`.
-- El servidor necesita igualmente una URL HTTPS estable hacia el listener (túnel Cloudflare con token) y no debe coexistir con otra instancia activa de la misma cuenta: duplicaría respuestas y provocaría bucles en el chat personal.
+- Without the `gui` feature the binary is always headless; with it, `--headless` or `PTA_HEADLESS=1` force it. Same profile, contract and operations as the GUI; operated only with `pta`.
+- It runs in the foreground: `pta app quit`, SIGTERM or Ctrl-C stop service and tunnel before exiting. A second host on the same profile exits with code 1. Logs go to stderr (no ANSI outside a terminal), fit for journald.
+- `--start` tries to start the service; if it fails, the host stays alive to diagnose with `pta status/doctor/audit`.
+- Remote Microsoft login: `pta auth microsoft login --no-browser` returns the URL; after authorizing on any device, the browser cannot open `http://localhost:PORT/?code=…`; that URL is pasted into `pta auth microsoft finish --redirect 'URL'` and the host forwards it to its own loopback listener (`forward_microsoft_redirect`: same pending port, rejected at once if the callback does not accept it). Alternative: migrate an existing profile with `pta config import` plus `STATE_ENCRYPTION_KEY`.
+- The server still needs a stable HTTPS URL to the listener (Cloudflare tunnel with a token) and must not coexist with another active instance of the same account: it would duplicate answers and cause loops in the personal chat.
 
-## 4. Perfil, datos y credenciales
+## 4. Profile, data and credentials
 
-**Esto es lo que mantiene la sesión del usuario: no cambiar nombres ni rutas.**
+**This is what keeps the user's session: do not change names or paths.**
 
-| Elemento | Ubicación |
+| Item | Location |
 | --- | --- |
-| Perfil (identificador Tauri `dev.personalteams.assistant`) | macOS `~/Library/Application Support/dev.personalteams.assistant/`; Windows `%APPDATA%\dev.personalteams.assistant\`; Linux `${XDG_CONFIG_HOME:-~/.config}/dev.personalteams.assistant/` |
-| Archivos del perfil | `config.toml`, `knowledge-map.toml`, `cloudflared-path.txt`, `control.json`, `control.lock`, `host-path.txt`, `settings-rollback.json` (journal transitorio), `skills/` |
-| Directorio de datos | `config.server.data_dir` (se conserva el importado; puede estar fuera del perfil). En un perfil nuevo: el del perfil en macOS/Windows, `${XDG_DATA_HOME:-~/.local/share}/dev.personalteams.assistant/` en Linux |
-| Datos | `assistant.db` (servicio), `desktop-chat.db` (chat local/simulación), `instance.lock`, `repositories/` (clones GitHub) |
-| Credenciales | Llavero macOS / Credential Manager, servicio `personal-teams-assistant.default`, cuenta = nombre de la credencial. Linux: archivos `<perfil>/credentials/default/NOMBRE` (0600, directorio 0700) |
+| Profile (Tauri identifier `dev.personalteams.assistant`) | macOS `~/Library/Application Support/dev.personalteams.assistant/`; Windows `%APPDATA%\dev.personalteams.assistant\`; Linux `${XDG_CONFIG_HOME:-~/.config}/dev.personalteams.assistant/` |
+| Profile files | `config.toml`, `knowledge-map.toml`, `cloudflared-path.txt`, `control.json`, `control.lock`, `host-path.txt`, `settings-rollback.json` (transient journal), `skills/` |
+| Data directory | `config.server.data_dir` (the imported one is kept; it may be outside the profile). In a new profile: the profile's own on macOS/Windows, `${XDG_DATA_HOME:-~/.local/share}/dev.personalteams.assistant/` on Linux |
+| Data | `assistant.db` (service), `desktop-chat.db` (local chat/simulation), `instance.lock`, `repositories/` (GitHub clones) |
+| Credentials | macOS Keychain / Credential Manager, service `personal-teams-assistant.default`, account = credential name. Linux: files `<profile>/credentials/default/NAME` (0600, directory 0700) |
 
-Resolución de un secreto (`security::secret`): `NAME_FILE` → variable `NAME` → almacén del sistema (Llavero/Credential Manager, o el almacén de archivos en Linux, configurado por `configure_credentials`). `secret_source` solo inspecciona metadatos (en macOS usa `/usr/bin/security find-generic-password` sin descifrar). Credenciales conocidas: `TYPESAFE_API_KEY`, `DEEPSEEK_API_KEY` (exigida al iniciar solo si DeepSeek está activo en `llm.chain`; si no, `credentials list` la muestra como `unused`), `GRAPH_WEBHOOK_SECRET` y `STATE_ENCRYPTION_KEY` (ambas se generan al primer arranque si faltan), `CLOUDFLARE_TUNNEL_TOKEN` (modo túnel con token), `GITHUB_OAUTH_TOKENS`, y las mapeadas en `[secrets]` (p. ej. `AZURE_DEVOPS_TOKEN`).
+Resolving a secret (`security::secret`): `NAME_FILE` → variable `NAME` → system store (Keychain/Credential Manager, or the file store on Linux, configured by `configure_credentials`). `secret_source` only inspects metadata (on macOS it uses `/usr/bin/security find-generic-password` without decrypting). Known credentials: `DEEPSEEK_API_KEY` (required at start only if DeepSeek is active in `llm.chain`; otherwise `credentials list` shows it as `unused`), `GRAPH_WEBHOOK_SECRET` and `STATE_ENCRYPTION_KEY` (both generated at the first start if missing), `CLOUDFLARE_TUNNEL_TOKEN` (tunnel mode with a token), `GITHUB_OAUTH_TOKENS`, and those mapped in `[secrets]` (e.g. `AZURE_DEVOPS_TOKEN`). `TYPESAFE_API_KEY` is retired (`app::RETIRED_CREDENTIALS`): nothing reads it, it cannot be set, and a stored one is listed as `retired` so it can be removed; it is never deleted automatically.
 
-Invariantes:
+Invariants:
 
-- `STATE_ENCRYPTION_KEY` (base64 de 32 bytes) cifra los tokens OAuth en `vault` con AES-256-GCM-SIV (AAD `teams-oauth-v1`). No se puede reemplazar ni borrar mientras exista `assistant.db`; importar una clave distinta se rechaza (`validate_state_key`).
-- Una base no se reutiliza con otro tenant/client/usuario (`protect_identity`).
-- Escrituras del perfil: archivo temporal 0600 + rename atómico; `commit_settings` escribe un journal y lo revierte si falla; el siguiente host recupera un journal pendiente.
-- Directorios 0700 / ACL de la cuenta en Windows.
-- En Linux el almacén de archivos guarda los valores en claro (protegidos solo por permisos), junto a la base cuyos tokens cifra `STATE_ENCRYPTION_KEY`. En un servidor, preferir credenciales de systemd o un gestor de secretos montado vía `NAME_FILE`.
+- `STATE_ENCRYPTION_KEY` (base64 of 32 bytes) encrypts the OAuth tokens in `vault` with AES-256-GCM-SIV (AAD `teams-oauth-v1`). It cannot be replaced or deleted while `assistant.db` exists; importing a different key is rejected (`validate_state_key`).
+- A database is never reused with another tenant/client/user (`protect_identity`).
+- Profile writes: temporary 0600 file + atomic rename; `commit_settings` writes a journal and rolls back on failure; the next host recovers a pending journal.
+- Directories 0700 / the account's ACL on Windows.
+- On Linux the file store keeps values in clear (protected only by permissions), next to the database whose tokens `STATE_ENCRYPTION_KEY` encrypts. On a server, prefer systemd credentials or a secret manager mounted through `NAME_FILE`.
 
-## 5. Configuración
+## 5. Configuration
 
-`Config` (`src/config.rs`) y `KnowledgeMap` (`src/knowledge.rs`) usan `deny_unknown_fields`. **No quitar ni renombrar campos**: perfiles existentes (y hosts antiguos que comparten el perfil) dejarían de cargar. Añadir campos solo con `#[serde(default)]`.
+`Config` (`src/config.rs`) and `KnowledgeMap` (`src/knowledge.rs`) use `deny_unknown_fields`. **Do not remove or rename fields**: existing profiles (and older hosts sharing the profile) would stop loading. Add fields only with `#[serde(default)]`. The single exception is the retired `[jev]` section of profiles written before 0.6.1: `Config::retired_reviewer` (`rename = "jev"`, `IgnoredAny`, `skip_serializing`) accepts it and drops it, so it disappears the next time the profile is saved. A host or CLI older than 0.6.1 requires that section and cannot load a profile saved by 0.6.1 or later.
 
-| Sección | Campos relevantes |
+| Section | Relevant fields |
 | --- | --- |
-| `server` | `bind` (debe ser loopback), `public_url` (origen HTTPS), `data_dir`, `cloudflare_tunnel` |
-| `graph` | `tenant_id`, `client_id`, `user_id` (UUID; nil hasta el login), `discover_all_chats` o `allowed_chats`, `self_chat {id,user_id,enabled_at}`, `channels` (heredado, debe estar vacío) |
-| `jev` | `model`, `final_threshold` (activo, 0.5–1). `follow_up_threshold`, `routing_threshold`, `evidence_threshold`: heredados, sin uso, se conservan por compatibilidad |
-| `llm` | `style`; `language` (`es` por defecto o `en`: idioma de todo lo que se envía a Teams, prevalece sobre el estilo); `chain`: lista ordenada `{provider, model, effort, enabled}` (`codex`, `claude`, `deepseek`; uno de cada uno, al menos uno activo). `provider`/`model` heredados: solo rigen con `chain` vacío (DeepSeek, esfuerzo `max`) |
-| `policy` | `dry_run`, `greeting`, `max_context_chars` (256–32000), `max_message_age_seconds` (30–3600), `sensitive_patterns`, `allowed_senders`; `max_answer_chars` y `max_detailed_answer_chars` se conservan por compatibilidad pero ya no se aplican |
-| `secrets` | `"secret://..." = "NOMBRE_CREDENCIAL"` (allowlist de referencias; nunca valores) |
+| `server` | `bind` (must be loopback), `public_url` (HTTPS origin), `data_dir`, `cloudflare_tunnel` |
+| `graph` | `tenant_id`, `client_id`, `user_id` (UUID; nil until login), `discover_all_chats` or `allowed_chats`, `self_chat {id,user_id,enabled_at}`, `channels` (legacy, must be empty) |
+| `llm` | `style`; `language` (`es` by default or `en`: the language of everything sent to Teams, overrides the style); `chain`: ordered list `{provider, model, effort, enabled}` (`codex`, `claude`, `deepseek`; one of each, at least one active). Legacy `provider`/`model`: apply only with an empty `chain` (DeepSeek, effort `max`) |
+| `policy` | `dry_run`, `greeting`, `max_context_chars` (256–32000), `max_message_age_seconds` (30–3600), `sensitive_patterns`, `allowed_senders`; `max_answer_chars` and `max_detailed_answer_chars` are kept for compatibility but no longer applied |
+| `secrets` | `"secret://..." = "CREDENTIAL_NAME"` (allowlist of references; never values) |
 
-`validate_teams_setup` (host) exige además URL pública real, IDs reales y cuenta conectada antes de iniciar Teams. El chat local no lo necesita.
+`validate_teams_setup` (host) also requires a real public URL, real IDs and a connected account before starting Teams. The local chat does not need them.
 
-## 6. Pipeline de un mensaje
+## 6. Message pipeline
 
-Entrada: webhook o polling → `Store.enqueue(resource)` → worker → `Pipeline::process` (`src/pipeline.rs`).
+Input: webhook or polling → `Store.enqueue(resource)` → worker → `Pipeline::process` (`src/pipeline.rs`).
 
 ```mermaid
 flowchart TD
-  N[POST /graph/notifications] --> V{clientState, tenant,<br/>suscripción propia y ruta}
+  N[POST /graph/notifications] --> V{clientState, tenant,<br/>own subscription and path}
   V -- no --> X403[403]
-  V -- sí --> Q[jobs: pending] --> F[Graph: leer mensaje y tipo de chat]
-  F --> E{eligible_in: directo, mención real,<br/>chat personal validado, edad, remitente}
+  V -- yes --> Q[jobs: pending] --> F[Graph: read message and chat type]
+  F --> E{eligible_in: direct, real mention,<br/>validated personal chat, age, sender}
   E -- no --> I[ignored]
-  E -- sí --> S{texto limpio tras redactar}
+  E -- yes --> S{clean text after redaction}
   S -- no --> I
-  S -- sí --> G{saludo exacto?}
-  G -- sí --> GR[respuesta determinista]
-  G -- no --> PR{pedido a la persona?<br/>llamada, reunión, disponibilidad}
-  PR -- sí, fuera del chat personal --> I
-  PR -- no --> QR{pregunta clara?}
-  QR -- no --> JI[Jev Intent: question/personal/greeting/statement]
-  JI -- statement, personal o baja confianza --> I
-  QR -- sí --> A[fuentes disponibles para conversación y remitente]
-  JI -- question --> A
-  A --> H[contexto: 10 mensajes previos<br/>con autor y fecha/hora]
-  H --> T[selección de UNA herramienta:<br/>wiki explícita/documental, actividad, única o LLM select_tool]
-  T --> R[leer archivos/URLs + herramienta,<br/>redactar, repartir max_context_chars]
-  R --> D[LLM generate_response: answer + detailed<br/>cadena Codex → Claude → DeepSeek]
-  D --> RS[Jev select_references, informativo<br/>+ entidades nombradas detectadas por código]
-  RS --> C[complete_answer: citas verificadas,<br/>páginas consultadas, URLs de la evidencia]
-  C -- ID/URL no verificable o dato sensible --> W[retenida; aviso en chat personal]
-  C --> FG[Jev Final: revisión informativa,<br/>se registra y no bloquea]
-  FG --> DR{dry_run?}
+  S -- yes --> G{exact greeting?}
+  G -- yes --> GR[deterministic answer]
+  G -- no --> PR{request for the person?<br/>call, meeting, availability}
+  PR -- yes, outside the personal chat --> I
+  PR -- no --> AR{unregistered work?<br/>activity_review_request}
+  AR -- yes --> REV
+  AR -- no --> QR{clear question?}
+  QR -- no --> MI[model: classify_intent<br/>question/activity_review/personal/greeting/statement]
+  MI -- statement, personal or low confidence --> I
+  MI -- activity_review --> REV
+  QR -- yes, about own work --> MQ[model: is it an activity review?]
+  MQ -- yes --> REV
+  QR -- yes --> A[sources available to conversation and sender]
+  MQ -- no --> A
+  MI -- question --> A
+  A --> H[context: 10 earlier messages<br/>with author and date/time]
+  H --> T[select ONE tool:<br/>explicit/documentary Wiki, activity, single or model select_tool]
+  REV[activity review: every authorized<br/>activity source at once] --> RE[Azure DevOps review + own Wiki edits<br/>+ own Teams messages, shared budget]
+  T --> R[read files/URLs + tool,<br/>redact, split max_context_chars]
+  R --> D[model generate_response: answer + detailed<br/>chain Codex → Claude → DeepSeek]
+  RE --> D
+  D --> RS[code links named entities;<br/>model select_references for the rest]
+  RS --> C[complete_answer: verified citations,<br/>consulted pages, evidence URLs]
+  C -- unverifiable ID/URL or sensitive data --> W[withheld; notice in the personal chat]
+  C --> DR{dry_run?}
   GR --> DR
-  DR -- sí --> DRY[dry_run]
-  DR -- no --> RR[releer: texto igual y aún elegible]
+  DR -- yes --> DRY[dry_run]
+  DR -- no --> RR[re-read: same text and still eligible]
   RR --> SND[sending → POST Graph → sent / uncertain]
 ```
 
-Detalles que importan al modificar:
+Details that matter when changing it:
 
-1. **Elegibilidad** (`teams::IncomingMessage::eligible_in`): mensaje de usuario no borrado, no propio (salvo chat personal validado y posterior a `enabled_at`), ≤16 000 bytes, dentro de `max_message_age_seconds`, `allowed_senders` global, y en grupos solo con mención real por ID de Graph (nunca por texto `@nombre`).
-2. **Intención.** Saludo exacto (`teams::greeting`) → saludo configurado. Pedido a la persona (`personal_request`: llamarla, reunirse, revisar algo en conjunto o su disponibilidad, p. ej. «te puedo llamar», «necesito llamarte», «revisemos…», «¿tienes un minuto?») → sin respuesta (`personal_request`), aunque lleve `?`. Pregunta clara (`question_request`: `?`/`¿` o prefijos interrogativos; «necesito que…» y «cuando puedas…» no cuentan porque piden a alguien que actúe) → recuperación. Lo ambiguo va a Jev `Stage::Intent` (`question`, `personal`, `greeting`, `statement`; sin catálogo de fuentes; confianza ≥0.5) y solo si hay alguna fuente autorizada; solo `question` y `greeting` se responden. En el chat personal quien pide es el propio usuario: ahí no se aplica el filtro de pedidos a la persona y `personal` se trata como pregunta.
-3. **Contexto y seguimientos.** `MessageAdapter::history` lee los `HISTORY_MESSAGES` (10) mensajes anteriores de la misma conversación (Graph: página reciente de `chats/{id}/messages` por `createdDateTime desc`; excluye borrados, eventos de sistema y los posteriores al actual). Cada uno lleva autor (`yo`, `asistente` si es una salida registrada de la app, o el nombre visible) y fecha/hora local; se redacta, se acota a 6000 caracteres (se conservan los más recientes) y termina con la hora de la solicitud actual. Se entrega como `conversation_history` a `standalone_request` y a `generate_response`: sirve para interpretar la solicitud, nunca como evidencia. Si Graph falla, se sigue sin historial (`conversation_history_unavailable`). Además, `conversation_context` guarda el último intercambio por conversación (caduca a los 30 min): la pregunta ya resuelta y la respuesta **sin** la sección de fuentes (las URLs copiadas fallarían la verificación). «dame más detalles» y equivalentes reutilizan esa pregunta como consulta de herramienta. Con otro mensaje, alguna herramienta autorizada y contexto (historial o último intercambio), `LlmProvider::standalone_request` reescribe la solicitud de forma autónoma (`question`) y extrae el tema a buscar (`topic`), p. ej. «¿cómo se invoca si quiero pagar 2 servicios?» → tema «Crear SPS». `question` decide la herramienta, elige pasajes y se guarda como pregunta del contexto; `topic` es la consulta de Search de la Wiki. Ambos se validan (longitud, sin control, `Redactor::clean`); si el proveedor falla o no aplica, se usa la solicitud literal. Solo da forma a la consulta dentro de fuentes ya autorizadas por código. El contexto anterior se pasa como referencia, nunca como evidencia; la solicitud actual manda.
-4. **Fuentes.** `KnowledgeMap::available` exige `enabled`, `external_processing`, conversación exacta o `*`, y `allowed_senders` de la fuente. En simulación local se seleccionan IDs explícitos (siguen exigiendo `enabled` y `external_processing`) sin ampliar audiencias Teams. Todos los archivos/URLs autorizados se leen; las herramientas se limitan a **una por mensaje**:
-   - pregunta con «wiki» o documental (`documentation_question`) → la Wiki si hay una sola;
-   - pregunta de actividad (`status_question`) → `azure-devops-status` (ID fijo);
-   - Wiki única y solo herramientas Wiki/actividad → Wiki;
-   - una sola candidata → esa; varias → `LlmProvider::select_tool` con IDs cerrados (fallo = ninguna).
-5. **Evidencia.** Redacción antes de recortar. Presupuesto `max_context_chars / nº fuentes`. Wiki y Azure devuelven JSON tipado (`ado::wiki::WikiResult`, `evidence::Evidence`) con un registro de referencias (ID, URL verificada, autoría) y mensajes Teams con autor; el resto se recorta con `knowledge::excerpt`.
-6. **Generación.** `LlmProvider::generate_response` devuelve JSON `{answer, detailed}`; el modelo elige el modo. `answer` es Markdown acotado (frase inicial directa, **negritas**, listas `-`/`1.`, `código`, bloques ```json), sin sección de fuentes ni enlaces a páginas Wiki. Una URL o endpoint solo se escribe si aparece literalmente en la evidencia (p. ej. la dirección de un ambiente documentada en la Wiki); si no está, el modelo lo dice y en ejemplos usa marcadores (`<URL_BASE>`, `<RUT_TRAMITADOR>`) para no chocar con la verificación de URLs ni con el `Redactor`. Sin límite de caracteres: solo se exige que el HTML quepa en un mensaje de Teams (27 800 bytes). Sin herramientas autónomas.
+1. **Eligibility** (`teams::IncomingMessage::eligible_in`): a user message, not deleted, not own (except a validated personal chat after `enabled_at`), ≤16,000 bytes, within `max_message_age_seconds`, the global `allowed_senders`, and in groups only with a real mention by Graph ID (never by `@name` text).
+2. **Intent.** An exact greeting (`teams::greeting`, Spanish and English) → the configured greeting. A request for the person (`personal_request`: calling them, meeting, reviewing something together or their availability, e.g. «te puedo llamar», «¿tienes un minuto?», "can we talk?", "let's meet") → no answer (`personal_request`), even with `?`. Unregistered work (`activity_review_request`: «no están registrados», «sin tarea», «sin HU», "not logged", "untracked"…) → activity review. A clear question (`question_request`: `?`/`¿` or interrogative prefixes in Spanish or English; «necesito que…», «cuando puedas…», "please…" do not count because they ask someone to act) → retrieval; if it mentions the user's own work (`work_mention`), is not a status or documentation question and some source can review activity, `LlmProvider::classify_intent` decides whether it is an activity review (a failure keeps it a question). Anything else goes to `classify_intent` (`question`, `activity_review`, `personal`, `greeting`, `statement`; no source catalog; confidence ≥0.5) and only if some source is authorized; `question`, `activity_review` and `greeting` are answered. In the personal chat the user is the one asking: the request-for-the-person filter does not apply there and `personal` is treated as a question. The intent is recorded in `audit.intent`.
+3. **Context and follow-ups.** `MessageAdapter::history` reads the `HISTORY_MESSAGES` (10) earlier messages of the same conversation (Graph: recent page of `chats/{id}/messages` by `createdDateTime desc`; excludes deleted messages, system events and those after the current one), once per message. Each carries its author (`me`, `assistant` if it is a recorded output of the app, or the display name) and local date/time; it is redacted, bounded to 6000 characters (the most recent are kept) and ends with the time of the current request. It goes as `conversation_history` to `classify_intent`, `standalone_request` and `generate_response`: it helps interpret the request, never as evidence. If Graph fails, it continues without history (`conversation_history_unavailable`). Besides, `conversation_context` keeps the last exchange per conversation (expires after 30 min): the resolved question and the answer **without** the sources section (copied URLs would fail verification). «dame más detalles», "tell me more" and equivalents reuse that question as the tool query. With another message, some authorized tool and context (history or last exchange), `LlmProvider::standalone_request` rewrites the request as a standalone one (`question`) and extracts the topic to search (`topic`), e.g. «¿cómo se invoca si quiero pagar 2 servicios?» → topic «Crear SPS». `question` decides the tool, picks passages and is saved as the context question; `topic` is the Wiki Search query. Both are validated (length, no control characters, `Redactor::clean`); if the provider fails or does not apply, the literal request is used. It only shapes the query inside sources already authorized by code. Earlier context goes as reference, never as evidence; the current request wins. Activity reviews skip the rewrite.
+4. **Sources.** `KnowledgeMap::available` requires `enabled`, `external_processing`, an exact conversation or `*`, and the source's `allowed_senders`. In a local simulation explicit IDs are selected (still requiring `enabled` and `external_processing`) without widening Teams audiences. Every authorized file/URL is read; a normal answer reads **one tool**:
+   - a question with «wiki» or a documentary one (`documentation_question`) → the Wiki if there is only one;
+   - an activity question (`status_question`) → `azure-devops-status` (fixed ID);
+   - a single Wiki and only Wiki/activity/Teams-message tools → Wiki;
+   - a single candidate → that one; several → `LlmProvider::select_tool` with closed IDs (failure = none).
+   **Activity reviews** read every authorized source whose `ToolSpec::reviews_activity()` (Azure DevOps activity, Wiki, own Teams messages) at once and concurrently, and no file or URL source (`Pipeline::review_evidence`). Each tool's `ReadOnlyTool::review(spec, days)` returns `Evidence`; a source that fails is reported as unread in the evidence and the trace, and coverage becomes partial. The context budget goes first to the shorter sources and the rest share what is left (`shares`), cutting at line boundaries. Without any such source, a review is answered as a question.
+5. **Evidence.** Redaction before trimming. Budget `max_context_chars / number of sources` for normal answers. The Wiki and Azure DevOps return typed JSON (`ado::wiki::WikiResult`, `evidence::Evidence`) with a reference registry (ID, verified URL, authorship) and Teams messages with their author; the rest is trimmed with `knowledge::excerpt`.
+6. **Activity review** (`ado::review`, `ado::wiki::Reader::own_edits`, `Graph::own_messages`). The window is `ado::recent_window` (two weeks unless the request names today, yesterday, this week, this month or «últimos N días»/"last N days"; at most 31) and the evidence states it.
+   - **Azure DevOps** per project, read-only and bounded: the user's work items in the window (assigned to, created or last changed by them) with their links (`ArtifactLink` to commits, pull requests and builds); the user's own commits per repository (cache 10 min; a repository the account cannot read answers 404 and is not a gap); pull requests they created (with their commits and linked work items); pipeline runs they queued (with the run's work items); releases they created and approvals they gave. Activity is **registered** when a work item links it, it names a work item (`#123`, `AB#123`, «HU 123», «Bug 123», a branch named after one of the user's items) or it belongs to registered work (a commit of a registered pull request, a run of a registered commit, a release of a registered run); the rest are **candidates**. Merge commits and commits of the user's pull requests are folded into them. Work items mentioned but not the user's own are read from Azure DevOps and named only if they exist in the catalog's scope; the rest show as "could not be verified", so no unverifiable number reaches the model.
+   - **Wiki**: for each wiki in scope, the user's own commits in the window, their changed `.md` pages mapped through the page tree to verified page links (`created_by_me` when the commit adds only that page); a page whose change or title names a work item counts as registered, with the same verification.
+   - **Teams** (`ToolSpec::TeamsMessages`, a source of its own, born disabled): the user's own messages in the window, from up to 30 chats with recent messages that the profile may read (`Graph::allowed_collection`), leaving the personal chat out; each with its chat (topic or other participants) and, when Graph returns one, its Teams link as a `teams_message` reference. Read with `Chat.Read` (already granted); no new scope.
+   - The generation prompt for a review states that verified authorship proves the user's own action (first person, no «requires your confirmation»), asks for the period first, then candidates grouped by project or topic with date, identifiers and a proposed task title, then a short summary of registered work, and forbids asking which system or period to use or inventing activity.
+7. **Generation.** `LlmProvider::generate_response` returns JSON `{answer, detailed}`; the model chooses the mode. `answer` is bounded Markdown (a direct first sentence, **bold**, `-`/`1.` lists, `code`, ```json blocks), without a sources section or links to Wiki pages. A URL or endpoint is written only if it appears literally in the evidence (e.g. an environment address documented in the Wiki); otherwise the model says so and uses placeholders in examples (`<BASE_URL>`) so it does not trip the URL check or the `Redactor`. No character limit: only that the HTML fits in a Teams message (27,800 bytes). No autonomous tools.
 
-   **Proveedores y respaldo** (`src/llm.rs`). Los prompts y contratos viven en `Model` y son idénticos para todos; cada transporte implementa `Backend::complete_json(system, user, schema)`. `llm::from_config` construye una `Chain` con los proveedores activos de `llm.chain` en orden. **Cada llamada** (`standalone_request`, `select_tool`, `generate_response`) empieza por el primero y pasa al siguiente solo si falla; la siguiente llamada vuelve a empezar por el primero, así que el predeterminado retoma en cuanto recupera su uso. Los fallos llevan solo una clase (`usage_limit`, `not_installed`, `failed`; `llm::Unavailable`), nunca texto del proveedor, y se registran como `llm_provider_unavailable`/`llm_fallback_used`. `audit.provider` guarda `proveedor:modelo:esfuerzo` del que redactó. Respaldar es seguro porque solo repite una llamada al modelo; ningún envío a Graph se reintenta.
+   **Providers and fallback** (`src/llm.rs`). Prompts and contracts live in `Model` and are the same for every provider; each transport implements `Backend::complete_json(system, user, schema)`. `llm::from_config` builds a `Chain` with the active providers of `llm.chain` in order. **Every call** (`classify_intent`, `standalone_request`, `select_tool`, `generate_response`, `select_references`) starts with the first and moves to the next only if it fails; the next call starts with the first again, so the default resumes as soon as it gets its quota back. Failures carry only a class (`usage_limit`, `not_installed`, `invalid_answer` — the reply broke the JSON contract —, `failed`; `llm::Unavailable`), never provider text, and are logged as `llm_provider_unavailable`/`llm_fallback_used`. `audit.provider` stores `provider:model:effort` of the one that wrote. Falling back is safe because it only repeats a model call; no Graph send is ever retried.
 
-   - **DeepSeek** (`llm/deepseek.rs`): HTTP directo a `/chat/completions` (sin SDK), modo JSON, `reasoning_effort` configurado (`none` desactiva `thinking`), sin `max_tokens` ni temperatura y **sin plazo** (solo se acotan la conexión, 30 s, y keepalive TCP). 402/429 = `usage_limit`. Solo se usa `content`; `reasoning_content` se descarta y nunca se registra.
-   - **Codex y Claude Code** (`llm/agent.rs`): la CLI instalada con **su propia sesión** (la app no guarda credenciales de OpenAI/Anthropic). Se localiza en `PATH` o en ubicaciones habituales (`~/.local/bin`, Homebrew…), porque una GUI abierta desde Finder tiene un PATH mínimo; se buscan en cada llamada, así que instalar una CLI no requiere reiniciar. Cada llamada corre en un directorio temporal privado y vacío, con entorno mínimo (`HOME`, `USER`, locale, proxy, `CODEX_HOME`/`CLAUDE_CONFIG_DIR`; **nunca** `NAME`/`NAME_FILE` del host), la solicitud y la evidencia por **stdin** (no en argv) y el esquema JSON del contrato. Codex: `codex exec --ephemeral --ignore-user-config --ignore-rules --sandbox read-only --json --output-schema`, instrucciones como `developer_instructions` y `-c features.X=false` para shell, exec/código, apps, plugins, navegador, computer use, subagentes, skills, memorias, hooks y búsqueda web (la forma `-c` tolera versiones que no conocen una feature); se usa el último `agent_message` de un turno `turn.completed`. Claude: `claude -p --output-format json --tools "" --safe-mode --strict-mcp-config --no-session-persistence --system-prompt --json-schema`; se usa `structured_output`, y `is_error` con HTTP 402/429 o texto de créditos/límite = `usage_limit`. Plazo de 20 min por llamada (las CLI reintentan por su cuenta); al vencer se mata el proceso y responde el siguiente.
-   - **Catálogo** (`llm::catalog`, IPC `llm_providers`, `pta llm providers`): CLI detectadas y su versión; modelos de Codex desde `codex debug models` (visibles, sin el esfuerzo `ultra`, que delega en subagentes); Claude y DeepSeek con lista fija. Esfuerzos validados en `llm::efforts`; IDs de modelo con alfabeto cerrado y sin guion inicial porque llegan a argv.
+   - **DeepSeek** (`llm/deepseek.rs`): direct HTTP to `/chat/completions` (no SDK), JSON mode, the configured `reasoning_effort` (`none` turns `thinking` off), no `max_tokens` or temperature and **no deadline** (only the connection, 30 s, and TCP keepalive are bounded). 402/429 = `usage_limit`. Only `content` is used; `reasoning_content` is discarded and never logged.
+   - **Codex and Claude Code** (`llm/agent.rs`): the installed CLI with **its own login** (the app stores no OpenAI/Anthropic credentials). Found in `PATH` or the usual locations (`~/.local/bin`, Homebrew…), because a GUI opened from Finder has a minimal PATH; they are looked up on every call, so installing a CLI needs no restart. Each call runs in an empty private temporary directory, with a minimal environment (`HOME`, `USER`, locale, proxy, `CODEX_HOME`/`CLAUDE_CONFIG_DIR`; **never** the host's `NAME`/`NAME_FILE`), the request and evidence on **stdin** (not argv) and the contract's JSON schema. Codex: `codex exec --ephemeral --ignore-user-config --ignore-rules --sandbox read-only --json --output-schema`, instructions as `developer_instructions` and `-c features.X=false` for shell, exec/code, apps, plugins, browser, computer use, sub-agents, skills, memories, hooks and web search (the `-c` form tolerates versions that do not know a feature); the last `agent_message` of a `turn.completed` turn is used. Claude: `claude -p --output-format json --tools "" --safe-mode --strict-mcp-config --no-session-persistence --system-prompt --json-schema`; `structured_output` is used, and `is_error` with HTTP 402/429 or credit/limit text = `usage_limit`. 20-minute deadline per call (the CLIs retry on their own); when it expires the process is killed and the next provider answers.
+   - **Catalog** (`llm::catalog`, IPC `llm_providers`, `pta llm providers`): detected CLIs and their version; Codex models from `codex debug models` (visible, without the `ultra` effort, which delegates to sub-agents); Claude and DeepSeek from a fixed list. Efforts validated in `llm::efforts`; model IDs with a closed alphabet and no leading dash because they reach argv.
 
-   **Aviso de espera** (`Pipeline::awaiting_model`): si a los 5 min de empezar a procesar un mensaje de Teams el modelo sigue trabajando, se envía una vez el texto fijo `holding_reply` («Déjame revisarlo.» o «Let me look into it.», según `llm.language`) y se sigue esperando la respuesta. `audit.holding_reply` registra `sending` antes del POST y luego `sent` o `uncertain`; un reintento del job con ese campo nunca vuelve a enviarlo, y un fallo no se reintenta. No aplica a `dry_run` ni a simulaciones (`pta chat`). En el chat personal lleva la misma marca de salida, así que no se procesa como pregunta.
-7. **Referencias.** Si hay registro, Jev sugiere por entrada (`source_i`) qué referencias usa el texto (`audit.reference_selection = jev`); si falla, no bloquea (`code`). A esa selección el código suma las entidades no Wiki que ve nombradas en el texto (`evidence::named_references`: alias o `#id`). `evidence::complete_answer` añade al final, en el idioma de `llm.language`, `**Fuentes**` (`**Sources**`) con una viñeta por referencia (`[título de la página](url): wiki del proyecto P; atribución`); si ninguna página Wiki quedó seleccionada, lista todas las consultadas bajo `**Páginas consultadas**` (`**Pages consulted**`), de modo que una respuesta basada en la Wiki siempre enlaza sus páginas. Las URLs del cuerpo deben ser referencias verificadas o aparecer literalmente en la evidencia. Siguen reteniendo la respuesta (en código): un ID inventado, una entidad concreta sin referencia verificada o una URL nueva (`invalid_references: …`), y los datos sensibles o el tamaño (`unsafe_proposal`/`unsafe_answer`). La propuesta retenida queda en `audit.proposed`.
-8. **Revisión final de Jev (informativa).** Jev `Stage::Final` con varias comprobaciones `noul` (confianza = mínimo) se registra en `audit.final_check` (`allow 0.91`, `ignore 0.40` o `unavailable`) y en el registro de pasos, pero **no impide el envío**, tampoco si Jev falla. `final_threshold` solo decide si el registro la marca como aprobada o con observaciones. Cuando solo hay Wiki (sin Teams) se omite `attribution` porque la atribución la construye el código.
+   **Holding notice** (`Pipeline::awaiting_model`): if the model is still working 5 minutes after processing of a Teams message started, the fixed text `holding_reply` («Déjame revisarlo.» or «Let me look into it.», per `llm.language`) is sent once and the answer is still awaited. `audit.holding_reply` records `sending` before the POST and then `sent` or `uncertain`; a retried job with that field never sends it again, and a failure is not retried. It does not apply to `dry_run` or simulations (`pta chat`), nor to intent classification (the message may not need an answer). In the personal chat it carries the same output marker, so it is not processed as a question.
+8. **References.** Code first links the non-Wiki entities it sees named in the text (`evidence::named_references`: alias or `#id`); `LlmProvider::select_references` then picks, among the remaining references, the ones the text uses. The model sees short closed keys (`r1`, `r2`…) with kind, label, project and authority — never IDs or URLs — and any key outside the list is an `invalid_answer` (the next provider answers). `audit.reference_selection` is `llm`, or `code` when no model could choose (or nothing was left to choose). `evidence::complete_answer` appends, in the language of `llm.language`, `**Fuentes**` (`**Sources**`) with one bullet per reference (`[page title](url): wiki of project P; attribution`); if no Wiki page was selected, it lists every consulted one under `**Páginas consultadas**` (`**Pages consulted**`), so a Wiki-based answer always links its pages. URLs in the body must be verified references or appear literally in the evidence. Code still withholds the answer for: an invented ID, a concrete entity without a verified reference or a new URL (`invalid_references: …`), and sensitive data or size (`unsafe_proposal`/`unsafe_answer`). The withheld proposal stays in `audit.proposed`. `teams_message` references accept only `https://teams.microsoft.com/l/message/…` links; every other reference must be a `dev.azure.com` URL inside its organization and project.
 
-   **Respuesta retenida** (`Pipeline::withhold`): en el chat personal, fuera de `dry_run` y simulaciones, se envía una vez un texto fijo en el idioma de `llm.language` («No envié la respuesta a tu mensaje: <causa>…» / «I didn't send the reply to your message: …») sin el contenido retenido. `audit.withheld_notice` registra `sending` antes del POST y luego `sent`/`uncertain`; un reintento nunca lo repite. En chats con otras personas no se avisa.
+   **Withheld answer** (`Pipeline::withhold`): in the personal chat, outside `dry_run` and simulations, a fixed text in the language of `llm.language` («No envié la respuesta a tu mensaje: <cause>…» / «I didn't send the reply to your message: …») is sent once, without the withheld content. `audit.withheld_notice` records `sending` before the POST and then `sent`/`uncertain`; a retry never repeats it. In chats with other people there is no notice.
 
-   **Registro de cada mensaje.** `Audit` guarda, además, el texto redactado del mensaje elegible (`question`; nunca el de mensajes no elegibles), la solicitud interpretada y el tema buscado, el tipo de conversación, la hora del mensaje, el número de mensajes de contexto, el proveedor y los que fallaron antes (`provider_fallbacks`), y `trace`: pasos con hora y una explicación que no incluye contenido del mensaje. `Store::inspect` devuelve `created_at` y, sin `content`, omite `question`, `resolved_question`, `topic`, `proposed` y `sent`.
-9. **Envío.** `teams::html` convierte el Markdown en HTML de Teams (texto escapado; solo enlaces `https` como `<a>`, bloques como `<codeblock>`); todos los chats se envían con `contentType: html` y el chat personal añade su marca de salida. `valid_answer` exige además que el HTML quepa en el límite de Graph (27 800 bytes) antes de `sending`. Releer el mensaje: texto igual y aún elegible, con la antigüedad medida al **empezar** a procesar (`max_message_age_seconds` + tiempo de proceso; sin límite si ya salió el aviso de espera); persistir `sending` con `synchronous=FULL` antes del POST; nunca reintentar un envío. Fallo o reinicio durante el envío = `uncertain` (revisión manual).
+   **The record of each message.** `Audit` also keeps the redacted text of the eligible message (`question`; never for ineligible ones), the interpreted request and the topic searched, the intent, the conversation type, the message time, the number of context messages, the provider and those that failed first (`provider_fallbacks`), and `trace`: timed steps with an explanation that never includes message content (step names in English; audits before 0.6.1 have Spanish ones). `Store::inspect` returns `created_at` and, without `content`, omits `question`, `resolved_question`, `topic`, `proposed` and `sent`. `final_check` exists only in audits written before 0.6.1.
+9. **Send.** `teams::html` turns the Markdown into Teams HTML (escaped text; only `https` links as `<a>`, blocks as `<codeblock>`); every chat is sent with `contentType: html` and the personal chat adds its output marker. `valid_answer` also requires the HTML to fit Graph's limit (27,800 bytes) before `sending`. Re-read the message: same text and still eligible, with the age measured when processing **started** (`max_message_age_seconds` + processing time; no limit once the holding notice went out); persist `sending` with `synchronous=FULL` before the POST; never retry a send. A failure or restart during the send = `uncertain` (manual review).
 
-Estados de `jobs`: `pending → processing → ignored | dry_run | failed | sending → sent | uncertain`. Lecturas/proveedores fallidos reintentan con backoff 2^n s hasta 5 intentos. Al abrir la base, `processing` vuelve a `pending` y `sending` pasa a `uncertain`. La auditoría (`jobs.audit`, JSON redactado) guarda motivo, fuentes, herramientas, confianzas, referencias y propuesta; `pta audit` la consulta.
+`jobs` states: `pending → processing → ignored | dry_run | failed | sending → sent | uncertain`. Failed reads/providers retry with backoff 2^n s up to 5 attempts. When the database opens, `processing` goes back to `pending` and `sending` becomes `uncertain`. The audit (`jobs.audit`, redacted JSON) keeps reason, sources, tools, confidences, references and proposal; `pta audit` reads it.
 
-Motivos frecuentes: `ineligible_message`, `sensitive_question`, `no_authorized_resource`, `informational_message`, `personal_request`, `deterministic_greeting`, `unsafe_proposal`, `invalid_references: …`, `supported_answer`, `message_changed`, `send_result_unknown_manual_review`. `reference_selection_failed` y `final_gate` solo aparecen en auditorías anteriores a que Jev dejara de bloquear.
+Frequent reasons: `ineligible_message`, `sensitive_question`, `no_authorized_resource`, `informational_message`, `personal_request`, `deterministic_greeting`, `unsafe_proposal`, `invalid_references: …`, `supported_answer`, `message_changed`, `send_result_unknown_manual_review`. `reference_selection_failed` and `final_gate` appear only in audits from before external reviews stopped withholding answers.
 
-## 7. Microsoft Graph y Entra
+## 7. Microsoft Graph and Entra
 
-- **OAuth** (`adapters/oauth.rs`): cliente público, navegador del sistema, PKCE S256, redirect `http://localhost:<puerto>/` servido por el host durante el login (600 s). Scopes fijos `offline_access User.Read Chat.Read ChatMessage.Send` (`Config::scopes`). Se verifica `/me` contra `graph.user_id` antes de guardar tokens. El refresh se serializa y cada token rotado se persiste cifrado antes de usarse.
-- **Registro Entra:** plataforma *Mobile and desktop* con `http://localhost`, cuentas multi-organización, solo permisos delegados. No añadir scopes: cambiaría el consentimiento ya concedido.
-- **Suscripciones** (`Graph::reconcile_subscriptions`, cada 60 s): `discover_all_chats` → un recurso `users/{id}/chats/getAllMessages`; si no, `chats/{id}/messages` por chat de `allowed_chats`; más el chat personal. Duración 50 min, renovación con <10 min. Se recuperan suscripciones propias por callback exacto y `applicationId` (Graph oculta `clientState`). Lifecycle: `subscriptionRemoved`, `reauthorizationRequired`, `missed` (encola recuperación de la página reciente).
-- **Webhook** (`adapters/webhook.rs`): valida todo el lote antes de encolar (clientState en tiempo constante, tenant, suscripción persistida, colección permitida, ruta canónica `chats/{id}/messages/{id}`). No sigue URLs de la notificación. Responde 202.
-- **Chat personal**: `48:notes` (notas) o un oneOnOne cuyo único miembro es el usuario; validado por `validate_self_chat`. Recepción por webhook + polling de 50 mensajes cada 10 s. Cada salida lleva un enlace `https://personalteams.invalid/output/{nonce}` registrado en `outputs` antes de enviar, para reconocer ecos y envíos ambiguos tras reinicio. Una salida sin ID pausa el chat personal hasta `pta self-chat reconcile`.
+- **OAuth** (`adapters/oauth.rs`): public client, system browser, PKCE S256, redirect `http://localhost:<port>/` served by the host during login (600 s). Fixed scopes `offline_access User.Read Chat.Read ChatMessage.Send` (`Config::scopes`). `/me` is checked against `graph.user_id` before storing tokens. Refresh is serialized and each rotated token is persisted encrypted before use.
+- **Entra registration:** *Mobile and desktop* platform with `http://localhost`, multi-organization accounts, delegated permissions only. Do not add scopes: it would change the consent already granted.
+- **Subscriptions** (`Graph::reconcile_subscriptions`, every 60 s): `discover_all_chats` → one `users/{id}/chats/getAllMessages` resource; otherwise `chats/{id}/messages` per chat in `allowed_chats`; plus the personal chat. 50-minute duration, renewed with <10 min left. Own subscriptions are recovered by exact callback and `applicationId` (Graph hides `clientState`). Lifecycle: `subscriptionRemoved`, `reauthorizationRequired`, `missed` (queues recovery of the recent page).
+- **Webhook** (`adapters/webhook.rs`): validates the whole batch before queuing (constant-time clientState, tenant, persisted subscription, allowed collection, canonical path `chats/{id}/messages/{id}`). Never follows URLs from the notification. Answers 202.
+- **Personal chat**: `48:notes` (notes) or a oneOnOne whose only member is the user; validated by `validate_self_chat`. Received by webhook + polling of 50 messages every 10 s. Each output carries a `https://personalteams.invalid/output/{nonce}` link registered in `outputs` before sending, to recognize echoes and ambiguous sends after a restart. An output without an ID pauses the personal chat until `pta self-chat reconcile`.
+- **Own messages** (`Graph::own_messages`, activity reviews only): `me/chats` with the last message preview, then each readable chat's recent messages; only the user's own, non-deleted, in the window, never the personal chat or app outputs.
 
-## 8. Conocimiento y herramientas
+## 8. Knowledge and tools
 
-`KnowledgeMap` = `repositories` (alias → checkout Git local) + `resources` (máx. 250). Cada recurso: `id`, `description`, `topics`, `enabled`, `external_processing`, `allowed_conversations`, `allowed_senders` y un acceso:
+`KnowledgeMap` = `repositories` (alias → local Git checkout) + `resources` (at most 250). Each resource: `id`, `description`, `topics`, `enabled`, `external_processing`, `allowed_conversations`, `allowed_senders` and an access:
 
-| `kind` | Reglas |
+| `kind` | Rules |
 | --- | --- |
-| `file` | Ruta relativa dentro de un checkout declarado, sin `..` ni symlinks que escapen; Markdown/TXT/JSON/TOML/YAML; ≤1 MB. |
-| `url` | HTTPS exacta, puerto 443, sin credenciales; DNS resuelto y fijado, IP privadas rechazadas, sin redirects. |
-| `tool` | `ToolSpec` (`src/tools.rs`), siempre de solo lectura y con `secret_ref` allowlisteado en `[secrets]`. |
+| `file` | Relative path inside a declared checkout, without `..` or escaping symlinks; Markdown/TXT/JSON/TOML/YAML; ≤1 MB. |
+| `url` | Exact HTTPS URL, port 443, no credentials; DNS resolved and pinned, private IPs rejected, no redirects. |
+| `tool` | `ToolSpec` (`src/tools.rs`), always read-only; a `secret_ref` when it has one must be allowlisted in `[secrets]`. |
 
-| `ToolSpec` (`type`) | Nombre en auditoría | Qué hace | Timeout |
+| `ToolSpec` (`type`) | Name in the audit | What it does | Timeout |
 | --- | --- | --- | --- |
-| `azure_devops_status` | `get_azure_devops_status` | Actividad reciente (7/14 días): work items, commits propios, pipelines/stages, releases, contexto Teams pertinente. Catálogo TOML (`organization`, `projects`, `author_email`) en el repo de conocimiento; índice de repos en `activity_cache` (activos 5 min, inactivos 6 h). | 180 s |
-| `azure_devops_wiki` | `search_azure_devops_wiki` | Search nativo + Pages + autoría por Git (`created_by_me`/`edited_by_me`/`other`/`unknown`). `wiki_ids`, `author_mode` (`prefer_mine`, `mine_only`, `all`). Límites: Search 25 por página/100 candidatos, 10 historiales, 4 páginas de contexto, 1 MB, 8 s por petición, 30 s total. Requiere PAT con `vso.wiki` (+ `vso.code` para autoría). | 32 s |
-| `azure_devops` | `get_work_item` | Un work item por `id: N`. | 5 s |
-| `sql_server` | `get_payment_status` … | Tres consultas parametrizadas fijas sobre vistas `assistant_readonly.*`; sin SQL dinámico; TLS verificado. | 5 s |
-| `rabbitmq` | `get_queue_status` | Metadatos de una cola (`/api/queues/...`). | 5 s |
-| `http` | `http_get` | GET a URL fija, bearer opcional, ≤64 KB. | 5 s |
+| `azure_devops_status` | `get_azure_devops_status` | Recent activity (7/14 days): work items, own commits, pipelines/stages, releases, relevant Teams context. In a review, own work compared with work items (`ado::review`). TOML catalog (`organization`, `projects`, `author_email`) in the knowledge repo; repository index in `activity_cache` (active 5 min, inactive 6 h; review commits 10 min). | 180 s |
+| `azure_devops_wiki` | `search_azure_devops_wiki` | Native Search + Pages + authorship through Git (`created_by_me`/`edited_by_me`/`other`/`unknown`). `wiki_ids`, `author_mode` (`prefer_mine`, `mine_only`, `all`). Limits: Search 25 per page/100 candidates, 10 histories, 4 context pages, 1 MB, 8 s per request, 30 s overall (90 s for a review's own edits). Needs a PAT with `vso.wiki` (+ `vso.code` for authorship). | 32 s (review 180 s) |
+| `teams_messages` | `get_own_teams_messages` | The user's own Teams messages in the window (see §6.6). No parameters. | 60 s (review 180 s) |
+| `azure_devops` | `get_work_item` | One work item by `id: N`. | 5 s |
+| `sql_server` | `get_payment_status` … | Three fixed parameterized queries over `assistant_readonly.*` views; no dynamic SQL; verified TLS. | 5 s |
+| `rabbitmq` | `get_queue_status` | Metadata of one queue (`/api/queues/...`). | 5 s |
+| `http` | `http_get` | GET to a fixed URL, optional bearer, ≤64 KB. | 5 s |
 
-Reglas de respuesta (también en `AGENTS.md`): documentación Wiki propia puede respaldar con autoridad; de terceros, indicar ubicación y autor verificado (o autor desconocido); toda respuesta con Wiki enlaza sus páginas; work items, pipelines y stages concretos llevan enlace verificado (ejecución ≠ configuración); con mensajes Teams, nombrar interlocutores relevantes preservando quién dijo qué.
+Answer rules (also in `AGENTS.md`): the user's own Wiki documentation can back an answer with authority; third-party documentation says where it is and its verified author (or unknown authorship); every Wiki answer links its pages; concrete work items, pull requests, commits, pipelines, stages and releases carry their verified link (run ≠ configuration); with Teams messages, name the relevant interlocutors keeping who said what; in an activity review, verified authorship proves the user's own action.
 
-## 9. Seguridad transversal
+## 9. Cross-cutting security
 
-- Jev no bloquea respuestas: solo clasifica la intención de mensajes ambiguos (paso que sí puede dejar un mensaje sin respuesta), sugiere referencias y registra una revisión final informativa. La protección contra datos sensibles, IDs y URLs no verificados y tamaño la hace el código (`Redactor`, `complete_answer`, `valid_answer`).
-- Toda decisión de modelo es consultiva: audiencias, rutas, URLs, herramientas y límites se verifican en código. Pregunta, documentos y resultados se presentan a los modelos como datos no confiables.
-- Las CLI de modelos corren sin herramientas (ni shell, ni lectura de archivos, ni web, ni subagentes), sin configuración de usuario ni sesión persistente, en un directorio vacío y sin las credenciales del host; su salida pasa por los mismos controles (`Redactor`, Jev final, límites) que la de DeepSeek.
-- `security::Redactor`: secretos cargados (coincidencia exacta), tokens/JWT/claves, credenciales en URL, correos, teléfonos, RUT, `secret://` y `sensitive_patterns`. Se aplica a pregunta, evidencia, propuesta y auditoría; una propuesta con patrones sensibles se bloquea.
-- Logs: solo eventos fijos propios (`tracing`, filtro `personal_teams_assistant=info`); no se registran prompts, cuerpos HTTP ni errores de proveedores. Los errores hacia GUI/CLI se traducen a mensajes saneados (`lib.rs::fail`, `cli.rs::run`).
-- Clientes HTTP sin redirects; tamaños de respuesta acotados (`adapters::bounded_json`).
-- WebView con CSP estricta (`connect-src 'none'`); solo `control::command` está expuesto a la UI.
-- Git: clones gestionados con askpass (`PERSONAL_TEAMS_GIT_ASKPASS`), sin token en URL/argv; `sync` exige checkout limpio y fast-forward.
+- No model withholds answers or grants permissions: the model chain classifies the intent of ambiguous messages (a step that can leave a message unanswered), decides whether a question about the user's work is an activity review, rewrites follow-ups, chooses a tool among authorized ones and picks references among verified ones. Audiences, paths, URLs, tools and limits are checked in code; sensitive data, IDs, unverified URLs and size are enforced by code (`Redactor`, `complete_answer`, `valid_answer`).
+- Questions, documents, results and conversation history reach the models as untrusted data.
+- The model CLIs run without tools (no shell, file reading, web or sub-agents), without user configuration or a persistent session, in an empty directory and without the host's credentials; their output goes through the same checks (`Redactor`, references, limits) as DeepSeek's.
+- `security::Redactor`: loaded secrets (exact match), tokens/JWT/keys, credentials in URLs, emails, phone numbers, RUT, `secret://` and `sensitive_patterns`. Applied to the question, evidence, proposal and audit; a proposal with sensitive patterns is blocked.
+- Logs: only fixed own events (`tracing`, filter `personal_teams_assistant=info`); prompts, HTTP bodies and provider errors are never logged. Errors to GUI/CLI become sanitized messages (`app.rs::fail`, `cli.rs::run`).
+- HTTP clients without redirects; bounded response sizes (`adapters::bounded_json`).
+- WebView with a strict CSP (`connect-src 'none'`); only `control::command` is exposed to the UI.
+- Git: managed clones with askpass (`PERSONAL_TEAMS_GIT_ASKPASS`), no token in URL/argv; `sync` requires a clean checkout and a fast-forward.
 
-## 10. CLI: contrato 1
+## 10. CLI: contract 1
 
-`pta [--json] [--non-interactive] COMANDO`. `pta`, `pta help`, `--help` o `-h` muestran la ayuda en español con cada comando descrito (una prueba exige que documente todos los comandos aceptados). `--json` imprime `{contract, version, ok, code, exit_code, message, data, revision}`; sin `--json`, `status`, `start`, `stop`, `restart` y `app quit` imprimen un resumen legible y el resto los datos en JSON. Progreso a stderr, sin streaming. Credenciales solo por stdin no interactivo (≤16 KiB). `pta --help` es la referencia de comandos.
+`pta [--json] [--non-interactive] COMMAND`. `pta`, `pta help`, `--help` or `-h` show the help in English with every command described (a test requires it to document every accepted command). `--json` prints `{contract, version, ok, code, exit_code, message, data, revision}`; without `--json`, `status`, `start`, `stop`, `restart` and `app quit` print a readable summary and the rest print the data as JSON. Progress goes to stderr, no streaming. Credentials only on non-interactive stdin (≤16 KiB). `pta --help` is the command reference.
 
-| Exit | Código | Significado |
+| Exit | Code | Meaning |
 | --- | --- | --- |
-| 0 | `ok` | Concluida |
-| 1 | `operation_failed` | Falló; inspeccionar estado antes de repetir |
-| 2 | `invalid_input` | Entrada/validación |
-| 3 | `not_ready` | Falta configuración o conexión |
-| 4 | `authorization_pending` | Requiere una acción humana (OAuth) |
-| 5 | `dependency_or_network` | Red, proveedor o instalación |
-| 6 | `state_conflict` / `revision_conflict` / `contract_mismatch` | Revisión, contrato o versión incompatible |
+| 0 | `ok` | Completed |
+| 1 | `operation_failed` | Failed; inspect the state before repeating |
+| 2 | `invalid_input` | Input/validation |
+| 3 | `not_ready` | Missing configuration or connection |
+| 4 | `authorization_pending` | Needs a human action (OAuth) |
+| 5 | `dependency_or_network` | Network, provider or installation (also `test providers` when no provider passes; `data.provider_checks` keeps each failure class) |
+| 6 | `state_conflict` / `revision_conflict` / `contract_mismatch` | Incompatible revision, contract or version |
 
-Para añadir una operación: método en `control::operate` (ventana o navegador solo a través de `host.shell`, para que funcione sin interfaz) (y en las listas permitidas durante login si es de lectura) → comando en `cli.rs` (`HELP` con descripción, `validate_args`, mapeo y la lista de `help_documents_every_accepted_command`) → si cambia el esquema que un host antiguo no entiende, anunciarlo en `Endpoint` como `wiki_support` → documentar en la skill.
+To add an operation: a method in `control::operate` (window or browser only through `host.shell`, so it works headless) (and in the lists allowed during login if it is a read) → a command in `cli.rs` (`HELP` with a description, `validate_args`, mapping and the list in `help_documents_every_accepted_command`) → if it changes a schema an older host does not understand, announce it in `Endpoint` like `wiki_support` → document it in the skill.
 
 ## 11. GUI
 
-`ui/` es HTML/CSS/JS plano sin build, con barra lateral y tema claro/oscuro según el sistema. Todo pasa por `invoke('command', {request})` con los mismos métodos que el CLI; no hay métodos IPC exclusivos de la GUI. Respeta la CSP de `tauri.conf.json`: sin estilos ni scripts en línea (solo propiedades CSSOM desde JS) y sin `innerHTML`.
+`ui/` is plain HTML/CSS/JS without a build, in English, with a sidebar and a light/dark theme following the system. Everything goes through `invoke('command', {request})` with the same methods as the CLI; there are no GUI-only IPC methods. It respects the CSP in `tauri.conf.json`: no inline styles or scripts (only CSSOM properties from JS) and no `innerHTML`.
 
-- **Inicio** (pestaña por defecto): estado del asistente (activo, en observación, Teams pendiente, detenido) con Iniciar/Reiniciar/Detener; fichas de cuenta Microsoft, modo, recepción, túnel, modelos, fuentes y chat personal; «Puesta en marcha», calculada del snapshot (credenciales requeridas —`GRAPH_WEBHOOK_SECRET` y `STATE_ENCRYPTION_KEY` cuentan como listas porque se generan al iniciar—, modelo activo, registro Entra con las mismas reglas que `validate_teams_setup`, cuenta, URL pública, al menos una fuente habilitada con procesamiento externo y audiencia, asistente iniciado y, opcional, envío activo); y la actividad reciente de `audit`. La barra lateral marca los errores o envíos inciertos de las últimas 24 h.
-- **Configuración**: credenciales (se guardan al momento), modelos de lenguaje (una fila por proveedor con activación, modelo, esfuerzo y orden; guarda `llm.chain`), Teams y Entra, URL pública y túnel, respuestas (modo de observación, idioma, estilo, modelo de Jev), chat personal e importación. Ya no muestra `max_answer_chars`/`max_detailed_answer_chars` (no se aplican; el valor guardado se conserva).
-- **Mensajes**: los últimos 100 trabajos de `assistant.db` (método `audit` con contenido): estado, mensaje, interpretación, respuesta enviada o propuesta (renderizada como Markdown), modelo y respaldos, revisión de Jev, avisos y registro de pasos. Filtros por estado, actualización cada 10 s y, por defecto, sin los mensajes no dirigidos al asistente.
-- **Conocimiento**: lista **todas** las fuentes (archivo, URL y herramientas como la Wiki o la actividad de Azure DevOps) con su estado y permite editar descripción, temas, audiencias y los conmutadores habilitada/procesamiento externo. Solo crea fuentes `kind=file` (nacen deshabilitadas, sin audiencias y sin procesamiento externo); las herramientas se agregan con `pta sources add`. No deja quitar un repositorio que usa una herramienta. Repositorios locales y GitHub.
-- **Chat de prueba**: ofrece las fuentes **guardadas** habilitadas y con procesamiento externo de cualquier tipo (la simulación lee el mapa persistido); muestra la respuesta como Markdown (mismo subconjunto que recibe Teams), las referencias verificadas, la cobertura parcial y el motivo legible cuando no responde. Los enlaces copian la URL al portapapeles en lugar de navegar la ventana.
+- **Home** (default tab): the assistant's state (running, observing, Teams pending, stopped) with Start/Restart/Stop; tiles for the Microsoft account, mode, reception, tunnel, models, sources and personal chat; «Setup», computed from the snapshot (required credentials — `GRAPH_WEBHOOK_SECRET` and `STATE_ENCRYPTION_KEY` count as ready because they are generated at start —, an active model, the Entra registration with the same rules as `validate_teams_setup`, account, public URL, at least one enabled source with external processing and an audience, assistant started and, optionally, sending on); and the recent activity from `audit`. The sidebar flags errors or uncertain sends of the last 24 h.
+- **Settings**: credentials (stored right away; a `retired` one can only be removed), language models (one row per provider with on/off, model, effort and order; saves `llm.chain`), Teams and Entra, public URL and tunnel, answers (observation mode, language, style), personal chat and import. It no longer shows `max_answer_chars`/`max_detailed_answer_chars` (not applied; the saved value is kept).
+- **Messages**: the last 100 jobs of `assistant.db` (method `audit` with content): state, message, interpretation, intent, answer sent or proposed (rendered as Markdown), model and fallbacks, references and how they were chosen, notices and the step log. Filters by state, refresh every 10 s and, by default, without messages not addressed to the assistant.
+- **Knowledge**: lists **every** source (file, URL and tools such as the Wiki, Azure DevOps activity or own Teams messages) with its state and edits description, topics, audiences and the enabled/external-processing switches. It creates only `kind=file` sources (born disabled, without audiences or external processing); tools are added with `pta sources add`. It does not let you remove a repository a tool uses. Local and GitHub repositories.
+- **Test chat**: offers the **saved** sources that are enabled and allowed external processing, of any type (the simulation reads the persisted map); shows the answer as Markdown (the same subset Teams receives), the verified references, partial coverage and a readable reason when it does not answer. Links copy the URL to the clipboard instead of navigating the window.
 
-Los cambios de Configuración y Conocimiento se acumulan en el modelo de la página y se guardan juntos con la barra «Cambios sin guardar» (`save_settings`, que reinicia el servicio si corría). Las operaciones que modifican el perfil en el host (conectar la cuenta, habilitar/deshabilitar el chat personal, clonar de GitHub) guardan antes los cambios pendientes; iniciar o reiniciar también. El estado se refresca cada 15 s sin pisar lo que se está editando. Tras reemplazar un host desactualizado cuyo asistente corría, la ventana muestra el aviso «Versión nueva instalada» con «Dejar corriendo» / «Dejarlo detenido».
+Settings and Knowledge changes accumulate in the page model and are saved together with the «You have unsaved changes» bar (`save_settings`, which restarts the service if it was running). Operations that change the profile on the host (connecting the account, enabling/disabling the personal chat, cloning from GitHub) save pending changes first; starting or restarting too. The state refreshes every 15 s without overwriting what is being edited. After replacing an outdated host whose assistant was running, the window shows the «New version installed» notice with «Keep running» / «Leave it stopped».
 
-## 12. Pruebas y verificación
+## 12. Tests and verification
 
 ```sh
 cargo fmt --all --check
@@ -265,56 +282,59 @@ cargo clippy --all-targets -- -D warnings
 cargo clippy --all-targets --no-default-features -- -D warnings
 cargo test
 cargo test --no-default-features
+bun build desktop/ui/app.js --no-bundle --outfile /tmp/app-check.js   # JS syntax, if the GUI changed
 ```
 
-- Unitarias junto al código; integración en `tests/integration.rs` con `wiremock` y dobles (`NoGate`, `NoLlm`, `NoTools`, `IntentGate`…). Ninguna prueba usa red ni credenciales reales. La cadena se prueba con backends falsos (respaldo y regreso al predeterminado llamada a llamada) y las CLI con un script falso que registra stdin, argv y entorno (Unix).
-- `pta test providers` prueba cada proveedor activo por separado (un respaldo no oculta un predeterminado roto); consume API/uso de suscripción.
-- `pta test simulate` / `pta chat` ejecutan el pipeline real con un adaptador que nunca envía a Graph (`simulation::TestAdapter`, estado `sent` = `simulation-only`). `pta test providers` usa hechos sintéticos y consume API.
-- `cargo run --example wiki_gate_smoke` (credencial Jev existente) evalúa el control final con hechos sintéticos.
-- Landing: en inglés (las respuestas pueden ser en inglés o español con `llm.language`; avisa que la interfaz de la app está en español), Worker de Cloudflare `personal-teams-assistant` **solo con assets** (`site/public/`, sin código; `not_found_handling = 404-page`), servido solo en el dominio propio `teams-assistant.elvisbrevi.cl` (`routes` con `custom_domain`, `workers_dev = false`; las etiquetas `og:` de `index.html` usan esa URL absoluta) y desplegado por **Workers Builds**, la integración de Git de Cloudflare (no GitHub Actions ni GitHub Pages): directorio raíz `site`, sin comando de build, comando de despliegue `npx wrangler deploy`, rama de producción `main` y ruta vigilada `site/*`. El nombre del Worker en el panel debe coincidir con `name` de `site/wrangler.jsonc`. El conector MCP de Cloudflare sirve para comprobar el Worker desplegado (`workers_get_worker`), no para desplegarlo. La página no usa JavaScript y `_headers` lo prohíbe con su CSP (`default-src 'none'`); si se añade un script, hay que ajustar esa política. Las capturas de `site/public/assets/` se generan con la UI real y un `__TAURI__` simulado con datos sintéticos; nunca con un perfil real. Validación local sin credenciales: `npx wrangler deploy --dry-run` desde `site/`.
-- Sin CI: GitHub Actions está desactivado en el repositorio para no generar costos y no hay workflows. Las verificaciones de `AGENTS.md` se ejecutan en local (macOS) antes de fusionar y son la única barrera; Windows no se compila en ninguna parte.
-- Publicación manual desde un Mac, en `main` fusionado y limpio: fusionar el cambio de versión (`Cargo.toml`, `Cargo.lock`, `desktop/tauri.conf.json`), comprobar que la versión no existe (`curl -s -o /dev/null -w '%{http_code}' https://crates.io/api/v1/crates/personal-teams-assistant/VERSION` → 404) y ejecutar `cargo publish --locked` con el token de `cargo login`.
-- Toda operación nueva debe compilar en ambas variantes: `cargo clippy --all-targets [--no-default-features] -- -D warnings`. El código de Tauri solo vive en `src/app/gui.rs` (una prueba comprueba que la UI de `desktop/ui` queda incrustada).
+- Unit tests next to the code; integration in `tests/integration.rs` with `wiremock` and doubles (`NoLlm`, `NoTools`, `Triage`, `ReviewTools`, `ReviewLlm`…). No test uses the network or real credentials. The chain is tested with fake backends (fallback and return to the default call by call, closed intent and reference contracts) and the CLIs with a fake script that records stdin, argv and environment (Unix). The activity review is tested with synthetic activity (`ado::review::summarize` is pure), wiremock for own Wiki edits and own Teams messages, and an end-to-end simulation across the three sources.
+- `pta test providers` tests each active provider on its own (a fallback does not hide a broken default) with synthetic facts: two answers and one intent classification; it uses API credit or subscription quota.
+- `pta test simulate` / `pta chat` run the real pipeline with an adapter that never sends to Graph (`simulation::TestAdapter`, state `sent` = `simulation-only`).
+- Landing: in English (answers can be in English or Spanish with `llm.language`; the app itself is in English), Cloudflare Worker `personal-teams-assistant` **assets only** (`site/public/`, no code; `not_found_handling = 404-page`), served only on the custom domain `teams-assistant.elvisbrevi.cl` (`routes` with `custom_domain`, `workers_dev = false`; the `og:` tags in `index.html` use that absolute URL). Workers Builds is not connected: each change in `site/` is deployed by hand with `cd site && bunx wrangler@4 deploy` (wrangler keeps its own login; there is no Node, so `bunx`). Connecting Workers Builds (root `site`, no build command, deploy command `npx wrangler deploy`, production branch `main`, watched path `site/*`) would deploy on merge. The Worker name in the dashboard must match `name` in `site/wrangler.jsonc`. The Cloudflare MCP connector checks the deployed Worker (`workers_get_worker`); it does not deploy. The page uses no JavaScript and `_headers` forbids it with its CSP (`default-src 'none'`); adding a script needs a change to that policy. The screenshots in `site/public/assets/` are generated with the real UI and a mocked `__TAURI__` with synthetic data; never with a real profile. Local validation without credentials: `bunx wrangler@4 deploy --dry-run` from `site/`.
+- No CI: GitHub Actions is disabled in the repository to avoid costs and there are no workflows. The `AGENTS.md` checks run locally (macOS) before merging and are the only gate; Windows is not built anywhere.
+- Manual publishing from a Mac, on a merged and clean `main`: merge the version change (`Cargo.toml`, `Cargo.lock`, `desktop/tauri.conf.json`), check the version does not exist (`curl -s -o /dev/null -w '%{http_code}' https://crates.io/api/v1/crates/personal-teams-assistant/VERSION` → 404) and run `cargo publish --locked` with the `cargo login` token.
+- Every new operation must build in both variants: `cargo clippy --all-targets [--no-default-features] -- -D warnings`. Tauri code lives only in `src/app/gui.rs` (a test checks that the `desktop/ui` UI is embedded).
 
-## 13. Recetas de cambio
+## 13. Change recipes
 
-- **Nuevo tipo de herramienta:** variante en `ToolSpec` + `validate` + `name` + rama en `Tools::execute` (con timeout) → si devuelve evidencia tipada, deserializarla en el pipeline y registrar referencias → pruebas con wiremock → documentar el esquema en la skill y en `knowledge-map.example.toml`.
-- **Nuevo proveedor LLM:** implementar `Backend` (un objeto JSON por llamada; fallos de crédito/límite como `Unavailable(Failure::UsageLimit)`, sin texto del proveedor), añadirlo a `PROVIDERS`, `efforts` y `llm::model_for`, y al catálogo (`llm::catalog`) para la GUI. Los prompts, la cadena y `runtime`/`local_chat`/`diagnostics` no cambian.
-- **Cambiar decisiones de Jev:** `decision.rs` (`Stage::Intent`, `Stage::Final`, `select_references`). Los contratos rechazan campos ausentes/extra y probabilidades inválidas. En el pipeline, `select_references` y `Stage::Final` son informativos: un error o un rechazo se registra y no retiene la respuesta.
-- **Nuevo paso en el registro de un mensaje:** `audit.step("nombre", "detalle sin contenido del mensaje")`; la GUI lo muestra sin cambios.
-- **Campo de configuración nuevo:** `#[serde(default)]`, validación en `Config::validate`, exposición en GUI si aplica; `pta config set` lo admite automáticamente por ruta.
+- **New tool type:** a `ToolSpec` variant + `validate` + `name` (+ `reviews_activity` if a review should read it) + a branch in `Tools::execute` (with a timeout) and, for reviews, in `Tools::review` → if it returns typed evidence, deserialize it in the pipeline and register its references → wiremock tests → document the schema in the skill and in `knowledge-map.example.toml`.
+- **New LLM provider:** implement `Backend` (one JSON object per call; credit/limit failures as `Unavailable(Failure::UsageLimit)`, without provider text), add it to `PROVIDERS`, `efforts` and `llm::model_for`, and to the catalog (`llm::catalog`) for the GUI. Prompts, the chain and `runtime`/`local_chat`/`diagnostics` do not change.
+- **Change a model decision:** the prompt and contract live in `llm::Model` (`classify_intent`, `select_references`, `select_tool`, `standalone_request`, `generate_response`) and the fallback in `Chain`. Contracts reject missing/extra fields, unknown values and invalid confidences (`invalid_answer`). In the pipeline, a failed classification of an ambiguous message retries the job; every other decision degrades: the literal request, no tool, or code-chosen references.
+- **New step in a message's log:** `audit.step("name", "detail without message content")`, in English; the GUI shows it unchanged.
+- **New configuration field:** `#[serde(default)]`, validation in `Config::validate`, exposed in the GUI if it applies; `pta config set` accepts it by path automatically.
 
-## 14. Decisiones vigentes y su porqué
+## 14. Current decisions and why
 
-- **Jev no veta la recuperación.** Antes un selector Jev decidía la fuente antes de leerla; en una muestra real (2026-10-01) rechazó la mitad de las preguntas documentales con confianza 0.29–0.38 y la Wiki nunca se consultó. No reintroducir un filtro previo por tema o pertinencia.
-- **Jev tampoco retiene respuestas.** El 2026-10-01 una pregunta de seguimiento («cuál es el endpoint para el ambiente de test») se redactó bien pero Jev no asoció la respuesta a ninguna página y la regla «toda respuesta Wiki cita una página» la descartó en silencio. Ahora la selección de referencias y la revisión final son informativas; si no hay página elegida se listan las consultadas. Lo que sí retiene una respuesta lo decide el código, y en el chat personal se avisa.
-- **Los pedidos a la persona no se responden.** El 2026-10-02 el asistente contestó «te puedo llamar» (Jev: `question` 0.79), «necesito llamarte» y «necesito que revisemos lo que se debe subir…» (atajo `necesito `) con páginas Wiki sin relación. Llamadas, reuniones, revisiones conjuntas y disponibilidad solo las puede responder la persona: el código las descarta antes del atajo de preguntas y Jev tiene la categoría `personal` para las que no reconoce el código.
-- **Contexto de la conversación, no solo el último intercambio.** Los 10 mensajes anteriores con autor y hora permiten entender seguimientos cortos; se pasan como contexto, no como evidencia.
-- **La atribución Wiki la construye el código** desde metadatos verificados; la comprobación probabilística `attribution` se omite cuando no hay mensajes Teams porque producía falsos rechazos (p. ej. `edited_by_me` con `author=null`). `supported` sigue rechazando autorías o ejecuciones inventadas.
-- **El modelo no copia IDs ni enlaces de páginas.** El modelo devuelve solo texto y modo; las citas salen del registro verificado. Puede copiar una URL que aparece literalmente en la evidencia (un endpoint documentado), porque prohibirlo impedía responder preguntas como «¿cuál es el endpoint de test?».
-- **Respaldo por llamada, sin memoria.** Cada llamada empieza por el proveedor predeterminado; no se recuerda que estaba sin créditos. Cuesta un intento fallido rápido mientras dure el agotamiento, a cambio de volver al predeterminado en cuanto recupera su uso. Se respalda ante cualquier fallo, no solo créditos: un contrato inválido o una CLI ausente tampoco deben dejar la pregunta sin respuesta.
-- **CLI en lugar de API para Codex y Claude**: usan la suscripción ya iniciada en esas CLI, sin claves nuevas en la app. A cambio, se invocan sin herramientas ni personalizaciones para que se comporten como una llamada de modelo, igual que la API.
-- **El formato se decide en código.** El modelo escribe Markdown acotado y el código lo convierte a HTML de Teams; la sección de fuentes se construye desde el registro. Antes, la respuesta se escapaba como texto y Teams mostraba `[etiqueta](url)` literal.
-- **Los seguimientos se resuelven antes de buscar, no se vetan.** Buscar solo las palabras de «¿y si quiero pagar 2 servicios?» no encontraba la página y el control final rechazaba la respuesta en silencio. La reescritura autónoma solo cambia la consulta; la selección de herramientas y las audiencias siguen en código.
-- **Una herramienta por mensaje**, para acotar coste, latencia y superficie; combinar fuentes es una mejora pendiente.
-- **Ningún envío se reintenta**: Graph no ofrece idempotencia; se prefiere omitir una respuesta antes que duplicarla.
-- **OAuth público de escritorio con los scopes ya concedidos**; el registro Entra existente admite `http://localhost` y otras organizaciones. Pedir nuevos permisos obligaría a un consentimiento nuevo.
-- **Solo Cargo**: sin bundles firmados/notarizados ni servidor Docker; el host (con GUI o sin interfaz) es el único runtime.
+- **No model vetoes retrieval.** A selector used to decide the source before reading it; in a real sample (2026-10-01) it rejected half the documentation questions with confidence 0.29–0.38 and the Wiki was never read. Do not reintroduce a topic or relevance prefilter.
+- **No model withholds answers.** On 2026-10-01 a follow-up («cuál es el endpoint para el ambiente de test») was written well but the external reviewer did not tie it to any page and the rule «every Wiki answer cites a page» discarded it silently. Reference selection is informative; if no page is chosen the consulted ones are listed. What withholds an answer is decided by code, and the personal chat is notified.
+- **The language model replaced the external classifier (0.6.1).** A separate classification API classified ambiguous messages, picked references and ran an informative final review; it was a second provider, credential and point of failure, and `pta test providers` failed on it without detail. The model chain now does the first two with closed contracts and code validation; the final review was dropped because it never blocked anything.
+- **Unregistered work is reviewed, not guessed.** On 2026-10-03 «¿qué tareas o trabajo he realizado que no están registrados en tareas?» went to the Wiki, cited one page and asked which system the user used. The review reads the user's real activity in every authorized source, compares it with work items in code and lets verified authorship speak in the first person. Only work items Azure DevOps returns are named, because an unverifiable number would withhold the whole answer.
+- **Requests for the person are not answered.** On 2026-10-02 the assistant answered «te puedo llamar», «necesito llamarte» and «necesito que revisemos lo que se debe subir…» with unrelated Wiki pages. Calls, meetings, joint reviews and availability can only be answered by the person: code discards them before the question shortcut and the intent classification has the `personal` category for those code does not recognize.
+- **Conversation context, not only the last exchange.** The 10 earlier messages with author and time let short follow-ups be understood; they go as context, not evidence.
+- **Wiki attribution is built by code** from verified metadata.
+- **The model does not copy IDs or page links.** It returns only text and mode; citations come from the verified registry. It may copy a URL that appears literally in the evidence (a documented endpoint), because forbidding it prevented answering «¿cuál es el endpoint de test?».
+- **Fallback per call, without memory.** Every call starts with the default provider; it is not remembered that it was out of credits. It costs a fast failed attempt while the exhaustion lasts, in exchange for returning to the default as soon as it recovers. It falls back on any failure, not only credits: an invalid contract or a missing CLI must not leave the question unanswered either.
+- **CLIs instead of APIs for Codex and Claude**: they use the subscription already signed in on those CLIs, with no new keys in the app. In exchange they are invoked without tools or customizations so they behave like one model call, like the API.
+- **Formatting is decided in code.** The model writes bounded Markdown and code turns it into Teams HTML; the sources section is built from the registry.
+- **Follow-ups are resolved before searching, not vetoed.** Searching only the words of «¿y si quiero pagar 2 servicios?» did not find the page. The standalone rewrite only changes the query; tool selection and audiences stay in code.
+- **One tool per normal answer**, to bound cost, latency and surface; activity reviews are the exception because comparing activity with registered work needs every source at once.
+- **No send is retried**: Graph has no idempotency; skipping an answer is preferred to duplicating it.
+- **Public desktop OAuth with the scopes already granted**; the existing Entra registration allows `http://localhost` and other organizations. Asking for new permissions would require a new consent. Own Teams messages are read with `Chat.Read`, already granted.
+- **Cargo only**: no signed/notarized bundles or Docker server; the host (with a GUI or headless) is the only runtime.
 
-## 15. Límites conocidos
+## 15. Known limits
 
-- Una identidad Teams por perfil. Canales de equipo no soportados.
-- La recepción exige equipo encendido y una URL HTTPS estable hasta el listener (túnel Cloudflare con token, archivo `cloudflared` propio o túnel externo).
-- Una sola herramienta por respuesta (no combina Wiki y actividad).
-- `pta chat` devuelve la respuesta en Markdown sin convertir (la GUI la renderiza). En la GUI, los enlaces de las respuestas se copian; no se abren en el navegador.
-- La GUI no crea fuentes de herramienta ni edita sus parámetros (`tool`) ni `allowed_senders`: se usan `pta sources add`/`pta config set`.
-- La recuperación de `missed` cubre solo la página reciente; no hay garantía de procesar mensajes durante apagones.
-- No detecta si el usuario respondió manualmente mientras se generaba la propuesta.
-- El historial de contexto viene de la página reciente del chat (50 mensajes); el chat de prueba (`pta chat`/GUI) no tiene historial. En chats con otras personas, las respuestas enviadas por la app aparecen como `yo` (solo el chat personal las marca como `asistente`).
-- Sin la selección de Jev, una respuesta Wiki lista todas las páginas consultadas, aunque no haya usado todas.
-- Con razonamiento al máximo una respuesta puede tardar varios minutos, y el worker procesa un mensaje a la vez: los siguientes esperan en cola. Si el predeterminado falla lento (p. ej. una CLI que agota su plazo de 20 min), el respaldo suma esa espera.
-- Los modelos de Claude y DeepSeek del catálogo son una lista fija (sus CLI/API no publican catálogo local); otros IDs válidos se configuran con `pta config set llm.chain`. Las CLI de Codex/Claude no se prueban en Windows (se buscan como `.exe`).
-- Windows no se compila ni se valida (no hay CI). Linux solo como host sin interfaz (la GUI en Linux no se prueba).
-- Cargo no tiene ganchos posteriores a la instalación: el host anterior sigue respondiendo con la versión vieja hasta el primer `pta` o la apertura de la app nueva.
-- La versión publicada en crates.io puede ir por detrás del repositorio; GUI y CLI deben ser de la misma compilación (el CLI rechaza esquemas Wiki contra un host sin `wiki_support`). Un perfil guardado desde 0.6.0 incluye `llm.language`, que un host o CLI anterior no carga (`deny_unknown_fields`).
-- `llm.language` solo cambia lo que se envía a Teams. La interfaz de la app, la auditoría, el CLI y el saludo configurado (`policy.greeting`) siguen como están, y la detección sin modelo de preguntas y de pedidos a la persona usa frases en español: un mensaje en inglés sin `?` lo clasifica Jev Intent.
+- One Teams identity per profile. Team channels are not supported.
+- Reception needs the computer on and a stable HTTPS URL to the listener (Cloudflare tunnel with a token, an own `cloudflared` file or an external tunnel).
+- A normal answer reads one tool (it does not combine Wiki and activity); only activity reviews combine sources.
+- An activity review takes about two minutes with Codex at medium effort (about half a minute of Azure DevOps reads, the answer and the reference selection), and a busy period may hit its bounds (60 commits, 15 pull requests, 10 runs, 10 releases, 10 approvals, 12 Wiki pages and 40 messages); it says so when coverage is partial. Approvals depend on what the Release API returns for the account.
+- `pta chat` returns the answer as unconverted Markdown (the GUI renders it). In the GUI, links in answers are copied; they do not open in the browser. The local test chat has no Microsoft session, so the own Teams messages source reports itself unread there.
+- The GUI does not create tool sources or edit their parameters (`tool`) or `allowed_senders`: use `pta sources add`/`pta config set`.
+- `missed` recovery covers only the recent page; there is no guarantee of processing messages during outages.
+- It does not detect whether the user answered manually while the proposal was being written.
+- The context history comes from the chat's recent page (50 messages); the test chat (`pta chat`/GUI) has no history. In chats with other people, answers sent by the app show as `me` (only the personal chat marks them as `assistant`).
+- Without a model's selection, a Wiki answer lists every consulted page, even if it did not use them all.
+- With maximum reasoning an answer can take several minutes, and the worker processes one message at a time: the next ones wait in the queue. If the default provider fails slowly (e.g. a CLI that hits its 20-minute deadline), the fallback adds that wait.
+- The Claude and DeepSeek models in the catalog are a fixed list (their CLI/API publish no local catalog); other valid IDs are set with `pta config set llm.chain`. The Codex/Claude CLIs are not tested on Windows (looked up as `.exe`).
+- Windows is not built or validated (no CI). Linux only as a headless host (the GUI on Linux is not tested).
+- Cargo has no post-install hooks: the previous host keeps answering with the old version until the first `pta` or opening the new app.
+- The version published on crates.io may lag the repository; GUI and CLI must come from the same build (the CLI rejects Wiki schemas against a host without `wiki_support`). A profile saved from 0.6.0 includes `llm.language`, which an older host or CLI does not load, and one saved from 0.6.1 lacks `[jev]`, which 0.6.0 requires (`deny_unknown_fields`).
+- `llm.language` only changes what is sent to Teams. The app's interface, audit log and CLI are in English, and the configured greeting (`policy.greeting`) stays as written. Detection without a model covers Spanish and English phrases; other phrasings go to the model's intent classification.

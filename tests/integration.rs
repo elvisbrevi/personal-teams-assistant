@@ -144,7 +144,7 @@ async fn graph_and_deepseek_end_to_end_without_an_external_reviewer() {
         audit.question.as_deref(),
         Some("¿Cuál es el horario del soporte?")
     );
-    assert!(audit.trace.iter().any(|s| s.step == "envío"));
+    assert!(audit.trace.iter().any(|s| s.step == "send"));
     let requests = server.received_requests().await.unwrap();
     for r in requests
         .iter()
@@ -262,7 +262,7 @@ impl ReadOnlyTool for ReadDocumentTool {
     async fn execute(&self, spec: &ToolSpec, question: &str, _: &str) -> Result<String> {
         assert!(matches!(spec, ToolSpec::Http { .. }));
         assert_eq!(question, "¿Cuál es el horario de soporte?");
-        Ok("No se recuperaron hechos verificables en esta consulta.".into())
+        Ok("No verifiable facts were retrieved in this read.".into())
     }
 }
 #[tokio::test]
@@ -424,7 +424,7 @@ impl LlmProvider for AnswerOrClarify {
             assert!(
                 input
                     .evidence
-                    .contains("No se recuperaron hechos verificables")
+                    .contains("No verifiable facts were retrieved")
             );
             Ok("No pude verificar el horario. ¿Qué fuente de soporte debo consultar?".into())
         }
@@ -632,7 +632,7 @@ fn map_requires_conversation_authorization_and_no_path_escape() {
     assert!(KnowledgeMap::parse(text).is_ok());
     assert!(
         KnowledgeMap::parse(&text.replace(
-            "path = \"temas/asistente/operacion.md\"",
+            "path = \"topics/assistant/operations.md\"",
             "path = \"../escape.md\""
         ))
         .is_err()
@@ -1313,11 +1313,11 @@ impl LlmProvider for FollowUpLlm {
         input: GenerationInput<'_>,
     ) -> Result<personal_teams_assistant::llm::GeneratedAnswer> {
         assert!(input.question.contains(
-            "Solicitud actual (tiene prioridad): como se invoca si quiero pagar 2 servicios?"
+            "Current request (takes priority): como se invoca si quiero pagar 2 servicios?"
         ));
         assert_eq!(
             input.question.contains(
-                "interpretada con el contexto: ¿Cómo se invoca el microservicio Crear SPS"
+                "interpreted with the context: ¿Cómo se invoca el microservicio Crear SPS"
             ),
             self.resolve
         );
@@ -1787,9 +1787,9 @@ async fn graph_history_returns_earlier_messages_oldest_first_with_author_and_tim
     assert_eq!(
         newest,
         vec![
-            ("asistente", "Respuesta del asistente"),
+            ("assistant", "Respuesta del asistente"),
             ("Ana Pérez", "Hablamos del microservicio Crear SPS"),
-            ("yo", "¿Cómo se usa crearsps?"),
+            ("me", "¿Cómo se usa crearsps?"),
         ]
     );
     assert!(history.iter().all(|m| !m.text.contains("borrado")
@@ -1841,12 +1841,12 @@ impl MessageAdapter for HistoryTeams {
         assert_eq!(limit, personal_teams_assistant::pipeline::HISTORY_MESSAGES);
         Ok(vec![
             personal_teams_assistant::adapters::teams::HistoryMessage {
-                author: "yo".into(),
+                author: "me".into(),
                 at: "2026-10-01 18:49".into(),
                 text: "¿Cómo se usa el microservicio crearsps?".into(),
             },
             personal_teams_assistant::adapters::teams::HistoryMessage {
-                author: "asistente".into(),
+                author: "assistant".into(),
                 at: "2026-10-01 18:51".into(),
                 text: "El microservicio Crear SPS se consume con POST.".into(),
             },
@@ -1919,9 +1919,9 @@ async fn earlier_messages_with_time_reach_the_model_and_the_log() {
     pipeline.process(resource).await.unwrap();
     let history = llm.seen.lock().unwrap().last().cloned().unwrap();
     assert!(history.starts_with(
-        "[2026-10-01 18:49 · yo] ¿Cómo se usa el microservicio crearsps?\n[2026-10-01 18:51 · asistente] El microservicio Crear SPS se consume con POST.\n["
+        "[2026-10-01 18:49 · me] ¿Cómo se usa el microservicio crearsps?\n[2026-10-01 18:51 · assistant] El microservicio Crear SPS se consume con POST.\n["
     ));
-    assert!(history.ends_with("· solicitud actual]"));
+    assert!(history.ends_with("· current request]"));
     let audit = store.audit(resource).unwrap().unwrap();
     assert_eq!(audit.status, "sent");
     assert!(audit.final_check.is_none());
@@ -1933,12 +1933,12 @@ async fn earlier_messages_with_time_reach_the_model_and_the_log() {
     );
     let steps: Vec<_> = audit.trace.iter().map(|s| s.step.as_str()).collect();
     for step in [
-        "recibido",
-        "elegibilidad",
-        "intención",
-        "contexto",
-        "modelo",
-        "envío",
+        "received",
+        "eligibility",
+        "intent",
+        "context",
+        "model",
+        "send",
     ] {
         assert!(steps.contains(&step), "{step}: {steps:?}");
     }

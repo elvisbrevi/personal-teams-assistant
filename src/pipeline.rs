@@ -88,7 +88,7 @@ impl Pipeline {
             received_at: Some(message.created_at_millis),
             ..Default::default()
         };
-        audit.step("recibido", "mensaje leído desde Teams");
+        audit.step("received", "message read from Teams");
         if !message.eligible_in(
             &self.config.graph.user_id,
             &self.config.policy.allowed_senders,
@@ -100,17 +100,17 @@ impl Pipeline {
             self.config.graph.self_chat.as_ref(),
         ) {
             audit.step(
-                "elegibilidad",
-                "no se evalúa: propio, de un grupo sin mención, antiguo, vacío o salida del asistente",
+                "eligibility",
+                "not evaluated: own, from a group without a mention, too old, empty or the assistant's output",
             );
             return self.store.record(resource, &audit);
         }
         let current = self.redactor.redact(&message.text);
         audit.question = Some(current.clone());
-        audit.step("elegibilidad", "mensaje dirigido al asistente");
+        audit.step("eligibility", "message addressed to the assistant");
         if !self.redactor.clean(&current) {
             audit.reason = "sensitive_question".into();
-            audit.step("bloqueado", "la pregunta contiene datos sensibles");
+            audit.step("blocked", "the question contains sensitive data");
             return self.store.record(resource, &audit);
         }
         let available = if let Some(ids) = local_sources {
@@ -134,15 +134,15 @@ impl Pipeline {
             .collect();
         let mut review = false;
         let is_greeting = if greeting(&current) {
-            audit.step("intención", "saludo");
+            audit.step("intent", "greeting");
             true
         } else if !own_chat && personal_request(&current) {
-            audit.step("intención", "pedido a la persona");
+            audit.step("intent", "request for the person");
             leave_to_person(&mut audit);
             return self.store.record(resource, &audit);
         } else if activity_review_request(&current) {
             review = true;
-            audit.step("intención", "revisión de actividad");
+            audit.step("intent", "activity review");
             false
         } else if question_request(&current) {
             // A question about the user's own work may ask to compare it with their tasks;
@@ -163,21 +163,18 @@ impl Pipeline {
                 }
             }
             audit.step(
-                "intención",
+                "intent",
                 if review {
-                    "revisión de actividad (modelo)"
+                    "activity review (model)"
                 } else {
-                    "pregunta"
+                    "question"
                 },
             );
             false
         } else {
             if available.is_empty() {
                 audit.reason = "no_authorized_resource".into();
-                audit.step(
-                    "fuentes",
-                    "ninguna fuente autorizada para esta conversación",
-                );
+                audit.step("sources", "no source is authorized for this conversation");
                 return self.store.record(resource, &audit);
             }
             let context = self.history(&message, &mut audit, &mut history).await;
@@ -185,9 +182,9 @@ impl Pipeline {
             let decision = self.llm.classify_intent(&current, &context).await?;
             audit.confidences.push(decision.confidence);
             audit.step(
-                "intención",
+                "intent",
                 format!(
-                    "modelo: {} ({:.2})",
+                    "model: {} ({:.2})",
                     decision.intent.as_str(),
                     decision.confidence
                 ),
@@ -203,7 +200,7 @@ impl Pipeline {
                     leave_to_person(&mut audit);
                 } else {
                     audit.reason = "informational_message".into();
-                    audit.step("sin respuesta", "mensaje informativo: no pide respuesta");
+                    audit.step("no answer", "informational message: it asks for no answer");
                 }
                 return self.store.record(resource, &audit);
             }
@@ -232,12 +229,12 @@ impl Pipeline {
             let previous = self.store.context(&message.conversation)?;
             let history = self.history(&message, &mut audit, &mut history).await;
             audit.step(
-                "contexto",
+                "context",
                 format!(
-                    "{} mensajes previos{}",
+                    "{} earlier messages{}",
                     audit.history_messages,
                     if previous.is_some() {
-                        " y el último intercambio con el asistente"
+                        " and the last exchange with the assistant"
                     } else {
                         ""
                     }
@@ -255,6 +252,13 @@ impl Pipeline {
                     | "explica más"
                     | "y eso"
                     | "amplía"
+                    | "more details"
+                    | "give me more details"
+                    | "tell me more"
+                    | "go on"
+                    | "continue"
+                    | "explain more"
+                    | "expand"
             );
             let mut tool_question = match &previous {
                 Some(previous) if more_details => previous.question.clone(),
@@ -263,7 +267,7 @@ impl Pipeline {
             // History helps interpret the request; a classifier cannot veto a new topic.
             let question = if let Some(previous) = &previous {
                 format!(
-                    "Contexto anterior (solo referencia, no evidencia):\nPregunta: {}\nRespuesta: {}\nSolicitud actual (tiene prioridad): {}",
+                    "Earlier context (reference only, not evidence):\nQuestion: {}\nAnswer: {}\nCurrent request (takes priority): {}",
                     previous.question, previous.answer, current
                 )
             } else {
@@ -272,15 +276,12 @@ impl Pipeline {
             // Questions containing secrets/PII stay manual, including tool requests with personal identifiers.
             if !self.redactor.clean(&question) {
                 audit.reason = "sensitive_question".into();
-                audit.step("bloqueado", "la pregunta contiene datos sensibles");
+                audit.step("blocked", "the question contains sensitive data");
                 return self.store.record(resource, &audit);
             }
             if available.is_empty() {
                 audit.reason = "no_authorized_resource".into();
-                audit.step(
-                    "fuentes",
-                    "ninguna fuente autorizada para esta conversación",
-                );
+                audit.step("sources", "no source is authorized for this conversation");
                 return self.store.record(resource, &audit);
             }
             // Read every authorized document: choosing one descriptor loses compound questions.
@@ -344,15 +345,15 @@ impl Pipeline {
                             wiki_topic = Some(topic.to_owned());
                             audit.resolved_question = Some(question.to_owned());
                             audit.topic = Some(topic.to_owned());
-                            audit.step("seguimiento", "solicitud interpretada con el contexto");
+                            audit.step("follow-up", "request interpreted with the context");
                         }
                     }
                     Ok(None) => {}
                     Err(_) => {
                         tracing::warn!(event = "follow_up_resolution_unavailable");
                         audit.step(
-                            "seguimiento",
-                            "ningún modelo pudo interpretarla; se busca el texto literal",
+                            "follow-up",
+                            "no model could interpret it; the literal text is searched",
                         );
                     }
                 }
@@ -360,9 +361,7 @@ impl Pipeline {
             // Chained follow-ups keep the resolved topic instead of the bare follow-up.
             context_question = Some(tool_question.chars().take(1800).collect::<String>());
             let question = if wiki_topic.is_some() {
-                format!(
-                    "{question}\nSolicitud actual interpretada con el contexto: {tool_question}"
-                )
+                format!("{question}\nCurrent request interpreted with the context: {tool_question}")
             } else {
                 question
             };
@@ -456,15 +455,15 @@ impl Pipeline {
                     .join(",")
             });
             audit.step(
-                "fuentes",
-                audit.source.clone().unwrap_or_else(|| "ninguna".into()),
+                "sources",
+                audit.source.clone().unwrap_or_else(|| "none".into()),
             );
             self.checkpoint(resource, &audit, "retrieving")?;
             let (mut evidence, registry) = if review {
                 let days = crate::ado::recent_window(&tool_question);
                 audit.step(
-                    "revisión de actividad",
-                    format!("últimos {days} días en {} fuentes", sources.len()),
+                    "activity review",
+                    format!("last {days} days in {} sources", sources.len()),
                 );
                 self.review_evidence(&sources, days, resource, &message, &mut audit)
                     .await?
@@ -555,15 +554,15 @@ impl Pipeline {
                 (evidence, registry)
             };
             audit.step(
-                "evidencia",
+                "evidence",
                 format!(
-                    "{} caracteres, {} referencias verificadas",
+                    "{} characters, {} verified references",
                     evidence.chars().count(),
                     registry.references.len()
                 ),
             );
             if evidence.trim().is_empty() {
-                evidence = "No se recuperaron hechos verificables. Explica la limitación y pide concretar la fuente o el proyecto; no inventes una respuesta.".chars().take(self.config.policy.max_context_chars).collect();
+                evidence = "No verifiable facts were retrieved. Explain the limitation and ask to specify the source or the project; do not make up an answer.".chars().take(self.config.policy.max_context_chars).collect();
             }
             audit.status = "ignored".into();
             // Relevance is assessed while answering, with missing facts qualified. Only code
@@ -591,15 +590,15 @@ impl Pipeline {
             }
             audit.provider_fallbacks = generated.fallbacks.clone();
             audit.step(
-                "modelo",
+                "model",
                 match generated.fallbacks.as_slice() {
                     [] => format!(
-                        "respondió {}",
-                        audit.provider.as_deref().unwrap_or("el modelo")
+                        "{} answered",
+                        audit.provider.as_deref().unwrap_or("the model")
                     ),
                     failed => format!(
-                        "respondió {} tras fallar {}",
-                        audit.provider.as_deref().unwrap_or("el modelo"),
+                        "{} answered after {} failed",
+                        audit.provider.as_deref().unwrap_or("the model"),
                         failed.join(", ")
                     ),
                 },
@@ -636,7 +635,7 @@ impl Pipeline {
                     .collect();
                 if remaining.is_empty() {
                     audit.reference_selection = Some("code".into());
-                    audit.step("referencias", "el código enlaza todas las que ve nombradas");
+                    audit.step("references", "code links every one it sees named");
                 } else {
                     self.checkpoint(resource, &audit, "selecting_references")?;
                     match self
@@ -651,7 +650,7 @@ impl Pipeline {
                     {
                         Ok(ids) => {
                             audit.reference_selection = Some("llm".into());
-                            audit.step("referencias", format!("el modelo eligió {}", ids.len()));
+                            audit.step("references", format!("the model chose {}", ids.len()));
                             for id in ids {
                                 if !used_sources.contains(&id) {
                                     used_sources.push(id);
@@ -661,8 +660,8 @@ impl Pipeline {
                         Err(_) => {
                             audit.reference_selection = Some("code".into());
                             audit.step(
-                                "referencias",
-                                "ningún modelo pudo elegirlas; el código enlaza lo que ve nombrado",
+                                "references",
+                                "no model could choose them; code links what it sees named",
                             );
                         }
                     }
@@ -719,8 +718,8 @@ impl Pipeline {
         if self.config.policy.dry_run {
             audit.status = "dry_run".into();
             audit.step(
-                "modo observación",
-                "propuesta registrada; no se envía a Teams",
+                "observation mode",
+                "proposal recorded; nothing is sent to Teams",
             );
             self.store.record(resource, &audit)?;
             if resource.starts_with("simulation:")
@@ -755,8 +754,8 @@ impl Pipeline {
         {
             audit.reason = "message_changed".into();
             audit.step(
-                "sin envío",
-                "el mensaje cambió, se borró o dejó de ser elegible",
+                "not sent",
+                "the message changed, was deleted or stopped being eligible",
             );
             return self.store.record(resource, &audit);
         }
@@ -767,14 +766,14 @@ impl Pipeline {
                 audit.status = "sent".into();
                 audit.sent = Some(proposal);
                 audit.graph_message_id = Some(id);
-                audit.step("envío", "respuesta enviada a Teams");
+                audit.step("send", "answer sent to Teams");
             }
             Err(_) => {
                 audit.status = "uncertain".into();
                 audit.reason = "send_result_unknown_manual_review".into();
                 audit.step(
-                    "envío",
-                    "resultado incierto; revisar manualmente (no se reintenta)",
+                    "send",
+                    "uncertain result; review it manually (never retried)",
                 );
             }
         }
@@ -847,8 +846,8 @@ impl Pipeline {
                 None => {
                     registry.partial = true;
                     audit.step(
-                        "revisión de actividad",
-                        format!("{} no se pudo leer", source.id),
+                        "activity review",
+                        format!("{} could not be read", source.id),
                     );
                     let name = match &source.access {
                         Access::Tool { tool } => tool.name(),
@@ -933,12 +932,12 @@ impl Pipeline {
         audit: &mut Audit,
         reason: String,
     ) -> Result<()> {
-        // The audit log is read in the app, which is in Spanish; the notice follows the reply language.
-        let explanation = withheld_reason(&reason, Language::Es);
+        // The audit log is read in the app, which is in English; the notice follows the reply language.
+        let explanation = withheld_reason(&reason, Language::En);
         let language = self.config.llm.language;
         let cause = withheld_reason(&reason, language);
         audit.reason = reason;
-        audit.step("retenida", explanation);
+        audit.step("withheld", explanation);
         self.store.record(resource, audit)?;
         let own_chat = self
             .config
@@ -966,11 +965,11 @@ impl Pipeline {
         let sent = self.adapter.send(message, &notice).await.is_ok();
         audit.withheld_notice = Some(if sent { "sent" } else { "uncertain" }.into());
         audit.step(
-            "aviso",
+            "notice",
             if sent {
-                "aviso enviado al chat personal"
+                "notice sent to the personal chat"
             } else {
-                "aviso con resultado incierto (no se reintenta)"
+                "notice with an uncertain result (never retried)"
             },
         );
         self.store.record(resource, audit)
@@ -997,7 +996,7 @@ impl Pipeline {
         *cached = Some(text.clone());
         text
     }
-    /// Earlier messages as `[fecha hora · autor] texto`, redacted, newest kept within budget,
+    /// Earlier messages as `[date time · author] text`, redacted, newest kept within budget,
     /// followed by the time of the current request.
     fn history_text(
         &self,
@@ -1025,7 +1024,7 @@ impl Pipeline {
         lines.reverse();
         if let Some(at) = chrono::DateTime::from_timestamp_millis(current_millis) {
             lines.push(format!(
-                "[{} · solicitud actual]",
+                "[{} · current request]",
                 at.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M")
             ));
         }
@@ -1189,9 +1188,15 @@ fn question_request(question: &str) -> bool {
         .replace('ú', "u");
     let normalized = normalized.trim_start_matches(|c: char| !c.is_alphanumeric());
     // «necesito que…», «cuando puedas…» ask someone to act; the intent classifier decides who.
-    if ["necesito que ", "cuando puedas"]
-        .iter()
-        .any(|p| normalized.starts_with(p))
+    if [
+        "necesito que ",
+        "cuando puedas",
+        "i need you to ",
+        "when you can",
+        "please ",
+    ]
+    .iter()
+    .any(|p| normalized.starts_with(p))
     {
         return false;
     }
@@ -1220,12 +1225,25 @@ fn question_request(question: &str) -> bool {
         "mas detalles",
         "how ",
         "what ",
+        "which ",
         "where ",
         "when ",
         "why ",
         "who ",
+        "can you ",
+        "could you ",
+        "do you know ",
+        "is there ",
+        "are there ",
         "explain ",
         "tell me ",
+        "show me ",
+        "give me ",
+        "list ",
+        "find ",
+        "summarize ",
+        "describe ",
+        "i need ",
     ]
     .iter()
     .any(|prefix| normalized.starts_with(prefix))
@@ -1233,8 +1251,8 @@ fn question_request(question: &str) -> bool {
 fn leave_to_person(audit: &mut Audit) {
     audit.reason = "personal_request".into();
     audit.step(
-        "sin respuesta",
-        "pide una llamada, reunión, revisión conjunta o disponibilidad: lo responde la persona",
+        "no answer",
+        "asks for a call, a meeting, a joint review or availability: the person answers it",
     );
 }
 /// A call, meeting, joint review or the person's availability. Only the person can answer
@@ -1298,8 +1316,25 @@ fn personal_request(text: &str) -> bool {
             " podemos hablar ",
             " call me ",
             " call you ",
+            " give me a call ",
+            " on a call ",
+            " have a call ",
+            " quick call ",
             " are you available ",
+            " are you free ",
             " can we talk ",
+            " can we meet ",
+            " let s talk ",
+            " lets talk ",
+            " let s meet ",
+            " lets meet ",
+            " catch up ",
+            " sync up ",
+            " do you have a minute ",
+            " do you have a moment ",
+            " do you have time ",
+            " got a minute ",
+            " with you ",
         ]
         .iter()
         .any(|p| phrase.contains(p))
@@ -1344,6 +1379,21 @@ fn documentation_question(question: &str) -> bool {
         "explicame ",
         "how to use ",
         "how to configure ",
+        "how to install ",
+        "how to invoke ",
+        "how to call ",
+        "how to integrate ",
+        "how do i use ",
+        "how do i configure ",
+        "how do i install ",
+        "how do i call ",
+        "how do i invoke ",
+        "how does ",
+        "what is ",
+        "what does ",
+        "what parameters ",
+        "what are the requirements ",
+        "explain ",
     ]
     .iter()
     .any(|p| normalized.starts_with(p))
@@ -1364,6 +1414,12 @@ fn status_question(question: &str) -> bool {
                 | "aprobar"
                 | "modifica"
                 | "modificar"
+                | "create"
+                | "run"
+                | "deploy"
+                | "approve"
+                | "modify"
+                | "trigger"
         )
     }) {
         return false;
@@ -1380,9 +1436,15 @@ fn status_question(question: &str) -> bool {
                 | "pipelines"
                 | "release"
                 | "releases"
+                | "progress"
+                | "blockers"
+                | "impediments"
+                | "commitments"
         )
     }) || (q.contains("esta semana")
         && (q.contains("he hecho") || q.contains("trabaj") || q.contains("hice")))
+        || (q.contains("this week")
+            && (q.contains("did") || q.contains("worked") || q.contains("done")))
 }
 
 #[cfg(test)]
@@ -1461,6 +1523,9 @@ mod tests {
             "Necesito los parámetros",
             "dame más detalles",
             "Como se usa un componente desconocido",
+            "Which endpoint does the test environment use",
+            "Can you explain the deployment",
+            "Show me the parameters",
         ] {
             assert!(question_request(q), "{q}");
         }
@@ -1470,6 +1535,8 @@ mod tests {
             "Crea una HU mañana",
             "Necesito que me envíes el documento",
             "Cuando puedas lo revisamos",
+            "The deployment finished",
+            "Please send me the document",
         ] {
             assert!(!question_request(q), "{q}");
         }
@@ -1490,6 +1557,10 @@ mod tests {
             "¿Lo vemos contigo en la tarde?",
             "¿Juntémonos a las 3?",
             "Can we talk?",
+            "Do you have a minute?",
+            "Let's meet tomorrow about the deploy",
+            "Can you give me a call?",
+            "Are you free at 3?",
         ] {
             assert!(personal_request(q), "{q}");
         }
@@ -1501,6 +1572,8 @@ mod tests {
             "Necesito los parámetros",
             "¿Qué se debe subir a prod en el próximo paso?",
             "en test y desa se cae",
+            "How do I call the payments service?",
+            "What does the call to the endpoint return?",
         ] {
             assert!(!personal_request(q), "{q}");
         }
@@ -1517,6 +1590,8 @@ mod tests {
             "¿Qué hace este servicio?",
             "Cómo instalar el componente",
             "How to use this service?",
+            "How does the payment notification work?",
+            "What parameters does the pipeline need?",
         ] {
             assert!(documentation_question(question), "{question}");
         }
@@ -1538,6 +1613,9 @@ mod tests {
             "¿En qué HU estás trabajando y cuáles son tus impedimentos?"
         ));
         assert!(status_question("¿Qué he hecho esta semana?"));
+        assert!(status_question("What did I do this week?"));
+        assert!(status_question("Any blockers on my work items?"));
+        assert!(!status_question("Deploy the release now"));
         assert!(status_question(
             "Pregunta anterior: avance de HU. Solicitud actual: dame más detalles"
         ));

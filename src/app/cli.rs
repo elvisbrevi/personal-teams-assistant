@@ -7,79 +7,79 @@ use std::{
     time::Duration,
 };
 
-const HELP: &str = "pta — administración de Personal Teams Assistant
+const HELP: &str = "pta — Personal Teams Assistant administration
 
-Uso: pta [--json] [--non-interactive] COMANDO [ARGUMENTOS]
-     pta help | pta --help | pta -h     muestra esta ayuda
-     pta --version                       versión del CLI y del contrato
+Usage: pta [--json] [--non-interactive] COMMAND [ARGUMENTS]
+       pta help | pta --help | pta -h     shows this help
+       pta --version                       CLI and contract version
 
-Asistente (servicio de Teams)
-  start                    Inicia el asistente; abre el host oculto si no está corriendo.
-  status                   Muestra si el host y el asistente están corriendo, el modo, Teams y los modelos.
-  stop                     Detiene el asistente (el host sigue abierto).
-  restart                  Detiene e inicia el asistente con la configuración guardada.
-  mode show|observe|active Modo actual; observe = nunca envía a Teams, active = responde.
-  doctor [--offline]       Revisa configuración, credenciales y cuenta (--offline: solo archivos locales).
+Assistant (Teams service)
+  start                    Starts the assistant; opens the hidden host if it is not running.
+  status                   Shows whether the host and the assistant are running, the mode, Teams and the models.
+  stop                     Stops the assistant (the host stays open).
+  restart                  Stops and starts the assistant with the saved configuration.
+  mode show|observe|active Current mode; observe = never sends to Teams, active = answers.
+  doctor [--offline]       Checks configuration, credentials and account (--offline: local files only).
 
-Aplicación (host)
-  app open|hide|quit       Muestra u oculta la ventana, o cierra el host (detiene antes asistente y túnel).
+Application (host)
+  app open|hide|quit       Shows or hides the window, or closes the host (stopping the assistant and tunnel first).
 
-Configuración
-  config show              Configuración guardada.
-  config get CAMPO         Lee un campo por ruta con puntos (p. ej. policy.dry_run).
-  config set CAMPO JSON    Cambia un campo; el valor es JSON (true, \"texto\", [...], {...}).
-  config apply|validate    Aplica o valida {config,map,tunnel_config} en JSON o TOML por stdin.
-  config import ARCHIVO    Importa un config.toml existente (con el asistente detenido).
-  credentials list         Credenciales y su origen, sin valores.
-  credentials set NOMBRE   Guarda una credencial leída por stdin (nunca como argumento).
-  credentials delete NOMBRE
-  tunnel status|validate   Estado y validación local del túnel Cloudflare.
-  tunnel configure token|external|file RUTA
+Configuration
+  config show              Saved configuration.
+  config get FIELD         Reads a field by dotted path (e.g. policy.dry_run).
+  config set FIELD JSON    Changes a field; the value is JSON (true, \"text\", [...], {...}).
+  config apply|validate    Applies or validates {config,map,tunnel_config} as JSON or TOML on stdin.
+  config import FILE       Imports an existing config.toml (with the assistant stopped).
+  credentials list         Credentials and their origin, without values.
+  credentials set NAME     Stores a credential read from stdin (never as an argument).
+  credentials delete NAME
+  tunnel status|validate   Status and local validation of the Cloudflare tunnel.
+  tunnel configure token|external|file PATH
 
-Modelos de lenguaje
-  llm providers            CLI detectadas (Codex, Claude), sus modelos y esfuerzos, y DeepSeek por API.
-                           Orden y respaldo: pta config set llm.chain '[{\"provider\":\"codex\",\"model\":\"gpt-6.1-sol\",\"effort\":\"medium\"},...]'
-  test providers           Prueba cada modelo activo con datos ficticios (consume uso o API).
+Language models
+  llm providers            Detected CLIs (Codex, Claude), their models and efforts, and DeepSeek through its API.
+                           Order and fallback: pta config set llm.chain '[{\"provider\":\"codex\",\"model\":\"gpt-6.1-sol\",\"effort\":\"medium\"},...]'
+  test providers           Tests each active model with synthetic data (uses quota or API credit).
 
-Mensajes y diagnóstico
-  audit list [--limit N] [--content]   Mensajes recibidos, su resultado y el registro de pasos.
-  audit show RECURSO [--content]       Un mensaje; --content incluye pregunta y respuesta.
-  logs [--limit N]         Eventos del host.
-  chat | test simulate     Pipeline real con SimulationRequest JSON por stdin; nunca envía a Teams.
-  test connectivity        Lee la cuenta Microsoft conectada (sin enviar).
+Messages and diagnostics
+  audit list [--limit N] [--content]   Received messages, their outcome and the step log.
+  audit show RESOURCE [--content]      One message; --content includes question and answer.
+  logs [--limit N]         Host events.
+  chat | test simulate     Real pipeline with a SimulationRequest JSON on stdin; never sends to Teams.
+  test connectivity        Reads the connected Microsoft account (without sending).
 
-Cuentas
+Accounts
   auth microsoft status|login|finish|cancel|logout
                            login [--no-browser]; finish [--wait] [--redirect URL]
-                           (--redirect: la URL http://localhost:PUERTO/?code=... abierta en otro equipo)
+                           (--redirect: the http://localhost:PORT/?code=... URL opened on another device)
   auth github status|login CLIENT_ID|finish|cancel|logout
-  github repos             Repositorios autorizados para la GitHub App.
+  github repos             Repositories authorized for the GitHub App.
 
-Chat personal
+Personal chat
   self-chat status|enable [CHAT_ID]|disable
-  self-chat reconcile NONCE MESSAGE_ID  Resuelve una salida pendiente.
-  test self-chat           Comprueba la pertenencia al chat personal (no envía).
+  self-chat reconcile NONCE MESSAGE_ID  Resolves a pending output.
+  test self-chat           Checks the personal chat membership (does not send).
 
-Conocimiento
-  repos list | repos add|edit ALIAS RUTA | repos remove ALIAS
+Knowledge
+  repos list | repos add|edit ALIAS PATH | repos remove ALIAS
   repos clone OWNER/REPO ALIAS | repos sync ALIAS
   sources list | sources show ID | sources add | sources edit ID | sources remove ID
   sources enable|disable ID
-  sources audience ID      JSON por stdin: allowed_conversations, allowed_senders, external_processing.
-  azure wiki list|search|read SOURCE_ID  (search/read: JSON por stdin; solo lectura local)
+  sources audience ID      JSON on stdin: allowed_conversations, allowed_senders, external_processing.
+  azure wiki list|search|read SOURCE_ID  (search/read: JSON on stdin; local read only)
 
-Agentes
-  capabilities             Contrato y comandos en JSON.
-  skill show|path|install DIRECTORIO     Manual operativo para agentes.
+Agents
+  capabilities             Contract and commands as JSON.
+  skill show|path|install DIRECTORY     Operating manual for agents.
 
-Opciones
-  --json                   Respuesta JSON {contract, version, ok, code, exit_code, message, data, revision}.
-  --non-interactive        Nunca pregunta ni abre el navegador.
+Options
+  --json                   JSON reply {contract, version, ok, code, exit_code, message, data, revision}.
+  --non-interactive        Never prompts or opens the browser.
 
-Actualizar: cargo install personal-teams-assistant --locked. El primer comando pta (o abrir la app) detiene
-el host anterior (asistente y túnel) y pregunta si dejar el asistente corriendo con la versión nueva.
-Fuentes nuevas nacen deshabilitadas y sin audiencias. Credenciales solo por stdin.
-Salida: 0 ok, 1 falló, 2 entrada inválida, 3 no listo, 4 autorización pendiente, 5 dependencia o red, 6 conflicto o versión.
+Update: cargo install personal-teams-assistant --locked. The first pta command (or opening the app) stops
+the previous host (assistant and tunnel) and asks whether to keep the assistant running with the new version.
+New sources start disabled and without audiences. Credentials only on stdin.
+Exit: 0 ok, 1 failed, 2 invalid input, 3 not ready, 4 authorization pending, 5 dependency or network, 6 conflict or version.
 ";
 fn stdin_text() -> Result<String> {
     let mut value = String::new();
@@ -258,28 +258,28 @@ async fn retire_outdated_host(command: &str, action: &str, interactive: bool) ->
         return Ok(());
     }
     eprintln!(
-        "Se instaló una versión nueva de Personal Teams Assistant: deteniendo la anterior (asistente y túnel)..."
+        "A new version of Personal Teams Assistant was installed: stopping the previous one (assistant and tunnel)..."
     );
     let was_running = control::retire_outdated_host().await?;
-    eprintln!("Versión anterior detenida.");
+    eprintln!("Previous version stopped.");
     // These commands decide the assistant's state themselves.
     if matches!(command, "start" | "restart" | "stop") || (command, action) == ("app", "quit") {
         return Ok(());
     }
     if !was_running {
-        eprintln!("El asistente estaba detenido; inícialo con `pta start` cuando quieras.");
+        eprintln!("The assistant was stopped; start it with `pta start` whenever you want.");
         return Ok(());
     }
     if !crate::app::keep_running_after_update(interactive) {
-        eprintln!("El asistente queda detenido; inícialo con `pta start` cuando quieras.");
+        eprintln!("The assistant stays stopped; start it with `pta start` whenever you want.");
         return Ok(());
     }
     let reply = call("start_assistant", json!({}), None, true).await?;
     if reply.ok {
-        eprintln!("El asistente sigue corriendo con la versión nueva.");
+        eprintln!("The assistant keeps running with the new version.");
     } else {
         eprintln!(
-            "No se pudo iniciar el asistente con la versión nueva: {}",
+            "The assistant could not start with the new version: {}",
             reply.message.as_deref().unwrap_or(&reply.code)
         );
     }
@@ -646,13 +646,13 @@ async fn execute(mut args: Vec<String>) -> Result<Reply> {
 fn human(command: &str, data: &Value) -> Option<String> {
     match command.split(' ').next()? {
         "status" => Some(status_text(data)),
-        "start" | "restart" if data["running"] == true => Some("Asistente corriendo.".into()),
-        "stop" if data["running"] == false => Some("Asistente detenido.".into()),
+        "start" | "restart" if data["running"] == true => Some("Assistant running.".into()),
+        "stop" if data["running"] == false => Some("Assistant stopped.".into()),
         "app" if command == "app quit" && data["quitting"] == true => {
-            Some("Host cerrado; el asistente y el túnel se detuvieron.".into())
+            Some("Host closed; the assistant and the tunnel stopped.".into())
         }
         "app" if command == "app quit" && data["host_running"] == false => {
-            Some("El host no estaba corriendo.".into())
+            Some("The host was not running.".into())
         }
         _ => None,
     }
@@ -663,64 +663,56 @@ fn status_text(data: &Value) -> String {
     lines.push(format!(
         "Host: {}",
         if !yes("host_running") {
-            "detenido".to_owned()
+            "stopped".to_owned()
         } else {
             format!(
-                "activo{}{}",
+                "running{}{}",
                 data["host_version"]
                     .as_str()
-                    .map(|v| format!(", versión {v}"))
+                    .map(|v| format!(", version {v}"))
                     .unwrap_or_default(),
-                if yes("headless") {
-                    ", sin interfaz"
-                } else {
-                    ""
-                }
+                if yes("headless") { ", headless" } else { "" }
             )
         }
     ));
     lines.push(format!(
-        "Asistente: {}",
-        if yes("running") {
-            "corriendo"
-        } else {
-            "detenido"
-        }
+        "Assistant: {}",
+        if yes("running") { "running" } else { "stopped" }
     ));
     let dry_run = data["config"]["policy"]["dry_run"]
         .as_bool()
         .or(data["persisted_dry_run"].as_bool());
     if let Some(dry_run) = dry_run {
         lines.push(format!(
-            "Modo: {}",
+            "Mode: {}",
             if dry_run {
-                "observación (no envía a Teams)"
+                "observe (never sends to Teams)"
             } else {
-                "activo (responde en Teams)"
+                "active (answers in Teams)"
             }
         ));
     }
     if yes("host_running") {
         lines.push(format!(
-            "Cuenta Microsoft: {}",
+            "Microsoft account: {}",
             if yes("microsoft_connected") {
-                "conectada"
+                "connected"
             } else {
-                "no conectada"
+                "not connected"
             }
         ));
         if yes("running") {
             let subscriptions = data["active_subscriptions"].as_u64().unwrap_or(0);
             lines.push(format!(
-                "Teams: {subscriptions} suscripción(es) vigente(s){}; túnel {}",
+                "Teams: {subscriptions} active subscription(s){}; tunnel {}",
                 data["subscription_issue"]
                     .as_str()
-                    .map(|issue| format!(" (último problema: {issue})"))
+                    .map(|issue| format!(" (last problem: {issue})"))
                     .unwrap_or_default(),
                 if yes("tunnel_running") {
-                    "activo"
+                    "running"
                 } else {
-                    "inactivo"
+                    "stopped"
                 }
             ));
         }
@@ -741,11 +733,11 @@ fn status_text(data: &Value) -> String {
         })
         .collect();
     if !chain.is_empty() {
-        lines.push(format!("Modelos: {}", chain.join(" > ")));
+        lines.push(format!("Models: {}", chain.join(" > ")));
     } else if let Some(model) = llm["model"].as_str() {
-        lines.push(format!("Modelos: deepseek:{model}:max"));
+        lines.push(format!("Models: deepseek:{model}:max"));
     }
-    lines.push("Detalle completo: pta --json status".into());
+    lines.push("Full detail: pta --json status".into());
     lines.join("\n")
 }
 pub async fn run() -> i32 {
@@ -990,25 +982,25 @@ mod help_tests {
             ]}}
         });
         let text = status_text(&running);
-        assert!(text.contains("Host: activo, versión 0.4.0"));
-        assert!(text.contains("Asistente: corriendo"));
-        assert!(text.contains("Modo: activo (responde en Teams)"));
-        assert!(text.contains("Teams: 1 suscripción(es) vigente(s); túnel activo"));
-        assert!(text.contains("Modelos: codex:gpt-6.1-sol:medium\n"));
+        assert!(text.contains("Host: running, version 0.4.0"));
+        assert!(text.contains("Assistant: running"));
+        assert!(text.contains("Mode: active (answers in Teams)"));
+        assert!(text.contains("Teams: 1 active subscription(s); tunnel running"));
+        assert!(text.contains("Models: codex:gpt-6.1-sol:medium\n"));
         let stopped = json!({"host_running": false, "running": false, "persisted_dry_run": true,
             "config": {"llm": {"model": "deepseek-flash", "chain": []}}});
         let text = status_text(&stopped);
-        assert!(text.contains("Host: detenido"));
-        assert!(text.contains("Asistente: detenido"));
-        assert!(text.contains("Modo: observación"));
-        assert!(text.contains("Modelos: deepseek:deepseek-flash:max"));
+        assert!(text.contains("Host: stopped"));
+        assert!(text.contains("Assistant: stopped"));
+        assert!(text.contains("Mode: observe"));
+        assert!(text.contains("Models: deepseek:deepseek-flash:max"));
         assert_eq!(
             human("stop", &json!({"running": false})).as_deref(),
-            Some("Asistente detenido.")
+            Some("Assistant stopped.")
         );
         assert_eq!(
             human("start", &json!({"running": true})).as_deref(),
-            Some("Asistente corriendo.")
+            Some("Assistant running.")
         );
         assert!(human("config show", &json!({})).is_none());
     }

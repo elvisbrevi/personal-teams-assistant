@@ -1,37 +1,39 @@
-# Guía para agentes
+# Guide for agents
 
-Lee primero [la arquitectura](docs/architecture.md): explica componentes, pipeline, datos, credenciales, invariantes y recetas de cambio.
+Read [the architecture](docs/architecture.md) first: it explains components, pipeline, data, credentials, invariants and change recipes.
 
-## Qué skill usar
+## Which skill to use
 
-- Guardar, corregir u organizar hechos de la base de conocimiento: [save-knowledge](.agents/skills/save-knowledge/SKILL.md).
-- Configurar, operar o diagnosticar la aplicación instalada: [personal-teams-assistant](desktop/skills/personal-teams-assistant/SKILL.md) (también `pta skill show`).
+- Save, correct or organize facts in the knowledge base: [save-knowledge](.agents/skills/save-knowledge/SKILL.md).
+- Configure, operate or diagnose the installed application: [personal-teams-assistant](desktop/skills/personal-teams-assistant/SKILL.md) (also `pta skill show`).
 
-## Prioridades
+## Priorities
 
-- El producto es un solo paquete de Cargo, `personal-teams-assistant`: la GUI y host `personal-teams-assistant`, el CLI `pta` y su skill. El mismo binario corre sin interfaz (`--headless`, o compilado con `--no-default-features` para Linux). No hay otros crates, bundles `.app`/`.dmg`/instaladores ni servidor independiente.
-- Tauri solo se usa en `src/app/gui.rs` (recursos en `desktop/`); las operaciones usan `Host`/`Shell` y deben compilar con y sin la feature `gui`.
-- La prioridad de entrega es el CLI y su núcleo compartido. Si la GUI queda desfasada, anótalo en «Límites conocidos» de la arquitectura; su paridad no bloquea el trabajo del CLI. No reinstales, publiques ni actualices la GUI salvo que el usuario lo pida.
+- The product is a single Cargo package, `personal-teams-assistant`: the GUI and host `personal-teams-assistant`, the `pta` CLI and its skill. The same binary runs without a window (`--headless`, or built with `--no-default-features` for Linux). There are no other crates, `.app`/`.dmg`/installer bundles or standalone server.
+- Tauri is used only in `src/app/gui.rs` (resources in `desktop/`); operations go through `Host`/`Shell` and must build with and without the `gui` feature.
+- Delivery priority is the CLI and its shared core. If the GUI falls behind, note it in the architecture's «Known limits»; its parity does not block CLI work. Do not reinstall, publish or update the GUI unless the user asks.
+- Everything in the repository is in English: code, comments, documentation, prompts, the GUI, CLI messages and audit steps. What the assistant writes to Teams follows `llm.language` (Spanish by default). Detecting messages without a model keeps Spanish and English phrases, because users write in both.
 
-## Invariantes que no se pueden romper
+## Invariants that must not be broken
 
-- Conservar perfil `dev.personalteams.assistant`, servicio de Llavero `personal-teams-assistant.default`, nombres de credenciales, `data_dir` y `STATE_ENCRYPTION_KEY`: de ellos depende que la sesión Microsoft y las credenciales sigan funcionando sin pedirlas otra vez.
-- No quitar ni renombrar campos de `Config`/`KnowledgeMap` (`deny_unknown_fields`); añadir solo con `#[serde(default)]`.
-- No añadir scopes de Graph ni cambiar el flujo OAuth (cliente público + PKCE + loopback).
-- Nunca reintentar un envío a Graph; ante duda, `uncertain` y revisión humana.
-- Las decisiones de modelos no conceden permisos: audiencias, rutas, URLs y límites se verifican en código.
-- Fuentes nuevas nacen deshabilitadas, sin audiencias y sin `external_processing`.
-- No imprimir ni registrar secretos; credenciales solo por stdin o almacén del sistema.
+- Keep the profile `dev.personalteams.assistant`, the Keychain service `personal-teams-assistant.default`, credential names, `data_dir` and `STATE_ENCRYPTION_KEY`: the Microsoft session and the credentials keep working without asking for them again only because of them.
+- Do not remove or rename fields of `Config`/`KnowledgeMap` (`deny_unknown_fields`); add only with `#[serde(default)]`. The single authorized exception is the retired `[jev]` section: `Config::retired_reviewer` accepts it so older profiles load, and never writes it again.
+- Do not add Graph scopes or change the OAuth flow (public client + PKCE + loopback).
+- Never retry a send to Graph; when in doubt, `uncertain` and human review.
+- Model decisions grant no permissions: audiences, paths, URLs and limits are checked in code.
+- New sources start disabled, without audiences and without `external_processing`.
+- Never print or log secrets; credentials only on stdin or from the system store.
 
-## Reglas de las respuestas del asistente
+## Rules for the assistant's answers
 
-- Wiki: la documentación creada o editada por el usuario puede respaldar una respuesta con su autoridad. La de terceros indica dónde está y quién la documentó, sin inventar autoría ausente. Toda respuesta basada en wikis enlaza las páginas usadas.
-- Cada work item, pipeline y stage concreto mencionado lleva su enlace verificado.
-- Con información de conversaciones de Teams, nombrar a las personas con quienes se interactuó cuando sea relevante y esté respaldado, conservando quién dijo o hizo qué. No inventar nombres ni atribuir una interacción a todos los miembros del chat.
+- Wiki: documentation the user created or edited can back an answer with their authority. Third-party documentation says where it is and who documented it, without inventing missing authorship. Every Wiki-based answer links the pages it used.
+- Every concrete work item, pull request, commit, pipeline, stage or release mentioned carries its verified link.
+- With information from Teams conversations, name the people involved when relevant and supported, keeping who said or did what. Do not invent names or attribute an interaction to every chat member.
+- In an activity review, verified authorship (an own commit, pull request, run, release, approval, Wiki edit or message) proves the user's own action; never invent activity.
 
-## Antes de entregar
+## Before delivering
 
-No hay CI (GitHub Actions está desactivado para no generar costos): estas verificaciones, en local, son la única barrera. No añadas workflows de GitHub Actions.
+There is no CI (GitHub Actions is disabled to avoid costs): these local checks are the only gate. Do not add GitHub Actions workflows.
 
 ```sh
 cargo fmt --all --check
@@ -39,6 +41,7 @@ cargo clippy --all-targets -- -D warnings
 cargo clippy --all-targets --no-default-features -- -D warnings
 cargo test
 cargo test --no-default-features
+bun build desktop/ui/app.js --no-bundle --outfile /tmp/app-check.js   # if the GUI changed
 ```
 
-Actualiza la arquitectura y la skill si cambias comportamiento, comandos o esquemas.
+Update the architecture and the skill when behavior, commands or schemas change.

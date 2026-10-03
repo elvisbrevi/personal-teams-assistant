@@ -374,14 +374,14 @@ impl Graph {
                     }
                     let sender = message["from"]["user"]["displayName"]
                         .as_str()
-                        .unwrap_or("Participante");
+                        .unwrap_or("Participant");
                     let mine = message["from"]["user"]["id"].as_str()
                         == Some(graph.config.graph.user_id.as_str());
                     let metadata = crate::evidence::TeamsMessage {
                         conversation: collection.clone(),
                         message: message["id"].as_str().unwrap_or("").into(),
                         sender: message["from"]["user"]["id"].as_str().unwrap_or("").into(),
-                        name: (sender != "Participante").then(|| sender.to_owned()),
+                        name: (sender != "Participant").then(|| sender.to_owned()),
                         mine,
                         date: date.into(),
                         text: body.clone(),
@@ -405,6 +405,12 @@ impl Graph {
                     "revis",
                     "pase a prod",
                     "bug",
+                    "deploy",
+                    "production",
+                    "meeting",
+                    "coordinat",
+                    "incident",
+                    "review",
                 ];
                 let own_work: Vec<usize> = found
                     .iter()
@@ -1112,9 +1118,9 @@ impl MessageAdapter for Graph {
                 continue;
             }
             let author = if output {
-                "asistente".to_owned()
+                "assistant".to_owned()
             } else if value["from"]["user"]["id"].as_str() == Some(&self.config.graph.user_id) {
-                "yo".to_owned()
+                "me".to_owned()
             } else {
                 value["from"]["user"]["displayName"]
                     .as_str()
