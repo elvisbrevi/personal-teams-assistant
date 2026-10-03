@@ -1880,7 +1880,7 @@ impl LlmProvider for SlowLlm {
 }
 #[tokio::test(start_paused = true)]
 async fn slow_answers_send_one_holding_reply_first() {
-    use personal_teams_assistant::pipeline::HOLDING_REPLY;
+    use personal_teams_assistant::{config::Language, pipeline::holding_reply};
     for earlier_notice in [None, Some("uncertain")] {
         let dir = tempfile::tempdir().unwrap();
         let store = support::store(&dir);
@@ -1921,7 +1921,7 @@ async fn slow_answers_send_one_holding_reply_first() {
             assert_eq!(sent, vec![answer]);
             assert_eq!(audit.holding_reply.as_deref(), Some("uncertain"));
         } else {
-            assert_eq!(sent, vec![HOLDING_REPLY.to_owned(), answer]);
+            assert_eq!(sent, vec![holding_reply(Language::Es).to_owned(), answer]);
             assert_eq!(audit.holding_reply.as_deref(), Some("sent"));
         }
     }
@@ -2155,10 +2155,16 @@ impl DecisionGate for IntentQuestionGate {
 }
 #[tokio::test]
 async fn withheld_answer_in_the_personal_chat_is_reported_once() {
-    for chat in ["chats/48:notes", "chats/chat1"] {
+    use personal_teams_assistant::config::Language;
+    for (chat, language) in [
+        ("chats/48:notes", Language::Es),
+        ("chats/48:notes", Language::En),
+        ("chats/chat1", Language::Es),
+    ] {
         let dir = tempfile::tempdir().unwrap();
         let store = support::store(&dir);
         let mut cfg = support::config();
+        cfg.llm.language = language;
         cfg.graph.self_chat = Some(personal_teams_assistant::config::SelfChat {
             id: "48:notes".into(),
             user_id: cfg.graph.user_id.clone(),
@@ -2218,7 +2224,11 @@ async fn withheld_answer_in_the_personal_chat_is_reported_once() {
         if own {
             assert_eq!(audit.withheld_notice.as_deref(), Some("sent"));
             assert_eq!(sent.len(), 1);
-            assert!(sent[0].starts_with("No envié la respuesta a tu mensaje: citaba referencias"));
+            // The notice follows the reply language; it never carries the withheld content.
+            assert!(sent[0].starts_with(match language {
+                Language::Es => "No envié la respuesta a tu mensaje: citaba referencias",
+                Language::En => "I didn't send the reply to your message: it cited references",
+            }));
             assert!(!sent[0].contains("no está documentado"));
         } else {
             // Never notify other people.

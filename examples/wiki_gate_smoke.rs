@@ -1,6 +1,7 @@
 //! Optional live Jev regression, synthetic facts only. Never constructs a Graph client.
 use anyhow::{Result, ensure};
 use personal_teams_assistant::{
+    config::Language,
     decision::{DecisionGate, Jev, Stage},
     evidence::{Evidence, Reference, TeamsMessage, complete_answer},
     security,
@@ -79,7 +80,7 @@ async fn main() -> Result<()> {
         ),
     ] {
         let used = vec!["wiki:synthetic:p".into()];
-        let answer = complete_answer(body, &used, &e, &e.text)?;
+        let answer = complete_answer(body, &used, &e, &e.text, Language::Es)?;
         let v=gate.evaluate(Stage::Final,json!({"question":"Según la wiki, explica el procedimiento de despliegue","evidence":e.text,"references":e.references,"used_sources":used,"answer":answer,"teams_messages":[]})).await?;
         let allowed = v.selected == "allow" && v.allows(0.65);
         println!("{name}: allowed={allowed}, confidence={}", v.confidence);
@@ -111,7 +112,7 @@ async fn main() -> Result<()> {
         ),
     ] {
         let used = vec!["wiki:synthetic:p".into(), "wiki:synthetic:third".into()];
-        let answer = complete_answer(body, &used, &mixed, &mixed.text)?;
+        let answer = complete_answer(body, &used, &mixed, &mixed.text, Language::Es)?;
         let v=gate.evaluate(Stage::Final,json!({"question":"Explica el procedimiento documentado","evidence":mixed.text,"references":mixed.references,"used_sources":used,"answer":answer,"teams_messages":[]})).await?;
         let allowed = v.selected == "allow" && v.allows(0.65);
         println!("{name}: allowed={allowed}, confidence={}", v.confidence);

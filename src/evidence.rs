@@ -1,5 +1,5 @@
 //! References are captured at retrieval, never reconstructed from model prose.
-use crate::security::Redactor;
+use crate::{config::Language, security::Redactor};
 use anyhow::{Result, ensure};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
@@ -179,7 +179,7 @@ impl Reference {
     }
     /// One bullet of the appended sources list. Wiki links show the page title; project and
     /// verified attribution follow the link so the reader sees provenance without the URL.
-    fn citation(&self) -> String {
+    fn citation(&self, language: Language) -> String {
         let label = self.label.replace(['[', ']', '\n', '\r'], " ");
         if self.kind != "wiki" {
             return format!("- [{label}]({})", self.url);
@@ -187,21 +187,41 @@ impl Reference {
         let title = label.rsplit(" / ").next().unwrap_or(&label).trim();
         let project = label.split(" / ").next().unwrap_or(&self.project).trim();
         let link = format!("[{title}]({})", self.url);
-        match self.authority.as_deref() {
-            Some("created_by_me" | "edited_by_me") => format!(
+        let own = matches!(
+            self.authority.as_deref(),
+            Some("created_by_me" | "edited_by_me")
+        );
+        // The Wiki reader records "último editor registrado" as the only author role.
+        let role = self
+            .author_role
+            .as_deref()
+            .unwrap_or("último editor registrado");
+        match (language, &self.author) {
+            (Language::Es, _) if own => format!(
                 "- {link}: wiki del proyecto {project}; documentación con contribución propia verificada."
             ),
-            _ => match &self.author {
-                Some(name) => format!(
-                    "- {link}: wiki del proyecto {project}; {}: {name}.",
-                    self.author_role
-                        .as_deref()
-                        .unwrap_or("último editor registrado"),
-                ),
-                None => format!(
-                    "- {link}: wiki del proyecto {project}; no se pudo verificar quién la documentó."
-                ),
-            },
+            (Language::Es, Some(name)) => {
+                format!("- {link}: wiki del proyecto {project}; {role}: {name}.")
+            }
+            (Language::Es, None) => format!(
+                "- {link}: wiki del proyecto {project}; no se pudo verificar quién la documentó."
+            ),
+            (Language::En, _) if own => {
+                format!(
+                    "- {link}: {project} project wiki; documentation I contributed to (verified)."
+                )
+            }
+            (Language::En, Some(name)) => {
+                let role = if role == "último editor registrado" {
+                    "last recorded editor"
+                } else {
+                    role
+                };
+                format!("- {link}: {project} project wiki; {role}: {name}.")
+            }
+            (Language::En, None) => format!(
+                "- {link}: {project} project wiki; it couldn't be verified who documented it."
+            ),
         }
     }
 }
@@ -234,14 +254,20 @@ pub fn named_references(body: &str, evidence: &Evidence) -> Vec<String> {
 }
 /// Runs before the privacy checks, against the complete rendered answer. Wiki pages selected
 /// as used are listed under **Fuentes**; when none is, every consulted page is listed under
-/// **Páginas consultadas**, so a Wiki-based answer always links its pages. URLs in the body
-/// must be verified references or appear literally in `evidence_text`.
+/// **Páginas consultadas** (in English, **Sources** and **Pages consulted**), so a Wiki-based
+/// answer always links its pages. URLs in the body must be verified references or appear
+/// literally in `evidence_text`.
 pub fn complete_answer(
     body: &str,
     used: &[String],
     evidence: &Evidence,
     evidence_text: &str,
+    language: Language,
 ) -> Result<String> {
+    let (sources, consulted_pages) = match language {
+        Language::Es => ("**Fuentes**", "**Páginas consultadas**"),
+        Language::En => ("**Sources**", "**Pages consulted**"),
+    };
     let selected: BTreeSet<_> = used.iter().collect();
     ensure!(selected.len() == used.len(), "duplicate used source");
     for id in &selected {
@@ -325,9 +351,9 @@ pub fn complete_answer(
             r.validate()?;
             if linked.insert((r.url.clone(), r.label.clone())) {
                 if linked.len() == 1 {
-                    answer.push_str("\n\n**Fuentes**");
+                    answer.push_str(&format!("\n\n{sources}"));
                 }
-                answer.push_str(&format!("\n{}", r.citation()));
+                answer.push_str(&format!("\n{}", r.citation(language)));
             }
         }
     }
@@ -337,9 +363,9 @@ pub fn complete_answer(
             r.validate()?;
             if consulted.insert((r.url.clone(), r.label.clone())) {
                 if consulted.len() == 1 {
-                    answer.push_str("\n\n**Páginas consultadas**");
+                    answer.push_str(&format!("\n\n{consulted_pages}"));
                 }
-                answer.push_str(&format!("\n{}", r.citation()));
+                answer.push_str(&format!("\n{}", r.citation(language)));
             }
         }
     }
@@ -391,6 +417,7 @@ mod tests {
                 &["p".into()],
                 &e,
                 "",
+                Language::Es,
             )
             .unwrap();
             assert!(a.contains("pagePath=%2FProcedure"));
@@ -407,18 +434,61 @@ mod tests {
         }
     }
     #[test]
+    fn english_answers_get_english_sources_and_attribution() {
+        let mut other = reference("p", "wiki");
+        other.authority = Some("other".into());
+        other.author = Some("Ana".into());
+        other.author_role = Some("último editor registrado".into());
+        let e = Evidence {
+            references: vec![other],
+            ..Default::default()
+        };
+        let a = complete_answer(
+            "The procedure says so.",
+            &["p".into()],
+            &e,
+            "",
+            Language::En,
+        )
+        .unwrap();
+        assert!(a.starts_with("The procedure says so.\n\n**Sources**\n- [Procedure]("));
+        assert!(a.ends_with("): Project project wiki; last recorded editor: Ana."));
+        assert!(!a.contains("Fuentes") && !a.contains("último editor"));
+
+        let mut own = reference("p", "wiki");
+        own.authority = Some("created_by_me".into());
+        let e = Evidence {
+            references: vec![own],
+            ..Default::default()
+        };
+        let a = complete_answer("Not documented.", &[], &e, "", Language::En).unwrap();
+        assert!(a.contains("\n\n**Pages consulted**\n- [Procedure]("));
+        assert!(a.ends_with("Project project wiki; documentation I contributed to (verified)."));
+
+        let mut unknown = reference("p", "wiki");
+        unknown.authority = Some("unknown".into());
+        let e = Evidence {
+            references: vec![unknown],
+            ..Default::default()
+        };
+        let a = complete_answer("Steps.", &["p".into()], &e, "", Language::En).unwrap();
+        assert!(a.ends_with("it couldn't be verified who documented it."));
+    }
+    #[test]
     fn missing_invented_and_out_of_scope_sources_fail_closed() {
         let e = Evidence {
             references: vec![reference("p", "wiki"), reference("w", "work_item")],
             ..Default::default()
         };
         // No page selected as used: the consulted pages are listed instead of withholding.
-        let a = complete_answer("No está documentado.", &[], &e, "").unwrap();
+        let a = complete_answer("No está documentado.", &[], &e, "", Language::Es).unwrap();
         assert!(a.contains("**Páginas consultadas**\n- [Procedure]("));
         assert!(!a.contains("**Fuentes**"));
-        assert!(complete_answer("Procedimiento", &["invented".into()], &e, "").is_err());
-        assert!(complete_answer("Según #42", &["p".into()], &e, "").is_err());
-        assert!(complete_answer("Según #99", &["p".into()], &e, "").is_err());
+        assert!(
+            complete_answer("Procedimiento", &["invented".into()], &e, "", Language::Es).is_err()
+        );
+        assert!(complete_answer("Según #42", &["p".into()], &e, "", Language::Es).is_err());
+        assert!(complete_answer("Según #99", &["p".into()], &e, "", Language::Es).is_err());
         assert_eq!(named_references("Según #42", &e), vec!["w".to_string()]);
         assert!(named_references("Según #99", &e).is_empty());
         assert!(
@@ -426,7 +496,8 @@ mod tests {
                 "https://dev.azure.com/other/Project/_workitems/edit/42",
                 &["p".into()],
                 &e,
-                ""
+                "",
+                Language::Es
             )
             .is_err()
         );
@@ -437,6 +508,7 @@ mod tests {
             &["p".into()],
             &e,
             evidence_text,
+            Language::Es,
         )
         .unwrap();
         assert!(a.contains("api-test.example.cl"));
@@ -446,27 +518,62 @@ mod tests {
                 &["p".into()],
                 &e,
                 evidence_text,
+                Language::Es
             )
             .is_err()
         );
-        let a = complete_answer("Revisar #42", &["p".into(), "w".into()], &e, "").unwrap();
+        let a = complete_answer(
+            "Revisar #42",
+            &["p".into(), "w".into()],
+            &e,
+            "",
+            Language::Es,
+        )
+        .unwrap();
         assert!(a.contains("_workitems/edit/42"));
         assert!(a.contains("pagePath"));
-        assert!(complete_answer("Concreta el tema", &[], &Evidence::default(), "").is_ok());
+        assert!(
+            complete_answer(
+                "Concreta el tema",
+                &[],
+                &Evidence::default(),
+                "",
+                Language::Es
+            )
+            .is_ok()
+        );
         let mut bad = e.clone();
         bad.references[0].url =
             "https://dev.azure.com/other/Project/_wiki/wikis/wiki?pagePath=%2FProcedure".into();
-        assert!(complete_answer("Procedimiento", &["p".into()], &bad, "").is_err());
-        assert!(complete_answer("Procedimiento", &[], &bad, "").is_err());
+        assert!(complete_answer("Procedimiento", &["p".into()], &bad, "", Language::Es).is_err());
+        assert!(complete_answer("Procedimiento", &[], &bad, "", Language::Es).is_err());
         bad.references[0] = reference("p", "wiki");
         bad.references[0].organization = "mailto:invalid".into();
-        assert!(complete_answer("Procedimiento", &["p".into()], &bad, "").is_err());
+        assert!(complete_answer("Procedimiento", &["p".into()], &bad, "", Language::Es).is_err());
         bad.references[1].kind = "pipeline_run".into();
-        assert!(complete_answer("Work item 42", &["p".into(), "w".into()], &bad, "").is_err());
+        assert!(
+            complete_answer(
+                "Work item 42",
+                &["p".into(), "w".into()],
+                &bad,
+                "",
+                Language::Es
+            )
+            .is_err()
+        );
         bad.references[0] = reference("p", "wiki");
         bad.references[1].label = "Build #420".into();
         bad.references[1].aliases.clear();
-        assert!(complete_answer("Build 42", &["p".into(), "w".into()], &bad, "").is_err());
+        assert!(
+            complete_answer(
+                "Build 42",
+                &["p".into(), "w".into()],
+                &bad,
+                "",
+                Language::Es
+            )
+            .is_err()
+        );
     }
     #[test]
     fn homonymous_stages_preserve_execution_definition_and_parent_identity() {
@@ -491,6 +598,7 @@ mod tests {
             &["stage:run:40".into()],
             &e,
             "",
+            Language::Es,
         )
         .unwrap();
         assert!(a.contains("buildId=40"));
@@ -500,6 +608,7 @@ mod tests {
             &["stage:config:5:2".into()],
             &e,
             "",
+            Language::Es,
         )
         .unwrap();
         assert!(b.contains("configuración en release #5"));

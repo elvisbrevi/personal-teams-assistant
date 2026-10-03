@@ -1,6 +1,6 @@
 use crate::{
     adapters::{MessageAdapter, teams::greeting},
-    config::Config,
+    config::{Config, Language},
     decision::{DecisionGate, Stage},
     knowledge::{Access, KnowledgeMap},
     llm::{GenerationInput, LlmProvider},
@@ -13,7 +13,12 @@ use serde_json::json;
 use std::{collections::BTreeMap, sync::Arc};
 
 /// Deterministic notice sent once when the model is still working after `HOLDING_AFTER`.
-pub const HOLDING_REPLY: &str = "Déjame revisarlo.";
+pub fn holding_reply(language: Language) -> &'static str {
+    match language {
+        Language::Es => "Déjame revisarlo.",
+        Language::En => "Let me look into it.",
+    }
+}
 const HOLDING_AFTER: std::time::Duration = std::time::Duration::from_secs(300);
 /// Earlier messages of the conversation given to the model to interpret the current one.
 pub const HISTORY_MESSAGES: usize = 10;
@@ -583,6 +588,7 @@ impl Pipeline {
                     &used_sources,
                     &registry,
                     &evidence,
+                    self.config.llm.language,
                 ) {
                     Ok(answer) => answer,
                     Err(error) => {
@@ -759,7 +765,11 @@ impl Pipeline {
         audit.holding_reply = Some("sending".into());
         self.checkpoint(resource, audit, "holding_reply")?;
         audit.holding_reply = Some(
-            match self.adapter.send(message, HOLDING_REPLY).await {
+            match self
+                .adapter
+                .send(message, holding_reply(self.config.llm.language))
+                .await
+            {
                 Ok(_) => "sent",
                 Err(_) => "uncertain",
             }
@@ -778,7 +788,10 @@ impl Pipeline {
         audit: &mut Audit,
         reason: String,
     ) -> Result<()> {
-        let explanation = withheld_reason(&reason);
+        // The audit log is read in the app, which is in Spanish; the notice follows the reply language.
+        let explanation = withheld_reason(&reason, Language::Es);
+        let language = self.config.llm.language;
+        let cause = withheld_reason(&reason, language);
         audit.reason = reason;
         audit.step("retenida", explanation);
         self.store.record(resource, audit)?;
@@ -797,9 +810,14 @@ impl Pipeline {
         }
         audit.withheld_notice = Some("sending".into());
         self.store.record(resource, audit)?;
-        let notice = format!(
-            "No envié la respuesta a tu mensaje: {explanation}. Puedes revisarla en la sección Mensajes de la app."
-        );
+        let notice = match language {
+            Language::Es => format!(
+                "No envié la respuesta a tu mensaje: {cause}. Puedes revisarla en la sección Mensajes de la app."
+            ),
+            Language::En => format!(
+                "I didn't send the reply to your message: it {cause}. You can review it in the app's Messages section (Mensajes)."
+            ),
+        };
         let sent = self.adapter.send(message, &notice).await.is_ok();
         audit.withheld_notice = Some(if sent { "sent" } else { "uncertain" }.into());
         audit.step(
@@ -861,15 +879,20 @@ impl Pipeline {
 }
 
 /// Plain-language cause of a withheld answer, without its content.
-fn withheld_reason(reason: &str) -> &'static str {
-    match reason {
-        "unsafe_proposal" | "unsafe_answer" => {
+fn withheld_reason(reason: &str, language: Language) -> &'static str {
+    let unsafe_answer = matches!(reason, "unsafe_proposal" | "unsafe_answer");
+    let references = reason.starts_with("invalid_references");
+    match language {
+        Language::Es if unsafe_answer => {
             "contenía datos sensibles o no cabía en un mensaje de Teams"
         }
-        r if r.starts_with("invalid_references") => {
-            "citaba referencias o enlaces que no se pudieron verificar"
+        Language::Es if references => "citaba referencias o enlaces que no se pudieron verificar",
+        Language::Es => "no pasó los controles de la aplicación",
+        Language::En if unsafe_answer => {
+            "contained sensitive data or didn't fit in a Teams message"
         }
-        _ => "no pasó los controles de la aplicación",
+        Language::En if references => "cited references or links that couldn't be verified",
+        Language::En => "didn't pass the app's checks",
     }
 }
 fn explicit_wiki(question: &str) -> bool {
@@ -1088,7 +1111,36 @@ fn status_question(question: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{documentation_question, personal_request, question_request, status_question};
+    use super::{
+        Language, documentation_question, holding_reply, personal_request, question_request,
+        status_question, withheld_reason,
+    };
+
+    #[test]
+    fn fixed_notices_follow_the_reply_language() {
+        assert_eq!(holding_reply(Language::Es), "Déjame revisarlo.");
+        assert_eq!(holding_reply(Language::En), "Let me look into it.");
+        for (reason, es, en) in [
+            (
+                "unsafe_answer",
+                "contenía datos sensibles o no cabía en un mensaje de Teams",
+                "contained sensitive data or didn't fit in a Teams message",
+            ),
+            (
+                "invalid_references: unverified answer URL",
+                "citaba referencias o enlaces que no se pudieron verificar",
+                "cited references or links that couldn't be verified",
+            ),
+            (
+                "other",
+                "no pasó los controles de la aplicación",
+                "didn't pass the app's checks",
+            ),
+        ] {
+            assert_eq!(withheld_reason(reason, Language::Es), es);
+            assert_eq!(withheld_reason(reason, Language::En), en);
+        }
+    }
 
     #[test]
     fn clear_information_requests_do_not_need_a_model_to_allow_retrieval() {

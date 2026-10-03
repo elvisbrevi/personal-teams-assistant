@@ -242,6 +242,7 @@ async function reload() {
   field('#tenant-id', config.graph.tenant_id); field('#client-id', config.graph.client_id);
   field('#user-id', config.graph.user_id); field('#public-url', config.server.public_url);
   field('#bind', config.server.bind); field('#llm-style', config.llm.style);
+  field('#llm-language', config.llm.language ?? 'es');
   field('#tunnel-config', current.tunnel_config);
   $('#cloudflare-tunnel').checked = config.server.cloudflare_tunnel;
   field('#allowed-chats', config.graph.allowed_chats.join('\n'));
@@ -404,6 +405,7 @@ function collectSettings() {
   config.jev.model = $('#jev-model').value.trim();
   config.llm.chain = llmRows.map(({ provider, model, effort, enabled }) => ({ provider, model, effort, enabled }));
   config.llm.style = $('#llm-style').value.trim();
+  config.llm.language = $('#llm-language').value;
   config.graph.tenant_id = $('#tenant-id').value.trim();
   config.graph.client_id = $('#client-id').value.trim();
   config.graph.user_id = $('#user-id').value.trim();
