@@ -1,13 +1,13 @@
 <!doctype html>
-<html lang="es">
+<html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light dark">
-  <title>Personal Teams Assistant — responde en Teams con tu identidad</title>
-  <meta name="description" content="Asistente personal de Microsoft Teams de código abierto: responde con tu propia identidad, solo con las fuentes que autorizas, verifica en código cada enlace y dato sensible, y nunca envía dos veces.">
+  <title>Personal Teams Assistant — answers in Teams as you</title>
+  <meta name="description" content="Open-source personal assistant for Microsoft Teams: it replies with your own identity, only from the sources you authorize, verifies every link and sensitive value in code, and never sends twice.">
   <meta property="og:title" content="Personal Teams Assistant">
-  <meta property="og:description" content="Responde en Teams con tu identidad y solo con lo que tú autorizas. App de bandeja, CLI y host sin interfaz, en un solo paquete de Cargo.">
+  <meta property="og:description" content="Answers in Teams as you, and only with what you authorize. Tray app, CLI and headless host in a single Cargo package.">
   <meta property="og:type" content="website">
   <meta property="og:url" content="https://teams-assistant.elvisbrevi.cl/">
   <meta property="og:image" content="https://teams-assistant.elvisbrevi.cl/assets/app-overview-light.jpg">
@@ -18,64 +18,64 @@
 <body>
   <header class="topbar">
     <div class="wrap topbar-inner">
-      <a class="brand" href="#inicio"><img src="assets/logo.svg" alt="" width="32" height="32"><span>Personal Teams Assistant</span></a>
-      <nav aria-label="Secciones">
-        <a href="#como-funciona">Cómo funciona</a>
-        <a href="#seguridad">Seguridad</a>
-        <a href="#instalar">Instalar</a>
+      <a class="brand" href="#top"><img src="assets/logo.svg" alt="" width="32" height="32"><span>Personal Teams Assistant</span></a>
+      <nav aria-label="Sections">
+        <a href="#how-it-works">How it works</a>
+        <a href="#security">Security</a>
+        <a href="#install">Install</a>
         <a class="button ghost" href="https://github.com/elvisbrevi/personal-teams-assistant">GitHub</a>
       </nav>
     </div>
   </header>
 
-  <main id="inicio">
+  <main id="top">
     <section class="hero">
       <div class="wrap hero-inner">
         <div class="hero-copy">
-          <p class="eyebrow">Asistente personal para Microsoft Teams</p>
-          <h1>Responde en Teams con tu identidad y solo con lo que tú autorizas.</h1>
-          <p class="lead">Contesta por ti cuando alguien te escribe, te menciona o te preguntas en tu chat personal. Busca evidencia en tus fuentes, redacta con Codex, Claude Code o DeepSeek, verifica en código cada enlace y dato sensible, y envía una sola vez.</p>
+          <p class="eyebrow">Personal assistant for Microsoft Teams</p>
+          <h1>Answers in Teams as you, and only with what you authorize.</h1>
+          <p class="lead">It replies for you when someone messages you directly, mentions you, or when you ask it in your chat with yourself. It gathers evidence from your sources, drafts with Codex, Claude Code or DeepSeek, verifies every link and sensitive value in code, and sends exactly once.</p>
           <div class="install"><span class="prompt" aria-hidden="true">$</span><code class="cmd">cargo install personal-teams-assistant --locked</code></div>
           <div class="cta">
-            <a class="button" href="#instalar">Empezar</a>
-            <a class="button ghost" href="https://github.com/elvisbrevi/personal-teams-assistant">Ver el código</a>
+            <a class="button" href="#install">Get started</a>
+            <a class="button ghost" href="https://github.com/elvisbrevi/personal-teams-assistant">View the code</a>
             <a class="button ghost" href="https://crates.io/crates/personal-teams-assistant">crates.io</a>
           </div>
-          <p class="fine">Código abierto (MIT) · macOS y Windows con app de bandeja · Linux y servidores sin interfaz</p>
+          <p class="fine">Open source (MIT) · Tray app on macOS and Windows · Headless on Linux and servers · Interface and replies in Spanish</p>
         </div>
         <figure class="window hero-shot">
           <div class="window-bar" aria-hidden="true"><i></i><i></i><i></i></div>
           <picture>
             <source srcset="assets/app-overview-dark.jpg" media="(prefers-color-scheme: dark)">
-            <img src="assets/app-overview-light.jpg" width="1200" height="760" alt="Pantalla de inicio de la app: asistente activo, cuenta Microsoft conectada, modelos con respaldo, fuentes listas y actividad reciente.">
+            <img src="assets/app-overview-light.jpg" width="1200" height="760" alt="The app's home screen: assistant running, Microsoft account connected, models with fallback, sources ready and recent activity.">
           </picture>
         </figure>
       </div>
     </section>
 
-    <section class="strip" aria-label="En resumen">
+    <section class="strip" aria-label="At a glance">
       <div class="wrap strip-inner">
-        <div><strong>Sin bot</strong><span>OAuth delegado con PKCE</span></div>
-        <div><strong>4 permisos</strong><span>los mínimos de Graph</span></div>
-        <div><strong>3 proveedores</strong><span>de modelos, con respaldo</span></div>
-        <div><strong>0 reintentos</strong><span>de envío a Teams</span></div>
+        <div><strong>No bot</strong><span>delegated OAuth with PKCE</span></div>
+        <div><strong>4 permissions</strong><span>the Graph minimum</span></div>
+        <div><strong>3 providers</strong><span>of models, with fallback</span></div>
+        <div><strong>0 retries</strong><span>when sending to Teams</span></div>
       </div>
     </section>
 
-    <section id="como-funciona" class="section">
+    <section id="how-it-works" class="section">
       <div class="wrap">
         <header class="section-head">
-          <p class="eyebrow">Cómo funciona</p>
-          <h2>Del mensaje a la respuesta, con un control en cada paso</h2>
-          <p>Los modelos proponen; el código decide qué se puede leer, qué se puede citar y qué se envía.</p>
+          <p class="eyebrow">How it works</p>
+          <h2>From message to reply, with a check at every step</h2>
+          <p>Models propose; code decides what can be read, what can be cited and what gets sent.</p>
         </header>
         <ol class="pipeline">
-          <li><span class="num">1</span><h3>Recibe</h3><p>Microsoft Graph avisa por webhook de cada mensaje nuevo. Tu chat personal también se consulta cada 10 s.</p></li>
-          <li><span class="num">2</span><h3>Decide si le toca</h3><p>Solo mensajes directos, menciones reales o tu chat personal. Llamadas, reuniones y «¿tienes un minuto?» quedan para ti.</p></li>
-          <li><span class="num">3</span><h3>Busca evidencia</h3><p>Lee únicamente las fuentes abiertas a esa conversación: archivos Git, URLs, Wiki y actividad de Azure DevOps.</p></li>
-          <li><span class="num">4</span><h3>Redacta</h3><p>Codex → Claude Code → DeepSeek. Si el primero falla o se queda sin créditos, responde el siguiente; la próxima llamada vuelve a empezar por tu predeterminado.</p></li>
-          <li><span class="num">5</span><h3>Verifica en código</h3><p>Referencias, IDs, URLs y datos sensibles. Si algo no se puede comprobar, la respuesta se retiene y te avisa en tu chat personal.</p></li>
-          <li><span class="num">6</span><h3>Envía una vez</h3><p>Como HTML de Teams y registrado antes de salir. Nunca reintenta: ante la duda, queda para revisión humana.</p></li>
+          <li><span class="num">1</span><h3>Receives</h3><p>Microsoft Graph notifies it of every new message through a webhook. Your chat with yourself is also checked every 10 s.</p></li>
+          <li><span class="num">2</span><h3>Decides whether to answer</h3><p>Only direct messages, real mentions or your chat with yourself. Calls, meetings and “got a minute?” are left to you.</p></li>
+          <li><span class="num">3</span><h3>Gathers evidence</h3><p>It reads only the sources open to that conversation: Git files, URLs, and Azure DevOps wikis and activity.</p></li>
+          <li><span class="num">4</span><h3>Drafts</h3><p>Codex → Claude Code → DeepSeek. If the first one fails or runs out of credits, the next one answers; the following call starts again from your default.</p></li>
+          <li><span class="num">5</span><h3>Verifies in code</h3><p>References, IDs, URLs and sensitive data. If something can't be checked, the reply is held back and you get a note in your chat with yourself.</p></li>
+          <li><span class="num">6</span><h3>Sends once</h3><p>As Teams HTML, logged before it goes out. It never retries: when in doubt, the message is left for human review.</p></li>
         </ol>
       </div>
     </section>
@@ -83,81 +83,81 @@
     <section class="section alt">
       <div class="wrap">
         <header class="section-head">
-          <p class="eyebrow">Qué incluye</p>
-          <h2>Pensado para quien responde muchas preguntas repetidas</h2>
+          <p class="eyebrow">What's included</p>
+          <h2>Built for people who answer the same questions again and again</h2>
         </header>
         <div class="features">
-          <article><h3>Con tu identidad</h3><p>Responde como tú, no como un bot. Cliente público de Entra, PKCE y solo <code>User.Read</code>, <code>Chat.Read</code>, <code>ChatMessage.Send</code> y <code>offline_access</code>.</p></article>
-          <article><h3>Fuentes con audiencia</h3><p>Cada fuente nace deshabilitada, sin audiencias y sin procesamiento externo. Tú decides qué conversación puede usar qué.</p></article>
-          <article><h3>Respuestas con fuentes</h3><p>Las respuestas basadas en la Wiki enlazan sus páginas y dicen quién las documentó. Work items y pipelines llevan enlace verificado.</p></article>
-          <article><h3>Modo de observación</h3><p>Empieza redactando propuestas sin enviar nada. Revísalas en la app y activa el envío cuando te convenzan.</p></article>
-          <article><h3>Cada mensaje, explicado</h3><p>Qué decidió, qué interpretó, qué modelo respondió, qué falló antes y el registro de cada paso, en la pestaña Mensajes o con <code>pta audit</code>.</p></article>
-          <article><h3>App, CLI y agentes</h3><p>App de bandeja, CLI <code>pta</code> con salida JSON estable y una skill incorporada para que tu agente de código lo opere.</p></article>
+          <article><h3>Your own identity</h3><p>It replies as you, not as a bot. A public Entra client with PKCE and only <code>User.Read</code>, <code>Chat.Read</code>, <code>ChatMessage.Send</code> and <code>offline_access</code>.</p></article>
+          <article><h3>Sources with audiences</h3><p>Every source starts disabled, with no audiences and no external processing. You decide which conversation can use what.</p></article>
+          <article><h3>Answers that cite sources</h3><p>Wiki-based answers link the pages they used and say who documented them. Work items and pipelines come with verified links.</p></article>
+          <article><h3>Observation mode</h3><p>Start with drafts that are never sent. Review them in the app and turn on sending once you trust them.</p></article>
+          <article><h3>Every message, explained</h3><p>What it decided, how it read the question, which model answered, what failed first and a log of every step, in the Messages tab (Mensajes) or with <code>pta audit</code>.</p></article>
+          <article><h3>App, CLI and agents</h3><p>A tray app, the <code>pta</code> CLI with stable JSON output and a built-in skill so your coding agent can operate it.</p></article>
         </div>
         <figure class="window wide-shot">
           <div class="window-bar" aria-hidden="true"><i></i><i></i><i></i></div>
           <picture>
             <source srcset="assets/app-chat-dark.jpg" media="(prefers-color-scheme: dark)">
-            <img src="assets/app-chat-light.jpg" width="1200" height="760" loading="lazy" alt="Chat de prueba: una pregunta sobre un endpoint respondida con pasos, un ejemplo JSON y la página de la Wiki citada.">
+            <img src="assets/app-chat-light.jpg" width="1200" height="760" loading="lazy" alt="Test chat: a question about an endpoint answered with steps, a JSON example and the cited wiki page.">
           </picture>
-          <figcaption>El chat de prueba ejecuta el mismo pipeline que Teams, sin enviar nada.</figcaption>
+          <figcaption>The test chat runs the same pipeline as Teams, without sending anything.</figcaption>
         </figure>
       </div>
     </section>
 
-    <section id="seguridad" class="section">
+    <section id="security" class="section">
       <div class="wrap split">
         <header class="section-head left">
-          <p class="eyebrow">Seguridad</p>
-          <h2>Las decisiones de los modelos no conceden permisos</h2>
-          <p>Audiencias, rutas, URLs y límites se verifican en código. La pregunta, los documentos y los resultados se tratan como datos no confiables.</p>
+          <p class="eyebrow">Security</p>
+          <h2>Model decisions don't grant permissions</h2>
+          <p>Audiences, paths, URLs and limits are verified in code. The question, the documents and the results are treated as untrusted data.</p>
         </header>
         <ul class="checks">
-          <li><strong>Credenciales en el almacén del sistema.</strong> Llavero de macOS o Credential Manager; en Linux, archivos privados del perfil. Solo entran por stdin.</li>
-          <li><strong>Tokens cifrados.</strong> Los tokens OAuth se guardan con AES-256-GCM-SIV.</li>
-          <li><strong>Modelos sin herramientas.</strong> Las CLI de Codex y Claude corren sin shell, archivos, web ni subagentes, en un directorio vacío y sin tus credenciales.</li>
-          <li><strong>Redacción antes del modelo.</strong> Secretos, tokens, correos, teléfonos, RUT y tus patrones propios se ocultan en la evidencia y en la auditoría.</li>
-          <li><strong>Un envío, nunca dos.</strong> Graph no ofrece idempotencia, así que un envío dudoso queda como «incierto» para que lo revises.</li>
+          <li><strong>Credentials in the system store.</strong> macOS Keychain or Windows Credential Manager; on Linux, private files in the profile. They only come in through stdin.</li>
+          <li><strong>Encrypted tokens.</strong> OAuth tokens are stored with AES-256-GCM-SIV.</li>
+          <li><strong>Models without tools.</strong> The Codex and Claude CLIs run without a shell, files, web access or subagents, in an empty directory and without your credentials.</li>
+          <li><strong>Redaction before the model.</strong> Secrets, tokens, emails, phone numbers, Chilean RUTs and your own patterns are masked in the evidence and in the audit log.</li>
+          <li><strong>One send, never two.</strong> Graph offers no idempotency, so a doubtful send is marked “uncertain” for you to review.</li>
         </ul>
       </div>
     </section>
 
-    <section id="instalar" class="section alt">
+    <section id="install" class="section alt">
       <div class="wrap">
         <header class="section-head">
-          <p class="eyebrow">Instalar</p>
-          <h2>Un solo paquete de Cargo</h2>
-          <p>Instala la app, el host y el CLI <code>pta</code>. Tu perfil, credenciales y cuenta se conservan entre versiones.</p>
+          <p class="eyebrow">Install</p>
+          <h2>A single Cargo package</h2>
+          <p>It installs the app, the host and the <code>pta</code> CLI. Your profile, credentials and account carry over between versions.</p>
         </header>
         <div class="platforms">
           <article class="platform">
-            <h3>macOS y Windows</h3>
-            <p>App de bandeja, host y CLI. Requiere Rust, los prerrequisitos de Tauri 2 y Git.</p>
+            <h3>macOS and Windows</h3>
+            <p>Tray app, host and CLI. Requires Rust, the Tauri 2 prerequisites and Git.</p>
             <pre><code><span class="cmd">cargo install personal-teams-assistant --locked</span>
-<span class="cmd">personal-teams-assistant</span>  <span class="comment"># abre la app</span></code></pre>
+<span class="cmd">personal-teams-assistant</span>  <span class="comment"># opens the app</span></code></pre>
           </article>
           <article class="platform">
-            <h3>Linux y servidores</h3>
-            <p>Sin Tauri ni WebKit; se opera solo con <code>pta</code> y sirve como servicio de systemd.</p>
+            <h3>Linux and servers</h3>
+            <p>No Tauri or WebKit: it is operated entirely with <code>pta</code> and runs as a systemd service.</p>
             <pre><code><span class="cmd">cargo install personal-teams-assistant \
   --no-default-features --locked</span>
 <span class="cmd">personal-teams-assistant --headless --start</span></code></pre>
           </article>
         </div>
         <ol class="steps">
-          <li><h3>Configura</h3><p>Guarda tus credenciales, elige el orden de los modelos y registra tu app de Entra. La pestaña Inicio te dice qué falta.</p><code>pta status</code></li>
-          <li><h3>Conecta</h3><p>Inicia sesión con tu cuenta Microsoft y expón el puerto local con una URL HTTPS estable, por ejemplo Cloudflare Tunnel.</p><code>pta auth microsoft login</code></li>
-          <li><h3>Observa</h3><p>Autoriza tus fuentes, inicia el asistente y revisa sus propuestas sin enviar nada.</p><code>pta start</code></li>
-          <li><h3>Activa</h3><p>Cuando las propuestas te convenzan, desactiva el modo de observación.</p><code>pta mode active</code></li>
+          <li><h3>Configure</h3><p>Save your credentials, choose the order of the models and register your Entra app. The Home tab (Inicio) tells you what's missing.</p><code>pta status</code></li>
+          <li><h3>Connect</h3><p>Sign in with your Microsoft account and expose the local port through a stable HTTPS URL, for example with Cloudflare Tunnel.</p><code>pta auth microsoft login</code></li>
+          <li><h3>Observe</h3><p>Authorize your sources, start the assistant and review its drafts without sending anything.</p><code>pta start</code></li>
+          <li><h3>Go live</h3><p>Once you trust the drafts, turn off observation mode.</p><code>pta mode active</code></li>
         </ol>
-        <p class="note">Para recibir mensajes, el equipo que ejecuta el asistente debe estar encendido y alcanzable desde una URL HTTPS pública. No ejecutes dos instancias activas de la misma cuenta.</p>
+        <p class="note">To receive messages, the machine running the assistant must be on and reachable through a public HTTPS URL. Don't run two active instances for the same account.</p>
       </div>
     </section>
 
     <section class="section closing">
       <div class="wrap closing-inner">
-        <h2>Empieza en modo de observación.</h2>
-        <p>Nada se envía hasta que tú lo decidas.</p>
+        <h2>Start in observation mode.</h2>
+        <p>Nothing is sent until you decide.</p>
         <div class="install"><span class="prompt" aria-hidden="true">$</span><code class="cmd">cargo install personal-teams-assistant --locked</code></div>
       </div>
     </section>
@@ -166,13 +166,13 @@
   <footer class="footer">
     <div class="wrap footer-inner">
       <div class="brand"><img src="assets/logo.svg" alt="" width="24" height="24"><span>Personal Teams Assistant</span></div>
-      <nav aria-label="Documentación">
+      <nav aria-label="Documentation">
         <a href="https://github.com/elvisbrevi/personal-teams-assistant#readme">README</a>
-        <a href="https://github.com/elvisbrevi/personal-teams-assistant/blob/main/docs/architecture.md">Arquitectura</a>
-        <a href="https://github.com/elvisbrevi/personal-teams-assistant/blob/main/desktop/skills/personal-teams-assistant/SKILL.md">Skill para agentes</a>
-        <a href="https://github.com/elvisbrevi/personal-teams-assistant/blob/main/LICENSE">Licencia MIT</a>
+        <a href="https://github.com/elvisbrevi/personal-teams-assistant/blob/main/docs/architecture.md">Architecture</a>
+        <a href="https://github.com/elvisbrevi/personal-teams-assistant/blob/main/desktop/skills/personal-teams-assistant/SKILL.md">Agent skill</a>
+        <a href="https://github.com/elvisbrevi/personal-teams-assistant/blob/main/LICENSE">MIT license</a>
       </nav>
-      <p class="fine">Proyecto independiente, sin afiliación con Microsoft. Microsoft Teams es una marca de Microsoft Corporation.</p>
+      <p class="fine">Independent project, not affiliated with Microsoft. Microsoft Teams is a trademark of Microsoft Corporation.</p>
     </div>
   </footer>
 </body>
