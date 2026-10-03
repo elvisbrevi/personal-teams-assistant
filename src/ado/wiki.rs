@@ -942,7 +942,7 @@ impl<'a> Reader<'a> {
                     }
                     match self.page(wiki, &path, Some(git), version).await {
                         Ok(page) => {
-                            // A page named after a work item («HU 19362 - …») documents it.
+                            // A page named after a work item («HU 8765 - …») documents it.
                             let mut work_items = items.clone();
                             work_items.extend(super::review::mentions(&page.title));
                             edits.push(WikiEdit {
@@ -1609,15 +1609,7 @@ mod tests {
     #[tokio::test]
     async fn own_edits_list_the_pages_the_user_changed_with_verified_links() {
         let server = MockServer::start().await;
-        fixture(
-            &server,
-            "/",
-            "projectWiki",
-            "/HU-19362.md",
-            "/HU 19362",
-            true,
-        )
-        .await;
+        fixture(&server, "/", "projectWiki", "/HU-8765.md", "/HU 8765", true).await;
         let recent = chrono::Utc::now().to_rfc3339();
         let old = (chrono::Utc::now() - chrono::Duration::days(40)).to_rfc3339();
         let created = "2222222222222222222222222222222222222222";
@@ -1640,12 +1632,12 @@ mod tests {
         for (sha, changes) in [
             (
                 created,
-                json!([{"item":{"path":"/HU-19362.md","gitObjectType":"blob"},"changeType":"add"}]),
+                json!([{"item":{"path":"/HU-8765.md","gitObjectType":"blob"},"changeType":"add"}]),
             ),
             (
                 edited,
                 json!([
-                    {"item":{"path":"/HU-19362.md","gitObjectType":"blob"},"changeType":"edit"},
+                    {"item":{"path":"/HU-8765.md","gitObjectType":"blob"},"changeType":"edit"},
                     {"item":{"path":"/.order","gitObjectType":"blob"},"changeType":"edit"},
                 ]),
             ),
@@ -1664,7 +1656,7 @@ mod tests {
         let since = chrono::Utc::now() - chrono::Duration::days(14);
         Mock::given(method("GET"))
             .and(path("/test/_apis/wit/workitems"))
-            .and(query_param("ids", "77,19362"))
+            .and(query_param("ids", "77,8765"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({"value":[
                 {"id":77,"fields":{"System.TeamProject":"Project","System.Title":"Runbook","System.State":"Active"}},
             ]})))
@@ -1678,9 +1670,9 @@ mod tests {
         assert!(!partial);
         assert_eq!(edits.len(), 1, "{edits:?}");
         let edit = &edits[0];
-        assert_eq!(edit.title, "HU 19362");
+        assert_eq!(edit.title, "HU 8765");
         assert!(edit.created);
-        // The commit names #77 and the title HU 19362, which Azure DevOps does not return.
+        // The commit names #77 and the title HU 8765, which Azure DevOps does not return.
         assert_eq!(edit.work_items, vec![77]);
         assert_eq!(edit.unverified, 1);
         assert_eq!(edit.reference.authority.as_deref(), Some("created_by_me"));
@@ -1693,7 +1685,7 @@ mod tests {
             .split_once("Registered in work items:")
             .unwrap();
         assert!(
-            registered.contains("created Wiki page \"HU 19362\" (Project / Documentation): the change names #77 and 1 work item(s) that could not be verified"),
+            registered.contains("created Wiki page \"HU 8765\" (Project / Documentation): the change names #77 and 1 work item(s) that could not be verified"),
             "{}",
             evidence.text
         );

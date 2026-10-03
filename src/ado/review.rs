@@ -110,7 +110,7 @@ fn linked(url: &str) -> Option<Linked> {
     }
 }
 /// Work item IDs a text names: `#123`, `AB#123` (Azure Boards' linking convention) or a
-/// type and number such as «HU 19362» or «Bug 24663».
+/// type and number such as «HU 8765» or «Bug 4321».
 pub(crate) fn mentions(text: &str) -> Vec<u64> {
     let mut ids: Vec<u64> = Vec::new();
     for pattern in [
@@ -1081,8 +1081,8 @@ mod tests {
         assert_eq!(linked("vstfs:///Git/Ref/proj%2Frepo%2FGBmain"), None);
         assert_eq!(mentions("Fix login AB#123 and #45; not x#9"), vec![123, 45]);
         assert_eq!(
-            mentions("Bug 24663: corregir Exento; HU 19362 - Paso a producción"),
-            vec![24663, 19362]
+            mentions("Bug 4321: corregir redondeo; HU 8765 - Paso a producción"),
+            vec![4321, 8765]
         );
         assert!(mentions("Release 2 of version 1.10.0").is_empty());
         assert_eq!(
@@ -1216,7 +1216,7 @@ mod tests {
                 title: "Shared fix".into(),
                 status: "completed".into(),
                 date: "2026-09-28T12:00:00Z".into(),
-                work_items: vec![555, 19362],
+                work_items: vec![555, 8765],
                 ..Default::default()
             }],
             runs: vec![Run {
@@ -1233,7 +1233,7 @@ mod tests {
         assert_eq!(candidates, 0, "{text}");
         assert!(text.contains("PR #48 \"Shared fix\" in payments-api (completed): linked to #555 and 1 that could not be verified"), "{text}");
         assert!(text.contains("pipeline run #901 of \"Nightly\", queued by the user: succeeded: linked to 2 work item(s) that could not be verified"), "{text}");
-        assert!(!text.contains("#19362") && !text.contains("#6") && !text.contains("#8,"));
+        assert!(!text.contains("#8765") && !text.contains("#6") && !text.contains("#8,"));
         assert!(
             references
                 .iter()
