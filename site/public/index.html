@@ -9,11 +9,9 @@
   <meta property="og:title" content="Personal Teams Assistant">
   <meta property="og:description" content="Responde en Teams con tu identidad y solo con lo que tú autorizas. App de bandeja, CLI y host sin interfaz, en un solo paquete de Cargo.">
   <meta property="og:type" content="website">
-  <meta property="og:image" content="https://elvisbrevi.github.io/personal-teams-assistant/assets/app-overview-light.jpg">
   <meta name="theme-color" content="#17382f">
   <link rel="icon" href="assets/logo.svg" type="image/svg+xml">
   <link rel="stylesheet" href="style.css">
-  <script src="main.js" defer></script>
 </head>
 <body>
   <header class="topbar">
@@ -35,10 +33,7 @@
           <p class="eyebrow">Asistente personal para Microsoft Teams</p>
           <h1>Responde en Teams con tu identidad y solo con lo que tú autorizas.</h1>
           <p class="lead">Contesta por ti cuando alguien te escribe, te menciona o te preguntas en tu chat personal. Busca evidencia en tus fuentes, redacta con Codex, Claude Code o DeepSeek, verifica en código cada enlace y dato sensible, y envía una sola vez.</p>
-          <div class="install" data-copy="cargo install personal-teams-assistant --locked">
-            <code><span class="prompt">$</span> cargo install personal-teams-assistant --locked</code>
-            <button type="button" class="copy" aria-label="Copiar comando de instalación">Copiar</button>
-          </div>
+          <div class="install"><span class="prompt" aria-hidden="true">$</span><code class="cmd">cargo install personal-teams-assistant --locked</code></div>
           <div class="cta">
             <a class="button" href="#instalar">Empezar</a>
             <a class="button ghost" href="https://github.com/elvisbrevi/personal-teams-assistant">Ver el código</a>
@@ -132,21 +127,20 @@
           <h2>Un solo paquete de Cargo</h2>
           <p>Instala la app, el host y el CLI <code>pta</code>. Tu perfil, credenciales y cuenta se conservan entre versiones.</p>
         </header>
-        <div class="tabs" role="tablist" aria-label="Plataforma">
-          <button role="tab" id="tab-desktop" aria-selected="true" aria-controls="panel-desktop">macOS y Windows</button>
-          <button role="tab" id="tab-server" aria-selected="false" aria-controls="panel-server" tabindex="-1">Linux y servidores</button>
-        </div>
-        <div class="install-panel" id="panel-desktop" role="tabpanel" aria-labelledby="tab-desktop">
-          <pre><code><span class="comment"># Requiere Rust, los prerrequisitos de Tauri 2 y Git</span>
-cargo install personal-teams-assistant --locked
-personal-teams-assistant        <span class="comment"># abre la app en la bandeja</span></code></pre>
-          <button type="button" class="copy" data-copy="cargo install personal-teams-assistant --locked">Copiar</button>
-        </div>
-        <div class="install-panel" id="panel-server" role="tabpanel" aria-labelledby="tab-server">
-          <pre><code><span class="comment"># Sin Tauri ni WebKit; se opera solo con pta</span>
-cargo install personal-teams-assistant --no-default-features --locked
-personal-teams-assistant --headless --start   <span class="comment"># apto para systemd</span></code></pre>
-          <button type="button" class="copy" data-copy="cargo install personal-teams-assistant --no-default-features --locked">Copiar</button>
+        <div class="platforms">
+          <article class="platform">
+            <h3>macOS y Windows</h3>
+            <p>App de bandeja, host y CLI. Requiere Rust, los prerrequisitos de Tauri 2 y Git.</p>
+            <pre><code><span class="cmd">cargo install personal-teams-assistant --locked</span>
+<span class="cmd">personal-teams-assistant</span>  <span class="comment"># abre la app</span></code></pre>
+          </article>
+          <article class="platform">
+            <h3>Linux y servidores</h3>
+            <p>Sin Tauri ni WebKit; se opera solo con <code>pta</code> y sirve como servicio de systemd.</p>
+            <pre><code><span class="cmd">cargo install personal-teams-assistant \
+  --no-default-features --locked</span>
+<span class="cmd">personal-teams-assistant --headless --start</span></code></pre>
+          </article>
         </div>
         <ol class="steps">
           <li><h3>Configura</h3><p>Guarda tus credenciales, elige el orden de los modelos y registra tu app de Entra. La pestaña Inicio te dice qué falta.</p><code>pta status</code></li>
@@ -162,10 +156,7 @@ personal-teams-assistant --headless --start   <span class="comment"># apto para 
       <div class="wrap closing-inner">
         <h2>Empieza en modo de observación.</h2>
         <p>Nada se envía hasta que tú lo decidas.</p>
-        <div class="install" data-copy="cargo install personal-teams-assistant --locked">
-          <code><span class="prompt">$</span> cargo install personal-teams-assistant --locked</code>
-          <button type="button" class="copy" aria-label="Copiar comando de instalación">Copiar</button>
-        </div>
+        <div class="install"><span class="prompt" aria-hidden="true">$</span><code class="cmd">cargo install personal-teams-assistant --locked</code></div>
       </div>
     </section>
   </main>

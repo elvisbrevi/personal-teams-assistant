@@ -35,8 +35,9 @@ src/                          núcleo: pipeline, adaptadores Graph, Jev, LLM, co
 desktop/                      recursos de la app: tauri.conf.json, Info.plist, capabilities/, icons/
   ui/                         HTML/CSS/JS sin framework; llama a `control::command` vía invoke
   skills/                     skill operativa (fuente canónica)
-site/                         landing estática (HTML/CSS/JS sin build, capturas de la GUI con datos
-                              sintéticos); fuera del paquete de Cargo, publicada por `pages.yml`
+site/                         landing estática fuera del paquete de Cargo: `public/` (HTML y CSS sin
+                              JavaScript ni build, `_headers`, `404.html`, capturas de la GUI con
+                              datos sintéticos) y `wrangler.jsonc` (Cloudflare Workers, solo assets)
 tests/integration.rs          integración con wiremock (Graph, Jev, DeepSeek simulados)
 examples/wiki_gate_smoke.rs   regresión opcional contra Jev real con hechos sintéticos
 config.example.toml           plantilla del perfil (`Config::desktop_template`)
@@ -270,7 +271,7 @@ cargo test --no-default-features
 - `pta test providers` prueba cada proveedor activo por separado (un respaldo no oculta un predeterminado roto); consume API/uso de suscripción.
 - `pta test simulate` / `pta chat` ejecutan el pipeline real con un adaptador que nunca envía a Graph (`simulation::TestAdapter`, estado `sent` = `simulation-only`). `pta test providers` usa hechos sintéticos y consume API.
 - `cargo run --example wiki_gate_smoke` (credencial Jev existente) evalúa el control final con hechos sintéticos.
-- Landing (`.github/workflows/pages.yml`): en cada push a `main` que toque `site/`, publica la carpeta tal cual en GitHub Pages (requiere Pages con origen «GitHub Actions»). Las capturas de `site/assets/` se generan con la UI real y un `__TAURI__` simulado con datos sintéticos; nunca con un perfil real.
+- Landing (`.github/workflows/landing.yml`): en cada push a `main` que toque `site/` (o a mano), `wrangler deploy` publica `site/public/` como Worker de Cloudflare **solo con assets** (sin código; `not_found_handling = 404-page`). Necesita los secretos del repositorio `CLOUDFLARE_API_TOKEN` (plantilla «Edit Cloudflare Workers») y `CLOUDFLARE_ACCOUNT_ID`. La página no usa JavaScript y `_headers` lo prohíbe con su CSP (`default-src 'none'`); si se añade un script, hay que ajustar esa política. Las capturas de `site/public/assets/` se generan con la UI real y un `__TAURI__` simulado con datos sintéticos; nunca con un perfil real. Validación local sin credenciales: `npx wrangler deploy --dry-run` desde `site/`.
 - Publicación (`.github/workflows/publish.yml`): en cada push a `main`, si la versión del `Cargo.toml` no existe en crates.io, prueba con la GUI en macOS y ejecuta `cargo publish` con el secreto `CARGO_REGISTRY_TOKEN`; si ya existe no hace nada. Publicar = fusionar a `main` un cambio de versión (`Cargo.toml`, `Cargo.lock`, `desktop/tauri.conf.json`).
 - CI (`.github/workflows/ci.yml`): en Ubuntu, fmt y el paquete sin la GUI (`--no-default-features`: biblioteca, host sin interfaz y CLI; clippy, test); con la GUI en macOS (check, clippy, test) y Windows (check).
 - Toda operación nueva debe compilar en ambas variantes: `cargo clippy --all-targets [--no-default-features] -- -D warnings`. El código de Tauri solo vive en `src/app/gui.rs` (una prueba comprueba que la UI de `desktop/ui` queda incrustada).

@@ -67,7 +67,7 @@ pta test simulate <<< '{"session":"demo","text":"¿Qué hice esta semana?","sour
 
 ## Documentación
 
-- [Sitio del proyecto](https://elvisbrevi.github.io/personal-teams-assistant/) (fuente en [`site/`](site/), publicada con GitHub Pages).
+- Sitio del proyecto: HTML y CSS en [`site/`](site/), publicado en Cloudflare con `.github/workflows/landing.yml`.
 - [Arquitectura](docs/architecture.md): componentes, pipeline, datos, seguridad, contrato del CLI y recetas de cambio.
 - [Mejoras propuestas](docs/mejoras-propuestas.md).
 - [Skill operativa](desktop/skills/personal-teams-assistant/SKILL.md) y [guía para agentes](AGENTS.md).

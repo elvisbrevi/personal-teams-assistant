@@ -32,7 +32,6 @@ code { font-family: var(--mono); font-size: .86em; background: var(--alt); borde
 .button:hover { filter: brightness(1.08); }
 .button.ghost { background: transparent; color: var(--text); border-color: var(--border); }
 .button.ghost:hover { background: var(--surface); filter: none; }
-button { font: inherit; cursor: pointer; }
 
 /* Top bar */
 .topbar { position: sticky; top: 0; z-index: 10; background: color-mix(in srgb, var(--bg) 82%, transparent); backdrop-filter: saturate(1.4) blur(12px); -webkit-backdrop-filter: saturate(1.4) blur(12px); border-bottom: 1px solid var(--border); }
@@ -49,12 +48,11 @@ button { font: inherit; cursor: pointer; }
 .hero h1 { font-size: clamp(2rem, 3.7vw, 2.95rem); margin-bottom: 1.1rem; }
 .lead { font-size: 1.14rem; color: var(--muted); margin: 0 0 1.6rem; max-width: 36rem; }
 .cta { display: flex; flex-wrap: wrap; gap: .6rem; margin: 1.2rem 0 1rem; }
-.install { display: flex; align-items: center; gap: .5rem; max-width: 37rem; padding: .5rem .5rem .5rem 1rem; border-radius: 12px; background: var(--code-bg); color: var(--code-text); border: 1px solid var(--code-border); box-shadow: 0 8px 24px #0002; }
-.install code { flex: 1; min-width: 0; background: none; border: 0; padding: 0; color: inherit; font-size: .86rem; overflow-x: auto; white-space: nowrap; }
-.prompt { color: var(--code-muted); user-select: none; margin-right: .4rem; }
-.copy { flex: none; border: 1px solid #ffffff2e; background: #ffffff14; color: var(--code-text); border-radius: 8px; padding: .4rem .7rem; font-size: .82rem; font-weight: 600; }
-.copy:hover { background: #ffffff26; }
-.copy.copied { border-color: #7fd6a6; color: #7fd6a6; }
+.install { display: flex; align-items: center; gap: .6rem; max-width: 37rem; padding: .85rem 1.1rem; border-radius: 12px; background: var(--code-bg); color: var(--code-text); border: 1px solid var(--code-border); box-shadow: 0 8px 24px #0002; }
+.install code { flex: 1; min-width: 0; background: none; border: 0; padding: 0; color: inherit; font-size: .88rem; overflow-x: auto; white-space: nowrap; }
+.prompt { color: var(--code-muted); user-select: none; font-family: var(--mono); font-size: .88rem; }
+/* One click selects the whole command: copying needs no JavaScript. */
+.cmd { user-select: all; -webkit-user-select: all; cursor: text; }
 .window { margin: 0; border-radius: 14px; overflow: hidden; background: var(--surface); border: 1px solid var(--border); box-shadow: var(--shadow); }
 .window-bar { display: flex; gap: 7px; padding: 11px 14px; background: var(--alt); border-bottom: 1px solid var(--border); }
 .window-bar i { width: 11px; height: 11px; border-radius: 50%; background: var(--border); }
@@ -96,14 +94,13 @@ button { font: inherit; cursor: pointer; }
 .checks li::after { content: ""; position: absolute; left: 27px; top: 26px; width: 6px; height: 10px; border: solid var(--brand); border-width: 0 2.5px 2.5px 0; transform: rotate(45deg); }
 .checks strong { color: var(--text); }
 
-.tabs { display: flex; justify-content: center; gap: 6px; margin-bottom: 14px; }
-.tabs button { border: 1px solid var(--border); background: var(--surface); color: var(--muted); padding: .5rem 1rem; border-radius: 99px; font-weight: 600; font-size: .95rem; }
-.tabs button[aria-selected="true"] { background: var(--brand); border-color: var(--brand); color: var(--on-brand); }
-.install-panel { position: relative; max-width: 760px; margin: 0 auto; border-radius: 14px; background: var(--code-bg); color: var(--code-text); border: 1px solid var(--code-border); box-shadow: 0 12px 30px #0002; }
-.install-panel pre { margin: 0; padding: 22px 24px; overflow-x: auto; }
-.install-panel code { background: none; border: 0; padding: 0; color: inherit; font-size: .92rem; line-height: 1.8; }
-.install-panel .copy { position: absolute; top: 12px; right: 12px; }
-.comment { color: var(--code-muted); }
+.platforms { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+.platform { display: flex; flex-direction: column; gap: .5rem; padding: 24px; border-radius: 16px; background: var(--surface); border: 1px solid var(--border); }
+.platform h3 { font-size: 1.12rem; }
+.platform p { margin: 0 0 .4rem; color: var(--muted); font-size: .97rem; flex: 1; }
+.platform pre { margin: 0; padding: 16px 18px; border-radius: 12px; background: var(--code-bg); color: var(--code-text); border: 1px solid var(--code-border); overflow-x: auto; }
+.platform pre code { background: none; border: 0; padding: 0; color: inherit; font-size: .84rem; line-height: 1.9; }
+.comment { color: var(--code-muted); user-select: none; }
 .steps { list-style: none; padding: 0; margin: 48px 0 0; display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; counter-reset: step; }
 .steps li { counter-increment: step; padding: 22px; border-radius: 16px; background: var(--surface); border: 1px solid var(--border); display: flex; flex-direction: column; gap: .6rem; }
 .steps li::before { content: counter(step); font-weight: 800; color: var(--brand); font-size: .9rem; }
@@ -129,6 +126,7 @@ button { font: inherit; cursor: pointer; }
   .hero-inner, .split { grid-template-columns: minmax(0, 1fr); gap: 40px; }
   .hero-shot { transform: none; }
   .pipeline, .features { grid-template-columns: repeat(2, 1fr); }
+  .platforms { grid-template-columns: minmax(0, 1fr); }
   .steps { grid-template-columns: repeat(2, 1fr); }
 }
 @media (max-width: 640px) {
@@ -141,6 +139,6 @@ button { font: inherit; cursor: pointer; }
   .strip-inner { grid-template-columns: repeat(2, 1fr); }
   .strip-inner div:nth-child(3) { border-left: 0; }
   .strip-inner div:nth-child(n+3) { border-top: 1px solid var(--border); }
-  .install code { font-size: .8rem; }
+  .install code, .prompt { font-size: .8rem; }
 }
 @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } * { transition: none !important; } }
