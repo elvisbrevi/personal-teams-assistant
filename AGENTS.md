@@ -31,6 +31,8 @@ Lee primero [la arquitectura](docs/architecture.md): explica componentes, pipeli
 
 ## Antes de entregar
 
+No hay CI (GitHub Actions está desactivado para no generar costos): estas verificaciones, en local, son la única barrera. No añadas workflows de GitHub Actions.
+
 ```sh
 cargo fmt --all --check
 cargo clippy --all-targets -- -D warnings
