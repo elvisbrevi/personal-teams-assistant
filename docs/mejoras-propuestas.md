@@ -88,13 +88,13 @@ Propuestas surgidas al revisar el código completo (2026-10-01). Salvo lo indica
 
 ## 6. Calidad y pruebas
 
-- **P1 — Comprobar el JavaScript en CI** (`node --check desktop/ui/app.js` como mínimo).
+- **P1 — Comprobar el JavaScript antes de entregar** (`node --check desktop/ui/app.js` como mínimo; no hay CI).
 - **P2 — Pruebas del host sin Tauri** una vez extraídas las operaciones (arranque/parada, revisión, journal de ajustes, protección de identidad y clave).
 - **P2 — Pruebas de propiedades** (`proptest`) para `teams::canonical_resource`, `knowledge` (rutas) y `Redactor`.
-- **P2 — Prueba de punta a punta en Linux real** del host sin interfaz con systemd, túnel y una pregunta nueva en Teams (CI solo compila y ejecuta pruebas unitarias en Ubuntu).
+- **P2 — Prueba de punta a punta en Linux real** del host sin interfaz con systemd, túnel y una pregunta nueva en Teams (no hay CI: las pruebas unitarias solo corren en local).
 
 ## 7. Distribución
 
-- **Publicación.** Un solo crate, `personal-teams-assistant` (0.6.0: biblioteca, GUI/host y `pta`). El crate anterior `personal-teams-desktop` queda obsoleto. Revisar el paquete con `cargo package --list` y gitleaks antes de publicar. La publicación la hace `.github/workflows/publish.yml` al fusionar a `main` una versión nueva.
+- **Publicación.** Un solo crate, `personal-teams-assistant` (0.6.0: biblioteca, GUI/host y `pta`). El crate anterior `personal-teams-desktop` queda obsoleto. Revisar el paquete con `cargo package --list` y gitleaks antes de publicar. La publicación es manual (`cargo publish --locked` desde `main`); GitHub Actions está desactivado para no generar costos.
 - **P2 — Linux con Secret Service** opcional (cuando exista D-Bus) en lugar del almacén de archivos.
-- **P2 — Windows funcional:** probar bandeja, Credential Manager, ACL e inicio/parada antes de anunciarlo.
+- **P2 — Windows funcional:** compilar y probar bandeja, Credential Manager, ACL e inicio/parada antes de anunciarlo (sin CI nadie lo compila).
