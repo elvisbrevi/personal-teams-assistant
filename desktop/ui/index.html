@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="es">
+<html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -26,52 +26,52 @@
         <svg class="logo" viewBox="0 0 64 64" aria-hidden="true"><rect width="64" height="64" rx="14" fill="#17382f"/><path d="M14 16h36a3 3 0 0 1 3 3v22a3 3 0 0 1-3 3H27l-9 7v-7h-4a3 3 0 0 1-3-3V19a3 3 0 0 1 3-3z" fill="#fff"/><path d="M23 22h18v5h-6.5v12h-5V27H23z" fill="#17382f"/></svg>
         <div><strong>Teams Assistant</strong><small id="version">Personal</small></div>
       </div>
-      <nav aria-label="Secciones">
-        <button data-tab="overview" title="Inicio" aria-current="page"><svg class="icon"><use href="#i-home"/></svg><span>Inicio</span></button>
-        <button data-tab="settings" title="Configuración"><svg class="icon"><use href="#i-settings"/></svg><span>Configuración</span></button>
-        <button data-tab="messages" title="Mensajes"><svg class="icon"><use href="#i-inbox"/></svg><span>Mensajes</span><b id="nav-attention" class="nav-count" hidden></b></button>
-        <button data-tab="knowledge" title="Conocimiento"><svg class="icon"><use href="#i-book"/></svg><span>Conocimiento</span></button>
-        <button data-tab="chat" title="Chat de prueba"><svg class="icon"><use href="#i-chat"/></svg><span>Chat de prueba</span></button>
+      <nav aria-label="Sections">
+        <button data-tab="overview" title="Home" aria-current="page"><svg class="icon"><use href="#i-home"/></svg><span>Home</span></button>
+        <button data-tab="settings" title="Settings"><svg class="icon"><use href="#i-settings"/></svg><span>Settings</span></button>
+        <button data-tab="messages" title="Messages"><svg class="icon"><use href="#i-inbox"/></svg><span>Messages</span><b id="nav-attention" class="nav-count" hidden></b></button>
+        <button data-tab="knowledge" title="Knowledge"><svg class="icon"><use href="#i-book"/></svg><span>Knowledge</span></button>
+        <button data-tab="chat" title="Test chat"><svg class="icon"><use href="#i-chat"/></svg><span>Test chat</span></button>
       </nav>
       <div class="sidebar-foot">
-        <span id="status" class="pill muted" role="status"><i></i><span>Cargando…</span></span>
+        <span id="status" class="pill muted" role="status"><i></i><span>Loading…</span></span>
       </div>
     </aside>
 
     <main>
-      <div id="notice" class="toast" role="alert" hidden><span id="notice-text"></span><button id="notice-close" class="icon-button" aria-label="Cerrar aviso"><svg class="icon"><use href="#i-close"/></svg></button></div>
+      <div id="notice" class="toast" role="alert" hidden><span id="notice-text"></span><button id="notice-close" class="icon-button" aria-label="Close notice"><svg class="icon"><use href="#i-close"/></svg></button></div>
       <div id="restart-offer" class="panel offer" role="alertdialog" aria-labelledby="restart-offer-title" hidden>
-        <h2 id="restart-offer-title">Versión nueva instalada</h2>
-        <p>Se detuvo la versión anterior del asistente (servicio y túnel). El asistente estaba corriendo. ¿Dejarlo corriendo con la versión nueva?</p>
-        <div class="actions"><button id="offer-start">Dejar corriendo</button><button id="offer-dismiss" class="secondary">Dejarlo detenido</button></div>
+        <h2 id="restart-offer-title">New version installed</h2>
+        <p>The previous version of the assistant was stopped (service and tunnel). The assistant was running. Keep it running with the new version?</p>
+        <div class="actions"><button id="offer-start">Keep running</button><button id="offer-dismiss" class="secondary">Leave it stopped</button></div>
       </div>
 
       <section id="overview">
         <header class="page-head">
-          <h1>Inicio</h1>
-          <p>Estado del asistente y lo que falta para que responda en Teams.</p>
+          <h1>Home</h1>
+          <p>The assistant's state and what is left for it to answer in Teams.</p>
         </header>
         <div id="hero" class="panel hero">
           <div class="hero-state">
             <span id="hero-dot" class="dot muted"></span>
-            <div><h2 id="hero-title">Cargando…</h2><p id="hero-detail"></p></div>
+            <div><h2 id="hero-title">Loading…</h2><p id="hero-detail"></p></div>
           </div>
           <div class="actions">
-            <button id="start">Iniciar asistente</button>
-            <button id="restart" class="secondary">Reiniciar</button>
-            <button id="stop" class="secondary">Detener</button>
+            <button id="start">Start assistant</button>
+            <button id="restart" class="secondary">Restart</button>
+            <button id="stop" class="secondary">Stop</button>
           </div>
         </div>
         <div id="tiles" class="tiles"></div>
         <div class="columns">
           <div class="panel">
-            <div class="panel-head"><h2>Puesta en marcha</h2><span id="setup-progress" class="hint"></span></div>
+            <div class="panel-head"><h2>Setup</h2><span id="setup-progress" class="hint"></span></div>
             <div class="progress" aria-hidden="true"><span id="setup-bar"></span></div>
-            <p id="setup-ready" class="done-note" hidden><svg class="icon"><use href="#i-check"/></svg>Todo listo para recibir mensajes de Teams.</p>
+            <p id="setup-ready" class="done-note" hidden><svg class="icon"><use href="#i-check"/></svg>Ready to receive messages from Teams.</p>
             <ol id="setup-steps" class="steps"></ol>
           </div>
           <div class="panel">
-            <div class="panel-head"><h2>Actividad reciente</h2><button id="activity-all" class="link-button">Ver mensajes<svg class="icon"><use href="#i-arrow"/></svg></button></div>
+            <div class="panel-head"><h2>Recent activity</h2><button id="activity-all" class="link-button">See messages<svg class="icon"><use href="#i-arrow"/></svg></button></div>
             <div id="activity-stats" class="stats"></div>
             <div id="activity-list" class="activity" aria-live="polite"></div>
           </div>
@@ -80,84 +80,83 @@
 
       <section id="settings" hidden>
         <header class="page-head">
-          <h1>Configuración</h1>
-          <p>Los cambios se guardan juntos con la barra inferior. Si el asistente está corriendo, se reinicia para aplicarlos.</p>
+          <h1>Settings</h1>
+          <p>Changes are saved together with the bar at the bottom. If the assistant is running, it restarts to apply them.</p>
         </header>
         <div class="panel" id="panel-credentials">
-          <h2>Credenciales</h2>
-          <p class="hint">Sus valores nunca se muestran. Escribe en un campo solo para guardar o reemplazar una credencial; se aplica al momento. Las variables de entorno y los archivos de secretos tienen prioridad.</p>
+          <h2>Credentials</h2>
+          <p class="hint">Their values are never shown. Type in a field only to store or replace a credential; it applies right away. Environment variables and secret files take priority.</p>
           <div id="credentials" class="list"></div>
         </div>
         <div class="panel" id="panel-llm">
-          <div class="panel-head"><h2>Modelos de lenguaje</h2><button id="detect-llm" class="secondary small">Volver a detectar CLI</button></div>
-          <p class="hint">Analizan las preguntas y redactan las respuestas. Responde el primero activo; si falla (por ejemplo, sin créditos o con el límite de uso agotado) responde el siguiente, y en la llamada siguiente se vuelve a empezar por el primero. Codex y Claude usan su CLI instalada con su propia sesión; DeepSeek usa su API con <code>DEEPSEEK_API_KEY</code>.</p>
-          <ol id="llm-chain" class="chain" aria-label="Orden de prioridad de los modelos"></ol>
+          <div class="panel-head"><h2>Language models</h2><button id="detect-llm" class="secondary small">Detect CLIs again</button></div>
+          <p class="hint">They classify messages, write the answers and pick the references they use. The first active one answers; if it fails (for example, out of credits or with its usage limit reached) the next one answers, and the next call starts again with the first. Codex and Claude use their installed CLI with their own login; DeepSeek uses its API with <code>DEEPSEEK_API_KEY</code>.</p>
+          <ol id="llm-chain" class="chain" aria-label="Model priority order"></ol>
         </div>
         <div class="panel" id="panel-teams">
-          <div class="panel-head"><h2>Microsoft Teams y Entra</h2><span id="microsoft-state" class="badge muted"></span></div>
-          <p class="hint">Usa tu registro Entra existente (plataforma <em>Mobile and desktop</em> con <code>http://localhost</code> y permisos delegados). El ID de usuario se completa al conectar la cuenta.</p>
+          <div class="panel-head"><h2>Microsoft Teams and Entra</h2><span id="microsoft-state" class="badge muted"></span></div>
+          <p class="hint">Use your existing Entra registration (<em>Mobile and desktop</em> platform with <code>http://localhost</code> and delegated permissions). The user ID is filled in when you connect the account.</p>
           <div class="grid">
-            <label>ID de tenant Entra<input id="tenant-id" class="cfg" spellcheck="false"></label>
-            <label>Client ID Entra<input id="client-id" class="cfg" spellcheck="false"></label>
-            <label>ID del usuario Teams<input id="user-id" class="cfg" spellcheck="false"></label>
+            <label>Entra tenant ID<input id="tenant-id" class="cfg" spellcheck="false"></label>
+            <label>Entra client ID<input id="client-id" class="cfg" spellcheck="false"></label>
+            <label>Teams user ID<input id="user-id" class="cfg" spellcheck="false"></label>
           </div>
-          <label class="check"><input id="discover-chats" class="cfg" type="checkbox"> Descubrir todos mis chats autorizados</label>
-          <label>Chats permitidos, uno por línea <small>Solo se usan si no descubres todos los chats.</small><textarea id="allowed-chats" class="cfg" rows="3" spellcheck="false"></textarea></label>
-          <div class="actions"><button id="teams-login" class="secondary">Conectar cuenta Microsoft</button></div>
+          <label class="check"><input id="discover-chats" class="cfg" type="checkbox"> Discover all my authorized chats</label>
+          <label>Allowed chats, one per line <small>Used only if you do not discover all chats.</small><textarea id="allowed-chats" class="cfg" rows="3" spellcheck="false"></textarea></label>
+          <div class="actions"><button id="teams-login" class="secondary">Connect Microsoft account</button></div>
         </div>
         <div class="panel" id="panel-server">
-          <h2>URL pública y túnel</h2>
-          <p class="hint">Microsoft Graph entrega los mensajes en una URL HTTPS pública que debe llegar al puerto local. Para un túnel administrado en Cloudflare, activa la opción, guarda <code>CLOUDFLARE_TUNNEL_TOKEN</code> en Credenciales y deja vacío el archivo local; también puedes usar un archivo local con una regla final 404. Si otro supervisor gestiona el túnel, deja ambos desactivados.</p>
+          <h2>Public URL and tunnel</h2>
+          <p class="hint">Microsoft Graph delivers messages to a public HTTPS URL that must reach the local port. For a tunnel managed in Cloudflare, turn on the option, store <code>CLOUDFLARE_TUNNEL_TOKEN</code> in Credentials and leave the local file empty; you can also use a local file with a final 404 rule. If another supervisor runs the tunnel, leave both off.</p>
           <div class="grid">
-            <label>URL HTTPS pública<input id="public-url" class="cfg" placeholder="https://assistant.example.com" spellcheck="false"></label>
-            <label>Puerto local<input id="bind" class="cfg" placeholder="127.0.0.1:38655" spellcheck="false"></label>
-            <label>Config de cloudflared (opcional)<input id="tunnel-config" class="cfg" placeholder="/ruta/privada/config.yml" spellcheck="false"></label>
+            <label>Public HTTPS URL<input id="public-url" class="cfg" placeholder="https://assistant.example.com" spellcheck="false"></label>
+            <label>Local port<input id="bind" class="cfg" placeholder="127.0.0.1:38655" spellcheck="false"></label>
+            <label>cloudflared config (optional)<input id="tunnel-config" class="cfg" placeholder="/private/path/config.yml" spellcheck="false"></label>
           </div>
-          <label class="check"><input id="cloudflare-tunnel" class="cfg" type="checkbox"> Iniciar y detener Cloudflare Tunnel con el asistente (token guardado)</label>
+          <label class="check"><input id="cloudflare-tunnel" class="cfg" type="checkbox"> Start and stop Cloudflare Tunnel with the assistant (stored token)</label>
         </div>
         <div class="panel" id="panel-behavior">
-          <h2>Respuestas</h2>
+          <h2>Answers</h2>
           <label class="switch-row">
             <input id="dry-run" class="cfg switch" type="checkbox">
-            <span><strong>Modo de observación</strong><small>Redacta y registra propuestas en Mensajes, pero nunca envía nada a Teams. Desactívalo cuando las propuestas te convenzan.</small></span>
+            <span><strong>Observation mode</strong><small>Drafts and records proposals in Messages, but never sends anything to Teams. Turn it off once the proposals convince you.</small></span>
           </label>
-          <label>Idioma de las respuestas <small>Lo que el asistente escribe en Teams, incluidos avisos y fuentes. Prevalece sobre el estilo; la app sigue en español.</small><select id="llm-language" class="cfg"><option value="es">Español</option><option value="en">English</option></select></label>
-          <label>Estilo de respuesta<textarea id="llm-style" class="cfg" rows="3"></textarea></label>
-          <label>Modelo de Jev <small>Clasifica mensajes ambiguos y registra una revisión informativa.</small><input id="jev-model" class="cfg" spellcheck="false"></label>
+          <label>Answer language <small>What the assistant writes in Teams, including notices and sources. It overrides the style; the app itself stays in English.</small><select id="llm-language" class="cfg"><option value="es">Español</option><option value="en">English</option></select></label>
+          <label>Answer style<textarea id="llm-style" class="cfg" rows="3"></textarea></label>
         </div>
         <div class="panel" id="panel-self-chat">
-          <div class="panel-head"><h2>Chat conmigo mismo</h2><span id="self-chat-badge" class="badge muted"></span></div>
+          <div class="panel-head"><h2>Chat with myself</h2><span id="self-chat-badge" class="badge muted"></span></div>
           <p id="self-chat-state" class="hint"></p>
-          <label>ID del chat personal <small>Opcional; se valida contra Microsoft. Vacío = descubrirlo.</small><input id="self-chat-id" spellcheck="false"></label>
-          <div class="actions"><button id="self-chat-enable">Validar y habilitar</button><button id="self-chat-disable" class="secondary">Deshabilitar</button><button id="self-chat-test" class="secondary">Comprobar membresía</button></div>
-          <p class="hint">Se procesan mensajes nuevos. Autoriza las fuentes elegidas a la audiencia exacta de este chat. Cada respuesta incluye un enlace PTA para evitar bucles incluso ante un envío ambiguo.</p>
+          <label>Personal chat ID <small>Optional; validated against Microsoft. Empty = discover it.</small><input id="self-chat-id" spellcheck="false"></label>
+          <div class="actions"><button id="self-chat-enable">Validate and enable</button><button id="self-chat-disable" class="secondary">Disable</button><button id="self-chat-test" class="secondary">Check membership</button></div>
+          <p class="hint">New messages are processed. Authorize the chosen sources for this chat's exact audience. Every answer carries a PTA link that prevents loops even after an ambiguous send.</p>
         </div>
         <div class="panel" id="panel-import">
-          <h2>Migrar esta instalación</h2>
-          <p class="hint">Importa tu <code>config.toml</code> actual. Se conserva su client ID, mapa y directorio SQLite. Importa también las credenciales existentes a este equipo, especialmente <code>STATE_ENCRYPTION_KEY</code>.</p>
-          <div class="actions"><input id="legacy-path" aria-label="Ruta del config.toml actual" placeholder="/ruta/al/config.toml" spellcheck="false"><button id="import" class="secondary">Importar</button></div>
+          <h2>Migrate this installation</h2>
+          <p class="hint">Imports your current <code>config.toml</code>, keeping its client ID, map and SQLite directory. Import the existing credentials to this computer too, especially <code>STATE_ENCRYPTION_KEY</code>.</p>
+          <div class="actions"><input id="legacy-path" aria-label="Path of the current config.toml" placeholder="/path/to/config.toml" spellcheck="false"><button id="import" class="secondary">Import</button></div>
         </div>
       </section>
 
       <section id="messages" hidden>
         <header class="page-head">
-          <h1>Mensajes</h1>
-          <p>Cada mensaje que llega desde Teams, qué decidió el asistente, la respuesta enviada o retenida y el registro de cada paso.</p>
+          <h1>Messages</h1>
+          <p>Every message that arrives from Teams, what the assistant decided, the answer sent or withheld and the log of each step.</p>
         </header>
         <div class="panel">
           <div class="toolbar">
-            <div id="messages-filters" class="segmented" role="group" aria-label="Filtrar mensajes">
-              <button data-filter="all" aria-pressed="true">Todos</button>
-              <button data-filter="sent" aria-pressed="false">Respondidos</button>
-              <button data-filter="withheld" aria-pressed="false">Retenidos o sin respuesta</button>
-              <button data-filter="error" aria-pressed="false">Errores</button>
-              <button data-filter="active" aria-pressed="false">En curso</button>
+            <div id="messages-filters" class="segmented" role="group" aria-label="Filter messages">
+              <button data-filter="all" aria-pressed="true">All</button>
+              <button data-filter="sent" aria-pressed="false">Answered</button>
+              <button data-filter="withheld" aria-pressed="false">Withheld or unanswered</button>
+              <button data-filter="error" aria-pressed="false">Errors</button>
+              <button data-filter="active" aria-pressed="false">In progress</button>
             </div>
-            <button id="messages-refresh" class="secondary small">Actualizar</button>
+            <button id="messages-refresh" class="secondary small">Refresh</button>
           </div>
           <div class="toolbar">
-            <label class="check"><input id="messages-auto" type="checkbox" checked> Actualizar cada 10 s</label>
-            <label class="check"><input id="messages-hide-ineligible" type="checkbox" checked> Ocultar mensajes no dirigidos al asistente</label>
+            <label class="check"><input id="messages-auto" type="checkbox" checked> Refresh every 10 s</label>
+            <label class="check"><input id="messages-hide-ineligible" type="checkbox" checked> Hide messages not addressed to the assistant</label>
           </div>
           <p id="messages-summary" class="hint"></p>
           <div id="messages-list" aria-live="polite"></div>
@@ -166,47 +165,47 @@
 
       <section id="knowledge" hidden>
         <header class="page-head">
-          <h1>Conocimiento</h1>
-          <p>El asistente solo responde con fuentes habilitadas, con procesamiento externo autorizado y abiertas a la conversación que pregunta.</p>
+          <h1>Knowledge</h1>
+          <p>The assistant answers only with sources that are enabled, authorized for external processing and open to the conversation that asks.</p>
         </header>
         <div class="panel">
-          <div class="panel-head"><h2>Fuentes</h2><span id="sources-summary" class="hint"></span></div>
+          <div class="panel-head"><h2>Sources</h2><span id="sources-summary" class="hint"></span></div>
           <div id="resources" class="list"></div>
           <details class="add-form">
-            <summary>Agregar un archivo de un repositorio</summary>
+            <summary>Add a file from a repository</summary>
             <div class="grid">
-              <label>ID de fuente<input id="source-id" placeholder="operaciones" spellcheck="false"></label>
-              <label>Repositorio<select id="source-repo"></select></label>
-              <label>Ruta relativa del archivo<input id="source-path" placeholder="temas/operacion.md" spellcheck="false"></label>
-              <label>Temas, separados por coma<input id="source-topics" placeholder="operación, asistencia"></label>
+              <label>Source ID<input id="source-id" placeholder="operations" spellcheck="false"></label>
+              <label>Repository<select id="source-repo"></select></label>
+              <label>Relative file path<input id="source-path" placeholder="topics/operations.md" spellcheck="false"></label>
+              <label>Topics, comma separated<input id="source-topics" placeholder="operations, support"></label>
             </div>
-            <label>Descripción<input id="source-description" placeholder="Qué preguntas responde"></label>
-            <div class="actions"><button id="add-source" class="secondary">Agregar fuente</button></div>
-            <p class="hint">Una fuente nueva empieza deshabilitada, sin audiencias y sin procesamiento externo. La Wiki, la actividad de Azure DevOps y otras herramientas se agregan con <code>pta sources add</code>; aquí puedes habilitarlas y autorizarlas.</p>
+            <label>Description<input id="source-description" placeholder="Which questions it answers"></label>
+            <div class="actions"><button id="add-source" class="secondary">Add source</button></div>
+            <p class="hint">A new source starts disabled, without audiences and without external processing. The Wiki, Azure DevOps activity, your Teams messages and other tools are added with <code>pta sources add</code>; here you can enable and authorize them.</p>
           </details>
         </div>
         <div class="panel">
-          <h2>Repositorios</h2>
-          <p class="hint">Checkouts Git locales de donde salen los archivos. Quitar uno de esta lista no borra sus archivos.</p>
+          <h2>Repositories</h2>
+          <p class="hint">Local Git checkouts the files come from. Removing one from this list does not delete its files.</p>
           <div id="repositories" class="list"></div>
           <details class="add-form">
-            <summary>Agregar un checkout local</summary>
+            <summary>Add a local checkout</summary>
             <div class="grid">
-              <label>Alias<input id="repo-alias" placeholder="mi_conocimiento" spellcheck="false"></label>
-              <label>Ruta del checkout<input id="repo-path" placeholder="/ruta/al/repositorio" spellcheck="false"></label>
+              <label>Alias<input id="repo-alias" placeholder="my_knowledge" spellcheck="false"></label>
+              <label>Checkout path<input id="repo-path" placeholder="/path/to/repository" spellcheck="false"></label>
             </div>
-            <div class="actions"><button id="add-repo" class="secondary">Agregar repositorio</button></div>
+            <div class="actions"><button id="add-repo" class="secondary">Add repository</button></div>
           </details>
         </div>
         <div class="panel">
-          <div class="panel-head"><h2>Repositorios privados de GitHub</h2><span id="github-state" class="badge muted"></span></div>
-          <p class="hint">Conecta una GitHub App con permiso Contents: read e instalación limitada a los repositorios que elijas. La organización puede requerir aprobación. El token queda en el almacén del sistema.</p>
-          <label>Client ID de la GitHub App<input id="github-client-id" value="Iv23liswvVle1ENUJYBT" placeholder="Client ID público" spellcheck="false"></label>
-          <div class="actions"><button id="github-connect" class="secondary">Conectar GitHub</button><button id="github-list" class="secondary">Ver repositorios autorizados</button><button id="github-disconnect" class="secondary">Desconectar GitHub</button></div>
+          <div class="panel-head"><h2>Private GitHub repositories</h2><span id="github-state" class="badge muted"></span></div>
+          <p class="hint">Connect a GitHub App with the Contents: read permission, installed only on the repositories you choose. The organization may require approval. The token stays in the system store.</p>
+          <label>GitHub App client ID<input id="github-client-id" value="Iv23liswvVle1ENUJYBT" placeholder="Public client ID" spellcheck="false"></label>
+          <div class="actions"><button id="github-connect" class="secondary">Connect GitHub</button><button id="github-list" class="secondary">See authorized repositories</button><button id="github-disconnect" class="secondary">Disconnect GitHub</button></div>
           <div id="github-device" class="device" hidden>
-            <p>Copia este código y autoriza la app en GitHub:</p>
+            <p>Copy this code and authorize the app on GitHub:</p>
             <strong id="github-code" class="code"></strong>
-            <div class="actions"><button id="github-open" class="secondary">Abrir GitHub</button><button id="github-finish">Ya autoricé</button></div>
+            <div class="actions"><button id="github-open" class="secondary">Open GitHub</button><button id="github-finish">I authorized it</button></div>
           </div>
           <div id="github-repositories" class="list"></div>
         </div>
@@ -214,37 +213,37 @@
 
       <section id="chat" hidden>
         <header class="page-head">
-          <h1>Chat de prueba</h1>
-          <p>Mismo pipeline, controles y cadena de modelos que Teams. Las respuestas aparecen aquí y nunca se envían.</p>
+          <h1>Test chat</h1>
+          <p>The same pipeline, checks and model chain as Teams. Answers appear here and are never sent.</p>
         </header>
         <div class="chat-layout">
           <div class="panel chat-panel">
             <div id="history" class="history" aria-live="polite">
               <div id="chat-empty" class="empty">
                 <svg class="icon big"><use href="#i-chat"/></svg>
-                <p><strong>Pregunta como lo haría un compañero en Teams.</strong></p>
-                <p class="hint">Elige las fuentes a la derecha. Con razonamiento alto una respuesta puede tardar varios minutos.</p>
+                <p><strong>Ask the way a teammate would in Teams.</strong></p>
+                <p class="hint">Choose the sources on the right. With high reasoning effort an answer can take several minutes.</p>
               </div>
             </div>
             <form id="chat-form" class="composer">
-              <label for="message" class="sr-only">Mensaje</label>
-              <textarea id="message" maxlength="2000" rows="2" placeholder="Escribe una pregunta…" required></textarea>
-              <button id="send" type="submit" aria-label="Enviar en simulación"><svg class="icon"><use href="#i-send"/></svg></button>
+              <label for="message" class="sr-only">Message</label>
+              <textarea id="message" maxlength="2000" rows="2" placeholder="Write a question…" required></textarea>
+              <button id="send" type="submit" aria-label="Send in simulation"><svg class="icon"><use href="#i-send"/></svg></button>
             </form>
-            <p class="hint composer-hint">Ctrl o ⌘ + Enter para enviar · simulación, no se envía a Teams</p>
+            <p class="hint composer-hint">Ctrl or ⌘ + Enter to send · simulation, nothing is sent to Teams</p>
           </div>
           <aside class="panel chat-side">
-            <div class="panel-head"><h2>Fuentes</h2><button id="chat-all" class="link-button">Todas</button></div>
-            <p class="hint">Habilitadas y con procesamiento externo autorizado. Al elegirlas autorizas su uso en esta prueba.</p>
+            <div class="panel-head"><h2>Sources</h2><button id="chat-all" class="link-button">All</button></div>
+            <p class="hint">Enabled and authorized for external processing. Choosing them authorizes their use in this test.</p>
             <div id="chat-sources" class="choices"></div>
-            <button id="chat-reset" class="secondary small">Nueva conversación</button>
+            <button id="chat-reset" class="secondary small">New conversation</button>
           </aside>
         </div>
       </section>
 
       <div id="savebar" class="savebar" hidden>
-        <span>Tienes cambios sin guardar.</span>
-        <div class="actions"><button id="discard" class="secondary">Descartar</button><button id="save">Guardar cambios</button></div>
+        <span>You have unsaved changes.</span>
+        <div class="actions"><button id="discard" class="secondary">Discard</button><button id="save">Save changes</button></div>
       </div>
     </main>
   </div>

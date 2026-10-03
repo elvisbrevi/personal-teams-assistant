@@ -5,7 +5,6 @@ use crate::{
         webhook::{self, WebState},
     },
     config::Config,
-    decision::Jev,
     knowledge::KnowledgeMap,
     pipeline::Pipeline,
     security::{self, Redactor, Vault},
@@ -29,7 +28,6 @@ pub async fn serve(
 ) -> Result<()> {
     let config = Arc::new(Config::load(path)?);
     let knowledge = KnowledgeMap::load(&config.knowledge_map)?;
-    let jev_key = security::secret("TYPESAFE_API_KEY")?;
     let (llm, llm_secrets) = crate::llm::from_config(&config.llm)?;
     let client_state = security::secret("GRAPH_WEBHOOK_SECRET")?;
     let encryption_key = security::secret("STATE_ENCRYPTION_KEY")?;
@@ -37,11 +35,7 @@ pub async fn serve(
         client_state.len() >= 32 && client_state.len() <= 128,
         "webhook secret must have 32-128 characters"
     );
-    let mut exact_secrets = vec![
-        jev_key.clone(),
-        client_state.clone(),
-        encryption_key.clone(),
-    ];
+    let mut exact_secrets = vec![client_state.clone(), encryption_key.clone()];
     exact_secrets.extend(llm_secrets);
     for name in config.secrets.values() {
         exact_secrets.push(security::secret(name)?);
@@ -82,12 +76,6 @@ pub async fn serve(
         client_state,
     });
     graph.verify_account().await?;
-    let gate = Arc::new(Jev {
-        client: client.clone(),
-        endpoint: "https://api.typesafe.ai/v1/systemone".into(),
-        api_key: jev_key,
-        model: config.jev.model.clone(),
-    });
     let llm = Arc::new(llm);
     let tools = Arc::new(Tools {
         bindings: config.secrets.clone(),
@@ -100,7 +88,6 @@ pub async fn serve(
         config: config.clone(),
         store: store.clone(),
         adapter: graph.clone(),
-        gate,
         knowledge,
         llm,
         tools,

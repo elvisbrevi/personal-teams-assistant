@@ -87,18 +87,12 @@ pub(crate) fn run(host_lock: fs::File, restart_offer: bool) {
                 .restart_offer
                 .store(restart_offer, std::sync::atomic::Ordering::Relaxed);
             app.manage(host);
-            let open = MenuItem::with_id(
-                app,
-                "open",
-                "Abrir configuración y chat",
-                true,
-                None::<&str>,
-            )?;
+            let open =
+                MenuItem::with_id(app, "open", "Open settings and chat", true, None::<&str>)?;
             let start_item =
-                MenuItem::with_id(app, "start", "Iniciar asistente", true, None::<&str>)?;
-            let stop_item =
-                MenuItem::with_id(app, "stop", "Detener asistente", true, None::<&str>)?;
-            let quit = MenuItem::with_id(app, "quit", "Salir", true, None::<&str>)?;
+                MenuItem::with_id(app, "start", "Start assistant", true, None::<&str>)?;
+            let stop_item = MenuItem::with_id(app, "stop", "Stop assistant", true, None::<&str>)?;
+            let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&open, &start_item, &stop_item, &quit])?;
             TrayIconBuilder::new()
                 .icon(

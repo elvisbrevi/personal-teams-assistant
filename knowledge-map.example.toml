@@ -3,8 +3,8 @@ personal = "../knowledge-repo"
 
 [[resources]]
 id = "assistant-operations"
-description = "Documentación de operación del asistente: controles, permisos y comportamiento."
-topics = ["asistente", "operación", "Teams"]
+description = "How the assistant is operated: controls, permissions and behavior."
+topics = ["assistant", "operations", "Teams"]
 enabled = true
 external_processing = true
 # Grant access to the entire conversation, not just the person asking.
@@ -13,7 +13,7 @@ allowed_conversations = []
 allowed_senders = []
 kind = "file"
 repository = "personal"
-path = "temas/asistente/operacion.md"
+path = "topics/assistant/operations.md"
 
 # A website must be an exact HTTPS URL. Redirects, private IPs and credentials are blocked.
 # [[resources]]
@@ -42,8 +42,8 @@ path = "temas/asistente/operacion.md"
 # Wiki is independent from activity. Start disabled, without audiences/external processing.
 # [[resources]]
 # id = "azure-devops-wikis"
-# description = "Procedimientos documentados en Wiki, con autoría y fuentes verificadas"
-# topics = ["wiki", "documentación", "procedimientos"]
+# description = "Procedures documented in the Wiki, with verified authorship and sources"
+# topics = ["wiki", "documentation", "procedures"]
 # enabled = false
 # external_processing = false
 # allowed_conversations = []
@@ -56,3 +56,18 @@ path = "temas/asistente/operacion.md"
 # secret_ref = "secret://azure-devops/reader"
 # wiki_ids = []
 # author_mode = "prefer_mine"
+
+# The user's own messages in their Teams chats, read only for activity reviews ("what work did I
+# do that isn't registered?") with the Microsoft session already granted (Chat.Read). It starts
+# disabled; authorize it for the personal chat only, e.g. allowed_conversations = ["chats/48:notes"].
+# [[resources]]
+# id = "teams-activity"
+# description = "My own messages in Teams chats, to review the work I did"
+# topics = ["teams", "activity"]
+# enabled = false
+# external_processing = false
+# allowed_conversations = []
+# allowed_senders = []
+# kind = "tool"
+# [resources.tool]
+# type = "teams_messages"

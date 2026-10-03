@@ -1,7 +1,6 @@
 use crate::{
     adapters::{graph::Graph, oauth::AccessToken},
     config::Config,
-    decision::Jev,
     knowledge::KnowledgeMap,
     pipeline::Pipeline,
     security::{self, Redactor},
@@ -41,10 +40,8 @@ pub async fn chat(config_path: &Path, input: SimulationRequest) -> Result<Simula
             .any(|r| { r.id == *id && r.enabled && r.external_processing })),
         "selected source is unavailable"
     );
-    let jev_key = security::secret("TYPESAFE_API_KEY")?;
     let (llm, llm_secrets) = crate::llm::from_config(&config.llm)?;
-    let mut exact_secrets = vec![jev_key.clone()];
-    exact_secrets.extend(llm_secrets);
+    let mut exact_secrets = llm_secrets;
     for name in config.secrets.values() {
         exact_secrets.push(security::secret(name)?);
     }
@@ -75,12 +72,6 @@ pub async fn chat(config_path: &Path, input: SimulationRequest) -> Result<Simula
         config: config.clone(),
         store: store.clone(),
         adapter: Arc::new(NoLocalAdapter),
-        gate: Arc::new(Jev {
-            client: client.clone(),
-            endpoint: "https://api.typesafe.ai/v1/systemone".into(),
-            api_key: jev_key,
-            model: config.jev.model.clone(),
-        }),
         knowledge,
         llm: Arc::new(llm),
         tools: Arc::new(Tools {

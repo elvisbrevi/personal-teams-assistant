@@ -112,23 +112,21 @@ fn fail<E: Into<anyhow::Error>>(error: E) -> String {
         return "[network] Dependency request failed. Check connectivity and authorization.".into();
     }
     tracing::warn!(event = "desktop_operation_failed");
-    "La operación no se completó. Revisa la configuración y vuelve a intentar.".into()
+    "The operation did not complete. Check the configuration and try again.".into()
 }
 
 fn validate_teams_setup(config: &Config) -> Result<()> {
     ensure!(
         !config.server.public_url.contains("example.com"),
-        SetupError(
-            "Configura una URL HTTPS pública real para iniciar Teams. El chat de prueba funciona sin esta URL."
-        )
+        SetupError("Set a real public HTTPS URL to start Teams. The test chat works without it.")
     );
     ensure!(
         !config.graph.client_id.ends_with("0002") && !config.graph.tenant_id.ends_with("0001"),
-        SetupError("Configura el tenant y el Client ID de tu registro Entra existente.")
+        SetupError("Set the tenant and Client ID of your existing Entra registration.")
     );
     ensure!(
         config.graph.user_id != uuid::Uuid::nil().to_string(),
-        SetupError("Conecta tu cuenta Microsoft antes de iniciar Teams.")
+        SetupError("Connect your Microsoft account before starting Teams.")
     );
     Ok(())
 }
@@ -255,7 +253,7 @@ fn validate_tunnel_mode(config: &Config, tunnel_config: &str) -> Result<()> {
     ensure!(
         !config.server.cloudflare_tunnel || tunnel_config.trim().is_empty(),
         SetupError(
-            "Elige el túnel Cloudflare con token o el archivo de configuración local; configura solo uno."
+            "Choose the Cloudflare tunnel with a token or the local configuration file; set up only one."
         )
     );
     Ok(())
@@ -342,9 +340,12 @@ pub(crate) fn init_state(config_dir: &Path, data_dir: &Path) -> Result<DesktopSt
     })
 }
 
+/// Credentials earlier versions required and nothing reads any more. A stored one is listed as
+/// `retired` so it can be removed; it is never deleted automatically and cannot be set.
+const RETIRED_CREDENTIALS: [&str; 1] = ["TYPESAFE_API_KEY"];
+
 fn credential_names(config: &Config) -> Vec<String> {
     let mut names = vec![
-        "TYPESAFE_API_KEY".into(),
         "DEEPSEEK_API_KEY".into(),
         "GRAPH_WEBHOOK_SECRET".into(),
         "STATE_ENCRYPTION_KEY".into(),
@@ -384,6 +385,11 @@ async fn snapshot(host: &Host) -> std::result::Result<Snapshot, String> {
             "unused"
         };
         credentials.insert(name, source.unwrap_or(missing).into());
+    }
+    for name in RETIRED_CREDENTIALS {
+        if security::secret_source(name).map_err(fail)?.is_some() {
+            credentials.insert(name.into(), "retired".into());
+        }
     }
     let mut running = state.running.lock().await;
     if running.as_mut().is_some_and(|r| {
@@ -584,7 +590,7 @@ async fn save_settings(
 
 async fn import_existing(state: &DesktopState, path: String) -> std::result::Result<(), String> {
     let source = PathBuf::from(path);
-    let source_dir = source.parent().ok_or_else(|| "Ruta inválida".to_string())?;
+    let source_dir = source.parent().ok_or_else(|| "Invalid path".to_string())?;
     let mut config: Config =
         toml::from_str(&fs::read_to_string(&source).map_err(fail)?).map_err(fail)?;
     if config.knowledge_map.is_relative() {
@@ -637,7 +643,7 @@ async fn set_credential(
 ) -> std::result::Result<(), String> {
     let config = read_config(&state.config_path).map_err(fail)?;
     if !credential_names(&config).contains(&name) {
-        return Err("[invalid_input] Nombre de credencial no permitido".into());
+        return Err("[invalid_input] Credential name not allowed".into());
     }
     if name == "STATE_ENCRYPTION_KEY" {
         validate_state_key(&config, &value).map_err(|_| {
@@ -652,11 +658,11 @@ async fn set_credential(
 
 async fn delete_credential(state: &DesktopState, name: String) -> std::result::Result<(), String> {
     let config = read_config(&state.config_path).map_err(fail)?;
-    if !credential_names(&config).contains(&name) {
-        return Err("[invalid_input] Nombre de credencial no permitido".into());
+    if !credential_names(&config).contains(&name) && !RETIRED_CREDENTIALS.contains(&name.as_str()) {
+        return Err("[invalid_input] Credential name not allowed".into());
     }
     if name == "STATE_ENCRYPTION_KEY" && config.server.data_dir.join("assistant.db").exists() {
-        return Err("La clave protege una base existente y no puede eliminarse.".into());
+        return Err("The key protects an existing database and cannot be removed.".into());
     }
     ensure_stopped(state)
         .await
@@ -703,7 +709,7 @@ async fn clone_github_repository(
     let config = read_config(&state.config_path).map_err(fail)?;
     let mut map = KnowledgeMap::load(&state.map_path).map_err(fail)?;
     if map.repositories.contains_key(&alias) {
-        return Err("Ese alias ya existe.".into());
+        return Err("That alias already exists.".into());
     }
     let path = github::clone_repository(&full_name, &alias, &config.server.data_dir)
         .await
@@ -755,10 +761,10 @@ async fn desktop_callback(
     Query(query): Query<HashMap<String, String>>,
 ) -> (StatusCode, &'static str) {
     let Some(csrf) = query.get("state") else {
-        return (StatusCode::BAD_REQUEST, "Respuesta de Microsoft inválida.");
+        return (StatusCode::BAD_REQUEST, "Invalid response from Microsoft.");
     };
     if !security::constant_eq(csrf, &state.csrf) {
-        return (StatusCode::BAD_REQUEST, "Respuesta de Microsoft inválida.");
+        return (StatusCode::BAD_REQUEST, "Invalid response from Microsoft.");
     }
     let result = if let Some(code) = query.get("code") {
         state.oauth.complete_desktop(csrf, code).await.ok()
@@ -772,12 +778,12 @@ async fn desktop_callback(
     if success {
         (
             StatusCode::OK,
-            "Cuenta conectada. Puedes cerrar esta ventana.",
+            "Account connected. You can close this window.",
         )
     } else {
         (
             StatusCode::BAD_REQUEST,
-            "No se pudo conectar la cuenta. Vuelve a la aplicación.",
+            "The account could not be connected. Go back to the app.",
         )
     }
 }
@@ -1113,7 +1119,7 @@ pub(crate) fn keep_running_after_update(interactive: bool) -> bool {
     if !interactive || !std::io::stdin().is_terminal() || !std::io::stderr().is_terminal() {
         return true;
     }
-    eprint!("El asistente estaba corriendo. ¿Dejarlo corriendo con la versión nueva? [S/n] ");
+    eprint!("The assistant was running. Keep it running with the new version? [Y/n] ");
     let _ = std::io::stderr().flush();
     let mut answer = String::new();
     if std::io::stdin().read_line(&mut answer).is_err() {
@@ -1334,8 +1340,8 @@ mod tests {
     fn teams_setup_error_is_actionable_without_exposing_internal_errors() {
         let config = Config::desktop_template().unwrap();
         let message = fail(validate_teams_setup(&config).unwrap_err());
-        assert!(message.contains("URL HTTPS pública real"));
-        assert!(message.contains("chat de prueba"));
+        assert!(message.contains("real public HTTPS URL"));
+        assert!(message.contains("test chat"));
         let internal = fail(anyhow::anyhow!("private token value"));
         assert!(!internal.contains("private token value"));
     }

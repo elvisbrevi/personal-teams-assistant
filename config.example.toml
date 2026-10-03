@@ -15,21 +15,13 @@ discover_all_chats = false
 # Legacy field, must stay empty: channel scopes are never requested.
 channels = []
 
-[jev]
-model = "jev-latest"
-# Only final_threshold is used; the other thresholds are kept for profile compatibility.
-follow_up_threshold = 0.70
-routing_threshold = 0.92
-evidence_threshold = 0.65
-final_threshold = 0.65
-
 [llm]
 # Legacy single provider: used only when `chain` is empty.
 provider = "deepseek"
 model = "deepseek-flash"
-style = "Español natural y claro. Resume por proyecto y explica lo que sugieren los cambios técnicos. Sin promesas ni opiniones personales."
+style = "Natural and clear. Summarize by project and explain what the technical changes suggest. No promises or personal opinions."
 # Language of everything sent to Teams (answers, notices, sources): "es" or "en". Overrides any
-# language the style names. The app's interface stays in Spanish.
+# language the style names. The app's interface, CLI and audit log are in English.
 language = "es"
 
 # Priority order. Every model call starts from the first enabled provider and falls back to the

@@ -72,7 +72,7 @@
         <ol class="pipeline">
           <li><span class="num">1</span><h3>Receives</h3><p>Microsoft Graph notifies it of every new message through a webhook. Your chat with yourself is also checked every 10 s.</p></li>
           <li><span class="num">2</span><h3>Decides whether to answer</h3><p>Only direct messages, real mentions or your chat with yourself. Calls, meetings and “got a minute?” are left to you.</p></li>
-          <li><span class="num">3</span><h3>Gathers evidence</h3><p>It reads only the sources open to that conversation: Git files, URLs, and Azure DevOps wikis and activity.</p></li>
+          <li><span class="num">3</span><h3>Gathers evidence</h3><p>It reads only the sources open to that conversation: Git files, URLs, Azure DevOps wikis and activity, and your own Teams messages.</p></li>
           <li><span class="num">4</span><h3>Drafts</h3><p>Codex → Claude Code → DeepSeek. If the first one fails or runs out of credits, the next one answers; the following call starts again from your default.</p></li>
           <li><span class="num">5</span><h3>Verifies in code</h3><p>References, IDs, URLs and sensitive data. If something can't be checked, the reply is held back and you get a note in your chat with yourself.</p></li>
           <li><span class="num">6</span><h3>Sends once</h3><p>As Teams HTML, logged before it goes out. It never retries: when in doubt, the message is left for human review.</p></li>
@@ -88,17 +88,17 @@
         </header>
         <div class="features">
           <article><h3>Your own identity</h3><p>It replies as you, not as a bot. A public Entra client with PKCE and only <code>User.Read</code>, <code>Chat.Read</code>, <code>ChatMessage.Send</code> and <code>offline_access</code>.</p></article>
-          <article><h3>Sources with audiences</h3><p>Every source starts disabled, with no audiences and no external processing. You decide which conversation can use what.</p></article>
-          <article><h3>Answers that cite sources</h3><p>Wiki-based answers link the pages they used and say who documented them. Work items and pipelines come with verified links.</p></article>
+          <article><h3>Sources with audiences</h3><p>Every source starts disabled, with no audiences and no external processing. You decide which conversation can use what. Answers link the Wiki pages, work items and pipelines they cite.</p></article>
+          <article><h3>Work you didn't log</h3><p>Ask what you did in the last two weeks that no task records. It compares your commits, pull requests, pipeline runs, releases, Wiki edits and Teams messages with your work items and proposes the missing tasks, each with its date and a verified link.</p></article>
           <article><h3>Observation mode</h3><p>Start with drafts that are never sent. Review them in the app and turn on sending once you trust them.</p></article>
-          <article><h3>Every message, explained</h3><p>What it decided, how it read the question, which model answered, what failed first and a log of every step, in the Messages tab (Mensajes) or with <code>pta audit</code>.</p></article>
+          <article><h3>Every message, explained</h3><p>What it decided, how it read the question, which model answered, what failed first and a log of every step, in the Messages tab or with <code>pta audit</code>.</p></article>
           <article><h3>App, CLI and agents</h3><p>A tray app, the <code>pta</code> CLI with stable JSON output and a built-in skill so your coding agent can operate it.</p></article>
         </div>
         <figure class="window wide-shot">
           <div class="window-bar" aria-hidden="true"><i></i><i></i><i></i></div>
           <picture>
             <source srcset="assets/app-chat-dark.jpg" media="(prefers-color-scheme: dark)">
-            <img src="assets/app-chat-light.jpg" width="1200" height="760" loading="lazy" alt="Test chat: a question about an endpoint answered with steps, a JSON example and the cited wiki page.">
+            <img src="assets/app-chat-light.jpg" width="1200" height="760" loading="lazy" alt="Test chat: a review of the work done in the last two weeks that no task records, with dates, identifiers and proposed task titles.">
           </picture>
           <figcaption>The test chat runs the same pipeline as Teams, without sending anything.</figcaption>
         </figure>
@@ -145,7 +145,7 @@
           </article>
         </div>
         <ol class="steps">
-          <li><h3>Configure</h3><p>Save your credentials, pick the reply language and the order of the models, and register your Entra app. The app's interface is in Spanish; its Home tab (Inicio) tells you what's missing.</p><code>pta status</code></li>
+          <li><h3>Configure</h3><p>Save your credentials, pick the reply language and the order of the models, and register your Entra app. Its Home tab tells you what's missing.</p><code>pta status</code></li>
           <li><h3>Connect</h3><p>Sign in with your Microsoft account and expose the local port through a stable HTTPS URL, for example with Cloudflare Tunnel.</p><code>pta auth microsoft login</code></li>
           <li><h3>Observe</h3><p>Authorize your sources, start the assistant and review its drafts without sending anything.</p><code>pta start</code></li>
           <li><h3>Go live</h3><p>Once you trust the drafts, turn off observation mode.</p><code>pta mode active</code></li>
