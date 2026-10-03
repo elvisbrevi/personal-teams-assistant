@@ -75,10 +75,22 @@ pub struct Llm {
     pub provider: String,
     pub model: String,
     pub style: String,
+    /// Language of everything sent to Teams: the model's answer and the app's fixed texts.
+    #[serde(default)]
+    pub language: Language,
     /// Providers in priority order. Every model call starts again from the first enabled one
     /// and falls back to the next only when it fails (for example, without usage credits).
     #[serde(default)]
     pub chain: Vec<LlmChoice>,
+}
+/// Language of the replies and notices the assistant writes in Teams. The app's own interface
+/// and audit log stay in Spanish.
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Language {
+    #[default]
+    Es,
+    En,
 }
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -194,5 +206,30 @@ impl Config {
     /// The delegated Graph scopes already consented for this Entra registration. Never widen.
     pub fn scopes(&self) -> &'static str {
         "offline_access User.Read Chat.Read ChatMessage.Send"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Config, Language};
+
+    #[test]
+    fn reply_language_defaults_to_spanish_and_accepts_english() {
+        let example = include_str!("../config.example.toml");
+        let parse = |text: &str| toml::from_str::<Config>(text).map(|c| c.llm.language);
+        assert_eq!(parse(example).unwrap(), Language::Es);
+        // Profiles written before the field existed keep answering in Spanish.
+        let missing = example.replace("language = \"es\"\n", "");
+        assert_ne!(missing, example);
+        assert_eq!(parse(&missing).unwrap(), Language::Es);
+        let english = example.replace("language = \"es\"", "language = \"en\"");
+        assert_eq!(parse(&english).unwrap(), Language::En);
+        assert!(parse(&example.replace("language = \"es\"", "language = \"fr\"")).is_err());
+        // JSON, as `pta config set llm.language '"en"'` and the app send it.
+        assert_eq!(
+            serde_json::from_str::<Language>("\"en\"").unwrap(),
+            Language::En
+        );
+        assert_eq!(serde_json::to_string(&Language::Es).unwrap(), "\"es\"");
     }
 }

@@ -28,6 +28,9 @@ final_threshold = 0.65
 provider = "deepseek"
 model = "deepseek-flash"
 style = "Español natural y claro. Resume por proyecto y explica lo que sugieren los cambios técnicos. Sin promesas ni opiniones personales."
+# Language of everything sent to Teams (answers, notices, sources): "es" or "en". Overrides any
+# language the style names. The app's interface stays in Spanish.
+language = "es"
 
 # Priority order. Every model call starts from the first enabled provider and falls back to the
 # next only when it fails (for example, out of usage credits). Codex and Claude run their
