@@ -71,11 +71,11 @@ Propuestas surgidas al revisar el código completo (2026-10-01). Salvo lo indica
 
 ## 4. GUI
 
-- **P1 — Fuentes de cualquier tipo.** `renderResources()` en `ui/app.js` filtra `kind=file`: la Wiki y la actividad de Azure DevOps solo se administran por CLI. Añadir alta/edición de herramientas, editor de audiencias y conmutadores habilitar/procesamiento externo.
-- **P1 — Estado operativo real.** Panel con suscripciones activas y su caducidad, último mensaje recibido, últimos resultados de auditoría con motivo legible, salidas `uncertain` o pendientes de reconciliar y estado del túnel.
+- **P1 — Fuentes de cualquier tipo.** Estado (2026-10-03): la pestaña Conocimiento ya lista todas las fuentes y edita descripción, temas, audiencias y los conmutadores habilitada/procesamiento externo; el chat de prueba las ofrece todas. Falta el alta y la edición de parámetros de herramientas (`tool`) y de `allowed_senders`.
+- **P1 — Estado operativo real.** Estado (2026-10-03): la pestaña Inicio muestra asistente, suscripciones vigentes, túnel, cuenta, modo, modelos, fuentes, puesta en marcha y actividad reciente, y la barra lateral marca errores/envíos inciertos de las últimas 24 h. Falta la caducidad de cada suscripción y las salidas del chat personal pendientes de reconciliar.
 - **P2 — Icono de bandeja con estado** (sin configurar / detenido / activo / requiere atención) y notificación del sistema ante `uncertain`, fallo de suscripción o login caducado.
 - **P2 — Inicio automático con la sesión** (opción desactivada por defecto; `tauri-plugin-autostart`): la recepción depende de que el host esté vivo. En Linux ya basta un servicio systemd de usuario con `--headless --start`.
-- **P2 — Chat de prueba más informativo:** permitir probar sin fuente seleccionada, mostrar referencias como enlaces, cobertura parcial y motivo humanizado.
+- **P2 — Chat de prueba más informativo:** Estado (2026-10-03): renderiza el Markdown, muestra referencias verificadas, cobertura parcial, avisos y motivo legible. Falta permitir probar sin fuente seleccionada (lo exige `local_chat`).
 - **P3 — Visor de auditoría** con filtro por estado/motivo y contenido solo bajo petición explícita (como `pta audit show --content`).
 
 ## 5. Seguridad y operación

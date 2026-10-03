@@ -35,6 +35,8 @@ src/                          núcleo: pipeline, adaptadores Graph, Jev, LLM, co
 desktop/                      recursos de la app: tauri.conf.json, Info.plist, capabilities/, icons/
   ui/                         HTML/CSS/JS sin framework; llama a `control::command` vía invoke
   skills/                     skill operativa (fuente canónica)
+site/                         landing estática (HTML/CSS/JS sin build, capturas de la GUI con datos
+                              sintéticos); fuera del paquete de Cargo, publicada por `pages.yml`
 tests/integration.rs          integración con wiremock (Graph, Jev, DeepSeek simulados)
 examples/wiki_gate_smoke.rs   regresión opcional contra Jev real con hechos sintéticos
 config.example.toml           plantilla del perfil (`Config::desktop_template`)
@@ -244,7 +246,15 @@ Para añadir una operación: método en `control::operate` (ventana o navegador 
 
 ## 11. GUI
 
-`ui/` es HTML/JS plano sin build. Cuatro pestañas: Configuración (servicio, credenciales, modelos de lenguaje, proveedores/Teams, chat personal, importación), Mensajes (los últimos 100 trabajos de `assistant.db` vía el método `audit` con contenido: estado —respondido, retenido, sin respuesta, en curso, error—, mensaje, interpretación, respuesta enviada o propuesta, modelo y respaldos, revisión de Jev, avisos y el registro de pasos; se actualiza cada 10 s y oculta por defecto los mensajes no dirigidos al asistente), Conocimiento (repositorios, GitHub, fuentes) y Chat de prueba. Todo pasa por `invoke('command', {request})` con los mismos métodos que el CLI. Tras reemplazar un host desactualizado cuyo asistente corría, la ventana muestra el aviso «Versión nueva instalada» con «Dejar corriendo» / «Dejarlo detenido». El panel «Modelos de lenguaje» muestra una fila por proveedor (CLI instalada o no, credencial de DeepSeek), con activación, desplegables de modelo y esfuerzo (del catálogo) y botones para ordenar; guarda `llm.chain`. Desfase conocido: la GUI solo lista y crea fuentes `kind=file`; Wiki y otras herramientas se administran por CLI. El chat de prueba muestra la respuesta como Markdown sin convertir (Teams la recibe en HTML).
+`ui/` es HTML/CSS/JS plano sin build, con barra lateral y tema claro/oscuro según el sistema. Todo pasa por `invoke('command', {request})` con los mismos métodos que el CLI; no hay métodos IPC exclusivos de la GUI. Respeta la CSP de `tauri.conf.json`: sin estilos ni scripts en línea (solo propiedades CSSOM desde JS) y sin `innerHTML`.
+
+- **Inicio** (pestaña por defecto): estado del asistente (activo, en observación, Teams pendiente, detenido) con Iniciar/Reiniciar/Detener; fichas de cuenta Microsoft, modo, recepción, túnel, modelos, fuentes y chat personal; «Puesta en marcha», calculada del snapshot (credenciales requeridas —`GRAPH_WEBHOOK_SECRET` y `STATE_ENCRYPTION_KEY` cuentan como listas porque se generan al iniciar—, modelo activo, registro Entra con las mismas reglas que `validate_teams_setup`, cuenta, URL pública, al menos una fuente habilitada con procesamiento externo y audiencia, asistente iniciado y, opcional, envío activo); y la actividad reciente de `audit`. La barra lateral marca los errores o envíos inciertos de las últimas 24 h.
+- **Configuración**: credenciales (se guardan al momento), modelos de lenguaje (una fila por proveedor con activación, modelo, esfuerzo y orden; guarda `llm.chain`), Teams y Entra, URL pública y túnel, respuestas (modo de observación, estilo, modelo de Jev), chat personal e importación. Ya no muestra `max_answer_chars`/`max_detailed_answer_chars` (no se aplican; el valor guardado se conserva).
+- **Mensajes**: los últimos 100 trabajos de `assistant.db` (método `audit` con contenido): estado, mensaje, interpretación, respuesta enviada o propuesta (renderizada como Markdown), modelo y respaldos, revisión de Jev, avisos y registro de pasos. Filtros por estado, actualización cada 10 s y, por defecto, sin los mensajes no dirigidos al asistente.
+- **Conocimiento**: lista **todas** las fuentes (archivo, URL y herramientas como la Wiki o la actividad de Azure DevOps) con su estado y permite editar descripción, temas, audiencias y los conmutadores habilitada/procesamiento externo. Solo crea fuentes `kind=file` (nacen deshabilitadas, sin audiencias y sin procesamiento externo); las herramientas se agregan con `pta sources add`. No deja quitar un repositorio que usa una herramienta. Repositorios locales y GitHub.
+- **Chat de prueba**: ofrece las fuentes **guardadas** habilitadas y con procesamiento externo de cualquier tipo (la simulación lee el mapa persistido); muestra la respuesta como Markdown (mismo subconjunto que recibe Teams), las referencias verificadas, la cobertura parcial y el motivo legible cuando no responde. Los enlaces copian la URL al portapapeles en lugar de navegar la ventana.
+
+Los cambios de Configuración y Conocimiento se acumulan en el modelo de la página y se guardan juntos con la barra «Cambios sin guardar» (`save_settings`, que reinicia el servicio si corría). Las operaciones que modifican el perfil en el host (conectar la cuenta, habilitar/deshabilitar el chat personal, clonar de GitHub) guardan antes los cambios pendientes; iniciar o reiniciar también. El estado se refresca cada 15 s sin pisar lo que se está editando. Tras reemplazar un host desactualizado cuyo asistente corría, la ventana muestra el aviso «Versión nueva instalada» con «Dejar corriendo» / «Dejarlo detenido».
 
 ## 12. Pruebas y verificación
 
@@ -260,6 +270,7 @@ cargo test --no-default-features
 - `pta test providers` prueba cada proveedor activo por separado (un respaldo no oculta un predeterminado roto); consume API/uso de suscripción.
 - `pta test simulate` / `pta chat` ejecutan el pipeline real con un adaptador que nunca envía a Graph (`simulation::TestAdapter`, estado `sent` = `simulation-only`). `pta test providers` usa hechos sintéticos y consume API.
 - `cargo run --example wiki_gate_smoke` (credencial Jev existente) evalúa el control final con hechos sintéticos.
+- Landing (`.github/workflows/pages.yml`): en cada push a `main` que toque `site/`, publica la carpeta tal cual en GitHub Pages (requiere Pages con origen «GitHub Actions»). Las capturas de `site/assets/` se generan con la UI real y un `__TAURI__` simulado con datos sintéticos; nunca con un perfil real.
 - Publicación (`.github/workflows/publish.yml`): en cada push a `main`, si la versión del `Cargo.toml` no existe en crates.io, prueba con la GUI en macOS y ejecuta `cargo publish` con el secreto `CARGO_REGISTRY_TOKEN`; si ya existe no hace nada. Publicar = fusionar a `main` un cambio de versión (`Cargo.toml`, `Cargo.lock`, `desktop/tauri.conf.json`).
 - CI (`.github/workflows/ci.yml`): en Ubuntu, fmt y el paquete sin la GUI (`--no-default-features`: biblioteca, host sin interfaz y CLI; clippy, test); con la GUI en macOS (check, clippy, test) y Windows (check).
 - Toda operación nueva debe compilar en ambas variantes: `cargo clippy --all-targets [--no-default-features] -- -D warnings`. El código de Tauri solo vive en `src/app/gui.rs` (una prueba comprueba que la UI de `desktop/ui` queda incrustada).
@@ -294,7 +305,8 @@ cargo test --no-default-features
 - Una identidad Teams por perfil. Canales de equipo no soportados.
 - La recepción exige equipo encendido y una URL HTTPS estable hasta el listener (túnel Cloudflare con token, archivo `cloudflared` propio o túnel externo).
 - Una sola herramienta por respuesta (no combina Wiki y actividad).
-- El chat de prueba de la GUI muestra el Markdown de la respuesta sin convertir; `pta chat` también lo devuelve como texto.
+- `pta chat` devuelve la respuesta en Markdown sin convertir (la GUI la renderiza). En la GUI, los enlaces de las respuestas se copian; no se abren en el navegador.
+- La GUI no crea fuentes de herramienta ni edita sus parámetros (`tool`) ni `allowed_senders`: se usan `pta sources add`/`pta config set`.
 - La recuperación de `missed` cubre solo la página reciente; no hay garantía de procesar mensajes durante apagones.
 - No detecta si el usuario respondió manualmente mientras se generaba la propuesta.
 - El historial de contexto viene de la página reciente del chat (50 mensajes); el chat de prueba (`pta chat`/GUI) no tiene historial. En chats con otras personas, las respuestas enviadas por la app aparecen como `yo` (solo el chat personal las marca como `asistente`).
