@@ -12,10 +12,10 @@
       {
         "label": "main",
         "title": "Personal Teams Assistant",
-        "width": 900,
-        "height": 700,
-        "minWidth": 620,
-        "minHeight": 480,
+        "width": 1100,
+        "height": 760,
+        "minWidth": 640,
+        "minHeight": 520,
         "visible": false
       }
     ],
