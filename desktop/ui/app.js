@@ -621,7 +621,7 @@ function setFilter(filter) {
 
 const toolNames = {
   azure_devops_wiki: 'Wiki de Azure DevOps', azure_devops_status: 'Actividad de Azure DevOps', azure_devops: 'Work items de Azure DevOps',
-  sql_server: 'SQL Server', rabbitmq: 'Cola RabbitMQ', http: 'HTTP GET',
+  sql_server: 'SQL Server', rabbitmq: 'Cola RabbitMQ', http: 'HTTP GET', teams_messages: 'Mis mensajes de Teams',
 };
 
 function kindName(resource) {

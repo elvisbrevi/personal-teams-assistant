@@ -137,6 +137,21 @@ impl Evidence {
 impl Reference {
     pub fn validate(&self) -> Result<()> {
         let u = url::Url::parse(&self.url)?;
+        if self.kind == "teams_message" {
+            // A message link Graph returned for one of the user's own messages.
+            ensure!(
+                u.scheme() == "https"
+                    && u.host_str() == Some("teams.microsoft.com")
+                    && u.port_or_known_default() == Some(443)
+                    && u.username().is_empty()
+                    && u.password().is_none()
+                    && u.path().starts_with("/l/message/")
+                    && !self.id.is_empty()
+                    && !self.label.is_empty(),
+                "invalid Teams message link"
+            );
+            return Ok(());
+        }
         let parts: Vec<_> = u
             .path_segments()
             .ok_or_else(|| anyhow::anyhow!("invalid reference URL"))?

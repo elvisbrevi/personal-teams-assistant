@@ -126,6 +126,13 @@ impl Pipeline {
         // Earlier messages say what a short follow-up refers to («¿y el endpoint de test?»).
         // Read once, when an intent decision or an answer first needs them.
         let mut history: Option<String> = None;
+        // Sources an activity review may read, already authorized for this conversation.
+        let review_sources: Vec<_> = available
+            .iter()
+            .copied()
+            .filter(|r| matches!(&r.access, Access::Tool { tool } if tool.reviews_activity()))
+            .collect();
+        let mut review = false;
         let is_greeting = if greeting(&current) {
             audit.step("intención", "saludo");
             true
@@ -133,8 +140,36 @@ impl Pipeline {
             audit.step("intención", "pedido a la persona");
             leave_to_person(&mut audit);
             return self.store.record(resource, &audit);
+        } else if activity_review_request(&current) {
+            review = true;
+            audit.step("intención", "revisión de actividad");
+            false
         } else if question_request(&current) {
-            audit.step("intención", "pregunta");
+            // A question about the user's own work may ask to compare it with their tasks;
+            // only then a model decides, and only if some source can review activity.
+            if !review_sources.is_empty()
+                && work_mention(&current)
+                && !status_question(&current)
+                && !explicit_wiki(&current)
+                && !documentation_question(&current)
+            {
+                let context = self.history(&message, &mut audit, &mut history).await;
+                if let Ok(decision) = self.llm.classify_intent(&current, &context).await
+                    && decision.intent == Intent::ActivityReview
+                    && decision.confident()
+                {
+                    audit.confidences.push(decision.confidence);
+                    review = true;
+                }
+            }
+            audit.step(
+                "intención",
+                if review {
+                    "revisión de actividad (modelo)"
+                } else {
+                    "pregunta"
+                },
+            );
             false
         } else {
             if available.is_empty() {
@@ -172,8 +207,22 @@ impl Pipeline {
                 }
                 return self.store.record(resource, &audit);
             }
+            review = decision.intent == Intent::ActivityReview;
             decision.intent == Intent::Greeting
         };
+        // Without a source that can read activity, a review is answered as a question.
+        review &= !review_sources.is_empty();
+        audit.intent = Some(
+            if is_greeting {
+                Intent::Greeting
+            } else if review {
+                Intent::ActivityReview
+            } else {
+                Intent::Question
+            }
+            .as_str()
+            .into(),
+        );
         let mut context_question = None;
         let mut context_answer = None;
         let proposal = if is_greeting {
@@ -261,6 +310,7 @@ impl Pipeline {
             let mut wiki_topic = None;
             if (previous.is_some() || !history.is_empty())
                 && !more_details
+                && !review
                 && !tool_candidates.is_empty()
             {
                 let (previous_question, previous_answer) = previous
@@ -338,7 +388,10 @@ impl Pipeline {
             } else {
                 tool_candidates
             };
-            let selected_tool = if wiki_requested && wiki_ids.len() == 1 {
+            let selected_tool = if review {
+                // An activity review reads every source that can review activity, below.
+                None
+            } else if wiki_requested && wiki_ids.len() == 1 {
                 Some(wiki_ids[0].clone())
             } else if !wiki_requested
                 && status_question(&tool_question)
@@ -353,6 +406,7 @@ impl Pipeline {
                             Access::Tool {
                                 tool: crate::tools::ToolSpec::AzureDevopsWiki { .. }
                                     | crate::tools::ToolSpec::AzureDevopsStatus { .. }
+                                    | crate::tools::ToolSpec::TeamsMessages {}
                             }
                         )
                 })
@@ -390,6 +444,10 @@ impl Pipeline {
             {
                 sources.push(*source);
             }
+            if review {
+                // The one case that combines tools: activity, Wiki edits and own messages.
+                sources = review_sources.clone();
+            }
             audit.source = (!sources.is_empty()).then(|| {
                 sources
                     .iter()
@@ -402,86 +460,100 @@ impl Pipeline {
                 audit.source.clone().unwrap_or_else(|| "ninguna".into()),
             );
             self.checkpoint(resource, &audit, "retrieving")?;
-            let mut evidence = String::new();
-            let mut registry = crate::evidence::Evidence::default();
-            // ponytail: divide the existing total budget between authorized sources; many sources
-            // reduce detail per source. Add local passage ranking across sources if that becomes limiting.
-            let budget = self.config.policy.max_context_chars / sources.len().max(1);
-            for source in &sources {
-                let raw = match &source.access {
-                    Access::Tool { tool } => {
-                        audit.tools.push(tool.name().into());
-                        audit.status = "processing".into();
-                        audit.reason = "tool_started".into();
-                        self.store.record(resource, &audit)?;
-                        ScopedTool {
-                            executor: self.tools.clone(),
-                            spec: tool.clone(),
-                            conversation: message.conversation.clone(),
+            let (mut evidence, registry) = if review {
+                let days = crate::ado::recent_window(&tool_question);
+                audit.step(
+                    "revisión de actividad",
+                    format!("últimos {days} días en {} fuentes", sources.len()),
+                );
+                self.review_evidence(&sources, days, resource, &message, &mut audit)
+                    .await?
+            } else {
+                let mut evidence = String::new();
+                let mut registry = crate::evidence::Evidence::default();
+                // ponytail: divide the existing total budget between authorized sources; many sources
+                // reduce detail per source. Add local passage ranking across sources if that becomes limiting.
+                let budget = self.config.policy.max_context_chars / sources.len().max(1);
+                for source in &sources {
+                    let raw = match &source.access {
+                        Access::Tool { tool } => {
+                            audit.tools.push(tool.name().into());
+                            audit.status = "processing".into();
+                            audit.reason = "tool_started".into();
+                            self.store.record(resource, &audit)?;
+                            ScopedTool {
+                                executor: self.tools.clone(),
+                                spec: tool.clone(),
+                                conversation: message.conversation.clone(),
+                            }
+                            .call(ToolArgs {
+                                // Wiki search needs the topic; other tools read the whole request.
+                                question: match (tool, &wiki_topic) {
+                                    (
+                                        crate::tools::ToolSpec::AzureDevopsWiki { .. },
+                                        Some(topic),
+                                    ) => topic.clone(),
+                                    _ => tool_question.clone(),
+                                },
+                            })
+                            .await?
                         }
-                        .call(ToolArgs {
-                            // Wiki search needs the topic; other tools read the whole request.
-                            question: match (tool, &wiki_topic) {
-                                (crate::tools::ToolSpec::AzureDevopsWiki { .. }, Some(topic)) => {
-                                    topic.clone()
-                                }
-                                _ => tool_question.clone(),
-                            },
-                        })
-                        .await?
-                    }
-                    _ => self.knowledge.retrieve(source, &question, budget).await?,
-                };
-                let typed = match &source.access {
-                    Access::Tool {
-                        tool: crate::tools::ToolSpec::AzureDevopsWiki { .. },
-                    } => {
-                        let mut result: crate::ado::wiki::WikiResult = serde_json::from_str(&raw)?;
-                        for page in &mut result.pages {
-                            page.content = self.redactor.redact(&page.content);
-                            page.reference.author = page
-                                .reference
-                                .author
-                                .take()
-                                .filter(|n| self.redactor.clean(n));
-                            page.reference.label = self.redactor.redact(&page.reference.label);
-                        }
-                        Some(result.evidence(&tool_question, budget.saturating_sub(200)))
-                    }
-                    Access::Tool {
-                        tool:
-                            crate::tools::ToolSpec::AzureDevopsStatus { .. }
-                            | crate::tools::ToolSpec::AzureDevops { .. },
-                    } => Some(serde_json::from_str::<crate::evidence::Evidence>(&raw)?),
-                    _ => None,
-                };
-                if let Some(mut data) = typed {
-                    data.sanitize(&self.redactor);
-                    let context = if matches!(
-                        &source.access,
-                        Access::Tool {
-                            tool: crate::tools::ToolSpec::AzureDevopsWiki { .. }
-                        }
-                    ) {
-                        data.text.clone()
-                    } else {
-                        data.context(&current, budget)
+                        _ => self.knowledge.retrieve(source, &question, budget).await?,
                     };
-                    if context.chars().count() <= budget && !context.trim().is_empty() {
-                        evidence.push_str(&context);
-                        registry.references.extend(data.references);
-                        registry.teams.extend(data.teams);
-                        registry.partial |= data.partial;
-                        registry.warnings.extend(data.warnings);
+                    let typed = match &source.access {
+                        Access::Tool {
+                            tool: crate::tools::ToolSpec::AzureDevopsWiki { .. },
+                        } => {
+                            let mut result: crate::ado::wiki::WikiResult =
+                                serde_json::from_str(&raw)?;
+                            for page in &mut result.pages {
+                                page.content = self.redactor.redact(&page.content);
+                                page.reference.author = page
+                                    .reference
+                                    .author
+                                    .take()
+                                    .filter(|n| self.redactor.clean(n));
+                                page.reference.label = self.redactor.redact(&page.reference.label);
+                            }
+                            Some(result.evidence(&tool_question, budget.saturating_sub(200)))
+                        }
+                        Access::Tool {
+                            tool:
+                                crate::tools::ToolSpec::AzureDevopsStatus { .. }
+                                | crate::tools::ToolSpec::AzureDevops { .. },
+                        } => Some(serde_json::from_str::<crate::evidence::Evidence>(&raw)?),
+                        _ => None,
+                    };
+                    if let Some(mut data) = typed {
+                        data.sanitize(&self.redactor);
+                        let context = if matches!(
+                            &source.access,
+                            Access::Tool {
+                                tool: crate::tools::ToolSpec::AzureDevopsWiki { .. }
+                            }
+                        ) {
+                            data.text.clone()
+                        } else {
+                            data.context(&current, budget)
+                        };
+                        if context.chars().count() <= budget && !context.trim().is_empty() {
+                            evidence.push_str(&context);
+                            registry.references.extend(data.references);
+                            registry.teams.extend(data.teams);
+                            registry.partial |= data.partial;
+                            registry.warnings.extend(data.warnings);
+                        }
+                    } else {
+                        let sanitized = self.redactor.redact(&raw);
+                        let header = format!("[source {}]\n", source.id);
+                        let passage_budget = budget.saturating_sub(header.chars().count() + 1);
+                        let passages =
+                            crate::knowledge::excerpt(&sanitized, &question, passage_budget);
+                        evidence.extend(format!("{header}{passages}\n").chars().take(budget));
                     }
-                } else {
-                    let sanitized = self.redactor.redact(&raw);
-                    let header = format!("[source {}]\n", source.id);
-                    let passage_budget = budget.saturating_sub(header.chars().count() + 1);
-                    let passages = crate::knowledge::excerpt(&sanitized, &question, passage_budget);
-                    evidence.extend(format!("{header}{passages}\n").chars().take(budget));
                 }
-            }
+                (evidence, registry)
+            };
             audit.step(
                 "evidencia",
                 format!(
@@ -509,7 +581,7 @@ impl Pipeline {
                         evidence: &evidence,
                         detail_requested: false,
                         history: &history,
-                        review: false,
+                        review,
                     }),
                 )
                 .await??;
@@ -549,38 +621,50 @@ impl Pipeline {
             // Wiki pages, and verifies every ID and URL.
             let mut used_sources = generated.used_sources.clone();
             if !registry.references.is_empty() {
-                self.checkpoint(resource, &audit, "selecting_references")?;
-                match self
-                    .awaiting_model(
-                        &mut holding,
-                        resource,
-                        &message,
-                        &mut audit,
-                        self.llm
-                            .select_references(&generated.answer, &registry.references),
-                    )
-                    .await?
-                {
-                    Ok(ids) => {
-                        audit.reference_selection = Some("llm".into());
-                        audit.step("referencias", format!("el modelo eligió {}", ids.len()));
-                        for id in ids {
-                            if !used_sources.contains(&id) {
-                                used_sources.push(id);
-                            }
-                        }
-                    }
-                    Err(_) => {
-                        audit.reference_selection = Some("code".into());
-                        audit.step(
-                            "referencias",
-                            "ningún modelo pudo elegirlas; el código enlaza lo que ve nombrado",
-                        );
-                    }
-                }
+                // Code links the entities it sees named; a model chooses among the rest
+                // (Wiki pages, messages, entities paraphrased without their identifier).
                 for id in crate::evidence::named_references(&generated.answer, &registry) {
                     if !used_sources.contains(&id) {
                         used_sources.push(id);
+                    }
+                }
+                let remaining: Vec<_> = registry
+                    .references
+                    .iter()
+                    .filter(|r| !used_sources.contains(&r.id))
+                    .cloned()
+                    .collect();
+                if remaining.is_empty() {
+                    audit.reference_selection = Some("code".into());
+                    audit.step("referencias", "el código enlaza todas las que ve nombradas");
+                } else {
+                    self.checkpoint(resource, &audit, "selecting_references")?;
+                    match self
+                        .awaiting_model(
+                            &mut holding,
+                            resource,
+                            &message,
+                            &mut audit,
+                            self.llm.select_references(&generated.answer, &remaining),
+                        )
+                        .await?
+                    {
+                        Ok(ids) => {
+                            audit.reference_selection = Some("llm".into());
+                            audit.step("referencias", format!("el modelo eligió {}", ids.len()));
+                            for id in ids {
+                                if !used_sources.contains(&id) {
+                                    used_sources.push(id);
+                                }
+                            }
+                        }
+                        Err(_) => {
+                            audit.reference_selection = Some("code".into());
+                            audit.step(
+                                "referencias",
+                                "ningún modelo pudo elegirlas; el código enlaza lo que ve nombrado",
+                            );
+                        }
                     }
                 }
             }
@@ -710,6 +794,97 @@ impl Pipeline {
             )?;
         }
         Ok(())
+    }
+    /// Read every activity source for a review, each on its own: a source that fails is
+    /// reported as unread instead of failing the answer. The context budget goes first to
+    /// the shorter sources; longer ones are cut at line boundaries and marked partial.
+    async fn review_evidence(
+        &self,
+        sources: &[&crate::knowledge::Resource],
+        days: i64,
+        resource: &str,
+        message: &crate::adapters::teams::IncomingMessage,
+        audit: &mut Audit,
+    ) -> Result<(String, crate::evidence::Evidence)> {
+        let mut registry = crate::evidence::Evidence::default();
+        let mut parts = Vec::new();
+        // Read the sources concurrently: each review takes tens of seconds.
+        let mut reads = tokio::task::JoinSet::new();
+        for (index, source) in sources.iter().enumerate() {
+            let Access::Tool { tool } = &source.access else {
+                continue;
+            };
+            audit.tools.push(tool.name().into());
+            let scoped = ScopedTool {
+                executor: self.tools.clone(),
+                spec: tool.clone(),
+                conversation: message.conversation.clone(),
+            };
+            reads.spawn(async move { (index, scoped.review(days).await) });
+        }
+        audit.status = "processing".into();
+        audit.reason = "tool_started".into();
+        self.store.record(resource, audit)?;
+        let mut results = Vec::new();
+        while let Some(read) = reads.join_next().await {
+            results.push(read?);
+        }
+        results.sort_by_key(|(index, _)| *index);
+        for (index, read) in results {
+            let source = sources[index];
+            let read = read
+                .ok()
+                .and_then(|raw| serde_json::from_str::<crate::evidence::Evidence>(&raw).ok());
+            match read {
+                Some(mut data) => {
+                    data.sanitize(&self.redactor);
+                    parts.push(data.text.clone());
+                    registry.references.extend(data.references);
+                    registry.teams.extend(data.teams);
+                    registry.partial |= data.partial;
+                    registry.warnings.extend(data.warnings);
+                }
+                None => {
+                    registry.partial = true;
+                    audit.step(
+                        "revisión de actividad",
+                        format!("{} no se pudo leer", source.id),
+                    );
+                    let name = match &source.access {
+                        Access::Tool { tool } => tool.name(),
+                        _ => "source",
+                    };
+                    parts.push(format!(
+                        "Source {} ({name}) could not be read: do not infer that there was no activity there.\n",
+                        source.id
+                    ));
+                }
+            }
+        }
+        let lengths: Vec<usize> = parts.iter().map(|p| p.chars().count()).collect();
+        let mut evidence = String::new();
+        for (part, cap) in parts
+            .iter()
+            .zip(shares(&lengths, self.config.policy.max_context_chars))
+        {
+            let mut used = 0;
+            for line in part.lines() {
+                let size = line.chars().count() + 1;
+                if used + size > cap {
+                    registry.partial = true;
+                    break;
+                }
+                evidence.push_str(line);
+                evidence.push('\n');
+                used += size;
+            }
+        }
+        if registry.partial {
+            evidence.push_str("Partial coverage: some sources were cut or could not be read; do not infer that there was no activity there.\n");
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        registry.references.retain(|r| seen.insert(r.id.clone()));
+        Ok((evidence, registry))
     }
     /// Await a model call without a deadline. If it is still running when the holding
     /// deadline passes, send the deterministic notice once; the intent is recorded first so
@@ -886,6 +1061,115 @@ fn withheld_reason(reason: &str, language: Language) -> &'static str {
         Language::En if references => "cited references or links that couldn't be verified",
         Language::En => "didn't pass the app's checks",
     }
+}
+/// Split `total` characters among parts: short parts keep everything, the rest share what is
+/// left evenly.
+fn shares(lengths: &[usize], total: usize) -> Vec<usize> {
+    let mut caps = vec![0; lengths.len()];
+    let mut open: Vec<usize> = (0..lengths.len()).collect();
+    let mut remaining = total;
+    while !open.is_empty() {
+        let share = remaining / open.len();
+        let (fits, rest): (Vec<usize>, Vec<usize>) =
+            open.iter().partition(|&&i| lengths[i] <= share);
+        if fits.is_empty() {
+            for i in rest {
+                caps[i] = share;
+            }
+            break;
+        }
+        for i in fits {
+            caps[i] = lengths[i];
+            remaining -= lengths[i];
+        }
+        open = rest;
+    }
+    caps
+}
+fn normalized_phrase(text: &str) -> String {
+    let normalized = text
+        .to_lowercase()
+        .replace('ó', "o")
+        .replace('é', "e")
+        .replace('í', "i")
+        .replace('á', "a")
+        .replace('ú', "u");
+    let words: Vec<&str> = normalized
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .collect();
+    format!(" {} ", words.join(" "))
+}
+/// Asks to find the user's work that no task records («¿qué hice que no está registrado?»).
+fn activity_review_request(text: &str) -> bool {
+    let phrase = normalized_phrase(text);
+    [
+        " no registrad",
+        " sin registrar",
+        " no esta registrad",
+        " no estan registrad",
+        " falta registrar",
+        " faltan registrar",
+        " por registrar",
+        " no he registrado",
+        " sin tarea ",
+        " sin tareas ",
+        " sin hu ",
+        " sin work item",
+        " no tiene tarea",
+        " no tienen tarea",
+        " no tiene hu ",
+        " no tienen hu ",
+        " sin imputar",
+        " no imputad",
+        " not registered",
+        " unregistered",
+        " not logged",
+        " unlogged",
+        " not tracked",
+        " untracked",
+        " without a task",
+        " without tasks",
+        " without a work item",
+        " without work items",
+        " haven t logged",
+        " have not logged",
+        " missing from my tasks",
+    ]
+    .iter()
+    .any(|p| phrase.contains(p))
+}
+/// Mentions the user's own work or tasks, so a model may check for an activity review.
+fn work_mention(text: &str) -> bool {
+    let phrase = normalized_phrase(text);
+    phrase.split(' ').any(|w| {
+        matches!(
+            w,
+            "tarea"
+                | "tareas"
+                | "trabajo"
+                | "trabajos"
+                | "trabaje"
+                | "trabajado"
+                | "hice"
+                | "hecho"
+                | "realizado"
+                | "realice"
+                | "registrado"
+                | "registrados"
+                | "registrar"
+                | "actividad"
+                | "imputar"
+                | "work"
+                | "worked"
+                | "task"
+                | "tasks"
+                | "did"
+                | "done"
+                | "logged"
+                | "activity"
+        )
+    })
 }
 fn explicit_wiki(question: &str) -> bool {
     question
@@ -1104,9 +1388,43 @@ fn status_question(question: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        Language, documentation_question, holding_reply, personal_request, question_request,
-        status_question, withheld_reason,
+        Language, activity_review_request, documentation_question, holding_reply, personal_request,
+        question_request, shares, status_question, withheld_reason, work_mention,
     };
+
+    #[test]
+    fn unregistered_work_requests_are_activity_reviews() {
+        for q in [
+            // The real request of 2026-10-03, typos included.
+            "Hola qué tareas o trabajo e realizado que no están registrados en tareas ?",
+            "¿Qué hice esta semana que no está registrado?",
+            "lista el trabajo sin tarea del último mes",
+            "¿Tengo commits sin HU?",
+            "What work did I do that is not logged?",
+            "Find my untracked work from last week",
+        ] {
+            assert!(activity_review_request(q), "{q}");
+        }
+        for q in [
+            "¿Cómo se registra una HU?",
+            "¿Qué he hecho esta semana?",
+            "¿Cuál es el endpoint de test?",
+            "Registrar el usuario en el servicio",
+        ] {
+            assert!(!activity_review_request(q), "{q}");
+        }
+        assert!(work_mention("¿Qué trabajo hice ayer que debería anotar?"));
+        assert!(work_mention("What did I do yesterday?"));
+        assert!(!work_mention("¿Cuál es el endpoint de test?"));
+    }
+
+    #[test]
+    fn short_sources_keep_everything_and_long_ones_share_the_rest() {
+        assert_eq!(shares(&[100, 9000, 9000], 6000), vec![100, 2950, 2950]);
+        assert_eq!(shares(&[100, 200], 6000), vec![100, 200]);
+        assert_eq!(shares(&[], 6000), Vec::<usize>::new());
+        assert_eq!(shares(&[5000, 5000], 6000), vec![3000, 3000]);
+    }
 
     #[test]
     fn fixed_notices_follow_the_reply_language() {

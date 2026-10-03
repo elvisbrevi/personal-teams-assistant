@@ -1,4 +1,5 @@
 //! Bounded, read-only evidence from Azure DevOps. The catalog lives in the private knowledge repo.
+pub mod review;
 pub mod wiki;
 use crate::evidence::{Block, Evidence, Reference};
 use crate::state::Store;
@@ -270,6 +271,12 @@ fn label(item: &Value) -> String {
     )
 }
 
+/// A repository the account cannot read answers 404: the user cannot have pushed there, so
+/// it is not a gap in their activity.
+fn unreadable(error: &anyhow::Error) -> bool {
+    error.to_string().ends_with("returned HTTP 404")
+}
+
 fn same_user(identity: &Value, email: &str) -> bool {
     identity["uniqueName"]
         .as_str()
@@ -277,10 +284,54 @@ fn same_user(identity: &Value, email: &str) -> bool {
         .is_some_and(|name| name.eq_ignore_ascii_case(email))
 }
 
-pub(crate) fn recent_window(question: &str) -> i64 {
-    let q = question.to_lowercase();
-    if q.contains("esta semana") || q.contains("última semana") || q.contains("ultima semana") {
+/// Days of activity a request asks about: «hoy»/today 1, «ayer»/yesterday 2, this week 7,
+/// this month 30, «últimos N días»/last N days (at most 31); two weeks otherwise.
+pub fn recent_window(question: &str) -> i64 {
+    let q = question
+        .to_lowercase()
+        .replace('á', "a")
+        .replace('é', "e")
+        .replace('í', "i")
+        .replace('ó', "o")
+        .replace('ú', "u");
+    let count = |unit: &str| {
+        regex::Regex::new(&format!(r"\b(\d{{1,2}})\s*{unit}"))
+            .ok()?
+            .captures(&q)?[1]
+            .parse::<i64>()
+            .ok()
+    };
+    if let Some(days) = count("(?:dias|days)\\b") {
+        return days.clamp(1, 31);
+    }
+    if let Some(weeks) = count("(?:semanas|weeks)\\b") {
+        return (weeks * 7).clamp(1, 31);
+    }
+    let words: Vec<&str> = q.split(|c: char| !c.is_alphanumeric()).collect();
+    let phrase = format!(" {} ", words.join(" "));
+    let has = |options: &[&str]| options.iter().any(|o| phrase.contains(&format!(" {o} ")));
+    if has(&["hoy", "today"]) {
+        1
+    } else if has(&["ayer", "yesterday"]) {
+        2
+    } else if has(&[
+        "esta semana",
+        "ultima semana",
+        "semana pasada",
+        "this week",
+        "last week",
+        "past week",
+    ]) {
         7
+    } else if has(&[
+        "este mes",
+        "ultimo mes",
+        "mes pasado",
+        "this month",
+        "last month",
+        "past month",
+    ]) {
+        30
     } else {
         14
     }
@@ -1039,8 +1090,8 @@ async fn repository_activity(
         .await
         {
             Ok(commits) => commits,
-            Err(_) => {
-                incomplete = true;
+            Err(error) => {
+                incomplete |= !unreadable(&error);
                 continue;
             }
         };
@@ -1633,6 +1684,14 @@ mod tests {
         assert_eq!(recent_window("¿Qué hice esta semana?"), 7);
         assert_eq!(recent_window("¿Qué hice la última semana?"), 7);
         assert_eq!(recent_window("Estado de mis proyectos"), 14);
+        assert_eq!(recent_window("What did I do this week?"), 7);
+        assert_eq!(recent_window("¿Qué hice hoy?"), 1);
+        assert_eq!(recent_window("trabajo de ayer sin registrar"), 2);
+        assert_eq!(recent_window("¿qué hice este mes sin tarea?"), 30);
+        assert_eq!(recent_window("los últimos 3 días"), 3);
+        assert_eq!(recent_window("last 90 days"), 31);
+        assert_eq!(recent_window("las últimas 3 semanas"), 21);
+        assert_eq!(recent_window("¿qué hice en la semana 40?"), 14);
         let catalog = "[[sources]]\norganization='https://dev.azure.com/example/'\nprojects=['*']\nauthor_email='x@example.com'\n";
         assert!(Catalog::parse(catalog).is_ok());
         assert!(Catalog::parse(&catalog.replace("['*']", "['*','A']")).is_err());

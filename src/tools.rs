@@ -40,6 +40,9 @@ pub enum ToolSpec {
         url: String,
         secret_ref: Option<String>,
     },
+    /// The user's own messages in their Teams chats, read with the delegated Graph session
+    /// (`Chat.Read`, already granted). Used to review the user's activity.
+    TeamsMessages {},
 }
 #[derive(Clone, Copy, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -121,6 +124,7 @@ impl ToolSpec {
                     );
                 }
             }
+            Self::TeamsMessages {} => {}
         }
         Ok(())
     }
@@ -136,12 +140,25 @@ impl ToolSpec {
             Self::AzureDevopsWiki { .. } => "search_azure_devops_wiki",
             Self::Rabbitmq { .. } => "get_queue_status",
             Self::Http { .. } => "http_get",
+            Self::TeamsMessages {} => "get_own_teams_messages",
         }
+    }
+    /// Sources an activity review reads: Azure DevOps activity, Wiki edits, own messages.
+    pub fn reviews_activity(&self) -> bool {
+        matches!(
+            self,
+            Self::AzureDevopsStatus { .. } | Self::AzureDevopsWiki { .. } | Self::TeamsMessages {}
+        )
     }
 }
 #[async_trait]
 pub trait ReadOnlyTool: Send + Sync {
     async fn execute(&self, spec: &ToolSpec, question: &str, conversation: &str) -> Result<String>;
+    /// The user's own activity in the last `days` days, as `Evidence` JSON that separates
+    /// work with a linked work item from work without one.
+    async fn review(&self, _spec: &ToolSpec, _days: i64) -> Result<String> {
+        anyhow::bail!("activity review unsupported")
+    }
 }
 pub struct Tools {
     pub bindings: BTreeMap<String, String>,
@@ -355,6 +372,16 @@ impl ReadOnlyTool for Tools {
                     let v: Value = crate::adapters::bounded_json(response, 64_000).await?;
                     Ok(json!({"name":v["name"],"messages":v["messages"],"messages_ready":v["messages_ready"],"consumers":v["consumers"],"state":v["state"]}).to_string())
                 }
+                ToolSpec::TeamsMessages {} => {
+                    let days = crate::ado::recent_window(question);
+                    let since = chrono::Utc::now() - chrono::Duration::days(days);
+                    let (messages, chats, partial) = self.graph.own_messages(since).await?;
+                    Ok(serde_json::to_string(
+                        &crate::adapters::graph::own_messages_evidence(
+                            &messages, chats, partial, days,
+                        ),
+                    )?)
+                }
                 ToolSpec::Http { url, secret_ref } => {
                     let mut req = self.client.get(url);
                     if let Some(s) = secret_ref {
@@ -368,19 +395,73 @@ impl ReadOnlyTool for Tools {
                 }
             }
         };
-        let seconds = if matches!(spec, ToolSpec::AzureDevopsStatus { .. }) {
-            180
-        } else if matches!(spec, ToolSpec::AzureDevopsWiki { .. }) {
-            32
-        } else {
-            5
+        let seconds = match spec {
+            ToolSpec::AzureDevopsStatus { .. } => 180,
+            ToolSpec::AzureDevopsWiki { .. } => 32,
+            ToolSpec::TeamsMessages {} => 60,
+            _ => 5,
         };
         tokio::time::timeout(std::time::Duration::from_secs(seconds), operation).await?
+    }
+    async fn review(&self, spec: &ToolSpec, days: i64) -> Result<String> {
+        spec.validate()?;
+        let days = days.clamp(1, 31);
+        let since = chrono::Utc::now() - chrono::Duration::days(days);
+        let operation = async {
+            let evidence = match spec {
+                ToolSpec::AzureDevopsStatus {
+                    repository,
+                    path,
+                    secret_ref,
+                } => {
+                    let catalog = crate::knowledge::read_repository_file(
+                        &self.repositories,
+                        repository,
+                        path,
+                    )?;
+                    let key = crate::security::resolve(secret_ref, &self.bindings)?;
+                    crate::ado::review::review(
+                        &self.client,
+                        &key,
+                        &catalog,
+                        days,
+                        self.store.clone(),
+                    )
+                    .await?
+                }
+                ToolSpec::AzureDevopsWiki {
+                    repository,
+                    path,
+                    secret_ref,
+                    wiki_ids,
+                    ..
+                } => {
+                    let catalog = crate::knowledge::read_repository_file(
+                        &self.repositories,
+                        repository,
+                        path,
+                    )?;
+                    let key = crate::security::resolve(secret_ref, &self.bindings)?;
+                    let reader =
+                        crate::ado::wiki::Reader::new(&self.client, &key, &catalog, wiki_ids)?
+                            .with_deadline(90);
+                    let (edits, linked, partial) = reader.own_edits(since).await?;
+                    crate::ado::wiki::edits_evidence(&edits, &linked, partial, days)
+                }
+                ToolSpec::TeamsMessages {} => {
+                    let (messages, chats, partial) = self.graph.own_messages(since).await?;
+                    crate::adapters::graph::own_messages_evidence(&messages, chats, partial, days)
+                }
+                _ => anyhow::bail!("activity review unsupported"),
+            };
+            Ok::<_, anyhow::Error>(serde_json::to_string(&evidence)?)
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(180), operation).await?
     }
 }
 
 /// Tool facade scoped to the resource already authorized by the pipeline.
-/// It is invoked by code after Jev routing, never exposed for autonomous LLM use.
+/// It is invoked by code after routing, never exposed for autonomous LLM use.
 pub struct ScopedTool {
     pub executor: Arc<dyn ReadOnlyTool>,
     pub spec: ToolSpec,
@@ -405,10 +486,34 @@ impl ScopedTool {
             .await
             .map_err(|_| ToolError)
     }
+    pub async fn review(&self, days: i64) -> std::result::Result<String, ToolError> {
+        self.executor
+            .review(&self.spec, days)
+            .await
+            .map_err(|_| ToolError)
+    }
 }
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn own_teams_messages_source_parses_and_reviews_activity() {
+        let map = crate::knowledge::KnowledgeMap::parse(
+            "[[resources]]\nid = \"teams-activity\"\ndescription = \"Own messages\"\ntopics = []\nenabled = false\nexternal_processing = false\nallowed_conversations = []\nkind = \"tool\"\n[resources.tool]\ntype = \"teams_messages\"\n",
+        )
+        .unwrap();
+        let crate::knowledge::Access::Tool { tool } = &map.resources[0].access else {
+            panic!("tool expected");
+        };
+        assert_eq!(tool.name(), "get_own_teams_messages");
+        assert!(tool.reviews_activity());
+        assert!(
+            crate::knowledge::KnowledgeMap::parse(
+                "[[resources]]\nid = \"teams-activity\"\ndescription = \"x\"\ntopics = []\nenabled = false\nexternal_processing = false\nallowed_conversations = []\nkind = \"tool\"\n[resources.tool]\ntype = \"teams_messages\"\nchat = \"all\"\n",
+            )
+            .is_err()
+        );
+    }
     #[test]
     fn tool_argument_is_closed() {
         assert_eq!(lookup_id("estado id: ABC-123").unwrap(), "ABC-123");

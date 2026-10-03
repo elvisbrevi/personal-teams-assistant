@@ -13,6 +13,87 @@ use reqwest::Method;
 use serde_json::{Value, json};
 use std::sync::Arc;
 
+/// A message the user wrote, with the chat it belongs to and its Teams link when Graph gives one.
+#[derive(Debug)]
+pub struct OwnMessage {
+    pub message: crate::evidence::TeamsMessage,
+    /// The chat's topic, or the other participants seen in it.
+    pub chat: String,
+    pub url: Option<String>,
+}
+
+/// Review evidence for the user's own Teams messages: dated lines grouped by chat, the
+/// messages themselves (author kept) and a link for each message Graph gives one for.
+pub fn own_messages_evidence(
+    messages: &[OwnMessage],
+    chats: usize,
+    partial: bool,
+    days: i64,
+) -> crate::evidence::Evidence {
+    let since = chrono::Utc::now() - chrono::Duration::days(days);
+    let mut text = format!(
+        "The user's own Teams messages from {} to {} (last {days} days; {} messages in {chats} chats, the personal chat left out). They show what the user said they did or coordinated; only messages that describe concrete work count as activity:\n",
+        since.format("%Y-%m-%d"),
+        chrono::Utc::now().format("%Y-%m-%d"),
+        messages.len(),
+    );
+    let mut references = Vec::new();
+    for own in messages {
+        let at = chrono::DateTime::parse_from_rfc3339(&own.message.date)
+            .map(|d| {
+                d.with_timezone(&chrono::Local)
+                    .format("%Y-%m-%d %H:%M")
+                    .to_string()
+            })
+            .unwrap_or_else(|_| own.message.date.clone());
+        let mentions = !crate::ado::review::mentions(&own.message.text).is_empty()
+            || own.message.text.contains("/_workitems/edit/");
+        text.push_str(&format!(
+            "- {at} · {}: \"{}\"{}\n",
+            own.chat,
+            own.message.text.replace('\n', " "),
+            if mentions {
+                " (mentions a work item)"
+            } else {
+                ""
+            }
+        ));
+        if let Some(url) = &own.url {
+            references.push(crate::evidence::Reference {
+                id: format!(
+                    "teams_message:{}:{}",
+                    own.message.conversation, own.message.message
+                ),
+                kind: "teams_message".into(),
+                label: format!("Teams message of {at} in {}", own.chat),
+                url: url.clone(),
+                organization: "https://teams.microsoft.com".into(),
+                project: "teams".into(),
+                aliases: Vec::new(),
+                parent: None,
+                revision: None,
+                authority: Some("mine".into()),
+                author: None,
+                author_role: None,
+            });
+        }
+    }
+    if messages.is_empty() {
+        text.push_str("No message written by the user was found in the window.\n");
+    }
+    if partial {
+        text.push_str("Partial coverage: some chats could not be read.\n");
+    }
+    references.retain(|r| r.validate().is_ok());
+    crate::evidence::Evidence {
+        text,
+        references,
+        teams: messages.iter().map(|m| m.message.clone()).collect(),
+        partial,
+        ..Default::default()
+    }
+}
+
 #[derive(Clone)]
 pub struct Graph {
     pub client: reqwest::Client,
@@ -415,6 +496,164 @@ impl Graph {
             .flat_map(|(_, section)| section)
             .take(12)
             .collect())
+    }
+    /// Messages the user wrote in their Teams chats since `since`, newest first and bounded,
+    /// for an activity review. The personal chat is left out: it holds requests to this app.
+    /// Only chats this profile may read are read, with the delegated `Chat.Read` scope.
+    pub async fn own_messages(
+        &self,
+        since: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(Vec<OwnMessage>, usize, bool)> {
+        let mut url = self.url("me/chats")?;
+        url.query_pairs_mut()
+            .append_pair("$expand", "lastMessagePreview")
+            .append_pair("$orderby", "lastMessagePreview/createdDateTime desc")
+            .append_pair("$top", "50");
+        let page = self.request_url(Method::GET, url, None, true).await?;
+        let personal = self.config.graph.self_chat.as_ref().map(|c| c.id.clone());
+        let chats: Vec<Value> = page["value"]
+            .as_array()
+            .context("invalid Graph chats")?
+            .iter()
+            .filter(|c| {
+                matches!(
+                    c["chatType"].as_str(),
+                    Some("oneOnOne" | "group" | "meeting")
+                )
+            })
+            .filter(|c| {
+                c["lastMessagePreview"]["createdDateTime"]
+                    .as_str()
+                    .is_some_and(|date| {
+                        chrono::DateTime::parse_from_rfc3339(date)
+                            .is_ok_and(|d| d.with_timezone(&chrono::Utc) >= since)
+                    })
+            })
+            .filter(|c| {
+                c["id"].as_str().is_some_and(|id| {
+                    personal.as_deref() != Some(id)
+                        && id != "48:notes"
+                        && teams::canonical_resource(&format!("chats/{id}/messages/0")).is_ok()
+                        && self.allowed_collection(&format!("chats/{id}/messages"))
+                })
+            })
+            .take(30)
+            .cloned()
+            .collect();
+        let mut jobs = tokio::task::JoinSet::new();
+        let limit = Arc::new(tokio::sync::Semaphore::new(6));
+        for chat in chats {
+            let graph = self.clone();
+            let limit = limit.clone();
+            jobs.spawn(async move {
+                let _permit = limit.acquire().await?;
+                let id = chat["id"].as_str().unwrap_or_default().to_owned();
+                let collection = format!("chats/{id}/messages");
+                let mut url = graph.url(&collection)?;
+                url.query_pairs_mut()
+                    .append_pair("$top", "50")
+                    .append_pair("$orderby", "lastModifiedDateTime desc")
+                    .append_pair(
+                        "$filter",
+                        &format!("lastModifiedDateTime gt {}", since.to_rfc3339()),
+                    );
+                let page = match graph.request_url(Method::GET, url, None, true).await {
+                    Ok(page) => page,
+                    Err(_) => graph.request(Method::GET, &collection, None, true).await?,
+                };
+                let messages = page["value"]
+                    .as_array()
+                    .context("invalid Graph chat messages")?;
+                let mut others: Vec<String> = Vec::new();
+                let mut own = Vec::new();
+                for message in messages {
+                    if message["messageType"].as_str() != Some("message")
+                        || !message["deletedDateTime"].is_null()
+                    {
+                        continue;
+                    }
+                    let mine = message["from"]["user"]["id"].as_str()
+                        == Some(graph.config.graph.user_id.as_str());
+                    if !mine {
+                        if let Some(name) = message["from"]["user"]["displayName"].as_str()
+                            && others.len() < 3
+                            && !others.iter().any(|o| o == name)
+                        {
+                            others.push(name.to_owned());
+                        }
+                        continue;
+                    }
+                    let Some(date) = message["createdDateTime"].as_str() else {
+                        continue;
+                    };
+                    if !chrono::DateTime::parse_from_rfc3339(date)
+                        .is_ok_and(|d| d.with_timezone(&chrono::Utc) >= since)
+                    {
+                        continue;
+                    }
+                    let raw = message["body"]["content"].as_str().unwrap_or("");
+                    let text = if message["body"]["contentType"].as_str() == Some("html") {
+                        teams::plain_text(raw)
+                    } else {
+                        raw.to_owned()
+                    };
+                    if text.trim().is_empty() || raw.contains("personalteams.invalid/output/") {
+                        continue;
+                    }
+                    own.push(OwnMessage {
+                        message: crate::evidence::TeamsMessage {
+                            conversation: collection.clone(),
+                            message: message["id"].as_str().unwrap_or("").into(),
+                            sender: graph.config.graph.user_id.clone(),
+                            name: message["from"]["user"]["displayName"]
+                                .as_str()
+                                .map(str::to_owned),
+                            mine: true,
+                            date: date.into(),
+                            text: text.chars().take(300).collect(),
+                        },
+                        chat: String::new(),
+                        url: message["webUrl"]
+                            .as_str()
+                            .filter(|u| u.starts_with("https://teams.microsoft.com/l/message/"))
+                            .map(str::to_owned),
+                    });
+                    if own.len() >= 15 {
+                        break;
+                    }
+                }
+                let chat_name = chat["topic"]
+                    .as_str()
+                    .filter(|t| !t.trim().is_empty())
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| {
+                        if others.is_empty() {
+                            "a chat".into()
+                        } else {
+                            format!("chat with {}", others.join(", "))
+                        }
+                    });
+                for message in &mut own {
+                    message.chat = chat_name.clone();
+                }
+                Ok::<_, anyhow::Error>(own)
+            });
+        }
+        let mut found = Vec::new();
+        let mut chats_with_messages = 0;
+        let mut partial = false;
+        while let Some(result) = jobs.join_next().await {
+            match result {
+                Ok(Ok(messages)) => {
+                    chats_with_messages += usize::from(!messages.is_empty());
+                    found.extend(messages);
+                }
+                _ => partial = true,
+            }
+        }
+        found.sort_by(|a, b| b.message.date.cmp(&a.message.date));
+        found.truncate(40);
+        Ok((found, chats_with_messages, partial))
     }
     pub fn user_messages_resource(&self) -> String {
         format!("users/{}/chats/getAllMessages", self.config.graph.user_id)

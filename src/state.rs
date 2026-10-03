@@ -56,9 +56,13 @@ pub struct Audit {
     pub history_messages: usize,
     /// Providers that failed before the one in `provider` answered, as `label: failure`.
     pub provider_fallbacks: Vec<String>,
-    /// How cited sources were chosen: `jev`, `code` (Jev unavailable) or `none`.
+    /// What the message asked: `question`, `activity_review` or `greeting`.
+    pub intent: Option<String>,
+    /// How cited sources were chosen: `llm`, `code` (no model could choose them) or `none`.
+    /// Audits written before 0.6.1 may say `jev`.
     pub reference_selection: Option<String>,
-    /// Jev's final review, informative only: `allow 0.91`, `revise 0.40` or `unavailable`.
+    /// Informative final review of audits written before 0.6.1 (`allow 0.91`, `unavailable`).
+    /// No longer produced.
     pub final_check: Option<String>,
     /// Notice sent to the personal chat when an answer was withheld: `sending`, `sent` or
     /// `uncertain`. Never sent twice.

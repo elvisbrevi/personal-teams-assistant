@@ -2082,3 +2082,338 @@ async fn requests_for_the_person_stay_unanswered_outside_the_personal_chat() {
         }
     }
 }
+
+fn review_reference(
+    id: &str,
+    kind: &str,
+    label: &str,
+    url: &str,
+    aliases: &[&str],
+) -> personal_teams_assistant::evidence::Reference {
+    personal_teams_assistant::evidence::Reference {
+        id: id.into(),
+        kind: kind.into(),
+        label: label.into(),
+        url: url.into(),
+        organization: "https://dev.azure.com/example".into(),
+        project: "Payments".into(),
+        aliases: aliases.iter().map(|a| (*a).to_owned()).collect(),
+        parent: None,
+        revision: None,
+        authority: (kind == "wiki").then(|| "edited_by_me".into()),
+        author: None,
+        author_role: None,
+    }
+}
+/// Synthetic activity per review source. The Teams read fails, so the review must say so
+/// instead of failing the answer.
+struct ReviewTools;
+#[async_trait]
+impl ReadOnlyTool for ReviewTools {
+    async fn execute(&self, _: &ToolSpec, _: &str, _: &str) -> Result<String> {
+        panic!("an activity review reads sources through review, not plain tool calls")
+    }
+    async fn review(&self, spec: &ToolSpec, days: i64) -> Result<String> {
+        use personal_teams_assistant::evidence::Evidence;
+        assert_eq!(days, 14, "no period asked: the default window");
+        let evidence = match spec {
+            ToolSpec::AzureDevopsStatus { .. } => Evidence {
+                text: "Azure DevOps activity review from 2026-09-19 to 2026-10-03 (last 14 days).\nProject: Payments.\nWithout a linked work item (candidates to register):\n- 2026-09-30 · PR #46 \"Retry timeouts\" in payments-api (completed), with 2 of the user's commits.\n- 2026-09-29 · commit cccccccc in payments-api: \"Hotfix for the payment report\".\nRegistered in work items:\n- work item #100 Task 100 — Active (changed 2026-09-30): commit aaaaaaaa in payments-api: \"Login\"\n".into(),
+                references: vec![
+                    review_reference("pull_request:46", "pull_request", "PR #46 Retry timeouts (payments-api)", "https://dev.azure.com/example/Payments/_git/payments-api/pullrequest/46", &["PR #46", "PR 46", "pull request 46", "!46"]),
+                    review_reference("commit:cccccccc33", "commit", "Commit cccccccc in payments-api: Hotfix for the payment report", "https://dev.azure.com/example/Payments/_git/payments-api/commit/cccccccc33", &["cccccccc"]),
+                    review_reference("work_item:100", "work_item", "#100 Task 100 — Active", "https://dev.azure.com/example/Payments/_workitems/edit/100", &["#100", "HU 100", "work item 100", "Task 100"]),
+                ],
+                ..Default::default()
+            },
+            ToolSpec::AzureDevopsWiki { .. } => Evidence {
+                text: "Wiki pages the user created or edited from 2026-09-19 to 2026-10-03 (last 14 days):\nWithout a linked work item (candidates to register):\n- 2026-09-28 · edited Wiki page \"Runbook\" (Payments / Payments.wiki).\n".into(),
+                references: vec![review_reference("wiki:runbook", "wiki", "Payments / Payments.wiki / Runbook", "https://dev.azure.com/example/Payments/_wiki/wikis/abcdeabc-abcd-abcd-abcd-abcdeabcdea2?pagePath=%2FRunbook", &[])],
+                ..Default::default()
+            },
+            ToolSpec::TeamsMessages {} => anyhow::bail!("Graph unavailable"),
+            _ => panic!("not an activity review source"),
+        };
+        Ok(serde_json::to_string(&evidence)?)
+    }
+}
+/// Writes the review from the evidence it receives; may classify a question as a review.
+struct ReviewLlm;
+#[async_trait]
+impl LlmProvider for ReviewLlm {
+    fn name(&self) -> &str {
+        "synthetic-review"
+    }
+    async fn classify_intent(&self, message: &str, _: &str) -> Result<IntentDecision> {
+        assert!(message.contains("debería anotar"), "{message}");
+        Ok(IntentDecision {
+            intent: Intent::ActivityReview,
+            confidence: 0.86,
+        })
+    }
+    async fn select_references(
+        &self,
+        _: &str,
+        references: &[personal_teams_assistant::evidence::Reference],
+    ) -> Result<Vec<String>> {
+        // The model picks the Wiki page; code links the entities it sees named.
+        Ok(references
+            .iter()
+            .filter(|r| r.kind == "wiki")
+            .map(|r| r.id.clone())
+            .collect())
+    }
+    async fn generate(&self, _: GenerationInput<'_>) -> Result<String> {
+        unreachable!()
+    }
+    async fn generate_response(
+        &self,
+        input: GenerationInput<'_>,
+    ) -> Result<personal_teams_assistant::llm::GeneratedAnswer> {
+        assert!(input.review);
+        for expected in [
+            "PR #46",
+            "commit cccccccc",
+            "work item #100",
+            "edited Wiki page \"Runbook\"",
+            "teams-activity (get_own_teams_messages) could not be read",
+            "Partial coverage",
+        ] {
+            assert!(
+                input.evidence.contains(expected),
+                "{expected}\n{}",
+                input.evidence
+            );
+        }
+        // No ordinary document is read for a review.
+        assert!(!input.evidence.contains("09:00 a 18:00"));
+        Ok(personal_teams_assistant::llm::GeneratedAnswer {
+            answer: "Revisé tu actividad del 2026-09-19 al 2026-10-03 (últimos 14 días); no pude leer tus mensajes de Teams.\n\n**Sin tarea registrada**\n- **Payments**, 2026-09-30: terminaste el PR #46 «Retry timeouts». Tarea propuesta: «Reintentos ante timeouts de pagos».\n- **Payments**, 2026-09-29: commit cccccccc con un hotfix del reporte de pagos. Tarea propuesta: «Corregir reporte de pagos».\n- **Wiki**, 2026-09-28: editaste la página Runbook. Tarea propuesta: «Actualizar runbook».\n\n**Ya registrado**\n- #100 Task 100, con su commit de login.".into(),
+            detailed: false,
+            used_sources: Vec::new(),
+            provider: None,
+            fallbacks: Vec::new(),
+        })
+    }
+}
+#[tokio::test]
+async fn unregistered_work_is_reviewed_across_activity_wiki_and_teams_with_verified_links() {
+    for question in [
+        // Detected by code: the real request of 2026-10-03.
+        "Hola qué tareas o trabajo e realizado que no están registrados en tareas ?",
+        // A question about the user's work that a model classifies as a review.
+        "¿Qué trabajo de estas semanas debería anotar?",
+    ] {
+        let server = MockServer::start().await;
+        let dir = tempfile::tempdir().unwrap();
+        let store = support::store(&dir);
+        let graph = support::graph(&server, store.clone());
+        let mut cfg = (*graph.config).clone();
+        cfg.policy.dry_run = true;
+        let mut status = wiki_resource();
+        status.id = "azure-devops-status".into();
+        status.access = Access::Tool {
+            tool: ToolSpec::AzureDevopsStatus {
+                repository: "private".into(),
+                path: "catalog.toml".into(),
+                secret_ref: "secret://ado/read".into(),
+            },
+        };
+        let mut teams = wiki_resource();
+        teams.id = "teams-activity".into();
+        teams.access = Access::Tool {
+            tool: ToolSpec::TeamsMessages {},
+        };
+        let mut map = knowledge(&dir);
+        map.resources.extend([wiki_resource(), status, teams]);
+        let pipeline = Pipeline {
+            config: Arc::new(cfg),
+            store: store.clone(),
+            adapter: graph,
+            knowledge: map,
+            llm: Arc::new(ReviewLlm),
+            tools: Arc::new(ReviewTools),
+            redactor: redactor(),
+        };
+        let sources: Vec<String> = vec![
+            "hours".into(),
+            "manuals".into(),
+            "azure-devops-status".into(),
+            "teams-activity".into(),
+        ];
+        let result = simulation::run(
+            &pipeline,
+            SimulationRequest {
+                session: "review".into(),
+                text: question.into(),
+                group: false,
+                mentioned: false,
+                sources: sources.clone(),
+            },
+            Some(&sources),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.status, "dry_run", "{question}: {}", result.reason);
+        assert_eq!(result.reason, "supported_answer");
+        let answer = result.answer.unwrap();
+        // Each piece of evidence the answer names gets its verified link.
+        let (_, sources_section) = answer.split_once("\n\n**Fuentes**\n").expect(&answer);
+        for link in [
+            "](https://dev.azure.com/example/Payments/_git/payments-api/pullrequest/46)",
+            "](https://dev.azure.com/example/Payments/_git/payments-api/commit/cccccccc33)",
+            "](https://dev.azure.com/example/Payments/_workitems/edit/100)",
+            "[Runbook](https://dev.azure.com/example/Payments/_wiki/wikis/abcdeabc-abcd-abcd-abcd-abcdeabcdea2?pagePath=%2FRunbook): wiki del proyecto Payments; documentación con contribución propia verificada.",
+        ] {
+            assert!(sources_section.contains(link), "{link}\n{answer}");
+        }
+        assert!(result.partial);
+        let rows = personal_teams_assistant::state::Store::inspect(
+            &dir.path().join("test.db"),
+            false,
+            1,
+            None,
+            true,
+        )
+        .unwrap();
+        let audit: personal_teams_assistant::state::Audit =
+            serde_json::from_value(rows[0]["audit"].clone()).unwrap();
+        assert_eq!(audit.intent.as_deref(), Some("activity_review"));
+        assert_eq!(
+            audit.tools,
+            vec![
+                "search_azure_devops_wiki",
+                "get_azure_devops_status",
+                "get_own_teams_messages"
+            ]
+        );
+        assert_eq!(
+            audit.source.as_deref(),
+            Some("manuals,azure-devops-status,teams-activity")
+        );
+        assert_eq!(audit.reference_selection.as_deref(), Some("llm"));
+        assert!(server.received_requests().await.unwrap().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn own_teams_messages_come_only_from_readable_chats_with_their_links() {
+    let server = MockServer::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let store = support::store(&dir);
+    let graph = support::graph(&server, store.clone());
+    let me = graph.config.graph.user_id.clone();
+    let now = chrono::Utc::now();
+    let at = |days: i64| (now - chrono::Duration::days(days)).to_rfc3339();
+    Mock::given(method("GET"))
+        .and(path("/me/chats"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"value":[
+            {"id":"chat1","chatType":"oneOnOne","topic":null,"lastMessagePreview":{"createdDateTime":at(1)}},
+            // Not in allowed_chats: never read.
+            {"id":"chat2","chatType":"group","topic":"Pagos","lastMessagePreview":{"createdDateTime":at(1)}},
+            // No message in the window.
+            {"id":"chat3","chatType":"group","topic":"Antiguo","lastMessagePreview":{"createdDateTime":at(40)}},
+        ]})))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/chats/chat1/messages"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"value":[
+            {"id":"m1","messageType":"message","createdDateTime":at(1),"deletedDateTime":null,"webUrl":"https://teams.microsoft.com/l/message/chat1/m1","from":{"user":{"id":me,"displayName":"Self"}},"body":{"contentType":"html","content":"<p>Desplegué el reporte en QA, ver #12</p>"}},
+            {"id":"m2","messageType":"message","createdDateTime":at(1),"deletedDateTime":null,"from":{"user":{"id":"ana","displayName":"Ana Pérez"}},"body":{"contentType":"text","content":"Gracias"}},
+            {"id":"m3","messageType":"message","createdDateTime":at(2),"deletedDateTime":at(1),"from":{"user":{"id":me}},"body":{"contentType":"text","content":"borrado"}},
+            {"id":"m4","messageType":"message","createdDateTime":at(30),"deletedDateTime":null,"from":{"user":{"id":me}},"body":{"contentType":"text","content":"antiguo"}},
+            {"id":"m5","messageType":"message","createdDateTime":at(2),"deletedDateTime":null,"webUrl":"https://evil.example/l/message/x","from":{"user":{"id":me,"displayName":"Self"}},"body":{"contentType":"text","content":"Revisé el pipeline de pagos"}},
+        ]})))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let (messages, chats, partial) = graph
+        .own_messages(now - chrono::Duration::days(14))
+        .await
+        .unwrap();
+    assert!(!partial);
+    assert_eq!(chats, 1);
+    let texts: Vec<_> = messages.iter().map(|m| m.message.text.as_str()).collect();
+    assert_eq!(
+        texts,
+        vec![
+            "Desplegué el reporte en QA, ver #12",
+            "Revisé el pipeline de pagos"
+        ]
+    );
+    assert!(
+        messages
+            .iter()
+            .all(|m| m.message.mine && m.chat == "chat with Ana Pérez")
+    );
+    let evidence = personal_teams_assistant::adapters::graph::own_messages_evidence(
+        &messages, chats, partial, 14,
+    );
+    assert!(evidence.text.contains(
+        "chat with Ana Pérez: \"Desplegué el reporte en QA, ver #12\" (mentions a work item)"
+    ));
+    // Only Teams' own message links become references.
+    assert_eq!(evidence.references.len(), 1);
+    assert_eq!(
+        evidence.references[0].url,
+        "https://teams.microsoft.com/l/message/chat1/m1"
+    );
+    evidence.references[0].validate().unwrap();
+    assert_eq!(evidence.teams.len(), 2);
+    assert!(
+        server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .all(|r| !r.url.path().contains("chat2") && !r.url.path().contains("chat3"))
+    );
+}
+#[tokio::test]
+async fn a_review_without_activity_sources_is_answered_as_a_question() {
+    let server = MockServer::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let store = support::store(&dir);
+    let graph = support::graph(&server, store.clone());
+    let mut cfg = (*graph.config).clone();
+    cfg.policy.dry_run = true;
+    let pipeline = Pipeline {
+        config: Arc::new(cfg),
+        store: store.clone(),
+        adapter: graph,
+        knowledge: knowledge(&dir),
+        llm: Arc::new(AnswerOrClarify(true)),
+        tools: Arc::new(NoTools),
+        redactor: redactor(),
+    };
+    let sources = vec!["hours".to_string()];
+    let result = simulation::run(
+        &pipeline,
+        SimulationRequest {
+            session: "no-review".into(),
+            text: "¿Qué hice que no está registrado?".into(),
+            group: false,
+            mentioned: false,
+            sources: sources.clone(),
+        },
+        Some(&sources),
+    )
+    .await
+    .unwrap();
+    assert_eq!(result.status, "dry_run", "{}", result.reason);
+    let audit = store.audit(&store_last(&dir)).unwrap().unwrap();
+    assert_eq!(audit.intent.as_deref(), Some("question"));
+}
+fn store_last(dir: &tempfile::TempDir) -> String {
+    let rows = personal_teams_assistant::state::Store::inspect(
+        &dir.path().join("test.db"),
+        false,
+        1,
+        None,
+        false,
+    )
+    .unwrap();
+    rows[0]["resource"].as_str().unwrap().to_owned()
+}

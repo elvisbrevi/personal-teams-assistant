@@ -168,6 +168,89 @@ impl WikiResult {
     }
 }
 
+/// A Wiki page the user created or edited in an activity review window.
+#[derive(Debug)]
+pub struct WikiEdit {
+    pub title: String,
+    /// Date of the user's latest change in the window.
+    pub date: String,
+    pub created: bool,
+    /// Work items the change names (commit message or page title) that Azure DevOps confirmed.
+    pub work_items: Vec<u64>,
+    /// Named work items that could not be confirmed (missing, or outside the catalog).
+    pub unverified: usize,
+    pub reference: Reference,
+}
+/// Review evidence for the user's own Wiki edits, with the work items they name.
+pub fn edits_evidence(
+    edits: &[WikiEdit],
+    linked: &[Reference],
+    partial: bool,
+    days: i64,
+) -> Evidence {
+    let since = chrono::Utc::now() - chrono::Duration::days(days);
+    let mut text = format!(
+        "Wiki pages the user created or edited from {} to {} (last {days} days):\n",
+        since.format("%Y-%m-%d"),
+        chrono::Utc::now().format("%Y-%m-%d")
+    );
+    let line = |e: &WikiEdit| {
+        let mut named: Vec<String> = e.work_items.iter().map(|id| format!("#{id}")).collect();
+        if e.unverified > 0 {
+            named.push(format!(
+                "{} work item(s) that could not be verified",
+                e.unverified
+            ));
+        }
+        format!(
+            "- {} · {} Wiki page \"{}\" ({}){}.\n",
+            e.date.get(..10).unwrap_or(&e.date),
+            if e.created { "created" } else { "edited" },
+            e.title,
+            e.reference
+                .label
+                .rsplit_once(" / ")
+                .map_or(e.reference.label.as_str(), |(location, _)| location),
+            if named.is_empty() {
+                String::new()
+            } else {
+                format!(": the change names {}", named.join(" and "))
+            }
+        )
+    };
+    let (registered, unregistered): (Vec<_>, Vec<_>) = edits
+        .iter()
+        .partition(|e| !e.work_items.is_empty() || e.unverified > 0);
+    if edits.is_empty() {
+        text.push_str("No page created or edited by the user was found in the window.\n");
+    }
+    if !unregistered.is_empty() {
+        text.push_str("Without a linked work item (candidates to register):\n");
+        for e in &unregistered {
+            text.push_str(&line(e));
+        }
+    }
+    if !registered.is_empty() {
+        text.push_str("Registered in work items:\n");
+        for e in &registered {
+            text.push_str(&line(e));
+        }
+    }
+    if partial {
+        text.push_str("Partial coverage: the history of some wikis or pages could not be read.\n");
+    }
+    Evidence {
+        text,
+        references: edits
+            .iter()
+            .map(|e| e.reference.clone())
+            .chain(linked.iter().cloned())
+            .collect(),
+        partial,
+        ..Default::default()
+    }
+}
+
 pub struct Reader<'a> {
     client: &'a Client,
     key: &'a str,
@@ -728,6 +811,212 @@ impl<'a> Reader<'a> {
             }
         }
     }
+    /// A longer overall budget, for an activity review that reads several histories.
+    pub fn with_deadline(mut self, seconds: u64) -> Self {
+        self.deadline = Instant::now() + Duration::from_secs(seconds);
+        self
+    }
+    /// Pages the user created or edited since `since`, from each wiki's Git history, newest
+    /// first and each with its verified link. The second value is true when some history
+    /// could not be read.
+    pub async fn own_edits(
+        &self,
+        since: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(Vec<WikiEdit>, Vec<Reference>, bool)> {
+        let wikis = self.list().await?.wikis;
+        let mut edits: Vec<WikiEdit> = Vec::new();
+        let mut partial = false;
+        // Every wiki in scope: one bounded history query each, within the reader's deadline.
+        for wiki in wikis.iter().take(80) {
+            let source = self.source(wiki)?;
+            let mut url = self.url(
+                wiki,
+                &[
+                    "_apis",
+                    "git",
+                    "repositories",
+                    &wiki.repository_id,
+                    "commits",
+                ],
+            )?;
+            url.query_pairs_mut()
+                .append_pair("searchCriteria.author", &source.author_email)
+                .append_pair("searchCriteria.fromDate", &since.to_rfc3339())
+                .append_pair("searchCriteria.$top", "20");
+            let Ok((history, _)) = self.request(Method::GET, url, None).await else {
+                partial = true;
+                continue;
+            };
+            let commits: Vec<&Value> = history["value"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|c| {
+                    c["author"]["email"]
+                        .as_str()
+                        .is_some_and(|e| e.eq_ignore_ascii_case(&source.author_email))
+                        && c["author"]["date"].as_str().is_some_and(|d| {
+                            chrono::DateTime::parse_from_rfc3339(d)
+                                .is_ok_and(|d| d.with_timezone(&chrono::Utc) >= since)
+                        })
+                })
+                .take(10)
+                .collect();
+            if commits.is_empty() {
+                continue;
+            }
+            // A wiki listed across the organization names its project by ID; the page
+            // label reads better with the project's name.
+            let mut wiki = wiki.clone();
+            if wiki.project.eq_ignore_ascii_case(&wiki.project_id) {
+                let url = organization_url(source, &["_apis", "projects", &wiki.project_id])?;
+                if let Ok((project, _)) = self.request(Method::GET, url, None).await
+                    && project["id"]
+                        .as_str()
+                        .is_some_and(|id| id.eq_ignore_ascii_case(&wiki.project_id))
+                    && let Some(name) = project["name"].as_str()
+                {
+                    wiki.project = name.into();
+                }
+            }
+            let wiki = &wiki;
+            let Some(version) = wiki.versions.first() else {
+                continue;
+            };
+            let Ok(tree) = self.tree(wiki, version).await else {
+                partial = true;
+                continue;
+            };
+            for commit in commits {
+                let Some(sha) = commit["commitId"]
+                    .as_str()
+                    .filter(|s| s.len() == 40 && s.chars().all(|c| c.is_ascii_hexdigit()))
+                else {
+                    continue;
+                };
+                let changes_url = self.url(
+                    wiki,
+                    &[
+                        "_apis",
+                        "git",
+                        "repositories",
+                        &wiki.repository_id,
+                        "commits",
+                        sha,
+                        "changes",
+                    ],
+                )?;
+                let Ok((changes, _)) = self.request(Method::GET, changes_url, None).await else {
+                    partial = true;
+                    continue;
+                };
+                let all = changes["changes"].as_array().cloned().unwrap_or_default();
+                let date = commit["author"]["date"].as_str().unwrap_or("").to_owned();
+                let comment = commit["comment"].as_str().unwrap_or("");
+                let items = super::review::mentions(comment);
+                for change in all.iter().take(5) {
+                    let git = change["item"]["path"].as_str().unwrap_or("");
+                    let kind = change["changeType"].as_str().unwrap_or("");
+                    if change["item"]["gitObjectType"].as_str() != Some("blob")
+                        || !git.ends_with(".md")
+                        || !under_mapped(git, &wiki.mapped_path)
+                        || kind.contains("delete")
+                    {
+                        continue;
+                    }
+                    let Some(path) = find_path(&tree, git).map(str::to_owned) else {
+                        continue;
+                    };
+                    // The same rule as page attribution: only a commit that adds just this
+                    // file proves the user created the page.
+                    let created = kind == "add"
+                        && all.len() == 1
+                        && !["squash", "import", "rename"]
+                            .iter()
+                            .any(|term| comment.to_lowercase().contains(term));
+                    let id = page_reference_id(wiki, version, &path);
+                    if let Some(edit) = edits.iter_mut().find(|e| e.reference.id == id) {
+                        edit.created |= created;
+                        edit.work_items.extend(items.iter().copied());
+                        continue;
+                    }
+                    if edits.len() >= 12 {
+                        continue;
+                    }
+                    match self.page(wiki, &path, Some(git), version).await {
+                        Ok(page) => {
+                            // A page named after a work item («HU 19362 - …») documents it.
+                            let mut work_items = items.clone();
+                            work_items.extend(super::review::mentions(&page.title));
+                            edits.push(WikiEdit {
+                                title: page.title,
+                                date: date.clone(),
+                                created,
+                                work_items,
+                                unverified: 0,
+                                reference: page.reference,
+                            });
+                        }
+                        Err(_) => partial = true,
+                    }
+                }
+            }
+        }
+        // Read the work items the changes name: only existing ones in scope are named, each
+        // with its link; the rest still count as a link to some task.
+        let mut linked = Vec::new();
+        let mut verified = BTreeSet::new();
+        for source in &self.catalog.sources {
+            let ids: BTreeSet<u64> = edits
+                .iter()
+                .filter(|e| e.reference.organization == source.organization)
+                .flat_map(|e| e.work_items.iter().copied())
+                .take(100)
+                .collect();
+            if ids.is_empty() {
+                continue;
+            }
+            let mut url = organization_url(source, &["_apis", "wit", "workitems"])?;
+            url.query_pairs_mut()
+                .append_pair(
+                    "ids",
+                    &ids.iter().map(u64::to_string).collect::<Vec<_>>().join(","),
+                )
+                .append_pair("errorPolicy", "Omit");
+            match self.request(Method::GET, url, None).await {
+                Ok((value, _)) => {
+                    for item in value["value"].as_array().into_iter().flatten() {
+                        if let (Some(id), Ok(reference)) =
+                            (item["id"].as_u64(), super::item_reference(source, "", item))
+                        {
+                            verified.insert(id);
+                            linked.push(reference);
+                        }
+                    }
+                }
+                Err(_) => partial = true,
+            }
+        }
+        for edit in &mut edits {
+            edit.work_items.sort_unstable();
+            edit.work_items.dedup();
+            edit.unverified = edit
+                .work_items
+                .iter()
+                .filter(|id| !verified.contains(id))
+                .count();
+            edit.work_items.retain(|id| verified.contains(id));
+            edit.reference.authority = Some(
+                if edit.created {
+                    "created_by_me"
+                } else {
+                    "edited_by_me"
+                }
+                .into(),
+            );
+        }
+        Ok((edits, linked, partial))
+    }
     pub async fn read(&self, input: &ReadInput) -> Result<WikiResult> {
         input.validate()?;
         let mut result = self.list().await?;
@@ -1282,6 +1571,99 @@ mod tests {
         let mut r = Reader::new(client, key, catalog, ids).unwrap();
         r.base = Some(server.uri());
         r
+    }
+    #[tokio::test]
+    async fn own_edits_list_the_pages_the_user_changed_with_verified_links() {
+        let server = MockServer::start().await;
+        fixture(
+            &server,
+            "/",
+            "projectWiki",
+            "/HU-19362.md",
+            "/HU 19362",
+            true,
+        )
+        .await;
+        let recent = chrono::Utc::now().to_rfc3339();
+        let old = (chrono::Utc::now() - chrono::Duration::days(40)).to_rfc3339();
+        let created = "2222222222222222222222222222222222222222";
+        let edited = "3333333333333333333333333333333333333333";
+        Mock::given(method("GET"))
+            .and(path(format!("/test/{PID}/_apis/git/repositories/{RID}/commits")))
+            .and(query_param("searchCriteria.author", "me@example.test"))
+            .and(|r: &wiremock::Request| {
+                r.url.query_pairs().any(|(k, _)| k == "searchCriteria.fromDate")
+            })
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"value":[
+                {"commitId":edited,"author":{"email":"me@example.test","date":recent},"comment":"Update runbook AB#77"},
+                {"commitId":created,"author":{"email":"me@example.test","date":recent},"comment":"Add runbook"},
+                {"commitId":"4444444444444444444444444444444444444444","author":{"email":"ana@example.test","date":recent},"comment":"Ana"},
+                {"commitId":"5555555555555555555555555555555555555555","author":{"email":"me@example.test","date":old},"comment":"Old"},
+            ]})))
+            .with_priority(1)
+            .mount(&server)
+            .await;
+        for (sha, changes) in [
+            (
+                created,
+                json!([{"item":{"path":"/HU-19362.md","gitObjectType":"blob"},"changeType":"add"}]),
+            ),
+            (
+                edited,
+                json!([
+                    {"item":{"path":"/HU-19362.md","gitObjectType":"blob"},"changeType":"edit"},
+                    {"item":{"path":"/.order","gitObjectType":"blob"},"changeType":"edit"},
+                ]),
+            ),
+        ] {
+            Mock::given(method("GET"))
+                .and(path(format!(
+                    "/test/{PID}/_apis/git/repositories/{RID}/commits/{sha}/changes"
+                )))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({"changes":changes})))
+                .expect(1)
+                .mount(&server)
+                .await;
+        }
+        let client = Client::new();
+        let catalog = catalog(false);
+        let since = chrono::Utc::now() - chrono::Duration::days(14);
+        Mock::given(method("GET"))
+            .and(path("/test/_apis/wit/workitems"))
+            .and(query_param("ids", "77,19362"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"value":[
+                {"id":77,"fields":{"System.TeamProject":"Project","System.Title":"Runbook","System.State":"Active"}},
+            ]})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let (edits, linked, partial) = reader(&client, "key", &catalog, &[], &server)
+            .own_edits(since)
+            .await
+            .unwrap();
+        assert!(!partial);
+        assert_eq!(edits.len(), 1, "{edits:?}");
+        let edit = &edits[0];
+        assert_eq!(edit.title, "HU 19362");
+        assert!(edit.created);
+        // The commit names #77 and the title HU 19362, which Azure DevOps does not return.
+        assert_eq!(edit.work_items, vec![77]);
+        assert_eq!(edit.unverified, 1);
+        assert_eq!(edit.reference.authority.as_deref(), Some("created_by_me"));
+        edit.reference.validate().unwrap();
+        assert_eq!(linked.len(), 1);
+        assert!(linked[0].url.ends_with("/_workitems/edit/77"));
+        let evidence = edits_evidence(&edits, &linked, partial, 14);
+        let (_, registered) = evidence
+            .text
+            .split_once("Registered in work items:")
+            .unwrap();
+        assert!(
+            registered.contains("created Wiki page \"HU 19362\" (Project / Documentation): the change names #77 and 1 work item(s) that could not be verified"),
+            "{}",
+            evidence.text
+        );
+        assert_eq!(evidence.references.len(), 2);
     }
     #[tokio::test]
     async fn native_search_resolves_project_and_code_paths_without_guessing_or_time_window() {

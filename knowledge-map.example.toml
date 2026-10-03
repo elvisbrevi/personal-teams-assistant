@@ -56,3 +56,18 @@ path = "temas/asistente/operacion.md"
 # secret_ref = "secret://azure-devops/reader"
 # wiki_ids = []
 # author_mode = "prefer_mine"
+
+# The user's own messages in their Teams chats, read only for activity reviews ("what work did I
+# do that isn't registered?") with the Microsoft session already granted (Chat.Read). It starts
+# disabled; authorize it for the personal chat only, e.g. allowed_conversations = ["chats/48:notes"].
+# [[resources]]
+# id = "teams-activity"
+# description = "My own messages in Teams chats, to review the work I did"
+# topics = ["teams", "activity"]
+# enabled = false
+# external_processing = false
+# allowed_conversations = []
+# allowed_senders = []
+# kind = "tool"
+# [resources.tool]
+# type = "teams_messages"
