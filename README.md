@@ -67,7 +67,7 @@ pta test simulate <<< '{"session":"demo","text":"¿Qué hice esta semana?","sour
 
 ## Documentación
 
-- Sitio del proyecto: HTML y CSS en [`site/`](site/), publicado en Cloudflare con `.github/workflows/landing.yml`.
+- Sitio del proyecto: HTML y CSS en [`site/`](site/), publicado como Worker de Cloudflare con Workers Builds.
 - [Arquitectura](docs/architecture.md): componentes, pipeline, datos, seguridad, contrato del CLI y recetas de cambio.
 - [Mejoras propuestas](docs/mejoras-propuestas.md).
 - [Skill operativa](desktop/skills/personal-teams-assistant/SKILL.md) y [guía para agentes](AGENTS.md).

@@ -1,6 +1,7 @@
 {
   // Landing page: static assets only (HTML, CSS and images in public/), no Worker code.
-  // Deployed by .github/workflows/landing.yml; locally: npx wrangler deploy (from site/).
+  // Deployed by Workers Builds (Cloudflare's Git integration) with root directory `site`;
+  // the Worker name in the dashboard must match `name`.
   "name": "personal-teams-assistant",
   "compatibility_date": "2026-10-01",
   "assets": {
