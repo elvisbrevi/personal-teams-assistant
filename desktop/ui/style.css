@@ -262,7 +262,9 @@ button.ref small { font-weight: 400; color: var(--muted); text-decoration: none;
 @media (max-width: 860px) {
   .app { grid-template-columns: 1fr; }
   .sidebar { position: sticky; z-index: 4; height: auto; flex-direction: row; align-items: center; gap: .6rem; padding: .55rem .8rem; border-right: 0; border-bottom: 1px solid var(--border); overflow-x: auto; }
-  .brand div, .sidebar-foot .pill span { display: none; }
+  .brand div { display: none; }
+  /* Visually hidden, still announced: the dot alone shows the state. */
+  .sidebar-foot .pill span { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
   .brand { padding: 0; }
   .brand .logo { width: 30px; height: 30px; }
   nav { display: flex; gap: .15rem; }
@@ -277,5 +279,5 @@ button.ref small { font-weight: 400; color: var(--muted); text-decoration: none;
   .message summary { grid-template-columns: auto 1fr; }
   .message summary .excerpt { grid-column: 1 / -1; }
 }
-@media (max-width: 680px) { nav button span { display: none; } }
+@media (max-width: 680px) { nav button span { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; } }
 @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
