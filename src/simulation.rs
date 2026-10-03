@@ -88,7 +88,6 @@ pub async fn run(
         config: base.config.clone(),
         store: base.store.clone(),
         adapter: Arc::new(TestAdapter(message)),
-        gate: base.gate.clone(),
         knowledge: base.knowledge.clone(),
         llm: base.llm.clone(),
         tools: base.tools.clone(),

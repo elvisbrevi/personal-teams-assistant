@@ -7,7 +7,10 @@ use std::{collections::BTreeMap, path::PathBuf};
 pub struct Config {
     pub server: Server,
     pub graph: Graph,
-    pub jev: Jev,
+    /// The `[jev]` section of profiles written before 0.6.1, when an external classifier
+    /// reviewed answers. Accepted so those profiles still load, and dropped: never written.
+    #[serde(default, rename = "jev", skip_serializing)]
+    pub retired_reviewer: Option<serde::de::IgnoredAny>,
     pub llm: Llm,
     pub policy: Policy,
     pub knowledge_map: PathBuf,
@@ -54,22 +57,6 @@ pub struct Channel {
 }
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct Jev {
-    pub model: String,
-    // Legacy thresholds: unused by the pipeline but still validated and written, because
-    // older hosts sharing the same profile require them (`deny_unknown_fields`, no default).
-    #[serde(default = "default_follow_up_threshold")]
-    pub follow_up_threshold: f64,
-    pub routing_threshold: f64,
-    pub evidence_threshold: f64,
-    /// Minimum Jev confidence for the final answer gate.
-    pub final_threshold: f64,
-}
-fn default_follow_up_threshold() -> f64 {
-    0.7
-}
-#[derive(Clone, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
 pub struct Llm {
     /// Legacy single provider; used only while `chain` is empty.
     pub provider: String,
@@ -84,7 +71,7 @@ pub struct Llm {
     pub chain: Vec<LlmChoice>,
 }
 /// Language of the replies and notices the assistant writes in Teams. The app's own interface
-/// and audit log stay in Spanish.
+/// and audit log are in English.
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Language {
@@ -180,17 +167,6 @@ impl Config {
                 && url.path() == "/",
             "public_url must be an HTTPS origin"
         );
-        for t in [
-            self.jev.follow_up_threshold,
-            self.jev.routing_threshold,
-            self.jev.evidence_threshold,
-            self.jev.final_threshold,
-        ] {
-            ensure!(
-                t.is_finite() && (0.5..=1.).contains(&t),
-                "invalid confidence threshold"
-            );
-        }
         ensure!(
             (256..=32000).contains(&self.policy.max_context_chars),
             "invalid context limit"
@@ -231,5 +207,26 @@ mod tests {
             Language::En
         );
         assert_eq!(serde_json::to_string(&Language::Es).unwrap(), "\"es\"");
+    }
+
+    #[test]
+    fn a_retired_reviewer_section_loads_and_is_never_written_again() {
+        let example = include_str!("../config.example.toml");
+        assert!(!example.contains("[jev]"));
+        // A profile written before 0.6.1, with its thresholds.
+        let legacy = example.replace(
+            "[llm]\n",
+            "[jev]\nmodel = \"jev-latest\"\nfollow_up_threshold = 0.7\nrouting_threshold = 0.5\nevidence_threshold = 0.65\nfinal_threshold = 0.65\n\n[llm]\n",
+        );
+        assert_ne!(legacy, example);
+        let config: Config = toml::from_str(&legacy).unwrap();
+        config.validate().unwrap();
+        let saved = toml::to_string(&config).unwrap();
+        assert!(!saved.contains("jev"), "{saved}");
+        assert!(toml::from_str::<Config>(&saved).is_ok());
+        let json = serde_json::to_value(&config).unwrap();
+        assert!(json.get("jev").is_none());
+        // Other unknown sections are still rejected.
+        assert!(toml::from_str::<Config>(&legacy.replace("[jev]", "[other]")).is_err());
     }
 }

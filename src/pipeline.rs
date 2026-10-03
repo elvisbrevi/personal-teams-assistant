@@ -1,15 +1,13 @@
 use crate::{
     adapters::{MessageAdapter, teams::greeting},
     config::{Config, Language},
-    decision::{DecisionGate, Stage},
     knowledge::{Access, KnowledgeMap},
-    llm::{GenerationInput, LlmProvider},
+    llm::{GenerationInput, Intent, LlmProvider},
     security::Redactor,
     state::{Audit, Store},
     tools::{ReadOnlyTool, ScopedTool, ToolArgs},
 };
 use anyhow::Result;
-use serde_json::json;
 use std::{collections::BTreeMap, sync::Arc};
 
 /// Deterministic notice sent once when the model is still working after `HOLDING_AFTER`.
@@ -35,7 +33,6 @@ pub struct Pipeline {
     pub config: Arc<Config>,
     pub store: Arc<Store>,
     pub adapter: Arc<dyn MessageAdapter>,
-    pub gate: Arc<dyn DecisionGate>,
     pub knowledge: KnowledgeMap,
     pub llm: Arc<dyn LlmProvider>,
     pub tools: Arc<dyn ReadOnlyTool>,
@@ -126,6 +123,9 @@ impl Pipeline {
             self.knowledge
                 .available(&message.conversation, &message.sender)
         };
+        // Earlier messages say what a short follow-up refers to («¿y el endpoint de test?»).
+        // Read once, when an intent decision or an answer first needs them.
+        let mut history: Option<String> = None;
         let is_greeting = if greeting(&current) {
             audit.step("intención", "saludo");
             true
@@ -145,23 +145,26 @@ impl Pipeline {
                 );
                 return self.store.record(resource, &audit);
             }
-            let intent = self
-                .gate
-                .evaluate(Stage::Intent, json!({"message":current}))
-                .await?;
-            audit.confidences.push(intent.confidence);
+            let context = self.history(&message, &mut audit, &mut history).await;
+            // No holding notice yet: the message may not need an answer at all.
+            let decision = self.llm.classify_intent(&current, &context).await?;
+            audit.confidences.push(decision.confidence);
             audit.step(
                 "intención",
-                format!("Jev: {} ({:.2})", intent.selected, intent.confidence),
+                format!(
+                    "modelo: {} ({:.2})",
+                    decision.intent.as_str(),
+                    decision.confidence
+                ),
             );
-            let answers = match intent.selected.as_str() {
-                "question" | "greeting" => true,
+            let answers = match decision.intent {
+                Intent::Question | Intent::ActivityReview | Intent::Greeting => true,
                 // In the personal chat the user is the one asking the assistant.
-                "personal" => own_chat,
-                _ => false,
+                Intent::Personal => own_chat,
+                Intent::Statement => false,
             };
-            if !intent.allows(0.5) || !answers {
-                if intent.selected == "personal" {
+            if !decision.confident() || !answers {
+                if decision.intent == Intent::Personal {
                     leave_to_person(&mut audit);
                 } else {
                     audit.reason = "informational_message".into();
@@ -169,7 +172,7 @@ impl Pipeline {
                 }
                 return self.store.record(resource, &audit);
             }
-            intent.selected == "greeting"
+            decision.intent == Intent::Greeting
         };
         let mut context_question = None;
         let mut context_answer = None;
@@ -178,16 +181,7 @@ impl Pipeline {
             self.config.policy.greeting.clone()
         } else {
             let previous = self.store.context(&message.conversation)?;
-            // Earlier messages say what a short follow-up refers to («¿y el endpoint de test?»).
-            let history = match self.adapter.history(&message, HISTORY_MESSAGES).await {
-                Ok(history) => history,
-                Err(_) => {
-                    tracing::warn!(event = "conversation_history_unavailable");
-                    Vec::new()
-                }
-            };
-            audit.history_messages = history.len();
-            let history = self.history_text(&history, message.created_at_millis);
+            let history = self.history(&message, &mut audit, &mut history).await;
             audit.step(
                 "contexto",
                 format!(
@@ -241,7 +235,7 @@ impl Pipeline {
                 return self.store.record(resource, &audit);
             }
             // Read every authorized document: choosing one descriptor loses compound questions.
-            // Read tools are selected from this authorized set; Jev does not veto retrieval.
+            // Read tools are selected from this authorized set; no model vetoes retrieval.
             let mut sources: Vec<_> = available
                 .iter()
                 .copied()
@@ -500,8 +494,8 @@ impl Pipeline {
                 evidence = "No se recuperaron hechos verificables. Explica la limitación y pide concretar la fuente o el proyecto; no inventes una respuesta.".chars().take(self.config.policy.max_context_chars).collect();
             }
             audit.status = "ignored".into();
-            // Relevance is assessed while answering, with missing facts qualified. Only the final
-            // groundedness/privacy/promise checks may veto a generated answer.
+            // Relevance is assessed while answering, with missing facts qualified. Only code
+            // checks (references, URLs, sensitive data, size) may withhold a generated answer.
             audit.provider = Some(self.llm.name().into());
             self.checkpoint(resource, &audit, "generating")?;
             let generated = self
@@ -515,6 +509,7 @@ impl Pipeline {
                         evidence: &evidence,
                         detail_requested: false,
                         history: &history,
+                        review: false,
                     }),
                 )
                 .await??;
@@ -549,30 +544,38 @@ impl Pipeline {
                     .withhold(resource, &message, &mut audit, "unsafe_proposal".into())
                     .await;
             }
-            // Jev suggests which references the text used, but cannot withhold the answer:
+            // A model suggests which references the text used, but cannot withhold the answer:
             // without its selection, code links the entities it sees named and the consulted
             // Wiki pages, and verifies every ID and URL.
-            let mut used_sources = Vec::new();
+            let mut used_sources = generated.used_sources.clone();
             if !registry.references.is_empty() {
                 self.checkpoint(resource, &audit, "selecting_references")?;
                 match self
-                    .gate
-                    .select_references(
-                        &generated.answer,
-                        &evidence,
-                        &registry.references,
-                        &generated.used_sources,
+                    .awaiting_model(
+                        &mut holding,
+                        resource,
+                        &message,
+                        &mut audit,
+                        self.llm
+                            .select_references(&generated.answer, &registry.references),
                     )
-                    .await
+                    .await?
                 {
                     Ok(ids) => {
-                        audit.reference_selection = Some("jev".into());
-                        audit.step("referencias", format!("Jev eligió {}", ids.len()));
-                        used_sources = ids;
+                        audit.reference_selection = Some("llm".into());
+                        audit.step("referencias", format!("el modelo eligió {}", ids.len()));
+                        for id in ids {
+                            if !used_sources.contains(&id) {
+                                used_sources.push(id);
+                            }
+                        }
                     }
                     Err(_) => {
                         audit.reference_selection = Some("code".into());
-                        audit.step("referencias", "Jev no disponible; las elige el código");
+                        audit.step(
+                            "referencias",
+                            "ningún modelo pudo elegirlas; el código enlaza lo que ve nombrado",
+                        );
                     }
                 }
                 for id in crate::evidence::named_references(&generated.answer, &registry) {
@@ -619,39 +622,6 @@ impl Pipeline {
                 return self
                     .withhold(resource, &message, &mut audit, "unsafe_proposal".into())
                     .await;
-            }
-            // Jev's final review is informative: recorded for the message log, never a veto.
-            // Sensitive data, sizes, IDs and URLs are still enforced by code above.
-            self.checkpoint(resource, &audit, "final_review")?;
-            match self
-                .gate
-                .evaluate(
-                    Stage::Final,
-                    json!({"question":question,"evidence":evidence,"answer":answer,"used_sources":used_sources,"references":registry.references,"teams_messages":registry.teams,"partial":registry.partial,"coverage_warnings":registry.warnings}))
-                .await
-            {
-                Ok(verdict) => {
-                    audit.confidences.push(verdict.confidence);
-                    audit.final_check =
-                        Some(format!("{} {:.2}", verdict.selected, verdict.confidence));
-                    let approved = verdict.selected == "allow"
-                        && verdict.allows(self.config.jev.final_threshold);
-                    audit.step(
-                        "revisión Jev (informativa)",
-                        if approved {
-                            format!("aprobada ({:.2})", verdict.confidence)
-                        } else {
-                            format!(
-                                "con observaciones ({} {:.2}); no bloquea",
-                                verdict.selected, verdict.confidence
-                            )
-                        },
-                    );
-                }
-                Err(_) => {
-                    audit.final_check = Some("unavailable".into());
-                    audit.step("revisión Jev (informativa)", "no disponible; no bloquea");
-                }
             }
             audit.reason = "supported_answer".into();
             answer
@@ -829,6 +799,28 @@ impl Pipeline {
             },
         );
         self.store.record(resource, audit)
+    }
+    /// The conversation's earlier messages as text, read from Teams once per message.
+    async fn history(
+        &self,
+        message: &crate::adapters::teams::IncomingMessage,
+        audit: &mut Audit,
+        cached: &mut Option<String>,
+    ) -> String {
+        if let Some(text) = cached {
+            return text.clone();
+        }
+        let history = match self.adapter.history(message, HISTORY_MESSAGES).await {
+            Ok(history) => history,
+            Err(_) => {
+                tracing::warn!(event = "conversation_history_unavailable");
+                Vec::new()
+            }
+        };
+        audit.history_messages = history.len();
+        let text = self.history_text(&history, message.created_at_millis);
+        *cached = Some(text.clone());
+        text
     }
     /// Earlier messages as `[fecha hora · autor] texto`, redacted, newest kept within budget,
     /// followed by the time of the current request.

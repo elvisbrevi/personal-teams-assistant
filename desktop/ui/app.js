@@ -238,7 +238,6 @@ async function reload() {
   current = await invoke('snapshot');
   live = structuredClone(current);
   const config = current.config;
-  field('#jev-model', config.jev.model);
   field('#tenant-id', config.graph.tenant_id); field('#client-id', config.graph.client_id);
   field('#user-id', config.graph.user_id); field('#public-url', config.server.public_url);
   field('#bind', config.server.bind); field('#llm-style', config.llm.style);
@@ -402,7 +401,6 @@ async function loadSelfChat() {
 
 function collectSettings() {
   const config = current.config;
-  config.jev.model = $('#jev-model').value.trim();
   config.llm.chain = llmRows.map(({ provider, model, effort, enabled }) => ({ provider, model, effort, enabled }));
   config.llm.style = $('#llm-style').value.trim();
   config.llm.language = $('#llm-language').value;
@@ -458,8 +456,8 @@ const reasonLabels = {
   supported_answer: 'Respuesta generada.',
   unsafe_proposal: 'Retenida: contenía datos sensibles o no cabía en un mensaje de Teams.',
   unsafe_answer: 'Retenida: contenía datos sensibles o no cabía en un mensaje de Teams.',
-  reference_selection_failed: 'Bloqueada por Jev al elegir referencias (versión anterior).',
-  final_gate: 'Bloqueada por el control final de Jev (versión anterior).',
+  reference_selection_failed: 'Retenida al elegir referencias (versión anterior).',
+  final_gate: 'Retenida por la revisión final (versión anterior).',
   message_changed: 'El mensaje cambió, se borró o dejó de ser elegible antes de enviar.',
   send_result_unknown_manual_review: 'No se sabe si el envío llegó: revísalo en Teams (no se reintenta).',
   read_or_provider_error: 'Error al leer Teams o al llamar a un proveedor; se reintenta.',
@@ -553,8 +551,8 @@ function renderMessages() {
     if (audit.provider) details.push(`Modelo: ${audit.provider}`);
     if (audit.provider_fallbacks?.length) details.push(`Fallaron antes: ${audit.provider_fallbacks.join(', ')}`);
     if (audit.source) details.push(`Fuentes: ${audit.source}`);
-    if (audit.references?.length) details.push(`Referencias: ${audit.used_sources?.length ?? 0} citadas de ${audit.references.length}${audit.reference_selection === 'code' ? ' (elegidas por el código; Jev no disponible)' : ''}`);
-    if (audit.final_check) details.push(`Revisión Jev (informativa): ${audit.final_check === 'unavailable' ? 'no disponible' : audit.final_check}`);
+    if (audit.references?.length) details.push(`Referencias: ${audit.used_sources?.length ?? 0} citadas de ${audit.references.length}${audit.reference_selection === 'code' ? ' (elegidas por el código; ningún modelo pudo elegirlas)' : ''}`);
+    if (audit.final_check) details.push(`Revisión final (versión anterior): ${audit.final_check === 'unavailable' ? 'no disponible' : audit.final_check}`);
     const notice = { sending: 'enviando', sent: 'enviado', uncertain: 'incierto (no se reintenta)' };
     if (audit.holding_reply) details.push(`Aviso de espera: ${notice[audit.holding_reply] || audit.holding_reply}`);
     if (audit.withheld_notice) details.push(`Aviso de respuesta retenida: ${notice[audit.withheld_notice] || audit.withheld_notice}`);

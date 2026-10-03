@@ -342,9 +342,12 @@ pub(crate) fn init_state(config_dir: &Path, data_dir: &Path) -> Result<DesktopSt
     })
 }
 
+/// Credentials earlier versions required and nothing reads any more. A stored one is listed as
+/// `retired` so it can be removed; it is never deleted automatically and cannot be set.
+const RETIRED_CREDENTIALS: [&str; 1] = ["TYPESAFE_API_KEY"];
+
 fn credential_names(config: &Config) -> Vec<String> {
     let mut names = vec![
-        "TYPESAFE_API_KEY".into(),
         "DEEPSEEK_API_KEY".into(),
         "GRAPH_WEBHOOK_SECRET".into(),
         "STATE_ENCRYPTION_KEY".into(),
@@ -384,6 +387,11 @@ async fn snapshot(host: &Host) -> std::result::Result<Snapshot, String> {
             "unused"
         };
         credentials.insert(name, source.unwrap_or(missing).into());
+    }
+    for name in RETIRED_CREDENTIALS {
+        if security::secret_source(name).map_err(fail)?.is_some() {
+            credentials.insert(name.into(), "retired".into());
+        }
     }
     let mut running = state.running.lock().await;
     if running.as_mut().is_some_and(|r| {
@@ -652,7 +660,7 @@ async fn set_credential(
 
 async fn delete_credential(state: &DesktopState, name: String) -> std::result::Result<(), String> {
     let config = read_config(&state.config_path).map_err(fail)?;
-    if !credential_names(&config).contains(&name) {
+    if !credential_names(&config).contains(&name) && !RETIRED_CREDENTIALS.contains(&name.as_str()) {
         return Err("[invalid_input] Nombre de credencial no permitido".into());
     }
     if name == "STATE_ENCRYPTION_KEY" && config.server.data_dir.join("assistant.db").exists() {

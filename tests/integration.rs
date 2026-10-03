@@ -11,9 +11,8 @@ use personal_teams_assistant::{
         graph::Graph,
         webhook::{self, WebState},
     },
-    decision::{DecisionGate, Jev, Stage},
     knowledge::{Access, KnowledgeMap, Resource},
-    llm::{DeepSeek, GenerationInput, LlmProvider, Model},
+    llm::{DeepSeek, GenerationInput, Intent, IntentDecision, LlmProvider, Model},
     pipeline::Pipeline,
     security::Redactor,
     simulation::{self, SimulationRequest},
@@ -45,29 +44,6 @@ impl LlmProvider for NoLlm {
         panic!("unexpected generation")
     }
 }
-/// Jev is down: every decision call fails; reference hints pass through for code checks.
-struct UnavailableGate;
-#[async_trait]
-impl DecisionGate for UnavailableGate {
-    async fn evaluate(
-        &self,
-        _: Stage,
-        _: serde_json::Value,
-    ) -> Result<personal_teams_assistant::decision::Verdict> {
-        anyhow::bail!("Jev unavailable")
-    }
-}
-struct NoGate;
-#[async_trait]
-impl DecisionGate for NoGate {
-    async fn evaluate(
-        &self,
-        _: Stage,
-        _: serde_json::Value,
-    ) -> Result<personal_teams_assistant::decision::Verdict> {
-        panic!("greetings must not consume Jev")
-    }
-}
 fn knowledge(dir: &tempfile::TempDir) -> KnowledgeMap {
     std::fs::create_dir_all(dir.path().join(".git")).unwrap();
     std::fs::write(
@@ -96,7 +72,7 @@ fn redactor() -> Arc<Redactor> {
     Arc::new(Redactor::new(&[], vec![]).unwrap())
 }
 #[tokio::test]
-async fn deterministic_greeting_sends_without_jev_or_llm() {
+async fn deterministic_greeting_sends_without_a_model() {
     let server = MockServer::start().await;
     let dir = tempfile::tempdir().unwrap();
     let store = support::store(&dir);
@@ -115,7 +91,6 @@ async fn deterministic_greeting_sends_without_jev_or_llm() {
         config: graph.config.clone(),
         store: store.clone(),
         adapter: graph,
-        gate: Arc::new(NoGate),
         knowledge: knowledge(&dir),
         llm: Arc::new(NoLlm),
         tools: Arc::new(NoTools),
@@ -129,93 +104,55 @@ async fn deterministic_greeting_sends_without_jev_or_llm() {
     assert!(store.next_job().unwrap().is_none());
 }
 #[tokio::test]
-async fn graph_jev_deepseek_end_to_end_and_informative_final_review() {
-    for allow in [true, false] {
-        let server = MockServer::start().await;
-        let dir = tempfile::tempdir().unwrap();
-        let store = support::store(&dir);
-        let graph = support::graph(&server, store.clone());
-        support::mock_message(&server, "¿Cuál es el horario del soporte?").await;
-        Mock::given(method("POST")).and(path("/v1/systemone")).respond_with(move |_req:&wiremock::Request| {
-            let answers = json!({"references":{"type":"noul","noul":0.99},"attribution":{"type":"noul","noul":0.99},"supported":{"type":"noul","noul":if allow {0.99} else {0.01}},"no_new_promise":{"type":"noul","noul":0.99},"privacy":{"type":"noul","noul":0.99},"relevant":{"type":"noul","noul":0.99}});
-            ResponseTemplate::new(200).set_body_json(json!({"model":"jev-test","answers":answers}))
-        }).expect(1).mount(&server).await;
-        Mock::given(method("POST")).and(path("/chat/completions")).respond_with(ResponseTemplate::new(200).set_body_json(json!({"id":"gen1","object":"chat.completion","created":1,"model":"deepseek-test","choices":[{"index":0,"message":{"role":"assistant","content":"{\"answer\":\"El soporte atiende de lunes a viernes de 09:00 a 18:00.\",\"detailed\":false}"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":10,"total_tokens":20,"prompt_cache_hit_tokens":0,"prompt_cache_miss_tokens":10}}))).expect(1).mount(&server).await;
-        Mock::given(method("POST"))
-            .and(path("/chats/chat1/messages"))
-            .respond_with(ResponseTemplate::new(201).set_body_json(json!({"id":"sent1"})))
-            .expect(1)
-            .mount(&server)
-            .await;
-        let gate = Arc::new(Jev {
-            client: reqwest::Client::new(),
-            endpoint: format!("{}/v1/systemone", server.uri()),
-            api_key: "test-typesafe-key".into(),
-            model: "jev-test".into(),
-        });
-        let llm = Arc::new(Model::new(
-            DeepSeek::new("test-deepseek-key", "deepseek-test", "max", &server.uri()).unwrap(),
-            "Brief Spanish",
-        ));
-        let pipeline = Pipeline {
-            config: graph.config.clone(),
-            store: store.clone(),
-            adapter: graph,
-            gate,
-            knowledge: knowledge(&dir),
-            llm,
-            tools: Arc::new(NoTools),
-            redactor: redactor(),
-        };
-        store.enqueue("chats/chat1/messages/123").unwrap();
-        let job = store.next_job().unwrap().unwrap();
-        pipeline.process(&job.resource).await.unwrap();
-        let audit = store.audit(&job.resource).unwrap().unwrap();
-        // Jev's final review is recorded for the message log but never withholds the answer.
-        assert_eq!(audit.status, "sent");
-        assert_eq!(audit.confidences.len(), 1);
-        assert_eq!(
-            audit.final_check.as_deref(),
-            Some(if allow { "allow 0.99" } else { "ignore 0.01" })
-        );
-        assert_eq!(
-            audit.question.as_deref(),
-            Some("¿Cuál es el horario del soporte?")
-        );
-        assert!(audit.trace.iter().any(|s| s.step == "envío"));
-        assert!(audit.trace.iter().any(|s| {
-            s.step == "revisión Jev (informativa)"
-                && s.detail
-                    .contains(if allow { "aprobada" } else { "no bloquea" })
-        }));
-        let requests = server.received_requests().await.unwrap();
-        for r in requests
-            .iter()
-            .filter(|r| r.url.path() == "/v1/systemone" || r.url.path() == "/chat/completions")
-        {
-            let body = String::from_utf8_lossy(&r.body);
-            assert!(!body.contains("test-typesafe-key"));
-            assert!(!body.contains("test-deepseek-key"));
-            assert!(!body.contains("test-access-token"));
-        }
-    }
-}
-struct FinalOnlyGate;
-#[async_trait]
-impl DecisionGate for FinalOnlyGate {
-    async fn evaluate(
-        &self,
-        stage: Stage,
-        _: serde_json::Value,
-    ) -> Result<personal_teams_assistant::decision::Verdict> {
-        assert!(
-            matches!(stage, Stage::Final),
-            "a semantic prefilter discarded an answerable question: {stage:?}"
-        );
-        Ok(personal_teams_assistant::decision::Verdict {
-            selected: "allow".into(),
-            confidence: 0.99,
-        })
+async fn graph_and_deepseek_end_to_end_without_an_external_reviewer() {
+    let server = MockServer::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let store = support::store(&dir);
+    let graph = support::graph(&server, store.clone());
+    support::mock_message(&server, "¿Cuál es el horario del soporte?").await;
+    Mock::given(method("POST")).and(path("/chat/completions")).respond_with(ResponseTemplate::new(200).set_body_json(json!({"id":"gen1","object":"chat.completion","created":1,"model":"deepseek-test","choices":[{"index":0,"message":{"role":"assistant","content":"{\"answer\":\"El soporte atiende de lunes a viernes de 09:00 a 18:00.\",\"detailed\":false}"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":10,"total_tokens":20,"prompt_cache_hit_tokens":0,"prompt_cache_miss_tokens":10}}))).expect(1).mount(&server).await;
+    Mock::given(method("POST"))
+        .and(path("/chats/chat1/messages"))
+        .respond_with(ResponseTemplate::new(201).set_body_json(json!({"id":"sent1"})))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let llm = Arc::new(Model::new(
+        DeepSeek::new("test-deepseek-key", "deepseek-test", "max", &server.uri()).unwrap(),
+        "Brief Spanish",
+    ));
+    let pipeline = Pipeline {
+        config: graph.config.clone(),
+        store: store.clone(),
+        adapter: graph,
+        knowledge: knowledge(&dir),
+        llm,
+        tools: Arc::new(NoTools),
+        redactor: redactor(),
+    };
+    store.enqueue("chats/chat1/messages/123").unwrap();
+    let job = store.next_job().unwrap().unwrap();
+    pipeline.process(&job.resource).await.unwrap();
+    let audit = store.audit(&job.resource).unwrap().unwrap();
+    // A clear question with a file source: one model call writes the answer; nothing else
+    // reviews it, and code checks still run before sending.
+    assert_eq!(audit.status, "sent");
+    assert_eq!(audit.reason, "supported_answer");
+    assert!(audit.final_check.is_none());
+    assert!(audit.confidences.is_empty());
+    assert_eq!(
+        audit.question.as_deref(),
+        Some("¿Cuál es el horario del soporte?")
+    );
+    assert!(audit.trace.iter().any(|s| s.step == "envío"));
+    let requests = server.received_requests().await.unwrap();
+    for r in requests
+        .iter()
+        .filter(|r| r.url.path() == "/chat/completions")
+    {
+        let body = String::from_utf8_lossy(&r.body);
+        assert!(!body.contains("test-deepseek-key"));
+        assert!(!body.contains("test-access-token"));
     }
 }
 struct CompoundAnswer;
@@ -303,7 +240,6 @@ async fn compound_and_new_topic_questions_read_authorized_sources_without_semant
             config: graph.config.clone(),
             store: store.clone(),
             adapter: graph,
-            gate: Arc::new(FinalOnlyGate),
             knowledge: map,
             llm: Arc::new(CompoundAnswer),
             tools: Arc::new(NoTools),
@@ -327,54 +263,6 @@ impl ReadOnlyTool for ReadDocumentTool {
         assert!(matches!(spec, ToolSpec::Http { .. }));
         assert_eq!(question, "¿Cuál es el horario de soporte?");
         Ok("No se recuperaron hechos verificables en esta consulta.".into())
-    }
-}
-struct IntentGate(&'static str);
-#[async_trait]
-impl DecisionGate for IntentGate {
-    async fn evaluate(
-        &self,
-        stage: Stage,
-        state: serde_json::Value,
-    ) -> Result<personal_teams_assistant::decision::Verdict> {
-        Ok(personal_teams_assistant::decision::Verdict {
-            selected: match stage {
-                Stage::Intent => {
-                    assert!(state.get("message").is_some());
-                    assert!(state.get("sources").is_none());
-                    self.0
-                }
-                Stage::Final => "allow",
-            }
-            .into(),
-            confidence: 0.99,
-        })
-    }
-}
-#[tokio::test]
-async fn wiki_provenance_uses_verified_metadata_and_semantic_claims_still_fail_closed() {
-    for (teams, supported, expected) in [
-        (false, 0.99, true),
-        (false, 0.08, false),
-        (true, 0.99, false),
-    ] {
-        let server = MockServer::start().await;
-        Mock::given(method("POST")).and(path("/jev")).respond_with(move |r:&wiremock::Request| {
-            let request:serde_json::Value = serde_json::from_slice(&r.body).unwrap();
-            let checks = request["questions"].as_object().unwrap();
-            assert_eq!(checks.contains_key("attribution"),teams);
-            assert_eq!(checks.len(),if teams {6} else {5});
-            let answers:serde_json::Map<_,_> = checks.keys().map(|k|(k.clone(),json!({"type":"noul","noul":if k=="supported" {supported} else if k=="attribution" {0.12} else {0.99}}))).collect();
-            ResponseTemplate::new(200).set_body_json(json!({"answers":answers}))
-        }).expect(1).mount(&server).await;
-        let gate = Jev {
-            client: reqwest::Client::new(),
-            endpoint: format!("{}/jev", server.uri()),
-            api_key: "synthetic-key".into(),
-            model: "jev-test".into(),
-        };
-        let v = gate.evaluate(Stage::Final,json!({"references":[{"kind":"wiki","authority":"edited_by_me","author":null}],"teams_messages":if teams {vec![json!({"name":"Ana","text":"Pidió revisar"})]} else {vec![]},"answer":"Respuesta con citas verificadas"})).await.unwrap();
-        assert_eq!(v.selected == "allow" && v.allows(0.65), expected);
     }
 }
 #[tokio::test]
@@ -409,48 +297,30 @@ async fn assistant_tool_selection_rejects_unknown_ids_and_closed_schema_changes(
     }
 }
 #[tokio::test]
-async fn jev_typed_reference_selection_maps_only_known_registry_entries() {
+async fn model_reference_selection_maps_only_known_registry_entries() {
     let wiki: personal_teams_assistant::ado::wiki::WikiResult =
         serde_json::from_value(synthetic_wiki_result()).unwrap();
     let refs: Vec<_> = wiki.pages.into_iter().map(|p| p.reference).collect();
-    for (answers, valid) in [
-        (
-            json!({"source_0":{"type":"noul","noul":0.9},"source_1":{"type":"noul","noul":0.1}}),
-            true,
-        ),
-        (
-            json!({"source_0":{"type":"noul","noul":0.9},"invented":{"type":"noul","noul":0.9}}),
-            false,
-        ),
-        (
-            json!({"source_0":{"type":"noul","noul":1.2},"source_1":{"type":"noul","noul":0.1}}),
-            false,
-        ),
-        (
-            json!({"source_0":{"type":"choice","noul":0.9},"source_1":{"type":"noul","noul":0.1}}),
-            false,
-        ),
+    for (used, valid) in [
+        (json!({"used":["r1"]}), true),
+        (json!({"used":["r1","invented"]}), false),
+        (json!({"used":["r3"]}), false),
+        (json!({"used":["r1"],"confidence":0.9}), false),
     ] {
         let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/jev"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"answers":answers})))
-            .expect(1)
-            .mount(&server)
-            .await;
-        let gate = Jev {
-            client: reqwest::Client::new(),
-            endpoint: format!("{}/jev", server.uri()),
-            api_key: "synthetic-key".into(),
-            model: "jev-test".into(),
-        };
-        let selected = gate
-            .select_references(
-                "Procedimiento verificable",
-                "Datos con dos páginas autorizadas",
-                &refs,
-                &["test:page1-without-wiki-prefix".into()],
-            )
+        Mock::given(method("POST")).and(path("/chat/completions")).respond_with(move |r: &wiremock::Request| {
+            // Only short keys and verified metadata reach the model, never IDs or URLs.
+            let body = String::from_utf8_lossy(&r.body);
+            assert!(body.contains("r1") && body.contains("r2"));
+            assert!(!body.contains("wiki:test:page1") && !body.contains("pagePath"));
+            ResponseTemplate::new(200).set_body_json(json!({"id":"refs","object":"chat.completion","created":1,"model":"deepseek-test","choices":[{"index":0,"message":{"role":"assistant","content":used.to_string()},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":10,"total_tokens":20,"prompt_cache_hit_tokens":0,"prompt_cache_miss_tokens":10}}))
+        }).expect(1).mount(&server).await;
+        let llm = Model::new(
+            DeepSeek::new("synthetic-key", "deepseek-test", "max", &server.uri()).unwrap(),
+            "Brief Spanish",
+        );
+        let selected = llm
+            .select_references("Procedimiento verificable", &refs)
             .await;
         assert_eq!(selected.is_ok(), valid);
         if valid {
@@ -463,18 +333,22 @@ async fn ambiguous_messages_triage_question_personal_greeting_or_statement() {
     for (text, intent, reason) in [
         (
             "Me ayudarías a entender el horario de soporte",
-            "question",
+            Intent::Question,
             "supported_answer",
         ),
         (
             "Cuando puedas lo vemos por teléfono",
-            "personal",
+            Intent::Personal,
             "personal_request",
         ),
-        ("Buen día para todos", "greeting", "deterministic_greeting"),
+        (
+            "Buen día para todos",
+            Intent::Greeting,
+            "deterministic_greeting",
+        ),
         (
             "El componente finalizó la tarea",
-            "statement",
+            Intent::Statement,
             "informational_message",
         ),
     ] {
@@ -489,9 +363,8 @@ async fn ambiguous_messages_triage_question_personal_greeting_or_statement() {
             config: Arc::new(config),
             store: store.clone(),
             adapter: graph,
-            gate: Arc::new(IntentGate(intent)),
             knowledge: knowledge(&dir),
-            llm: Arc::new(AnswerOrClarify(true)),
+            llm: Arc::new(Triage(intent)),
             tools: Arc::new(NoTools),
             redactor: redactor(),
         };
@@ -499,9 +372,10 @@ async fn ambiguous_messages_triage_question_personal_greeting_or_statement() {
         pipeline.process("chats/chat1/messages/123").await.unwrap();
         let audit = store.audit("chats/chat1/messages/123").unwrap().unwrap();
         assert_eq!(audit.reason, reason);
+        assert_eq!(audit.confidences, vec![0.99]);
         assert_eq!(
             audit.status,
-            if matches!(intent, "statement" | "personal") {
+            if matches!(intent, Intent::Statement | Intent::Personal) {
                 "ignored"
             } else {
                 "dry_run"
@@ -516,6 +390,24 @@ async fn ambiguous_messages_triage_question_personal_greeting_or_statement() {
                 .iter()
                 .any(|r| r.method == "POST")
         );
+    }
+}
+/// Classifies every ambiguous message with a fixed intent, then answers from the hours file.
+struct Triage(Intent);
+#[async_trait]
+impl LlmProvider for Triage {
+    fn name(&self) -> &str {
+        "synthetic-triage"
+    }
+    async fn classify_intent(&self, message: &str, _: &str) -> Result<IntentDecision> {
+        assert!(!message.is_empty());
+        Ok(IntentDecision {
+            intent: self.0,
+            confidence: 0.99,
+        })
+    }
+    async fn generate(&self, input: GenerationInput<'_>) -> Result<String> {
+        AnswerOrClarify(true).generate(input).await
     }
 }
 struct AnswerOrClarify(bool);
@@ -539,7 +431,7 @@ impl LlmProvider for AnswerOrClarify {
     }
 }
 #[tokio::test]
-async fn questions_read_authorized_tools_without_a_jev_source_veto() {
+async fn questions_read_authorized_tools_without_a_model_source_veto() {
     for with_document in [true, false] {
         let server = MockServer::start().await;
         let dir = tempfile::tempdir().unwrap();
@@ -576,7 +468,6 @@ async fn questions_read_authorized_tools_without_a_jev_source_veto() {
             config: graph.config.clone(),
             store: store.clone(),
             adapter: graph,
-            gate: Arc::new(FinalOnlyGate),
             knowledge: map,
             llm: Arc::new(AnswerOrClarify(with_document)),
             tools: Arc::new(ReadDocumentTool),
@@ -606,7 +497,6 @@ async fn send_error_is_not_retried() {
         config: graph.config.clone(),
         store: store.clone(),
         adapter: graph,
-        gate: Arc::new(NoGate),
         knowledge: knowledge(&dir),
         llm: Arc::new(NoLlm),
         tools: Arc::new(NoTools),
@@ -700,7 +590,6 @@ async fn public_router_has_no_admin_routes_and_simulation_never_sends_to_graph()
         config: graph.config.clone(),
         store: store.clone(),
         adapter: graph.clone(),
-        gate: Arc::new(NoGate),
         knowledge: knowledge(&dir),
         llm: Arc::new(NoLlm),
         tools: Arc::new(NoTools),
@@ -748,23 +637,6 @@ fn map_requires_conversation_authorization_and_no_path_escape() {
         ))
         .is_err()
     );
-}
-#[tokio::test]
-async fn jev_rejects_missing_and_invalid_decisions() {
-    let server = MockServer::start().await;
-    Mock::given(method("POST"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(
-            json!({"answers":{"decision":{"type":"choice","choice":"allow","confidence":0.999}}}),
-        ))
-        .mount(&server)
-        .await;
-    let gate = Jev {
-        client: reqwest::Client::new(),
-        endpoint: server.uri(),
-        api_key: "test-key".into(),
-        model: "test".into(),
-    };
-    assert!(gate.evaluate(Stage::Final, json!({})).await.is_err());
 }
 #[tokio::test]
 async fn graph_refreshes_and_renews_subscriptions() {
@@ -924,7 +796,6 @@ async fn dry_run_and_sensitive_question_never_send() {
             config: Arc::new(cfg),
             store: store.clone(),
             adapter: graph,
-            gate: Arc::new(NoGate),
             knowledge: knowledge(&dir),
             llm: Arc::new(NoLlm),
             tools: Arc::new(NoTools),
@@ -995,7 +866,6 @@ async fn self_chat_is_scoped_durable_and_does_not_confuse_equal_human_text() {
         config: graph.config.clone(),
         store: store.clone(),
         adapter: graph.clone(),
-        gate: Arc::new(NoGate),
         knowledge: knowledge(&dir),
         llm: Arc::new(NoLlm),
         tools: Arc::new(NoTools),
@@ -1160,7 +1030,6 @@ async fn answers_are_not_capped_by_character_count() {
             config: graph.config.clone(),
             store: store.clone(),
             adapter: graph,
-            gate: Arc::new(FinalOnlyGate),
             knowledge: knowledge(&dir),
             llm: Arc::new(LengthChoice { detailed }),
             tools: Arc::new(NoTools),
@@ -1278,27 +1147,6 @@ impl LlmProvider for WikiLlm {
         })
     }
 }
-struct WikiGate;
-#[async_trait]
-impl DecisionGate for WikiGate {
-    async fn evaluate(
-        &self,
-        stage: Stage,
-        state: serde_json::Value,
-    ) -> Result<personal_teams_assistant::decision::Verdict> {
-        assert!(matches!(stage, Stage::Final));
-        let answer = state["answer"].as_str().unwrap();
-        assert!(answer.contains("pagePath=%2FProcedure"));
-        assert!(answer.contains("último editor registrado: Ana"));
-        assert!(answer.chars().count() <= 3000);
-        assert_eq!(state["used_sources"].as_array().unwrap().len(), 2);
-        assert_eq!(state["references"].as_array().unwrap().len(), 2);
-        Ok(personal_teams_assistant::decision::Verdict {
-            selected: "allow".into(),
-            confidence: 0.99,
-        })
-    }
-}
 fn synthetic_wiki_result() -> serde_json::Value {
     let wiki = json!({"organization":"https://dev.azure.com/test","project":"Project","project_id":"abcdeabc-abcd-abcd-abcd-abcdeabcdea1","id":"abcdeabc-abcd-abcd-abcd-abcdeabcdea2","name":"Wiki","kind":"projectWiki","repository_id":"abcdeabc-abcd-abcd-abcd-abcdeabcdea3","mapped_path":"/","versions":["published"]});
     let pages:Vec<_>=[("page1","edited_by_me",None),("page2","other",Some("Ana"))].into_iter().map(|(id,authority,author)|json!({"wiki":wiki,"title":id,"path":"/Procedure","git_item_path":"/Procedure.md","version":"published","revision":"1111111111111111111111111111111111111111","content":"Procedimiento verificable: validar configuración.","reference":{"id":format!("wiki:test:{id}"),"kind":"wiki","label":format!("Project / Wiki / {id}"),"url":format!("https://dev.azure.com/test/abcdeabc-abcd-abcd-abcd-abcdeabcdea1/_wiki/wikis/abcdeabc-abcd-abcd-abcd-abcdeabcdea2?pagePath=%2FProcedure&anchor={id}"),"organization":"https://dev.azure.com/test","project":"abcdeabc-abcd-abcd-abcd-abcdeabcdea1","aliases":[],"parent":null,"revision":"1111111111111111111111111111111111111111","authority":authority,"author":author,"author_role":"último editor registrado"}})).collect();
@@ -1356,11 +1204,6 @@ async fn wiki_priority_current_request_mixed_citations_and_complete_gate_without
                 config: Arc::new(cfg),
                 store: store.clone(),
                 adapter: graph,
-                gate: if ids.len() == 2 {
-                    Arc::new(WikiGate)
-                } else {
-                    Arc::new(UnavailableGate)
-                },
                 knowledge: KnowledgeMap {
                     repositories: BTreeMap::new(),
                     resources: vec![
@@ -1413,8 +1256,8 @@ async fn wiki_priority_current_request_mixed_citations_and_complete_gate_without
                         .contains("contribución propia verificada")
                 );
             } else if ids.is_empty() {
-                // Jev unavailable and no page selected: the consulted pages are linked instead
-                // of withholding the answer.
+                // No model selected a page: the consulted pages are linked instead of
+                // withholding the answer.
                 assert_eq!(result.status, "dry_run", "{}", result.reason);
                 assert!(result.answer.unwrap().contains("**Páginas consultadas**"));
             } else {
@@ -1455,6 +1298,13 @@ impl LlmProvider for FollowUpLlm {
             topic: "Crear SPS".into(),
         }))
     }
+    async fn select_references(
+        &self,
+        _: &str,
+        references: &[personal_teams_assistant::evidence::Reference],
+    ) -> Result<Vec<String>> {
+        Ok(references.iter().map(|r| r.id.clone()).collect())
+    }
     async fn generate(&self, _: GenerationInput<'_>) -> Result<String> {
         unreachable!()
     }
@@ -1480,30 +1330,6 @@ impl LlmProvider for FollowUpLlm {
         })
     }
 }
-struct AllowFinal;
-#[async_trait]
-impl DecisionGate for AllowFinal {
-    async fn evaluate(
-        &self,
-        stage: Stage,
-        _: serde_json::Value,
-    ) -> Result<personal_teams_assistant::decision::Verdict> {
-        assert!(matches!(stage, Stage::Final));
-        Ok(personal_teams_assistant::decision::Verdict {
-            selected: "allow".into(),
-            confidence: 0.99,
-        })
-    }
-    async fn select_references(
-        &self,
-        _: &str,
-        _: &str,
-        references: &[personal_teams_assistant::evidence::Reference],
-        _: &[String],
-    ) -> Result<Vec<String>> {
-        Ok(references.iter().map(|r| r.id.clone()).collect())
-    }
-}
 #[tokio::test]
 async fn follow_up_without_subject_searches_the_previous_topic_and_keeps_it_for_the_next_turn() {
     for resolve in [true, false] {
@@ -1524,7 +1350,6 @@ async fn follow_up_without_subject_searches_the_previous_topic_and_keeps_it_for_
             config: Arc::new(cfg),
             store: store.clone(),
             adapter: graph,
-            gate: Arc::new(AllowFinal),
             knowledge: KnowledgeMap {
                 repositories: BTreeMap::new(),
                 resources: vec![wiki_resource()],
@@ -1586,7 +1411,6 @@ async fn explicit_local_selection_still_requires_enabled_and_external_processing
             config: graph.config.clone(),
             store: store.clone(),
             adapter: graph.clone(),
-            gate: Arc::new(NoGate),
             knowledge: KnowledgeMap {
                 repositories: BTreeMap::new(),
                 resources: vec![source],
@@ -1626,7 +1450,6 @@ async fn implicit_documentation_does_not_bypass_teams_source_audiences() {
         config: graph.config.clone(),
         store: store.clone(),
         adapter: graph,
-        gate: Arc::new(NoGate),
         knowledge: KnowledgeMap {
             repositories: BTreeMap::new(),
             resources: vec![wiki],
@@ -1722,7 +1545,7 @@ impl ReadOnlyTool for TeamsEvidenceTool {
         })?)
     }
 }
-struct TeamsAttributionLlm(bool);
+struct TeamsAttributionLlm;
 #[async_trait]
 impl LlmProvider for TeamsAttributionLlm {
     fn name(&self) -> &str {
@@ -1732,95 +1555,78 @@ impl LlmProvider for TeamsAttributionLlm {
         assert!(input.evidence.contains("\"name\":\"Ana\""));
         assert!(input.evidence.contains("\"name\":\"Luis\""));
         assert!(input.evidence.contains("\"mine\":true"));
-        Ok(if self.0 {
-            "Luis pidió revisar y Ana indicó que faltaba validar."
-        } else {
-            "Ana pidió revisar y Luis indicó que faltaba validar."
-        }
-        .into())
+        Ok("Ana pidió revisar y Luis indicó que faltaba validar.".into())
     }
 }
 #[tokio::test]
-async fn teams_simulation_preserves_attribution_and_final_review_flags_swapped_authors() {
-    for swapped in [false, true] {
-        let server = MockServer::start().await;
-        let dir = tempfile::tempdir().unwrap();
-        let store = support::store(&dir);
-        let graph = support::graph(&server, store.clone());
-        Mock::given(method("POST")).and(path("/jev")).respond_with(move |req:&wiremock::Request| {
-            let input=req.body_json::<serde_json::Value>().unwrap();
-            assert!(input["state"]["teams_messages"].as_array().unwrap().iter().any(|m|m["name"]=="Ana" && m["text"]=="Pidió revisar el pipeline"));
-            let answers:serde_json::Map<String,serde_json::Value>=["references","attribution","supported","privacy","relevant","no_new_promise"].into_iter().map(|name|(name.into(),json!({"type":"noul","noul":if name=="attribution" && swapped {0.01} else {0.99}}))).collect();
-            ResponseTemplate::new(200).set_body_json(json!({"answers":answers}))
-        }).expect(1).mount(&server).await;
-        let mut cfg = (*graph.config).clone();
-        cfg.policy.dry_run = true;
-        let mut resource = wiki_resource();
-        resource.id = "azure-devops-status".into();
-        resource.access = Access::Tool {
-            tool: ToolSpec::AzureDevopsStatus {
-                repository: "private".into(),
-                path: "catalog.toml".into(),
-                secret_ref: "secret://ado/read".into(),
-            },
-        };
-        let pipeline = Pipeline {
-            config: Arc::new(cfg),
-            store: store.clone(),
-            adapter: graph,
-            gate: Arc::new(Jev {
-                client: reqwest::Client::new(),
-                endpoint: format!("{}/jev", server.uri()),
-                api_key: "synthetic".into(),
-                model: "synthetic".into(),
-            }),
-            knowledge: KnowledgeMap {
-                repositories: BTreeMap::new(),
-                resources: vec![resource],
-            },
-            llm: Arc::new(TeamsAttributionLlm(swapped)),
-            tools: Arc::new(TeamsEvidenceTool),
-            redactor: redactor(),
-        };
-        let sources = vec!["azure-devops-status".into()];
-        let result = personal_teams_assistant::simulation::run(
-            &pipeline,
-            personal_teams_assistant::simulation::SimulationRequest {
-                session: "team-attribution".into(),
-                text: "¿Qué coordinación hubo sobre el pipeline?".into(),
-                group: false,
-                mentioned: false,
-                sources: sources.clone(),
-            },
-            Some(&sources),
-        )
-        .await
-        .unwrap();
-        // A swapped attribution is flagged in the log; the review no longer withholds it.
-        assert_eq!(result.status, "dry_run");
-        let rows = personal_teams_assistant::state::Store::inspect(
-            &dir.path().join("test.db"),
-            false,
-            1,
-            None,
-            true,
-        )
-        .unwrap();
-        let audit: personal_teams_assistant::state::Audit =
-            serde_json::from_value(rows[0]["audit"].clone()).unwrap();
-        assert_eq!(
-            audit.final_check.as_deref().map(|c| c.starts_with("allow")),
-            Some(!swapped)
-        );
-        assert!(
-            server
-                .received_requests()
-                .await
-                .unwrap()
-                .iter()
-                .all(|r| r.url.path() == "/jev")
-        );
-    }
+async fn teams_simulation_keeps_who_said_what_in_the_evidence_and_the_log() {
+    let server = MockServer::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let store = support::store(&dir);
+    let graph = support::graph(&server, store.clone());
+    let mut cfg = (*graph.config).clone();
+    cfg.policy.dry_run = true;
+    let mut resource = wiki_resource();
+    resource.id = "azure-devops-status".into();
+    resource.access = Access::Tool {
+        tool: ToolSpec::AzureDevopsStatus {
+            repository: "private".into(),
+            path: "catalog.toml".into(),
+            secret_ref: "secret://ado/read".into(),
+        },
+    };
+    let pipeline = Pipeline {
+        config: Arc::new(cfg),
+        store: store.clone(),
+        adapter: graph,
+        knowledge: KnowledgeMap {
+            repositories: BTreeMap::new(),
+            resources: vec![resource],
+        },
+        llm: Arc::new(TeamsAttributionLlm),
+        tools: Arc::new(TeamsEvidenceTool),
+        redactor: redactor(),
+    };
+    let sources = vec!["azure-devops-status".into()];
+    let result = personal_teams_assistant::simulation::run(
+        &pipeline,
+        personal_teams_assistant::simulation::SimulationRequest {
+            session: "team-attribution".into(),
+            text: "¿Qué coordinación hubo sobre el pipeline?".into(),
+            group: false,
+            mentioned: false,
+            sources: sources.clone(),
+        },
+        Some(&sources),
+    )
+    .await
+    .unwrap();
+    assert_eq!(result.status, "dry_run");
+    let rows = personal_teams_assistant::state::Store::inspect(
+        &dir.path().join("test.db"),
+        false,
+        1,
+        None,
+        true,
+    )
+    .unwrap();
+    let audit: personal_teams_assistant::state::Audit =
+        serde_json::from_value(rows[0]["audit"].clone()).unwrap();
+    let authors: Vec<_> = audit
+        .teams_messages
+        .iter()
+        .map(|m| (m.name.as_deref(), m.mine))
+        .collect();
+    assert_eq!(
+        authors,
+        vec![
+            (Some("Ana"), false),
+            (Some("Self"), true),
+            (Some("Luis"), false)
+        ]
+    );
+    assert!(audit.final_check.is_none());
+    assert!(server.received_requests().await.unwrap().is_empty());
 }
 
 /// In-memory Teams double: no network, so a paused clock cannot fire transport timeouts.
@@ -1891,7 +1697,6 @@ async fn slow_answers_send_one_holding_reply_first() {
             config: Arc::new(support::config()),
             store: store.clone(),
             adapter: teams.clone(),
-            gate: Arc::new(FinalOnlyGate),
             knowledge: knowledge(&dir),
             llm: Arc::new(SlowLlm),
             tools: Arc::new(NoTools),
@@ -2058,6 +1863,12 @@ impl LlmProvider for HistoryLlm {
     fn name(&self) -> &str {
         "history"
     }
+    async fn classify_intent(&self, _: &str, _: &str) -> Result<IntentDecision> {
+        Ok(IntentDecision {
+            intent: Intent::Question,
+            confidence: 0.9,
+        })
+    }
     async fn generate(&self, _: GenerationInput<'_>) -> Result<String> {
         unreachable!()
     }
@@ -2093,13 +1904,11 @@ async fn earlier_messages_with_time_reach_the_model_and_the_log() {
         seen: Default::default(),
         invent_reference: false,
     });
-    // «cual es…» is a clear question, so Jev is not consulted for intent; it is down for
-    // the reference and final reviews, which no longer withhold the answer.
+    // «cual es…» is a clear question, so no model classifies its intent.
     let pipeline = Pipeline {
         config: Arc::new(support::config()),
         store: store.clone(),
         adapter: teams.clone(),
-        gate: Arc::new(UnavailableGate),
         knowledge: knowledge(&dir),
         llm: llm.clone(),
         tools: Arc::new(NoTools),
@@ -2114,9 +1923,8 @@ async fn earlier_messages_with_time_reach_the_model_and_the_log() {
     ));
     assert!(history.ends_with("· solicitud actual]"));
     let audit = store.audit(resource).unwrap().unwrap();
-    // Jev's final review was unavailable and did not withhold the answer.
     assert_eq!(audit.status, "sent");
-    assert_eq!(audit.final_check.as_deref(), Some("unavailable"));
+    assert!(audit.final_check.is_none());
     assert_eq!(audit.history_messages, 2);
     assert_eq!(audit.provider.as_deref(), Some("codex:gpt-6.1-sol:medium"));
     assert_eq!(
@@ -2136,22 +1944,6 @@ async fn earlier_messages_with_time_reach_the_model_and_the_log() {
     }
     // The log names decisions, never the message text.
     assert!(audit.trace.iter().all(|s| !s.detail.contains("endpoint")));
-}
-/// Classifies every ambiguous message as a question; Final review is unavailable.
-struct IntentQuestionGate;
-#[async_trait]
-impl DecisionGate for IntentQuestionGate {
-    async fn evaluate(
-        &self,
-        stage: Stage,
-        _: serde_json::Value,
-    ) -> Result<personal_teams_assistant::decision::Verdict> {
-        anyhow::ensure!(matches!(stage, Stage::Intent), "final review unavailable");
-        Ok(personal_teams_assistant::decision::Verdict {
-            selected: "question".into(),
-            confidence: 0.9,
-        })
-    }
 }
 #[tokio::test]
 async fn withheld_answer_in_the_personal_chat_is_reported_once() {
@@ -2185,7 +1977,6 @@ async fn withheld_answer_in_the_personal_chat_is_reported_once() {
             config: Arc::new(cfg),
             store: store.clone(),
             adapter: teams.clone(),
-            gate: Arc::new(IntentQuestionGate),
             knowledge: knowledge(&dir),
             llm: Arc::new(HistoryLlm {
                 seen: Default::default(),
@@ -2269,7 +2060,6 @@ async fn requests_for_the_person_stay_unanswered_outside_the_personal_chat() {
             config: Arc::new(cfg),
             store: store.clone(),
             adapter: teams.clone(),
-            gate: Arc::new(IntentQuestionGate),
             knowledge: map,
             llm: llm.clone(),
             tools: Arc::new(NoTools),
@@ -2284,7 +2074,7 @@ async fn requests_for_the_person_stay_unanswered_outside_the_personal_chat() {
             assert_eq!(audit.status, "sent", "{}", audit.reason);
             assert_eq!(llm.seen.lock().unwrap().len(), 1);
         } else {
-            // Someone asks the user for a joint review: neither Jev nor a model is consulted.
+            // Someone asks the user for a joint review: no model is consulted.
             assert_eq!(audit.status, "ignored");
             assert_eq!(audit.reason, "personal_request");
             assert!(llm.seen.lock().unwrap().is_empty());

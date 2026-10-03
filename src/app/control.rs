@@ -483,6 +483,16 @@ pub(crate) async fn dispatch(host: &Arc<Host>, request: Request) -> Reply {
             Reply::error(code, exit, message)
         }
     };
+    // No provider passed: fail, but keep each provider's failure class in `data`.
+    if reply.ok
+        && method == "test_providers"
+        && let Some(summary) = crate::diagnostics::failed_summary(&reply.data)
+    {
+        reply.ok = false;
+        reply.code = "dependency_or_network".into();
+        reply.exit_code = 5;
+        reply.message = Some(summary);
+    }
     if reply.ok && reply.data.get("pending").and_then(Value::as_bool) == Some(true) {
         reply.ok = false;
         reply.code = "authorization_pending".into();
