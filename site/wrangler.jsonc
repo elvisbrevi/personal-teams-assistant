@@ -7,5 +7,9 @@
   "assets": {
     "directory": "./public",
     "not_found_handling": "404-page"
-  }
+  },
+  // Served only on the custom domain (Cloudflare creates its DNS record and certificate);
+  // workers.dev stays off so the landing has a single canonical URL.
+  "routes": [{ "pattern": "teams-assistant.elvisbrevi.cl", "custom_domain": true }],
+  "workers_dev": false
 }
