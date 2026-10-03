@@ -24,7 +24,7 @@ pub async fn providers(config: &Config) -> Result<serde_json::Value> {
     for choice in config.llm.active() {
         let label = format!("{}:{}:{}", choice.provider, choice.model, choice.effort);
         let probe = async {
-            let model = llm::model_for(&choice, &config.llm.style, &mut Vec::new())?;
+            let model = llm::model_for(&choice, &config.llm, &mut Vec::new())?;
             let mut results = Vec::new();
             for (question, expect_detail) in [
                 (
