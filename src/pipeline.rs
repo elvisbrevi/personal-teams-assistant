@@ -829,15 +829,25 @@ impl Pipeline {
             results.push(read?);
         }
         results.sort_by_key(|(index, _)| *index);
+        let mut unread = Vec::new();
         for (index, read) in results {
             let source = sources[index];
+            let what = match &source.access {
+                Access::Tool {
+                    tool: crate::tools::ToolSpec::AzureDevopsWiki { .. },
+                } => "Wiki edits",
+                Access::Tool {
+                    tool: crate::tools::ToolSpec::TeamsMessages {},
+                } => "own Teams messages",
+                _ => "Azure DevOps activity",
+            };
             let read = read
                 .ok()
                 .and_then(|raw| serde_json::from_str::<crate::evidence::Evidence>(&raw).ok());
             match read {
                 Some(mut data) => {
                     data.sanitize(&self.redactor);
-                    parts.push(data.text.clone());
+                    parts.push((what, data.text.clone()));
                     registry.references.extend(data.references);
                     registry.teams.extend(data.teams);
                     registry.partial |= data.partial;
@@ -849,20 +859,14 @@ impl Pipeline {
                         "activity review",
                         format!("{} could not be read", source.id),
                     );
-                    let name = match &source.access {
-                        Access::Tool { tool } => tool.name(),
-                        _ => "source",
-                    };
-                    parts.push(format!(
-                        "Source {} ({name}) could not be read: do not infer that there was no activity there.\n",
-                        source.id
-                    ));
+                    unread.push(what);
                 }
             }
         }
-        let lengths: Vec<usize> = parts.iter().map(|p| p.chars().count()).collect();
+        let lengths: Vec<usize> = parts.iter().map(|(_, p)| p.chars().count()).collect();
         let mut evidence = String::new();
-        for (part, cap) in parts
+        let mut cut = Vec::new();
+        for ((what, part), cap) in parts
             .iter()
             .zip(shares(&lengths, self.config.policy.max_context_chars))
         {
@@ -871,6 +875,7 @@ impl Pipeline {
                 let size = line.chars().count() + 1;
                 if used + size > cap {
                     registry.partial = true;
+                    cut.push(*what);
                     break;
                 }
                 evidence.push_str(line);
@@ -878,8 +883,17 @@ impl Pipeline {
                 used += size;
             }
         }
-        if registry.partial {
-            evidence.push_str("Partial coverage: some sources were cut or could not be read; do not infer that there was no activity there.\n");
+        // Name what is missing, so the answer can say it in one line.
+        for (list, state) in [
+            (&unread, "could not be read"),
+            (&cut, "were cut to fit the context"),
+        ] {
+            if !list.is_empty() {
+                evidence.push_str(&format!(
+                    "Partial coverage: {} {state}; do not infer that there was no activity there.\n",
+                    list.join(" and ")
+                ));
+            }
         }
         let mut seen = std::collections::BTreeSet::new();
         registry.references.retain(|r| seen.insert(r.id.clone()));

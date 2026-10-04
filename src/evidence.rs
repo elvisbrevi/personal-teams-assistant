@@ -105,9 +105,9 @@ impl Evidence {
                 .references
                 .iter()
                 .filter(|r| {
-                    r.aliases.iter().any(|a| {
-                        !a.is_empty() && message.text.to_lowercase().contains(&a.to_lowercase())
-                    })
+                    r.aliases
+                        .iter()
+                        .any(|a| names(&message.text.to_lowercase(), a))
                 })
                 .collect();
             let block = format!(
@@ -256,15 +256,60 @@ pub fn named_references(body: &str, evidence: &Evidence) -> Vec<String> {
         .iter()
         .filter(|r| r.kind != "wiki")
         .filter(|r| {
-            r.aliases
-                .iter()
-                .any(|a| !a.is_empty() && lower.contains(&a.to_lowercase()))
+            r.aliases.iter().any(|a| names(&lower, a))
                 || ids.iter().any(|id| {
                     regex::Regex::new(&format!(r"{id}\b")).is_ok_and(|re| re.is_match(&r.label))
                 })
         })
         .map(|r| r.id.clone())
         .collect()
+}
+/// Whether `lower_text` names `alias` as whole words: «Notificador» does not name the entity
+/// inside «notificadorimport», nor `#12` inside `#123`.
+fn names(lower_text: &str, alias: &str) -> bool {
+    word_position(lower_text, &alias.to_lowercase()).is_some()
+}
+fn word_position(lower_text: &str, name: &str) -> Option<usize> {
+    if name.is_empty() {
+        return None;
+    }
+    lower_text.match_indices(name).find_map(|(at, _)| {
+        let before = lower_text[..at].chars().next_back();
+        let after = lower_text[at + name.len()..].chars().next();
+        (!before.is_some_and(char::is_alphanumeric) && !after.is_some_and(char::is_alphanumeric))
+            .then_some(at)
+    })
+}
+/// Where the answer first names a reference: an alias, its `#id` or a Wiki page title.
+/// References the text does not name sort last.
+fn first_mention(lower_body: &str, reference: &Reference) -> usize {
+    let mut candidates: Vec<String> = reference
+        .aliases
+        .iter()
+        .filter(|a| !a.is_empty())
+        .map(|a| a.to_lowercase())
+        .collect();
+    if reference.kind == "wiki" {
+        candidates.push(
+            reference
+                .label
+                .rsplit(" / ")
+                .next()
+                .unwrap_or(&reference.label)
+                .trim()
+                .to_lowercase(),
+        );
+    } else if let Some(number) = regex::Regex::new(r"#\d+")
+        .ok()
+        .and_then(|re| re.find(&reference.label).map(|m| m.as_str().to_owned()))
+    {
+        candidates.push(number);
+    }
+    candidates
+        .iter()
+        .filter_map(|name| word_position(lower_body, name))
+        .min()
+        .unwrap_or(usize::MAX)
 }
 /// Runs before the privacy checks, against the complete rendered answer. Wiki pages selected
 /// as used are listed under **Fuentes**; when none is, every consulted page is listed under
@@ -297,11 +342,7 @@ pub fn complete_answer(
             .any(|r| r.kind == "wiki" && selected.contains(&r.id));
     let lower = body.to_lowercase();
     for r in &evidence.references {
-        if r.kind != "wiki"
-            && r.aliases
-                .iter()
-                .any(|a| !a.is_empty() && lower.contains(&a.to_lowercase()))
-        {
+        if r.kind != "wiki" && r.aliases.iter().any(|a| names(&lower, a)) {
             ensure!(
                 selected.contains(&r.id)
                     || evidence
@@ -314,7 +355,7 @@ pub fn complete_answer(
                                 || (other.kind.starts_with("pipeline_")
                                     && r.kind.starts_with("pipeline_")))
                             && other.aliases.iter().any(|a| !a.is_empty()
-                                && lower.contains(&a.to_lowercase())
+                                && names(&lower, a)
                                 && r.aliases.contains(a))),
                 "mentioned entity missing used source"
             );
@@ -360,15 +401,20 @@ pub fn complete_answer(
     }
     let mut answer = body.trim_end().to_owned();
     let mut linked = BTreeSet::new();
-    for r in &evidence.references {
-        if selected.contains(&r.id) {
-            r.validate()?;
-            if linked.insert((r.url.clone(), r.label.clone())) {
-                if linked.len() == 1 {
-                    answer.push_str(&format!("\n\n{sources}"));
-                }
-                answer.push_str(&format!("\n{}", r.citation(language)));
+    // Sources follow the answer: the first thing it names is cited first.
+    let mut cited: Vec<&Reference> = evidence
+        .references
+        .iter()
+        .filter(|r| selected.contains(&r.id))
+        .collect();
+    cited.sort_by_key(|r| first_mention(&lower, r));
+    for r in cited {
+        r.validate()?;
+        if linked.insert((r.url.clone(), r.label.clone())) {
+            if linked.len() == 1 {
+                answer.push_str(&format!("\n\n{sources}"));
             }
+            answer.push_str(&format!("\n{}", r.citation(language)));
         }
     }
     if consulted_only {
@@ -447,6 +493,50 @@ mod tests {
             }
         }
     }
+    #[test]
+    fn aliases_match_whole_words_only() {
+        assert!(names("ejecuté el run #12 de notificador.", "Notificador"));
+        assert!(!names("ejecuté notificadorimport", "Notificador"));
+        assert!(!names("ver #123", "#12"));
+        assert!(names("ver #12, listo", "#12"));
+        assert!(names("pr #5 y (pr #6)", "PR #6"));
+        assert!(!names("algo", ""));
+    }
+
+    #[test]
+    fn sources_follow_the_order_the_answer_names_them() {
+        let mut first = reference("w12", "work_item");
+        first.label = "#12 First task — Active".into();
+        first.url = "https://dev.azure.com/test/Project/_workitems/edit/12".into();
+        first.aliases = vec!["#12".into()];
+        let mut pr = reference("pr7", "pull_request");
+        pr.label = "PR #7 Change (repo)".into();
+        pr.url = "https://dev.azure.com/test/Project/_git/repo/pullrequest/7".into();
+        pr.aliases = vec!["PR #7".into()];
+        let mut unnamed = reference("w123", "work_item");
+        unnamed.label = "#123 Other task — Done".into();
+        unnamed.url = "https://dev.azure.com/test/Project/_workitems/edit/123".into();
+        unnamed.aliases = vec![];
+        let e = Evidence {
+            references: vec![unnamed.clone(), first.clone(), pr.clone()],
+            ..Default::default()
+        };
+        let a = complete_answer(
+            "I merged PR #7, which belongs in #12.",
+            &["w123".into(), "w12".into(), "pr7".into()],
+            &e,
+            "",
+            Language::En,
+        )
+        .unwrap();
+        let sources = a.split_once("**Sources**").unwrap().1;
+        let order: Vec<_> = ["pullrequest/7", "edit/12)", "edit/123"]
+            .iter()
+            .map(|u| sources.find(u).unwrap())
+            .collect();
+        assert!(order[0] < order[1] && order[1] < order[2], "{sources}");
+    }
+
     #[test]
     fn english_answers_get_english_sources_and_attribution() {
         let mut other = reference("p", "wiki");

@@ -167,6 +167,92 @@ fn ids(value: &Value) -> Vec<u64> {
         .collect()
 }
 
+/// Words every repository, pipeline, Git message or activity line shares: they say nothing
+/// about which work item an activity belongs to.
+const COMMON_WORDS: [&str; 44] = [
+    "merge",
+    "merged",
+    "pull",
+    "request",
+    "from",
+    "into",
+    "main",
+    "master",
+    "develop",
+    "feature",
+    "features",
+    "bugfix",
+    "hotfix",
+    "refs",
+    "heads",
+    "release",
+    "releases",
+    "pipeline",
+    "pipelines",
+    "build",
+    "queued",
+    "user",
+    "commit",
+    "commits",
+    "with",
+    "para",
+    "desde",
+    "sobre",
+    "este",
+    "esta",
+    "como",
+    "update",
+    "version",
+    "test",
+    "succeeded",
+    "partiallysucceeded",
+    "failed",
+    "completed",
+    "active",
+    "abandoned",
+    "created",
+    "approved",
+    "stage",
+    "edited",
+];
+/// Distinctive words of a text: accents folded, at least four characters, no numbers.
+fn terms(text: &str) -> BTreeSet<String> {
+    text.to_lowercase()
+        .replace('á', "a")
+        .replace('é', "e")
+        .replace('í', "i")
+        .replace('ó', "o")
+        .replace('ú', "u")
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| {
+            w.chars().count() >= 4
+                && !w.chars().all(|c| c.is_ascii_digit())
+                && !COMMON_WORDS.contains(w)
+        })
+        .map(str::to_owned)
+        .collect()
+}
+/// The user's work items whose titles share the most distinctive words with an activity,
+/// best first (then the most recently changed): where it could be registered.
+fn suggested<'a>(activity: &str, items: &BTreeMap<u64, &'a Value>) -> Vec<&'a Value> {
+    let words = terms(activity);
+    let mut scored: Vec<(usize, &str, &'a Value)> = items
+        .values()
+        .filter_map(|item| {
+            let shared = terms(field(item, "System.Title"))
+                .intersection(&words)
+                .count();
+            (shared > 0).then(|| (shared, field(item, "System.ChangedDate"), *item))
+        })
+        .collect();
+    scored.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.cmp(a.1)));
+    scored
+        .into_iter()
+        .take(3)
+        .map(|(_, _, item)| item)
+        .collect()
+}
+
 /// One activity line, sorted by date, with the references it names.
 struct Line {
     date: String,
@@ -453,6 +539,23 @@ pub(super) fn summarize(
         text.push_str("Without a linked work item (candidates to register):\n");
         for line in unregistered.iter().take(MAX_LINES) {
             text.push_str(&format!("- {}\n", line.text));
+            let fits = suggested(&line.text, &items);
+            if fits.is_empty() {
+                text.push_str("  No work item of the user matches it.\n");
+            } else {
+                for item in &fits {
+                    if let Ok(reference) = item_reference(source, project, item) {
+                        references.push(reference);
+                    }
+                }
+                text.push_str(&format!(
+                    "  Possible work items: {}\n",
+                    fits.iter()
+                        .map(|item| label(item))
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                ));
+            }
         }
         if unregistered.len() > MAX_LINES {
             text.push_str(&format!(
@@ -1239,6 +1342,53 @@ mod tests {
                 .iter()
                 .any(|r| r.url.ends_with("/_workitems/edit/555"))
         );
+    }
+
+    #[test]
+    fn unlinked_activity_suggests_the_work_items_it_could_go_in() {
+        let mut receipt = item(300, &[]);
+        receipt["fields"]["System.Title"] =
+            json!("[ms.payments] Fix the receipt and deploy to TEST");
+        let mut telemetry = item(301, &[]);
+        telemetry["fields"]["System.Title"] = json!("Telemetry for ms.users");
+        let activity = ProjectActivity {
+            project: "Payments".into(),
+            items: vec![receipt, telemetry],
+            pull_requests: vec![PullRequest {
+                repo_id: "repo-9".into(),
+                repo: "acme.ms.payments".into(),
+                id: 90,
+                title: "fix: align the receipt with billing".into(),
+                status: "completed".into(),
+                date: "2026-09-30T12:00:00Z".into(),
+                ..Default::default()
+            }],
+            runs: vec![Run {
+                id: 91,
+                definition: "acme.ms.reports".into(),
+                result: "succeeded".into(),
+                date: "2026-09-29T08:00:00Z".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let (text, references, candidates) = summarize(&source(), &activity).unwrap();
+        assert_eq!(candidates, 2, "{text}");
+        let (unregistered, _) = text.split_once("Registered in work items:").unwrap();
+        let (pr, run) = unregistered.split_once("pipeline run #91").unwrap();
+        assert!(pr.contains("PR #90"));
+        assert!(pr.contains("Possible work items: #300 [ms.payments] Fix the receipt and deploy to TEST — Active"), "{text}");
+        assert!(!pr.contains("#301"), "{text}");
+        assert!(
+            run.contains("No work item of the user matches it."),
+            "{text}"
+        );
+        assert!(
+            references
+                .iter()
+                .any(|r| r.url.ends_with("/_workitems/edit/300"))
+        );
+        assert!(terms("Merge pull request 12 from feature/x into main").is_empty());
     }
 
     #[test]
