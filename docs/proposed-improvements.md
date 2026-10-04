@@ -54,6 +54,10 @@ Proposals that came out of reviewing the whole codebase (2026-10-01, updated 202
 - **Problem:** an activity review still sends dozens of references to the model (about 25 s with Codex).
 - **Proposal:** skip the call when every remaining reference is a registered work item the answer only summarizes, or batch the selection into the answer call.
 
+### P2 — Register unlinked work from the chat
+- **Problem:** an activity review ends asking in which work item to register each piece of work, but the app only reads Azure DevOps; the user links them by hand.
+- **Proposal:** an explicit confirmation step in the personal chat («link PR #12 to #78») with a separate write credential (`vso.work_write`) used only to add artifact links, each write confirmed by the user and recorded in the audit; never from a model decision alone.
+
 ### P2 — Detect a manual answer from the user before sending
 - **Problem:** if the user answers while the proposal is being written, the assistant sends anyway (known limit).
 - **Proposal:** in the re-read before sending, list the chat's later messages and abort if there is a human one from the user.
@@ -96,6 +100,6 @@ Proposals that came out of reviewing the whole codebase (2026-10-01, updated 202
 
 ## 7. Distribution
 
-- **Publishing.** One crate, `personal-teams-assistant` (0.6.1: library, GUI/host and `pta`). The old `personal-teams-desktop` crate is obsolete. Review the package with `cargo package --list` and gitleaks before publishing. Publishing is manual (`cargo publish --locked` from `main`); GitHub Actions is disabled to avoid costs.
+- **Publishing.** One crate, `personal-teams-assistant` (0.6.2: library, GUI/host and `pta`). The old `personal-teams-desktop` crate is obsolete. Review the package with `cargo package --list` and gitleaks before publishing. Publishing is manual (`cargo publish --locked` from `main`); GitHub Actions is disabled to avoid costs.
 - **P2 — Linux with Secret Service** (when D-Bus exists) instead of the file store.
 - **P2 — Working Windows:** build and test the tray, Credential Manager, ACLs and start/stop before announcing it (without CI nobody builds it).

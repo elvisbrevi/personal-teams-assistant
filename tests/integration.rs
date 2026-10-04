@@ -2176,7 +2176,7 @@ impl LlmProvider for ReviewLlm {
             "commit cccccccc",
             "work item #100",
             "edited Wiki page \"Runbook\"",
-            "teams-activity (get_own_teams_messages) could not be read",
+            "Partial coverage: own Teams messages could not be read",
             "Partial coverage",
         ] {
             assert!(
