@@ -1,6 +1,9 @@
 //! Activity review: the user's own Azure DevOps work in a window, split into work that a work
 //! item records and work that none does. Read-only and bounded; reads are separate from the
 //! classification so the rules can be tested without the network.
+use super::link::{
+    LinkOffer, Linkable, Target, build_artifact, commit_artifact, pull_request_artifact,
+};
 use super::{
     COLD_REPO_SECONDS, Catalog, Source, artifact, bounded_lines, cached_read, field,
     item_reference, label, project_url, projects, request, same_user, wiql, work_items,
@@ -75,6 +78,8 @@ pub(super) struct Approval {
 #[derive(Debug, Default)]
 pub(super) struct ProjectActivity {
     pub project: String,
+    /// The project's ID, which work item links to commits and pull requests need.
+    pub project_id: Option<String>,
     pub items: Vec<Value>,
     /// Other work items the activity links or mentions, as read from Azure DevOps: only
     /// these are named by number.
@@ -253,19 +258,30 @@ fn suggested<'a>(activity: &str, items: &BTreeMap<u64, &'a Value>) -> Vec<&'a Va
         .collect()
 }
 
-/// One activity line, sorted by date, with the references it names.
+/// One activity line, sorted by date, with what a work item would link to.
 struct Line {
     date: String,
     text: String,
+    linkable: Linkable,
 }
 
 /// Classify one project's activity. Pure: no network, so the rules are testable.
 pub(super) fn summarize(
     source: &Source,
     activity: &ProjectActivity,
-) -> Result<(String, Vec<Reference>, usize)> {
+) -> Result<(String, Vec<Reference>, usize, LinkOffer)> {
     let project = activity.project.as_str();
     let mut references = Vec::new();
+    let linkable =
+        |label: String, url: &str, date: &str, artifact: Option<(String, &str)>| Linkable {
+            label,
+            url: url.to_owned(),
+            organization: source.organization.clone(),
+            date: day(date).to_owned(),
+            link_name: artifact.as_ref().map(|(_, name)| (*name).to_owned()),
+            artifact: artifact.map(|(uri, _)| uri),
+            ..Default::default()
+        };
     // What the user's work items already link.
     let mut items: BTreeMap<u64, &Value> = BTreeMap::new();
     let mut commits_linked: BTreeMap<String, u64> = BTreeMap::new();
@@ -330,6 +346,15 @@ pub(super) fn summarize(
             None,
             None,
         )?;
+        let pr_link = linkable(
+            reference.label.clone(),
+            &reference.url,
+            &pr.date,
+            activity
+                .project_id
+                .as_ref()
+                .map(|p| (pull_request_artifact(p, &pr.repo_id, pr.id), "Pull Request")),
+        );
         references.push(reference);
         let mut linked_items: Vec<u64> = pr.work_items.clone();
         if let Some(item) = pulls_linked.get(&(pr.repo_id.to_ascii_lowercase(), pr.id)) {
@@ -369,6 +394,7 @@ pub(super) fn summarize(
             unregistered.push(Line {
                 date: pr.date.clone(),
                 text: format!("{} · {what}.", day(&pr.date)),
+                linkable: pr_link,
             });
         } else {
             registered_commits.extend(pr.commits.iter().cloned());
@@ -383,7 +409,7 @@ pub(super) fn summarize(
             continue;
         }
         let short_sha: String = commit.sha.chars().take(8).collect();
-        references.push(artifact(
+        let reference = artifact(
             source,
             project,
             "commit",
@@ -398,7 +424,19 @@ pub(super) fn summarize(
             &[],
             None,
             None,
-        )?);
+        )?;
+        let commit_link = linkable(
+            reference.label.clone(),
+            &reference.url,
+            &commit.date,
+            activity.project_id.as_ref().map(|p| {
+                (
+                    commit_artifact(p, &commit.repo_id, &commit.sha),
+                    "Fixed in Commit",
+                )
+            }),
+        );
+        references.push(reference);
         let mut linked_items = mentions(&commit.message);
         if let Some(item) = commits_linked.get(&commit.sha) {
             linked_items.push(*item);
@@ -412,6 +450,7 @@ pub(super) fn summarize(
             unregistered.push(Line {
                 date: commit.date.clone(),
                 text: format!("{} · {what}.", day(&commit.date)),
+                linkable: commit_link,
             });
         } else {
             registered_commits.insert(commit.sha.clone());
@@ -420,7 +459,7 @@ pub(super) fn summarize(
     }
     let mut registered_runs = BTreeSet::new();
     for run in &activity.runs {
-        references.push(artifact(
+        let reference = artifact(
             source,
             project,
             "pipeline_run",
@@ -431,7 +470,14 @@ pub(super) fn summarize(
             &[("buildId", run.id.to_string())],
             None,
             None,
-        )?);
+        )?;
+        let run_link = linkable(
+            reference.label.clone(),
+            &reference.url,
+            &run.date,
+            Some((build_artifact(run.id), "Build")),
+        );
+        references.push(reference);
         let mut linked_items = run.work_items.clone();
         if let Some(item) = builds_linked.get(&run.id) {
             linked_items.push(*item);
@@ -446,6 +492,7 @@ pub(super) fn summarize(
             unregistered.push(Line {
                 date: run.date.clone(),
                 text: format!("{} · {what}.", day(&run.date)),
+                linkable: run_link,
             });
         } else {
             registered_runs.insert(run.id);
@@ -454,7 +501,7 @@ pub(super) fn summarize(
     }
     let mut registered_releases = BTreeSet::new();
     for release in &activity.releases {
-        references.push(artifact(
+        let reference = artifact(
             source,
             project,
             "release",
@@ -472,7 +519,10 @@ pub(super) fn summarize(
             ],
             None,
             None,
-        )?);
+        )?;
+        // Releases have no work item artifact link of their own: a hyperlink keeps the trace.
+        let release_link = linkable(reference.label.clone(), &reference.url, &release.date, None);
+        references.push(reference);
         let items_of_builds: Vec<u64> = release
             .builds
             .iter()
@@ -489,6 +539,7 @@ pub(super) fn summarize(
             unregistered.push(Line {
                 date: release.date.clone(),
                 text: format!("{} · {what}.", day(&release.date)),
+                linkable: release_link,
             });
         } else {
             registered_releases.insert(release.id);
@@ -499,28 +550,40 @@ pub(super) fn summarize(
         if registered_releases.contains(&approval.release_id) {
             continue;
         }
+        let reference = artifact(
+            source,
+            project,
+            "release",
+            &approval.release_id.to_string(),
+            format!("Release {}", short(&approval.release, 80)),
+            vec![approval.release.clone()],
+            &["_releaseProgress"],
+            &[
+                ("_a", "release-pipeline-progress".into()),
+                ("releaseId", approval.release_id.to_string()),
+            ],
+            None,
+            None,
+        )?;
+        let approval_link = linkable(
+            format!(
+                "Approval of stage {} in release {}",
+                short(&approval.stage, 60),
+                short(&approval.release, 60)
+            ),
+            &reference.url,
+            &approval.date,
+            None,
+        );
         if !activity
             .releases
             .iter()
             .any(|r| r.id == approval.release_id)
         {
-            references.push(artifact(
-                source,
-                project,
-                "release",
-                &approval.release_id.to_string(),
-                format!("Release {}", short(&approval.release, 80)),
-                vec![approval.release.clone()],
-                &["_releaseProgress"],
-                &[
-                    ("_a", "release-pipeline-progress".into()),
-                    ("releaseId", approval.release_id.to_string()),
-                ],
-                None,
-                None,
-            )?);
+            references.push(reference);
         }
         unregistered.push(Line {
+            linkable: approval_link,
             date: approval.date.clone(),
             text: format!(
                 "{} · approved stage \"{}\" of release {}.",
@@ -537,9 +600,10 @@ pub(super) fn summarize(
         text.push_str("Without a linked work item: nothing found.\n");
     } else {
         text.push_str("Without a linked work item (candidates to register):\n");
-        for line in unregistered.iter().take(MAX_LINES) {
+        for line in unregistered.iter_mut().take(MAX_LINES) {
             text.push_str(&format!("- {}\n", line.text));
             let fits = suggested(&line.text, &items);
+            line.linkable.suggested = fits.iter().filter_map(|item| item["id"].as_u64()).collect();
             if fits.is_empty() {
                 text.push_str("  No work item of the user matches it.\n");
             } else {
@@ -635,7 +699,31 @@ pub(super) fn summarize(
             ));
         }
     }
-    Ok((text, references, candidates))
+    // What a confirmed reply in the personal chat may link: the listed unlinked work and the
+    // user's own work items, each with its verified link.
+    let mut offer = LinkOffer {
+        activities: unregistered
+            .into_iter()
+            .take(MAX_LINES)
+            .map(|line| line.linkable)
+            .collect(),
+        ..Default::default()
+    };
+    for item in items.values() {
+        let (Some(id), Ok(reference)) =
+            (item["id"].as_u64(), item_reference(source, project, item))
+        else {
+            continue;
+        };
+        offer.work_items.push(Target {
+            id,
+            title: field(item, "System.Title").chars().take(160).collect(),
+            url: reference.url,
+            organization: source.organization.clone(),
+            project: field(item, "System.TeamProject").to_owned(),
+        });
+    }
+    Ok((text, references, candidates, offer))
 }
 
 async fn commits(
@@ -645,7 +733,7 @@ async fn commits(
     project: &str,
     since: DateTime<Utc>,
     store: &Store,
-) -> Result<(Vec<Commit>, bool)> {
+) -> Result<(Vec<Commit>, bool, Option<String>)> {
     let scope = format!("{}|{}|{project}", source.organization, source.author_email);
     let url = project_url(
         source,
@@ -662,10 +750,15 @@ async fn commits(
     .await?;
     let mut found = Vec::new();
     let mut incomplete = false;
-    for repo in repos["value"]
+    let repos = repos["value"]
         .as_array()
-        .context("invalid ADO repositories")?
-    {
+        .context("invalid ADO repositories")?;
+    let project_id = repos
+        .iter()
+        .find_map(|repo| repo["project"]["id"].as_str())
+        .filter(|id| uuid::Uuid::parse_str(id).is_ok())
+        .map(str::to_ascii_lowercase);
+    for repo in repos {
         // An empty repository has no commits to read (its commits query fails).
         if repo["isDisabled"].as_bool() == Some(true) || repo["size"].as_u64() == Some(0) {
             continue;
@@ -722,7 +815,7 @@ async fn commits(
     }
     found.sort_by(|a, b| b.date.cmp(&a.date));
     found.truncate(60);
-    Ok((found, incomplete))
+    Ok((found, incomplete, project_id))
 }
 
 async fn pull_requests(
@@ -995,7 +1088,7 @@ async fn project_activity(
         .map(|items| items.iter().filter_map(|i| i["id"].as_u64()).collect())
         .unwrap_or_default();
     let mut foreign: BTreeSet<u64> = BTreeSet::new();
-    if let Ok((found, _)) = &commits {
+    if let Ok((found, _, _)) = &commits {
         foreign.extend(found.iter().flat_map(|c| mentions(&c.message)));
     }
     if let Ok(found) = &pull_requests {
@@ -1019,8 +1112,9 @@ async fn project_activity(
         Err(_) => activity.failed.push("work items"),
     }
     match commits {
-        Ok((commits, incomplete)) => {
+        Ok((commits, incomplete, project_id)) => {
             activity.commits = commits;
+            activity.project_id = project_id;
             if incomplete {
                 activity.failed.push("some repositories' commits");
             }
@@ -1090,6 +1184,7 @@ pub async fn review(
     let mut references = Vec::new();
     let mut partial = Vec::new();
     let mut found = Vec::new();
+    let mut offers = Vec::new();
     for (source, activity) in &sections {
         if !activity.failed.is_empty() {
             partial.push(format!(
@@ -1107,9 +1202,10 @@ pub async fn review(
         if empty {
             continue;
         }
-        let (section, refs, candidates) = summarize(source, activity)?;
+        let (section, refs, candidates, offer) = summarize(source, activity)?;
         found.push((candidates, section));
         references.extend(refs);
+        offers.push(offer);
     }
     // Projects with more unregistered work first.
     found.sort_by_key(|(candidates, _)| std::cmp::Reverse(*candidates));
@@ -1131,6 +1227,7 @@ pub async fn review(
         text: bounded_lines(&text, 14_000),
         references,
         partial: !partial.is_empty(),
+        links: Some(LinkOffer::merge(offers)),
         ..Default::default()
     })
 }
@@ -1203,6 +1300,7 @@ mod tests {
     fn work_without_a_linked_item_becomes_a_candidate() {
         let activity = ProjectActivity {
             project: "Payments".into(),
+            project_id: Some("proj-id".into()),
             items: vec![
                 item(100, &["vstfs:///Git/Commit/proj%2Frepo-1%2Faaaaaaaa11"]),
                 item(200, &[]),
@@ -1262,8 +1360,25 @@ mod tests {
             }],
             failed: vec![],
         };
-        let (text, references, candidates) = summarize(&source(), &activity).unwrap();
+        let (text, references, candidates, offer) = summarize(&source(), &activity).unwrap();
         let (unregistered, registered) = text.split_once("Registered in work items:").expect(&text);
+        // Each unlinked piece is offered for linking with the artifact Azure DevOps stores.
+        let artifacts: Vec<_> = offer
+            .activities
+            .iter()
+            .map(|a| (a.artifact.as_deref(), a.link_name.as_deref()))
+            .collect();
+        assert!(artifacts.contains(&(
+            Some("vstfs:///Git/PullRequestId/proj-id%2frepo-1%2f46"),
+            Some("Pull Request")
+        )));
+        assert!(artifacts.contains(&(Some("vstfs:///Build/Build/812"), Some("Build"))));
+        assert!(
+            offer
+                .activities
+                .iter()
+                .all(|a| a.organization == "https://dev.azure.com/example")
+        );
         // Unlinked PR (with its commit folded in), the hotfix, the manual run, the release
         // of that run and the approval.
         assert_eq!(candidates, 5, "{text}");
@@ -1332,7 +1447,7 @@ mod tests {
             }],
             ..Default::default()
         };
-        let (text, references, candidates) = summarize(&source(), &activity).unwrap();
+        let (text, references, candidates, _) = summarize(&source(), &activity).unwrap();
         assert_eq!(candidates, 0, "{text}");
         assert!(text.contains("PR #48 \"Shared fix\" in payments-api (completed): linked to #555 and 1 that could not be verified"), "{text}");
         assert!(text.contains("pipeline run #901 of \"Nightly\", queued by the user: succeeded: linked to 2 work item(s) that could not be verified"), "{text}");
@@ -1372,7 +1487,7 @@ mod tests {
             }],
             ..Default::default()
         };
-        let (text, references, candidates) = summarize(&source(), &activity).unwrap();
+        let (text, references, candidates, _) = summarize(&source(), &activity).unwrap();
         assert_eq!(candidates, 2, "{text}");
         let (unregistered, _) = text.split_once("Registered in work items:").unwrap();
         let (pr, run) = unregistered.split_once("pipeline run #91").unwrap();
@@ -1413,7 +1528,7 @@ mod tests {
             }],
             ..Default::default()
         };
-        let (text, _, candidates) = summarize(&source(), &activity).unwrap();
+        let (text, _, candidates, _) = summarize(&source(), &activity).unwrap();
         assert_eq!(candidates, 0, "{text}");
         assert!(text.contains("Without a linked work item: nothing found."));
         assert!(text.contains("pipeline run #900"));

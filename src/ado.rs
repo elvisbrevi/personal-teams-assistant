@@ -1,4 +1,5 @@
 //! Bounded, read-only evidence from Azure DevOps. The catalog lives in the private knowledge repo.
+pub mod link;
 pub mod review;
 pub mod wiki;
 use crate::evidence::{Block, Evidence, Reference};

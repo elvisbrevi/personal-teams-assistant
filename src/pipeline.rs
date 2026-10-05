@@ -1,5 +1,6 @@
 use crate::{
     adapters::{MessageAdapter, teams::greeting},
+    ado::link::{LinkOffer, LinkPlan, LinkRecord, LinkStatus},
     config::{Config, Language},
     knowledge::{Access, KnowledgeMap},
     llm::{GenerationInput, Intent, LlmProvider},
@@ -58,6 +59,11 @@ impl Pipeline {
         // Notices from an earlier attempt are never sent again.
         let earlier = self.store.audit(resource)?;
         let holding_reply = earlier.as_ref().and_then(|e| e.holding_reply.clone());
+        // Links an earlier attempt already tried are never written again.
+        let earlier_links = earlier
+            .as_ref()
+            .map(|e| e.links.clone())
+            .unwrap_or_default();
         let withheld_notice = earlier.and_then(|e| e.withheld_notice);
         let mut holding = Holding {
             enabled: !self.config.policy.dry_run && !resource.starts_with("simulation:"),
@@ -125,6 +131,27 @@ impl Pipeline {
         };
         // Earlier messages say what a short follow-up refers to («¿y el endpoint de test?»).
         // Read once, when an intent decision or an answer first needs them.
+        // A reply to an activity review in the personal chat may ask to link the work it found
+        // to work items; that conversation is handled before any intent decision.
+        let mut link_plan = None;
+        let link_reply =
+            if own_chat && !resource.starts_with("simulation:") && !self.config.policy.dry_run {
+                self.link_conversation(
+                    resource,
+                    &message,
+                    &current,
+                    &mut audit,
+                    &available,
+                    earlier_links,
+                )
+                .await?
+                .map(|turn| {
+                    link_plan = turn.plan;
+                    turn.reply
+                })
+            } else {
+                None
+            };
         let mut history: Option<String> = None;
         // Sources an activity review may read, already authorized for this conversation.
         let review_sources: Vec<_> = available
@@ -133,7 +160,9 @@ impl Pipeline {
             .filter(|r| matches!(&r.access, Access::Tool { tool } if tool.reviews_activity()))
             .collect();
         let mut review = false;
-        let is_greeting = if greeting(&current) {
+        let is_greeting = if link_reply.is_some() {
+            false
+        } else if greeting(&current) {
             audit.step("intent", "greeting");
             true
         } else if !own_chat && personal_request(&current) {
@@ -210,19 +239,23 @@ impl Pipeline {
         // Without a source that can read activity, a review is answered as a question.
         review &= !review_sources.is_empty();
         audit.intent = Some(
-            if is_greeting {
-                Intent::Greeting
+            if link_reply.is_some() {
+                "link"
+            } else if is_greeting {
+                Intent::Greeting.as_str()
             } else if review {
-                Intent::ActivityReview
+                Intent::ActivityReview.as_str()
             } else {
-                Intent::Question
+                Intent::Question.as_str()
             }
-            .as_str()
             .into(),
         );
         let mut context_question = None;
         let mut context_answer = None;
-        let proposal = if is_greeting {
+        let mut link_offer: Option<LinkOffer> = None;
+        let proposal = if let Some(reply) = link_reply {
+            reply
+        } else if is_greeting {
             audit.reason = "deterministic_greeting".into();
             self.config.policy.greeting.clone()
         } else {
@@ -604,6 +637,10 @@ impl Pipeline {
                 },
             );
             context_answer = Some(generated.answer.clone());
+            if review && let Some(mut offer) = registry.links.clone() {
+                offer.answer = generated.answer.clone();
+                link_offer = Some(offer);
+            }
             audit.partial = registry.partial;
             audit.coverage_warnings = registry.warnings.clone();
             audit.references = registry.references.clone();
@@ -778,6 +815,28 @@ impl Pipeline {
             }
         }
         self.store.record(resource, &audit)?;
+        // A plan is confirmable only once the user has seen it.
+        if audit.status == "sent"
+            && let Some(plan) = link_plan
+        {
+            self.store.save_activity_cache(
+                &format!("link_plan|{}", message.conversation),
+                &serde_json::to_string(&plan)?,
+            )?;
+        }
+        // A review the user saw in the personal chat leaves its unlinked work ready to link.
+        if audit.status == "sent"
+            && own_chat
+            && !resource.starts_with("simulation:")
+            && let Some(offer) = link_offer.filter(|o| !o.activities.is_empty())
+        {
+            self.store.save_activity_cache(
+                &format!("link_offer|{}", message.conversation),
+                &serde_json::to_string(&offer)?,
+            )?;
+            self.store
+                .clear_activity_cache(&format!("link_plan|{}", message.conversation))?;
+        }
         if audit.status == "sent"
             && let Some(question) = context_question
         {
@@ -830,6 +889,7 @@ impl Pipeline {
         }
         results.sort_by_key(|(index, _)| *index);
         let mut unread = Vec::new();
+        let mut offers = Vec::new();
         for (index, read) in results {
             let source = sources[index];
             let what = match &source.access {
@@ -847,6 +907,7 @@ impl Pipeline {
             match read {
                 Some(mut data) => {
                     data.sanitize(&self.redactor);
+                    offers.extend(data.links.take());
                     parts.push((what, data.text.clone()));
                     registry.references.extend(data.references);
                     registry.teams.extend(data.teams);
@@ -897,6 +958,7 @@ impl Pipeline {
         }
         let mut seen = std::collections::BTreeSet::new();
         registry.references.retain(|r| seen.insert(r.id.clone()));
+        registry.links = Some(LinkOffer::merge(offers));
         Ok((evidence, registry))
     }
     /// Await a model call without a deadline. If it is still running when the holding
@@ -1044,6 +1106,243 @@ impl Pipeline {
         }
         lines.join("\n")
     }
+    /// The personal chat's replies to an activity review that ask to link its unlinked work.
+    /// A request becomes a plan the user sees in full; only an explicit confirmation of that
+    /// plan writes, one link at a time, each recorded before its request and never retried.
+    /// Returns `None` when the message is not about linking.
+    async fn link_conversation(
+        &self,
+        resource: &str,
+        message: &crate::adapters::teams::IncomingMessage,
+        current: &str,
+        audit: &mut Audit,
+        available: &[&crate::knowledge::Resource],
+        earlier_links: Vec<LinkRecord>,
+    ) -> Result<Option<LinkTurn>> {
+        let language = self.config.llm.language;
+        let plan_key = format!("link_plan|{}", message.conversation);
+        let offer_key = format!("link_offer|{}", message.conversation);
+        // A retried confirmation reports what the first attempt did and writes nothing.
+        if !earlier_links.is_empty() {
+            audit.links = earlier_links
+                .into_iter()
+                .map(|mut link| {
+                    if link.status == LinkStatus::Sending {
+                        link.status = LinkStatus::Uncertain;
+                    }
+                    link
+                })
+                .collect();
+            audit.reason = "links_applied".into();
+            audit.step("links", "links already attempted; never written again");
+            self.store.clear_activity_cache(&plan_key)?;
+            return Ok(Some(LinkTurn::reply(link_results(&audit.links, language))));
+        }
+        let now = chrono::Utc::now().timestamp();
+        let fresh = |key: &str, seconds: i64| -> Result<Option<String>> {
+            Ok(self
+                .store
+                .activity_cache(key)?
+                .filter(|(_, at)| now - at <= seconds)
+                .map(|(value, _)| value))
+        };
+        if let Some(plan) = fresh(&plan_key, LINK_PLAN_SECONDS)?
+            && let Some(confirmed) = confirmation(current)
+        {
+            self.store.clear_activity_cache(&plan_key)?;
+            if !confirmed {
+                audit.reason = "links_cancelled".into();
+                audit.step("links", "the user cancelled the link plan");
+                return Ok(Some(LinkTurn::reply(match language {
+                    Language::Es => "Listo, no vinculé nada.".into(),
+                    Language::En => "OK, I didn't link anything.".into(),
+                })));
+            }
+            let plan: LinkPlan = serde_json::from_str(&plan)?;
+            self.apply_links(resource, audit, available, &plan).await?;
+            // What was linked leaves the offer; the rest can still be linked.
+            if let Some(offer) = fresh(&offer_key, LINK_OFFER_SECONDS)? {
+                let mut offer: LinkOffer = serde_json::from_str(&offer)?;
+                offer.activities.retain(|a| {
+                    !audit.links.iter().any(|l| {
+                        l.activity_url == a.url
+                            && matches!(l.status, LinkStatus::Linked | LinkStatus::AlreadyLinked)
+                    })
+                });
+                if offer.activities.is_empty() {
+                    self.store.clear_activity_cache(&offer_key)?;
+                } else {
+                    self.store
+                        .save_activity_cache(&offer_key, &serde_json::to_string(&offer)?)?;
+                }
+            }
+            audit.reason = "links_applied".into();
+            return Ok(Some(LinkTurn::reply(link_results(&audit.links, language))));
+        }
+        let Some(offer) = fresh(&offer_key, LINK_OFFER_SECONDS)? else {
+            return Ok(None);
+        };
+        let offer: LinkOffer = serde_json::from_str(&offer)?;
+        // A new review request is answered by a new review, not read as a link request.
+        if offer.activities.is_empty()
+            || activity_review_request(current)
+            || !link_request(current, &offer)
+        {
+            return Ok(None);
+        }
+        let linking: Vec<_> = available
+            .iter()
+            .copied()
+            .filter(|r| matches!(&r.access, Access::Tool { tool } if self.tools.links_work(tool)))
+            .collect();
+        if linking.is_empty() {
+            audit.reason = "links_not_configured".into();
+            audit.step("links", "no authorized source has a write credential");
+            return Ok(Some(LinkTurn::reply(match language {
+                Language::Es => "Para vincular trabajo a una HU necesito una credencial de Azure DevOps con permiso de escritura en Work Items, configurada en la fuente de actividad (`link_secret_ref`). Cuando esté, vuelve a pedírmelo.".into(),
+                Language::En => "To link work to a work item I need an Azure DevOps credential with write access to Work Items, set on the activity source (`link_secret_ref`). Ask me again once it is configured.".into(),
+            })));
+        }
+        audit.provider = Some(self.llm.name().into());
+        let Ok(planned) = self.llm.plan_links(current, &offer).await else {
+            audit.reason = "links_unresolved".into();
+            audit.step("links", "the model could not read the link request");
+            return Ok(Some(LinkTurn::reply(unresolved(language, &[]))));
+        };
+        if planned.is_empty() {
+            audit.step("links", "the message does not ask to link anything");
+            return Ok(None);
+        }
+        // The model only names keys and IDs: every target is read and scoped in code.
+        let named: std::collections::BTreeSet<u64> = current
+            .split(|c: char| !c.is_ascii_digit())
+            .filter_map(|n| n.parse().ok())
+            .collect();
+        let mut targets: BTreeMap<u64, Option<(String, crate::ado::link::Target)>> =
+            BTreeMap::new();
+        let mut rejected = Vec::new();
+        let mut unknown = false;
+        let mut plan = LinkPlan::default();
+        for link in planned {
+            let Some(activity) = offer.activities.iter().find(|a| a.key == link.activity) else {
+                unknown = true;
+                continue;
+            };
+            let id = link.work_item;
+            let offered = offer.work_items.iter().any(|w| w.id == id)
+                || offer.activities.iter().any(|a| a.suggested.contains(&id))
+                || named.contains(&id);
+            if !offered {
+                unknown = true;
+                continue;
+            }
+            if let std::collections::btree_map::Entry::Vacant(entry) = targets.entry(id) {
+                let mut found = None;
+                for source in &linking {
+                    let Access::Tool { tool } = &source.access else {
+                        continue;
+                    };
+                    if let Ok(Some(target)) = self.tools.work_item(tool, id).await {
+                        found = Some((source.id.clone(), target));
+                        break;
+                    }
+                }
+                entry.insert(found);
+            }
+            match &targets[&id] {
+                Some((source, target)) if target.organization == activity.organization => {
+                    let step = crate::ado::link::PlanStep {
+                        source: source.clone(),
+                        activity: activity.clone(),
+                        target: target.clone(),
+                    };
+                    if !plan.links.iter().any(|s| {
+                        s.activity.key == step.activity.key && s.target.id == step.target.id
+                    }) && plan.links.len() < 20
+                    {
+                        plan.links.push(step);
+                    }
+                }
+                _ => {
+                    if !rejected.contains(&id) {
+                        rejected.push(id);
+                    }
+                }
+            }
+        }
+        if plan.links.is_empty() {
+            audit.reason = "links_unresolved".into();
+            audit.step("links", "no requested link could be resolved and verified");
+            return Ok(Some(LinkTurn::reply(unresolved(language, &rejected))));
+        }
+        if unknown {
+            audit.step("links", "some requested links did not match the review");
+        }
+        audit.reason = "links_planned".into();
+        audit.step(
+            "links",
+            format!(
+                "{} link(s) planned; waiting for confirmation",
+                plan.links.len()
+            ),
+        );
+        let reply = planned_reply(&plan, &rejected, language);
+        Ok(Some(LinkTurn {
+            reply,
+            plan: Some(plan),
+        }))
+    }
+    /// Write a confirmed plan, one link at a time. Each link is recorded as `sending` before
+    /// its request and never sent again; a source no longer authorized writes nothing.
+    async fn apply_links(
+        &self,
+        resource: &str,
+        audit: &mut Audit,
+        available: &[&crate::knowledge::Resource],
+        plan: &LinkPlan,
+    ) -> Result<()> {
+        for step in &plan.links {
+            audit.links.push(LinkRecord {
+                activity: step.activity.label.clone(),
+                activity_url: step.activity.url.clone(),
+                work_item: step.target.id,
+                title: step.target.title.clone(),
+                work_item_url: step.target.url.clone(),
+                status: LinkStatus::Sending,
+            });
+            let spec = available.iter().find_map(|r| match &r.access {
+                Access::Tool { tool } if r.id == step.source && self.tools.links_work(tool) => {
+                    Some(tool)
+                }
+                _ => None,
+            });
+            let Some(spec) = spec else {
+                audit.links.last_mut().unwrap().status = LinkStatus::Failed;
+                continue;
+            };
+            self.checkpoint(resource, audit, "linking")?;
+            let status = self
+                .tools
+                .add_link(spec, &step.target, &step.activity)
+                .await
+                .unwrap_or(LinkStatus::Failed);
+            audit.links.last_mut().unwrap().status = status;
+            self.checkpoint(resource, audit, "linking")?;
+        }
+        let linked = audit
+            .links
+            .iter()
+            .filter(|l| matches!(l.status, LinkStatus::Linked | LinkStatus::AlreadyLinked))
+            .count();
+        audit.step(
+            "links",
+            format!(
+                "{linked} of {} confirmed link(s) recorded in Azure DevOps (never retried)",
+                audit.links.len()
+            ),
+        );
+        Ok(())
+    }
     fn checkpoint(&self, resource: &str, audit: &Audit, stage: &str) -> Result<()> {
         let mut saved = audit.clone();
         saved.status = "processing".into();
@@ -1056,6 +1355,194 @@ impl Pipeline {
             && crate::adapters::teams::html(answer).len() <= 27_800
             && self.redactor.clean(answer)
     }
+}
+
+/// A link plan waits this long for its confirmation; a review's offer, for the request.
+const LINK_PLAN_SECONDS: i64 = 900;
+const LINK_OFFER_SECONDS: i64 = 3600;
+
+/// What the link conversation answers, and the plan to keep once the user has seen it.
+struct LinkTurn {
+    reply: String,
+    plan: Option<LinkPlan>,
+}
+impl LinkTurn {
+    fn reply(reply: String) -> Self {
+        Self { reply, plan: None }
+    }
+}
+
+/// A reply made only of confirming (`Some(true)`) or cancelling (`Some(false)`) words.
+fn confirmation(text: &str) -> Option<bool> {
+    const YES: &[&str] = &[
+        "si",
+        "confirmo",
+        "confirmar",
+        "confirma",
+        "confirmado",
+        "confirm",
+        "confirmed",
+        "yes",
+        "ok",
+        "okay",
+        "dale",
+        "hazlo",
+        "adelante",
+        "go",
+        "ahead",
+        "please",
+        "porfa",
+        "por",
+        "favor",
+    ];
+    const NO: &[&str] = &[
+        "no",
+        "cancelar",
+        "cancela",
+        "cancelo",
+        "cancelado",
+        "cancel",
+        "cancelled",
+        "olvidalo",
+        "nada",
+        "mejor",
+        "dont",
+        "don",
+        "t",
+        "stop",
+    ];
+    let phrase = normalized_phrase(text);
+    let words: Vec<&str> = phrase.split_whitespace().collect();
+    if words.is_empty() {
+        return None;
+    }
+    if words.iter().all(|w| YES.contains(w)) {
+        return Some(true);
+    }
+    if words.iter().all(|w| NO.contains(w) || YES.contains(w))
+        && words.iter().any(|w| {
+            [
+                "no", "cancelar", "cancela", "cancelo", "cancel", "olvidalo", "stop",
+            ]
+            .contains(w)
+        })
+    {
+        return Some(false);
+    }
+    None
+}
+/// Asks to register or link work a review listed: a linking verb, an opening «sí», or a
+/// work item number the review offered.
+fn link_request(text: &str, offer: &LinkOffer) -> bool {
+    let phrase = normalized_phrase(text);
+    if [
+        " registr",
+        " vincul",
+        " asoci",
+        " enlaz",
+        " relacion",
+        " link",
+        " attach",
+    ]
+    .iter()
+    .any(|stem| phrase.contains(stem))
+    {
+        return true;
+    }
+    let first = phrase.split_whitespace().next().unwrap_or("");
+    if ["si", "ok", "okay", "yes", "dale", "claro", "bueno", "sure"].contains(&first) {
+        return true;
+    }
+    text.split(|c: char| !c.is_ascii_digit())
+        .filter_map(|n| n.parse::<u64>().ok())
+        .any(|id| {
+            offer.work_items.iter().any(|w| w.id == id)
+                || offer.activities.iter().any(|a| a.suggested.contains(&id))
+        })
+}
+fn planned_reply(plan: &LinkPlan, rejected: &[u64], language: Language) -> String {
+    let mut lines = vec![
+        match language {
+            Language::Es => "Voy a vincular:",
+            Language::En => "I'll link:",
+        }
+        .to_owned(),
+    ];
+    for step in &plan.links {
+        lines.push(format!(
+            "- [{}]({}) → [#{} {}]({})",
+            step.activity.label,
+            step.activity.url,
+            step.target.id,
+            step.target.title,
+            step.target.url
+        ));
+    }
+    if !rejected.is_empty() {
+        let ids = rejected
+            .iter()
+            .map(|id| format!("#{id}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        lines.push(String::new());
+        lines.push(match language {
+            Language::Es => format!("No incluí {ids}: no la encontré en tus proyectos."),
+            Language::En => format!("I left out {ids}: I couldn't find it in your projects."),
+        });
+    }
+    lines.push(String::new());
+    lines.push(
+        match language {
+            Language::Es => "Responde «confirmo» para hacerlo o «cancelar» para descartarlo.",
+            Language::En => "Reply «confirm» to do it or «cancel» to drop it.",
+        }
+        .into(),
+    );
+    lines.join("\n")
+}
+fn link_results(links: &[LinkRecord], language: Language) -> String {
+    let mut lines = vec![
+        match language {
+            Language::Es => "Resultado:",
+            Language::En => "Result:",
+        }
+        .to_owned(),
+    ];
+    for link in links {
+        let status = match (link.status, language) {
+            (LinkStatus::Linked, Language::Es) => "vinculado",
+            (LinkStatus::Linked, Language::En) => "linked",
+            (LinkStatus::AlreadyLinked, Language::Es) => "ya estaba vinculado",
+            (LinkStatus::AlreadyLinked, Language::En) => "already linked",
+            (LinkStatus::Failed, Language::Es) => "no se pudo vincular",
+            (LinkStatus::Failed, Language::En) => "could not be linked",
+            (_, Language::Es) => "resultado incierto; revisa la HU",
+            (_, Language::En) => "uncertain result; check the work item",
+        };
+        lines.push(format!(
+            "- [{}]({}) → [#{} {}]({}): {status}",
+            link.activity, link.activity_url, link.work_item, link.title, link.work_item_url
+        ));
+    }
+    lines.join("\n")
+}
+fn unresolved(language: Language, rejected: &[u64]) -> String {
+    let mut text = match language {
+        Language::Es => "No pude identificar qué vincular. Indícalo así: «la primera en la #1234» o «todas en las sugeridas».".to_owned(),
+        Language::En => "I couldn't tell what to link. Say it like «the first one to #1234» or «all of them to the suggested ones».".to_owned(),
+    };
+    if !rejected.is_empty() {
+        let ids = rejected
+            .iter()
+            .map(|id| format!("#{id}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        text.push_str(&match language {
+            Language::Es => format!(" No encontré {ids} en tus proyectos."),
+            Language::En => format!(" I couldn't find {ids} in your projects."),
+        });
+    }
+    text
 }
 
 /// Plain-language cause of a withheld answer, without its content.
@@ -1464,9 +1951,64 @@ fn status_question(question: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        Language, activity_review_request, documentation_question, holding_reply, personal_request,
-        question_request, shares, status_question, withheld_reason, work_mention,
+        Language, LinkOffer, activity_review_request, confirmation, documentation_question,
+        holding_reply, link_request, personal_request, question_request, shares, status_question,
+        withheld_reason, work_mention,
     };
+
+    #[test]
+    fn only_bare_confirmations_or_cancellations_settle_a_link_plan() {
+        for yes in [
+            "Confirmo",
+            "sí, confirmo",
+            "ok",
+            "Dale!",
+            "yes, confirm",
+            "sí por favor",
+        ] {
+            assert_eq!(confirmation(yes), Some(true), "{yes}");
+        }
+        for no in ["cancelar", "No", "no, cancela", "mejor no", "cancel"] {
+            assert_eq!(confirmation(no), Some(false), "{no}");
+        }
+        for other in [
+            "",
+            "confirmo pero en la #200",
+            "sí, en la #25",
+            "no sé",
+            "¿qué hice ayer?",
+            "nada",
+        ] {
+            assert_eq!(confirmation(other), None, "{other}");
+        }
+    }
+
+    #[test]
+    fn link_requests_name_a_verb_an_opening_yes_or_an_offered_work_item() {
+        let offer = LinkOffer {
+            activities: vec![crate::ado::link::Linkable {
+                suggested: vec![4321],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        for request in [
+            "sí, en la #4321",
+            "Regístralas en las sugeridas",
+            "vincula el PR a la 300",
+            "ok",
+            "la primera en la 4321",
+        ] {
+            assert!(link_request(request, &offer), "{request}");
+        }
+        for other in [
+            "¿y si quiero pagar 2 servicios?",
+            "¿qué pipelines corrieron hoy?",
+            "gracias",
+        ] {
+            assert!(!link_request(other, &offer), "{other}");
+        }
+    }
 
     #[test]
     fn unregistered_work_requests_are_activity_reviews() {

@@ -39,6 +39,25 @@ path = "topics/assistant/operations.md"
 # operation = "get_payment_status"
 # secret_ref = "secret://sqlserver/payments-readonly"
 
+# Azure DevOps activity (status questions and activity reviews). Optional link_secret_ref: a
+# second credential (PAT with Work Items Read & write), only used to link unregistered work to a
+# work item after the user confirms the exact plan in their personal chat. Without it, read-only.
+# [[resources]]
+# id = "azure-devops-status"
+# description = "My Azure DevOps activity: work items, commits, pull requests, pipelines"
+# topics = ["azure devops", "activity"]
+# enabled = false
+# external_processing = false
+# allowed_conversations = []
+# allowed_senders = []
+# kind = "tool"
+# [resources.tool]
+# type = "azure_devops_status"
+# repository = "personal"
+# path = "integrations/azure-devops.toml"
+# secret_ref = "secret://azure-devops/reader"
+# link_secret_ref = "secret://azure-devops/linker"
+
 # Wiki is independent from activity. Start disabled, without audiences/external processing.
 # [[resources]]
 # id = "azure-devops-wikis"
