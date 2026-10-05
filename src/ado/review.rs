@@ -348,7 +348,7 @@ pub(super) fn summarize(
             None,
             None,
         )?;
-        let pr_link = linkable(
+        let mut pr_link = linkable(
             reference.label.clone(),
             &reference.url,
             &pr.date,
@@ -357,6 +357,7 @@ pub(super) fn summarize(
                 .as_ref()
                 .map(|p| (pull_request_artifact(p, &pr.repo_id, pr.id), "Pull Request")),
         );
+        pr_link.short = format!("PR #{}", pr.id);
         references.push(reference);
         let mut linked_items: Vec<u64> = pr.work_items.clone();
         if let Some(item) = pulls_linked.get(&(pr.repo_id.to_ascii_lowercase(), pr.id)) {
@@ -427,7 +428,7 @@ pub(super) fn summarize(
             None,
             None,
         )?;
-        let commit_link = linkable(
+        let mut commit_link = linkable(
             reference.label.clone(),
             &reference.url,
             &commit.date,
@@ -438,6 +439,7 @@ pub(super) fn summarize(
                 )
             }),
         );
+        commit_link.short = format!("commit {}", commit.sha.get(..8).unwrap_or(&commit.sha));
         references.push(reference);
         let mut linked_items = mentions(&commit.message);
         if let Some(item) = commits_linked.get(&commit.sha) {
@@ -473,12 +475,13 @@ pub(super) fn summarize(
             None,
             None,
         )?;
-        let run_link = linkable(
+        let mut run_link = linkable(
             reference.label.clone(),
             &reference.url,
             &run.date,
             Some((build_artifact(run.id), "Build")),
         );
+        run_link.short = format!("run #{}", run.id);
         references.push(reference);
         let mut linked_items = run.work_items.clone();
         if let Some(item) = builds_linked.get(&run.id) {
@@ -523,7 +526,9 @@ pub(super) fn summarize(
             None,
         )?;
         // Releases have no work item artifact link of their own: a hyperlink keeps the trace.
-        let release_link = linkable(reference.label.clone(), &reference.url, &release.date, None);
+        let mut release_link =
+            linkable(reference.label.clone(), &reference.url, &release.date, None);
+        release_link.short = short(&release.name, 60);
         references.push(reference);
         let items_of_builds: Vec<u64> = release
             .builds
@@ -567,7 +572,7 @@ pub(super) fn summarize(
             None,
             None,
         )?;
-        let approval_link = linkable(
+        let mut approval_link = linkable(
             format!(
                 "Approval of stage {} in release {}",
                 short(&approval.stage, 60),
@@ -576,6 +581,11 @@ pub(super) fn summarize(
             &reference.url,
             &approval.date,
             None,
+        );
+        approval_link.short = format!(
+            "{} · {}",
+            short(&approval.release, 60),
+            short(&approval.stage, 60)
         );
         if !activity
             .releases

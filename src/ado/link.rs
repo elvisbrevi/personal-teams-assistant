@@ -18,6 +18,9 @@ pub struct Linkable {
     pub key: String,
     /// Readable label, e.g. «PR #12 Fix the receipt (repo)».
     pub label: String,
+    /// Its identifier as the user knows it, e.g. «PR #12», «run #345», «Release-6».
+    #[serde(default)]
+    pub short: String,
     /// Verified web address of the artifact.
     pub url: String,
     pub organization: String,

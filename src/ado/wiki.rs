@@ -245,6 +245,7 @@ pub fn edits_evidence(
             .iter()
             .map(|e| super::link::Linkable {
                 label: format!("Wiki page «{}»", e.title),
+                short: format!("Wiki «{}»", e.title),
                 url: e.reference.url.clone(),
                 organization: e.reference.organization.clone(),
                 date: e.date.get(..10).unwrap_or(&e.date).to_owned(),

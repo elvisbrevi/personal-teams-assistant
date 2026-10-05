@@ -1,5 +1,9 @@
 const rawInvoke = window.__TAURI__.core.invoke;
 const READS = ['snapshot', 'chat', 'github_repositories', 'self_chat_status', 'llm_providers', 'audit'];
+// Revision of the profile files the last reply saw. The form's own revision (`current.revision`)
+// changes only when it reloads or writes, so saving a stale form fails instead of overwriting
+// changes made elsewhere (e.g. with `pta`).
+let lastRevision = null;
 async function invoke(method, args = {}) {
   let result = await rawInvoke('command', { request: {
     method, args, revision: READS.includes(method) ? null : current?.revision ?? null, contract: 1
@@ -13,7 +17,8 @@ async function invoke(method, args = {}) {
       result = await rawInvoke('command', { request: { method: finish, args: {}, revision: null, contract: 1 } });
     }
   }
-  if (result.revision && current) current.revision = result.revision;
+  if (result.revision) lastRevision = result.revision;
+  if (result.revision && current && !READS.includes(method)) current.revision = result.revision;
   if (!result.ok) throw result.message || result.code;
   return result.data;
 }
@@ -236,6 +241,7 @@ async function refreshLive() {
 
 async function reload() {
   current = await invoke('snapshot');
+  current.revision = lastRevision;
   live = structuredClone(current);
   const config = current.config;
   field('#tenant-id', config.graph.tenant_id); field('#client-id', config.graph.client_id);
