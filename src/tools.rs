@@ -196,6 +196,17 @@ pub trait ReadOnlyTool: Send + Sync {
     ) -> Result<crate::ado::link::LinkStatus> {
         anyhow::bail!("linking unsupported")
     }
+    /// Create one confirmed task under `parent` with the activities linked; returns its ID.
+    /// Like `add_link`, recorded first by the caller and never called twice.
+    async fn create_task(
+        &self,
+        _spec: &ToolSpec,
+        _parent: &crate::ado::link::Target,
+        _task: &crate::ado::link::NewTask,
+        _activities: &[&crate::ado::link::Linkable],
+    ) -> Result<(crate::ado::link::LinkStatus, Option<u64>)> {
+        anyhow::bail!("task creation unsupported")
+    }
 }
 pub struct Tools {
     pub bindings: BTreeMap<String, String>,
@@ -543,6 +554,32 @@ impl ReadOnlyTool for Tools {
         )
         .await
         .unwrap_or(Ok(crate::ado::link::LinkStatus::Uncertain))
+    }
+    async fn create_task(
+        &self,
+        spec: &ToolSpec,
+        parent: &crate::ado::link::Target,
+        task: &crate::ado::link::NewTask,
+        activities: &[&crate::ado::link::Linkable],
+    ) -> Result<(crate::ado::link::LinkStatus, Option<u64>)> {
+        let ToolSpec::AzureDevopsStatus {
+            repository,
+            path,
+            link_secret_ref: Some(link_secret_ref),
+            ..
+        } = spec
+        else {
+            anyhow::bail!("linking is not set up");
+        };
+        let catalog = crate::knowledge::read_repository_file(&self.repositories, repository, path)?;
+        let key = crate::security::resolve(link_secret_ref, &self.bindings)?;
+        // A deadline reached mid-request may or may not have created the task.
+        tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            crate::ado::link::create_task(&self.client, &key, &catalog, parent, task, activities),
+        )
+        .await
+        .unwrap_or(Ok((crate::ado::link::LinkStatus::Uncertain, None)))
     }
 }
 

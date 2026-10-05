@@ -84,6 +84,8 @@ pub(super) struct ProjectActivity {
     /// Other work items the activity links or mentions, as read from Azure DevOps: only
     /// these are named by number.
     pub other_items: Vec<Value>,
+    /// Parents of the user's work items (their HUs), where a new task may be created.
+    pub parents: Vec<Value>,
     pub commits: Vec<Commit>,
     pub pull_requests: Vec<PullRequest>,
     pub runs: Vec<Run>,
@@ -709,20 +711,33 @@ pub(super) fn summarize(
             .collect(),
         ..Default::default()
     };
-    for item in items.values() {
-        let (Some(id), Ok(reference)) =
-            (item["id"].as_u64(), item_reference(source, project, item))
-        else {
+    for item in items.values().copied().chain(activity.parents.iter()) {
+        let Ok(reference) = item_reference(source, project, item) else {
             continue;
         };
-        offer.work_items.push(Target {
-            id,
-            title: field(item, "System.Title").chars().take(160).collect(),
-            url: reference.url,
-            organization: source.organization.clone(),
-            project: field(item, "System.TeamProject").to_owned(),
-        });
+        if let Some(target) = Target::from_item(item, reference.url.clone(), &source.organization)
+            && !offer.work_items.iter().any(|w| w.id == target.id)
+        {
+            offer.work_items.push(target);
+            // Named in a proposal, an HU needs its verified link like any work item.
+            if !references.iter().any(|r: &Reference| r.id == reference.id) {
+                references.push(reference);
+            }
+        }
     }
+    // New tasks take the type of the user's own tasks that already have a parent.
+    let mut kinds: BTreeMap<&str, usize> = BTreeMap::new();
+    for item in items.values() {
+        if !super::relation_ids(item, "System.LinkTypes.Hierarchy-Reverse").is_empty() {
+            *kinds.entry(field(item, "System.WorkItemType")).or_default() += 1;
+        }
+    }
+    offer.task_kind = kinds
+        .into_iter()
+        .filter(|(kind, _)| !kind.is_empty())
+        .max_by_key(|(_, count)| *count)
+        .map(|(kind, _)| kind.to_owned())
+        .unwrap_or_else(|| "Task".into());
     Ok((text, references, candidates, offer))
 }
 
@@ -1107,6 +1122,23 @@ async fn project_activity(
             .await
             .unwrap_or_default();
     }
+    // The HUs the user's work items belong to: where new tasks would go.
+    let parents: BTreeSet<u64> = items
+        .as_ref()
+        .map(|items| {
+            items
+                .iter()
+                .flat_map(|i| super::relation_ids(i, "System.LinkTypes.Hierarchy-Reverse"))
+                .filter(|id| !own.contains(id))
+                .take(40)
+                .collect()
+        })
+        .unwrap_or_default();
+    if !parents.is_empty() {
+        activity.parents = work_items(client, key, source, &activity.project, &parents)
+            .await
+            .unwrap_or_default();
+    }
     match items {
         Ok(items) => activity.items = items,
         Err(_) => activity.failed.push("work items"),
@@ -1298,13 +1330,20 @@ mod tests {
 
     #[test]
     fn work_without_a_linked_item_becomes_a_candidate() {
+        let mut child = item(200, &[]);
+        child["fields"]["System.WorkItemType"] = json!("Tarea");
+        child["relations"] = json!([{"rel":"System.LinkTypes.Hierarchy-Reverse","url":"https://dev.azure.com/example/_apis/wit/workItems/50"}]);
+        let mut story = item(50, &[]);
+        story["fields"]["System.WorkItemType"] = json!("User Story");
+        story["fields"]["System.Title"] = json!("Payments story");
         let activity = ProjectActivity {
             project: "Payments".into(),
             project_id: Some("proj-id".into()),
             items: vec![
                 item(100, &["vstfs:///Git/Commit/proj%2Frepo-1%2Faaaaaaaa11"]),
-                item(200, &[]),
+                child,
             ],
+            parents: vec![story],
             commits: vec![
                 commit("aaaaaaaa11", "Linked from the work item"),
                 commit("bbbbbbbb22", "Mentions AB#200 in the message"),
@@ -1378,6 +1417,26 @@ mod tests {
                 .activities
                 .iter()
                 .all(|a| a.organization == "https://dev.azure.com/example")
+        );
+        // The HU of the user's tasks is offered as a parent for new tasks of their type, with
+        // its verified link.
+        let story = offer.work_items.iter().find(|w| w.id == 50).unwrap();
+        assert!(story.holds_tasks());
+        assert_eq!(story.kind, "User Story");
+        assert_eq!(offer.task_kind, "Tarea");
+        assert_eq!(
+            offer
+                .work_items
+                .iter()
+                .find(|w| w.id == 200)
+                .unwrap()
+                .parent,
+            Some(50)
+        );
+        assert!(
+            references
+                .iter()
+                .any(|r| r.kind == "work_item" && r.url.ends_with("/_workitems/edit/50"))
         );
         // Unlinked PR (with its commit folded in), the hotfix, the manual run, the release
         // of that run and the approval.

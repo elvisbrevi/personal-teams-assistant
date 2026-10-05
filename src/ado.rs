@@ -235,7 +235,7 @@ async fn work_items(
         .cloned()
         .collect())
 }
-fn field<'a>(item: &'a Value, name: &str) -> &'a str {
+pub(crate) fn field<'a>(item: &'a Value, name: &str) -> &'a str {
     item["fields"][name].as_str().unwrap_or("")
 }
 fn identity(item: &Value, name: &str) -> String {
@@ -249,7 +249,7 @@ fn belongs_to_user(item: &Value, email: &str) -> bool {
     let email = email.to_ascii_lowercase();
     identity(item, "System.AssignedTo") == email || identity(item, "System.ChangedBy") == email
 }
-fn relation_ids(item: &Value, relation: &str) -> Vec<u64> {
+pub(crate) fn relation_ids(item: &Value, relation: &str) -> Vec<u64> {
     item["relations"]
         .as_array()
         .into_iter()
