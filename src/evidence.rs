@@ -70,6 +70,7 @@ impl Evidence {
         if let Some(offer) = &mut self.links {
             for activity in &mut offer.activities {
                 activity.label = redactor.redact(&activity.label);
+                activity.short = redactor.redact(&activity.short);
             }
             for item in &mut offer.work_items {
                 item.title = redactor.redact(&item.title);

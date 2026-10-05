@@ -2480,6 +2480,14 @@ impl ReadOnlyTool for LinkTools {
         assert!(matches!(spec, ToolSpec::AzureDevopsStatus { .. }));
         let linkable = |label: &str, url: &str, artifact: &str, name: &str| Linkable {
             label: label.into(),
+            short: label
+                .split(" Retry")
+                .next()
+                .unwrap()
+                .split(" in ")
+                .next()
+                .unwrap()
+                .into(),
             url: url.into(),
             organization: "https://dev.azure.com/example".into(),
             date: "2026-09-30".into(),
@@ -2494,11 +2502,22 @@ impl ReadOnlyTool for LinkTools {
                 review_reference("pull_request:46", "pull_request", "PR #46 Retry timeouts (payments-api)", "https://dev.azure.com/example/Payments/_git/payments-api/pullrequest/46", &["PR #46"]),
                 review_reference("commit:cccccccc33", "commit", "Commit cccccccc in payments-api", "https://dev.azure.com/example/Payments/_git/payments-api/commit/cccccccc33", &["cccccccc"]),
                 review_reference("work_item:100", "work_item", "#100 Payment timeouts", "https://dev.azure.com/example/Payments/_workitems/edit/100", &["#100"]),
+                review_reference("release:7", "release", "Release DESA-20260921-1", "https://dev.azure.com/example/Payments/_releaseProgress?_a=release-pipeline-progress&releaseId=7", &[]),
             ],
             links: Some(LinkOffer {
                 activities: vec![
                     linkable("PR #46 Retry timeouts (payments-api)", "https://dev.azure.com/example/Payments/_git/payments-api/pullrequest/46", "vstfs:///Git/PullRequestId/p%2fr%2f46", "Pull Request"),
                     linkable("Commit cccccccc in payments-api", "https://dev.azure.com/example/Payments/_git/payments-api/commit/cccccccc33", "vstfs:///Git/Commit/p%2fr%2fcccccccc33", "Fixed in Commit"),
+                    // A release named like a RUT: redacted, so shown only by its date.
+                    Linkable {
+                        label: "Release DESA-20260921-1".into(),
+                        short: "DESA-20260921-1".into(),
+                        url: "https://dev.azure.com/example/Payments/_releaseProgress?_a=release-pipeline-progress&releaseId=7".into(),
+                        organization: "https://dev.azure.com/example".into(),
+                        date: "2026-09-21".into(),
+                        suggested: vec![100],
+                        ..Default::default()
+                    },
                 ],
                 work_items: vec![link_target(100, "Payment timeouts"), story()],
                 task_kind: "Task".into(),
@@ -2578,7 +2597,7 @@ impl LlmProvider for LinkLlm {
     ) -> Result<Vec<personal_teams_assistant::ado::link::Proposal>> {
         use personal_teams_assistant::ado::link::{Proposal, ProposalAction};
         anyhow::ensure!(self.propose, "no proposal");
-        assert_eq!(offer.activities.len(), 2);
+        assert_eq!(offer.activities.len(), 3);
         let proposal = |activity: &str, action, work_item, parent, title: Option<&str>| Proposal {
             activity: activity.into(),
             action,
@@ -2589,6 +2608,7 @@ impl LlmProvider for LinkLlm {
         };
         Ok(vec![
             proposal("a1", ProposalAction::Link, Some(100), None, None),
+            proposal("a3", ProposalAction::Link, Some(100), None, None),
             proposal(
                 "a2",
                 ProposalAction::Create,
@@ -2726,7 +2746,7 @@ async fn unlinked_work_is_linked_only_after_the_user_confirms_the_exact_plan() {
     let plan = last_sent();
     assert_eq!(
         plan,
-        "Voy a vincular:\n- [PR #46 Retry timeouts (payments-api)](https://dev.azure.com/example/Payments/_git/payments-api/pullrequest/46) → [#200 Login](https://dev.azure.com/example/Payments/_workitems/edit/200)\n\nNo incluí #999: no la encontré en tus proyectos.\n\nResponde «confirmo» para hacerlo o «cancelar» para descartarlo."
+        "Voy a vincular:\n- [PR #46](https://dev.azure.com/example/Payments/_git/payments-api/pullrequest/46) → [#200 Login](https://dev.azure.com/example/Payments/_workitems/edit/200)\n\nNo incluí #999: no la encontré en tus proyectos.\n\nResponde «confirmo» para hacerlo o «cancelar» para descartarlo."
     );
     assert!(tools.writes.lock().unwrap().is_empty());
 
@@ -2745,7 +2765,7 @@ async fn unlinked_work_is_linked_only_after_the_user_confirms_the_exact_plan() {
         audit.links[0].status,
         personal_teams_assistant::ado::link::LinkStatus::Linked
     );
-    assert!(last_sent().starts_with("Resultado:\n- [PR #46"));
+    assert!(last_sent().starts_with("Resultado:\n- [PR #46]"));
     assert!(last_sent().ends_with(
         "[#200 Login](https://dev.azure.com/example/Payments/_workitems/edit/200): vinculado"
     ));
@@ -2791,7 +2811,7 @@ async fn unlinked_work_is_linked_only_after_the_user_confirms_the_exact_plan() {
     // The linked PR left the offer; the commit can still be planned, and cancelled.
     let (_, audit) = say(&pipeline, "registra el commit en la sugerida").await;
     assert_eq!(audit.reason, "links_planned");
-    assert!(last_sent().contains("[Commit cccccccc in payments-api]"));
+    assert!(last_sent().contains("[Commit cccccccc]"));
     assert!(last_sent().contains("→ [#100 Payment timeouts]"));
     let (_, audit) = say(&pipeline, "no, cancelar").await;
     assert_eq!(audit.reason, "links_cancelled");
@@ -2850,9 +2870,12 @@ async fn a_review_proposes_where_to_register_each_piece_and_applies_it_on_confir
         tools: tools.clone(),
         redactor: redactor(),
     };
-    for (index, text) in ["¿Qué trabajo hice que no está registrado?", "confirmo"]
-        .into_iter()
-        .enumerate()
+    for (index, text) in [
+        "¿Qué trabajo hice que no está registrado?",
+        "Sí, regístralas",
+    ]
+    .into_iter()
+    .enumerate()
     {
         let resource = format!("chats/48:notes/messages/{index}");
         teams
@@ -2868,16 +2891,15 @@ async fn a_review_proposes_where_to_register_each_piece_and_applies_it_on_confir
         if index == 0 {
             // The activities, then where each goes and why, then one confirmation question.
             let (_, proposal) = sent.split_once("**Propuesta de registro**\n").expect(&sent);
-            assert!(proposal.starts_with("- PR #46 Retry timeouts (payments-api) → vincular a [#100 Payment timeouts](https://dev.azure.com/example/Payments/_workitems/edit/100): Mismo componente de pagos.\n- Commit cccccccc in payments-api → crear la tarea «Corregir el reporte de pagos» en [#50 Payments reliability](https://dev.azure.com/example/Payments/_workitems/edit/50): Mismo componente de pagos.\n\n¿Confirmas?"), "{sent}");
-            assert!(
-                !sent.contains("¿Quieres que los registre?")
-                    || sent.find("¿Quieres").unwrap() < sent.find("**Propuesta").unwrap()
-            );
+            assert!(proposal.starts_with("- [PR #46](https://dev.azure.com/example/Payments/_git/payments-api/pullrequest/46), [actividad del 2026-09-21](https://dev.azure.com/example/Payments/_releaseProgress?_a=release-pipeline-progress&releaseId=7) → vincular a [#100 Payment timeouts](https://dev.azure.com/example/Payments/_workitems/edit/100): Mismo componente de pagos.\n- [Commit cccccccc](https://dev.azure.com/example/Payments/_git/payments-api/commit/cccccccc33) → crear la tarea «Corregir el reporte de pagos» en [#50 Payments reliability](https://dev.azure.com/example/Payments/_workitems/edit/50): Mismo componente de pagos.\n\n¿Quieres que las registre?"), "{sent}");
+            assert!(sent.find("**Propuesta").unwrap() < sent.find("**Fuentes**").unwrap());
+            // One activity named like a RUT never withholds the answer.
+            assert!(!sent.contains("REDACTED"), "{sent}");
             assert!(sent.contains("](https://dev.azure.com/example/Payments/_workitems/edit/50)"));
             assert!(audit.trace.iter().any(|s| {
                 s.step == "proposal"
                     && s.detail
-                        .starts_with("2 registration(s) proposed; 3 dropped")
+                        .starts_with("3 registration(s) proposed; 3 dropped")
             }));
             assert!(tools.writes.lock().unwrap().is_empty());
             assert!(tools.created.lock().unwrap().is_empty());
@@ -2885,17 +2907,20 @@ async fn a_review_proposes_where_to_register_each_piece_and_applies_it_on_confir
             assert_eq!(audit.reason, "links_applied");
             assert_eq!(
                 *tools.writes.lock().unwrap(),
-                vec![(
-                    100,
-                    "https://dev.azure.com/example/Payments/_git/payments-api/pullrequest/46"
-                        .to_owned()
-                )]
+                vec![
+                    (
+                        100,
+                        "https://dev.azure.com/example/Payments/_git/payments-api/pullrequest/46"
+                            .to_owned()
+                    ),
+                    (100, "https://dev.azure.com/example/Payments/_releaseProgress?_a=release-pipeline-progress&releaseId=7".to_owned()),
+                ]
             );
             assert_eq!(
                 *tools.created.lock().unwrap(),
                 vec![(50, "Corregir el reporte de pagos".to_owned(), vec!["https://dev.azure.com/example/Payments/_git/payments-api/commit/cccccccc33".to_owned()])]
             );
-            assert_eq!(audit.links[1].created, Some(900));
+            assert_eq!(audit.links[2].created, Some(900));
             assert!(sent.contains("→ nueva tarea #900 «Corregir el reporte de pagos» en [#50 Payments reliability]"), "{sent}");
         }
     }

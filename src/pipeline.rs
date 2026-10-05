@@ -613,7 +613,7 @@ impl Pipeline {
                 && available.iter().any(
                     |r| matches!(&r.access, Access::Tool { tool } if self.tools.links_work(tool)),
                 );
-            let mut generated = self
+            let generated = self
                 .awaiting_model(
                     &mut holding,
                     resource,
@@ -654,13 +654,16 @@ impl Pipeline {
                 .links
                 .as_ref()
                 .is_some_and(|o| !o.activities.is_empty());
+            // Built by code from verified data, the section goes in after the citation checks.
+            let mut registration: Option<String> = None;
             if proposing && unlinked {
                 let offer = registry.links.clone().unwrap_or_default();
                 let proposal = self
                     .propose(&offer, &available, &mut audit, &mut registry)
                     .await;
                 let language = self.config.llm.language;
-                let section = match proposal {
+                // A section the sensitive-data check would reject is dropped, never the answer.
+                let section = match proposal.filter(|(text, _)| self.redactor.clean(text)) {
                     Some((text, plan)) => {
                         link_plan = Some(plan);
                         text
@@ -670,11 +673,14 @@ impl Pipeline {
                         Language::En => "Which work item should each one be registered in?".into(),
                     },
                 };
-                generated.answer = format!("{}\n\n{section}", generated.answer.trim_end());
+                registration = Some(section);
             }
             context_answer = Some(generated.answer.clone());
             if review && let Some(mut offer) = registry.links.clone() {
-                offer.answer = generated.answer.clone();
+                offer.answer = match &registration {
+                    Some(section) => format!("{}\n\n{section}", generated.answer.trim_end()),
+                    None => generated.answer.clone(),
+                };
                 link_offer = Some(offer);
             }
             audit.partial = registry.partial;
@@ -772,6 +778,10 @@ impl Pipeline {
                     .await;
             } else {
                 generated.answer
+            };
+            let answer = match &registration {
+                Some(section) => with_registration(&answer, section),
+                None => answer,
             };
             audit.proposed = Some(self.redactor.redact(&answer));
             if !self.valid_answer(&answer) {
@@ -1289,7 +1299,7 @@ impl Pipeline {
                 Some((source, target)) if target.organization == activity.organization => {
                     let step = crate::ado::link::PlanStep {
                         source: source.clone(),
-                        activity: activity.clone(),
+                        activity: self.shown(activity),
                         target: target.clone(),
                         create: None,
                         reason: String::new(),
@@ -1359,7 +1369,11 @@ impl Pipeline {
             let first = audit.links.len();
             for step in &group {
                 audit.links.push(LinkRecord {
-                    activity: step.activity.label.clone(),
+                    activity: if step.activity.short.is_empty() {
+                        step.activity.label.clone()
+                    } else {
+                        step.activity.short.clone()
+                    },
                     activity_url: step.activity.url.clone(),
                     work_item: step.target.id,
                     title: step.target.title.clone(),
@@ -1530,7 +1544,7 @@ impl Pipeline {
                 .collect();
             plan.links.push(crate::ado::link::PlanStep {
                 source,
-                activity: activity.clone(),
+                activity: self.shown(activity),
                 target,
                 create,
                 reason: if self.redactor.clean(&reason) {
@@ -1573,6 +1587,20 @@ impl Pipeline {
             }
         }
         Some((proposal_text(&plan, self.config.llm.language), plan))
+    }
+    /// An activity as shown to the user: its short identifier, or its label, or only its
+    /// date when the text would trip the sensitive-data check (a release named like a RUT).
+    fn shown(&self, activity: &crate::ado::link::Linkable) -> crate::ado::link::Linkable {
+        let mut shown = activity.clone();
+        shown.short = [&activity.short, &activity.label]
+            .into_iter()
+            .find(|t| !t.is_empty() && self.redactor.clean(t))
+            .cloned()
+            .unwrap_or_else(|| match self.config.llm.language {
+                Language::Es => format!("actividad del {}", activity.date),
+                Language::En => format!("activity on {}", activity.date),
+            });
+        shown
     }
     fn checkpoint(&self, resource: &str, audit: &Audit, stage: &str) -> Result<()> {
         let mut saved = audit.clone();
@@ -1625,6 +1653,26 @@ fn confirmation(text: &str) -> Option<bool> {
         "porfa",
         "por",
         "favor",
+        "registralas",
+        "registralos",
+        "registrala",
+        "registralo",
+        "todas",
+        "todos",
+        "todo",
+        "asi",
+        "register",
+        "them",
+        "it",
+        "all",
+        "quiero",
+        "claro",
+        "perfecto",
+        "listo",
+        "procede",
+        "bueno",
+        "sure",
+        "do",
     ];
     const NO: &[&str] = &[
         "no",
@@ -1705,7 +1753,7 @@ fn planned_reply(plan: &LinkPlan, rejected: &[u64], language: Language) -> Strin
     for step in &plan.links {
         lines.push(format!(
             "- [{}]({}) → [#{} {}]({})",
-            step.activity.label,
+            step.activity.short,
             step.activity.url,
             step.target.id,
             step.target.title,
@@ -1782,18 +1830,37 @@ fn link_results(links: &[LinkRecord], language: Language) -> String {
     }
     lines.join("\n")
 }
+/// Put the registration section after the review's body and before its sources section.
+fn with_registration(answer: &str, section: &str) -> String {
+    let start = [
+        "\n\n**Fuentes**",
+        "\n\n**Sources**",
+        "\n\n**Páginas consultadas**",
+        "\n\n**Pages consulted**",
+    ]
+    .iter()
+    .filter_map(|header| answer.find(header))
+    .min()
+    .unwrap_or(answer.len());
+    format!(
+        "{}\n\n{section}{}",
+        answer[..start].trim_end(),
+        &answer[start..]
+    )
+}
 /// The section that ends a review: where each piece of work would be registered and why,
 /// grouped by destination, and the request to confirm.
 fn proposal_text(plan: &LinkPlan, language: Language) -> String {
-    let mut groups: Vec<(&crate::ado::link::PlanStep, Vec<&str>)> = Vec::new();
+    let mut groups: Vec<(&crate::ado::link::PlanStep, Vec<String>)> = Vec::new();
     for step in &plan.links {
         let same = groups.iter().position(|(g, _)| {
             g.target.id == step.target.id
                 && g.create.as_ref().map(|t| &t.title) == step.create.as_ref().map(|t| &t.title)
         });
+        let activity = format!("[{}]({})", step.activity.short, step.activity.url);
         match same {
-            Some(index) => groups[index].1.push(&step.activity.label),
-            None => groups.push((step, vec![&step.activity.label])),
+            Some(index) => groups[index].1.push(activity),
+            None => groups.push((step, vec![activity])),
         }
     }
     let mut lines = vec![
@@ -1819,13 +1886,13 @@ fn proposal_text(plan: &LinkPlan, language: Language) -> String {
         } else {
             format!(": {}", step.reason)
         };
-        lines.push(format!("- {} → {place}{reason}", activities.join("; ")));
+        lines.push(format!("- {} → {place}{reason}", activities.join(", ")));
     }
     lines.push(String::new());
     lines.push(
         match language {
-            Language::Es => "¿Confirmas? Responde «confirmo» para registrarlo todo, «cancelar» para descartarlo o dime qué cambiar.",
-            Language::En => "Do you confirm? Reply «confirm» to register it all, «cancel» to drop it, or tell me what to change.",
+            Language::Es => "¿Quieres que las registre? Responde «sí» para registrarlas así, «cancelar» para descartarlo o dime qué cambiar.",
+            Language::En => "Do you want me to register them? Reply «yes» to register them like this, «cancel» to drop it, or tell me what to change.",
         }
         .into(),
     );
@@ -2258,8 +2325,24 @@ mod tests {
     use super::{
         Language, LinkOffer, activity_review_request, confirmation, documentation_question,
         holding_reply, link_request, personal_request, question_request, shares, status_question,
-        withheld_reason, work_mention,
+        with_registration, withheld_reason, work_mention,
     };
+
+    #[test]
+    fn the_registration_goes_before_the_sources_and_keeps_links_with_parentheses() {
+        let section = "**Propuesta de registro**\n- [PR #1](https://dev.azure.com/o/Red%20(RPF)/_git/r/pullrequest/1) → vincular a [#2 HU](https://dev.azure.com/o/Red%20(RPF)/_workitems/edit/2): razón\n\n¿Quieres que las registre?";
+        let answer = with_registration("Cuerpo.\n\n**Fuentes**\n- [PR #1](https://x)", section);
+        assert_eq!(
+            answer,
+            format!("Cuerpo.\n\n{section}\n\n**Fuentes**\n- [PR #1](https://x)")
+        );
+        assert_eq!(with_registration("Cuerpo.", "S"), "Cuerpo.\n\nS");
+        let html = crate::adapters::teams::html(section);
+        assert!(
+            html.contains("href=\"https://dev.azure.com/o/Red%20(RPF)/_workitems/edit/2\""),
+            "{html}"
+        );
+    }
 
     #[test]
     fn only_bare_confirmations_or_cancellations_settle_a_link_plan() {
