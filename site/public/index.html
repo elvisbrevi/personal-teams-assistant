@@ -89,7 +89,7 @@
         <div class="features">
           <article><h3>Your own identity</h3><p>It replies as you, not as a bot. A public Entra client with PKCE and only <code>User.Read</code>, <code>Chat.Read</code>, <code>ChatMessage.Send</code> and <code>offline_access</code>.</p></article>
           <article><h3>Sources with audiences</h3><p>Every source starts disabled, with no audiences and no external processing. You decide which conversation can use what. Answers link the Wiki pages, work items and pipelines they cite.</p></article>
-          <article><h3>Work you didn't log</h3><p>Ask what you did in the last two weeks that no task records. It compares your commits, pull requests, pipeline runs, releases, Wiki edits and Teams messages with your work items and proposes the missing tasks, each with its date and a verified link.</p></article>
+          <article><h3>Work you didn't log</h3><p>Ask what you did in the last two weeks that no task records. It compares your commits, pull requests, pipeline runs, releases, Wiki edits and Teams messages with your work items, lists what is missing with verified links and proposes where each piece goes: an existing work item, or a new task in the right user story, with the reason. Say yes in your chat with yourself and it registers them.</p></article>
           <article><h3>Observation mode</h3><p>Start with drafts that are never sent. Review them in the app and turn on sending once you trust them.</p></article>
           <article><h3>Every message, explained</h3><p>What it decided, how it read the question, which model answered, what failed first and a log of every step, in the Messages tab or with <code>pta audit</code>.</p></article>
           <article><h3>App, CLI and agents</h3><p>A tray app, the <code>pta</code> CLI with stable JSON output and a built-in skill so your coding agent can operate it.</p></article>
@@ -118,6 +118,7 @@
           <li><strong>Models without tools.</strong> The Codex and Claude CLIs run without a shell, files, web access or subagents, in an empty directory and without your credentials.</li>
           <li><strong>Redaction before the model.</strong> Secrets, tokens, emails, phone numbers, Chilean RUTs and your own patterns are masked in the evidence and in the audit log.</li>
           <li><strong>One send, never two.</strong> Graph offers no idempotency, so a doubtful send is marked “uncertain” for you to review.</li>
+          <li><strong>Writes only on your yes.</strong> Linking your work to a work item or creating a task needs its own Azure DevOps credential and your confirmation of the exact plan; each write is logged before it is sent and never retried.</li>
         </ul>
       </div>
     </section>
