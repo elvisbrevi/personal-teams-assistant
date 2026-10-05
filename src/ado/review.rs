@@ -735,16 +735,20 @@ pub(super) fn summarize(
             }
         }
     }
-    // New tasks take the type of the user's own tasks that already have a parent.
+    // New tasks take the task type the user's own tasks use (`Task` or `Tarea`); never an
+    // HU or feature type, even when the user owns more of those.
     let mut kinds: BTreeMap<&str, usize> = BTreeMap::new();
     for item in items.values() {
-        if !super::relation_ids(item, "System.LinkTypes.Hierarchy-Reverse").is_empty() {
-            *kinds.entry(field(item, "System.WorkItemType")).or_default() += 1;
+        let kind = field(item, "System.WorkItemType");
+        if super::link::TASK_KINDS
+            .iter()
+            .any(|k| kind.eq_ignore_ascii_case(k))
+        {
+            *kinds.entry(kind).or_default() += 1;
         }
     }
     offer.task_kind = kinds
         .into_iter()
-        .filter(|(kind, _)| !kind.is_empty())
         .max_by_key(|(_, count)| *count)
         .map(|(kind, _)| kind.to_owned())
         .unwrap_or_else(|| "Task".into());
@@ -1340,6 +1344,13 @@ mod tests {
 
     #[test]
     fn work_without_a_linked_item_becomes_a_candidate() {
+        // The user owns more backlog items (under features) than tasks: new tasks are still
+        // tasks.
+        let mut backlog = item(300, &[]);
+        backlog["fields"]["System.WorkItemType"] = json!("Product Backlog Item");
+        backlog["relations"] = json!([{"rel":"System.LinkTypes.Hierarchy-Reverse","url":"https://dev.azure.com/example/_apis/wit/workItems/60"}]);
+        let mut backlog2 = backlog.clone();
+        backlog2["id"] = json!(301);
         let mut child = item(200, &[]);
         child["fields"]["System.WorkItemType"] = json!("Tarea");
         child["relations"] = json!([{"rel":"System.LinkTypes.Hierarchy-Reverse","url":"https://dev.azure.com/example/_apis/wit/workItems/50"}]);
@@ -1352,6 +1363,8 @@ mod tests {
             items: vec![
                 item(100, &["vstfs:///Git/Commit/proj%2Frepo-1%2Faaaaaaaa11"]),
                 child,
+                backlog,
+                backlog2,
             ],
             parents: vec![story],
             commits: vec![

@@ -55,9 +55,24 @@ pub struct Target {
     pub iteration: String,
 }
 impl Target {
-    /// Task-like items hold work; anything else (an HU, a feature) may get a new task.
+    /// Only an open HU (a user story or backlog item) may get a new task: not a task, a
+    /// feature or an epic, and not one that is done, closed, aborted or removed.
     pub fn holds_tasks(&self) -> bool {
-        !TASK_KINDS.iter().any(|k| self.kind.eq_ignore_ascii_case(k))
+        let kind = self.kind.to_lowercase();
+        let story = STORY_KINDS.iter().any(|k| kind == *k)
+            || [
+                "story",
+                "historia",
+                "backlog item",
+                "requirement",
+                "requisito",
+            ]
+            .iter()
+            .any(|k| kind.contains(k));
+        let closed = CLOSED_STATES
+            .iter()
+            .any(|s| self.state.eq_ignore_ascii_case(s));
+        story && !closed
     }
     pub fn from_item(item: &Value, url: String, organization: &str) -> Option<Self> {
         Some(Self {
@@ -79,7 +94,32 @@ impl Target {
         })
     }
 }
-pub const TASK_KINDS: &[&str] = &["Task", "Tarea", "Bug", "Issue", "Impediment"];
+/// Work item types a new task is created as, by the user's own usage; `Task` by default.
+pub const TASK_KINDS: &[&str] = &["Task", "Tarea"];
+const STORY_KINDS: &[&str] = &["hu", "user story", "product backlog item", "pbi"];
+const CLOSED_STATES: &[&str] = &[
+    "Done",
+    "Closed",
+    "Removed",
+    "Resolved",
+    "Cut",
+    "Rejected",
+    "Completed",
+    "Cerrado",
+    "Cerrada",
+    "Terminado",
+    "Terminada",
+    "Hecho",
+    "Removido",
+    "Removida",
+    "Eliminado",
+    "Abortado",
+    "Abortada",
+    "Cancelado",
+    "Cancelada",
+    "Rechazado",
+    "Rechazada",
+];
 /// What a review leaves ready to link in the personal chat: the answer the user saw, the
 /// unlinked activity and the user's work items.
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
@@ -454,9 +494,26 @@ mod tests {
             ..Default::default()
         };
         assert!(parent.holds_tasks());
+        // Not a task, a feature or an HU that is closed or aborted.
+        for (kind, state) in [
+            ("task", "Active"),
+            ("Feature", "New"),
+            ("Epic", "New"),
+            ("Product Backlog Item", "Abortada"),
+            ("User Story", "Done"),
+            ("Product Backlog Item", "Removed"),
+        ] {
+            let item = Target {
+                kind: kind.into(),
+                state: state.into(),
+                ..Default::default()
+            };
+            assert!(!item.holds_tasks(), "{kind} {state}");
+        }
         assert!(
-            !Target {
-                kind: "task".into(),
+            Target {
+                kind: "Product Backlog Item".into(),
+                state: "Committed".into(),
                 ..Default::default()
             }
             .holds_tasks()
