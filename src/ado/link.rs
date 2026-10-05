@@ -1,0 +1,283 @@
+//! Registering unlinked work: one link from one of the user's work items to an artifact an
+//! activity review found. It is the only Azure DevOps write the app makes, with its own
+//! credential, and only after the user confirms the exact plan in their personal chat. Every
+//! target and artifact comes from data the app read and verified, never from model text.
+use super::{Catalog, item_reference, project_url, request};
+use anyhow::{Context, Result, ensure};
+use reqwest::{Client, Method};
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+
+/// Work a review found without a linked work item, ready to be linked.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+pub struct Linkable {
+    /// Closed key the model refers to (`a1`, `a2`…), assigned when the offer is built.
+    #[serde(default)]
+    pub key: String,
+    /// Readable label, e.g. «PR #12 Fix the receipt (repo)».
+    pub label: String,
+    /// Verified web address of the artifact.
+    pub url: String,
+    pub organization: String,
+    /// Date of the activity (`YYYY-MM-DD`).
+    pub date: String,
+    /// `vstfs:///…` artifact and its link type (`Pull Request`, `Fixed in Commit`, `Build`);
+    /// without one the link is a hyperlink to `url`.
+    pub artifact: Option<String>,
+    pub link_name: Option<String>,
+    /// The user's work items code suggested for it, best first.
+    #[serde(default)]
+    pub suggested: Vec<u64>,
+}
+/// A work item a link may point from, as read from Azure DevOps.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct Target {
+    pub id: u64,
+    pub title: String,
+    pub url: String,
+    pub organization: String,
+    pub project: String,
+}
+/// What a review leaves ready to link in the personal chat: the answer the user saw, the
+/// unlinked activity and the user's work items.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+pub struct LinkOffer {
+    #[serde(default)]
+    pub answer: String,
+    #[serde(default)]
+    pub activities: Vec<Linkable>,
+    #[serde(default)]
+    pub work_items: Vec<Target>,
+}
+impl LinkOffer {
+    /// Join offers from several sources, giving each activity its closed key in order.
+    pub fn merge(offers: impl IntoIterator<Item = LinkOffer>) -> Self {
+        let mut merged = LinkOffer::default();
+        for offer in offers {
+            merged.activities.extend(offer.activities);
+            for item in offer.work_items {
+                if !merged.work_items.iter().any(|w| w.id == item.id) {
+                    merged.work_items.push(item);
+                }
+            }
+        }
+        merged.activities.truncate(40);
+        for (index, activity) in merged.activities.iter_mut().enumerate() {
+            activity.key = format!("a{}", index + 1);
+        }
+        merged
+    }
+}
+/// One link the user asked for, in closed keys.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlannedLink {
+    pub activity: String,
+    pub work_item: u64,
+}
+/// One resolved link: the source whose write credential adds it, the activity and the work
+/// item read from Azure DevOps.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct PlanStep {
+    pub source: String,
+    pub activity: Linkable,
+    pub target: Target,
+}
+/// A plan the user must confirm: every activity and target fully resolved.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+pub struct LinkPlan {
+    pub links: Vec<PlanStep>,
+}
+/// The result of one write; recorded before the request as `sending` and never retried.
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LinkStatus {
+    Sending,
+    Linked,
+    AlreadyLinked,
+    Failed,
+    /// The write may or may not have happened (interrupted): check the work item by hand.
+    Uncertain,
+}
+
+/// One link of a confirmed plan as recorded in the audit, before and after its request.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct LinkRecord {
+    pub activity: String,
+    pub activity_url: String,
+    pub work_item: u64,
+    pub title: String,
+    pub work_item_url: String,
+    pub status: LinkStatus,
+}
+
+pub fn pull_request_artifact(project_id: &str, repo_id: &str, id: u64) -> String {
+    format!("vstfs:///Git/PullRequestId/{project_id}%2f{repo_id}%2f{id}")
+}
+pub fn commit_artifact(project_id: &str, repo_id: &str, sha: &str) -> String {
+    format!("vstfs:///Git/Commit/{project_id}%2f{repo_id}%2f{sha}")
+}
+pub fn build_artifact(id: u64) -> String {
+    format!("vstfs:///Build/Build/{id}")
+}
+
+/// The JSON Patch that adds the link to a work item.
+fn patch(activity: &Linkable) -> Value {
+    let relation = match (&activity.artifact, &activity.link_name) {
+        (Some(artifact), Some(name)) => {
+            json!({"rel":"ArtifactLink","url":artifact,"attributes":{"name":name}})
+        }
+        _ => {
+            json!({"rel":"Hyperlink","url":activity.url,"attributes":{"comment":"Linked from Personal Teams Assistant"}})
+        }
+    };
+    json!([{"op":"add","path":"/relations/-","value":relation}])
+}
+
+/// Read one work item and accept it as a target only inside the catalog's scope.
+pub async fn verify_work_item(
+    client: &Client,
+    key: &str,
+    catalog_text: &str,
+    id: u64,
+) -> Result<Option<Target>> {
+    let catalog = Catalog::parse(catalog_text)?;
+    for source in &catalog.sources {
+        let mut url = url::Url::parse(&source.organization)?;
+        url.path_segments_mut()
+            .map_err(|_| anyhow::anyhow!("invalid ADO URL"))?
+            .pop_if_empty()
+            .extend(["_apis", "wit", "workitems", &id.to_string()]);
+        url.query_pairs_mut().append_pair("api-version", "7.1");
+        let Ok(item) = request(client, key, Method::GET, url, None).await else {
+            continue;
+        };
+        if item["id"].as_u64() != Some(id) {
+            continue;
+        }
+        let project = super::field(&item, "System.TeamProject").to_owned();
+        let Ok(reference) = item_reference(source, &project, &item) else {
+            continue;
+        };
+        return Ok(Some(Target {
+            id,
+            title: super::field(&item, "System.Title")
+                .chars()
+                .take(160)
+                .collect(),
+            url: reference.url,
+            organization: source.organization.clone(),
+            project,
+        }));
+    }
+    Ok(None)
+}
+
+/// Add one link. Called once per confirmed link; the caller records `sending` first and never
+/// calls it again for the same link.
+pub async fn add_link(
+    client: &Client,
+    key: &str,
+    catalog_text: &str,
+    target: &Target,
+    activity: &Linkable,
+) -> Result<LinkStatus> {
+    let catalog = Catalog::parse(catalog_text)?;
+    let source = catalog
+        .sources
+        .iter()
+        .find(|s| s.organization == target.organization && s.organization == activity.organization)
+        .context("link outside the catalog's organization")?;
+    let url = project_url(
+        source,
+        &target.project,
+        "dev.azure.com",
+        &["_apis", "wit", "workitems", &target.id.to_string()],
+    )?;
+    // A transport error after sending may or may not have written the link.
+    let Ok(response) = client
+        .request(Method::PATCH, url)
+        .basic_auth("", Some(key))
+        .header("Content-Type", "application/json-patch+json")
+        .body(patch(activity).to_string())
+        .send()
+        .await
+    else {
+        return Ok(LinkStatus::Uncertain);
+    };
+    let status = response.status().as_u16();
+    if (200..300).contains(&status) {
+        return Ok(LinkStatus::Linked);
+    }
+    // Azure DevOps rejects a relation that already exists; only that class leaves here.
+    let body = crate::adapters::bounded_bytes(response, 64_000)
+        .await
+        .unwrap_or_default();
+    let text = String::from_utf8_lossy(&body).to_lowercase();
+    ensure!(
+        status == 400 && text.contains("already exists"),
+        "Azure DevOps link write returned HTTP {status}"
+    );
+    Ok(LinkStatus::AlreadyLinked)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn activity(artifact: Option<&str>) -> Linkable {
+        Linkable {
+            label: "PR #12 Fix".into(),
+            url: "https://dev.azure.com/example/Payments/_git/api/pullrequest/12".into(),
+            organization: "https://dev.azure.com/example".into(),
+            date: "2026-09-30".into(),
+            artifact: artifact.map(str::to_owned),
+            link_name: artifact.map(|_| "Pull Request".into()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn links_use_the_artifact_formats_azure_devops_stores() {
+        assert_eq!(
+            pull_request_artifact("p-id", "r-id", 12),
+            "vstfs:///Git/PullRequestId/p-id%2fr-id%2f12"
+        );
+        assert_eq!(
+            commit_artifact("p-id", "r-id", "abc"),
+            "vstfs:///Git/Commit/p-id%2fr-id%2fabc"
+        );
+        assert_eq!(build_artifact(7), "vstfs:///Build/Build/7");
+        let artifact = patch(&activity(Some("vstfs:///Git/PullRequestId/p%2fr%2f12")));
+        assert_eq!(artifact[0]["op"], "add");
+        assert_eq!(artifact[0]["path"], "/relations/-");
+        assert_eq!(artifact[0]["value"]["rel"], "ArtifactLink");
+        assert_eq!(artifact[0]["value"]["attributes"]["name"], "Pull Request");
+        let hyperlink = patch(&activity(None));
+        assert_eq!(hyperlink[0]["value"]["rel"], "Hyperlink");
+        assert_eq!(
+            hyperlink[0]["value"]["url"],
+            "https://dev.azure.com/example/Payments/_git/api/pullrequest/12"
+        );
+    }
+
+    #[test]
+    fn merged_offers_get_closed_keys_and_unique_work_items() {
+        let target = Target {
+            id: 5,
+            title: "Task".into(),
+            url: "https://dev.azure.com/example/P/_workitems/edit/5".into(),
+            organization: "https://dev.azure.com/example".into(),
+            project: "P".into(),
+        };
+        let one = LinkOffer {
+            activities: vec![activity(None)],
+            work_items: vec![target.clone()],
+            ..Default::default()
+        };
+        let merged = LinkOffer::merge([one.clone(), one]);
+        let keys: Vec<_> = merged.activities.iter().map(|a| a.key.as_str()).collect();
+        assert_eq!(keys, vec!["a1", "a2"]);
+        assert_eq!(merged.work_items, vec![target]);
+    }
+}

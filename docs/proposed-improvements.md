@@ -57,6 +57,7 @@ Proposals that came out of reviewing the whole codebase (2026-10-01, updated 202
 ### P2 — Register unlinked work from the chat
 - **Problem:** an activity review ends asking in which work item to register each piece of work, but the app only reads Azure DevOps; the user links them by hand.
 - **Proposal:** an explicit confirmation step in the personal chat («link PR #12 to #78») with a separate write credential (`vso.work_write`) used only to add artifact links, each write confirmed by the user and recorded in the audit; never from a model decision alone.
+- **Status (0.6.3):** implemented (`ado::link`, `Pipeline::link_conversation`; architecture §6.10). Pending: linking from the GUI's test chat and creating a new work item for work that fits none.
 
 ### P2 — Detect a manual answer from the user before sending
 - **Problem:** if the user answers while the proposal is being written, the assistant sends anyway (known limit).

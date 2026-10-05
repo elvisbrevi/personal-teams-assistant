@@ -22,6 +22,11 @@ pub enum ToolSpec {
         repository: String,
         path: PathBuf,
         secret_ref: String,
+        /// A separate credential with permission to edit work items. When set, the user may
+        /// link work an activity review found to one of their work items, from the personal
+        /// chat and after confirming the exact plan. The only write the app makes outside Teams.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        link_secret_ref: Option<String>,
     },
     AzureDevopsWiki {
         repository: String,
@@ -78,10 +83,14 @@ impl ToolSpec {
                 repository,
                 path,
                 secret_ref,
+                link_secret_ref,
             } => {
                 ensure!(
                     !repository.is_empty()
                         && secret_ref.starts_with("secret://")
+                        && link_secret_ref
+                            .as_ref()
+                            .is_none_or(|s| s.starts_with("secret://") && s != secret_ref)
                         && path.extension().is_some_and(|ext| ext == "toml"),
                     "invalid ADO status catalog reference"
                 );
@@ -158,6 +167,34 @@ pub trait ReadOnlyTool: Send + Sync {
     /// work with a linked work item from work without one.
     async fn review(&self, _spec: &ToolSpec, _days: i64) -> Result<String> {
         anyhow::bail!("activity review unsupported")
+    }
+    /// Whether the source can link work to work items (it has a write credential).
+    fn links_work(&self, spec: &ToolSpec) -> bool {
+        matches!(
+            spec,
+            ToolSpec::AzureDevopsStatus {
+                link_secret_ref: Some(_),
+                ..
+            }
+        )
+    }
+    /// Read a work item the user named, inside the catalog's scope.
+    async fn work_item(
+        &self,
+        _spec: &ToolSpec,
+        _id: u64,
+    ) -> Result<Option<crate::ado::link::Target>> {
+        anyhow::bail!("work item reads unsupported")
+    }
+    /// Add one confirmed link. The only write; the caller records the attempt first and
+    /// never calls it twice for the same link.
+    async fn add_link(
+        &self,
+        _spec: &ToolSpec,
+        _target: &crate::ado::link::Target,
+        _activity: &crate::ado::link::Linkable,
+    ) -> Result<crate::ado::link::LinkStatus> {
+        anyhow::bail!("linking unsupported")
     }
 }
 pub struct Tools {
@@ -285,6 +322,7 @@ impl ReadOnlyTool for Tools {
                     repository,
                     path,
                     secret_ref,
+                    ..
                 } => {
                     let catalog = crate::knowledge::read_repository_file(
                         &self.repositories,
@@ -413,6 +451,7 @@ impl ReadOnlyTool for Tools {
                     repository,
                     path,
                     secret_ref,
+                    ..
                 } => {
                     let catalog = crate::knowledge::read_repository_file(
                         &self.repositories,
@@ -457,6 +496,53 @@ impl ReadOnlyTool for Tools {
             Ok::<_, anyhow::Error>(serde_json::to_string(&evidence)?)
         };
         tokio::time::timeout(std::time::Duration::from_secs(180), operation).await?
+    }
+    async fn work_item(
+        &self,
+        spec: &ToolSpec,
+        id: u64,
+    ) -> Result<Option<crate::ado::link::Target>> {
+        let ToolSpec::AzureDevopsStatus {
+            repository,
+            path,
+            secret_ref,
+            ..
+        } = spec
+        else {
+            anyhow::bail!("work item reads unsupported");
+        };
+        let catalog = crate::knowledge::read_repository_file(&self.repositories, repository, path)?;
+        let key = crate::security::resolve(secret_ref, &self.bindings)?;
+        tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            crate::ado::link::verify_work_item(&self.client, &key, &catalog, id),
+        )
+        .await?
+    }
+    async fn add_link(
+        &self,
+        spec: &ToolSpec,
+        target: &crate::ado::link::Target,
+        activity: &crate::ado::link::Linkable,
+    ) -> Result<crate::ado::link::LinkStatus> {
+        let ToolSpec::AzureDevopsStatus {
+            repository,
+            path,
+            link_secret_ref: Some(link_secret_ref),
+            ..
+        } = spec
+        else {
+            anyhow::bail!("linking is not set up");
+        };
+        let catalog = crate::knowledge::read_repository_file(&self.repositories, repository, path)?;
+        let key = crate::security::resolve(link_secret_ref, &self.bindings)?;
+        // A deadline reached mid-request may or may not have written the link.
+        tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            crate::ado::link::add_link(&self.client, &key, &catalog, target, activity),
+        )
+        .await
+        .unwrap_or(Ok(crate::ado::link::LinkStatus::Uncertain))
     }
 }
 

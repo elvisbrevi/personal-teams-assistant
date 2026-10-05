@@ -17,6 +17,9 @@ pub struct Evidence {
     pub partial: bool,
     #[serde(default)]
     pub warnings: Vec<String>,
+    /// Activity review only: what the user may ask to link afterwards in the personal chat.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub links: Option<crate::ado::link::LinkOffer>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Block {
@@ -63,6 +66,14 @@ impl Evidence {
         for m in &mut self.teams {
             m.text = redactor.redact(&m.text);
             m.name = m.name.take().filter(|n| redactor.clean(n));
+        }
+        if let Some(offer) = &mut self.links {
+            for activity in &mut offer.activities {
+                activity.label = redactor.redact(&activity.label);
+            }
+            for item in &mut offer.work_items {
+                item.title = redactor.redact(&item.title);
+            }
         }
     }
     /// Keep each message and each source header together through passage selection.

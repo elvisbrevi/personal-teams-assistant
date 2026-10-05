@@ -239,6 +239,20 @@ pub fn edits_evidence(
     if partial {
         text.push_str("Partial coverage: the history of some wikis or pages could not be read.\n");
     }
+    // Wiki pages have no work item artifact link this app writes: a hyperlink keeps the trace.
+    let offer = super::link::LinkOffer {
+        activities: unregistered
+            .iter()
+            .map(|e| super::link::Linkable {
+                label: format!("Wiki page «{}»", e.title),
+                url: e.reference.url.clone(),
+                organization: e.reference.organization.clone(),
+                date: e.date.get(..10).unwrap_or(&e.date).to_owned(),
+                ..Default::default()
+            })
+            .collect(),
+        ..Default::default()
+    };
     Evidence {
         text,
         references: edits
@@ -247,6 +261,7 @@ pub fn edits_evidence(
             .chain(linked.iter().cloned())
             .collect(),
         partial,
+        links: Some(offer),
         ..Default::default()
     }
 }

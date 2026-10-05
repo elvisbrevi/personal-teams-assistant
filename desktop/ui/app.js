@@ -467,9 +467,16 @@ const reasonLabels = {
   generating: 'Writing the answer.', retrieving: 'Searching the sources.', tool_started: 'Reading a tool.',
   selecting_references: 'Choosing references.', final_review: 'Final review.',
   holding_reply: 'Sending the holding notice.',
+  linking: 'Linking work to work items.',
+  links_planned: 'Link plan shown; waiting for your confirmation.',
+  links_applied: 'Confirmed links written to Azure DevOps (never retried).',
+  links_cancelled: 'Link plan cancelled; nothing was linked.',
+  links_unresolved: 'The link request could not be resolved; nothing was planned.',
+  links_not_configured: 'Linking asked for, but no source has a write credential.',
 };
 const kindLabels = { self: 'Personal chat', direct: 'Direct', group: 'Group', unsupported: 'Other' };
-const intentLabels = { question: 'question', activity_review: 'activity review', greeting: 'greeting' };
+const intentLabels = { question: 'question', activity_review: 'activity review', greeting: 'greeting', link: 'link work to work items' };
+const linkLabels = { sending: 'sending', linked: 'linked', already_linked: 'already linked', failed: 'failed', uncertain: 'uncertain (check the work item; never retried)' };
 let messageRows = [];
 let messageFilter = 'all';
 const openMessages = new Set();
@@ -561,6 +568,7 @@ function renderMessages() {
     const notice = { sending: 'sending', sent: 'sent', uncertain: 'uncertain (never retried)' };
     if (audit.holding_reply) details.push(`Holding notice: ${notice[audit.holding_reply] || audit.holding_reply}`);
     if (audit.withheld_notice) details.push(`Withheld-answer notice: ${notice[audit.withheld_notice] || audit.withheld_notice}`);
+    for (const link of audit.links || []) details.push(`Link: ${link.activity} → #${link.work_item} ${link.title}: ${linkLabels[link.status] || link.status}`);
     messageField(body, 'Details', details.join('\n'), true);
     if (audit.trace?.length) {
       const log = el('ol', { class: 'trace' });

@@ -1221,6 +1221,7 @@ async fn wiki_priority_current_request_mixed_citations_and_complete_gate_without
                                     repository: "private".into(),
                                     path: "catalog.toml".into(),
                                     secret_ref: "secret://ado/read".into(),
+                                    link_secret_ref: None,
                                 },
                             },
                         },
@@ -1573,6 +1574,7 @@ async fn teams_simulation_keeps_who_said_what_in_the_evidence_and_the_log() {
             repository: "private".into(),
             path: "catalog.toml".into(),
             secret_ref: "secret://ado/read".into(),
+            link_secret_ref: None,
         },
     };
     let pipeline = Pipeline {
@@ -2217,6 +2219,7 @@ async fn unregistered_work_is_reviewed_across_activity_wiki_and_teams_with_verif
                 repository: "private".into(),
                 path: "catalog.toml".into(),
                 secret_ref: "secret://ado/read".into(),
+                link_secret_ref: None,
             },
         };
         let mut teams = wiki_resource();
@@ -2416,4 +2419,330 @@ fn store_last(dir: &tempfile::TempDir) -> String {
     )
     .unwrap();
     rows[0]["resource"].as_str().unwrap().to_owned()
+}
+
+/// The personal chat: each resource carries its own text, sent by the user to themselves.
+struct NotesTeams {
+    user: String,
+    texts: std::sync::Mutex<BTreeMap<String, String>>,
+    sent: std::sync::Mutex<Vec<String>>,
+}
+#[async_trait]
+impl MessageAdapter for NotesTeams {
+    async fn fetch(
+        &self,
+        resource: &str,
+    ) -> Result<personal_teams_assistant::adapters::teams::IncomingMessage> {
+        Ok(personal_teams_assistant::adapters::teams::IncomingMessage {
+            resource: resource.into(),
+            conversation: "chats/48:notes".into(),
+            sender: self.user.clone(),
+            kind: personal_teams_assistant::adapters::teams::ConversationKind::Direct,
+            mentions: vec![],
+            text: self.texts.lock().unwrap()[resource].clone(),
+            created_at: chrono::Utc::now().timestamp(),
+            created_at_millis: chrono::Utc::now().timestamp_millis(),
+            is_user_message: true,
+        })
+    }
+    async fn send(
+        &self,
+        _: &personal_teams_assistant::adapters::teams::IncomingMessage,
+        text: &str,
+    ) -> Result<String> {
+        let mut sent = self.sent.lock().unwrap();
+        sent.push(text.into());
+        Ok(format!("sent-{}", sent.len()))
+    }
+}
+fn link_target(id: u64, title: &str) -> personal_teams_assistant::ado::link::Target {
+    personal_teams_assistant::ado::link::Target {
+        id,
+        title: title.into(),
+        url: format!("https://dev.azure.com/example/Payments/_workitems/edit/{id}"),
+        organization: "https://dev.azure.com/example".into(),
+        project: "Payments".into(),
+    }
+}
+/// A review with two unlinked pieces of work, work item reads and recorded link writes.
+struct LinkTools {
+    writes: std::sync::Mutex<Vec<(u64, String)>>,
+}
+#[async_trait]
+impl ReadOnlyTool for LinkTools {
+    async fn execute(&self, _: &ToolSpec, _: &str, _: &str) -> Result<String> {
+        panic!("an activity review reads sources through review, not plain tool calls")
+    }
+    async fn review(&self, spec: &ToolSpec, _: i64) -> Result<String> {
+        use personal_teams_assistant::{ado::link::*, evidence::Evidence};
+        assert!(matches!(spec, ToolSpec::AzureDevopsStatus { .. }));
+        let linkable = |label: &str, url: &str, artifact: &str, name: &str| Linkable {
+            label: label.into(),
+            url: url.into(),
+            organization: "https://dev.azure.com/example".into(),
+            date: "2026-09-30".into(),
+            artifact: Some(artifact.into()),
+            link_name: Some(name.into()),
+            suggested: vec![100],
+            ..Default::default()
+        };
+        let evidence = Evidence {
+            text: "Azure DevOps activity review from 2026-09-19 to 2026-10-03 (last 14 days).\nProject: Payments.\nWithout a linked work item (candidates to register):\n- 2026-09-30 · PR #46 \"Retry timeouts\" in payments-api (completed).\n- 2026-09-29 · commit cccccccc in payments-api: \"Hotfix for the payment report\".\n".into(),
+            references: vec![
+                review_reference("pull_request:46", "pull_request", "PR #46 Retry timeouts (payments-api)", "https://dev.azure.com/example/Payments/_git/payments-api/pullrequest/46", &["PR #46"]),
+                review_reference("commit:cccccccc33", "commit", "Commit cccccccc in payments-api", "https://dev.azure.com/example/Payments/_git/payments-api/commit/cccccccc33", &["cccccccc"]),
+                review_reference("work_item:100", "work_item", "#100 Payment timeouts", "https://dev.azure.com/example/Payments/_workitems/edit/100", &["#100"]),
+            ],
+            links: Some(LinkOffer {
+                activities: vec![
+                    linkable("PR #46 Retry timeouts (payments-api)", "https://dev.azure.com/example/Payments/_git/payments-api/pullrequest/46", "vstfs:///Git/PullRequestId/p%2fr%2f46", "Pull Request"),
+                    linkable("Commit cccccccc in payments-api", "https://dev.azure.com/example/Payments/_git/payments-api/commit/cccccccc33", "vstfs:///Git/Commit/p%2fr%2fcccccccc33", "Fixed in Commit"),
+                ],
+                work_items: vec![link_target(100, "Payment timeouts")],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        Ok(serde_json::to_string(&evidence)?)
+    }
+    async fn work_item(
+        &self,
+        _: &ToolSpec,
+        id: u64,
+    ) -> Result<Option<personal_teams_assistant::ado::link::Target>> {
+        Ok(match id {
+            100 => Some(link_target(100, "Payment timeouts")),
+            200 => Some(link_target(200, "Login")),
+            _ => None,
+        })
+    }
+    async fn add_link(
+        &self,
+        spec: &ToolSpec,
+        target: &personal_teams_assistant::ado::link::Target,
+        activity: &personal_teams_assistant::ado::link::Linkable,
+    ) -> Result<personal_teams_assistant::ado::link::LinkStatus> {
+        assert!(matches!(
+            spec,
+            ToolSpec::AzureDevopsStatus {
+                link_secret_ref: Some(_),
+                ..
+            }
+        ));
+        self.writes
+            .lock()
+            .unwrap()
+            .push((target.id, activity.url.clone()));
+        Ok(personal_teams_assistant::ado::link::LinkStatus::Linked)
+    }
+}
+/// Writes the review and reads link requests into closed keys, including keys and IDs the
+/// review never offered, which code must drop.
+struct LinkLlm;
+#[async_trait]
+impl LlmProvider for LinkLlm {
+    fn name(&self) -> &str {
+        "link"
+    }
+    async fn select_references(
+        &self,
+        _: &str,
+        _: &[personal_teams_assistant::evidence::Reference],
+    ) -> Result<Vec<String>> {
+        Ok(Vec::new())
+    }
+    async fn plan_links(
+        &self,
+        reply: &str,
+        offer: &personal_teams_assistant::ado::link::LinkOffer,
+    ) -> Result<Vec<personal_teams_assistant::ado::link::PlannedLink>> {
+        use personal_teams_assistant::ado::link::PlannedLink;
+        let link = |activity: &str, work_item| PlannedLink {
+            activity: activity.into(),
+            work_item,
+        };
+        assert!(offer.answer.contains("PR #46"), "{}", offer.answer);
+        Ok(if reply.contains("#200") {
+            vec![
+                link("a1", 200),
+                link("a2", 999),
+                link("a9", 100),
+                link("a2", 300),
+            ]
+        } else if reply.contains("commit") {
+            vec![link("a2", 100)]
+        } else {
+            vec![]
+        })
+    }
+    async fn generate(&self, _: GenerationInput<'_>) -> Result<String> {
+        unreachable!()
+    }
+    async fn generate_response(
+        &self,
+        input: GenerationInput<'_>,
+    ) -> Result<personal_teams_assistant::llm::GeneratedAnswer> {
+        assert!(input.review);
+        Ok(personal_teams_assistant::llm::GeneratedAnswer {
+            answer: "Del 2026-09-19 al 2026-10-03 encontré 2 trabajos sin HU:\n- PR #46 «Retry timeouts».\n  - Podrías registrarlo en #100 Payment timeouts.\n- Commit cccccccc.\n  - Podrías registrarlo en #100 Payment timeouts.\n\n¿Quieres que los registre?".into(),
+            detailed: false,
+            used_sources: Vec::new(),
+            provider: None,
+            fallbacks: Vec::new(),
+        })
+    }
+}
+#[tokio::test]
+async fn unlinked_work_is_linked_only_after_the_user_confirms_the_exact_plan() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = support::store(&dir);
+    let mut cfg = support::config();
+    cfg.graph.self_chat = Some(personal_teams_assistant::config::SelfChat {
+        id: "48:notes".into(),
+        user_id: cfg.graph.user_id.clone(),
+        enabled_at: 1,
+    });
+    let teams = Arc::new(NotesTeams {
+        user: cfg.graph.user_id.clone(),
+        texts: Default::default(),
+        sent: Default::default(),
+    });
+    let tools = Arc::new(LinkTools {
+        writes: Default::default(),
+    });
+    let status = |link_secret_ref: Option<&str>| {
+        let mut status = wiki_resource();
+        status.id = "azure-devops-status".into();
+        status.allowed_conversations = vec!["chats/48:notes".into()];
+        status.access = Access::Tool {
+            tool: ToolSpec::AzureDevopsStatus {
+                repository: "private".into(),
+                path: "catalog.toml".into(),
+                secret_ref: "secret://ado/read".into(),
+                link_secret_ref: link_secret_ref.map(str::to_owned),
+            },
+        };
+        let mut map = knowledge(&dir);
+        map.resources = vec![status];
+        map
+    };
+    let pipeline = Pipeline {
+        config: Arc::new(cfg),
+        store: store.clone(),
+        adapter: teams.clone(),
+        knowledge: status(Some("secret://ado/link")),
+        llm: Arc::new(LinkLlm),
+        tools: tools.clone(),
+        redactor: redactor(),
+    };
+    let mut turn = 0;
+    let mut say = async |pipeline: &Pipeline, text: &str| {
+        turn += 1;
+        let resource = format!("chats/48:notes/messages/{turn}");
+        teams
+            .texts
+            .lock()
+            .unwrap()
+            .insert(resource.clone(), text.into());
+        store.enqueue(&resource).unwrap();
+        pipeline.process(&resource).await.unwrap();
+        let audit = store.audit(&resource).unwrap().unwrap();
+        (resource, audit)
+    };
+    let last_sent = || teams.sent.lock().unwrap().last().cloned().unwrap();
+
+    let (_, audit) = say(&pipeline, "¿Qué trabajo hice que no está registrado?").await;
+    assert_eq!(audit.status, "sent", "{}", audit.reason);
+    assert_eq!(audit.intent.as_deref(), Some("activity_review"));
+
+    // The request becomes a plan the user sees; nothing is written yet. Keys and IDs the
+    // review never offered, and work items that cannot be read, are left out.
+    let (_, audit) = say(&pipeline, "sí, el PR en la #200 y el commit en la 999").await;
+    assert_eq!(audit.status, "sent", "{}", audit.reason);
+    assert_eq!(audit.reason, "links_planned");
+    assert_eq!(audit.intent.as_deref(), Some("link"));
+    let plan = last_sent();
+    assert_eq!(
+        plan,
+        "Voy a vincular:\n- [PR #46 Retry timeouts (payments-api)](https://dev.azure.com/example/Payments/_git/payments-api/pullrequest/46) → [#200 Login](https://dev.azure.com/example/Payments/_workitems/edit/200)\n\nNo incluí #999: no la encontré en tus proyectos.\n\nResponde «confirmo» para hacerlo o «cancelar» para descartarlo."
+    );
+    assert!(tools.writes.lock().unwrap().is_empty());
+
+    // Only the confirmation writes, exactly the plan.
+    let (confirmed, audit) = say(&pipeline, "Confirmo").await;
+    assert_eq!(audit.reason, "links_applied");
+    assert_eq!(
+        *tools.writes.lock().unwrap(),
+        vec![(
+            200,
+            "https://dev.azure.com/example/Payments/_git/payments-api/pullrequest/46".to_owned()
+        )]
+    );
+    assert_eq!(audit.links.len(), 1);
+    assert_eq!(
+        audit.links[0].status,
+        personal_teams_assistant::ado::link::LinkStatus::Linked
+    );
+    assert!(last_sent().starts_with("Resultado:\n- [PR #46"));
+    assert!(last_sent().ends_with(
+        "[#200 Login](https://dev.azure.com/example/Payments/_workitems/edit/200): vinculado"
+    ));
+
+    // A retried confirmation never writes again, and a confirmation without a plan is a
+    // normal message.
+    pipeline.process(&confirmed).await.unwrap();
+    assert_eq!(tools.writes.lock().unwrap().len(), 1);
+    let retried = store.audit(&confirmed).unwrap().unwrap();
+    assert_eq!(
+        retried.links[0].status,
+        personal_teams_assistant::ado::link::LinkStatus::Linked
+    );
+    // An attempt interrupted after recording `sending` is reported as uncertain.
+    let interrupted = "chats/48:notes/messages/interrupted";
+    teams
+        .texts
+        .lock()
+        .unwrap()
+        .insert(interrupted.into(), "confirmo".into());
+    store.enqueue(interrupted).unwrap();
+    let mut sending = audit.links[0].clone();
+    sending.status = personal_teams_assistant::ado::link::LinkStatus::Sending;
+    store
+        .record(
+            interrupted,
+            &personal_teams_assistant::state::Audit {
+                status: "processing".into(),
+                links: vec![sending],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    pipeline.process(interrupted).await.unwrap();
+    let audit = store.audit(interrupted).unwrap().unwrap();
+    assert_eq!(
+        audit.links[0].status,
+        personal_teams_assistant::ado::link::LinkStatus::Uncertain
+    );
+    assert!(last_sent().ends_with("resultado incierto; revisa la HU"));
+    assert_eq!(tools.writes.lock().unwrap().len(), 1);
+
+    // The linked PR left the offer; the commit can still be planned, and cancelled.
+    let (_, audit) = say(&pipeline, "registra el commit en la sugerida").await;
+    assert_eq!(audit.reason, "links_planned");
+    assert!(last_sent().contains("[Commit cccccccc in payments-api]"));
+    assert!(last_sent().contains("→ [#100 Payment timeouts]"));
+    let (_, audit) = say(&pipeline, "no, cancelar").await;
+    assert_eq!(audit.reason, "links_cancelled");
+    assert_eq!(last_sent(), "Listo, no vinculé nada.");
+    assert_eq!(tools.writes.lock().unwrap().len(), 1);
+
+    // Without a write credential, linking is explained instead of attempted.
+    let read_only = Pipeline {
+        knowledge: status(None),
+        ..pipeline
+    };
+    let (_, audit) = say(&read_only, "vincula el commit en la #100").await;
+    assert_eq!(audit.reason, "links_not_configured");
+    assert!(last_sent().contains("link_secret_ref"));
+    assert_eq!(tools.writes.lock().unwrap().len(), 1);
 }

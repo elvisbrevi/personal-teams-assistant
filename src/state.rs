@@ -67,6 +67,9 @@ pub struct Audit {
     /// Notice sent to the personal chat when an answer was withheld: `sending`, `sent` or
     /// `uncertain`. Never sent twice.
     pub withheld_notice: Option<String>,
+    /// Links written to Azure DevOps for this message (a confirmed plan in the personal
+    /// chat), each recorded as `sending` before its request and never retried.
+    pub links: Vec<crate::ado::link::LinkRecord>,
     /// Processing steps in order. Details name decisions and counts, never message content.
     pub trace: Vec<TraceStep>,
 }
@@ -323,6 +326,13 @@ impl Store {
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .optional()?)
+    }
+    pub fn clear_activity_cache(&self, key: &str) -> Result<()> {
+        self.db
+            .lock()
+            .unwrap()
+            .execute("DELETE FROM activity_cache WHERE key=?1", [key])?;
+        Ok(())
     }
     pub fn save_activity_cache(&self, key: &str, value: &str) -> Result<()> {
         let db = self.db.lock().unwrap();
