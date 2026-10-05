@@ -492,7 +492,7 @@ impl Pipeline {
                 audit.source.clone().unwrap_or_else(|| "none".into()),
             );
             self.checkpoint(resource, &audit, "retrieving")?;
-            let (mut evidence, registry) = if review {
+            let (mut evidence, mut registry) = if review {
                 let days = crate::ado::recent_window(&tool_question);
                 audit.step(
                     "activity review",
@@ -602,7 +602,18 @@ impl Pipeline {
             // checks (references, URLs, sensitive data, size) may withhold a generated answer.
             audit.provider = Some(self.llm.name().into());
             self.checkpoint(resource, &audit, "generating")?;
-            let generated = self
+            // In the personal chat, with a source that can register work, the app proposes
+            // where to register it instead of the model asking.
+            let proposing = review
+                && own_chat
+                && registry
+                    .links
+                    .as_ref()
+                    .is_some_and(|o| !o.activities.is_empty())
+                && available.iter().any(
+                    |r| matches!(&r.access, Access::Tool { tool } if self.tools.links_work(tool)),
+                );
+            let mut generated = self
                 .awaiting_model(
                     &mut holding,
                     resource,
@@ -614,6 +625,7 @@ impl Pipeline {
                         detail_requested: false,
                         history: &history,
                         review,
+                        proposing,
                     }),
                 )
                 .await??;
@@ -636,6 +648,30 @@ impl Pipeline {
                     ),
                 },
             );
+            // In the personal chat a review proposes where to register each piece of work and
+            // asks to confirm; the plan is kept once the user has seen it.
+            let unlinked = registry
+                .links
+                .as_ref()
+                .is_some_and(|o| !o.activities.is_empty());
+            if proposing && unlinked {
+                let offer = registry.links.clone().unwrap_or_default();
+                let proposal = self
+                    .propose(&offer, &available, &mut audit, &mut registry)
+                    .await;
+                let language = self.config.llm.language;
+                let section = match proposal {
+                    Some((text, plan)) => {
+                        link_plan = Some(plan);
+                        text
+                    }
+                    None => match language {
+                        Language::Es => "¿En qué work item registro cada una?".into(),
+                        Language::En => "Which work item should each one be registered in?".into(),
+                    },
+                };
+                generated.answer = format!("{}\n\n{section}", generated.answer.trim_end());
+            }
             context_answer = Some(generated.answer.clone());
             if review && let Some(mut offer) = registry.links.clone() {
                 offer.answer = generated.answer.clone();
@@ -815,15 +851,6 @@ impl Pipeline {
             }
         }
         self.store.record(resource, &audit)?;
-        // A plan is confirmable only once the user has seen it.
-        if audit.status == "sent"
-            && let Some(plan) = link_plan
-        {
-            self.store.save_activity_cache(
-                &format!("link_plan|{}", message.conversation),
-                &serde_json::to_string(&plan)?,
-            )?;
-        }
         // A review the user saw in the personal chat leaves its unlinked work ready to link.
         if audit.status == "sent"
             && own_chat
@@ -836,6 +863,15 @@ impl Pipeline {
             )?;
             self.store
                 .clear_activity_cache(&format!("link_plan|{}", message.conversation))?;
+        }
+        // A plan is confirmable only once the user has seen it.
+        if audit.status == "sent"
+            && let Some(plan) = link_plan
+        {
+            self.store.save_activity_cache(
+                &format!("link_plan|{}", message.conversation),
+                &serde_json::to_string(&plan)?,
+            )?;
         }
         if audit.status == "sent"
             && let Some(question) = context_question
@@ -1255,6 +1291,8 @@ impl Pipeline {
                         source: source.clone(),
                         activity: activity.clone(),
                         target: target.clone(),
+                        create: None,
+                        reason: String::new(),
                     };
                     if !plan.links.iter().any(|s| {
                         s.activity.key == step.activity.key && s.target.id == step.target.id
@@ -1301,32 +1339,68 @@ impl Pipeline {
         available: &[&crate::knowledge::Resource],
         plan: &LinkPlan,
     ) -> Result<()> {
+        // Steps that share a new task (same source, parent and title) are one write.
+        let mut groups: Vec<Vec<&crate::ado::link::PlanStep>> = Vec::new();
         for step in &plan.links {
-            audit.links.push(LinkRecord {
-                activity: step.activity.label.clone(),
-                activity_url: step.activity.url.clone(),
-                work_item: step.target.id,
-                title: step.target.title.clone(),
-                work_item_url: step.target.url.clone(),
-                status: LinkStatus::Sending,
+            let shared = step.create.as_ref().and_then(|task| {
+                groups.iter().position(|g| {
+                    g[0].source == step.source
+                        && g[0].target.id == step.target.id
+                        && g[0].create.as_ref().is_some_and(|t| t.title == task.title)
+                })
             });
+            match shared {
+                Some(index) => groups[index].push(step),
+                None => groups.push(vec![step]),
+            }
+        }
+        for group in groups {
+            let step = group[0];
+            let first = audit.links.len();
+            for step in &group {
+                audit.links.push(LinkRecord {
+                    activity: step.activity.label.clone(),
+                    activity_url: step.activity.url.clone(),
+                    work_item: step.target.id,
+                    title: step.target.title.clone(),
+                    work_item_url: step.target.url.clone(),
+                    status: LinkStatus::Sending,
+                    created: None,
+                    created_title: step.create.as_ref().map(|t| t.title.clone()),
+                });
+            }
             let spec = available.iter().find_map(|r| match &r.access {
                 Access::Tool { tool } if r.id == step.source && self.tools.links_work(tool) => {
                     Some(tool)
                 }
                 _ => None,
             });
-            let Some(spec) = spec else {
-                audit.links.last_mut().unwrap().status = LinkStatus::Failed;
-                continue;
+            let (status, created) = match spec {
+                None => (LinkStatus::Failed, None),
+                Some(spec) => {
+                    self.checkpoint(resource, audit, "linking")?;
+                    match &step.create {
+                        Some(task) => {
+                            let activities: Vec<_> = group.iter().map(|s| &s.activity).collect();
+                            self.tools
+                                .create_task(spec, &step.target, task, &activities)
+                                .await
+                                .unwrap_or((LinkStatus::Failed, None))
+                        }
+                        None => (
+                            self.tools
+                                .add_link(spec, &step.target, &step.activity)
+                                .await
+                                .unwrap_or(LinkStatus::Failed),
+                            None,
+                        ),
+                    }
+                }
             };
-            self.checkpoint(resource, audit, "linking")?;
-            let status = self
-                .tools
-                .add_link(spec, &step.target, &step.activity)
-                .await
-                .unwrap_or(LinkStatus::Failed);
-            audit.links.last_mut().unwrap().status = status;
+            for record in &mut audit.links[first..] {
+                record.status = status;
+                record.created = created;
+            }
             self.checkpoint(resource, audit, "linking")?;
         }
         let linked = audit
@@ -1337,11 +1411,168 @@ impl Pipeline {
         audit.step(
             "links",
             format!(
-                "{linked} of {} confirmed link(s) recorded in Azure DevOps (never retried)",
+                "{linked} of {} confirmed registration(s) recorded in Azure DevOps (never retried)",
                 audit.links.len()
             ),
         );
         Ok(())
+    }
+    /// Ask the model where to register each unlinked activity and keep only what code can
+    /// verify: known keys, work items read again from Azure DevOps in the activity's
+    /// organization, and new tasks only under an HU of the review. Returns the section that
+    /// ends the review and the plan to confirm, or `None` when nothing could be proposed.
+    async fn propose(
+        &self,
+        offer: &LinkOffer,
+        available: &[&crate::knowledge::Resource],
+        audit: &mut Audit,
+        registry: &mut crate::evidence::Evidence,
+    ) -> Option<(String, LinkPlan)> {
+        let linking: Vec<_> = available
+            .iter()
+            .copied()
+            .filter(|r| matches!(&r.access, Access::Tool { tool } if self.tools.links_work(tool)))
+            .collect();
+        if linking.is_empty() {
+            audit.step(
+                "proposal",
+                "no source can register work (no write credential)",
+            );
+            return None;
+        }
+        let proposals = match self
+            .llm
+            .propose_registration(offer, self.config.llm.language)
+            .await
+        {
+            Ok(proposals) => proposals,
+            Err(_) => {
+                audit.step("proposal", "the model could not propose where to register");
+                return None;
+            }
+        };
+        let mut verified: BTreeMap<u64, Option<(String, crate::ado::link::Target)>> =
+            BTreeMap::new();
+        let mut plan = LinkPlan::default();
+        let mut dropped = 0;
+        for proposal in proposals {
+            let Some(activity) = offer.activities.iter().find(|a| a.key == proposal.activity)
+            else {
+                dropped += 1;
+                continue;
+            };
+            if plan.links.iter().any(|s| s.activity.key == activity.key) || plan.links.len() >= 20 {
+                dropped += 1;
+                continue;
+            }
+            let (id, create) = match proposal.action {
+                crate::ado::link::ProposalAction::Link => (proposal.work_item, None),
+                crate::ado::link::ProposalAction::Create => {
+                    let title: String = proposal
+                        .title
+                        .unwrap_or_default()
+                        .split_whitespace()
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    if title.is_empty()
+                        || title.chars().count() > 120
+                        || !self.redactor.clean(&title)
+                    {
+                        dropped += 1;
+                        continue;
+                    }
+                    (
+                        proposal.parent,
+                        Some(crate::ado::link::NewTask {
+                            title,
+                            kind: offer.task_kind.clone(),
+                        }),
+                    )
+                }
+            };
+            // Only work items the review read; a new task only under one that holds tasks.
+            let Some(offered) = id.and_then(|id| offer.work_items.iter().find(|w| w.id == id))
+            else {
+                dropped += 1;
+                continue;
+            };
+            if create.is_some() && !offered.holds_tasks() {
+                dropped += 1;
+                continue;
+            }
+            if let std::collections::btree_map::Entry::Vacant(entry) = verified.entry(offered.id) {
+                let mut found = None;
+                for source in &linking {
+                    let Access::Tool { tool } = &source.access else {
+                        continue;
+                    };
+                    if let Ok(Some(target)) = self.tools.work_item(tool, offered.id).await {
+                        found = Some((source.id.clone(), target));
+                        break;
+                    }
+                }
+                entry.insert(found);
+            }
+            let Some((source, target)) = verified[&offered.id]
+                .clone()
+                .filter(|(_, t)| t.organization == activity.organization)
+            else {
+                dropped += 1;
+                continue;
+            };
+            let reason: String = proposal
+                .reason
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+                .chars()
+                .take(300)
+                .collect();
+            plan.links.push(crate::ado::link::PlanStep {
+                source,
+                activity: activity.clone(),
+                target,
+                create,
+                reason: if self.redactor.clean(&reason) {
+                    reason
+                } else {
+                    String::new()
+                },
+            });
+        }
+        audit.step(
+            "proposal",
+            format!(
+                "{} registration(s) proposed; {dropped} dropped by code checks",
+                plan.links.len()
+            ),
+        );
+        if plan.links.is_empty() {
+            return None;
+        }
+        // Every work item the proposal names carries its verified link.
+        for step in &plan.links {
+            if !registry.references.iter().any(|r| r.url == step.target.url) {
+                registry.references.push(crate::evidence::Reference {
+                    id: format!(
+                        "work_item:{}:{}:{}",
+                        step.target.organization, step.target.project, step.target.id
+                    ),
+                    kind: "work_item".into(),
+                    label: format!("#{} {}", step.target.id, step.target.title),
+                    url: step.target.url.clone(),
+                    organization: step.target.organization.clone(),
+                    project: step.target.project.clone(),
+                    aliases: vec![format!("#{}", step.target.id)],
+                    parent: None,
+                    revision: None,
+                    authority: None,
+                    author: None,
+                    author_role: None,
+                });
+            }
+        }
+        Some((proposal_text(&plan, self.config.llm.language), plan))
     }
     fn checkpoint(&self, resource: &str, audit: &Audit, stage: &str) -> Result<()> {
         let mut saved = audit.clone();
@@ -1358,7 +1589,7 @@ impl Pipeline {
 }
 
 /// A link plan waits this long for its confirmation; a review's offer, for the request.
-const LINK_PLAN_SECONDS: i64 = 900;
+const LINK_PLAN_SECONDS: i64 = 3600;
 const LINK_OFFER_SECONDS: i64 = 3600;
 
 /// What the link conversation answers, and the plan to keep once the user has seen it.
@@ -1437,6 +1668,9 @@ fn link_request(text: &str, offer: &LinkOffer) -> bool {
     let phrase = normalized_phrase(text);
     if [
         " registr",
+        " regist",
+        " resgi",
+        " regsi",
         " vincul",
         " asoci",
         " enlaz",
@@ -1519,11 +1753,82 @@ fn link_results(links: &[LinkRecord], language: Language) -> String {
             (_, Language::Es) => "resultado incierto; revisa la HU",
             (_, Language::En) => "uncertain result; check the work item",
         };
+        let target = match (&link.created_title, link.created, language) {
+            (Some(title), Some(id), Language::Es) => format!(
+                "nueva tarea #{id} «{title}» en [#{} {}]({})",
+                link.work_item, link.title, link.work_item_url
+            ),
+            (Some(title), Some(id), Language::En) => format!(
+                "new task #{id} «{title}» under [#{} {}]({})",
+                link.work_item, link.title, link.work_item_url
+            ),
+            (Some(title), None, Language::Es) => format!(
+                "nueva tarea «{title}» en [#{} {}]({})",
+                link.work_item, link.title, link.work_item_url
+            ),
+            (Some(title), None, Language::En) => format!(
+                "new task «{title}» under [#{} {}]({})",
+                link.work_item, link.title, link.work_item_url
+            ),
+            (None, _, _) => format!(
+                "[#{} {}]({})",
+                link.work_item, link.title, link.work_item_url
+            ),
+        };
         lines.push(format!(
-            "- [{}]({}) → [#{} {}]({}): {status}",
-            link.activity, link.activity_url, link.work_item, link.title, link.work_item_url
+            "- [{}]({}) → {target}: {status}",
+            link.activity, link.activity_url
         ));
     }
+    lines.join("\n")
+}
+/// The section that ends a review: where each piece of work would be registered and why,
+/// grouped by destination, and the request to confirm.
+fn proposal_text(plan: &LinkPlan, language: Language) -> String {
+    let mut groups: Vec<(&crate::ado::link::PlanStep, Vec<&str>)> = Vec::new();
+    for step in &plan.links {
+        let same = groups.iter().position(|(g, _)| {
+            g.target.id == step.target.id
+                && g.create.as_ref().map(|t| &t.title) == step.create.as_ref().map(|t| &t.title)
+        });
+        match same {
+            Some(index) => groups[index].1.push(&step.activity.label),
+            None => groups.push((step, vec![&step.activity.label])),
+        }
+    }
+    let mut lines = vec![
+        match language {
+            Language::Es => "**Propuesta de registro**",
+            Language::En => "**Where to register it**",
+        }
+        .to_owned(),
+    ];
+    for (step, activities) in groups {
+        let item = format!(
+            "[#{} {}]({})",
+            step.target.id, step.target.title, step.target.url
+        );
+        let place = match (&step.create, language) {
+            (None, Language::Es) => format!("vincular a {item}"),
+            (None, Language::En) => format!("link to {item}"),
+            (Some(task), Language::Es) => format!("crear la tarea «{}» en {item}", task.title),
+            (Some(task), Language::En) => format!("create the task «{}» under {item}", task.title),
+        };
+        let reason = if step.reason.is_empty() {
+            String::new()
+        } else {
+            format!(": {}", step.reason)
+        };
+        lines.push(format!("- {} → {place}{reason}", activities.join("; ")));
+    }
+    lines.push(String::new());
+    lines.push(
+        match language {
+            Language::Es => "¿Confirmas? Responde «confirmo» para registrarlo todo, «cancelar» para descartarlo o dime qué cambiar.",
+            Language::En => "Do you confirm? Reply «confirm» to register it all, «cancel» to drop it, or tell me what to change.",
+        }
+        .into(),
+    );
     lines.join("\n")
 }
 fn unresolved(language: Language, rejected: &[u64]) -> String {
@@ -1995,6 +2300,7 @@ mod tests {
         for request in [
             "sí, en la #4321",
             "Regístralas en las sugeridas",
+            "determina tu mismo donde resgitrar las tareas",
             "vincula el PR a la 300",
             "ok",
             "la primera en la 4321",

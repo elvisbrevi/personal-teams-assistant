@@ -568,7 +568,10 @@ function renderMessages() {
     const notice = { sending: 'sending', sent: 'sent', uncertain: 'uncertain (never retried)' };
     if (audit.holding_reply) details.push(`Holding notice: ${notice[audit.holding_reply] || audit.holding_reply}`);
     if (audit.withheld_notice) details.push(`Withheld-answer notice: ${notice[audit.withheld_notice] || audit.withheld_notice}`);
-    for (const link of audit.links || []) details.push(`Link: ${link.activity} → #${link.work_item} ${link.title}: ${linkLabels[link.status] || link.status}`);
+    for (const link of audit.links || []) {
+      const target = link.created_title ? `new task ${link.created ? `#${link.created} ` : ''}«${link.created_title}» under #${link.work_item} ${link.title}` : `#${link.work_item} ${link.title}`;
+      details.push(`Registered: ${link.activity} → ${target}: ${linkLabels[link.status] || link.status}`);
+    }
     messageField(body, 'Details', details.join('\n'), true);
     if (audit.trace?.length) {
       const log = el('ol', { class: 'trace' });

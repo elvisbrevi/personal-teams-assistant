@@ -2462,11 +2462,13 @@ fn link_target(id: u64, title: &str) -> personal_teams_assistant::ado::link::Tar
         url: format!("https://dev.azure.com/example/Payments/_workitems/edit/{id}"),
         organization: "https://dev.azure.com/example".into(),
         project: "Payments".into(),
+        ..Default::default()
     }
 }
 /// A review with two unlinked pieces of work, work item reads and recorded link writes.
 struct LinkTools {
     writes: std::sync::Mutex<Vec<(u64, String)>>,
+    created: std::sync::Mutex<Vec<(u64, String, Vec<String>)>>,
 }
 #[async_trait]
 impl ReadOnlyTool for LinkTools {
@@ -2498,7 +2500,8 @@ impl ReadOnlyTool for LinkTools {
                     linkable("PR #46 Retry timeouts (payments-api)", "https://dev.azure.com/example/Payments/_git/payments-api/pullrequest/46", "vstfs:///Git/PullRequestId/p%2fr%2f46", "Pull Request"),
                     linkable("Commit cccccccc in payments-api", "https://dev.azure.com/example/Payments/_git/payments-api/commit/cccccccc33", "vstfs:///Git/Commit/p%2fr%2fcccccccc33", "Fixed in Commit"),
                 ],
-                work_items: vec![link_target(100, "Payment timeouts")],
+                work_items: vec![link_target(100, "Payment timeouts"), story()],
+                task_kind: "Task".into(),
                 ..Default::default()
             }),
             ..Default::default()
@@ -2513,6 +2516,7 @@ impl ReadOnlyTool for LinkTools {
         Ok(match id {
             100 => Some(link_target(100, "Payment timeouts")),
             200 => Some(link_target(200, "Login")),
+            50 => Some(story()),
             _ => None,
         })
     }
@@ -2535,12 +2539,69 @@ impl ReadOnlyTool for LinkTools {
             .push((target.id, activity.url.clone()));
         Ok(personal_teams_assistant::ado::link::LinkStatus::Linked)
     }
+    async fn create_task(
+        &self,
+        _: &ToolSpec,
+        parent: &personal_teams_assistant::ado::link::Target,
+        task: &personal_teams_assistant::ado::link::NewTask,
+        activities: &[&personal_teams_assistant::ado::link::Linkable],
+    ) -> Result<(personal_teams_assistant::ado::link::LinkStatus, Option<u64>)> {
+        assert_eq!(task.kind, "Task");
+        self.created.lock().unwrap().push((
+            parent.id,
+            task.title.clone(),
+            activities.iter().map(|a| a.url.clone()).collect(),
+        ));
+        Ok((
+            personal_teams_assistant::ado::link::LinkStatus::Linked,
+            Some(900),
+        ))
+    }
+}
+fn story() -> personal_teams_assistant::ado::link::Target {
+    personal_teams_assistant::ado::link::Target {
+        kind: "User Story".into(),
+        ..link_target(50, "Payments reliability")
+    }
 }
 /// Writes the review and reads link requests into closed keys, including keys and IDs the
 /// review never offered, which code must drop.
-struct LinkLlm;
+struct LinkLlm {
+    propose: bool,
+}
 #[async_trait]
 impl LlmProvider for LinkLlm {
+    async fn propose_registration(
+        &self,
+        offer: &personal_teams_assistant::ado::link::LinkOffer,
+        _: personal_teams_assistant::config::Language,
+    ) -> Result<Vec<personal_teams_assistant::ado::link::Proposal>> {
+        use personal_teams_assistant::ado::link::{Proposal, ProposalAction};
+        anyhow::ensure!(self.propose, "no proposal");
+        assert_eq!(offer.activities.len(), 2);
+        let proposal = |activity: &str, action, work_item, parent, title: Option<&str>| Proposal {
+            activity: activity.into(),
+            action,
+            work_item,
+            parent,
+            title: title.map(str::to_owned),
+            reason: "Mismo componente de pagos.".into(),
+        };
+        Ok(vec![
+            proposal("a1", ProposalAction::Link, Some(100), None, None),
+            proposal(
+                "a2",
+                ProposalAction::Create,
+                None,
+                Some(50),
+                Some("Corregir el reporte de pagos"),
+            ),
+            // Dropped by code: unknown key, an ID the review never read, a task under a task.
+            proposal("a9", ProposalAction::Link, Some(100), None, None),
+            proposal("a1", ProposalAction::Link, Some(777), None, None),
+            proposal("a2", ProposalAction::Create, None, Some(100), Some("x")),
+        ])
+    }
     fn name(&self) -> &str {
         "link"
     }
@@ -2609,6 +2670,7 @@ async fn unlinked_work_is_linked_only_after_the_user_confirms_the_exact_plan() {
     });
     let tools = Arc::new(LinkTools {
         writes: Default::default(),
+        created: Default::default(),
     });
     let status = |link_secret_ref: Option<&str>| {
         let mut status = wiki_resource();
@@ -2631,7 +2693,7 @@ async fn unlinked_work_is_linked_only_after_the_user_confirms_the_exact_plan() {
         store: store.clone(),
         adapter: teams.clone(),
         knowledge: status(Some("secret://ado/link")),
-        llm: Arc::new(LinkLlm),
+        llm: Arc::new(LinkLlm { propose: false }),
         tools: tools.clone(),
         redactor: redactor(),
     };
@@ -2745,4 +2807,96 @@ async fn unlinked_work_is_linked_only_after_the_user_confirms_the_exact_plan() {
     assert_eq!(audit.reason, "links_not_configured");
     assert!(last_sent().contains("link_secret_ref"));
     assert_eq!(tools.writes.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn a_review_proposes_where_to_register_each_piece_and_applies_it_on_confirmation() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = support::store(&dir);
+    let mut cfg = support::config();
+    cfg.graph.self_chat = Some(personal_teams_assistant::config::SelfChat {
+        id: "48:notes".into(),
+        user_id: cfg.graph.user_id.clone(),
+        enabled_at: 1,
+    });
+    let teams = Arc::new(NotesTeams {
+        user: cfg.graph.user_id.clone(),
+        texts: Default::default(),
+        sent: Default::default(),
+    });
+    let tools = Arc::new(LinkTools {
+        writes: Default::default(),
+        created: Default::default(),
+    });
+    let mut status = wiki_resource();
+    status.id = "azure-devops-status".into();
+    status.allowed_conversations = vec!["chats/48:notes".into()];
+    status.access = Access::Tool {
+        tool: ToolSpec::AzureDevopsStatus {
+            repository: "private".into(),
+            path: "catalog.toml".into(),
+            secret_ref: "secret://ado/read".into(),
+            link_secret_ref: Some("secret://ado/link".into()),
+        },
+    };
+    let mut map = knowledge(&dir);
+    map.resources = vec![status];
+    let pipeline = Pipeline {
+        config: Arc::new(cfg),
+        store: store.clone(),
+        adapter: teams.clone(),
+        knowledge: map,
+        llm: Arc::new(LinkLlm { propose: true }),
+        tools: tools.clone(),
+        redactor: redactor(),
+    };
+    for (index, text) in ["¿Qué trabajo hice que no está registrado?", "confirmo"]
+        .into_iter()
+        .enumerate()
+    {
+        let resource = format!("chats/48:notes/messages/{index}");
+        teams
+            .texts
+            .lock()
+            .unwrap()
+            .insert(resource.clone(), text.into());
+        store.enqueue(&resource).unwrap();
+        pipeline.process(&resource).await.unwrap();
+        let audit = store.audit(&resource).unwrap().unwrap();
+        assert_eq!(audit.status, "sent", "{text}: {}", audit.reason);
+        let sent = teams.sent.lock().unwrap().last().cloned().unwrap();
+        if index == 0 {
+            // The activities, then where each goes and why, then one confirmation question.
+            let (_, proposal) = sent.split_once("**Propuesta de registro**\n").expect(&sent);
+            assert!(proposal.starts_with("- PR #46 Retry timeouts (payments-api) → vincular a [#100 Payment timeouts](https://dev.azure.com/example/Payments/_workitems/edit/100): Mismo componente de pagos.\n- Commit cccccccc in payments-api → crear la tarea «Corregir el reporte de pagos» en [#50 Payments reliability](https://dev.azure.com/example/Payments/_workitems/edit/50): Mismo componente de pagos.\n\n¿Confirmas?"), "{sent}");
+            assert!(
+                !sent.contains("¿Quieres que los registre?")
+                    || sent.find("¿Quieres").unwrap() < sent.find("**Propuesta").unwrap()
+            );
+            assert!(sent.contains("](https://dev.azure.com/example/Payments/_workitems/edit/50)"));
+            assert!(audit.trace.iter().any(|s| {
+                s.step == "proposal"
+                    && s.detail
+                        .starts_with("2 registration(s) proposed; 3 dropped")
+            }));
+            assert!(tools.writes.lock().unwrap().is_empty());
+            assert!(tools.created.lock().unwrap().is_empty());
+        } else {
+            assert_eq!(audit.reason, "links_applied");
+            assert_eq!(
+                *tools.writes.lock().unwrap(),
+                vec![(
+                    100,
+                    "https://dev.azure.com/example/Payments/_git/payments-api/pullrequest/46"
+                        .to_owned()
+                )]
+            );
+            assert_eq!(
+                *tools.created.lock().unwrap(),
+                vec![(50, "Corregir el reporte de pagos".to_owned(), vec!["https://dev.azure.com/example/Payments/_git/payments-api/commit/cccccccc33".to_owned()])]
+            );
+            assert_eq!(audit.links[1].created, Some(900));
+            assert!(sent.contains("→ nueva tarea #900 «Corregir el reporte de pagos» en [#50 Payments reliability]"), "{sent}");
+        }
+    }
 }

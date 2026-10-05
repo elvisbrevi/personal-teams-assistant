@@ -1,7 +1,9 @@
-//! Registering unlinked work: one link from one of the user's work items to an artifact an
-//! activity review found. It is the only Azure DevOps write the app makes, with its own
-//! credential, and only after the user confirms the exact plan in their personal chat. Every
-//! target and artifact comes from data the app read and verified, never from model text.
+//! Registering unlinked work: a link from one of the user's work items to an artifact an
+//! activity review found, or a new task under an existing work item (an HU) created with those
+//! links. They are the only Azure DevOps writes the app makes, with their own credential, and
+//! only after the user confirms the exact plan in their personal chat. Every target, parent and
+//! artifact comes from data the app read and verified; the model only proposes titles and
+//! reasons.
 use super::{Catalog, item_reference, project_url, request};
 use anyhow::{Context, Result, ensure};
 use reqwest::{Client, Method};
@@ -29,15 +31,52 @@ pub struct Linkable {
     #[serde(default)]
     pub suggested: Vec<u64>,
 }
-/// A work item a link may point from, as read from Azure DevOps.
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+/// A work item a link may point from, or a new task's parent, as read from Azure DevOps.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub struct Target {
     pub id: u64,
     pub title: String,
     pub url: String,
     pub organization: String,
     pub project: String,
+    /// Work item type, state, parent, area and iteration, to choose and create under it.
+    #[serde(default)]
+    pub kind: String,
+    #[serde(default)]
+    pub state: String,
+    #[serde(default)]
+    pub parent: Option<u64>,
+    #[serde(default)]
+    pub area: String,
+    #[serde(default)]
+    pub iteration: String,
 }
+impl Target {
+    /// Task-like items hold work; anything else (an HU, a feature) may get a new task.
+    pub fn holds_tasks(&self) -> bool {
+        !TASK_KINDS.iter().any(|k| self.kind.eq_ignore_ascii_case(k))
+    }
+    pub fn from_item(item: &Value, url: String, organization: &str) -> Option<Self> {
+        Some(Self {
+            id: item["id"].as_u64()?,
+            title: super::field(item, "System.Title")
+                .chars()
+                .take(160)
+                .collect(),
+            url,
+            organization: organization.to_owned(),
+            project: super::field(item, "System.TeamProject").to_owned(),
+            kind: super::field(item, "System.WorkItemType").to_owned(),
+            state: super::field(item, "System.State").to_owned(),
+            parent: super::relation_ids(item, "System.LinkTypes.Hierarchy-Reverse")
+                .first()
+                .copied(),
+            area: super::field(item, "System.AreaPath").to_owned(),
+            iteration: super::field(item, "System.IterationPath").to_owned(),
+        })
+    }
+}
+pub const TASK_KINDS: &[&str] = &["Task", "Tarea", "Bug", "Issue", "Impediment"];
 /// What a review leaves ready to link in the personal chat: the answer the user saw, the
 /// unlinked activity and the user's work items.
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
@@ -48,12 +87,18 @@ pub struct LinkOffer {
     pub activities: Vec<Linkable>,
     #[serde(default)]
     pub work_items: Vec<Target>,
+    /// Type of the tasks the user registers work in, for new ones (`Task` when unknown).
+    #[serde(default)]
+    pub task_kind: String,
 }
 impl LinkOffer {
     /// Join offers from several sources, giving each activity its closed key in order.
     pub fn merge(offers: impl IntoIterator<Item = LinkOffer>) -> Self {
         let mut merged = LinkOffer::default();
         for offer in offers {
+            if merged.task_kind.is_empty() {
+                merged.task_kind = offer.task_kind;
+            }
             merged.activities.extend(offer.activities);
             for item in offer.work_items {
                 if !merged.work_items.iter().any(|w| w.id == item.id) {
@@ -75,6 +120,30 @@ pub struct PlannedLink {
     pub activity: String,
     pub work_item: u64,
 }
+/// Where the model proposes to register one activity: link it to an existing work item, or
+/// create a task with `title` under `parent`. Code validates every key and ID.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Proposal {
+    pub activity: String,
+    pub action: ProposalAction,
+    pub work_item: Option<u64>,
+    pub parent: Option<u64>,
+    pub title: Option<String>,
+    pub reason: String,
+}
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProposalAction {
+    Link,
+    Create,
+}
+/// A task the plan creates: its title and type; the step's target is its parent.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct NewTask {
+    pub title: String,
+    pub kind: String,
+}
 /// One resolved link: the source whose write credential adds it, the activity and the work
 /// item read from Azure DevOps.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -82,6 +151,11 @@ pub struct PlanStep {
     pub source: String,
     pub activity: Linkable,
     pub target: Target,
+    /// With a new task, `target` is its parent and the link goes on the new task.
+    #[serde(default)]
+    pub create: Option<NewTask>,
+    #[serde(default)]
+    pub reason: String,
 }
 /// A plan the user must confirm: every activity and target fully resolved.
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
@@ -109,6 +183,11 @@ pub struct LinkRecord {
     pub title: String,
     pub work_item_url: String,
     pub status: LinkStatus,
+    /// A task created for the link, under `work_item` (its parent).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_title: Option<String>,
 }
 
 pub fn pull_request_artifact(project_id: &str, repo_id: &str, id: u64) -> String {
@@ -121,17 +200,52 @@ pub fn build_artifact(id: u64) -> String {
     format!("vstfs:///Build/Build/{id}")
 }
 
-/// The JSON Patch that adds the link to a work item.
-fn patch(activity: &Linkable) -> Value {
-    let relation = match (&activity.artifact, &activity.link_name) {
+/// The relation that links an activity from a work item.
+fn relation(activity: &Linkable) -> Value {
+    match (&activity.artifact, &activity.link_name) {
         (Some(artifact), Some(name)) => {
             json!({"rel":"ArtifactLink","url":artifact,"attributes":{"name":name}})
         }
         _ => {
             json!({"rel":"Hyperlink","url":activity.url,"attributes":{"comment":"Linked from Personal Teams Assistant"}})
         }
-    };
-    json!([{"op":"add","path":"/relations/-","value":relation}])
+    }
+}
+/// The JSON Patch that adds the link to a work item.
+fn patch(activity: &Linkable) -> Value {
+    json!([{"op":"add","path":"/relations/-","value":relation(activity)}])
+}
+/// The JSON Patch that creates a task under `parent`, assigned to the user, in the parent's
+/// area and iteration, already linking `activities`.
+fn new_task(
+    organization: &str,
+    parent: &Target,
+    title: &str,
+    assignee: &str,
+    activities: &[&Linkable],
+) -> Value {
+    let parent_url = format!(
+        "{}/_apis/wit/workItems/{}",
+        organization.trim_end_matches('/'),
+        parent.id
+    );
+    let mut operations = vec![
+        json!({"op":"add","path":"/fields/System.Title","value":title}),
+        json!({"op":"add","path":"/fields/System.AssignedTo","value":assignee}),
+        json!({"op":"add","path":"/relations/-","value":{"rel":"System.LinkTypes.Hierarchy-Reverse","url":parent_url}}),
+    ];
+    if !parent.area.is_empty() {
+        operations.push(json!({"op":"add","path":"/fields/System.AreaPath","value":parent.area}));
+    }
+    if !parent.iteration.is_empty() {
+        operations.push(
+            json!({"op":"add","path":"/fields/System.IterationPath","value":parent.iteration}),
+        );
+    }
+    for activity in activities {
+        operations.push(json!({"op":"add","path":"/relations/-","value":relation(activity)}));
+    }
+    Value::Array(operations)
 }
 
 /// Read one work item and accept it as a target only inside the catalog's scope.
@@ -148,7 +262,9 @@ pub async fn verify_work_item(
             .map_err(|_| anyhow::anyhow!("invalid ADO URL"))?
             .pop_if_empty()
             .extend(["_apis", "wit", "workitems", &id.to_string()]);
-        url.query_pairs_mut().append_pair("api-version", "7.1");
+        url.query_pairs_mut()
+            .append_pair("api-version", "7.1")
+            .append_pair("$expand", "Relations");
         let Ok(item) = request(client, key, Method::GET, url, None).await else {
             continue;
         };
@@ -159,16 +275,11 @@ pub async fn verify_work_item(
         let Ok(reference) = item_reference(source, &project, &item) else {
             continue;
         };
-        return Ok(Some(Target {
-            id,
-            title: super::field(&item, "System.Title")
-                .chars()
-                .take(160)
-                .collect(),
-            url: reference.url,
-            organization: source.organization.clone(),
-            project,
-        }));
+        return Ok(Target::from_item(
+            &item,
+            reference.url,
+            &source.organization,
+        ));
     }
     Ok(None)
 }
@@ -221,6 +332,71 @@ pub async fn add_link(
     Ok(LinkStatus::AlreadyLinked)
 }
 
+/// Create one task under `parent` linking `activities`. Called once per confirmed task; the
+/// caller records `sending` first and never calls it again. Returns the new task's ID.
+pub async fn create_task(
+    client: &Client,
+    key: &str,
+    catalog_text: &str,
+    parent: &Target,
+    task: &NewTask,
+    activities: &[&Linkable],
+) -> Result<(LinkStatus, Option<u64>)> {
+    let catalog = Catalog::parse(catalog_text)?;
+    let source = catalog
+        .sources
+        .iter()
+        .find(|s| {
+            s.organization == parent.organization
+                && activities.iter().all(|a| a.organization == s.organization)
+        })
+        .context("task outside the catalog's organization")?;
+    let kind = format!(
+        "${}",
+        if task.kind.is_empty() {
+            "Task"
+        } else {
+            &task.kind
+        }
+    );
+    let url = project_url(
+        source,
+        &parent.project,
+        "dev.azure.com",
+        &["_apis", "wit", "workitems", &kind],
+    )?;
+    let body = new_task(
+        &source.organization,
+        parent,
+        &task.title,
+        &source.author_email,
+        activities,
+    );
+    // A transport error after sending may or may not have created the task.
+    let Ok(response) = client
+        .request(Method::POST, url)
+        .basic_auth("", Some(key))
+        .header("Content-Type", "application/json-patch+json")
+        .body(body.to_string())
+        .send()
+        .await
+    else {
+        return Ok((LinkStatus::Uncertain, None));
+    };
+    let status = response.status().as_u16();
+    ensure!(
+        (200..300).contains(&status),
+        "Azure DevOps task creation returned HTTP {status}"
+    );
+    // Created: an unreadable body only loses the new ID.
+    let id = crate::adapters::bounded_bytes(response, 1_000_000)
+        .await
+        .ok()
+        .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
+        .and_then(|v| v["id"].as_u64());
+    Ok((LinkStatus::Linked, id))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -262,6 +438,68 @@ mod tests {
     }
 
     #[test]
+    fn a_new_task_goes_under_its_parent_assigned_to_the_user_with_its_links() {
+        let parent = Target {
+            id: 40,
+            title: "HU".into(),
+            url: "https://dev.azure.com/example/P/_workitems/edit/40".into(),
+            organization: "https://dev.azure.com/example".into(),
+            project: "P".into(),
+            kind: "User Story".into(),
+            area: "P\\Team".into(),
+            iteration: "P\\Sprint 9".into(),
+            ..Default::default()
+        };
+        assert!(parent.holds_tasks());
+        assert!(
+            !Target {
+                kind: "task".into(),
+                ..Default::default()
+            }
+            .holds_tasks()
+        );
+        let pr = activity(Some("vstfs:///Git/PullRequestId/p%2fr%2f12"));
+        let wiki = activity(None);
+        let body = new_task(
+            "https://dev.azure.com/example/",
+            &parent,
+            "Fix the receipt",
+            "me@example.com",
+            &[&pr, &wiki],
+        );
+        let ops = body.as_array().unwrap();
+        let value = |path: &str| {
+            ops.iter()
+                .filter(|o| o["path"] == path)
+                .map(|o| o["value"].clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            value("/fields/System.Title"),
+            vec![json!("Fix the receipt")]
+        );
+        assert_eq!(
+            value("/fields/System.AssignedTo"),
+            vec![json!("me@example.com")]
+        );
+        assert_eq!(value("/fields/System.AreaPath"), vec![json!("P\\Team")]);
+        assert_eq!(
+            value("/fields/System.IterationPath"),
+            vec![json!("P\\Sprint 9")]
+        );
+        let relations = value("/relations/-");
+        assert_eq!(relations.len(), 3);
+        assert_eq!(relations[0]["rel"], "System.LinkTypes.Hierarchy-Reverse");
+        assert_eq!(
+            relations[0]["url"],
+            "https://dev.azure.com/example/_apis/wit/workItems/40"
+        );
+        assert_eq!(relations[1]["rel"], "ArtifactLink");
+        assert_eq!(relations[2]["rel"], "Hyperlink");
+        assert!(ops.iter().all(|o| o["op"] == "add"));
+    }
+
+    #[test]
     fn merged_offers_get_closed_keys_and_unique_work_items() {
         let target = Target {
             id: 5,
@@ -269,6 +507,7 @@ mod tests {
             url: "https://dev.azure.com/example/P/_workitems/edit/5".into(),
             organization: "https://dev.azure.com/example".into(),
             project: "P".into(),
+            ..Default::default()
         };
         let one = LinkOffer {
             activities: vec![activity(None)],
