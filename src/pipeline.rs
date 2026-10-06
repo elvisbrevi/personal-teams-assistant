@@ -342,7 +342,21 @@ impl Pipeline {
             // those words alone misses the page. Resolve it against the previous exchange first;
             // the rewrite only shapes the query inside sources already authorized by code.
             let mut wiki_topic = None;
-            if (previous.is_some() || !history.is_empty())
+            // Without earlier context the rewrite still names the topic when the Wiki may be
+            // searched: the whole request («qué parámetros recibe en el body…») ranks generic
+            // API pages above the one about the service.
+            let wiki_candidate = available.iter().any(|r| {
+                tool_candidates.contains_key(&r.id)
+                    && matches!(
+                        &r.access,
+                        Access::Tool {
+                            tool: crate::tools::ToolSpec::AzureDevopsWiki { .. }
+                        }
+                    )
+            });
+            if (previous.is_some()
+                || !history.is_empty()
+                || (wiki_candidate && !status_question(&current)))
                 && !more_details
                 && !review
                 && !tool_candidates.is_empty()
@@ -503,9 +517,16 @@ impl Pipeline {
             } else {
                 let mut evidence = String::new();
                 let mut registry = crate::evidence::Evidence::default();
-                // ponytail: divide the existing total budget between authorized sources; many sources
-                // reduce detail per source. Add local passage ranking across sources if that becomes limiting.
-                let budget = self.config.policy.max_context_chars / sources.len().max(1);
+                // Read every source first, then share the budget by need: a short document keeps
+                // all it has and the rest goes to the sources that can use it. An even split gave
+                // the Wiki half of the budget when the other source was one short page.
+                let total = self.config.policy.max_context_chars;
+                enum Read {
+                    Wiki(crate::ado::wiki::WikiResult),
+                    Typed(crate::evidence::Evidence),
+                    Text(String),
+                }
+                let mut reads = Vec::new();
                 for source in &sources {
                     let raw = match &source.access {
                         Access::Tool { tool } => {
@@ -530,9 +551,9 @@ impl Pipeline {
                             })
                             .await?
                         }
-                        _ => self.knowledge.retrieve(source, &question, budget).await?,
+                        _ => self.knowledge.retrieve(source, &question, total).await?,
                     };
-                    let typed = match &source.access {
+                    let read = match &source.access {
                         Access::Tool {
                             tool: crate::tools::ToolSpec::AzureDevopsWiki { .. },
                         } => {
@@ -547,41 +568,75 @@ impl Pipeline {
                                     .filter(|n| self.redactor.clean(n));
                                 page.reference.label = self.redactor.redact(&page.reference.label);
                             }
-                            Some(result.evidence(&tool_question, budget.saturating_sub(200)))
+                            for file in &mut result.repository_files {
+                                file.content = self.redactor.redact(&file.content);
+                                file.reference.label = self.redactor.redact(&file.reference.label);
+                            }
+                            Read::Wiki(result)
                         }
                         Access::Tool {
                             tool:
                                 crate::tools::ToolSpec::AzureDevopsStatus { .. }
                                 | crate::tools::ToolSpec::AzureDevops { .. },
-                        } => Some(serde_json::from_str::<crate::evidence::Evidence>(&raw)?),
-                        _ => None,
-                    };
-                    if let Some(mut data) = typed {
-                        data.sanitize(&self.redactor);
-                        let context = if matches!(
-                            &source.access,
-                            Access::Tool {
-                                tool: crate::tools::ToolSpec::AzureDevopsWiki { .. }
-                            }
-                        ) {
-                            data.text.clone()
-                        } else {
-                            data.context(&current, budget)
-                        };
-                        if context.chars().count() <= budget && !context.trim().is_empty() {
-                            evidence.push_str(&context);
-                            registry.references.extend(data.references);
-                            registry.teams.extend(data.teams);
-                            registry.partial |= data.partial;
-                            registry.warnings.extend(data.warnings);
+                        } => {
+                            let mut data: crate::evidence::Evidence = serde_json::from_str(&raw)?;
+                            data.sanitize(&self.redactor);
+                            Read::Typed(data)
                         }
-                    } else {
-                        let sanitized = self.redactor.redact(&raw);
-                        let header = format!("[source {}]\n", source.id);
-                        let passage_budget = budget.saturating_sub(header.chars().count() + 1);
-                        let passages =
-                            crate::knowledge::excerpt(&sanitized, &question, passage_budget);
-                        evidence.extend(format!("{header}{passages}\n").chars().take(budget));
+                        _ => Read::Text(self.redactor.redact(&raw)),
+                    };
+                    reads.push((source, read));
+                }
+                // The text a source writes within `budget`, with its verified registry if typed.
+                // The Wiki keeps room for its coverage note; its need counts that room too.
+                const WIKI_NOTE: usize = 200;
+                let render =
+                    |source: &crate::knowledge::Resource, read: &Read, budget: usize| match read {
+                        Read::Wiki(result) => {
+                            let data =
+                                result.evidence(&tool_question, budget.saturating_sub(WIKI_NOTE));
+                            (data.text.clone(), Some(data))
+                        }
+                        Read::Typed(data) => {
+                            let mut data = data.clone();
+                            (data.context(&current, budget), Some(data))
+                        }
+                        Read::Text(text) => {
+                            let header = format!("[source {}]\n", source.id);
+                            let passage_budget = budget.saturating_sub(header.chars().count() + 1);
+                            let passages =
+                                crate::knowledge::excerpt(text, &question, passage_budget);
+                            let text: String = format!("{header}{passages}\n")
+                                .chars()
+                                .take(budget)
+                                .collect();
+                            (text, None)
+                        }
+                    };
+                let wants: Vec<usize> = reads
+                    .iter()
+                    .map(|(source, read)| {
+                        let need = render(source, read, total).0.chars().count();
+                        match read {
+                            Read::Wiki(_) => need + WIKI_NOTE,
+                            _ => need,
+                        }
+                    })
+                    .collect();
+                for ((source, read), budget) in
+                    reads.iter().zip(crate::evidence::shares(&wants, total))
+                {
+                    match render(source, read, budget) {
+                        (context, Some(data)) => {
+                            if context.chars().count() <= budget && !context.trim().is_empty() {
+                                evidence.push_str(&context);
+                                registry.references.extend(data.references);
+                                registry.teams.extend(data.teams);
+                                registry.partial |= data.partial;
+                                registry.warnings.extend(data.warnings);
+                            }
+                        }
+                        (text, None) => evidence.push_str(&text),
                     }
                 }
                 (evidence, registry)
@@ -973,10 +1028,10 @@ impl Pipeline {
         let lengths: Vec<usize> = parts.iter().map(|(_, p)| p.chars().count()).collect();
         let mut evidence = String::new();
         let mut cut = Vec::new();
-        for ((what, part), cap) in parts
-            .iter()
-            .zip(shares(&lengths, self.config.policy.max_context_chars))
-        {
+        for ((what, part), cap) in parts.iter().zip(crate::evidence::shares(
+            &lengths,
+            self.config.policy.max_context_chars,
+        )) {
             let mut used = 0;
             for line in part.lines() {
                 let size = line.chars().count() + 1;
@@ -1934,30 +1989,6 @@ fn withheld_reason(reason: &str, language: Language) -> &'static str {
         Language::En => "didn't pass the app's checks",
     }
 }
-/// Split `total` characters among parts: short parts keep everything, the rest share what is
-/// left evenly.
-fn shares(lengths: &[usize], total: usize) -> Vec<usize> {
-    let mut caps = vec![0; lengths.len()];
-    let mut open: Vec<usize> = (0..lengths.len()).collect();
-    let mut remaining = total;
-    while !open.is_empty() {
-        let share = remaining / open.len();
-        let (fits, rest): (Vec<usize>, Vec<usize>) =
-            open.iter().partition(|&&i| lengths[i] <= share);
-        if fits.is_empty() {
-            for i in rest {
-                caps[i] = share;
-            }
-            break;
-        }
-        for i in fits {
-            caps[i] = lengths[i];
-            remaining -= lengths[i];
-        }
-        open = rest;
-    }
-    caps
-}
 fn normalized_phrase(text: &str) -> String {
     let normalized = text
         .to_lowercase()
@@ -2324,7 +2355,7 @@ fn status_question(question: &str) -> bool {
 mod tests {
     use super::{
         Language, LinkOffer, activity_review_request, confirmation, documentation_question,
-        holding_reply, link_request, personal_request, question_request, shares, status_question,
+        holding_reply, link_request, personal_request, question_request, status_question,
         with_registration, withheld_reason, work_mention,
     };
 
@@ -2427,6 +2458,7 @@ mod tests {
 
     #[test]
     fn short_sources_keep_everything_and_long_ones_share_the_rest() {
+        use crate::evidence::shares;
         assert_eq!(shares(&[100, 9000, 9000], 6000), vec![100, 2950, 2950]);
         assert_eq!(shares(&[100, 200], 6000), vec![100, 200]);
         assert_eq!(shares(&[], 6000), Vec::<usize>::new());

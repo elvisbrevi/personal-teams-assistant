@@ -105,12 +105,29 @@ pub fn plain_text(html: &str) -> String {
         .collect::<Vec<_>>()
         .join(" ")
 }
-/// Render the assistant's Markdown subset as Teams chat HTML: paragraphs, line breaks,
-/// `**bold**`, `` `code` ``, `-`/`1.` lists (nested by indentation), fenced code blocks and
+/// Text colors the answer may use, by name: mid tones that stay readable on Teams' light and
+/// dark themes. Any other name is not a color and stays text.
+const COLORS: [(&str, &str); 5] = [
+    ("red", "#E74856"),
+    ("orange", "#CA5010"),
+    ("green", "#13A10E"),
+    ("blue", "#2F80ED"),
+    ("gray", "#8A8A8A"),
+];
+/// Render the assistant's Markdown as Teams chat HTML.
+///
+/// Blocks: paragraphs and line breaks, `#` headings (as `<h2>`/`<h3>`: an `<h1>` is too large
+/// for a chat), `-`/`1.` lists nested by indentation with `[ ]`/`[x]` checklists, fenced code
+/// blocks, `>` quotes (one level), `---` rules and pipe tables. Inline: `**bold**`, `*italic*`,
+/// `~~strike~~`, `` `code` ``, `{green:text}` in one of the [`COLORS`], `\` escapes and
 /// `[title](https://…)` links. Everything else is escaped text; only HTTPS links become anchors,
 /// and the pipeline has already verified every URL in the answer against the registry.
 pub fn html(markdown: &str) -> String {
+    blocks(markdown, true)
+}
+fn blocks(markdown: &str, quotes: bool) -> String {
     let item = regex::Regex::new(r"^(\s*)([-*+]|\d{1,3}[.)])\s+(.*)$").unwrap();
+    let lines: Vec<&str> = markdown.lines().collect();
     let mut out = String::new();
     let mut paragraph: Vec<String> = Vec::new();
     // (indent, tag) per open list; every open list has one open <li>.
@@ -129,7 +146,22 @@ pub fn html(markdown: &str) -> String {
             out.push_str(&format!("</li></{tag}>"));
         }
     }
-    for line in markdown.lines() {
+    // A block ends the paragraph; indented, it belongs to the current list item, otherwise it
+    // ends the list.
+    fn open(
+        out: &mut String,
+        paragraph: &mut Vec<String>,
+        lists: &mut Vec<(usize, &str)>,
+        indent: usize,
+    ) {
+        flush(out, paragraph);
+        if indent == 0 {
+            close(out, lists, 0);
+        }
+    }
+    let mut next = 0;
+    while let Some(line) = lines.get(next) {
+        next += 1;
         let indent = line.chars().take_while(|c| c.is_whitespace()).count();
         let trimmed = line.trim_start();
         if let Some((fence, lang, body)) = code.as_mut() {
@@ -143,11 +175,7 @@ pub fn html(markdown: &str) -> String {
             continue;
         }
         if let Some(lang) = trimmed.strip_prefix("```") {
-            flush(&mut out, &mut paragraph);
-            // An indented fence belongs to the current list item; otherwise it ends the list.
-            if indent == 0 {
-                close(&mut out, &mut lists, 0);
-            }
+            open(&mut out, &mut paragraph, &mut lists, indent);
             code = Some((indent, lang.trim().to_lowercase(), Vec::new()));
             blank = false;
             continue;
@@ -155,6 +183,60 @@ pub fn html(markdown: &str) -> String {
         if trimmed.is_empty() {
             flush(&mut out, &mut paragraph);
             blank = true;
+            continue;
+        }
+        if indent == 0 && rule(trimmed) {
+            open(&mut out, &mut paragraph, &mut lists, 0);
+            out.push_str("<hr>");
+            blank = false;
+            continue;
+        }
+        if indent == 0
+            && let Some((level, text)) = heading(trimmed)
+        {
+            open(&mut out, &mut paragraph, &mut lists, 0);
+            out.push_str(&format!("<h{level}>{}</h{level}>", inline(text)));
+            blank = false;
+            continue;
+        }
+        if quotes && let Some(first) = trimmed.strip_prefix('>') {
+            open(&mut out, &mut paragraph, &mut lists, indent);
+            let mut quoted = vec![first];
+            while let Some(more) = lines
+                .get(next)
+                .and_then(|l| l.trim_start().strip_prefix('>'))
+            {
+                quoted.push(more);
+                next += 1;
+            }
+            let body: Vec<&str> = quoted
+                .iter()
+                .map(|l| l.strip_prefix(' ').unwrap_or(l))
+                .collect();
+            out.push_str(&format!(
+                "<blockquote>{}</blockquote>",
+                blocks(&body.join("\n"), false)
+            ));
+            blank = false;
+            continue;
+        }
+        // A row with pipes followed by a delimiter row with as many cells starts a table.
+        let header = trimmed
+            .contains('|')
+            .then(|| cells(trimmed))
+            .filter(|header| lines.get(next).and_then(|l| delimiter(l)) == Some(header.len()));
+        if let Some(header) = header {
+            open(&mut out, &mut paragraph, &mut lists, indent);
+            next += 1;
+            let mut rows = Vec::new();
+            while let Some(row) = lines.get(next).filter(|l| {
+                l.contains('|') && !l.trim().is_empty() && !l.trim_start().starts_with("```")
+            }) {
+                rows.push(cells(row));
+                next += 1;
+            }
+            out.push_str(&table(&header, &rows));
+            blank = false;
             continue;
         }
         if let Some(c) = item.captures(line) {
@@ -182,7 +264,13 @@ pub fn html(markdown: &str) -> String {
                     lists.push((indent, tag));
                 }
             }
-            out.push_str(&format!("<li>{}", inline(&c[3])));
+            // Teams has no checkboxes in messages: checklist items start with a ballot box.
+            let (mark, text) = match c[3].split_at_checked(4) {
+                Some(("[ ] ", text)) => ("☐ ", text),
+                Some(("[x] " | "[X] ", text)) => ("☑ ", text),
+                _ => ("", &c[3]),
+            };
+            out.push_str(&format!("<li>{mark}{}", inline(text)));
             blank = false;
             continue;
         }
@@ -193,13 +281,7 @@ pub fn html(markdown: &str) -> String {
             continue;
         }
         close(&mut out, &mut lists, 0);
-        let heading = trimmed.trim_start_matches('#');
-        if trimmed.starts_with('#') && heading.starts_with(' ') {
-            flush(&mut out, &mut paragraph);
-            out.push_str(&format!("<p><b>{}</b></p>", inline(heading.trim())));
-        } else {
-            paragraph.push(inline(trimmed));
-        }
+        paragraph.push(inline(trimmed));
         blank = false;
     }
     if let Some((_, lang, body)) = &code {
@@ -208,6 +290,71 @@ pub fn html(markdown: &str) -> String {
     flush(&mut out, &mut paragraph);
     close(&mut out, &mut lists, 0);
     out
+}
+/// `---`, `***` or `___`, three or more and spaces allowed: a horizontal rule.
+fn rule(line: &str) -> bool {
+    let marks: Vec<char> = line.chars().filter(|c| !c.is_whitespace()).collect();
+    marks.len() >= 3 && matches!(marks[0], '-' | '*' | '_') && marks.iter().all(|m| *m == marks[0])
+}
+/// `#` to `######` and a space: the heading level (`#`/`##` as 2, deeper as 3) and its text.
+fn heading(line: &str) -> Option<(u8, &str)> {
+    let text = line.trim_start_matches('#');
+    let level = line.len() - text.len();
+    ((1..=6).contains(&level) && text.starts_with(' ') && !text.trim().is_empty())
+        .then(|| (if level <= 2 { 2 } else { 3 }, text.trim()))
+}
+/// The cells of a pipe-table row. `|` separates cells unless escaped (`\|`) or inside a code
+/// span; the outer pipes are optional.
+fn cells(row: &str) -> Vec<String> {
+    let row = row.trim();
+    let row = row.strip_prefix('|').unwrap_or(row);
+    let mut cells = vec![String::new()];
+    let mut code = false;
+    let mut chars = row.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' if chars.peek() == Some(&'|') => {
+                chars.next();
+                cells.last_mut().unwrap().push('|');
+            }
+            '|' if !code => cells.push(String::new()),
+            _ => {
+                code ^= c == '`';
+                cells.last_mut().unwrap().push(c);
+            }
+        }
+    }
+    if row.ends_with('|') && cells.last().is_some_and(String::is_empty) {
+        cells.pop();
+    }
+    cells.iter().map(|c| c.trim().to_owned()).collect()
+}
+/// The number of columns of a table delimiter row such as `| --- | :---: |`.
+fn delimiter(line: &str) -> Option<usize> {
+    let cells = cells(line);
+    let dashes = |cell: &String| {
+        let cell = cell.strip_prefix(':').unwrap_or(cell);
+        let cell = cell.strip_suffix(':').unwrap_or(cell);
+        !cell.is_empty() && cell.chars().all(|c| c == '-')
+    };
+    (line.contains('|') && cells.iter().all(dashes)).then_some(cells.len())
+}
+/// A table with the header's columns: shorter rows are padded and extra cells dropped.
+fn table(header: &[String], rows: &[Vec<String>]) -> String {
+    let row = |tag: &str, cells: &[String]| {
+        let cells: String = (0..header.len())
+            .map(|k| {
+                let cell = cells.get(k).map_or("", String::as_str);
+                format!("<{tag}>{}</{tag}>", inline(cell))
+            })
+            .collect();
+        format!("<tr>{cells}</tr>")
+    };
+    let body: String = rows.iter().map(|cells| row("td", cells)).collect();
+    format!(
+        "<table><thead>{}</thead><tbody>{body}</tbody></table>",
+        row("th", header)
+    )
 }
 fn escape(text: &str) -> String {
     text.replace('&', "&amp;")
@@ -255,36 +402,95 @@ fn codeblock(lang: &str, lines: &[String]) -> String {
 fn inline(text: &str) -> String {
     let mut out = String::new();
     let mut rest = text;
+    // The character before `rest`: an underscore inside a word is not emphasis.
+    let mut before = None;
     while let Some(c) = rest.chars().next() {
-        if c == '`'
-            && let Some(end) = rest[1..].find('`')
-        {
-            out.push_str(&format!("<code>{}</code>", escape(&rest[1..1 + end])));
-            rest = &rest[end + 2..];
-            continue;
-        }
-        if rest.starts_with("**")
-            && let Some(end) = rest[2..].find("**").filter(|end| *end > 0)
-        {
-            out.push_str(&format!("<b>{}</b>", inline(&rest[2..2 + end])));
-            rest = &rest[end + 4..];
-            continue;
-        }
-        if c == '['
-            && let Some((label, url, used)) = link(rest)
-        {
-            out.push_str(&format!(
-                "<a href=\"{}\">{}</a>",
-                escape(url),
-                inline(label)
-            ));
-            rest = &rest[used..];
-            continue;
-        }
-        out.push_str(&escape(&rest[..c.len_utf8()]));
-        rest = &rest[c.len_utf8()..];
+        let (html, used) =
+            span(rest, before).unwrap_or_else(|| (escape(&rest[..c.len_utf8()]), c.len_utf8()));
+        out.push_str(&html);
+        before = rest[..used].chars().next_back();
+        rest = &rest[used..];
     }
     out
+}
+/// The inline element at the start of `text`: its HTML and the bytes it spans.
+fn span(text: &str, before: Option<char>) -> Option<(String, usize)> {
+    let mut chars = text.chars();
+    match chars.next()? {
+        '\\' => chars
+            .next()
+            .filter(char::is_ascii_punctuation)
+            .map(|c| (escape(&c.to_string()), 2)),
+        '`' => text[1..].find('`').map(|end| {
+            (
+                format!("<code>{}</code>", escape(&text[1..1 + end])),
+                end + 2,
+            )
+        }),
+        '*' | '_' | '~' => emphasis(text, before),
+        '{' => color(text),
+        '[' => link(text).map(|(label, url, used)| {
+            let html = format!("<a href=\"{}\">{}</a>", escape(url), inline(label));
+            (html, used)
+        }),
+        _ => None,
+    }
+}
+/// `***bold italic***`, `**bold**`, `__bold__`, `~~strike~~`, `*italic*` and `_italic_`. The
+/// text inside neither starts nor ends with a space, and underscores count only at word
+/// boundaries, so `2 * 3` and `snake_case` names stay text.
+fn emphasis(text: &str, before: Option<char>) -> Option<(String, usize)> {
+    const MARKS: [(&str, &str, &str); 6] = [
+        ("***", "<b><i>", "</i></b>"),
+        ("**", "<b>", "</b>"),
+        ("__", "<b>", "</b>"),
+        ("~~", "<s>", "</s>"),
+        ("*", "<i>", "</i>"),
+        ("_", "<i>", "</i>"),
+    ];
+    let word = |c: Option<char>| c.is_some_and(char::is_alphanumeric);
+    for (mark, open, close) in MARKS {
+        let underscore = mark.starts_with('_');
+        let Some(inner) = text.strip_prefix(mark) else {
+            continue;
+        };
+        if inner.starts_with(char::is_whitespace) || (underscore && word(before)) {
+            continue;
+        }
+        let mut from = 0;
+        while let Some(at) = inner[from..].find(mark).map(|at| at + from) {
+            // A single mark does not close inside a longer run: `*a **b** c*` is one italic.
+            let run = inner[at..]
+                .bytes()
+                .take_while(|b| *b == mark.as_bytes()[0])
+                .count();
+            let closes = at > 0
+                && !inner[..at].ends_with(char::is_whitespace)
+                && !(underscore && word(inner[at + mark.len()..].chars().next()))
+                && (mark.len() > 1 || run == 1);
+            if closes {
+                let html = format!("{open}{}{close}", inline(&inner[..at]));
+                return Some((html, at + 2 * mark.len()));
+            }
+            from = at + if mark.len() == 1 { run } else { 1 };
+        }
+    }
+    None
+}
+/// `{green:text}`: the text in one of the [`COLORS`]. Another name, a nested brace or an
+/// empty text stays as written.
+fn color(text: &str) -> Option<(String, usize)> {
+    let colon = 1 + text[1..].char_indices().take(8).find(|(_, c)| *c == ':')?.0;
+    let (_, hex) = COLORS.iter().find(|(name, _)| *name == &text[1..colon])?;
+    let body = &text[colon + 1..];
+    let end = body.find(['{', '}'])?;
+    (body[end..].starts_with('}') && !body[..end].trim().is_empty()).then(|| {
+        let html = format!(
+            "<span style=\"color:{hex}\">{}</span>",
+            inline(body[..end].trim())
+        );
+        (html, colon + end + 2)
+    })
 }
 /// `[label](https://url)` at the start of `text`, with balanced parentheses in the URL.
 fn link(text: &str) -> Option<(&str, &str, usize)> {
@@ -441,6 +647,56 @@ mod tests {
         );
         assert_eq!(super::html("¡Hola!"), "<p>¡Hola!</p>");
         assert_eq!(super::html("a ** b ` c [d]"), "<p>a ** b ` c [d]</p>");
+    }
+    #[test]
+    fn rich_markdown_renders_tables_quotes_rules_checklists_and_colors() {
+        let answer = "## Estado de **Crear SPS**\n\nEl servicio está *disponible* y ~~en pruebas~~ en producción.\n| Ambiente | Estado | Nota |\n|---|:---:|---|\n| QA | {green:OK} | `GET /a\\|b` |\n| Prod | {red: Caído} |\n\n> **Importante:** revisar el *token*.\n> > anidado\n\n---\n- [x] Desplegado\n- [ ] Validado";
+        assert_eq!(
+            html(answer),
+            concat!(
+                "<h2>Estado de <b>Crear SPS</b></h2>",
+                "<p>El servicio está <i>disponible</i> y <s>en pruebas</s> en producción.</p>",
+                "<table><thead><tr><th>Ambiente</th><th>Estado</th><th>Nota</th></tr></thead><tbody>",
+                "<tr><td>QA</td><td><span style=\"color:#13A10E\">OK</span></td><td><code>GET /a|b</code></td></tr>",
+                "<tr><td>Prod</td><td><span style=\"color:#E74856\">Caído</span></td><td></td></tr>",
+                "</tbody></table>",
+                "<blockquote><p><b>Importante:</b> revisar el <i>token</i>.<br>&gt; anidado</p></blockquote>",
+                "<hr><ul><li>☑ Desplegado</li><li>☐ Validado</li></ul>",
+            )
+        );
+        assert_eq!(
+            html(
+                "1. Paso\n   | a | b |\n   | - | - |\n   | 1 | 2 |\n2. Otro\n# Grande\n#### Chico\n#hashtag"
+            ),
+            concat!(
+                "<ol><li>Paso<table><thead><tr><th>a</th><th>b</th></tr></thead>",
+                "<tbody><tr><td>1</td><td>2</td></tr></tbody></table></li><li>Otro</li></ol>",
+                "<h2>Grande</h2><h3>Chico</h3><p>#hashtag</p>",
+            )
+        );
+        // Without a delimiter row a pipe is text.
+        assert_eq!(html("a | b\nc | d"), "<p>a | b<br>c | d</p>");
+    }
+    #[test]
+    fn emphasis_needs_clear_boundaries_and_unknown_markup_stays_text() {
+        assert_eq!(
+            html("*a **b** c* y ***ambos*** y **a *b* c** y _nota_"),
+            "<p><i>a <b>b</b> c</i> y <b><i>ambos</i></b> y <b>a <i>b</i> c</b> y <i>nota</i></p>"
+        );
+        assert_eq!(
+            html(
+                "snake_case_name, 2 * 3 * 4, \\*literal\\*, C:\\Users\\x, {purple:no}, {red:} {red:a{b}}"
+            ),
+            "<p>snake_case_name, 2 * 3 * 4, *literal*, C:\\Users\\x, {purple:no}, {red:} {red:a{b}}</p>"
+        );
+        assert_eq!(
+            html("https://dev.azure.com/o/p/_git/r/_build?x=1_2"),
+            "<p>https://dev.azure.com/o/p/_git/r/_build?x=1_2</p>"
+        );
+        assert_eq!(
+            html("{green:<b>ok</b>}"),
+            "<p><span style=\"color:#13A10E\">&lt;b&gt;ok&lt;/b&gt;</span></p>"
+        );
     }
     #[test]
     fn requires_real_mention() {

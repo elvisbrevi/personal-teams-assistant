@@ -1195,7 +1195,7 @@ pub async fn review(
     days: i64,
     store: Arc<Store>,
 ) -> Result<Evidence> {
-    let catalog = Catalog::parse(catalog_text)?;
+    let catalog = Catalog::parse(catalog_text)?.own(client, key).await?;
     let since = Utc::now() - Duration::days(days);
     let mut jobs = tokio::task::JoinSet::new();
     let mut sections = Vec::new();

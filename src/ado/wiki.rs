@@ -1,5 +1,5 @@
 //! Native ADO Wiki/Search reads. No content cache, cloning, embeddings or permission fallback.
-use super::{Catalog, Source, organization_url, project_url};
+use super::{Catalog, Source, organization_url, project_url, team_projects, teams_url};
 use crate::evidence::{Evidence, Reference};
 use anyhow::{Context, Result, bail, ensure};
 use reqwest::{Client, Method};
@@ -110,6 +110,105 @@ pub struct WikiResult {
     pub histories_checked: usize,
     pub partial: bool,
     pub warnings: Vec<String>,
+    /// Only when the source enables `repository_docs`: README and OpenAPI files of the
+    /// repositories named like the search topic.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub repository_files: Vec<RepositoryFile>,
+}
+/// A documentation file at the root of a Git repository whose name matches the search topic,
+/// read at its default branch with the Wiki's credential and catalog.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RepositoryFile {
+    pub repository: String,
+    pub path: String,
+    pub content: String,
+    pub reference: Reference,
+}
+/// Topic words that can name a repository: folded to lowercase ASCII letters, without generic
+/// words such as «microservicio» or «endpoint» that repository names rarely carry.
+fn repository_terms(topic: &str) -> Vec<String> {
+    const GENERIC: [&str; 37] = [
+        "and",
+        "api",
+        "apis",
+        "body",
+        "con",
+        "del",
+        "for",
+        "las",
+        "los",
+        "para",
+        "por",
+        "the",
+        "una",
+        "documentacion",
+        "documentation",
+        "endpoint",
+        "endpoints",
+        "microservice",
+        "microservices",
+        "microservicio",
+        "microservicios",
+        "openapi",
+        "parameters",
+        "parametros",
+        "project",
+        "proyecto",
+        "readme",
+        "repo",
+        "repositorio",
+        "repository",
+        "request",
+        "service",
+        "services",
+        "servicio",
+        "servicios",
+        "swagger",
+        "wiki",
+    ];
+    topic
+        .split(|c: char| !c.is_alphanumeric())
+        .map(fold)
+        .filter(|w| w.chars().count() >= 3 && !GENERIC.contains(&w.as_str()))
+        .collect()
+}
+fn fold(text: &str) -> String {
+    text.to_lowercase()
+        .chars()
+        .map(|c| match c {
+            'á' | 'à' | 'ä' | 'â' => 'a',
+            'é' | 'è' | 'ë' | 'ê' => 'e',
+            'í' | 'ì' | 'ï' | 'î' => 'i',
+            'ó' | 'ò' | 'ö' | 'ô' => 'o',
+            'ú' | 'ù' | 'ü' | 'û' => 'u',
+            'ñ' => 'n',
+            c => c,
+        })
+        .collect()
+}
+/// Whether a repository name carries every term, ignoring separators; a term of five or more
+/// letters may lose its last one («crear» names `cyp-crea-usuario-natural`).
+fn names_repository(name: &str, terms: &[String]) -> bool {
+    let name: String = fold(name).chars().filter(|c| c.is_alphanumeric()).collect();
+    !terms.is_empty()
+        && terms.iter().all(|term| {
+            name.contains(term.as_str())
+                || (term.chars().count() >= 5
+                    && term
+                        .char_indices()
+                        .last()
+                        .is_some_and(|(at, _)| name.contains(&term[..at])))
+        })
+}
+/// A README or an OpenAPI definition (`swagger*`/`openapi*` YAML or JSON) at the root.
+fn documentation_file(path: &str) -> bool {
+    let name = path.trim_start_matches('/').to_lowercase();
+    !name.contains('/')
+        && (matches!(
+            name.as_str(),
+            "readme" | "readme.md" | "readme.markdown" | "readme.txt"
+        ) || ((name.starts_with("swagger") || name.starts_with("openapi"))
+            && [".yaml", ".yml", ".json"].iter().any(|e| name.ends_with(e))))
 }
 impl WikiResult {
     pub fn evidence(&self, question: &str, budget: usize) -> Evidence {
@@ -118,8 +217,17 @@ impl WikiResult {
             warnings: self.warnings.clone(),
             ..Default::default()
         };
-        let each = budget / self.pages.len().max(1);
-        for p in &self.pages {
+        /// A document to write: a copy carries no text, only its header and note.
+        struct Doc<'a> {
+            id: &'a str,
+            header: String,
+            note: String,
+            text: Option<(String, String)>,
+            references: Vec<Reference>,
+            original: Option<&'a str>,
+        }
+        let mut docs: Vec<Doc> = Vec::new();
+        for (i, p) in self.pages.iter().enumerate() {
             let header = format!(
                 "\nWiki page: {}\n",
                 serde_json::to_string(&json!({
@@ -133,26 +241,123 @@ impl WikiResult {
                 }))
                 .unwrap()
             );
-            if header.chars().count() + 50 > each {
-                evidence.partial = true;
-                continue;
-            }
-            // Canonical titles preserve spaced names such as "Crear SPS" when the
-            // caller used an identifier such as "crearsps". URLs/revisions stay in
-            // the verified registry instead of consuming the model's text budget.
-            let excerpt = crate::knowledge::excerpt(
-                &p.content,
-                &format!("{question} {}", p.title),
-                each - header.chars().count() - 1,
+            let mut references = vec![p.reference.clone()];
+            references.extend(p.entities.clone());
+            // The same page can live in several wikis: its content goes once and every copy
+            // only adds its header and reference.
+            let original = self.pages[..i]
+                .iter()
+                .find(|earlier| earlier.content == p.content)
+                .map(|earlier| earlier.reference.id.as_str());
+            docs.push(Doc {
+                id: &p.reference.id,
+                header,
+                note: original
+                    .map_or_else(String::new, |o| format!("Same content as Wiki page {o}.\n")),
+                // Canonical titles preserve spaced names such as "Crear SPS" when the caller
+                // used an identifier such as "crearsps". URLs/revisions stay in the verified
+                // registry instead of consuming the model's text budget.
+                text: original
+                    .is_none()
+                    .then(|| (p.content.clone(), format!("{question} {}", p.title))),
+                references,
+                original,
+            });
+        }
+        let lines = |text: &str| -> BTreeSet<String> {
+            text.lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty())
+                .map(str::to_owned)
+                .collect()
+        };
+        let page_lines: Vec<BTreeSet<String>> =
+            self.pages.iter().map(|p| lines(&p.content)).collect();
+        for file in &self.repository_files {
+            let header = format!(
+                "\nRepository file: {}\n",
+                serde_json::to_string(&json!({
+                    "id": file.reference.id,
+                    "location": file.reference.label,
+                    "project": file.reference.project,
+                }))
+                .unwrap()
             );
-            if excerpt.trim().is_empty() {
-                continue;
-            }
-            evidence.text.push_str(&header);
+            // A README is often copied into the Wiki: when most of its lines are in a page,
+            // only the lines that differ (a newer version, say) are worth the budget.
+            let own = lines(&file.content);
+            let copied = self.pages.iter().zip(&page_lines).find(|(_, page)| {
+                !own.is_empty() && own.intersection(page).count() * 5 >= own.len() * 4
+            });
+            let (note, text, original) = match copied {
+                Some((page, page_lines)) => {
+                    let rest: Vec<&str> = file
+                        .content
+                        .lines()
+                        .filter(|l| !l.trim().is_empty() && !page_lines.contains(l.trim()))
+                        .collect();
+                    let id = page.reference.id.as_str();
+                    if rest.is_empty() {
+                        (format!("Same content as Wiki page {id}.\n"), None, Some(id))
+                    } else {
+                        (
+                            format!(
+                                "Mostly the same content as Wiki page {id}; only its other lines follow.\n"
+                            ),
+                            Some(rest.join("\n")),
+                            None,
+                        )
+                    }
+                }
+                None => (String::new(), Some(file.content.clone()), None),
+            };
+            docs.push(Doc {
+                id: &file.reference.id,
+                header,
+                note,
+                text: text.map(|t| (t, format!("{question} {}", file.repository))),
+                references: vec![file.reference.clone()],
+                original,
+            });
+        }
+        // Headers and notes always fit; the text budget follows what each document needs, so
+        // a short page or a README reduced to its differences leaves room for the long ones.
+        let fixed: usize = docs
+            .iter()
+            .map(|d| d.header.chars().count() + d.note.chars().count())
+            .sum();
+        let wants: Vec<usize> = docs
+            .iter()
+            .map(|d| d.text.as_ref().map_or(0, |(t, _)| t.chars().count() + 1))
+            .collect();
+        let budgets = crate::evidence::shares(&wants, budget.saturating_sub(fixed));
+        let mut written: Vec<&str> = Vec::new();
+        for (doc, share) in docs.iter().zip(budgets) {
+            let excerpt = match &doc.text {
+                None => {
+                    if !doc.original.is_some_and(|o| written.contains(&o)) {
+                        continue;
+                    }
+                    String::new()
+                }
+                Some((text, query)) => {
+                    // A text that fits whole is kept however short; a cut one needs some room.
+                    if share == 0 || (share <= text.chars().count() && share < 50) {
+                        evidence.partial = true;
+                        continue;
+                    }
+                    let excerpt = crate::knowledge::excerpt(text, query, share - 1);
+                    if excerpt.trim().is_empty() {
+                        continue;
+                    }
+                    format!("{excerpt}\n")
+                }
+            };
+            evidence.text.push_str(&doc.header);
+            evidence.text.push_str(&doc.note);
             evidence.text.push_str(&excerpt);
-            evidence.text.push('\n');
-            evidence.references.push(p.reference.clone());
-            evidence.references.extend(p.entities.clone());
+            evidence.references.extend(doc.references.iter().cloned());
+            written.push(doc.id);
         }
         if self.partial {
             evidence.text.push_str("\nPartial Wiki coverage: ");
@@ -160,7 +365,7 @@ impl WikiResult {
         }
         evidence
     }
-    fn warn(&mut self, phase: &str) {
+    pub fn warn(&mut self, phase: &str) {
         self.partial = true;
         if !self.warnings.iter().any(|w| w == phase) {
             self.warnings.push(phase.to_owned());
@@ -829,6 +1034,21 @@ impl<'a> Reader<'a> {
         self.deadline = Instant::now() + Duration::from_secs(seconds);
         self
     }
+    /// Replaces `*` with the projects of the teams the user belongs to, as the activity reads
+    /// do, so Search, pages and repositories stay in the projects the user takes part in.
+    pub async fn own_scope(mut self) -> Result<Self> {
+        let mut narrowed = Vec::new();
+        for (index, source) in self.catalog.sources.iter().enumerate() {
+            if source.projects == ["*"] {
+                let (value, _) = self.request(Method::GET, teams_url(source)?, None).await?;
+                narrowed.push((index, team_projects(&value)?));
+            }
+        }
+        for (index, projects) in narrowed {
+            self.catalog.sources[index].projects = projects;
+        }
+        Ok(self)
+    }
     /// Pages the user created or edited since `since`, from each wiki's Git history, newest
     /// first and each with its verified link. The second value is true when some history
     /// could not be read.
@@ -1056,6 +1276,167 @@ impl<'a> Reader<'a> {
         result.pages.push(page);
         Ok(result)
     }
+    /// Adds the README and OpenAPI files at the root of at most two repositories whose name
+    /// carries every word of the search topic, in the catalog's projects as narrowed by
+    /// [`Self::own_scope`]; a failed read leaves a warning and the Wiki result intact.
+    pub async fn repository_docs(&self, result: &mut WikiResult) {
+        let terms = repository_terms(&result.query);
+        if terms.is_empty() {
+            return;
+        }
+        let mut found = Vec::new();
+        for source in &self.catalog.sources {
+            // `*` lists the whole organization: only after `own_scope` are these the user's.
+            if source.projects == ["*"] {
+                result.warn("Repositories not read: projects not narrowed to the user's teams");
+                continue;
+            }
+            for project in &source.projects {
+                let listed = match project_url(
+                    source,
+                    project,
+                    "dev.azure.com",
+                    &["_apis", "git", "repositories"],
+                ) {
+                    Ok(url) => self.request(Method::GET, url, None).await,
+                    Err(e) => Err(e),
+                };
+                let value = match listed {
+                    Ok((value, _)) => value,
+                    Err(error) => {
+                        result.warn(&format!(
+                            "Repository list incomplete; README/OpenAPI not read: {error}"
+                        ));
+                        continue;
+                    }
+                };
+                for repo in value["value"].as_array().into_iter().flatten() {
+                    let name = repo["name"].as_str().unwrap_or("");
+                    if !repo["isDisabled"].as_bool().unwrap_or(false)
+                        && !name.ends_with(".wiki")
+                        && names_repository(name, &terms)
+                    {
+                        found.push((source, repo.clone()));
+                    }
+                }
+            }
+        }
+        // The shortest names carry the fewest words beyond the topic.
+        found.sort_by_key(|(_, repo)| repo["name"].as_str().map_or(usize::MAX, str::len));
+        if found.len() > 2 {
+            result.warn("Repository match limit (2)");
+        }
+        for (source, repo) in found.into_iter().take(2) {
+            if let Err(error) = self.read_repository(source, &repo, result).await {
+                result.warn(&format!(
+                    "Repository documentation read incomplete: {error}"
+                ));
+            }
+        }
+    }
+    async fn read_repository(
+        &self,
+        source: &Source,
+        repo: &Value,
+        result: &mut WikiResult,
+    ) -> Result<()> {
+        let id = repo["id"].as_str().context("repository ID missing")?;
+        let name = repo["name"].as_str().context("repository name missing")?;
+        let project = repo["project"]["name"]
+            .as_str()
+            .context("repository project missing")?;
+        let branch = repo["defaultBranch"]
+            .as_str()
+            .and_then(|b| b.strip_prefix("refs/heads/"))
+            .context("repository has no default branch")?;
+        let items = |query: &[(&str, &str)]| -> Result<Url> {
+            let mut url = project_url(
+                source,
+                project,
+                "dev.azure.com",
+                &["_apis", "git", "repositories", id, "items"],
+            )?;
+            url.query_pairs_mut()
+                .append_pair("versionDescriptor.version", branch)
+                .append_pair("versionDescriptor.versionType", "branch")
+                .extend_pairs(query);
+            Ok(url)
+        };
+        let (listing, _) = self
+            .request(
+                Method::GET,
+                items(&[("scopePath", "/"), ("recursionLevel", "OneLevel")])?,
+                None,
+            )
+            .await?;
+        let mut paths: Vec<&str> = listing["value"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|item| !item["isFolder"].as_bool().unwrap_or(false))
+            .filter_map(|item| item["path"].as_str())
+            .filter(|path| documentation_file(path))
+            .collect();
+        // The README first, then one OpenAPI definition.
+        paths.sort_by_key(|path| (!path.to_lowercase().contains("readme"), *path));
+        paths.dedup_by_key(|path| path.to_lowercase().contains("readme"));
+        for path in paths {
+            let Ok((item, _)) = self
+                .request(
+                    Method::GET,
+                    items(&[
+                        ("path", path),
+                        ("includeContent", "true"),
+                        ("$format", "json"),
+                    ])?,
+                    None,
+                )
+                .await
+            else {
+                result.warn("Repository documentation read incomplete");
+                continue;
+            };
+            let content: String = item["content"]
+                .as_str()
+                .unwrap_or("")
+                .chars()
+                .take(100_000)
+                .collect();
+            if content.trim().is_empty() {
+                continue;
+            }
+            let mut url = project_url(source, project, "dev.azure.com", &["_git", name])?;
+            url.set_query(None);
+            url.query_pairs_mut()
+                .append_pair("path", path)
+                .append_pair("version", &format!("GB{branch}"));
+            let reference = Reference {
+                id: format!(
+                    "repository_file:{}:{project}:{id}:{path}",
+                    source.organization
+                ),
+                kind: "repository_file".into(),
+                label: format!("{name} / {}", path.trim_start_matches('/')),
+                url: url.into(),
+                organization: source.organization.clone(),
+                project: project.into(),
+                aliases: Vec::new(),
+                parent: None,
+                revision: item["commitId"].as_str().map(str::to_owned),
+                authority: None,
+                author: None,
+                author_role: None,
+            };
+            reference.validate()?;
+            result.repository_files.push(RepositoryFile {
+                repository: name.into(),
+                path: path.into(),
+                content,
+                reference,
+            });
+        }
+        Ok(())
+    }
     pub async fn search(
         &self,
         input: &SearchInput,
@@ -1077,6 +1458,10 @@ impl<'a> Reader<'a> {
         let mut trees = BTreeMap::<(String, String, String), Value>::new();
         let mut read_candidates = Vec::new();
         'organizations: for source in &self.catalog.sources {
+            // No team of the user in this organization: an empty project filter would search it all.
+            if source.projects.is_empty() {
+                continue;
+            }
             for skip in (0..100).step_by(25) {
                 if result.candidates >= 100 {
                     result.warn("Search candidate limit (100)");
@@ -1622,6 +2007,245 @@ mod tests {
         r.base = Some(server.uri());
         r
     }
+    #[test]
+    fn repositories_are_named_by_every_topic_word() {
+        let terms = repository_terms("Microservicio Crear Usuario Natural");
+        assert_eq!(terms, ["crear", "usuario", "natural"]);
+        assert!(names_repository(
+            "sag.portalpagos.ms.crearusuarionatural",
+            &terms
+        ));
+        assert!(names_repository("cyp-crea-usuario-natural", &terms));
+        assert!(!names_repository(
+            "sag.portalpagos.ms.crearusuariojuridico",
+            &terms
+        ));
+        assert!(names_repository(
+            "sag.portalpagos.ms.crearsps",
+            &repository_terms("endpoint crear SPS")
+        ));
+        assert!(repository_terms("API del microservicio").is_empty());
+        assert!(!names_repository("anything", &[]));
+        for path in ["/README.md", "/readme", "/swagger.yaml", "/openapi.v1.json"] {
+            assert!(documentation_file(path), "{path}");
+        }
+        for path in ["/src/README.md", "/index.js", "/swagger.js", "/docs"] {
+            assert!(!documentation_file(path), "{path}");
+        }
+    }
+    #[test]
+    fn a_readme_copied_into_a_page_adds_only_its_differences_and_budgets_follow_need() {
+        let wiki: Wiki = serde_json::from_value(json!({"organization":"https://dev.azure.com/test","project":"Project","project_id":PID,"id":WID,"name":"Wiki","kind":"projectWiki","repository_id":RID,"mapped_path":"/","versions":["published"]})).unwrap();
+        let reference = |id: &str, kind: &str, url: &str| Reference {
+            id: id.into(),
+            kind: kind.into(),
+            label: format!("Project / {id}"),
+            url: url.into(),
+            organization: "https://dev.azure.com/test".into(),
+            project: "Project".into(),
+            aliases: vec![],
+            parent: None,
+            revision: None,
+            authority: None,
+            author: None,
+            author_role: None,
+        };
+        let shared: Vec<String> = (1..=9).map(|i| format!("Shared line {i}.")).collect();
+        let page = Page {
+            wiki,
+            title: "Crear Usuario Natural".into(),
+            path: "/Crear Usuario Natural".into(),
+            git_item_path: "/Crear-Usuario-Natural.md".into(),
+            version: "published".into(),
+            revision: SHA.into(),
+            git_revision: None,
+            content: shared.join("\n\n"),
+            reference: reference(
+                "wiki:page",
+                "wiki",
+                "https://dev.azure.com/test/Project/_wiki/wikis/w?pagePath=%2Fp",
+            ),
+            entities: vec![],
+        };
+        let file = |path: &str, content: String| RepositoryFile {
+            repository: "crearusuarionatural".into(),
+            path: path.into(),
+            content,
+            reference: reference(
+                &format!("repository_file:{path}"),
+                "repository_file",
+                &format!("https://dev.azure.com/test/Project/_git/r?path={path}"),
+            ),
+        };
+        let swagger: String = (1..=80).map(|i| format!("field{i}: string\n")).collect();
+        let result = WikiResult {
+            pages: vec![page],
+            repository_files: vec![
+                file(
+                    "/README.md",
+                    format!("{}\n\nNew in the repository.", shared.join("\n\n")),
+                ),
+                file("/swagger.yaml", swagger),
+            ],
+            ..Default::default()
+        };
+        let evidence = result.evidence("¿qué parámetros recibe?", 2600);
+        assert!(evidence.text.chars().count() <= 2600);
+        assert_eq!(
+            evidence.text.matches("Shared line 1.").count(),
+            1,
+            "{}",
+            evidence.text
+        );
+        assert!(evidence.text.contains(
+            "Mostly the same content as Wiki page wiki:page; only its other lines follow.\nNew in the repository."
+        ));
+        // An even split would cut the OpenAPI file; the short page and README leave it room.
+        assert!(
+            evidence.text.contains("field80: string"),
+            "{}",
+            evidence.text
+        );
+        assert_eq!(evidence.references.len(), 3);
+    }
+    #[tokio::test]
+    async fn an_organization_without_own_teams_is_not_searched() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/test/_apis/teams"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"value":[]})))
+            .mount(&server)
+            .await;
+        let client = Client::new();
+        let reader = reader(&client, "token", &catalog(true), &[], &server)
+            .own_scope()
+            .await
+            .unwrap();
+        assert!(reader.catalog.sources[0].projects.is_empty());
+        let input = SearchInput {
+            query: "crear usuario natural".into(),
+            wiki_id: None,
+            author_mode: None,
+        };
+        let result = reader.search(&input, AuthorMode::All).await.unwrap();
+        assert!(result.pages.is_empty());
+        let paths: Vec<String> = server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .map(|r| r.url.path().to_owned())
+            .collect();
+        assert_eq!(paths, ["/test/_apis/teams"]);
+    }
+    #[tokio::test]
+    async fn repository_docs_read_the_readme_and_openapi_of_the_named_repository() {
+        let server = MockServer::start().await;
+        let other = "00000000-0000-0000-0000-000000000004";
+        Mock::given(method("GET"))
+            .and(path("/test/Project/_apis/git/repositories"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"value":[
+                {"id":RID,"name":"sag.portalpagos.ms.crearusuarionatural","project":{"id":PID,"name":"Project"},"defaultBranch":"refs/heads/main"},
+                {"id":other,"name":"sag.portalpagos.ms.crearusuariojuridico","project":{"id":PID,"name":"Project"},"defaultBranch":"refs/heads/main"},
+                {"id":WID,"name":"Project.wiki","project":{"id":PID,"name":"Project"},"defaultBranch":"refs/heads/wikiMaster"}
+            ]})))
+            .mount(&server)
+            .await;
+        let items = format!("/test/Project/_apis/git/repositories/{RID}/items");
+        Mock::given(method("GET"))
+            .and(path(items.clone()))
+            .and(query_param("recursionLevel", "OneLevel"))
+            .and(query_param("versionDescriptor.version", "main"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"value":[
+                {"path":"/","isFolder":true},{"path":"/index.js"},{"path":"/swagger.yaml"},
+                {"path":"/README.md"},{"path":"/src","isFolder":true}
+            ]})))
+            .mount(&server)
+            .await;
+        for (file, content) in [
+            (
+                "/README.md",
+                "# Crear Usuario Natural\n\nMicroservicio de registro.",
+            ),
+            (
+                "/swagger.yaml",
+                "paths:\n  /generar:\n    post:\n      requestBody:\n        UserName: string",
+            ),
+        ] {
+            Mock::given(method("GET"))
+                .and(path(items.clone()))
+                .and(query_param("path", file))
+                .and(query_param("includeContent", "true"))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .set_body_json(json!({"path":file,"commitId":SHA,"content":content})),
+                )
+                .mount(&server)
+                .await;
+        }
+        // With `*`, only the projects of the user's teams are listed, never the organization.
+        Mock::given(method("GET"))
+            .and(path("/test/_apis/teams"))
+            .and(query_param("$mine", "true"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                json!({"value":[{"projectName":"Project"},{"projectName":"Project"}]}),
+            ))
+            .mount(&server)
+            .await;
+        let client = Client::new();
+        let wildcard = reader(&client, "token", &catalog(true), &[], &server);
+        let mut unscoped = WikiResult {
+            query: "crear usuario natural".into(),
+            ..Default::default()
+        };
+        wildcard.repository_docs(&mut unscoped).await;
+        assert!(unscoped.repository_files.is_empty());
+        let reader = wildcard.own_scope().await.unwrap();
+        assert_eq!(reader.catalog.sources[0].projects, ["Project"]);
+        let mut result = WikiResult {
+            query: "crear usuario natural".into(),
+            ..Default::default()
+        };
+        reader.repository_docs(&mut result).await;
+        assert!(
+            !server
+                .received_requests()
+                .await
+                .unwrap()
+                .iter()
+                .any(|r| r.url.path() == "/test/_apis/git/repositories")
+        );
+        let files: Vec<_> = result
+            .repository_files
+            .iter()
+            .map(|f| f.path.as_str())
+            .collect();
+        assert_eq!(
+            files,
+            ["/README.md", "/swagger.yaml"],
+            "{:?}",
+            result.warnings
+        );
+        assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+        let readme = &result.repository_files[0].reference;
+        assert_eq!(readme.kind, "repository_file");
+        assert_eq!(
+            readme.label,
+            "sag.portalpagos.ms.crearusuarionatural / README.md"
+        );
+        assert_eq!(
+            readme.url,
+            "https://dev.azure.com/test/Project/_git/sag.portalpagos.ms.crearusuarionatural?path=%2FREADME.md&version=GBmain"
+        );
+        readme.validate().unwrap();
+        let evidence = result.evidence("¿qué parámetros recibe?", 4000);
+        assert!(
+            evidence.text.contains("UserName: string"),
+            "{}",
+            evidence.text
+        );
+        assert_eq!(evidence.references.len(), 2);
+    }
     #[tokio::test]
     async fn own_edits_list_the_pages_the_user_changed_with_verified_links() {
         let server = MockServer::start().await;
@@ -2156,6 +2780,21 @@ mod tests {
                 .iter()
                 .all(|r| r.url.starts_with("https://dev.azure.com/"))
         );
+        // A page copied in another wiki is written once; the copy adds its reference.
+        let mut result = result;
+        result.pages[1].content = format!("{}\n\nUnique paragraph.", result.pages[0].content);
+        let distinct = result.evidence("Cómo funciona notifypayment", 2000);
+        result.pages[1].content = result.pages[0].content.clone();
+        let evidence = result.evidence("Cómo funciona notifypayment", 2000);
+        assert_eq!(evidence.references.len(), 2);
+        assert!(
+            distinct.text.matches("Procedimiento vigente").count()
+                > evidence.text.matches("Procedimiento vigente").count()
+        );
+        assert!(evidence.text.contains(&format!(
+            "Same content as Wiki page {}.",
+            result.pages[0].reference.id
+        )));
     }
 
     #[tokio::test]

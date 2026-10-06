@@ -173,34 +173,137 @@ pub fn read_repository_file(
     );
     Ok(std::fs::read_to_string(full)?)
 }
-/// Rank paragraphs locally; the pipeline shares its total budget between authorized sources.
+/// The parts of `text` most relevant to `question`, in document order and within `limit`
+/// characters; a text that fits is returned whole. The pipeline shares its total budget
+/// between authorized sources.
+///
+/// Parts are Markdown sections (a section longer than `limit`, its paragraphs), never split
+/// inside a fenced code block, so a parameter table or a request example stays whole. A
+/// question word weighs more the fewer parts contain it, so the words of a page's own topic,
+/// found everywhere in it, barely count; it counts again when its heading or a parent heading
+/// has it. The most relevant part always goes (cut if it alone exceeds the budget), the next
+/// ones go whole while they fit, and the room left goes to the best one that did not, cut.
 pub fn excerpt(text: &str, question: &str, limit: usize) -> String {
-    let words: Vec<String> = question
+    if text.chars().count() <= limit {
+        return text.to_owned();
+    }
+    let words: BTreeSet<String> = question
         .split(|c: char| !c.is_alphanumeric())
         .filter(|w| w.chars().count() > 2)
         .map(str::to_lowercase)
         .collect();
-    let mut chunks: Vec<(usize, usize, String)> = text
-        .split("\n\n")
-        .enumerate()
-        .map(|(i, p)| {
-            let lower = p.to_lowercase();
-            (
-                words.iter().filter(|w| lower.contains(w.as_str())).count(),
-                i,
-                p.chars().take(limit).collect(),
-            )
+    let parts = parts(text, limit);
+    let lower: Vec<String> = parts.iter().map(|(_, p)| p.to_lowercase()).collect();
+    let weights: Vec<(&str, f64)> = words
+        .iter()
+        .map(|w| {
+            let found = lower.iter().filter(|p| p.contains(w.as_str())).count();
+            let weight = if found == 0 {
+                0.0
+            } else {
+                (parts.len() as f64 / found as f64).ln()
+            };
+            (w.as_str(), weight)
         })
         .collect();
-    chunks.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
-    let mut out = String::new();
-    for (_, index, p) in chunks.into_iter().take(4) {
-        out.push_str(&format!("[passage {}]\n{}\n", index + 1, p));
-        if out.chars().count() >= limit {
-            break;
+    let mut ranked: Vec<(f64, usize)> = parts
+        .iter()
+        .zip(&lower)
+        .enumerate()
+        .map(|(i, ((headings, _), text))| {
+            let score = weights
+                .iter()
+                .map(|(w, weight)| {
+                    weight * f64::from(u8::from(text.contains(w)) + u8::from(headings.contains(w)))
+                })
+                .sum();
+            (score, i)
+        })
+        .collect();
+    ranked.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
+    let marker = |i: usize| format!("[passage {}]\n", i + 1);
+    let mut left = limit;
+    let mut chosen = Vec::new();
+    let mut too_long = Vec::new();
+    let cut = |i: usize, left: usize| {
+        let room = left.saturating_sub(marker(i).chars().count() + 1);
+        let part: String = parts[i].1.chars().take(room).collect();
+        (i, format!("{}{part}\n", marker(i)))
+    };
+    for (rank, (_, i)) in ranked.into_iter().enumerate() {
+        let size = marker(i).chars().count() + parts[i].1.chars().count() + 1;
+        if size <= left {
+            left -= size;
+            chosen.push((i, format!("{}{}\n", marker(i), parts[i].1)));
+        } else if rank == 0 {
+            // The most relevant part always goes, cut to the whole budget if it must.
+            chosen.push(cut(i, left));
+            left = 0;
+        } else {
+            too_long.push(i);
         }
     }
-    out.chars().take(limit).collect()
+    // The room left after the parts that fit whole goes to the best one that did not, cut,
+    // when that room still says something.
+    if let Some(&i) = too_long.first()
+        && left >= 200 + marker(i).chars().count()
+    {
+        chosen.push(cut(i, left));
+    }
+    chosen.sort();
+    chosen.into_iter().map(|(_, part)| part).collect()
+}
+/// `text` split at Markdown headings outside fenced code, each part with its lowercase heading
+/// path; a section longer than `limit` splits again at blank lines outside fences.
+fn parts(text: &str, limit: usize) -> Vec<(String, String)> {
+    let fence = |line: &str| {
+        let line = line.trim_start();
+        line.starts_with("```") || line.starts_with("~~~")
+    };
+    let mut sections: Vec<(String, Vec<&str>)> = Vec::new();
+    let mut path: Vec<(usize, String)> = Vec::new();
+    let mut code = false;
+    for line in text.lines() {
+        let trimmed = line.trim_start();
+        let level = trimmed.len() - trimmed.trim_start_matches('#').len();
+        if fence(line) {
+            code = !code;
+        } else if !code && (1..=6).contains(&level) && trimmed[level..].starts_with(' ') {
+            path.retain(|(l, _)| *l < level);
+            path.push((level, trimmed[level..].trim().to_lowercase()));
+            let headings: Vec<&str> = path.iter().map(|(_, h)| h.as_str()).collect();
+            sections.push((headings.join(" / "), Vec::new()));
+        }
+        if sections.is_empty() {
+            sections.push((String::new(), Vec::new()));
+        }
+        sections.last_mut().unwrap().1.push(line);
+    }
+    let mut parts = Vec::new();
+    for (headings, lines) in sections {
+        let section = lines.join("\n");
+        if section.chars().count() <= limit {
+            parts.push((headings, section));
+            continue;
+        }
+        let mut code = false;
+        let mut paragraph: Vec<&str> = Vec::new();
+        for line in lines {
+            code ^= fence(line);
+            if !code && line.trim().is_empty() {
+                if !paragraph.is_empty() {
+                    parts.push((headings.clone(), paragraph.join("\n")));
+                    paragraph.clear();
+                }
+                continue;
+            }
+            paragraph.push(line);
+        }
+        if !paragraph.is_empty() {
+            parts.push((headings, paragraph.join("\n")));
+        }
+    }
+    parts
 }
 pub fn validate_url(value: &str) -> Result<url::Url> {
     let u = url::Url::parse(value)?;
@@ -296,5 +399,28 @@ mod tests {
         );
         assert!(result.contains("Payment"));
         assert!(result.chars().count() <= 30);
+    }
+    #[test]
+    fn excerpts_keep_the_relevant_sections_and_their_code_whole() {
+        let page = format!(
+            "# Crear Usuario Natural\n\nServicio crear usuario natural.\n\n## Estructura\n\n```\n{}```\n\n## Endpoints\n\n### Crear Usuario Natural\n\n#### Parámetros del Request\n\n| Campo | Tipo |\n|---|---|\n| `UserName` | string |\n\n#### Ejemplos de Uso\n\n```bash\ncurl -X POST \"https://x/generar\" \\\n  -d '{{\n    \"UserName\": \"1\",\n\n    \"Email\": \"a\"\n  }}'\n```\n\n## Changelog\n\n{}",
+            "src/usuario-natural/crear.js\n".repeat(40),
+            "- Crear usuario natural: cambio.\n".repeat(40),
+        );
+        let question =
+            "¿Qué parámetros recibe el endpoint crear usuario natural? Crear Usuario Natural";
+        let result = excerpt(&page, question, 700);
+        assert!(result.chars().count() <= 700, "{result}");
+        assert!(result.contains("| `UserName` | string |"), "{result}");
+        // The example is under the Endpoints heading and keeps its blank line.
+        assert!(
+            result.contains("\"UserName\": \"1\",\n\n    \"Email\""),
+            "{result}"
+        );
+        // Irrelevant bulk only fills the room left, cut: it never displaces the sections above.
+        assert!(result.matches("cambio").count() < 40, "{result}");
+        assert!(result.matches("crear.js").count() < 40, "{result}");
+        // A text that fits stays whole and in order.
+        assert_eq!(excerpt("a\n\nb", "b", 10), "a\n\nb");
     }
 }

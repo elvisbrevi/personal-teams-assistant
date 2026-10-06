@@ -246,6 +246,14 @@ button.secondary.busy::after, button.danger.busy::after { border-color: var(--br
 .md li { margin: .15rem 0; }
 .md pre { background: var(--sunken); border: 1px solid var(--border); border-radius: 9px; padding: .65rem .75rem; overflow-x: auto; margin: .6rem 0; }
 .md pre code { background: none; padding: 0; font-size: .85rem; white-space: pre; overflow-wrap: normal; }
+.md h2, .md h3 { margin: .85rem 0 .35rem; line-height: 1.3; } .md h2 { font-size: 1.05rem; } .md h3 { font-size: .97rem; }
+.md blockquote { margin: .55rem 0; padding: .05rem 0 .05rem .75rem; border-left: 3px solid var(--border-strong); color: var(--muted); }
+.md hr { border: 0; border-top: 1px solid var(--border); margin: .75rem 0; }
+.md .table { overflow-x: auto; margin: .6rem 0; }
+.md table { border-collapse: collapse; font-size: .9rem; }
+.md th, .md td { border: 1px solid var(--border); padding: .3rem .55rem; text-align: left; vertical-align: top; }
+.md th { background: var(--sunken); font-weight: 600; }
+.md .tone-red { color: var(--error); } .md .tone-orange { color: var(--warn); } .md .tone-green { color: var(--ok); } .md .tone-blue { color: #2f80ed; } .md .tone-gray { color: var(--muted); }
 button.ref { display: inline; background: none; color: var(--brand); padding: 0; font: inherit; font-weight: 600; text-decoration: underline; text-underline-offset: 2px; border-radius: 3px; }
 button.ref small { font-weight: 400; color: var(--muted); text-decoration: none; }
 
