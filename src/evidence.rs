@@ -251,6 +251,30 @@ impl Reference {
         }
     }
 }
+/// Split `total` characters among parts: short parts keep everything, the rest share what is
+/// left evenly.
+pub fn shares(lengths: &[usize], total: usize) -> Vec<usize> {
+    let mut caps = vec![0; lengths.len()];
+    let mut open: Vec<usize> = (0..lengths.len()).collect();
+    let mut remaining = total;
+    while !open.is_empty() {
+        let share = remaining / open.len();
+        let (fits, rest): (Vec<usize>, Vec<usize>) =
+            open.iter().partition(|&&i| lengths[i] <= share);
+        if fits.is_empty() {
+            for i in rest {
+                caps[i] = share;
+            }
+            break;
+        }
+        for i in fits {
+            caps[i] = lengths[i];
+            remaining -= lengths[i];
+        }
+        open = rest;
+    }
+    caps
+}
 /// Non-Wiki references the code sees named in the answer (aliases or `#id`). Added to the
 /// model's selection, and the whole selection when no model can choose, so a named work item,
 /// pipeline or stage always gets its verified link.
@@ -403,7 +427,7 @@ pub fn complete_answer(
     for hit in urls.find_iter(body) {
         let url = hit
             .as_str()
-            .trim_end_matches(['`', '.', ',', ';', ':', '"', '\'', '*']);
+            .trim_end_matches(['`', '.', ',', ';', ':', '"', '\'', '*', '~', '|', '}']);
         ensure!(
             evidence.references.iter().any(|r| r.url == url
                 && (selected.contains(&r.id) || (consulted_only && r.kind == "wiki")))
@@ -628,6 +652,16 @@ mod tests {
         )
         .unwrap();
         assert!(a.contains("api-test.example.cl"));
+        // Formatting right after the URL (a table cell, a color) is not part of it.
+        let a = complete_answer(
+            "| Ambiente | URL |\n|---|---|\n| test |https://api-test.example.cl/api/v1/solicitudes/crear|\n\n{blue:https://api-test.example.cl/api/v1/solicitudes/crear}",
+            &["p".into()],
+            &e,
+            evidence_text,
+            Language::Es,
+        )
+        .unwrap();
+        assert!(a.contains("{blue:"));
         assert!(
             complete_answer(
                 "En test: https://api-prod.example.cl/api/v1/solicitudes/crear",

@@ -206,11 +206,12 @@ impl Store {
                 ))
             })? {
                 let (resource, status, text, created_at) = row?;
+                // A job still queued has no audit yet: an empty object, never null.
                 let mut audit: serde_json::Value = text
                     .as_deref()
                     .map(serde_json::from_str)
                     .transpose()?
-                    .unwrap_or_default();
+                    .unwrap_or_else(|| serde_json::json!({}));
                 if !content && let Some(obj) = audit.as_object_mut() {
                     for field in ["proposed", "sent", "question", "resolved_question", "topic"] {
                         obj.remove(field);
@@ -475,6 +476,19 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn a_job_in_progress_lists_an_empty_audit() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("assistant.db");
+        assert!(
+            Store::open(&path)
+                .unwrap()
+                .enqueue("chats/c/messages/1")
+                .unwrap()
+        );
+        let rows = Store::inspect(&path, false, 10, None, false).unwrap();
+        assert_eq!(rows[0]["audit"], serde_json::json!({}));
+    }
     #[test]
     fn activity_index_survives_restart() {
         let dir = tempfile::tempdir().unwrap();

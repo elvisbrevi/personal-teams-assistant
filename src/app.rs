@@ -1236,6 +1236,7 @@ async fn azure_wiki(
                 secret_ref,
                 wiki_ids,
                 author_mode,
+                repository_docs,
             },
     } = &source.access
     else {
@@ -1251,13 +1252,31 @@ async fn azure_wiki(
         .build()
         .map_err(fail)?;
     let reader = wiki::Reader::new(&client, &key, &catalog, wiki_ids)
-        .map_err(|_| "[invalid_input] Invalid Wiki catalog or scope.".to_owned())?;
+        .map_err(|_| "[invalid_input] Invalid Wiki catalog or scope.".to_owned())?
+        .own_scope()
+        .await
+        .map_err(|_| {
+            "[network] Team membership could not be read; check the Azure credential (vso.project)."
+                .to_owned()
+        })?;
     let result = match operation.as_str() {
         "list" => reader.list().await,
         "search" => {
             let input: wiki::SearchInput = serde_json::from_value(input).map_err(|_| "[invalid_input] Invalid Wiki search JSON.".to_owned())?;
             input.validate().map_err(|e| format!("[invalid_input] {e}"))?;
-            reader.search(&input, *author_mode).await
+            let mut result = reader.search(&input, *author_mode).await;
+            if *repository_docs && let Ok(result) = &mut result {
+                // Its own deadline, as in the assistant's tool call.
+                if let Ok(docs) = wiki::Reader::new(&client, &key, &catalog, wiki_ids) {
+                    match docs.own_scope().await {
+                        Ok(docs) => docs.repository_docs(result).await,
+                        Err(error) => result.warn(&format!(
+                            "Team membership unreadable; repositories not read: {error}"
+                        )),
+                    }
+                }
+            }
+            result
         }
         "read" => {
             let input: wiki::ReadInput = serde_json::from_value(input).map_err(|_| "[invalid_input] Invalid Wiki read JSON.".to_owned())?;

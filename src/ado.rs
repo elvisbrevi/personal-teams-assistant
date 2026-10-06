@@ -173,6 +173,40 @@ async fn wiql(
         .filter_map(|v| v["id"].as_u64())
         .collect())
 }
+impl Catalog {
+    /// The catalog with `*` replaced by the projects of the teams the user belongs to, so
+    /// activity, pipelines, releases, Wiki and repository reads stay in the projects the user
+    /// takes part in. An organization where the user is in no team keeps no project.
+    async fn own(mut self, client: &Client, key: &str) -> Result<Self> {
+        for source in &mut self.sources {
+            if source.projects == ["*"] {
+                let value = request(client, key, Method::GET, teams_url(source)?, None).await?;
+                source.projects = team_projects(&value)?;
+            }
+        }
+        Ok(self)
+    }
+}
+/// The teams of the organization the user is a member of (`$mine`).
+fn teams_url(source: &Source) -> Result<Url> {
+    let mut url = organization_url(source, &["_apis", "teams"])?;
+    url.set_query(None);
+    url.query_pairs_mut()
+        .append_pair("$mine", "true")
+        .append_pair("$top", "1000")
+        .append_pair("api-version", "7.1-preview.3");
+    Ok(url)
+}
+/// The distinct project names of a teams reply, sorted.
+fn team_projects(value: &Value) -> Result<Vec<String>> {
+    let projects: BTreeSet<String> = value["value"]
+        .as_array()
+        .context("invalid ADO teams")?
+        .iter()
+        .filter_map(|team| team["projectName"].as_str().map(str::to_owned))
+        .collect();
+    Ok(projects.into_iter().collect())
+}
 async fn projects(client: &Client, key: &str, source: &Source) -> Result<Vec<String>> {
     if source.projects != ["*"] {
         return Ok(source.projects.clone());
@@ -371,6 +405,20 @@ fn changed_excerpt(before: &str, after: &str) -> String {
     )
 }
 
+/// A project's facts for the status tool, cut at 5,000 characters. The one-line facts (work
+/// items, run results) go before the bulky commit details, so the cut never drops them.
+fn project_facts(
+    items: &str,
+    pipelines: &str,
+    commits: &str,
+    definitions: &str,
+    details: &str,
+) -> String {
+    bounded_lines(
+        &format!("{items}{pipelines}{commits}{definitions}{details}"),
+        5_000,
+    )
+}
 fn bounded_lines(text: &str, limit: usize) -> String {
     let mut out = String::new();
     for line in text.lines() {
@@ -518,7 +566,7 @@ pub async fn team_references(
     catalog: &str,
     messages: &[crate::evidence::TeamsMessage],
 ) -> Result<Vec<Reference>> {
-    let catalog = Catalog::parse(catalog)?;
+    let catalog = Catalog::parse(catalog)?.own(client, key).await?;
     let urls = regex::Regex::new(r"https://dev\.azure\.com/[^\s<>)\]]+")?;
     let mut refs = Vec::new();
     let mut seen = BTreeSet::new();
@@ -1483,7 +1531,7 @@ pub async fn status(
     question: &str,
     store: Arc<Store>,
 ) -> Result<Evidence> {
-    let catalog = Catalog::parse(catalog_text)?;
+    let catalog = Catalog::parse(catalog_text)?.own(client, key).await?;
     let days = recent_window(question);
     let since = Utc::now() - Duration::days(days);
     let mut sections = Vec::new();
@@ -1530,7 +1578,7 @@ pub async fn status(
                 (
                     project,
                     score,
-                    format!("{commits}{details}{definitions}{pipelines}{items}"),
+                    project_facts(&items, &pipelines, &commits, &definitions, &details),
                     item_blocked,
                     incomplete,
                     refs,
@@ -1542,11 +1590,7 @@ pub async fn status(
                     .await
                     .context("ADO project worker missing")??;
                 if score > 0 {
-                    sections.push((
-                        score,
-                        format!("Project: {project}.\n{}", bounded_lines(&content, 5_000)),
-                        refs,
-                    ));
+                    sections.push((score, format!("Project: {project}.\n{content}"), refs));
                 }
                 blocked |= item_blocked;
                 partial_projects += usize::from(incomplete);
@@ -1556,11 +1600,7 @@ pub async fn status(
     while let Some(result) = jobs.join_next().await {
         let (project, score, content, item_blocked, incomplete, refs) = result?;
         if score > 0 {
-            sections.push((
-                score,
-                format!("Project: {project}.\n{}", bounded_lines(&content, 5_000)),
-                refs,
-            ));
+            sections.push((score, format!("Project: {project}.\n{content}"), refs));
         }
         blocked |= item_blocked;
         partial_projects += usize::from(incomplete);
@@ -1640,6 +1680,43 @@ pub async fn status(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn own_projects_come_from_the_users_teams() {
+        let teams = json!({"value":[
+            {"name":"Pagos","projectName":"Cobro Pago y Tarifas"},
+            {"name":"QA","projectName":"Cobro Pago y Tarifas"},
+            {"name":"Docs","projectName":"Normas Generales"},
+            {"name":"Broken"}
+        ]});
+        assert_eq!(
+            team_projects(&teams).unwrap(),
+            ["Cobro Pago y Tarifas", "Normas Generales"]
+        );
+        assert!(team_projects(&json!({})).is_err());
+        let source = Source {
+            organization: "https://dev.azure.com/org/".into(),
+            projects: vec!["*".into()],
+            author_email: "me@example.test".into(),
+        };
+        assert_eq!(
+            teams_url(&source).unwrap().as_str(),
+            "https://dev.azure.com/org/_apis/teams?%24mine=true&%24top=1000&api-version=7.1-preview.3"
+        );
+    }
+    #[test]
+    fn run_results_survive_long_commit_details() {
+        let details = "Commit detail 1a2b3c4d: changed file content.\n".repeat(200);
+        let facts = project_facts(
+            "Work item Task #7 Fix (last recorded change 2026-10-06).\n",
+            "Pipeline api (build #29416, started by the user): result succeeded, date 2026-10-06.\n",
+            "Commit 1a2b3c4d: fix.\n",
+            "",
+            &details,
+        );
+        assert!(facts.chars().count() <= 5_000);
+        assert!(facts.contains("Task #7"));
+        assert!(facts.contains("build #29416, started by the user): result succeeded"));
+    }
     #[test]
     fn content_excerpt_identifies_the_actual_edit() {
         let before = "stage: prod\nword: Excento\nrun: false\n";

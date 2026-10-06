@@ -36,6 +36,11 @@ pub enum ToolSpec {
         wiki_ids: Vec<String>,
         #[serde(default)]
         author_mode: crate::ado::wiki::AuthorMode,
+        /// Also read the README and OpenAPI files at the root of up to two repositories whose
+        /// name carries the search topic, in the catalog's projects (needs `vso.code`). Off by
+        /// default: it widens what the source sends to the model.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        repository_docs: bool,
     },
     Rabbitmq {
         url: String,
@@ -384,6 +389,7 @@ impl ReadOnlyTool for Tools {
                     secret_ref,
                     wiki_ids,
                     author_mode,
+                    repository_docs,
                 } => {
                     let query = match crate::ado::wiki::question_query(question) {
                         Ok(query)=>query,
@@ -396,15 +402,28 @@ impl ReadOnlyTool for Tools {
                     )?;
                     let key = crate::security::resolve(secret_ref, &self.bindings)?;
                     let reader =
-                        crate::ado::wiki::Reader::new(&self.client, &key, &catalog, wiki_ids)?;
+                        crate::ado::wiki::Reader::new(&self.client, &key, &catalog, wiki_ids)?
+                            .own_scope()
+                            .await?;
                     let input = crate::ado::wiki::SearchInput {
                         query,
                         wiki_id: None,
                         author_mode: None,
                     };
-                    Ok(serde_json::to_string(
-                        &reader.search(&input, *author_mode).await?,
-                    )?)
+                    let mut result = reader.search(&input, *author_mode).await?;
+                    if *repository_docs {
+                        // Its own deadline: a slow Wiki search must not leave it without time.
+                        match crate::ado::wiki::Reader::new(&self.client, &key, &catalog, wiki_ids)?
+                            .own_scope()
+                            .await
+                        {
+                            Ok(docs) => docs.repository_docs(&mut result).await,
+                            Err(error) => result.warn(&format!(
+                                "Team membership unreadable; repositories not read: {error}"
+                            )),
+                        }
+                    }
+                    Ok(serde_json::to_string(&result)?)
                 }
                 ToolSpec::Rabbitmq { url, secret_ref } => {
                     let auth = crate::security::resolve(secret_ref, &self.bindings)?;
@@ -494,7 +513,9 @@ impl ReadOnlyTool for Tools {
                     let key = crate::security::resolve(secret_ref, &self.bindings)?;
                     let reader =
                         crate::ado::wiki::Reader::new(&self.client, &key, &catalog, wiki_ids)?
-                            .with_deadline(90);
+                            .with_deadline(90)
+                            .own_scope()
+                            .await?;
                     let (edits, linked, partial) = reader.own_edits(since).await?;
                     crate::ado::wiki::edits_evidence(&edits, &linked, partial, days)
                 }

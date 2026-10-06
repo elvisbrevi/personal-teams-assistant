@@ -1168,6 +1168,7 @@ fn wiki_resource() -> Resource {
                 secret_ref: "secret://ado/read".into(),
                 wiki_ids: vec![],
                 author_mode: personal_teams_assistant::ado::wiki::AuthorMode::PreferMine,
+                repository_docs: false,
             },
         },
     }
@@ -1397,6 +1398,168 @@ async fn follow_up_without_subject_searches_the_previous_topic_and_keeps_it_for_
         assert!(!context.answer.contains("Fuentes"));
         assert!(server.received_requests().await.unwrap().is_empty());
     }
+}
+struct TopicLlm;
+#[async_trait]
+impl LlmProvider for TopicLlm {
+    fn name(&self) -> &str {
+        "synthetic-topic"
+    }
+    async fn standalone_request(
+        &self,
+        previous_question: &str,
+        previous_answer: &str,
+        _history: &str,
+        current: &str,
+    ) -> Result<Option<personal_teams_assistant::llm::StandaloneRequest>> {
+        assert!(previous_question.is_empty() && previous_answer.is_empty());
+        Ok(Some(personal_teams_assistant::llm::StandaloneRequest {
+            question: current.into(),
+            topic: "Crear Usuario Natural".into(),
+        }))
+    }
+    async fn select_references(
+        &self,
+        _: &str,
+        references: &[personal_teams_assistant::evidence::Reference],
+    ) -> Result<Vec<String>> {
+        Ok(references.iter().map(|r| r.id.clone()).collect())
+    }
+    async fn generate(&self, _: GenerationInput<'_>) -> Result<String> {
+        unreachable!()
+    }
+    async fn generate_response(
+        &self,
+        _: GenerationInput<'_>,
+    ) -> Result<personal_teams_assistant::llm::GeneratedAnswer> {
+        Ok(personal_teams_assistant::llm::GeneratedAnswer {
+            answer: "El body lleva `UserName`.".into(),
+            detailed: false,
+            used_sources: vec![],
+            provider: None,
+            fallbacks: Vec::new(),
+        })
+    }
+}
+#[tokio::test]
+async fn a_first_wiki_question_searches_its_topic_not_the_whole_request() {
+    let server = MockServer::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let store = support::store(&dir);
+    let graph = support::graph(&server, store.clone());
+    let mut cfg = (*graph.config).clone();
+    cfg.policy.dry_run = true;
+    let pipeline = Pipeline {
+        config: Arc::new(cfg),
+        store: store.clone(),
+        adapter: graph,
+        knowledge: KnowledgeMap {
+            repositories: BTreeMap::new(),
+            resources: vec![wiki_resource()],
+        },
+        llm: Arc::new(TopicLlm),
+        // Generic words of the whole request («body», «endpoint») rank other API pages first.
+        tools: Arc::new(WikiTools {
+            result: synthetic_wiki_result(),
+            question: "Crear Usuario Natural",
+        }),
+        redactor: redactor(),
+    };
+    let sources = vec!["manuals".into()];
+    let result = simulation::run(
+        &pipeline,
+        SimulationRequest {
+            session: "topic".into(),
+            text: "¿qué parámetros recibe en el body el endpoint crear usuario natural?".into(),
+            group: false,
+            mentioned: false,
+            sources: sources.clone(),
+        },
+        Some(&sources),
+    )
+    .await
+    .unwrap();
+    assert_eq!(result.status, "dry_run", "{}", result.reason);
+}
+struct BudgetLlm;
+#[async_trait]
+impl LlmProvider for BudgetLlm {
+    fn name(&self) -> &str {
+        "synthetic-budget"
+    }
+    async fn generate(&self, _: GenerationInput<'_>) -> Result<String> {
+        unreachable!()
+    }
+    async fn generate_response(
+        &self,
+        input: GenerationInput<'_>,
+    ) -> Result<personal_teams_assistant::llm::GeneratedAnswer> {
+        // The short file keeps all it has and the Wiki uses the rest, not an even half.
+        assert!(
+            input
+                .evidence
+                .contains("El soporte atiende de lunes a viernes")
+        );
+        assert!(
+            input.evidence.chars().count() > 3_000,
+            "{}",
+            input.evidence.chars().count()
+        );
+        assert!(input.evidence.chars().count() <= 4_000);
+        Ok(personal_teams_assistant::llm::GeneratedAnswer {
+            answer: "El procedimiento está documentado.".into(),
+            detailed: false,
+            used_sources: vec![],
+            provider: None,
+            fallbacks: Vec::new(),
+        })
+    }
+}
+#[tokio::test]
+async fn a_short_source_leaves_its_unused_budget_to_the_wiki() {
+    let server = MockServer::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let store = support::store(&dir);
+    let graph = support::graph(&server, store.clone());
+    let mut cfg = (*graph.config).clone();
+    cfg.policy.dry_run = true;
+    cfg.policy.max_context_chars = 4_000;
+    let mut wiki = synthetic_wiki_result();
+    wiki["pages"][0]["content"] = json!(format!(
+        "Procedimiento verificable.\n\n{}",
+        "Detalle técnico del procedimiento documentado. ".repeat(400)
+    ));
+    wiki["pages"][1]["content"] = json!("Otra página.");
+    let mut knowledge = knowledge(&dir);
+    knowledge.resources.push(wiki_resource());
+    let question = "¿cómo funciona el procedimiento de soporte?";
+    let pipeline = Pipeline {
+        config: Arc::new(cfg),
+        store: store.clone(),
+        adapter: graph,
+        knowledge,
+        llm: Arc::new(BudgetLlm),
+        tools: Arc::new(WikiTools {
+            result: wiki,
+            question,
+        }),
+        redactor: redactor(),
+    };
+    let sources = vec!["hours".into(), "manuals".into()];
+    let result = simulation::run(
+        &pipeline,
+        SimulationRequest {
+            session: "budget".into(),
+            text: question.into(),
+            group: false,
+            mentioned: false,
+            sources: sources.clone(),
+        },
+        Some(&sources),
+    )
+    .await
+    .unwrap();
+    assert_eq!(result.status, "dry_run", "{}", result.reason);
 }
 #[tokio::test]
 async fn explicit_local_selection_still_requires_enabled_and_external_processing() {
