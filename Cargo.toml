@@ -40,7 +40,7 @@ path = "src/bin/pta.rs"
 # Tray/window GUI. Build with --no-default-features for a headless host (Linux servers):
 # no Tauri/WebKit, operated only through `pta`.
 default = ["gui"]
-gui = ["dep:tauri", "dep:tauri-plugin-opener", "dep:tauri-build"]
+gui = ["dep:tauri", "dep:tauri-plugin-opener", "dep:tauri-build", "dep:notify-rust"]
 
 [dependencies]
 anyhow = "1"
@@ -49,6 +49,7 @@ axum = "0.8"
 aes-gcm-siv = "0.11"
 base64 = "0.22"
 chrono = { version = "0.4", features = ["serde"] }
+chrono-tz = "0.10"
 fs2 = "0.4"
 rand = "0.9"
 regex = "1"
@@ -70,6 +71,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = "2"
 uuid = { version = "1", features = ["v4"] }
+notify-rust = { version = "4.18.2", optional = true }
 tiberius = { version = "0.12", default-features = false, features = ["rustls", "tds73"] }
 
 [target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]

@@ -60,6 +60,15 @@ Personal chat
   self-chat reconcile NONCE MESSAGE_ID  Resolves a pending output.
   test self-chat           Checks the personal chat membership (does not send).
 
+Activity registration
+  activity status|pending  Current run, or activities needing context or an HU.
+  activity run [DAY]        Reviews and registers work (YYYY-MM-DD, today by default).
+  activity history [DAY]    Tasks and runs filtered by day.
+  activity resolve ID       JSON on stdin: action=create|refine|dismiss, parent, title, description,
+                           hours, context (Other), fields (additional required field values).
+  activity open [ID]        Opens the activity review in a separate app window.
+                           Configure with config set activity_registration.FIELD JSON.
+
 Knowledge
   repos list | repos add|edit ALIAS PATH | repos remove ALIAS
   repos clone OWNER/REPO ALIAS | repos sync ALIAS
@@ -197,6 +206,11 @@ fn validate_args(args: &[String]) -> Result<()> {
             | ["self-chat", "status" | "enable" | "disable"]
             | ["self-chat", "enable", _]
             | ["self-chat", "reconcile", _, _]
+            | [
+                "activity",
+                "status" | "pending" | "run" | "history" | "open"
+            ]
+            | ["activity", "run" | "history" | "open" | "resolve", _]
             | ["credentials", "list"]
             | ["credentials", "set" | "delete", _]
             | [
@@ -299,7 +313,7 @@ async fn execute(mut args: Vec<String>) -> Result<Reply> {
     match command {
         "capabilities" => {
             return Ok(Reply::success(
-                json!({"contract":control::CONTRACT,"commands":HELP,"skill_version":env!("CARGO_PKG_VERSION")}),
+                json!({"contract":control::CONTRACT,"commands":HELP,"skill_version":env!("CARGO_PKG_VERSION"),"activity_registration_support":true}),
             ));
         }
         "skill" => return crate::app::skill::command(action, args.get(2).map(String::as_str)),
@@ -313,6 +327,24 @@ async fn execute(mut args: Vec<String>) -> Result<Reply> {
             ));
         }
         _ => {}
+    }
+    if command == "activity" {
+        let method = match action {
+            "status" => "activity_status",
+            "pending" => "activity_pending",
+            "run" => "activity_run",
+            "history" => "activity_history",
+            "resolve" => "activity_resolve",
+            "open" => "activity_open",
+            _ => unreachable!(),
+        };
+        let values = match action {
+            "run" | "history" => json!({"day":args.get(2)}),
+            "open" => json!({"id":args.get(2)}),
+            "resolve" => json!({"id":positional(&args,2)?,"resolution":input()?}),
+            _ => json!({}),
+        };
+        return call(method, values, None, true).await;
     }
     if command == "doctor" && args.iter().any(|a| a == "--offline") {
         let dir = control::profile_dir()?;
@@ -942,6 +974,12 @@ mod help_tests {
             &["config", "set", "policy.dry_run", "true"],
             &["mode", "observe"],
             &["self-chat", "status"],
+            &["activity", "status"],
+            &["activity", "run"],
+            &["activity", "history"],
+            &["activity", "pending"],
+            &["activity", "open"],
+            &["activity", "resolve", "activity-id"],
             &["credentials", "list"],
             &["auth", "microsoft", "status"],
             &["auth", "github", "login", "client"],

@@ -24,7 +24,7 @@ fn stop_requested(stop: &tokio::sync::watch::Receiver<bool>) -> bool {
 pub async fn serve(
     path: &str,
     stop_rx: tokio::sync::watch::Receiver<bool>,
-    ready: tokio::sync::oneshot::Sender<()>,
+    ready: tokio::sync::oneshot::Sender<Arc<Graph>>,
 ) -> Result<()> {
     let config = Arc::new(Config::load(path)?);
     let knowledge = KnowledgeMap::load(&config.knowledge_map)?;
@@ -192,8 +192,8 @@ pub async fn serve(
         renewer.abort_handle(),
         personal_poller.abort_handle(),
     ]);
+    let _ = ready.send(graph.clone());
     let app = webhook::router(Arc::new(WebState { graph }));
-    let _ = ready.send(());
     tracing::info!(event = "started", dry_run = config.policy.dry_run);
     axum::serve(listener, app)
         .with_graceful_shutdown(async move {

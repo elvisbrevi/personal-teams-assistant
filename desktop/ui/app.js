@@ -1,5 +1,5 @@
 const rawInvoke = window.__TAURI__.core.invoke;
-const READS = ['snapshot', 'chat', 'github_repositories', 'self_chat_status', 'llm_providers', 'audit'];
+const READS = ['snapshot', 'chat', 'github_repositories', 'self_chat_status', 'llm_providers', 'audit', 'activity_status', 'activity_history', 'activity_pending'];
 // Revision of the profile files the last reply saw. The form's own revision (`current.revision`)
 // changes only when it reloads or writes, so saving a stale form fails instead of overwriting
 // changes made elsewhere (e.g. with `pta`).
@@ -76,17 +76,20 @@ async function busy(button, task) {
   finally {
     if (button) { button.disabled = false; button.classList.remove('busy'); }
     renderLive();
+    if (viewedActivity) renderActivityEditor(viewedActivity);
+    if (button?.id === 'activity-run') button.disabled = activityRunning;
   }
 }
 
 function showTab(name, anchor) {
   tab = name;
-  for (const section of ['overview', 'settings', 'messages', 'knowledge', 'chat']) $('#' + section).hidden = section !== name;
+  for (const section of ['overview', 'settings', 'messages', 'knowledge', 'chat', 'registration']) $('#' + section).hidden = section !== name;
   for (const button of document.querySelectorAll('nav button')) {
     button.setAttribute('aria-current', button.dataset.tab === name ? 'page' : 'false');
   }
   if (name === 'messages') loadMessages().catch(fail);
   if (name === 'overview') loadActivity();
+  if (name === 'registration') loadRegistration().catch(fail);
   renderSavebar();
   const target = anchor && document.getElementById(anchor);
   if (target) target.scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -253,6 +256,7 @@ async function reload() {
   field('#allowed-chats', config.graph.allowed_chats.join('\n'));
   $('#dry-run').checked = config.policy.dry_run;
   $('#discover-chats').checked = config.graph.discover_all_chats;
+  renderRegistrationSettings();
   dirty = false;
   renderSavebar();
   renderLive();
@@ -422,6 +426,7 @@ function collectSettings() {
   config.server.bind = $('#bind').value.trim();
   config.server.cloudflare_tunnel = $('#cloudflare-tunnel').checked;
   config.policy.dry_run = $('#dry-run').checked;
+  collectRegistrationSettings();
 }
 
 async function save() {
@@ -446,6 +451,158 @@ function startAssistant(button) {
     await refreshLive();
     done('Assistant started.');
   });
+}
+
+// ---------------------------------------------------------------- activity registration
+
+const activityWindow = new URLSearchParams(window.location.search).get('activity');
+let selectedActivity = activityWindow && activityWindow !== 'pending' ? activityWindow : null;
+let activityPayload = '';
+let activityEditing = false;
+let activityRunning = false;
+let pendingActivities = [];
+let viewedActivity = null;
+
+function renderRegistrationSettings() {
+  const s = current.config.activity_registration;
+  $('#registration-enabled').checked = s.enabled;
+  $('#registration-auto').checked = s.auto_register;
+  for (const [id, value] of Object.entries({ hours: s.daily_hours, schedule: s.schedule, at: s.at,
+    interval: s.interval_minutes, start: s.window_start, end: s.window_end, zone: s.time_zone,
+    weekdays: s.weekdays.join(', '), kind: s.task_kind, state: s.done_state, effort: s.effort_field,
+    fields: JSON.stringify(s.extra_fields, null, 2) })) field('#registration-' + id, value);
+  const sources = current.map.resources.filter(r => ['azure_devops_status', 'azure_devops_wiki', 'teams_messages'].includes(r.tool?.type));
+  const writers = sources.filter(r => r.tool.type === 'azure_devops_status' && r.tool.link_secret_ref);
+  $('#registration-writer').replaceChildren(el('option', { value: '', textContent: 'Select a source with a write credential' }),
+    ...writers.map(r => el('option', { value: r.id, textContent: r.description || r.id, disabled: !r.enabled || !r.external_processing })));
+  field('#registration-writer', s.write_source);
+  $('#registration-sources').replaceChildren(...sources.map(r => {
+    const check = el('input', { type: 'checkbox', checked: s.sources.includes(r.id), disabled: !r.enabled || !r.external_processing });
+    check.dataset.source = r.id;
+    check.onchange = markDirty;
+    return el('label', { class: 'check' }, check, r.description || r.id,
+      !r.enabled || !r.external_processing ? el('small', { textContent: 'Enable and authorize this source in Knowledge first.' }) : null);
+  }));
+  if (!sources.length) $('#registration-sources').append(el('p', { class: 'hint', textContent: 'Add Azure DevOps activity, Wiki or Teams messages sources in Knowledge to review your work.' }));
+}
+function jsonFields(text) {
+  const value = JSON.parse(text.trim() || '{}');
+  if (!value || Array.isArray(value) || typeof value !== 'object') throw 'Additional fields must be a JSON object.';
+  return value;
+}
+function collectRegistrationSettings() {
+  const s = current.config.activity_registration;
+  Object.assign(s, { enabled: $('#registration-enabled').checked, auto_register: $('#registration-auto').checked,
+    daily_hours: Number($('#registration-hours').value), schedule: $('#registration-schedule').value,
+    at: $('#registration-at').value, interval_minutes: Number($('#registration-interval').value),
+    window_start: $('#registration-start').value, window_end: $('#registration-end').value,
+    time_zone: $('#registration-zone').value.trim(), weekdays: names($('#registration-weekdays').value).map(Number),
+    write_source: $('#registration-writer').value, task_kind: $('#registration-kind').value,
+    done_state: $('#registration-state').value.trim(), effort_field: $('#registration-effort').value.trim(),
+    extra_fields: jsonFields($('#registration-fields').value),
+    sources: [...document.querySelectorAll('#registration-sources input:checked')].map(c => c.dataset.source) });
+  if (s.write_source && !s.sources.includes(s.write_source)) s.sources.push(s.write_source);
+}
+const activityStates = { pending: ['Needs input', 'warn'], refining: ['Asking assistant', 'info'], sending: ['Creating', 'info'],
+  done: ['Done', 'ok'], dismissed: ['Dismissed', 'muted'], uncertain: ['Inspect Azure DevOps', 'error'],
+  failed: ['Rejected', 'error'], already_registered: ['Already registered', 'muted'] };
+
+async function loadRegistration() {
+  let [history, pending] = await Promise.all([
+    invoke('activity_history', $('#activity-day').value ? { day: $('#activity-day').value } : {}), invoke('activity_pending')
+  ]);
+  const selected = pending.entries.find(e => e.id === selectedActivity);
+  if (activityWindow && selected && history.day !== selected.day) {
+    field('#activity-day', selected.day);
+    history = await invoke('activity_history', { day: selected.day });
+  }
+  if (!$('#activity-day').value) field('#activity-day', history.day);
+  activityRunning = history.running;
+  pendingActivities = pending.entries;
+  const count = pending.entries.length;
+  $('#nav-activities').hidden = !count;
+  $('#nav-activities').textContent = count;
+  $('#activity-notice').hidden = !count && !activityRunning;
+  $('#activity-notice-text').textContent = activityRunning ? 'Reviewing your work…' : `${count} activities need your context or an HU.`;
+  $('#activity-running').textContent = activityRunning ? 'An activity operation is running. This view refreshes automatically.' : 'Ready. Scheduled reviews run while the app is open, even if Teams reception is stopped.';
+  $('#activity-run').disabled = activityRunning;
+  const registered = history.entries.filter(e => e.state === 'done');
+  const hours = registered.reduce((total, e) => total + (e.draft.hours || 0), 0);
+  const summary = history.summary || history.runs.find(r => r.status === 'completed' && r.summary)?.summary;
+  $('#activity-summary').replaceChildren(...[
+    badge(`${registered.length} tasks created`, 'ok'), badge(`${hours.toFixed(2)} hours registered by this process`, 'info'),
+    summary ? badge(`Last review: ${summary.remaining_hours.toFixed(2)} hours remaining`, 'muted') : badge('No completed review for this day'),
+    summary?.partial ? badge('Some sources could not be fully read', 'warn') : null].filter(Boolean));
+  $('#activity-pending').replaceChildren(...pending.entries.map(entry => {
+    const review = el('button', { class: 'secondary small', textContent: activityWindow ? 'Review' : 'Review in new window' });
+    review.onclick = () => busy(review, async () => {
+      if (activityWindow) { selectedActivity = entry.id; activityEditing = false; renderActivityEditor(entry); }
+      else await invoke('activity_open', { id: entry.id });
+    });
+    return el('div', { class: 'activity-card' }, el('div', { class: 'panel-head' },
+      el('strong', { textContent: entry.draft.title || 'Activity without a task' }), badge(entry.day), review),
+      el('p', { textContent: entry.draft.question || entry.issue || 'Review the HU, description and effort before creating the task.' }));
+  }));
+  if (!count) $('#activity-pending').append(el('p', { class: 'hint', textContent: 'No activities need your input.' }));
+  const table = el('table', {}, el('thead', {}, el('tr', {}, ...['Task', 'HU', 'Effort', 'Status'].map(t => el('th', { textContent: t })))),
+    el('tbody', {}, ...history.entries.map(e => {
+      const state = activityStates[e.state] || [e.state, 'muted'];
+      const parent = e.parents.find(p => p.id === e.draft.parent);
+      const task = e.task_url ? link(`#${e.task_id} ${e.draft.title}`, e.task_url) : el('span', { textContent: e.draft.title || 'Activity' });
+      return el('tr', {}, el('td', {}, task, e.issue ? el('small', { textContent: e.issue }) : null),
+        el('td', {}, parent ? link(`#${parent.id} ${parent.title}`, parent.url) : 'Not selected'),
+        el('td', { textContent: e.draft.hours ? `${e.draft.hours.toFixed(2)} h` : 'Needs input' }), el('td', {}, badge(...state)));
+    })));
+  $('#activity-history').replaceChildren(history.entries.length ? table : el('p', { class: 'hint', textContent: 'No activities registered for this day.' }));
+  $('#activity-runs').replaceChildren(...history.runs.map(r => el('div', { class: 'activity-card' },
+    badge(r.status, r.status === 'failed' || r.status === 'interrupted' ? 'error' : 'muted'),
+    el('span', { textContent: ` ${new Date(r.created_at * 1000).toLocaleString()}` }),
+    r.summary?.warnings?.length ? el('p', { textContent: r.summary.warnings.join(' ') }) : null)));
+  let entry = [...pending.entries, ...history.entries].find(e => e.id === selectedActivity);
+  if (activityWindow && !selectedActivity && count) { entry = pending.entries[0]; selectedActivity = entry.id; }
+  if (entry) renderActivityEditor(entry);
+  else if (selectedActivity) { $('#activity-editor').hidden = true; viewedActivity = null; }
+}
+function renderActivityEditor(entry) {
+  viewedActivity = entry;
+  $('#activity-editor').hidden = false;
+  const payload = JSON.stringify(entry);
+  if (payload !== activityPayload && !activityEditing) {
+    activityPayload = payload;
+    $('#activity-editor-title').textContent = entry.draft.title || 'Review activity';
+    const needsInput = ['pending', 'refining'].includes(entry.state);
+    $('#activity-question').textContent = needsInput ? entry.draft.question : '';
+    const needsCallContext = entry.activities.some(a => a.context_required && a.organization === 'https://teams.microsoft.com');
+    $('#activity-issue').textContent = entry.issue || (needsInput && entry.activities.some(a => a.context_required)
+      ? needsCallContext ? 'Confirm that you attended this call, its purpose and its HU before registering it.' : 'Confirm the referenced work items and corresponding HU before registering this work.' : '');
+    $('#activity-evidence').replaceChildren(...entry.activities.map(a => el('p', { class: 'activity-evidence-link' }, link(a.label, a.url))));
+    const suggested = entry.draft.suggested_parents;
+    const parents = [...entry.parents].sort((a, b) => Number(suggested.includes(b.id)) - Number(suggested.includes(a.id)));
+    $('#activity-parent').replaceChildren(el('option', { value: '', textContent: 'Select an HU' }),
+      ...parents.map(p => el('option', { value: p.id, textContent: `${suggested.includes(p.id) ? 'Suggested · ' : ''}#${p.id} ${p.title} (${p.project})` })),
+      el('option', { value: 'other', textContent: 'Other HU…' }));
+    field('#activity-parent', entry.draft.parent || '');
+    $('#activity-other-parent-label').hidden = true;
+    field('#activity-title', entry.draft.title); field('#activity-description', entry.draft.description);
+    field('#activity-hours', entry.draft.hours); field('#activity-context', '');
+    field('#activity-fields', JSON.stringify(entry.fields, null, 2));
+  }
+  const disabled = activityRunning || entry.state !== 'pending';
+  for (const input of document.querySelectorAll('#activity-form input, #activity-form textarea, #activity-form select, #activity-form button')) input.disabled = disabled;
+}
+async function resolveActivity(action) {
+  if (!selectedActivity) throw 'Select an activity.';
+  const parentValue = $('#activity-parent').value === 'other' ? $('#activity-other-parent').value : $('#activity-parent').value;
+  const resolution = action === 'dismiss' ? { action } : {
+    action, parent: parentValue ? Number(parentValue) : null, title: $('#activity-title').value.trim(),
+    description: $('#activity-description').value.trim(), hours: $('#activity-hours').value ? Number($('#activity-hours').value) : null,
+    context: $('#activity-context').value.trim(), fields: jsonFields($('#activity-fields').value)
+  };
+  if (action === 'refine' && !resolution.context) throw 'Add context in Other / more context first.';
+  await invoke('activity_resolve', { id: selectedActivity, resolution });
+  activityEditing = false; activityPayload = '';
+  await loadRegistration();
+  notify(action === 'refine' ? 'The assistant is reviewing your context.' : action === 'dismiss' ? 'Dismissing activity…' : 'Creating the completed task…');
 }
 
 // ---------------------------------------------------------------- messages
@@ -991,6 +1148,27 @@ $('#offer-dismiss').onclick = () => busy($('#offer-dismiss'), async () => {
   await invoke('dismiss_restart_offer'); await refreshLive(); notify('The assistant stays stopped. You can start it whenever you want.');
 });
 $('#activity-all').onclick = () => showTab('messages');
+$('#activity-notice-open').onclick = () => busy($('#activity-notice-open'), () => invoke('activity_open'));
+$('#activity-settings').onclick = () => showTab('settings', 'panel-registration');
+$('#activity-refresh').onclick = () => busy($('#activity-refresh'), loadRegistration);
+$('#activity-day').onchange = () => loadRegistration().catch(fail);
+$('#activity-run').onclick = () => busy($('#activity-run'), async () => {
+  if (dirty) await save();
+  await invoke('activity_run', { day: $('#activity-day').value || null }); await loadRegistration();
+});
+$('#activity-parent').onchange = () => { activityEditing = true; $('#activity-other-parent-label').hidden = $('#activity-parent').value !== 'other'; };
+$('#activity-form').oninput = () => { activityEditing = true; };
+$('#activity-form').onsubmit = event => { event.preventDefault(); busy($('#activity-create'), () => resolveActivity('create')); };
+$('#activity-refine').onclick = () => busy($('#activity-refine'), () => resolveActivity('refine'));
+$('#activity-dismiss').onclick = () => busy($('#activity-dismiss'), () => resolveActivity('dismiss'));
+setInterval(() => { if (current) loadRegistration().catch(() => {}); }, 5_000);
+if (window.__TAURI__.event?.listen) {
+  window.__TAURI__.event.listen('activity-registration', () => loadRegistration().catch(fail));
+  window.__TAURI__.event.listen('activity-open', event => {
+    selectedActivity = event.payload.id; activityEditing = false; activityPayload = '';
+    showTab('registration');
+  });
+}
 $('#messages-refresh').onclick = () => busy($('#messages-refresh'), loadMessages);
 document.querySelectorAll('#messages-filters button').forEach(button => { button.onclick = () => setFilter(button.dataset.filter); });
 $('#messages-hide-ineligible').onchange = renderMessages;
@@ -1105,4 +1283,4 @@ $('#chat-form').onsubmit = async event => {
   }
 };
 
-reload().then(() => loadActivity()).catch(fail);
+reload().then(async () => { await loadActivity(); await loadRegistration(); if (activityWindow) showTab('registration'); }).catch(fail);

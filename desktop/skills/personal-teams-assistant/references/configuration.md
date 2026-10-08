@@ -1,5 +1,7 @@
 Read `pta config show` or `pta config get policy.dry_run`. `pta config set policy.dry_run true` keeps the other fields and validates before applying. The last argument is JSON, including quotes for strings. Every existing field can be edited by its dotted path; objects, lists and optional fields are replaced as whole JSON values.
 
+`activity_registration` configures scheduled/manual registration of performed work as completed tasks, the 9-hour target, source selection and required fields. Every setting and review action is available through `pta`: see [activity-registration.md](activity-registration.md). It defaults to disabled; observation mode also prevents task creation.
+
 `pta config apply` and `pta config validate` read JSON or TOML on stdin with `config`, `map` and, optionally, `tunnel_config`. Start from a recent read. Writes based on a read detect revision changes; after a conflict, read again and redo the change. The GUI takes part in the same control: it collects Settings and Knowledge changes in the «You have unsaved changes» bar and writes nothing until «Save changes» (credentials are stored right away). Validation and import keep the map and identity restrictions.
 
 A profile written before 0.6.1 may still have a `[jev]` section (an external classifier the app no longer uses). It loads and is dropped the next time the profile is saved; `pta config set jev.*` is rejected as an unknown field. A host or CLI older than 0.6.1 cannot load a profile saved by 0.6.1 or later.

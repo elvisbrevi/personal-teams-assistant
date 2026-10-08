@@ -20,7 +20,7 @@ Read [the architecture](docs/architecture.md) first: it explains components, pip
 - Do not remove or rename fields of `Config`/`KnowledgeMap` (`deny_unknown_fields`); add only with `#[serde(default)]`. The single authorized exception is the retired `[jev]` section: `Config::retired_reviewer` accepts it so older profiles load, and never writes it again.
 - Do not add Graph scopes or change the OAuth flow (public client + PKCE + loopback).
 - Never retry a send to Graph; when in doubt, `uncertain` and human review.
-- Outside Teams the app only reads. The only writes register the user's unregistered work (`ado::link`): a link to an existing work item, or a new task under an HU carrying those links. Personal chat only, its own credential (`link_secret_ref`), after the user confirms the exact plan, recorded before the request and never retried. Do not add other writes without the same safeguards.
+- Outside Teams the only writes register the user's unregistered work: personal-chat links/new tasks (`ado::link`) after exact-plan confirmation, or completed tasks under an HU through explicitly configured local/scheduled activity registration (`activity`, `ado::registration`). Both use their own credential (`link_secret_ref`), verified evidence and in-scope open HUs, record before the request and never retry. Automatic registration is opt-in; unclear descriptions, effort, HUs and call attendance require local/CLI clarification. Do not add other writes without the same safeguards.
 - Model decisions grant no permissions: audiences, paths, URLs and limits are checked in code.
 - New sources start disabled, without audiences and without `external_processing`.
 - Never print or log secrets; credentials only on stdin or from the system store.

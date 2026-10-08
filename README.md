@@ -6,6 +6,8 @@ Ask it, for example, which work you did in the last two weeks that no task recor
 
 Answers to Teams are written in Spanish or English (`llm.language`); the app itself — GUI, CLI and audit log — is in English.
 
+You can also register work on a schedule: once a day or every interval in a time window. Select your Azure DevOps activity (commits, pull requests, pipeline runs, releases and stage approvals), Wiki creation/edits and Teams messages/call sources, and a separate work-item write credential. The app proposes or creates **Task** items under the matching open HU, assigned to you, with a description, effort in hours, evidence links and the fields required for **Done**. It deducts hours already registered from the daily target (9 by default), groups related artifacts and never invents work to fill the remaining hours. Unclear descriptions, effort, HUs or calls produce a system notification that opens a separate review window with suggestions and an **Other / more context** field. The **Activities** tab shows pending decisions and history by day. Everything is also available through `pta`; see the [activity registration guide](desktop/skills/personal-teams-assistant/references/activity-registration.md).
+
 ## Installation
 
 One Cargo package, `personal-teams-assistant`, installs everything: the tray/menu bar app and host `personal-teams-assistant`, the `pta` CLI and the agent skill built into `pta`.
@@ -59,6 +61,10 @@ pta auth microsoft login          # OAuth PKCE with the system browser
 pta auth microsoft finish --wait  # waits for you to finish the consent
 pta mode active                   # turns real sends on after reviewing the proposals
 pta test simulate <<< '{"session":"demo","text":"What work did I do that is not registered?","sources":["azure-devops-status","azure-devops-wikis"]}'
+pta activity status              # scheduled/manual activity process
+pta activity run                 # review today's work with the saved settings
+pta activity pending             # activities needing context or an HU
+pta activity history 2026-10-08   # completed tasks and process outcomes by day
 ```
 
 `pta help` (or `pta`, `pta --help`) lists every command with its description; `--json` returns the full result as JSON. `pta skill show` gives the operating manual for agents.
@@ -77,6 +83,7 @@ pta test simulate <<< '{"session":"demo","text":"What work did I do that is not 
 - [Architecture](docs/architecture.md): components, pipeline, data, security, CLI contract and change recipes.
 - [Proposed improvements](docs/proposed-improvements.md).
 - [Operating skill](desktop/skills/personal-teams-assistant/SKILL.md) and [guide for agents](AGENTS.md).
+- [Activity registration](desktop/skills/personal-teams-assistant/references/activity-registration.md): scheduling, required task fields, calls, clarification and CLI commands.
 
 ## License
 

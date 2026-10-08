@@ -24,6 +24,7 @@ use std::{
 };
 use tokio::sync::{Mutex, oneshot, watch};
 
+mod activity;
 pub mod cli;
 pub mod control;
 mod github;
@@ -40,6 +41,12 @@ pub(crate) trait Shell: Send + Sync {
     /// Open a URL in the user's browser. A headless host only returns the URL to the caller.
     fn open_url(&self, url: &str) -> Result<()>;
     fn exit(&self);
+    fn notify_activity(&self, _title: &str, _body: &str, _entry: Option<&str>) -> Result<()> {
+        Ok(())
+    }
+    fn open_activity(&self, _entry: Option<&str>) -> Result<()> {
+        self.show()
+    }
 }
 
 /// The single owner of a profile: settings, credentials, the service and its UI shell.
@@ -69,6 +76,9 @@ pub(crate) struct DesktopState {
     /// This host replaced an outdated one whose assistant was running: the window asks
     /// whether to keep it running.
     restart_offer: std::sync::atomic::AtomicBool,
+    activity_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    activity_graph: Mutex<Option<Arc<crate::adapters::graph::Graph>>>,
+    activity_recovered: Mutex<Option<PathBuf>>,
 }
 
 #[derive(Serialize)]
@@ -168,6 +178,7 @@ fn validate_local(config: &Config, map: &KnowledgeMap) -> Result<()> {
         "desktop server must bind to loopback"
     );
     KnowledgeMap::parse(&toml::to_string(map)?)?;
+    crate::activity::validate_sources(&config.activity_registration, map)?;
     for path in map.repositories.values() {
         let root = fs::canonicalize(path)?;
         ensure!(
@@ -337,6 +348,9 @@ pub(crate) fn init_state(config_dir: &Path, data_dir: &Path) -> Result<DesktopSt
         github_api: Mutex::new(()),
         tunnel_path,
         restart_offer: std::sync::atomic::AtomicBool::new(false),
+        activity_task: Mutex::new(None),
+        activity_graph: Mutex::new(None),
+        activity_recovered: Mutex::new(None),
     })
 }
 
@@ -504,17 +518,16 @@ async fn start(state: &DesktopState) -> Result<()> {
     let path = state.config_path.to_string_lossy().into_owned();
     let (ready_tx, ready_rx) = oneshot::channel();
     let task = tokio::spawn(async move { runtime::serve(&path, receiver, ready_tx).await });
-    if tokio::time::timeout(std::time::Duration::from_secs(60), ready_rx)
+    let graph = tokio::time::timeout(std::time::Duration::from_secs(60), ready_rx)
         .await
         .ok()
-        .and_then(Result::ok)
-        .is_none()
-    {
+        .and_then(Result::ok);
+    let Some(graph) = graph else {
         let _ = stop.send(true);
         task.abort();
         let _ = task.await;
         anyhow::bail!("assistant failed to become ready");
-    }
+    };
     let tunnel_result = async {
         if tunnel_config_path.is_none() && tunnel_token.is_none() {
             return Ok(None);
@@ -554,6 +567,7 @@ async fn start(state: &DesktopState) -> Result<()> {
         }
     };
     *state.loaded_config.lock().await = Some(config);
+    *state.activity_graph.lock().await = Some(graph);
     *running = Some(Running { stop, task, tunnel });
     Ok(())
 }
@@ -582,6 +596,7 @@ async fn save_settings(
         stop(state).await.map_err(fail)?;
     }
     commit_settings(state, &config, &map, tunnel_config.trim()).map_err(fail)?;
+    *state.activity_graph.lock().await = None;
     if was_running {
         start(state).await.map_err(fail)?;
     }
@@ -625,6 +640,7 @@ async fn import_existing(state: &DesktopState, path: String) -> std::result::Res
     let tunnel = fs::read_to_string(&state.tunnel_path).unwrap_or_default();
     validate_tunnel_mode(&config, &tunnel).map_err(fail)?;
     commit_settings(state, &config, &map, &tunnel).map_err(fail)?;
+    *state.activity_graph.lock().await = None;
     Ok(())
 }
 
@@ -817,6 +833,7 @@ async fn begin_microsoft(host: &Arc<Host>, open: bool) -> std::result::Result<St
         .map_err(fail)?;
     }
     stop(state).await.map_err(fail)?;
+    *state.activity_graph.lock().await = None;
     security::private_dir(&config.server.data_dir).map_err(fail)?;
     let dataset_lock = claim_dataset(&config.server.data_dir).map_err(fail)?;
     let store = Arc::new(Store::open(&config.server.data_dir.join("assistant.db")).map_err(fail)?);

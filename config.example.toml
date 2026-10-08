@@ -65,3 +65,22 @@ sensitive_patterns = []
 # "secret://azure-devops/linker" = "AZURE_DEVOPS_LINK_TOKEN"
 # "secret://rabbitmq/monitor" = "RABBITMQ_READONLY_AUTH"
 # "secret://internal/status" = "INTERNAL_API_TOKEN"
+
+[activity_registration]
+# Explicitly selected enabled sources may be reviewed locally without new Teams audiences.
+enabled = false
+auto_register = true
+daily_hours = 9.0
+schedule = "daily" # daily or interval
+at = "18:00"
+interval_minutes = 60
+window_start = "09:00"
+window_end = "18:00"
+weekdays = [1, 2, 3, 4, 5] # Monday to Sunday = 1 to 7
+time_zone = "local" # or an IANA zone, e.g. America/Santiago
+sources = [] # Resource IDs: ADO commits/PRs/pipelines/releases/approvals, Wiki edits, Teams work/calls
+write_source = "" # activity source with a separate link_secret_ref
+task_kind = "Task"
+done_state = "Done" # checked against the project's Completed states
+effort_field = "Microsoft.VSTS.Scheduling.CompletedWork" # hours
+extra_fields = {} # e.g. { "Custom.ActivityType" = "Documentation" }

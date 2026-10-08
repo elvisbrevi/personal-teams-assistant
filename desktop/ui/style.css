@@ -289,3 +289,14 @@ button.ref small { font-weight: 400; color: var(--muted); text-decoration: none;
 }
 @media (max-width: 680px) { nav button span { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; } }
 @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
+.activity-sources { border: 1px solid var(--border); border-radius: 10px; margin: 1rem 0; padding: 1rem; }
+.activity-sources legend { font-weight: 600; padding: 0 .4rem; }
+.activity-issue:empty { display: none; }
+.activity-issue { color: var(--warn); }
+.activity-evidence-link { overflow-wrap: anywhere; }
+.activity-card { border-bottom: 1px solid var(--border); padding: .8rem 0; }
+.activity-card:last-child { border-bottom: 0; }
+#activity-history table { width: 100%; border-collapse: collapse; }
+#activity-history th, #activity-history td { padding: .6rem; text-align: left; border-bottom: 1px solid var(--border); vertical-align: top; }
+#activity-history th { white-space: nowrap; }
+.table-scroll { overflow-x: auto; }

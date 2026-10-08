@@ -16,6 +16,8 @@ pub struct Config {
     pub knowledge_map: PathBuf,
     #[serde(default)]
     pub secrets: BTreeMap<String, String>,
+    #[serde(default)]
+    pub activity_registration: crate::activity::Settings,
 }
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -177,6 +179,7 @@ impl Config {
         );
         ensure!(!self.policy.greeting.trim().is_empty(), "invalid greeting");
         crate::llm::validate(&self.llm)?;
+        self.activity_registration.validate()?;
         Ok(())
     }
     /// The delegated Graph scopes already consented for this Entra registration. Never widen.

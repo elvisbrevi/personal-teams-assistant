@@ -1,7 +1,7 @@
 //! Registering unlinked work: a link from one of the user's work items to an artifact an
 //! activity review found, or a new task under an existing work item (an HU) created with those
-//! links. They are the only Azure DevOps writes the app makes, with their own credential, and
-//! only after the user confirms the exact plan in their personal chat. Every target, parent and
+//! links. This personal-chat flow uses its own credential, and writes only after the user
+//! confirms the exact plan. Local/scheduled registration is in `ado::registration`. Every target, parent and
 //! artifact comes from data the app read and verified; the model only proposes titles and
 //! reasons.
 use super::{Catalog, item_reference, project_url, request};
@@ -26,6 +26,14 @@ pub struct Linkable {
     pub organization: String,
     /// Date of the activity (`YYYY-MM-DD`).
     pub date: String,
+    /// Original timestamp, for registration in the user's configured time zone.
+    #[serde(default)]
+    pub occurred_at: String,
+    /// Calls without verified attendance/purpose must be clarified before registration.
+    #[serde(default)]
+    pub context_required: bool,
+    #[serde(default)]
+    pub duration_hours: Option<f64>,
     /// `vstfs:///…` artifact and its link type (`Pull Request`, `Fixed in Commit`, `Build`);
     /// without one the link is a hyperlink to `url`.
     pub artifact: Option<String>,

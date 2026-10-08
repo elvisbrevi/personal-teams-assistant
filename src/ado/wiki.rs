@@ -382,6 +382,8 @@ pub struct WikiEdit {
     pub created: bool,
     /// Work items the change names (commit message or page title) that Azure DevOps confirmed.
     pub work_items: Vec<u64>,
+    /// Verified task mentions; an HU mention alone does not register work in a task.
+    pub tasks: Vec<u64>,
     /// Named work items that could not be confirmed (missing, or outside the catalog).
     pub unverified: usize,
     pub reference: Reference,
@@ -454,6 +456,7 @@ pub fn edits_evidence(
                 url: e.reference.url.clone(),
                 organization: e.reference.organization.clone(),
                 date: e.date.get(..10).unwrap_or(&e.date).to_owned(),
+                occurred_at: e.date.clone(),
                 ..Default::default()
             })
             .collect(),
@@ -470,6 +473,42 @@ pub fn edits_evidence(
         links: Some(offer),
         ..Default::default()
     }
+}
+
+/// Task registration distinguishes a task reference from a description of the parent HU.
+pub fn registration_edits_evidence(
+    edits: &[WikiEdit],
+    linked: &[Reference],
+    partial: bool,
+    days: i64,
+) -> Evidence {
+    let mut evidence = edits_evidence(edits, linked, partial, days);
+    evidence.text = evidence.text.replace(
+        "Registered in work items:",
+        "Changes naming work items (an HU mention alone does not prove task registration):",
+    );
+    evidence.links = Some(super::link::LinkOffer {
+        activities: edits
+            .iter()
+            .filter(|e| e.tasks.is_empty())
+            .map(|e| super::link::Linkable {
+                label: format!(
+                    "{} Wiki page «{}»",
+                    if e.created { "Created" } else { "Edited" },
+                    e.title
+                ),
+                short: format!("Wiki «{}»", e.title),
+                url: e.reference.url.clone(),
+                organization: e.reference.organization.clone(),
+                date: e.date.get(..10).unwrap_or(&e.date).to_owned(),
+                occurred_at: e.date.clone(),
+                context_required: e.unverified > 0,
+                ..Default::default()
+            })
+            .collect(),
+        ..Default::default()
+    });
+    evidence
 }
 
 pub struct Reader<'a> {
@@ -1186,6 +1225,7 @@ impl<'a> Reader<'a> {
                                 date: date.clone(),
                                 created,
                                 work_items,
+                                tasks: Vec::new(),
                                 unverified: 0,
                                 reference: page.reference,
                             });
@@ -1199,6 +1239,7 @@ impl<'a> Reader<'a> {
         // with its link; the rest still count as a link to some task.
         let mut linked = Vec::new();
         let mut verified = BTreeSet::new();
+        let mut tasks = BTreeSet::new();
         for source in &self.catalog.sources {
             let ids: BTreeSet<u64> = edits
                 .iter()
@@ -1223,6 +1264,11 @@ impl<'a> Reader<'a> {
                             (item["id"].as_u64(), super::item_reference(source, "", item))
                         {
                             verified.insert(id);
+                            if super::link::TASK_KINDS
+                                .contains(&super::field(item, "System.WorkItemType"))
+                            {
+                                tasks.insert(id);
+                            }
                             linked.push(reference);
                         }
                     }
@@ -1239,6 +1285,12 @@ impl<'a> Reader<'a> {
                 .filter(|id| !verified.contains(id))
                 .count();
             edit.work_items.retain(|id| verified.contains(id));
+            edit.tasks = edit
+                .work_items
+                .iter()
+                .copied()
+                .filter(|id| tasks.contains(id))
+                .collect();
             edit.reference.authority = Some(
                 if edit.created {
                     "created_by_me"
@@ -2298,12 +2350,12 @@ mod tests {
             .and(path("/test/_apis/wit/workitems"))
             .and(query_param("ids", "77,8765"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({"value":[
-                {"id":77,"fields":{"System.TeamProject":"Project","System.Title":"Runbook","System.State":"Active"}},
+                {"id":77,"fields":{"System.TeamProject":"Project","System.Title":"Runbook","System.State":"Active","System.WorkItemType":"User Story"}},
             ]})))
             .expect(1)
             .mount(&server)
             .await;
-        let (edits, linked, partial) = reader(&client, "key", &catalog, &[], &server)
+        let (mut edits, linked, partial) = reader(&client, "key", &catalog, &[], &server)
             .own_edits(since)
             .await
             .unwrap();
@@ -2319,6 +2371,12 @@ mod tests {
         edit.reference.validate().unwrap();
         assert_eq!(linked.len(), 1);
         assert!(linked[0].url.ends_with("/_workitems/edit/77"));
+        let registration = registration_edits_evidence(&edits, &linked, partial, 14);
+        assert_eq!(
+            registration.links.unwrap().activities.len(),
+            1,
+            "an HU mention alone is not a registered task"
+        );
         let evidence = edits_evidence(&edits, &linked, partial, 14);
         let (_, registered) = evidence
             .text
@@ -2328,6 +2386,14 @@ mod tests {
             registered.contains("created Wiki page \"HU 8765\" (Project / Documentation): the change names #77 and 1 work item(s) that could not be verified"),
             "{}",
             evidence.text
+        );
+        edits[0].tasks.push(77);
+        assert!(
+            registration_edits_evidence(&edits, &linked, partial, 14)
+                .links
+                .unwrap()
+                .activities
+                .is_empty()
         );
         assert_eq!(evidence.references.len(), 2);
     }
