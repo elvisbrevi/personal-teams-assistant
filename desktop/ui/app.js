@@ -143,6 +143,13 @@ function assistantState(snapshot) {
   };
 }
 
+/** Phase the host pushes while the assistant starts or stops (`starting`/`stopping`), else null. */
+let transition = null;
+const transitions = {
+  starting: { tone: 'busy', pill: 'Starting…', title: 'Starting the assistant…', detail: 'It will receive Teams messages once it is ready.' },
+  stopping: { tone: 'busy', pill: 'Stopping…', title: 'Stopping the assistant…', detail: 'It stops receiving Teams messages.' },
+};
+
 function tile(label, value, tone, detail) {
   return el('div', { class: 'tile' }, el('small', { textContent: label }),
     el('strong', {}, el('span', { class: `dot ${tone}` }), value), el('p', { textContent: detail }));
@@ -210,17 +217,20 @@ function renderSteps(s) {
 function renderLive() {
   const s = live;
   if (!s) return;
-  const state = assistantState(s);
-  $('#status').className = `pill ${state.tone}`;
+  const state = transitions[transition] ?? assistantState(s);
+  // A running assistant's dot pulses slowly; a starting or stopping one, faster.
+  const motion = transition ? '' : s.running ? ' live' : '';
+  $('#status').className = `pill ${state.tone}${motion}`;
   $('#status').title = state.detail;
   $('#status span').textContent = state.pill;
-  $('#hero-dot').className = `dot ${state.tone}`;
+  $('#hero-dot').className = `dot ${state.tone}${motion}`;
   $('#hero-title').textContent = state.title;
   $('#hero-detail').textContent = state.detail;
   $('#version').textContent = `v${s.host_version}${s.headless ? ' · headless' : ''}`;
   $('#restart-offer').hidden = !s.restart_offer;
   $('#start').hidden = s.running;
   $('#restart').hidden = $('#stop').hidden = !s.running;
+  for (const button of [$('#start'), $('#restart'), $('#stop')]) button.disabled = Boolean(transition) || button.classList.contains('busy');
   $('#microsoft-state').className = `badge ${s.microsoft_connected ? 'ok' : 'warn'}`;
   $('#microsoft-state').textContent = s.microsoft_connected ? 'Account connected' : 'Account not connected';
   $('#teams-login').textContent = s.microsoft_connected ? 'Reconnect the account' : 'Connect Microsoft account';
@@ -1163,6 +1173,14 @@ $('#activity-refine').onclick = () => busy($('#activity-refine'), () => resolveA
 $('#activity-dismiss').onclick = () => busy($('#activity-dismiss'), () => resolveActivity('dismiss'));
 setInterval(() => { if (current) loadRegistration().catch(() => {}); }, 5_000);
 if (window.__TAURI__.event?.listen) {
+  // Pushed on every start/stop, including from the tray and `pta`.
+  window.__TAURI__.event.listen('assistant-phase', event => {
+    transition = transitions[event.payload] ? event.payload : null;
+    // Once settled, render from a fresh snapshot rather than the one from before the change.
+    if (transition || !current) renderLive();
+    else refreshLive().catch(() => renderLive());
+  });
+  window.__TAURI__.event.listen('assistant-error', event => fail(event.payload));
   window.__TAURI__.event.listen('activity-registration', () => loadRegistration().catch(fail));
   window.__TAURI__.event.listen('activity-open', event => {
     selectedActivity = event.payload.id; activityEditing = false; activityPayload = '';

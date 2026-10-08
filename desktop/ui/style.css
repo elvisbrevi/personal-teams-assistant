@@ -105,6 +105,12 @@ button.secondary.busy::after, button.danger.busy::after { border-color: var(--br
 .pill.warn i, .dot.warn { background: var(--warn); box-shadow: 0 0 0 4px var(--warn-soft); }
 .pill.info i, .dot.info { background: var(--info); box-shadow: 0 0 0 4px var(--info-soft); }
 .pill.error i, .dot.error { background: var(--error); box-shadow: 0 0 0 4px var(--error-soft); }
+.pill.busy i, .dot.busy { background: var(--warn); box-shadow: 0 0 0 4px var(--warn-soft); }
+/* Assistant phase: a slow pulse while it runs, a quicker one while it starts or stops. */
+.pill.live i, .pill.busy i, .hero .dot.live, .hero .dot.busy { position: relative; }
+.pill.live i::after, .pill.busy i::after, .hero .dot.live::after, .hero .dot.busy::after { content: ""; position: absolute; inset: 0; border-radius: 50%; background: inherit; animation: pulse 3s cubic-bezier(0, 0, .2, 1) infinite; }
+.pill.busy i::after, .hero .dot.busy::after { animation-duration: 1.2s; }
+@keyframes pulse { 0% { transform: scale(1); opacity: .45; } 70%, 100% { transform: scale(2.4); opacity: 0; } }
 .badge { display: inline-block; font-size: .78rem; font-weight: 700; border-radius: 99px; padding: .18rem .55rem; white-space: nowrap; }
 .badge:empty { display: none; }
 .badge.ok { background: var(--ok-soft); color: var(--ok); } .badge.warn { background: var(--warn-soft); color: var(--warn); }
@@ -288,7 +294,7 @@ button.ref small { font-weight: 400; color: var(--muted); text-decoration: none;
   .message summary .excerpt { grid-column: 1 / -1; }
 }
 @media (max-width: 680px) { nav button span { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; } }
-@media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
+@media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } .pill i::after, .dot::after { display: none; } }
 .activity-sources { border: 1px solid var(--border); border-radius: 10px; margin: 1rem 0; padding: 1rem; }
 .activity-sources legend { font-weight: 600; padding: 0 .4rem; }
 .activity-issue:empty { display: none; }
