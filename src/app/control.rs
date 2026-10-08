@@ -65,6 +65,8 @@ impl Reply {
 struct Endpoint {
     #[serde(default)]
     wiki_support: bool,
+    #[serde(default)]
+    activity_registration_support: bool,
     contract: u32,
     port: u16,
     token: String,
@@ -250,6 +252,12 @@ pub async fn client(request: Request, start_host: bool) -> Result<Reply> {
             serde_json::from_slice(&fs::read(profile_dir()?.join("control.json"))?)?;
         ensure!(endpoint.contract == CONTRACT, "incompatible host contract");
         ensure!(
+            endpoint.activity_registration_support
+                || (!request.method.starts_with("activity_")
+                    && !request.args.to_string().contains("activity_registration")),
+            "incompatible activity registration host: update the host and CLI together"
+        );
+        ensure!(
             endpoint.wiki_support
                 || (request.method != "azure_wiki"
                     && !request.args.to_string().contains("azure_devops_wiki")),
@@ -321,6 +329,7 @@ pub(crate) fn launch(
         &dir.join("control.json"),
         &serde_json::to_string(&Endpoint {
             wiki_support: true,
+            activity_registration_support: true,
             contract: CONTRACT,
             port: listener.local_addr()?.port(),
             token: token.clone(),
@@ -331,14 +340,16 @@ pub(crate) fn launch(
         .route("/control", post(endpoint))
         .layer(DefaultBodyLimit::max(1_000_000))
         .with_state(Arc::new(LocalState {
-            host,
+            host: host.clone(),
             token,
             _lock: lock,
         }));
     Ok(async move {
+        let scheduler = tokio::spawn(activity::schedule(host));
         if let Ok(listener) = tokio::net::TcpListener::from_std(listener) {
             let _ = axum::serve(listener, router).await;
         }
+        scheduler.abort();
     })
 }
 async fn endpoint(
@@ -384,6 +395,28 @@ pub(crate) async fn dispatch(host: &Arc<Host>, request: Request) -> Reply {
     }
     let state = &host.state;
     let _guard = state.operations.lock().await;
+    if activity::active(state).await
+        && ![
+            "snapshot",
+            "llm_providers",
+            "audit",
+            "logs",
+            "activity_status",
+            "activity_history",
+            "activity_pending",
+            "activity_open",
+            "app_open",
+            "app_hide",
+            "app_quit",
+        ]
+        .contains(&request.method.as_str())
+    {
+        return Reply::error(
+            "state_conflict",
+            6,
+            "Activity registration is running. Wait for it to finish before changing settings or starting another operation.",
+        );
+    }
     if let Some(expected) = &request.revision
         && revision(state).ok().as_ref() != Some(expected)
     {
@@ -403,6 +436,10 @@ pub(crate) async fn dispatch(host: &Arc<Host>, request: Request) -> Reply {
         && ![
             "snapshot",
             "llm_providers",
+            "activity_status",
+            "activity_history",
+            "activity_pending",
+            "activity_open",
             "app_quit",
             "self_chat_status",
             "audit",
@@ -430,6 +467,10 @@ pub(crate) async fn dispatch(host: &Arc<Host>, request: Request) -> Reply {
         && ![
             "snapshot",
             "llm_providers",
+            "activity_status",
+            "activity_history",
+            "activity_pending",
+            "activity_open",
             "self_chat_status",
             "audit",
             "logs",
@@ -512,6 +553,28 @@ async fn operate(
     let state = &host.state;
     let value = match method {
         "snapshot" => serde_json::to_value(snapshot(host).await?).map_err(fail)?,
+        "activity_status" | "activity_history" | "activity_pending" => activity::inspect(
+            state,
+            args.get("day").and_then(Value::as_str),
+            method == "activity_pending",
+        )
+        .await
+        .map_err(fail)?,
+        "activity_run" => activity::run(host, args.get("day").and_then(Value::as_str), None)
+            .await
+            .map_err(fail)?,
+        "activity_resolve" => activity::resolve(host, arg(args, "id")?, arg(args, "resolution")?)
+            .await
+            .map_err(fail)?,
+        "activity_open" => {
+            let id = args.get("id").and_then(Value::as_str);
+            if let Some(id) = id {
+                uuid::Uuid::parse_str(id)
+                    .map_err(|_| "[invalid_input] Invalid activity ID.".to_string())?;
+            }
+            host.shell.open_activity(id).map_err(fail)?;
+            json!({"visible":true})
+        }
         "start_assistant" => {
             state
                 .restart_offer
@@ -690,6 +753,7 @@ async fn operate(
         }
         "microsoft_logout" => {
             stop(state).await.map_err(fail)?;
+            *state.activity_graph.lock().await = None;
             let config = read_config(&state.config_path).map_err(fail)?;
             Store::logout(&config.server.data_dir.join("assistant.db")).map_err(fail)?;
             json!({"local_logout":true,"remote_revoked":false,"running":false})
@@ -787,6 +851,7 @@ async fn operate(
             json!({"visible":false})
         }
         "app_quit" => {
+            activity::shutdown(state).await;
             if let Some(task) = state.microsoft_login.lock().await.take() {
                 task.abort();
             }
@@ -829,6 +894,7 @@ mod tests {
             &descriptor,
             &serde_json::to_string(&Endpoint {
                 wiki_support: true,
+                activity_registration_support: true,
                 contract: CONTRACT,
                 port: 1,
                 token: "stale-token".into(),
@@ -844,6 +910,7 @@ mod tests {
             &descriptor,
             &serde_json::to_string(&Endpoint {
                 wiki_support: true,
+                activity_registration_support: true,
                 contract: CONTRACT,
                 port: 2,
                 token: "new-instance".into(),
@@ -868,6 +935,7 @@ mod tests {
                 &dir.path().join("control.json"),
                 &serde_json::to_string(&Endpoint {
                     wiki_support: true,
+                    activity_registration_support: true,
                     contract: CONTRACT,
                     port: 1,
                     token: "instance".into(),

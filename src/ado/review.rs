@@ -280,6 +280,7 @@ pub(super) fn summarize(
             url: url.to_owned(),
             organization: source.organization.clone(),
             date: day(date).to_owned(),
+            occurred_at: date.to_owned(),
             link_name: artifact.as_ref().map(|(_, name)| (*name).to_owned()),
             artifact: artifact.map(|(uri, _)| uri),
             ..Default::default()

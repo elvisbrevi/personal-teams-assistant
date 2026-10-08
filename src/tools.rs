@@ -1,5 +1,5 @@
 use crate::{adapters::graph::Graph, state::Store};
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -173,6 +173,45 @@ pub trait ReadOnlyTool: Send + Sync {
     async fn review(&self, _spec: &ToolSpec, _days: i64) -> Result<String> {
         anyhow::bail!("activity review unsupported")
     }
+    async fn registration_review(&self, spec: &ToolSpec, days: i64) -> Result<String> {
+        self.review(spec, days).await
+    }
+    async fn daily_work(
+        &self,
+        _spec: &ToolSpec,
+        _start: chrono::DateTime<chrono::Utc>,
+        _end: chrono::DateTime<chrono::Utc>,
+        _effort: &str,
+        _day: &str,
+    ) -> Result<crate::ado::registration::DailyWork> {
+        anyhow::bail!("daily work reads unsupported")
+    }
+    async fn task_fields(
+        &self,
+        _spec: &ToolSpec,
+        _parent: &crate::ado::link::Target,
+        _kind: &str,
+    ) -> Result<crate::ado::registration::TaskSchema> {
+        anyhow::bail!("task field reads unsupported")
+    }
+    async fn validate_task(
+        &self,
+        _spec: &ToolSpec,
+        _parent: &crate::ado::link::Target,
+        _task: &crate::ado::registration::TaskFields,
+        _activities: &[crate::ado::link::Linkable],
+    ) -> Result<bool> {
+        anyhow::bail!("task validation unsupported")
+    }
+    async fn register_task(
+        &self,
+        _spec: &ToolSpec,
+        _parent: &crate::ado::link::Target,
+        _task: &crate::ado::registration::TaskFields,
+        _activities: &[crate::ado::link::Linkable],
+    ) -> Result<(crate::ado::link::LinkStatus, Option<u64>)> {
+        anyhow::bail!("task registration unsupported")
+    }
     /// Whether the source can link work to work items (it has a write credential).
     fn links_work(&self, spec: &ToolSpec) -> bool {
         matches!(
@@ -220,6 +259,31 @@ pub struct Tools {
     pub store: Arc<Store>,
     pub graph: Arc<Graph>,
 }
+impl Tools {
+    fn registration_catalog(&self, spec: &ToolSpec, write: bool) -> Result<(String, String)> {
+        let ToolSpec::AzureDevopsStatus {
+            repository,
+            path,
+            secret_ref,
+            link_secret_ref,
+            ..
+        } = spec
+        else {
+            anyhow::bail!("registration needs Azure DevOps activity");
+        };
+        let reference = if write {
+            link_secret_ref
+                .as_ref()
+                .context("write credential unavailable")?
+        } else {
+            secret_ref
+        };
+        Ok((
+            crate::knowledge::read_repository_file(&self.repositories, repository, path)?,
+            crate::security::resolve(reference, &self.bindings)?,
+        ))
+    }
+}
 fn lookup_id(question: &str) -> Result<String> {
     // Deliberately explicit: the question must contain exactly one `id: ABC-123`.
     let re = regex::Regex::new(r"(?i)\bid:\s*([A-Z0-9_-]{1,64})\b")?;
@@ -232,6 +296,127 @@ fn lookup_id(question: &str) -> Result<String> {
 }
 #[async_trait]
 impl ReadOnlyTool for Tools {
+    async fn registration_review(&self, spec: &ToolSpec, days: i64) -> Result<String> {
+        spec.validate()?;
+        if let ToolSpec::AzureDevopsWiki {
+            repository,
+            path,
+            secret_ref,
+            wiki_ids,
+            ..
+        } = spec
+        {
+            let days = days.clamp(1, 31);
+            let operation = async {
+                let catalog =
+                    crate::knowledge::read_repository_file(&self.repositories, repository, path)?;
+                let key = crate::security::resolve(secret_ref, &self.bindings)?;
+                let reader = crate::ado::wiki::Reader::new(&self.client, &key, &catalog, wiki_ids)?
+                    .with_deadline(90)
+                    .own_scope()
+                    .await?;
+                let (edits, linked, partial) = reader
+                    .own_edits(chrono::Utc::now() - chrono::Duration::days(days))
+                    .await?;
+                Ok::<_, anyhow::Error>(serde_json::to_string(
+                    &crate::ado::wiki::registration_edits_evidence(&edits, &linked, partial, days),
+                )?)
+            };
+            tokio::time::timeout(std::time::Duration::from_secs(180), operation).await?
+        } else if matches!(spec, ToolSpec::TeamsMessages {}) {
+            let since = chrono::Utc::now() - chrono::Duration::days(days.clamp(1, 31));
+            let found = tokio::time::timeout(
+                std::time::Duration::from_secs(180),
+                self.graph.registration_activity(since),
+            )
+            .await??;
+            Ok(serde_json::to_string(&found)?)
+        } else {
+            self.review(spec, days).await
+        }
+    }
+    async fn daily_work(
+        &self,
+        spec: &ToolSpec,
+        start: chrono::DateTime<chrono::Utc>,
+        end: chrono::DateTime<chrono::Utc>,
+        effort: &str,
+        day: &str,
+    ) -> Result<crate::ado::registration::DailyWork> {
+        let (catalog, key) = self.registration_catalog(spec, false)?;
+        tokio::time::timeout(
+            std::time::Duration::from_secs(180),
+            crate::ado::registration::daily_work(
+                &self.client,
+                &key,
+                &catalog,
+                start,
+                end,
+                effort,
+                day,
+            ),
+        )
+        .await?
+    }
+    async fn task_fields(
+        &self,
+        spec: &ToolSpec,
+        parent: &crate::ado::link::Target,
+        kind: &str,
+    ) -> Result<crate::ado::registration::TaskSchema> {
+        let (catalog, key) = self.registration_catalog(spec, false)?;
+        tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            crate::ado::registration::task_schema(&self.client, &key, &catalog, parent, kind),
+        )
+        .await?
+    }
+    async fn validate_task(
+        &self,
+        spec: &ToolSpec,
+        parent: &crate::ado::link::Target,
+        task: &crate::ado::registration::TaskFields,
+        activities: &[crate::ado::link::Linkable],
+    ) -> Result<bool> {
+        let (catalog, key) = self.registration_catalog(spec, true)?;
+        let (status, _) = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            crate::ado::registration::write_task(
+                &self.client,
+                &key,
+                &catalog,
+                parent,
+                task,
+                activities,
+                true,
+            ),
+        )
+        .await??;
+        Ok(status == crate::ado::link::LinkStatus::Linked)
+    }
+    async fn register_task(
+        &self,
+        spec: &ToolSpec,
+        parent: &crate::ado::link::Target,
+        task: &crate::ado::registration::TaskFields,
+        activities: &[crate::ado::link::Linkable],
+    ) -> Result<(crate::ado::link::LinkStatus, Option<u64>)> {
+        let (catalog, key) = self.registration_catalog(spec, true)?;
+        tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            crate::ado::registration::write_task(
+                &self.client,
+                &key,
+                &catalog,
+                parent,
+                task,
+                activities,
+                false,
+            ),
+        )
+        .await
+        .unwrap_or(Ok((crate::ado::link::LinkStatus::Uncertain, None)))
+    }
     async fn execute(&self, spec: &ToolSpec, question: &str, conversation: &str) -> Result<String> {
         spec.validate()?;
         let operation = async {

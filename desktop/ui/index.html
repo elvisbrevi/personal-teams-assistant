@@ -30,6 +30,7 @@
         <button data-tab="overview" title="Home" aria-current="page"><svg class="icon"><use href="#i-home"/></svg><span>Home</span></button>
         <button data-tab="settings" title="Settings"><svg class="icon"><use href="#i-settings"/></svg><span>Settings</span></button>
         <button data-tab="messages" title="Messages"><svg class="icon"><use href="#i-inbox"/></svg><span>Messages</span><b id="nav-attention" class="nav-count" hidden></b></button>
+        <button data-tab="registration" title="Activity registration"><svg class="icon"><use href="#i-check"/></svg><span>Activities</span><b id="nav-activities" class="nav-count" hidden></b></button>
         <button data-tab="knowledge" title="Knowledge"><svg class="icon"><use href="#i-book"/></svg><span>Knowledge</span></button>
         <button data-tab="chat" title="Test chat"><svg class="icon"><use href="#i-chat"/></svg><span>Test chat</span></button>
       </nav>
@@ -40,6 +41,7 @@
 
     <main>
       <div id="notice" class="toast" role="alert" hidden><span id="notice-text"></span><button id="notice-close" class="icon-button" aria-label="Close notice"><svg class="icon"><use href="#i-close"/></svg></button></div>
+      <div id="activity-notice" class="panel offer" role="status" hidden><div class="panel-head"><strong id="activity-notice-text"></strong><button id="activity-notice-open" class="secondary small">Review activities</button></div></div>
       <div id="restart-offer" class="panel offer" role="alertdialog" aria-labelledby="restart-offer-title" hidden>
         <h2 id="restart-offer-title">New version installed</h2>
         <p>The previous version of the assistant was stopped (service and tunnel). The assistant was running. Keep it running with the new version?</p>
@@ -124,6 +126,32 @@
           <label>Answer language <small>What the assistant writes in Teams, including notices and sources. It overrides the style; the app itself stays in English.</small><select id="llm-language" class="cfg"><option value="es">Español</option><option value="en">English</option></select></label>
           <label>Answer style<textarea id="llm-style" class="cfg" rows="3"></textarea></label>
         </div>
+        <div class="panel" id="panel-registration">
+          <h2>Activity registration</h2>
+          <p class="hint">Register performed work as completed tasks under the matching HU. The target is 9 hours by default; hours already registered are deducted. Unclear work, effort or call attendance stays pending for your input.</p>
+          <label class="check"><input id="registration-enabled" class="cfg" type="checkbox"> Run on a schedule while this app is open</label>
+          <label class="check"><input id="registration-auto" class="cfg" type="checkbox"> Automatically create tasks when the HU, description and effort are clear</label>
+          <p class="hint">Creates tasks with the separate write credential. Observation mode keeps all proposals pending.</p>
+          <div class="grid">
+            <label>Daily target (hours)<input id="registration-hours" class="cfg" type="number" min="0.25" max="24" step="0.25"></label>
+            <label>Schedule<select id="registration-schedule" class="cfg"><option value="daily">Once a day</option><option value="interval">Every interval within a window</option></select></label>
+            <label>Daily time<input id="registration-at" class="cfg" type="time"></label>
+            <label>Interval (minutes)<input id="registration-interval" class="cfg" type="number" min="5" max="1440"></label>
+            <label>Window starts<input id="registration-start" class="cfg" type="time"></label>
+            <label>Window ends<input id="registration-end" class="cfg" type="time"></label>
+            <label>Time zone<input id="registration-zone" class="cfg" placeholder="local or America/Santiago" spellcheck="false"></label>
+            <label>Workdays <small>1 = Monday … 7 = Sunday, separated by commas.</small><input id="registration-weekdays" class="cfg"></label>
+          </div>
+          <label>Azure DevOps write source<select id="registration-writer" class="cfg"></select></label>
+          <fieldset class="activity-sources"><legend>Activity sources</legend><div id="registration-sources" class="list"></div></fieldset>
+          <p class="hint">Sources must be enabled and allow external processing. Azure DevOps activity includes your commits, pull requests, pipeline runs, releases and stage approvals. Wiki covers your page creation and edits. Teams messages covers work described in your own messages and call events in authorized chats and meetings.</p>
+          <div class="grid">
+            <label>Task type<select id="registration-kind" class="cfg"><option>Task</option><option>Tarea</option></select></label>
+            <label>Completed state<input id="registration-state" class="cfg" placeholder="Done"></label>
+            <label>Effort field<input id="registration-effort" class="cfg" placeholder="Microsoft.VSTS.Scheduling.CompletedWork" spellcheck="false"></label>
+          </div>
+          <label>Additional required fields <small>JSON object with Azure DevOps field reference names and values.</small><textarea id="registration-fields" class="cfg" rows="3" spellcheck="false" placeholder='{"Custom.ActivityType":"Documentation"}'></textarea></label>
+        </div>
         <div class="panel" id="panel-self-chat">
           <div class="panel-head"><h2>Chat with myself</h2><span id="self-chat-badge" class="badge muted"></span></div>
           <p id="self-chat-state" class="hint"></p>
@@ -138,6 +166,28 @@
         </div>
       </section>
 
+      <section id="registration" hidden>
+        <header class="page-head"><h1>Activity registration</h1><p>Completed tasks, activities that need your context, and the daily effort still to register.</p></header>
+        <div class="panel">
+          <div class="toolbar"><label>Day<input id="activity-day" type="date"></label><button id="activity-run">Review this day</button><button id="activity-refresh" class="secondary">Refresh</button><button id="activity-settings" class="secondary">Configure</button></div>
+          <p id="activity-running" class="hint" role="status"></p>
+          <div id="activity-summary" class="stats"></div>
+        </div>
+        <div class="panel"><h2>Needs your input</h2><div id="activity-pending" class="list"></div></div>
+        <div id="activity-editor" class="panel" hidden>
+          <h2 id="activity-editor-title">Review activity</h2><p id="activity-question"></p><p id="activity-issue" class="activity-issue" role="status"></p><div id="activity-evidence" class="list"></div>
+          <form id="activity-form">
+            <label>Suggested HU<select id="activity-parent"></select></label>
+            <label id="activity-other-parent-label" hidden>Other HU ID<input id="activity-other-parent" type="number" min="1" step="1"></label>
+            <div class="grid"><label>Task title<input id="activity-title" maxlength="160"></label><label>Effort (hours)<input id="activity-hours" type="number" min="0.01" max="24" step="0.01"></label></div>
+            <label>Description<textarea id="activity-description" rows="5" maxlength="6000"></textarea></label>
+            <label>Other / more context <small>Explain the work, choose a different HU, or tell the assistant which call you attended and what it covered.</small><textarea id="activity-context" rows="4" maxlength="6000"></textarea></label>
+            <label>Additional fields (JSON)<textarea id="activity-fields" rows="3" spellcheck="false"></textarea></label>
+            <div class="actions"><button id="activity-create" type="submit">Create task in Done</button><button id="activity-refine" type="button" class="secondary">Ask assistant with this context</button><button id="activity-dismiss" type="button" class="secondary">Dismiss activity</button></div>
+          </form>
+        </div>
+        <div class="panel"><h2>Daily history</h2><div id="activity-history" class="table-scroll"></div><details><summary>Process runs</summary><div id="activity-runs" class="list"></div></details></div>
+      </section>
       <section id="messages" hidden>
         <header class="page-head">
           <h1>Messages</h1>

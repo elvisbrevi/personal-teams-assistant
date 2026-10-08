@@ -8,6 +8,12 @@ const FILES: &[(&str, &str)] = &[
         include_str!("../../desktop/skills/personal-teams-assistant/SKILL.md"),
     ),
     (
+        "references/activity-registration.md",
+        include_str!(
+            "../../desktop/skills/personal-teams-assistant/references/activity-registration.md"
+        ),
+    ),
+    (
         "references/configuration.md",
         include_str!("../../desktop/skills/personal-teams-assistant/references/configuration.md"),
     ),

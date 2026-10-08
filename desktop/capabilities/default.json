@@ -1,6 +1,6 @@
 {
   "identifier": "default",
   "description": "Local desktop windows",
-  "windows": ["main"],
+  "windows": ["main", "activity-registration"],
   "permissions": ["core:default"]
 }

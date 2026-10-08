@@ -52,6 +52,7 @@ pub(crate) fn run(host_lock: fs::File, start_service: bool) -> Result<()> {
         if let Some(task) = host.state.github_finish.lock().await.take() {
             task.abort();
         }
+        activity::shutdown(&host.state).await;
         stop(&host.state).await
     })
 }

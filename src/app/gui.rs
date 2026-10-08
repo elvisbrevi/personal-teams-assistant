@@ -1,7 +1,7 @@
 //! Tauri shell: tray/menu-bar icon and the settings/chat window. Operations live in the host.
 use super::*;
 use tauri::{
-    Manager, WindowEvent,
+    Emitter, Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent,
     menu::{Menu, MenuItem},
     tray::TrayIconBuilder,
 };
@@ -30,6 +30,58 @@ impl Shell for TauriShell {
     fn exit(&self) {
         self.0.exit(0);
     }
+    fn open_activity(&self, entry: Option<&str>) -> Result<()> {
+        open_activity(&self.0, entry)
+    }
+    fn notify_activity(&self, title: &str, body: &str, entry: Option<&str>) -> Result<()> {
+        let _ = self.0.emit("activity-registration", ());
+        let app = self.0.clone();
+        let title = title.to_owned();
+        let body = body.to_owned();
+        let entry = entry.map(str::to_owned);
+        std::thread::spawn(move || {
+            let result = notify_rust::Notification::new()
+                .summary(&title)
+                .body(&body)
+                .appname("Personal Teams Assistant")
+                .action("default", "Review activities")
+                .timeout(15_000)
+                .show();
+            if let Ok(handle) = result {
+                handle.wait_for_action(|action| {
+                    if action != "__closed" {
+                        let target = app.clone();
+                        let _ = app.run_on_main_thread(move || {
+                            let _ = open_activity(&target, entry.as_deref());
+                        });
+                    }
+                });
+            } else {
+                tracing::warn!(event = "activity_notification_unavailable");
+            }
+        });
+        Ok(())
+    }
+}
+
+fn open_activity(app: &tauri::AppHandle, entry: Option<&str>) -> Result<()> {
+    if let Some(window) = app.get_webview_window("activity-registration") {
+        window.emit("activity-open", serde_json::json!({"id":entry}))?;
+        window.show()?;
+        window.set_focus()?;
+    } else {
+        let query = entry.unwrap_or("pending");
+        WebviewWindowBuilder::new(
+            app,
+            "activity-registration",
+            WebviewUrl::App(format!("index.html?activity={query}").into()),
+        )
+        .title("Activity registration — Personal Teams Assistant")
+        .inner_size(1000., 760.)
+        .min_inner_size(640., 520.)
+        .build()?;
+    }
+    Ok(())
 }
 
 fn show_main(app: &tauri::AppHandle) {
@@ -115,7 +167,9 @@ pub(crate) fn run(host_lock: fs::File, restart_offer: bool) {
             Ok(())
         })
         .on_window_event(|window, event| {
-            if let WindowEvent::CloseRequested { api, .. } = event {
+            if let WindowEvent::CloseRequested { api, .. } = event
+                && window.label() == "main"
+            {
                 api.prevent_close();
                 let _ = window.hide();
             }
@@ -126,6 +180,7 @@ pub(crate) fn run(host_lock: fs::File, restart_offer: bool) {
             // Native macOS Quit/termination may bypass ExitRequested and deliver Exit directly.
             // Await cleanup on the main event thread while Tokio keeps servicing background tasks.
             tauri::RunEvent::Exit => {
+                tauri::async_runtime::block_on(activity::shutdown(&host(app).state));
                 let _ = tauri::async_runtime::block_on(stop(&host(app).state));
             }
             tauri::RunEvent::ExitRequested {

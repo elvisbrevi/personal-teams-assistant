@@ -103,6 +103,109 @@ pub struct Graph {
     pub store: Arc<Store>,
     pub client_state: String,
 }
+
+fn call_hours(duration: &str) -> Option<f64> {
+    let pattern =
+        regex::Regex::new(r"^PT(?:(\d+(?:\.\d+)?)H)?(?:(\d+(?:\.\d+)?)M)?(?:(\d+(?:\.\d+)?)S)?$")
+            .ok()?;
+    let c = pattern.captures(duration)?;
+    let number = |index| {
+        c.get(index)
+            .and_then(|v| v.as_str().parse::<f64>().ok())
+            .unwrap_or(0.)
+    };
+    let hours = number(1) + number(2) / 60. + number(3) / 3600.;
+    (hours > 0. && hours <= 24.).then_some(hours)
+}
+fn registration_message(
+    message: &Value,
+    chat: &str,
+    topic: &str,
+    user: &str,
+    since: chrono::DateTime<chrono::Utc>,
+) -> Option<crate::ado::link::Linkable> {
+    if !message["deletedDateTime"].is_null() {
+        return None;
+    }
+    let timestamp = message["createdDateTime"].as_str()?;
+    let at = chrono::DateTime::parse_from_rfc3339(timestamp).ok()?;
+    if at < since || at > chrono::Utc::now() {
+        return None;
+    }
+    let call = message["eventDetail"]["@odata.type"]
+        .as_str()
+        .is_some_and(|t| t.ends_with("callEndedEventMessageDetail"));
+    let mine = message["messageType"].as_str() == Some("message")
+        && message["from"]["user"]["id"].as_str() == Some(user);
+    if !mine && !call {
+        return None;
+    }
+    let mut url = message["webUrl"].as_str().map(str::to_owned);
+    // Graph frequently omits webUrl on system messages. Build the documented deep link
+    // only from the validated chat ID and the message ID that Graph returned.
+    if url.is_none() {
+        let mut address = url::Url::parse("https://teams.microsoft.com/l/message/").ok()?;
+        address
+            .path_segments_mut()
+            .ok()?
+            .pop_if_empty()
+            .push(chat)
+            .push(message["id"].as_str()?);
+        url = Some(address.to_string());
+    }
+    let url = url?;
+    let parsed = url::Url::parse(&url).ok()?;
+    if parsed.scheme() != "https"
+        || parsed.host_str() != Some("teams.microsoft.com")
+        || parsed.port_or_known_default() != Some(443)
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || !parsed.path().starts_with("/l/message/")
+    {
+        return None;
+    }
+    let raw = message["body"]["content"].as_str().unwrap_or("");
+    if raw.contains("personalteams.invalid/output/") {
+        return None;
+    }
+    let text = if message["body"]["contentType"].as_str() == Some("html") {
+        teams::plain_text(raw)
+    } else {
+        raw.to_owned()
+    };
+    if !call && text.trim().is_empty() {
+        return None;
+    }
+    let label = if call {
+        format!("Call ended in {topic}. Its purpose and the user's attendance are not verified.")
+    } else {
+        format!(
+            "Own message in {topic}: {}",
+            text.chars().take(600).collect::<String>()
+        )
+    };
+    Some(crate::ado::link::Linkable {
+        label,
+        short: if call {
+            format!("Call in {topic}")
+        } else {
+            format!("Work described in {topic}")
+        },
+        url,
+        organization: "https://teams.microsoft.com".into(),
+        date: timestamp.get(..10)?.into(),
+        occurred_at: timestamp.into(),
+        context_required: call,
+        duration_hours: if call {
+            message["eventDetail"]["callDuration"]
+                .as_str()
+                .and_then(call_hours)
+        } else {
+            None
+        },
+        ..Default::default()
+    })
+}
 impl Graph {
     pub async fn verify_account(&self) -> Result<()> {
         let me = self.request(Method::GET, "me", None, true).await?;
@@ -664,6 +767,109 @@ impl Graph {
     pub fn user_messages_resource(&self) -> String {
         format!("users/{}/chats/getAllMessages", self.config.graph.user_id)
     }
+    /// Registration candidates from authorized chats and their call-ended events, using
+    /// Chat.Read only. An event proves a call happened, never that the user attended it.
+    pub async fn registration_activity(
+        &self,
+        since: chrono::DateTime<chrono::Utc>,
+    ) -> Result<crate::evidence::Evidence> {
+        let mut url = self.url("me/chats")?;
+        url.query_pairs_mut()
+            .append_pair("$expand", "lastMessagePreview")
+            .append_pair("$orderby", "lastMessagePreview/createdDateTime desc")
+            .append_pair("$top", "50");
+        let page = self.request_url(Method::GET, url, None, true).await?;
+        let chats = page["value"].as_array().context("invalid chats")?;
+        let mut partial = page["@odata.nextLink"].is_string();
+        let mut activities = Vec::new();
+        let mut read = 0;
+        for chat in chats {
+            let Some(id) = chat["id"].as_str() else {
+                continue;
+            };
+            if id == "48:notes"
+                || self
+                    .config
+                    .graph
+                    .self_chat
+                    .as_ref()
+                    .is_some_and(|s| s.id == id)
+                || !matches!(
+                    chat["chatType"].as_str(),
+                    Some("oneOnOne" | "group" | "meeting")
+                )
+                || !self.allowed_collection(&format!("chats/{id}/messages"))
+            {
+                continue;
+            }
+            teams::canonical_resource(&format!("chats/{id}/messages/0"))?;
+            if chat["lastMessagePreview"]["createdDateTime"]
+                .as_str()
+                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                .is_some_and(|d| d < since)
+            {
+                continue;
+            }
+            if read >= 30 {
+                partial = true;
+                break;
+            }
+            read += 1;
+            let collection = format!("chats/{id}/messages");
+            let mut url = self.url(&collection)?;
+            url.query_pairs_mut().append_pair("$top", "50");
+            let reply = match self.request_url(Method::GET, url, None, true).await {
+                Ok(p) => p,
+                Err(_) => {
+                    partial = true;
+                    continue;
+                }
+            };
+            partial |= reply["@odata.nextLink"].is_string();
+            let topic = chat["topic"]
+                .as_str()
+                .filter(|s| !s.trim().is_empty())
+                .unwrap_or("a chat without a description");
+            let Some(messages) = reply["value"].as_array() else {
+                partial = true;
+                continue;
+            };
+            for message in messages {
+                if let Some(a) =
+                    registration_message(message, id, topic, &self.config.graph.user_id, since)
+                {
+                    activities.push(a);
+                }
+            }
+        }
+        activities.sort_by(|a, b| b.occurred_at.cmp(&a.occurred_at));
+        partial |= activities.len() > 60;
+        activities.truncate(60);
+        let text = activities
+            .iter()
+            .map(|a| {
+                format!(
+                    "{} · {}{}\n",
+                    a.occurred_at,
+                    a.label,
+                    if a.context_required {
+                        " (attendance, purpose and HU need user confirmation)"
+                    } else {
+                        ""
+                    }
+                )
+            })
+            .collect::<String>();
+        Ok(crate::evidence::Evidence {
+            text,
+            partial,
+            links: Some(crate::ado::link::LinkOffer {
+                activities,
+                ..Default::default()
+            }),
+            ..Default::default()
+        })
+    }
     fn url(&self, path: &str) -> Result<url::Url> {
         ensure!(
             !path.starts_with('/') && !path.contains("://"),
@@ -1199,3 +1405,58 @@ impl std::fmt::Display for GraphHttpError {
     }
 }
 impl std::error::Error for GraphHttpError {}
+
+#[cfg(test)]
+mod registration_tests {
+    use super::*;
+
+    #[test]
+    fn call_without_description_needs_attendance_and_hu_context() {
+        let now = chrono::Utc::now();
+        let message = json!({"id":"1741000","messageType":"systemEventMessage",
+            "createdDateTime":(now-chrono::Duration::minutes(5)).to_rfc3339(),
+            "eventDetail":{"@odata.type":"#microsoft.graph.callEndedEventMessageDetail","callDuration":"PT1H30M"}});
+        let activity = registration_message(
+            &message,
+            "19:meeting_abc@thread.v2",
+            "a chat without a description",
+            "me",
+            now - chrono::Duration::days(1),
+        )
+        .unwrap();
+        assert!(activity.context_required);
+        assert_eq!(activity.duration_hours, Some(1.5));
+        assert!(activity.label.contains("attendance are not verified"));
+        let url = url::Url::parse(&activity.url).unwrap();
+        assert_eq!(url.host_str(), Some("teams.microsoft.com"));
+        assert!(activity.occurred_at.ends_with("+00:00"));
+    }
+
+    #[test]
+    fn registration_messages_require_own_authorship_time_and_verified_links() {
+        let now = chrono::Utc::now();
+        let since = now - chrono::Duration::days(1);
+        let mut message = json!({"id":"1741000","messageType":"message",
+            "createdDateTime":(now-chrono::Duration::minutes(5)).to_rfc3339(),
+            "from":{"user":{"id":"me"}},"body":{"contentType":"html","content":"<p>I documented the payment flow.</p>"}});
+        assert!(
+            registration_message(&message, "19:abc@thread.v2", "Payments", "me", since).is_some()
+        );
+        message["from"]["user"]["id"] = json!("someone-else");
+        assert!(
+            registration_message(&message, "19:abc@thread.v2", "Payments", "me", since).is_none()
+        );
+        message["from"]["user"]["id"] = json!("me");
+        message["webUrl"] = json!("https://other.example/l/message/chat/1741000");
+        assert!(
+            registration_message(&message, "19:abc@thread.v2", "Payments", "me", since).is_none()
+        );
+        message.as_object_mut().unwrap().remove("webUrl");
+        message["createdDateTime"] = json!((now - chrono::Duration::days(2)).to_rfc3339());
+        assert!(
+            registration_message(&message, "19:abc@thread.v2", "Payments", "me", since).is_none()
+        );
+        assert_eq!(call_hours("PT40M"), Some(2. / 3.));
+        assert_eq!(call_hours("PT25H"), None);
+    }
+}
