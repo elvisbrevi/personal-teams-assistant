@@ -61,12 +61,29 @@ struct Running {
     tunnel: Option<tokio::process::Child>,
 }
 
+/// Where the assistant service is in its lifecycle. `start`/`stop` and the service ending on
+/// its own publish it, so the tray and the window follow changes made by any client.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum AssistantPhase {
+    Stopped,
+    Starting,
+    Running,
+    Stopping,
+}
+
+/// Publishes `phase` only when it changes, so followers are not woken for nothing.
+fn set_phase(sender: &watch::Sender<AssistantPhase>, phase: AssistantPhase) {
+    sender.send_if_modified(|current| std::mem::replace(current, phase) != phase);
+}
+
 pub(crate) struct DesktopState {
     operations: Mutex<()>,
     loaded_config: Mutex<Option<Config>>,
     config_path: PathBuf,
     map_path: PathBuf,
     running: Mutex<Option<Running>>,
+    phase: watch::Sender<AssistantPhase>,
     github_login: Mutex<Option<github::Pending>>,
     github_finish: Mutex<Option<tokio::task::JoinHandle<std::result::Result<(), String>>>>,
     microsoft_login: Mutex<Option<tokio::task::JoinHandle<std::result::Result<(), String>>>>,
@@ -341,6 +358,7 @@ pub(crate) fn init_state(config_dir: &Path, data_dir: &Path) -> Result<DesktopSt
         config_path,
         map_path,
         running: Mutex::new(None),
+        phase: watch::Sender::new(AssistantPhase::Stopped),
         github_login: Mutex::new(None),
         github_finish: Mutex::new(None),
         microsoft_login: Mutex::new(None),
@@ -453,6 +471,7 @@ async fn snapshot(host: &Host) -> std::result::Result<Snapshot, String> {
 
 async fn stop(state: &DesktopState) -> Result<()> {
     if let Some(mut running) = state.running.lock().await.take() {
+        set_phase(&state.phase, AssistantPhase::Stopping);
         if let Some(mut tunnel) = running.tunnel.take() {
             let _ = tunnel.kill().await;
         }
@@ -466,10 +485,34 @@ async fn stop(state: &DesktopState) -> Result<()> {
         }
     }
     *state.loaded_config.lock().await = None;
+    set_phase(&state.phase, AssistantPhase::Stopped);
     Ok(())
 }
 
 async fn start(state: &DesktopState) -> Result<()> {
+    // Starting an assistant that already runs changes nothing, so it does not flash `starting`.
+    if *state.phase.borrow() == AssistantPhase::Stopped {
+        set_phase(&state.phase, AssistantPhase::Starting);
+    }
+    let result = start_service(state).await;
+    let running = state
+        .running
+        .lock()
+        .await
+        .as_ref()
+        .is_some_and(|r| !r.task.is_finished());
+    set_phase(
+        &state.phase,
+        if running {
+            AssistantPhase::Running
+        } else {
+            AssistantPhase::Stopped
+        },
+    );
+    result
+}
+
+async fn start_service(state: &DesktopState) -> Result<()> {
     let config = read_config(&state.config_path)?;
     let map = KnowledgeMap::load(&state.map_path)?;
     validate_local(&config, &map)?;
@@ -517,7 +560,13 @@ async fn start(state: &DesktopState) -> Result<()> {
     let (stop, receiver) = watch::channel(false);
     let path = state.config_path.to_string_lossy().into_owned();
     let (ready_tx, ready_rx) = oneshot::channel();
-    let task = tokio::spawn(async move { runtime::serve(&path, receiver, ready_tx).await });
+    let phase = state.phase.clone();
+    let task = tokio::spawn(async move {
+        let result = runtime::serve(&path, receiver, ready_tx).await;
+        // Also when the service ends on its own (an error), not only through `stop`.
+        set_phase(&phase, AssistantPhase::Stopped);
+        result
+    });
     let graph = tokio::time::timeout(std::time::Duration::from_secs(60), ready_rx)
         .await
         .ok()
@@ -1415,5 +1464,23 @@ mod tests {
         assert!(protect_identity(&previous, &next).is_ok());
         fs::write(dir.path().join("assistant.db"), "").unwrap();
         assert!(protect_identity(&previous, &next).is_err());
+    }
+
+    #[tokio::test]
+    async fn phase_follows_a_failed_start_and_ignores_an_idle_stop() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = init_state(&dir.path().join("profile"), &dir.path().join("data")).unwrap();
+        let mut phase = state.phase.subscribe();
+        stop(&state).await.unwrap();
+        assert!(
+            !phase.has_changed().unwrap(),
+            "an idle stop wakes no follower"
+        );
+        // The template has no Teams setup, so it fails before opening anything.
+        assert!(start(&state).await.is_err());
+        // It went through `starting` (only changes notify) and settled back on `stopped`.
+        assert!(phase.has_changed().unwrap());
+        assert_eq!(*phase.borrow_and_update(), AssistantPhase::Stopped);
+        assert!(state.running.lock().await.is_none());
     }
 }
