@@ -2,29 +2,49 @@
 
 ## Crate publication follow-up
 
-The user authorized publishing the crate if needed. The published
+**Publication is complete.**
+[`personal-teams-assistant 0.6.9`](https://crates.io/crates/personal-teams-assistant/0.6.9)
+was published from the user's Mac on 2026-10-09 at 03:28:44 UTC, from a clean,
+updated `main` checkout at
+[`10a69bb50c320e67b69391465e5075749619d415`](https://github.com/elvisbrevi/personal-teams-assistant/commit/10a69bb50c320e67b69391465e5075749619d415).
+A separate clone preserved the existing Mac checkout and its untracked files.
+The Cargo manifest, lockfile and Tauri versions were verified as `0.6.9`.
+
+The previous cloud attempt stopped before upload because it had no registry
+credential. The Mac continuation used the already existing private
+`CARGO_REGISTRY_TOKEN` credential for Cargo, without displaying its value or
+requesting another token or publication approval. The crates.io version API
+returned 404 immediately before the real upload.
+
+`cargo publish --dry-run --locked` and `cargo publish --locked` both passed on
+the Mac, including compilation of the packaged default GUI build. Formatting
+also passed. The previously completed Clippy, test and JavaScript gates remain
+recorded below; no implementation changed during this continuation. Gitleaks
+scanned all 71 packaged files (1.42 MB) and found no secrets.
+
+After upload, the crates.io API confirmed version `0.6.9`, not yanked, with
+the creation time above. The
+[downloadable crate](https://crates.io/api/v1/crates/personal-teams-assistant/0.6.9/download)
+was downloaded and verified byte for byte against the local upload. Its SHA-256
+matches the registry checksum:
+`b6b85760f24b8f02672105a1f955853cf476549acaaca21ff3f81fc6f33bcb6f`.
+Its VCS metadata identifies the clean source commit above, and every packaged
+source file matches that checkout. The 71-file archive includes:
+
+- `src/app/web.rs` and its account/profile modules, including the `/login` and
+  `/api/login` routes.
+- `desktop/ui/index.html`, `app.js`, `transport.js`, `login.html`, `login.js`
+  and `style.css` for the panel and sign-in page.
+- `desktop/skills/personal-teams-assistant/references/web-access.md`, embedded
+  in the operating skill.
+
+The older
 [`0.6.8` crate](https://crates.io/crates/personal-teams-assistant/0.6.8)
-does not contain the web portal, login assets or embedded web-access guide.
-Version `0.6.9` was prepared on `main` in
-[`34aea2995b3ceadeaae24303277efab5dd081f02`](https://github.com/elvisbrevi/personal-teams-assistant/commit/34aea2995b3ceadeaae24303277efab5dd081f02),
-with matching Cargo manifest, lockfile and Tauri versions.
-
-All required local gates passed again with the new version. The clean-tree
-`cargo publish --dry-run --locked` also passed, including compilation of the
-packaged default GUI build. Gitleaks scanned all 71 packaged files and found
-no secrets. Version `0.6.9` returned 404 from crates.io before publication.
-
-**The crate has not been published.** The authorized real
-`cargo publish --locked` stopped with `no token found`, before upload. This
-cloud session has no Cargo registry token or Cargo login credential. The user
-was asked to configure `CARGO_REGISTRY_TOKEN` securely; never request or print
-its value in chat. No new publication approval is needed.
-
-To continue, use the clean, updated `main`, check that `0.6.9` is still absent
-from crates.io, then run `cargo publish --locked` with the configured registry
-credential. On the Mac, `cargo login` obtains the credential through a private
-terminal prompt. Verify crates.io and its downloadable package after publishing.
-The crate release does not start the Mac portal or its tunnel.
+lacks these web components. Use `0.6.9` for a registry installation that needs
+the web portal. Publication does not install or start the Mac portal or tunnel:
+service installation/startup and end-to-end HTTPS verification at
+`assistant.elvisbrevi.cl` remain pending under the
+[Mac deployment guide](web-macos-deployment.md).
 
 ## Current continuation status
 
