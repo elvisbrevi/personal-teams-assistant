@@ -37,7 +37,7 @@ src/                          core: pipeline, Graph adapters, LLM, knowledge, to
   app.rs                      host: Host/Shell, state, start/stop, OAuth, tunnel, settings, `run` entry
   app/gui.rs                  Tauri shell (`gui` feature): window, tray, the WebView's `command`
   app/headless.rs             headless shell: foreground, SIGTERM/Ctrl-C, `--start`
-  app/web.rs, app/web/         browser GUI, password sessions, isolated per-user host processes
+  app/web.rs, app/web/         browser GUI, Access-bound sessions, isolated per-user host processes
   app/control.rs              profile paths, IPC channel (contract 1), single dispatcher, update
   app/cli.rs                  `pta`: help, parsing, argument validation, translation to IPC methods
   app/github.rs               GitHub App with Device Flow, clone/sync without a token in URL/argv
@@ -85,16 +85,53 @@ flowchart LR
 ### Browser GUI and independent accounts
 
 `personal-teams-assistant --web` serves the same `desktop/ui` assets on a separate
-loopback listener (default `127.0.0.1:38656`), with an HTTPS origin provided by
-Cloudflare Tunnel or a TLS proxy. `pta web configure` writes private `web/settings.json`;
-`pta web users add/password/disable/enable/list` manages private `web/accounts.json`
-under an operator-local file lock. There is no public registration. Passwords are
-salted Argon2id hashes; values are supplied on protected stdin or the password form.
-In-memory random sessions expire, use HttpOnly/SameSite=Strict cookies (Secure and
-`__Host-` on HTTPS), and are invalidated by logout, password changes and account
-version changes. Every browser POST needs the exact configured Origin, and commands,
-logout and password changes also need a session-specific CSRF header. Host headers
-are checked; the portal never trusts forwarded identity headers or a browser profile selector.
+loopback listener (default `127.0.0.1:38656`), with an HTTPS origin through the
+dedicated Cloudflare Tunnel. Cloudflare Access owns the interactive GitHub login,
+using a dedicated OAuth App unrelated to repository GitHub Device Flow. Access
+protects the complete hostname and API; an explicit email allowlist plus the
+configured GitHub login method gates admission at the edge. Admission never
+creates or selects an application profile.
+
+`app/web/access.rs` accepts exactly one `Cf-Access-Jwt-Assertion` and verifies
+RS256 signature, pinned issuer/application audience, required subject/issuance/
+not-before/expiration and application token type. Keys come only from the team's
+HTTPS `/cdn-cgi/access/certs`, with bounded responses, five-minute freshness and
+rate-limited rotation refresh. Expired keys are never used after a failed refresh.
+The exact verified assertion is sent as `CF_Authorization` to the pinned team's
+`/cdn-cgi/access/get-identity`; account, GitHub IdP ID/type and `user_uuid == sub`
+are checked. Positive identity responses are cached by assertion hash for at most
+30 seconds; JWT validity and local revocation are checked on every request.
+Identity/email headers, service tokens and caller-selected URLs grant no access.
+
+`pta web configure` writes private `web/settings.json`, whose additive `access`
+configuration contains issuer, audience, account and dedicated GitHub IdP ID.
+Legacy settings remain readable for inspection; a portal cannot start without
+Access. `pta web users add/bind/unbind/revoke/disable/enable/list` manages private
+`web/accounts.json` under the existing operator-local lock. `bind` takes the
+operator's verified Access identity JSON on stdin. Its binding is the issuer,
+GitHub IdP ID and provider subject (`id` from get-identity), never an email, name
+or email-associated Access `sub`. Bindings cannot belong to two accounts. Existing
+IDs, profile selection and retired password hashes survive additive schema reads;
+hashes are never used to authenticate. Local association/reassociation is the
+recovery path; there is no public registration or password endpoint/form.
+
+`GET /login` exchanges a verified, enabled, explicitly associated identity for a
+random local session and redirects to the panel without another form. Sessions
+are bound to the exact Access assertion, provider binding, Access subject and
+account version, and expire at the earlier of local duration or JWT expiration.
+Cookies are HttpOnly/SameSite=Strict and host-only Secure on HTTPS. Every browser
+POST requires the exact configured Origin and a session-specific CSRF header.
+Logout revokes the local session and persists the assertion fingerprint until its
+expiration in private `web/access-revocations.json`, then the browser visits
+`/cdn-cgi/access/logout` to revoke Access and clear its application cookie. Local
+`users revoke` also sets an issuance cutoff so old Access assertions cannot open
+new sessions. Disable, unbind and rebind take effect on the next request.
+
+Hosts advertise additive `web_access_support` in their IPC descriptors and CLI
+capabilities. The portal refuses to reuse a password-era host, and account edits
+refuse to migrate the schema while one is running. A controlled Mac transition
+updates the compatible host/CLI pair and preserves the previous assistant state.
+The native transport remains unchanged and never accepts browser credentials.
 
 Each web account gets an opaque-ID directory `web/profiles/<id>/`, its own settings,
 map, SQLite data, file credentials and provider home, and a separate instance of
@@ -105,7 +142,7 @@ The portal and CLI scrub inherited app/provider credentials when launching isola
 hosts, preserve proxy/CA configuration, and use private credential files on all OSes.
 These are application profiles under one trusted operator's OS account, not OS-level tenants.
 
-One account may instead use `pta web users add USER --current-profile` to operate
+One account may instead use `pta web users add USER --current-profile` followed by a local identity association to operate
 the existing GUI/headless host and its actual data without a copy or re-login.
 The portal selects each IPC descriptor from the authenticated account, strips browser
 transport headers and uses the existing instance bearer. IPC itself still rejects
@@ -128,11 +165,18 @@ workflow, while GitHub uses its existing device flow. Activities open in the web
 The portal owns its own lock, starts enabled profile hosts for offline scheduling,
 remembers explicit Assistant Start/Stop state in private `web/resume/<id>` files,
 and stops only processes it started on exit. Disabling an account revokes access
-immediately and its portal-owned host on reconciliation. The setup helper
+immediately and its portal-owned host on reconciliation. The tunnel setup helper
 `scripts/configure-web-cloudflare.py` needs a Cloudflare API token, creates a
 dedicated remotely managed Tunnel/DNS route, saves its connector token privately
 and refuses to replace unrelated DNS or Tunnel routes. The existing static landing
-and desktop tunnel remain separate. See the [web operating guide](../desktop/skills/personal-teams-assistant/references/web-access.md).
+and desktop tunnel remain separate. `scripts/configure-web-access.py` separately
+creates/reuses only the dedicated GitHub IdP and panel/Graph Access applications,
+rejects overlapping unmanaged resources, installs only explicit callback paths
+exported by `pta web callbacks` before protecting the hostname, and verifies
+readback before writing private portal settings. No broad `/webhooks/*` bypass is
+allowed. The backend exempts only canonical notification/lifecycle POST paths;
+Graph forwarding and its existing batch authentication stay unchanged. The current
+profile's separate desktop Graph hostname/tunnel remains unchanged. See the [web operating guide](../desktop/skills/personal-teams-assistant/references/web-access.md).
 
 ### Headless host (Linux and servers)
 
@@ -358,7 +402,7 @@ To add an operation: a method in `control::operate` (window or browser only thro
 
 ## 11. GUI
 
-`ui/` is plain HTML/CSS/JS without a build, in English, with a sidebar and a light/dark theme following the system. `transport.js` selects Tauri `invoke('command', {request})` or same-origin `/api/control` with the existing contract. The browser reuses every tab and adds account sign-out/password controls, remote Microsoft login and phone-sized navigation. There are no GUI-only IPC methods. It respects the CSP in `tauri.conf.json`: no inline styles or scripts (only CSSOM properties from JS) and no `innerHTML`. The portal's CSP additionally permits same-origin fetch; session cookies are never available to JS.
+`ui/` is plain HTML/CSS/JS without a build, in English, with a sidebar and a light/dark theme following the system. `transport.js` selects Tauri `invoke('command', {request})` or same-origin `/api/control` with the existing contract. The browser reuses every tab and adds GitHub account sign-out controls, remote Microsoft login and phone-sized navigation. There are no GUI-only IPC methods. It respects the CSP in `tauri.conf.json`: no inline styles or scripts (only CSSOM properties from JS) and no `innerHTML`. The portal's CSP additionally permits same-origin fetch; session cookies are never available to JS.
 
 - **Tray/menu bar**: «Open settings and chat», a single item that reads «Start assistant» while stopped and «Stop assistant» while running (disabled «Starting assistant…»/«Stopping assistant…» in between), and «Quit». The icon carries a status dot drawn over the app icon (green running, amber starting or stopping, none stopped) and the tooltip names the state. Both follow `DesktopState.phase` (`AssistantPhase`: a `watch` that `start`/`stop` and the service ending on its own publish), so changes made from the window or `pta` show there too. A failed tray start/stop appears in the window when it is open, otherwise as a native notification.
 - **Home** (default tab): the assistant's state (running, observing, Teams pending, stopped) with Start/Restart/Stop; tiles for the Microsoft account, mode, reception, tunnel, models, sources and personal chat; «Setup», computed from the snapshot (required credentials — `GRAPH_WEBHOOK_SECRET` and `STATE_ENCRYPTION_KEY` count as ready because they are generated at start —, an active model, the Entra registration with the same rules as `validate_teams_setup`, account, public URL, at least one enabled source with external processing and an audience, assistant started and, optionally, sending on); and the recent activity from `audit`. The sidebar flags errors or uncertain sends of the last 24 h.

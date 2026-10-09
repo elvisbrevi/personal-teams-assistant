@@ -26,11 +26,13 @@ Application (host)
 
 Web portal
   web status              Web URL, settings and account profiles (never passwords).
-  web configure           JSON on stdin: bind, public_url (HTTPS behind Cloudflare Tunnel), session_hours.
+  web configure           JSON on stdin: bind, public_url, session_hours and Cloudflare Access configuration.
+  web callbacks           Exact Graph callback paths for Cloudflare Access bypass applications.
   web users list          Lists web accounts and their isolated profile directories.
-  web users add USER      Password on protected stdin (12+ characters); creates an isolated profile.
+  web users add USER      Creates an isolated profile, blocked until an Access identity is associated locally.
                            --current-profile instead grants this account access to the existing desktop profile.
-  web users password USER Password on protected stdin; revokes existing sessions.
+  web users bind USER     Verified Access get-identity JSON on stdin; associates the GitHub provider subject.
+  web users unbind|revoke USER  Removes the association or revokes all local sessions; preserves the profile.
   web users disable|enable USER  Revokes sessions and disables or enables web access; preserves data.
                            Run the portal with personal-teams-assistant --web; no public registration.
 
@@ -207,9 +209,14 @@ fn validate_args(args: &[String]) -> Result<()> {
             | "chat"
             | "help"]
             | ["app", "open" | "hide" | "quit"]
-            | ["web", "status" | "configure"]
+            | ["web", "status" | "configure" | "callbacks"]
             | ["web", "users", "list"]
-            | ["web", "users", "add" | "password" | "disable" | "enable", _]
+            | [
+                "web",
+                "users",
+                "add" | "bind" | "unbind" | "revoke" | "disable" | "enable",
+                _
+            ]
             | ["skill", "show" | "path"]
             | ["skill", "install", _]
             | ["config", "show" | "apply" | "validate"]
@@ -333,7 +340,7 @@ async fn execute(mut args: Vec<String>) -> Result<Reply> {
     match command {
         "capabilities" => {
             return Ok(Reply::success(
-                json!({"contract":control::CONTRACT,"commands":HELP,"skill_version":env!("CARGO_PKG_VERSION"),"activity_registration_support":true,"web_support":true}),
+                json!({"contract":control::CONTRACT,"commands":HELP,"skill_version":env!("CARGO_PKG_VERSION"),"activity_registration_support":true,"web_support":true,"web_access_support":true}),
             ));
         }
         "skill" => return crate::app::skill::command(action, args.get(2).map(String::as_str)),
@@ -991,6 +998,10 @@ mod help_tests {
             &["app", "open"],
             &["web", "status"],
             &["web", "configure"],
+            &["web", "callbacks"],
+            &["web", "users", "bind", "alice"],
+            &["web", "users", "unbind", "alice"],
+            &["web", "users", "revoke", "alice"],
             &["web", "users", "list"],
             &["skill", "show"],
             &["config", "show"],

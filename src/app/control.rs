@@ -69,6 +69,8 @@ struct Endpoint {
     activity_registration_support: bool,
     #[serde(default)]
     web_support: bool,
+    #[serde(default)]
+    web_access_support: bool,
     contract: u32,
     port: u16,
     token: String,
@@ -197,6 +199,17 @@ pub fn outdated_host(installed: &Path) -> bool {
     profile_dir()
         .and_then(|dir| outdated_at(&dir, installed))
         .unwrap_or(false)
+}
+/// The password-era host rejects the new account fields. Never silently reuse
+/// it against an Access-enabled portal, including the existing desktop profile.
+pub(super) fn require_web_access_host_at(dir: &Path) -> Result<()> {
+    existing_host_at(dir)?;
+    let endpoint: Endpoint = serde_json::from_slice(&fs::read(dir.join("control.json"))?)?;
+    ensure!(
+        endpoint.web_access_support,
+        "incompatible Access account schema: update the host and CLI together, preserving the assistant's running state"
+    );
+    Ok(())
 }
 /// Stop an outdated host (assistant and tunnel first) and wait until it releases the profile.
 /// Returns whether its assistant was running, so the caller can offer to keep it running.
@@ -378,6 +391,7 @@ pub(crate) fn launch(
             wiki_support: true,
             activity_registration_support: true,
             web_support: true,
+            web_access_support: true,
             contract: CONTRACT,
             port: listener.local_addr()?.port(),
             token: token.clone(),
@@ -928,6 +942,7 @@ mod tests {
         let legacy: Endpoint =
             serde_json::from_value(json!({"contract":1,"port":1,"token":"synthetic"})).unwrap();
         assert!(!legacy.wiki_support);
+        assert!(!legacy.web_access_support);
         let new: Endpoint = serde_json::from_value(
             json!({"contract":1,"port":1,"token":"synthetic","wiki_support":true}),
         )
@@ -948,6 +963,7 @@ mod tests {
                 token: "stale-token".into(),
                 binary: None,
                 web_support: true,
+                web_access_support: true,
             })
             .unwrap(),
         )
@@ -965,6 +981,7 @@ mod tests {
                 token: "new-instance".into(),
                 binary: None,
                 web_support: true,
+                web_access_support: true,
             })
             .unwrap(),
         )
@@ -991,6 +1008,7 @@ mod tests {
                     token: "instance".into(),
                     binary,
                     web_support: true,
+                    web_access_support: true,
                 })
                 .unwrap(),
             )

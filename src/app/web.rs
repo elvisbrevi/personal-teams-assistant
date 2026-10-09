@@ -4,7 +4,7 @@ use super::*;
 use axum::{
     Json,
     body::Bytes,
-    extract::{DefaultBodyLimit, Path as WebPath},
+    extract::{DefaultBodyLimit, Extension, Path as WebPath},
     http::{HeaderMap, Uri, header},
     middleware::{self, Next},
     response::{IntoResponse, Redirect, Response},
@@ -19,10 +19,11 @@ use std::{
 };
 use tokio::sync::Semaphore;
 
+mod access;
 mod profiles;
 mod store;
 use profiles::{Worker, create_profile, profile_dir};
-use store::{Account, accounts, edit_accounts, hash_password, username, verify_password};
+use store::{Account, accounts};
 pub(super) fn admin(args: &[String]) -> Result<control::Reply> {
     store::admin(args)
 }
@@ -85,6 +86,7 @@ struct Settings {
     bind: String,
     public_url: String,
     session_hours: u32,
+    access: Option<access::Config>,
 }
 impl Default for Settings {
     fn default() -> Self {
@@ -92,6 +94,7 @@ impl Default for Settings {
             bind: "127.0.0.1:38656".into(),
             public_url: "http://localhost:38656".into(),
             session_hours: 12,
+            access: None,
         }
     }
 }
@@ -115,6 +118,13 @@ impl Settings {
                 && (1..=168).contains(&self.session_hours),
             "invalid web settings: use an HTTPS origin"
         );
+        if let Some(config) = &self.access {
+            config.validate()?;
+            ensure!(
+                url.scheme() == "https",
+                "Access requires an HTTPS public origin"
+            );
+        }
         Ok(())
     }
     fn origin(&self) -> String {
@@ -133,15 +143,11 @@ impl Settings {
             "pta-session"
         }
     }
-    fn cookie(&self, token: &str, expires: bool) -> String {
+    fn cookie(&self, token: &str, max_age: u64) -> String {
         format!(
             "{}={token}; Path=/; HttpOnly; SameSite=Strict; Max-Age={}{}",
             self.cookie_name(),
-            if expires {
-                0
-            } else {
-                self.session_hours * 3600
-            },
+            max_age.min(u64::from(self.session_hours) * 3600),
             if self.https() { "; Secure" } else { "" }
         )
     }
@@ -163,6 +169,7 @@ struct Session {
     version: String,
     csrf: String,
     expires: Instant,
+    identity: access::Verified,
 }
 struct Portal {
     root: PathBuf,
@@ -170,24 +177,28 @@ struct Portal {
     binary: PathBuf,
     sessions: Mutex<HashMap<String, Session>>,
     attempts: Mutex<HashMap<String, VecDeque<Instant>>>,
-    hashing: Arc<Semaphore>,
     requests: Semaphore,
-    dummy_hash: String,
+    access: Option<access::Verifier>,
     workers: Mutex<HashMap<String, Worker>>,
     identities: Mutex<()>,
 }
 impl Portal {
     fn new(root: PathBuf, binary: PathBuf) -> Result<Self> {
         security::private_dir(&root)?;
+        let settings = settings(&root)?;
+        let access = settings
+            .access
+            .clone()
+            .map(access::Verifier::new)
+            .transpose()?;
         Ok(Self {
-            settings: settings(&root)?,
+            settings,
             root,
             binary,
             sessions: Mutex::new(HashMap::new()),
             attempts: Mutex::new(HashMap::new()),
-            hashing: Arc::new(Semaphore::new(2)),
             requests: Semaphore::new(32),
-            dummy_hash: hash_password(&security::random_secret())?,
+            access,
             workers: Mutex::new(HashMap::new()),
             identities: Mutex::new(()),
         })
@@ -215,6 +226,7 @@ impl Portal {
     async fn authenticate(
         &self,
         headers: &HeaderMap,
+        identity: &access::Verified,
         write: bool,
     ) -> std::result::Result<(Account, Session), StatusCode> {
         let key = self.session_key(headers).ok_or(StatusCode::UNAUTHORIZED)?;
@@ -225,14 +237,20 @@ impl Portal {
             .get(&key)
             .cloned()
             .ok_or(StatusCode::UNAUTHORIZED)?;
-        if session.expires <= Instant::now() {
+        if session.expires <= Instant::now() || session.identity != *identity {
             self.sessions.lock().await.remove(&key);
             return Err(StatusCode::UNAUTHORIZED);
         }
         let entry = accounts(&self.root)
             .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
             .into_iter()
-            .find(|e| e.enabled && e.id == session.account_id && e.version == session.version)
+            .find(|e| {
+                e.enabled
+                    && e.id == session.account_id
+                    && e.version == session.version
+                    && e.access_binding.as_ref() == Some(&identity.binding)
+                    && identity.issued_at >= e.access_valid_after
+            })
             .ok_or(StatusCode::UNAUTHORIZED)?;
         if write
             && (!self.origin(headers)
@@ -248,7 +266,12 @@ impl Portal {
     async fn issue_session(
         &self,
         account: &Account,
+        identity: access::Verified,
     ) -> std::result::Result<(String, Session), StatusCode> {
+        let remaining = identity.expires_at.saturating_sub(access::now());
+        if remaining == 0 {
+            return Err(StatusCode::UNAUTHORIZED);
+        }
         let mut sessions = self.sessions.lock().await;
         sessions.retain(|_, session| session.expires > Instant::now());
         if sessions.len() >= 1000 {
@@ -260,7 +283,10 @@ impl Portal {
             version: account.version.clone(),
             csrf: security::random_secret(),
             expires: Instant::now()
-                + Duration::from_secs(u64::from(self.settings.session_hours) * 3600),
+                + Duration::from_secs(
+                    (u64::from(self.settings.session_hours) * 3600).min(remaining),
+                ),
+            identity,
         };
         sessions.insert(
             format!("{:x}", Sha256::digest(token.as_bytes())),
@@ -293,24 +319,7 @@ fn router(portal: Arc<Portal>) -> Router {
     Router::new()
         .route("/", get(index))
         .route("/index.html", get(index))
-        .route(
-            "/login",
-            get(|| async {
-                asset(
-                    "text/html; charset=utf-8",
-                    include_str!("../../desktop/ui/login.html"),
-                )
-            }),
-        )
-        .route(
-            "/login.js",
-            get(|| async {
-                asset(
-                    "text/javascript; charset=utf-8",
-                    include_str!("../../desktop/ui/login.js"),
-                )
-            }),
-        )
+        .route("/login", get(login))
         .route(
             "/style.css",
             get(|| async {
@@ -322,13 +331,8 @@ fn router(portal: Arc<Portal>) -> Router {
         )
         .route("/app.js", get(app_js))
         .route("/transport.js", get(transport_js))
-        .route("/api/login", post(login).layer(DefaultBodyLimit::max(4096)))
         .route("/api/session", get(session))
         .route("/api/logout", post(logout))
-        .route(
-            "/api/password",
-            post(password).layer(DefaultBodyLimit::max(4096)),
-        )
         .route("/api/control", post(command))
         .route(
             "/webhooks/{id}/graph/{kind}",
@@ -346,7 +350,7 @@ fn asset(content_type: &'static str, content: &'static str) -> Response {
 }
 async fn secure_headers(
     State(portal): State<Arc<Portal>>,
-    request: axum::extract::Request,
+    mut request: axum::extract::Request,
     next: Next,
 ) -> Response {
     let origin = url::Url::parse(&portal.settings.origin()).unwrap();
@@ -357,8 +361,28 @@ async fn secure_headers(
     let expected = &origin[url::Position::BeforeHost..url::Position::AfterPort];
     let mut response = if host != Some(expected) {
         StatusCode::MISDIRECTED_REQUEST.into_response()
-    } else {
+    } else if request.method() == axum::http::Method::POST
+        && store::callback_path(request.uri().path())
+    {
         next.run(request).await
+    } else if let Some(verifier) = &portal.access {
+        match verifier.verify(request.headers()).await {
+            Ok(identity) => match store::access_revoked(&portal.root, &identity) {
+                Ok(false) => {
+                    request.extensions_mut().insert(identity);
+                    next.run(request).await
+                }
+                Ok(true) => StatusCode::UNAUTHORIZED.into_response(),
+                Err(_) => StatusCode::SERVICE_UNAVAILABLE.into_response(),
+            },
+            Err(status) => status.into_response(),
+        }
+    } else {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Cloudflare Access is not configured. Contact the portal operator.",
+        )
+            .into_response()
     };
     let headers = response.headers_mut();
     headers.insert(header::CACHE_CONTROL, "no-store".parse().unwrap());
@@ -368,8 +392,16 @@ async fn secure_headers(
     headers.insert(header::X_FRAME_OPTIONS, "DENY".parse().unwrap());
     response
 }
-async fn index(State(portal): State<Arc<Portal>>, headers: HeaderMap) -> Response {
-    if portal.authenticate(&headers, false).await.is_err() {
+async fn index(
+    State(portal): State<Arc<Portal>>,
+    Extension(identity): Extension<access::Verified>,
+    headers: HeaderMap,
+) -> Response {
+    if portal
+        .authenticate(&headers, &identity, false)
+        .await
+        .is_err()
+    {
         return Redirect::to("/login").into_response();
     }
     asset(
@@ -377,8 +409,12 @@ async fn index(State(portal): State<Arc<Portal>>, headers: HeaderMap) -> Respons
         include_str!("../../desktop/ui/index.html"),
     )
 }
-async fn app_js(State(portal): State<Arc<Portal>>, headers: HeaderMap) -> Response {
-    if let Err(status) = portal.authenticate(&headers, false).await {
+async fn app_js(
+    State(portal): State<Arc<Portal>>,
+    Extension(identity): Extension<access::Verified>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(status) = portal.authenticate(&headers, &identity, false).await {
         return status.into_response();
     }
     asset(
@@ -386,8 +422,12 @@ async fn app_js(State(portal): State<Arc<Portal>>, headers: HeaderMap) -> Respon
         include_str!("../../desktop/ui/app.js"),
     )
 }
-async fn transport_js(State(portal): State<Arc<Portal>>, headers: HeaderMap) -> Response {
-    if let Err(status) = portal.authenticate(&headers, false).await {
+async fn transport_js(
+    State(portal): State<Arc<Portal>>,
+    Extension(identity): Extension<access::Verified>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(status) = portal.authenticate(&headers, &identity, false).await {
         return status.into_response();
     }
     asset(
@@ -395,144 +435,97 @@ async fn transport_js(State(portal): State<Arc<Portal>>, headers: HeaderMap) -> 
         include_str!("../../desktop/ui/transport.js"),
     )
 }
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Login {
-    username: String,
-    password: String,
-}
+// Access handles the interactive login. This endpoint only creates a CSRF-bound
+// local session for a verified, explicitly associated GitHub identity.
 async fn login(
     State(portal): State<Arc<Portal>>,
+    Extension(identity): Extension<access::Verified>,
     headers: HeaderMap,
-    Json(input): Json<Login>,
 ) -> Response {
-    if !portal.origin(&headers) {
-        return StatusCode::FORBIDDEN.into_response();
+    let entry = match accounts(&portal.root) {
+        Ok(entries) => entries.into_iter().find(|e| {
+            e.enabled
+                && e.access_binding.as_ref() == Some(&identity.binding)
+                && identity.issued_at >= e.access_valid_after
+        }),
+        Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
+    };
+    let Some(account) = entry else {
+        return (
+            StatusCode::FORBIDDEN,
+            "Your GitHub identity has no enabled local account. Contact the portal operator.",
+        )
+            .into_response();
+    };
+    if portal
+        .authenticate(&headers, &identity, false)
+        .await
+        .is_ok()
+    {
+        return Redirect::to("/").into_response();
     }
-    let name = username(&input.username).unwrap_or_default();
-    if !portal.login_limit(&name).await {
+    if !portal.login_limit(&account.id).await {
         return StatusCode::TOO_MANY_REQUESTS.into_response();
     }
-    let Ok(permit) = portal.hashing.clone().try_acquire_owned() else {
-        return StatusCode::TOO_MANY_REQUESTS.into_response();
+    let (token, session) = match portal.issue_session(&account, identity).await {
+        Ok(value) => value,
+        Err(status) => return status.into_response(),
     };
-    let Ok(entries) = accounts(&portal.root) else {
-        return StatusCode::SERVICE_UNAVAILABLE.into_response();
-    };
-    let account = entries
-        .into_iter()
-        .find(|e| e.enabled && e.username == name);
-    let hash = account
-        .as_ref()
-        .map(|e| e.password_hash.clone())
-        .unwrap_or_else(|| portal.dummy_hash.clone());
-    let valid = tokio::task::spawn_blocking(move || {
-        let _permit = permit;
-        verify_password(&hash, &input.password)
-    })
-    .await
-    .unwrap_or(false);
-    if !valid {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
-    let Some(account) = account else {
-        return StatusCode::UNAUTHORIZED.into_response();
-    };
-    let Ok((token, _)) = portal.issue_session(&account).await else {
-        return StatusCode::TOO_MANY_REQUESTS.into_response();
-    };
-    (
-        [(header::SET_COOKIE, portal.settings.cookie(&token, false))],
-        Json(json!({"ok":true})),
-    )
-        .into_response()
+    let mut response = Redirect::to("/").into_response();
+    response.headers_mut().insert(
+        header::SET_COOKIE,
+        portal
+            .settings
+            .cookie(
+                &token,
+                session
+                    .expires
+                    .saturating_duration_since(Instant::now())
+                    .as_secs(),
+            )
+            .parse()
+            .unwrap(),
+    );
+    response
 }
-async fn session(State(portal): State<Arc<Portal>>, headers: HeaderMap) -> Response {
-    match portal.authenticate(&headers, false).await {
+async fn session(
+    State(portal): State<Arc<Portal>>,
+    Extension(identity): Extension<access::Verified>,
+    headers: HeaderMap,
+) -> Response {
+    match portal.authenticate(&headers, &identity, false).await {
         Ok((account, session)) => Json(json!({"username":account.username,"csrf_token":session.csrf,
-            "current_profile":account.current_profile,"profile":profile_dir(&portal.root,&account)})).into_response(),
+            "current_profile":account.current_profile,"profile":profile_dir(&portal.root,&account),"auth_provider":"github"})).into_response(),
         Err(status) => status.into_response(),
     }
 }
-async fn logout(State(portal): State<Arc<Portal>>, headers: HeaderMap) -> Response {
-    if let Err(status) = portal.authenticate(&headers, true).await {
+async fn logout(
+    State(portal): State<Arc<Portal>>,
+    Extension(identity): Extension<access::Verified>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(status) = portal.authenticate(&headers, &identity, true).await {
         return status.into_response();
+    }
+    if store::revoke_access(&portal.root, &identity).is_err() {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
     }
     if let Some(key) = portal.session_key(&headers) {
         portal.sessions.lock().await.remove(&key);
     }
     (
-        [(header::SET_COOKIE, portal.settings.cookie("", true))],
-        Json(json!({"ok":true})),
-    )
-        .into_response()
-}
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct PasswordChange {
-    current_password: String,
-    new_password: String,
-}
-async fn password(
-    State(portal): State<Arc<Portal>>,
-    headers: HeaderMap,
-    Json(input): Json<PasswordChange>,
-) -> Response {
-    let (account, _) = match portal.authenticate(&headers, true).await {
-        Ok(value) => value,
-        Err(status) => return status.into_response(),
-    };
-    if !portal.login_limit(&account.username).await {
-        return StatusCode::TOO_MANY_REQUESTS.into_response();
-    }
-    let Ok(permit) = portal.hashing.clone().try_acquire_owned() else {
-        return StatusCode::TOO_MANY_REQUESTS.into_response();
-    };
-    let hash = account.password_hash.clone();
-    let result = tokio::task::spawn_blocking(move || {
-        let _permit = permit;
-        ensure!(
-            verify_password(&hash, &input.current_password),
-            "invalid password"
-        );
-        hash_password(&input.new_password)
-    })
-    .await;
-    let Ok(Ok(hash)) = result else {
-        return StatusCode::BAD_REQUEST.into_response();
-    };
-    let updated = edit_accounts(&portal.root, |entries| {
-        let entry = entries
-            .iter_mut()
-            .find(|e| e.id == account.id && e.version == account.version)
-            .context("account changed")?;
-        entry.password_hash = hash;
-        entry.version = uuid::Uuid::new_v4().to_string();
-        Ok(entry.clone())
-    });
-    let Ok(account) = updated else {
-        return StatusCode::CONFLICT.into_response();
-    };
-    portal
-        .sessions
-        .lock()
-        .await
-        .retain(|_, session| session.account_id != account.id);
-    let Ok((token, _)) = portal.issue_session(&account).await else {
-        return StatusCode::TOO_MANY_REQUESTS.into_response();
-    };
-    (
-        [(header::SET_COOKIE, portal.settings.cookie(&token, false))],
-        Json(json!({"ok":true})),
+        [(header::SET_COOKIE, portal.settings.cookie("", 0))],
+        Json(json!({"ok":true,"logout_url":"/cdn-cgi/access/logout"})),
     )
         .into_response()
 }
 async fn command(
     State(portal): State<Arc<Portal>>,
+    Extension(identity): Extension<access::Verified>,
     headers: HeaderMap,
     Json(mut request): Json<control::Request>,
 ) -> Response {
-    let (account, _) = match portal.authenticate(&headers, true).await {
+    let (account, _) = match portal.authenticate(&headers, &identity, true).await {
         Ok(value) => value,
         Err(status) => return status.into_response(),
     };
@@ -698,6 +691,10 @@ pub(super) fn run() -> Result<()> {
     security::protect_file(&root.join("portal.lock"))?;
     lock.try_lock_exclusive()?;
     let portal = Arc::new(Portal::new(root, std::env::current_exe()?)?);
+    ensure!(
+        portal.access.is_some(),
+        "Configure Cloudflare Access locally before starting the web portal; legacy passwords cannot authenticate."
+    );
     tokio::runtime::Runtime::new()?.block_on(async move {
         let listener = tokio::net::TcpListener::bind(&portal.settings.bind).await?;
         eprintln!(

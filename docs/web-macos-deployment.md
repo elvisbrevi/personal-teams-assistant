@@ -1,213 +1,214 @@
-# Deploying the web portal on the existing Mac
+# Deploying the Access portal on the existing Mac
 
-The selected origin is the user's Mac. The initial account is `elvis`, attached
-to the existing desktop profile through `--current-profile`. Keep the Mac awake
-and connected for remote access. LaunchAgents run while the user is logged in;
-they do not make a sleeping or powered-off Mac reachable.
+The origin remains the owner's Mac and the initial account is `elvis`, attached
+to the existing desktop profile. The dedicated portal and tunnel LaunchAgents
+were installed on 2026-10-09; inspect them before changing anything. The latest
+cloud inspection found the tunnel down with no connectors, so the historical
+HTTPS success is not current availability evidence. Keep the Mac awake, connected
+and logged into the ordinary application owner's macOS account.
 
-These commands are for a terminal on that Mac, not the cloud development
-workspace. No installation on the Mac has been performed by the cloud session.
-Use the ordinary macOS account that already owns the application and its profile.
-Run without a `PTA_PROFILE_DIR` override so the existing profile is selected.
-Keep any current desktop checkout and its uncommitted work intact.
+These steps run **on that Mac**, without a `PTA_PROFILE_DIR` override. They update
+the existing Cargo host/CLI together and preserve Tauri, data, credentials,
+Microsoft OAuth/scopes, the encryption key and separate desktop Teams tunnel.
+No Mac execution channel is attached to the current cloud session.
 
-## Install the web-capable binaries
+## Inspect and build before the transition
 
-The published crate may not contain the web portal yet. Install both headless
-binaries from the verified implementation commit into a dedicated directory,
-leaving the existing GUI installation in place:
+Read the repository's `AGENTS.md`, architecture and Access operating guide. Do
+not reset or clean an existing checkout. Inspect its status, the installed
+versions, `pta --json status`, `pta --json web status`, `pta web users list`, and
+the two existing `dev.personalteams.assistant.web[.tunnel]` LaunchAgents. Record
+whether the assistant is running and the existing portal executable path. Do not
+print `control.json`, credential files, plist environment secrets or log bodies.
+
+Obtain the Access source in a **separate** temporary clone, then build both
+binaries with default GUI features so the native application remains available:
 
 ```sh
 set +x
-export PTA_WEB_PROFILE_DIR="$HOME/Library/Application Support/dev.personalteams.assistant"
-export PTA_WEB_RUNTIME_DIR="$PTA_WEB_PROFILE_DIR/web/runtime"
-mkdir -p "$PTA_WEB_RUNTIME_DIR" "$PTA_WEB_PROFILE_DIR/web/logs"
-chmod 700 "$PTA_WEB_PROFILE_DIR/web" "$PTA_WEB_RUNTIME_DIR" "$PTA_WEB_PROFILE_DIR/web/logs"
-cargo install --git https://github.com/elvisbrevi/personal-teams-assistant \
-  --rev 926007b8e67ff543441915b3687a40e3621837d0 \
-  --locked --no-default-features --root "$PTA_WEB_RUNTIME_DIR" \
-  personal-teams-assistant
-"$PTA_WEB_RUNTIME_DIR/bin/pta" --version
-"$PTA_WEB_RUNTIME_DIR/bin/pta" --json web status
+export PTA_ACCESS_PROFILE_DIR="$HOME/Library/Application Support/dev.personalteams.assistant"
+export PTA_ACCESS_RUNTIME_DIR="$PTA_ACCESS_PROFILE_DIR/web/runtime/access-build"
+export PTA_ACCESS_SOURCE_DIR="$(mktemp -d /tmp/pta-access-source.XXXXXX)"
+git clone --branch feat/cloudflare-access \
+  https://github.com/elvisbrevi/personal-teams-assistant "$PTA_ACCESS_SOURCE_DIR"
+git -C "$PTA_ACCESS_SOURCE_DIR" rev-parse HEAD
+cargo install --path "$PTA_ACCESS_SOURCE_DIR" --locked --root "$PTA_ACCESS_RUNTIME_DIR"
+"$PTA_ACCESS_RUNTIME_DIR/bin/pta" --version
+"$PTA_ACCESS_RUNTIME_DIR/bin/pta" --json capabilities
+"$PTA_ACCESS_RUNTIME_DIR/bin/pta" --json web status
 ```
 
-The two new binaries share their build. The portal can reuse an already running
-compatible desktop host, and starts a headless host only when needed. This install
-does not start the Teams service or replace the Microsoft session or encryption key.
+Require `web_access_support: true`. Verify the source commit against the handoff
+before installation. The old 0.6.9 registry package has no Access support; no new
+crate publication is implied by this change. Both binaries must come from the
+same verified build. Compilation should finish before stopping a running service.
 
-Before starting the portal, inspect the existing host's capabilities without
-printing its private IPC token:
+## Credentials, GitHub and Access
+
+The actual Cloudflare token in the cloud session is
+`005cf5b38ffa573d4edfe8aae87886a4`, for account
+`26f1f3a05cbfe51ade90a57362c15fad`. Its reads work, but the attempted application
+and GitHub IdP creation returned HTTP 403 `auth.forbidden`. Add account permissions
+`Access: Apps and Policies Write` and `Access: Identity Providers Write` (or the
+combined `Access: Organizations, Identity Providers, and Groups Write`). Update
+the existing configured credential, never send token values through chat.
+
+Check for an existing dedicated OAuth App in GitHub Developer Settings. If none
+exists, create **`personal-teams-assistant-login`** as an OAuth App, separate from
+the repository GitHub connection. The current Cloudflare team is
+`small-forest-4923.cloudflareaccess.com`. Homepage:
+`https://small-forest-4923.cloudflareaccess.com`; callback:
+`https://small-forest-4923.cloudflareaccess.com/cdn-cgi/access/callback`.
+Verify the team domain through the API before creating the OAuth App. GitHub App
+Device Flow/repository credentials cannot replace these login credentials.
+
+Supply the API token and dedicated OAuth client ID/secret through private
+bindings or 0600 files using `CLOUDFLARE_API_TOKEN[_FILE]`,
+`PTA_ACCESS_GITHUB_CLIENT_ID[_FILE]` and
+`PTA_ACCESS_GITHUB_CLIENT_SECRET[_FILE]`. The helper inspects before creating,
+refuses conflicting resources and reports the exact API operation/permission on
+403. Finish the GitHub provider's authorization/Test in Cloudflare Zero Trust.
+
+Export the **actual Mac accounts'** callbacks with the new CLI, while still only
+reading legacy account data:
 
 ```sh
-python3 - <<'PY'
-import json, os, pathlib
-descriptor = pathlib.Path(os.environ['PTA_WEB_PROFILE_DIR']) / 'control.json'
-if descriptor.exists():
-    data = json.loads(descriptor.read_text())
-    print({'web_support': data.get('web_support', False),
-           'activity_registration_support': data.get('activity_registration_support', False)})
-else:
-    print('No existing host descriptor.')
-PY
+umask 077
+"$PTA_ACCESS_RUNTIME_DIR/bin/pta" --json web callbacks \
+  > "$PTA_ACCESS_RUNTIME_DIR/production-callbacks.json"
+python3 "$PTA_ACCESS_SOURCE_DIR/scripts/configure-web-access.py" \
+  --hostname assistant.elvisbrevi.cl --allow-email AUTHORIZED_GITHUB_EMAIL \
+  --callbacks-file "$PTA_ACCESS_RUNTIME_DIR/production-callbacks.json" --dry-run
 ```
 
-If an older desktop host is running with either capability absent, record its
-assistant's running state with the installed `pta status`, then quit that older
-GUI normally before starting the portal. The new portal can then start its own
-compatible headless host against the same profile. Do not delete or reimport any
-profile files. Restore Assistant Start in the web panel only if it was running
-before the transition. Reopening an older GUI can claim the profile first again;
-use the compatible host for the web session.
+Use the intended users' explicit GitHub email allowlist; repeat `--allow-email`
+for approved people. Edge admission is restricted to that list **and** the
+dedicated GitHub provider; local bindings independently decide profile access.
+Do not infer an email or bind by username similarity. The current-profile account
+retains its existing separate desktop Graph callback hostname. Additional isolated
+profiles need only their exported exact notification/lifecycle paths exempted.
+The helper refuses wildcard, administrative and unrelated callback exceptions.
 
-## Configure the dedicated Cloudflare route
+## Controlled cutover and account association
 
-Cloudflare setup has already succeeded from the cloud session. The remotely
-managed tunnel is `personal-teams-assistant-web`, ID
-`08cce5df-23a0-45e3-92f6-e65f2d8abe3e`. Its proxied CNAME and routes are verified;
-it has not been connected to the Mac yet. The steps below reuse that same tunnel
-and obtain its dedicated connector credential privately on the Mac. Do not copy
-the cloud workspace's development profile or its existing desktop tunnel token.
+Before schema writes, privately back up `web/accounts.json`, `web/settings.json`,
+the existing portal plist and installed sibling binaries. Preserve all other
+profile files. New account fields cannot be read by the password-era host.
+Stop the old portal using `launchctl bootout gui/UID/dev.personalteams.assistant.web`
+(replace UID with `id -u`). Leave the dedicated web tunnel LaunchAgent in place.
+If the desktop/profile host lacks `web_access_support`, quit it normally using its
+installed `pta app quit` after recording its assistant's running state. This is a
+controlled binary transition, not a profile migration. Do not signal a PID or
+start a second assistant for the same Teams identity.
 
-The API token needs Zone Read and DNS Edit for `elvisbrevi.cl`, and Cloudflare
-Tunnel Edit for that zone's account. For current permission names, see the
-[Cloudflare tunnel creation API](https://developers.cloudflare.com/api/resources/zero_trust/subresources/tunnels/subresources/cloudflared/methods/create/).
-Do not use the existing desktop connector token.
-
-Fetch the setup helper from the same verified commit:
+Install the already-built compatible GUI/host and CLI into the ordinary Cargo
+location, retaining the staged pair for diagnosis:
 
 ```sh
-curl --fail --location \
-  https://raw.githubusercontent.com/elvisbrevi/personal-teams-assistant/926007b8e67ff543441915b3687a40e3621837d0/scripts/configure-web-cloudflare.py \
-  --output "$PTA_WEB_RUNTIME_DIR/configure-web-cloudflare.py"
+cargo install --path "$PTA_ACCESS_SOURCE_DIR" --locked --force
+pta --json capabilities
 ```
 
-The following wrapper uses an existing protected API-token file or environment
-binding when present, otherwise prompts privately in the terminal. Its value
-never goes in chat, arguments, repository files or output. The helper safely
-reuses the dedicated route if it was already created from the cloud session.
+Prepare Access before restarting the portal. The helper creates/readbacks exact
+Graph Bypass apps **before** protecting the enclosing panel hostname and API:
 
 ```sh
-python3 - <<'PY'
-import getpass, os, pathlib, subprocess
-runtime = pathlib.Path(os.environ['PTA_WEB_RUNTIME_DIR'])
-env = os.environ.copy()
-if not env.get('CLOUDFLARE_API_TOKEN_FILE') and not env.get('CLOUDFLARE_API_TOKEN'):
-    env['CLOUDFLARE_API_TOKEN'] = getpass.getpass('Cloudflare API token: ')
-subprocess.run([
-    'python3', str(runtime / 'configure-web-cloudflare.py'),
-    '--domain', 'elvisbrevi.cl', '--hostname', 'assistant.elvisbrevi.cl',
-    '--token-file', str(runtime / 'cloudflared-token'),
-], env=env, check=True)
-PY
+python3 "$PTA_ACCESS_SOURCE_DIR/scripts/configure-web-access.py" \
+  --hostname assistant.elvisbrevi.cl --allow-email AUTHORIZED_GITHUB_EMAIL \
+  --callbacks-file "$PTA_ACCESS_RUNTIME_DIR/production-callbacks.json" \
+  --settings-file "$PTA_ACCESS_RUNTIME_DIR/access-settings.json"
+pta web configure < "$PTA_ACCESS_RUNTIME_DIR/access-settings.json"
+pta web users list
 ```
 
-The dedicated connector credential is stored in a 0600 file. No existing tunnel,
-unrelated DNS record or landing is overwritten. If the API returns 403, correct
-the token's write permissions and account scope before continuing.
+`access-settings.json` is private and uses Cloudflare's real audience and IdP ID.
+Keep the listener `127.0.0.1:38656` and existing public URL. No new tunnel/DNS route
+or connector token is needed. Reuse
+`personal-teams-assistant-web` (`08cce5df-23a0-45e3-92f6-e65f2d8abe3e`), the proxied
+CNAME and existing private `web/runtime/cloudflared-token`.
 
-## Configure the portal and create the owner account
+If `elvis` exists, require its current-profile association and keep its ID. If it
+is absent, create it with `pta web users add elvis --current-profile`, without a
+password. If another account already owns the current profile, inspect the
+association instead of creating a duplicate. The account is blocked until bound.
+
+Sign in through GitHub to
+`https://assistant.elvisbrevi.cl/cdn-cgi/access/get-identity` and save the official
+identity JSON locally in a 0600 file. The Cloudflare edge serves this identity
+endpoint; it need not expose a password form at the origin. Verify the intended
+GitHub person, account and dedicated IdP, then associate **locally**:
 
 ```sh
-"$PTA_WEB_RUNTIME_DIR/bin/pta" web configure <<'JSON'
-{"bind":"127.0.0.1:38656","public_url":"https://assistant.elvisbrevi.cl","session_hours":12}
-JSON
-"$PTA_WEB_RUNTIME_DIR/bin/pta" web users list
+pta web users bind elvis < /private/path/verified-elvis-identity.json
 ```
 
-If `elvis` already exists, inspect its profile choice; do not overwrite it. For
-a new account, choose a unique password of 12–256 characters through this private
-terminal prompt. No password is printed or stored in plaintext:
+The binding uses the provider subject `id`, not email or email-associated Access
+`sub`. Unexpected/missing provider fields require investigation; never invent an
+ID or relax validation. Binding changes preserve the old profile, Microsoft
+session, Keychain service and encryption key. `users unbind/revoke/disable/enable`
+provides local recovery and revocation without a public password backdoor.
+
+Launch the compatible native GUI if the desktop previously owned its host. Read
+`pta --json status` and restore Assistant Start only if it was running before the
+transition. The portal can reuse only a host advertising `web_access_support`.
+
+Inspect the existing portal plist. If it already invokes
+`~/.cargo/bin/personal-teams-assistant --web`, preserve it. If it uses another
+runtime location, back it up and update **only** its executable to the compatible
+host, preserving label, logs and other settings. Do not rewrite the tunnel plist.
+Bootstrap the existing portal plist and check both service states:
 
 ```sh
-python3 - <<'PY'
-import getpass, os, pathlib, subprocess
-password = getpass.getpass('New password for elvis: ')
-if password != getpass.getpass('Confirm password: '):
-    raise SystemExit('Passwords do not match.')
-pta = pathlib.Path(os.environ['PTA_WEB_RUNTIME_DIR']) / 'bin' / 'pta'
-subprocess.run([str(pta), 'web', 'users', 'add', 'elvis', '--current-profile'],
-               input=password + '\n', text=True, check=True)
-PY
-```
-
-## Prepare the two dedicated LaunchAgents
-
-Use the Mac's existing `cloudflared` installation. Check `command -v cloudflared`
-and `cloudflared tunnel run --help` for `--token-file`. If it is absent and the
-Mac uses Homebrew, install it with `brew install cloudflared`.
-
-The generator below checks that both executables and the private connector file
-exist before writing plists. It refuses to overwrite an existing service file.
-It does not include credential values or reuse the desktop tunnel's service.
-
-```sh
-python3 - <<'PY'
-import os, pathlib, plistlib, shutil
-profile = pathlib.Path(os.environ['PTA_WEB_PROFILE_DIR'])
-runtime = pathlib.Path(os.environ['PTA_WEB_RUNTIME_DIR'])
-portal = runtime / 'bin' / 'personal-teams-assistant'
-token = runtime / 'cloudflared-token'
-cloudflared = shutil.which('cloudflared')
-if not portal.is_file() or not os.access(portal, os.X_OK) or not cloudflared or not token.is_file():
-    raise SystemExit('Install the portal, cloudflared and dedicated connector token first.')
-if token.stat().st_mode & 0o077:
-    raise SystemExit('The connector token must be private: chmod 600 its file.')
-agents = pathlib.Path.home() / 'Library' / 'LaunchAgents'
-agents.mkdir(parents=True, exist_ok=True)
-logs = profile / 'web' / 'logs'
-logs.mkdir(parents=True, exist_ok=True, mode=0o700)
-services = [
-    ('dev.personalteams.assistant.web', [str(portal), '--web']),
-    ('dev.personalteams.assistant.web.tunnel',
-     [cloudflared, '--no-autoupdate', 'tunnel', 'run', '--token-file', str(token)]),
-]
-if any((agents / (label + '.plist')).exists() for label, _ in services):
-    raise SystemExit('A dedicated web service plist already exists; inspect it before replacing it.')
-for label, argv in services:
-    definition = {
-        'Label': label, 'ProgramArguments': argv,
-        'RunAtLoad': True, 'KeepAlive': True, 'ThrottleInterval': 10,
-        'ProcessType': 'Background',
-        'StandardOutPath': str(logs / (label + '.out.log')),
-        'StandardErrorPath': str(logs / (label + '.err.log')),
-    }
-    path = agents / (label + '.plist')
-    with path.open('xb') as output:
-        plistlib.dump(definition, output)
-    path.chmod(0o600)
-    print(path)
-PY
-```
-
-Start only these new services:
-
-```sh
-launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/dev.personalteams.assistant.web.plist"
-launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/dev.personalteams.assistant.web.tunnel.plist"
+launchctl bootstrap "gui/$(id -u)" \
+  "$HOME/Library/LaunchAgents/dev.personalteams.assistant.web.plist"
 launchctl print "gui/$(id -u)/dev.personalteams.assistant.web"
 launchctl print "gui/$(id -u)/dev.personalteams.assistant.web.tunnel"
+pta --json web status
+pta --json status
 ```
 
-## Verify from the Mac and a phone
+If the web connector is stopped, start its **existing** LaunchAgent with the
+existing dedicated token file. Confirm the tunnel becomes healthy with active
+connections in Cloudflare. Do not reuse the desktop connector credential. A
+sleeping/offline Mac cannot be recovered by changing DNS.
+
+## Verify HTTPS and preserve evidence
+
+From the Mac, with TLS verification enabled and a browser User-Agent:
 
 ```sh
-curl --fail --silent --show-error --dump-header - \
-  --output /dev/null https://assistant.elvisbrevi.cl/login
+curl --silent --show-error --dump-header - --output /dev/null \
+  --user-agent 'Mozilla/5.0' https://assistant.elvisbrevi.cl/login
 ```
 
-Keep TLS verification enabled. Require HTTP 200, CSP, `X-Content-Type-Options:
-nosniff`, `Referrer-Policy: no-referrer` and `Cache-Control: no-store`. Confirm
-the dedicated tunnel has an active connector in Cloudflare. A DNS record alone
-does not establish publication.
+An unauthenticated request should redirect to Access/GitHub, not return the old
+password form. Browser Integrity Check can reject non-browser User-Agents with
+1010; keep it enabled. Complete these checks from the Mac and an actual phone:
 
-Open `https://assistant.elvisbrevi.cl/login` on the phone, sign in as `elvis`, and
-check that the existing profile's settings and history are available. Verify
-logout and, in browser developer tools, that the `__Host-pta-session` cookie is
-Secure, HttpOnly and SameSite=Strict. Do not send real Teams messages as a smoke
-test. Additional isolated users are created locally with ordinary `web users add`
-without `--current-profile`.
+- GitHub sign-in opens the existing `elvis` settings/history with no second form.
+- A second explicitly approved/bound synthetic account has independent settings,
+  credential files and history. No production credentials are copied to it.
+- Unknown identities, disabled/unbound accounts, invalid signatures/audiences/
+  issuers, expired tokens and cookie-only/identity-header-only requests are blocked.
+- All writes, including read commands over POST, require exact Origin and CSRF.
+- Sign out clears the local cookie, blocks assertion replay immediately and visits
+  Access logout. Fresh login succeeds after Cloudflare revocation propagation.
+  Local/Access expiration and `pta web users revoke` prevent old assertion reuse.
+- Exact Graph validation/invalid-clientState checks still work without interactive
+  Access; unrelated webhook paths stay protected. Use synthetic notifications,
+  never real Teams messages. Existing Graph scopes/credentials are unchanged.
+- Tauri opens normally and ordinary CLI status/config reads still use private IPC.
+  The desktop service/tunnel and previous assistant state are restored.
+- The local session cookie is `__Host-pta-session`, Secure, HttpOnly, SameSite=Strict,
+  with lifetime no longer than the Access assertion. CSP, nosniff, no-referrer and
+  no-store headers remain present.
 
-To stop the two web services while preserving the desktop application's own
-service, use `launchctl bootout gui/UID/dev.personalteams.assistant.web.tunnel`
-and `launchctl bootout gui/UID/dev.personalteams.assistant.web`, replacing UID
-with the result of `id -u`. Keep the private token and account data out of Git.
+Do not label the migration deployed or verified before these live checks pass.
+Record exact results and unresolved steps in `docs/handoff-web-cloudflare.md`.
+
+For rollback, stop only the new portal and transition the current host normally,
+restore the backed-up **web account/settings JSON and binary pair** together,
+then restore the prior assistant state. An old binary cannot read the new web
+schema. Never delete/copy profile data or change `STATE_ENCRYPTION_KEY`. Access
+rollback must preserve the exact Graph exceptions; inspect the actual Access
+policies before any removal, as another application must never be altered.

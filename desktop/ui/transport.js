@@ -13,9 +13,7 @@
       window.location.replace('/login');
       throw new Error('Your session has expired. Sign in again.');
     }
-    if (!reply.ok) throw new Error(path === '/api/password' && reply.status === 400
-      ? 'Check your current password and use at least 12 characters for the new password.'
-      : reply.status === 429
+    if (!reply.ok) throw new Error(reply.status === 429
       ? 'Too many requests. Wait a minute and try again.'
       : 'The request could not complete. Refresh the page and check the service.');
     return reply.json();

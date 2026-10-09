@@ -1361,17 +1361,8 @@ if (window.ptaTransport.browser) {
     $('#web-username').textContent = identity.username;
     for (const id of ['#public-url', '#bind', '#tunnel-config', '#cloudflare-tunnel']) $(id).disabled = true;
     $('#web-logout').onclick = () => busy($('#web-logout'), async () => {
-      await window.ptaTransport.request('/api/logout', {}); window.location.replace('/login');
+      const result = await window.ptaTransport.request('/api/logout', {});
+      window.location.replace(result.logout_url);
     });
-    $('#web-password-form').onsubmit = event => {
-      event.preventDefault();
-      busy($('#web-password-form button'), async () => {
-        await window.ptaTransport.request('/api/password', {
-          current_password: $('#web-current-password').value, new_password: $('#web-new-password').value,
-        });
-        $('#web-current-password').value = $('#web-new-password').value = '';
-        window.location.reload();
-      });
-    };
   }).catch(fail);
 }

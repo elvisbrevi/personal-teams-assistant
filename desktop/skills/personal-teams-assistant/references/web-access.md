@@ -1,147 +1,172 @@
-# Web access and independent users
+# Web access with Cloudflare Access and GitHub
 
-The same `personal-teams-assistant` binary can serve the existing GUI in a browser:
-Home, Settings, Messages, Activities (pending decisions and daily history), Knowledge
-and Test chat. The CLI and native Tauri GUI keep using their existing private IPC.
+The same host binary serves the existing GUI in a browser: Home, Settings,
+Messages, Activities, Knowledge and Test chat. Native Tauri and the CLI keep their
+private loopback IPC. The portal is `personal-teams-assistant --web`, behind the
+existing dedicated Tunnel. Its HTTPS hostname and complete API must be protected
+by Cloudflare Access. GitHub owns the interactive sign-in; there is no second
+password form, public registration or password authentication endpoint.
 
-`personal-teams-assistant --web` is the portal entry point. It stays in the foreground
-and owns a private `web/portal.lock` under the existing profile. It runs with or
-without the Cargo `gui` feature. This is not the static landing in `site/`.
+Read [the Mac deployment guide](../../../../docs/web-macos-deployment.md) for the
+production transition. A registry install of 0.6.9 predating the Access change
+still has the password portal. Install the verified Access source build, including
+the compatible host/CLI pair, before associating identities.
 
-## Accounts
-
-The operator creates accounts locally; there is no public registration. Passwords
-are supplied on protected stdin, have 12–256 characters, and are stored as salted
-Argon2id hashes, never plaintext. Do not put them in arguments, TOML or logs.
+## Operator-local accounts and recovery
 
 ```sh
-pta web users add alice < /private/path/alice-password
-pta web users add elvis --current-profile < /private/path/elvis-password
+pta web status
 pta web users list
-pta web users password alice < /private/path/new-password
+pta web users add alice
+pta web users add elvis --current-profile
+pta web users bind alice < /private/path/verified-alice-identity.json
+pta web users unbind alice
+pta web users revoke alice
 pta web users disable alice
 pta web users enable alice
-pta web status
+pta --json web callbacks > /private/path/production-callbacks.json
 ```
 
-An ordinary account gets a new profile under `<profile>/web/profiles/<random-id>/`
-with its own settings, knowledge map, credentials, provider home and SQLite data.
-The account connects its own Teams identity. New profiles start stopped and in
-observation mode, with DeepSeek as their default provider. Sources start disabled,
-without audiences or external processing, as in the desktop.
+Create `elvis --current-profile` only if it is absent. An existing `elvis` account
+must keep its ID and current profile association. `add` takes no password and does
+not grant access until `bind`. No username/email similarity associates accounts.
 
-Exactly one account may use `--current-profile`. It controls the existing desktop
-profile and reuses its live GUI/headless host, credentials and history. It does not
-copy or migrate the Microsoft session. If that host is stopped, the portal starts
-it headless. Do not create a second profile for the same Teams account: the portal
-and host reject duplicate tenant/user identities, including the desktop profile.
+After authorizing the **dedicated login OAuth App**, obtain the identity response
+from `https://assistant.elvisbrevi.cl/cdn-cgi/access/get-identity` in the signed-in
+browser. Save that response locally in a private file. The local operator checks
+that it is the intended person's identity from the configured GitHub provider,
+then supplies it to `users bind USER`. The response must include `id` (provider
+subject), `idp.id`, `idp.type` (`github`), `account_id` and `user_uuid`. Never paste
+Access cookies, JWTs or OAuth secrets into chat, command arguments or documentation.
+Missing or unsupported provider subjects fail closed; do not substitute an email
+or Access `sub`. The runtime repeats the identity lookup using the verified JWT;
+a user-supplied identity header/file never authenticates an HTTP request.
 
-Passwords can also be changed in web Settings. Password changes, disabling and
-re-enabling an account revoke its old browser sessions. Signing out revokes that
-session. Sessions expire (12 hours by default), use HttpOnly, SameSite=Strict
-cookies, and on HTTPS a host-only Secure cookie. Browser writes require an exact
-Origin and a session-specific CSRF header. The private CLI IPC still rejects Origin.
+The stored binding is issuer + GitHub IdP ID + provider subject. The Access `sub`
+is email-associated, so it is checked against `user_uuid` and bound to each local
+session, but it cannot select a profile. Bindings cannot belong to two accounts.
+Local unbind/rebind is the recovery mechanism; it preserves files and credentials.
+`revoke` invalidates local sessions and requires an Access assertion issued after
+the local cutoff; log out of Access and sign in again. Disabling an account blocks
+its next browser request and stops its portal-owned host on reconciliation.
+Re-enabling, unbinding or reassociating changes the account version and revokes
+its existing local sessions.
 
-## Local preview
+An ordinary account owns `web/profiles/<existing-opaque-id>/`, with independent
+settings, knowledge, databases, file credentials and provider home. Exactly one
+`--current-profile` account reuses the existing desktop host/data/Keychain without
+a Microsoft re-login. The portal rejects duplicate Teams identities across
+profiles. New profiles start stopped/in observation mode with sources disabled,
+no audiences/external processing and DeepSeek as the default provider.
+
+Legacy account/settings JSON remains readable without deleting passwords,
+profiles or credentials. Retired hashes remain inert. Hosts must advertise
+`web_access_support` before the new account schema is written or the portal
+reuses them; transition an older host first. No portal starts without Access
+configuration. Native local recovery does not expose an HTTP password backdoor.
+
+## Cloudflare setup
+
+Preserve tunnel `personal-teams-assistant-web`, DNS, the desktop Teams tunnel and
+the static landing. The portal ingress remains `http://127.0.0.1:38656`, with the
+public Host header preserved and an unrelated-path 404 catch-all.
+
+Use a dedicated GitHub **OAuth App** named `personal-teams-assistant-login`,
+separate from the GitHub App/Device Flow used for repositories. Cloudflare's
+[GitHub setup guide](https://developers.cloudflare.com/cloudflare-one/integrations/identity-providers/github/)
+requires the team origin as homepage and this callback:
+
+```text
+https://small-forest-4923.cloudflareaccess.com/cdn-cgi/access/callback
+```
+
+Verify the team domain again before creating/reusing the OAuth App. GitHub OAuth
+App creation/secret generation happens in GitHub Developer Settings; the repository
+connection cannot supply dedicated login credentials. Finish the provider's GitHub
+authorization/Test flow in Cloudflare before declaring login operational.
+
+The helper `scripts/configure-web-access.py` inspects existing resources, refuses
+to overwrite overlapping/unmanaged apps, uses only the dedicated GitHub IdP,
+limits edge admission to explicitly authorized emails plus that login method,
+and reads back the apps/policies before writing private portal settings. The
+allowlist is an edge restriction only; a local provider-subject binding is still
+required. Never use an everyone or whole-domain Allow policy.
+
+Required **account** permissions:
+
+- `Access: Apps and Policies Write`: panel app, Allow policy and exact Graph bypass
+  applications. Read permission alone cannot configure them.
+- `Access: Identity Providers Write`, or `Access: Organizations, Identity Providers,
+  and Groups Write`: dedicated GitHub IdP. Existing read access to the organization
+  is also needed to discover the team domain.
+
+Supply `CLOUDFLARE_API_TOKEN[_FILE]` and dedicated
+`PTA_ACCESS_GITHUB_CLIENT_ID[_FILE]`/`PTA_ACCESS_GITHUB_CLIENT_SECRET[_FILE]` through
+protected environment bindings or 0600 files. The helper never prints secrets.
+Do not reuse `GITHUB_OAUTH_TOKENS` or a Tunnel connector token.
 
 ```sh
-personal-teams-assistant --web
-# Open http://localhost:38656/login on this computer.
+python3 scripts/configure-web-access.py \
+  --hostname assistant.elvisbrevi.cl --allow-email AUTHORIZED_GITHUB_EMAIL \
+  --callbacks-file /private/path/production-callbacks.json --dry-run
+python3 scripts/configure-web-access.py \
+  --hostname assistant.elvisbrevi.cl --allow-email AUTHORIZED_GITHUB_EMAIL \
+  --callbacks-file /private/path/production-callbacks.json \
+  --settings-file /private/path/access-settings.json
+pta web configure < /private/path/access-settings.json
 ```
 
-The default URL is only for local preview. A phone uses the public HTTPS URL.
-The portal binds to loopback; Cloudflare Tunnel or a trusted TLS reverse proxy
-reaches it. Configure it with JSON on stdin, then restart the portal:
+The real helper-generated settings contain `bind`, `public_url`, `session_hours`
+and `access` (`issuer`, `audience`, `account_id`, `github_idp_id`). Audience/provider
+IDs come from actual Cloudflare resources; never invent them. Configuration takes
+effect when the portal restarts. Plain HTTP previews cannot authenticate Access.
 
-```sh
-pta web configure <<'JSON'
-{"bind":"127.0.0.1:38656","public_url":"https://assistant.elvisbrevi.cl","session_hours":12}
-JSON
-```
+`pta web callbacks` exports only exact `/webhooks/<profile-id>/graph/notifications`
+and `/webhooks/<profile-id>/graph/lifecycle` paths. Re-run setup when adding an
+isolated account. Only these callback POST handlers are exempt in the backend;
+the exact matching paths have separate Access Bypass apps at the edge. No broad
+`/webhooks/*` bypass is accepted. Disabled/unknown profiles and additional paths
+cannot start hosts or administer the panel. Graph subscription, clientState,
+tenant/resource and validation-token handling stay unchanged. The current
+profile retains its separate existing Teams callback hostname/tunnel.
 
-## Cloudflare
+## Sessions, logout and remote operations
 
-Use a dedicated **remotely managed Tunnel** for the portal, with this route:
+Access assertions are verified against the official team HTTPS public keys for
+signature, issuer, audience, not-before and expiration. Each session is bound to
+the exact verified assertion, provider identity, Access subject and local account
+version. Its lifetime/cookie is capped by JWT expiration. Every browser POST
+requires the exact configured Origin and the session's CSRF header. Native IPC
+continues to reject Origin and browser cookies.
 
-| Public hostname | Origin |
-| --- | --- |
-| `assistant.elvisbrevi.cl` | `http://127.0.0.1:38656` |
-| Catch-all | `http_status:404` |
+Sign out revokes the local session and persists the Access assertion fingerprint
+until expiration, then navigates to `/cdn-cgi/access/logout`, clearing the Access
+application cookie and revoking Access sessions. Cloudflare documents propagation
+of global revocation in 20–30 seconds; local assertion replay is blocked immediately.
+A stolen cookie alone, invalid JWT or identity/email-only header cannot authenticate.
 
-Preserve the public Host header (or set `httpHostHeader` to the hostname). Keep the
-landing `teams-assistant.elvisbrevi.cl` and the desktop's existing Tunnel unchanged.
-The one portal origin forwards `/webhooks/<profile-id>/graph/notifications` and
-`/webhooks/<profile-id>/graph/lifecycle` to the matching private host. Each host
-still verifies its own Graph subscription, tenant, resource and clientState.
-Unsigned callbacks cannot start a profile or administer it.
+Microsoft connection keeps its public-client PKCE/scopes and loopback callback.
+On a phone, authorize the returned Microsoft link, copy the final
+`http://localhost:PORT/?code=…&state=…` address and paste it into **Final redirect
+address**. Repository GitHub still uses its separate Device Flow. Browser activity
+navigation stays in the tab. Hosting/data paths remain operator-managed, and
+repositories/imports remain confined to each profile.
 
-The repository provides an idempotent operator helper:
-
-```sh
-python3 scripts/configure-web-cloudflare.py \
-  --domain elvisbrevi.cl --hostname assistant.elvisbrevi.cl \
-  --token-file /private/path/pta-web-cloudflare-token
-```
-
-It requires `CLOUDFLARE_API_TOKEN` or `CLOUDFLARE_API_TOKEN_FILE`, with Zone Read,
-DNS Edit on the domain and Cloudflare Tunnel Edit on its account. A connector's
-`CLOUDFLARE_TUNNEL_TOKEN` cannot create DNS records. The helper creates/reuses
-`personal-teams-assistant-web`, configures only its dedicated routes and writes
-the connector token to a 0600 file. It refuses to overwrite unrelated DNS records
-or Tunnel routes and does not touch the landing. It does not claim that the origin
-is reachable: start the connector and check `/login` over HTTPS afterward.
-
-Run the portal and the connector as services on the always-on machine:
-
-```sh
-personal-teams-assistant --web
-# Separate foreground service, token contents never in argv:
-TUNNEL_TOKEN_FILE=/private/path/pta-web-cloudflare-token cloudflared tunnel run
-```
-
-Cloudflare Access is an optional additional protection. If configured, protect
-the panel and `/api/*`, but bypass Access on the exact `/webhooks/*` callback path:
-Microsoft Graph cannot complete an interactive Access login. The application login
-still selects the private user profile. These are application profiles for people
-authorized by the same server operator, not separate OS accounts or containers.
-
-## Remote operations
-
-Sign in to the web account first, then connect Microsoft in Settings. The existing
-public-client PKCE flow and Graph scopes are unchanged. On a phone, open the returned
-Microsoft sign-in link, copy the final `http://localhost:PORT/?code=…&state=…` address
-that the device cannot open, and paste it in the portal's **Final redirect address**.
-The host forwards it only to its own pending loopback callback. The form clears the
-address and sign-in URL afterward. GitHub's device code is authorized on the phone.
-
-Activities open in the browser's Activities tab; native windows, the tray and OS
-notifications stay on the desktop. Web polls show activity and status updates.
-The server operator manages public URL/listener/tunnel and data paths, which the
-web form shows as read-only. Repository paths are server paths inside the profile's
-`data/repositories/`, with canonical path and symlink checks; the current-profile
-account may also keep the repositories already in its desktop map. Imports must
-stay inside that profile and preserve its data, map and hosting paths. No browser
-request may select another account's IPC endpoint, files or credentials.
-
-For operator-local CLI access to an isolated account, use the profile path shown by
-`pta web users list` (use ordinary `pta` for the current-profile account):
+For isolated operator-local CLI access use the path in `web users list`:
 
 ```sh
 PTA_PROFILE_DIR=/absolute/profile/path pta status
 PTA_PROFILE_DIR=/absolute/profile/path pta credentials set DEEPSEEK_API_KEY < /private/path/key
 ```
 
-`PTA_PROFILE_DIR` is an explicit isolated-profile override; omitting it keeps the
-existing `dev.personalteams.assistant` profile, data directory, Keychain service
-and Microsoft session. Isolated hosts use private credential files on all OSes
-and do not inherit the operator's app credentials or provider logins.
+Without `PTA_PROFILE_DIR`, the existing `dev.personalteams.assistant` profile,
+Keychain service, encryption key and Microsoft session remain selected. Isolated
+hosts inherit network/CA settings, but never the operator's application secrets
+or provider logins. The portal remembers Assistant Start/Stop state and stops only
+hosts it owns on exit; a running desktop host remains owned by the desktop.
 
-The portal starts a host for each enabled account so activity schedules do not
-depend on a browser being open. Assistant Start/Stop state is persisted separately
-and restored when the portal restarts. On shutdown it stops only hosts it started;
-an already running desktop host remains owned by the desktop. Disabling an account
-stops its portal-owned host within the next reconciliation cycle and keeps its data.
-
-Verification: check `/login` over the configured HTTPS hostname, then authenticate
-two accounts and verify independent settings, credentials and history. Local tests
-use synthetic profiles and mocked Graph/IPC, never real accounts or Teams sends.
+Verify GitHub sign-in over HTTPS from the Mac and phone with no password form,
+two distinct approved users' settings/credentials/history, blocked unknown and
+disabled identities, JWT rejection, logout/replay/expiration, exact Graph callbacks,
+and native Tauri/CLI behavior. Use synthetic data and existing status reads; never
+send real Teams messages as a smoke test.

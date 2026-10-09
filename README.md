@@ -43,7 +43,8 @@ GUI and CLI share the same profile, Keychain/Credential Manager credentials and 
 The same GUI can run in a browser, including settings, messages, activity decisions
 and history, knowledge and the test chat. Each login has its own Teams account,
 configuration, credentials and data. Create users with `pta web users add USER`
-(password on protected stdin), configure the HTTPS origin with `pta web configure`,
+and associate their verified GitHub identities locally with `pta web users bind USER`,
+configure Cloudflare Access and the HTTPS origin with `pta web configure`,
 and run `personal-teams-assistant --web` on an always-on machine behind Cloudflare
 Tunnel. `--current-profile` gives one account access to the existing desktop profile
 without copying its history or reconnecting Teams. See the

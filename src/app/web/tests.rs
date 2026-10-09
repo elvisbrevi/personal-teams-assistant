@@ -10,19 +10,22 @@ use wiremock::{
     matchers::{method, path},
 };
 
-const PASSWORD: &str = "synthetic-test-password";
-
 fn fixture() -> (tempfile::TempDir, Arc<Portal>, Vec<Account>) {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("profile/web");
     security::private_dir(&root).unwrap();
-    let hash = hash_password(PASSWORD).unwrap();
     let accounts: Vec<_> = ["alice", "bob"]
         .into_iter()
         .map(|name| Account {
             id: uuid::Uuid::new_v4().to_string(),
             username: name.into(),
-            password_hash: hash.clone(),
+            password_hash: "retired-synthetic-hash".into(),
+            access_binding: Some(access::Binding {
+                issuer: access::tests::config().issuer,
+                idp_id: access::tests::config().github_idp_id,
+                provider_user_id: format!("github-{name}"),
+            }),
+            access_valid_after: 0,
             version: uuid::Uuid::new_v4().to_string(),
             enabled: true,
             current_profile: false,
@@ -43,7 +46,7 @@ async fn send(
     portal: &Arc<Portal>,
     method: &str,
     uri: &str,
-    cookie: Option<&str>,
+    cookie: Option<&TestSession>,
     csrf: Option<&str>,
     origin: Option<&str>,
     input: Value,
@@ -52,8 +55,11 @@ async fn send(
         .method(method)
         .uri(uri)
         .header(header::HOST, "localhost:38656");
-    if let Some(cookie) = cookie {
-        request = request.header(header::COOKIE, cookie);
+    if let Some(auth) = cookie {
+        request = request.header("cf-access-jwt-assertion", &auth.assertion);
+        if !auth.cookie.is_empty() {
+            request = request.header(header::COOKIE, &auth.cookie);
+        }
     }
     if let Some(csrf) = csrf {
         request = request.header("x-pta-csrf", csrf);
@@ -75,10 +81,67 @@ async fn send(
 async fn json_body(response: Response) -> Value {
     serde_json::from_slice(&to_bytes(response.into_body(), 2_000_000).await.unwrap()).unwrap()
 }
-async fn session_cookie(portal: &Arc<Portal>, account: &Account) -> (String, String) {
-    let (token, session) = portal.issue_session(account).await.unwrap();
+struct TestSession {
+    cookie: String,
+    assertion: String,
+}
+async fn configured_fixture() -> (tempfile::TempDir, Arc<Portal>, Vec<Account>, MockServer) {
+    let (dir, mut portal, entries) = fixture();
+    let (verifier, server) = access::tests::mock_verifier().await;
+    let bindings: HashMap<_, _> = entries
+        .iter()
+        .map(|e| {
+            (
+                e.id.clone(),
+                e.access_binding.as_ref().unwrap().provider_user_id.clone(),
+            )
+        })
+        .collect();
+    Mock::given(method("GET"))
+        .and(path("/cdn-cgi/access/get-identity"))
+        .respond_with(move |request: &wiremock::Request| {
+            use base64::Engine;
+            let token = request.headers["cookie"]
+                .to_str()
+                .unwrap()
+                .strip_prefix("CF_Authorization=")
+                .unwrap();
+            let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .decode(token.split('.').nth(1).unwrap())
+                .unwrap();
+            let claims: Value = serde_json::from_slice(&payload).unwrap();
+            let subject = claims["sub"].as_str().unwrap();
+            ResponseTemplate::new(200).set_body_json(access::tests::identity(
+                subject,
+                bindings
+                    .get(subject)
+                    .map(String::as_str)
+                    .unwrap_or("unassociated"),
+            ))
+        })
+        .mount(&server)
+        .await;
+    Arc::get_mut(&mut portal).unwrap().access = Some(verifier);
+    (dir, portal, entries, server)
+}
+fn assertion(account: &Account) -> String {
+    access::tests::token(&access::tests::claims(&account.id), "synthetic-key")
+}
+async fn session_cookie(portal: &Arc<Portal>, account: &Account) -> (TestSession, String) {
+    let assertion = assertion(account);
+    let identity = portal
+        .access
+        .as_ref()
+        .unwrap()
+        .verify(&access::tests::headers(&assertion))
+        .await
+        .unwrap();
+    let (token, session) = portal.issue_session(account, identity).await.unwrap();
     (
-        format!("{}={token}", portal.settings.cookie_name()),
+        TestSession {
+            cookie: format!("{}={token}", portal.settings.cookie_name()),
+            assertion,
+        },
         session.csrf,
     )
 }
@@ -97,7 +160,7 @@ async fn fake_host(portal: &Portal, account: &Account) -> (MockServer, fs::File)
     write_private(
         &dir.join("control.json"),
         &json!({"contract":1,"port":port,"token":"synthetic-ipc-token",
-        "wiki_support":true,"activity_registration_support":true,"web_support":true})
+        "wiki_support":true,"activity_registration_support":true,"web_support":true,"web_access_support":true})
         .to_string(),
     )
     .unwrap();
@@ -113,19 +176,16 @@ async fn fake_host(portal: &Portal, account: &Account) -> (MockServer, fs::File)
 }
 
 #[tokio::test]
-async fn login_requires_same_origin_and_never_exposes_profile_without_a_session() {
-    let (_dir, portal, _) = fixture();
-    let root = send(&portal, "GET", "/", None, None, None, Value::Null).await;
-    assert_eq!(root.status(), StatusCode::SEE_OTHER);
-    assert_eq!(root.headers()[header::LOCATION], "/login");
-    assert_eq!(root.headers()[header::CACHE_CONTROL], "no-store");
-    assert!(
-        root.headers()[header::CONTENT_SECURITY_POLICY]
-            .to_str()
-            .unwrap()
-            .contains("frame-ancestors 'none'")
-    );
-    for uri in ["/api/session", "/app.js", "/transport.js"] {
+async fn access_bootstraps_the_existing_profile_without_a_password_form() {
+    let (_dir, portal, entries, _server) = configured_fixture().await;
+    for uri in [
+        "/",
+        "/login",
+        "/api/session",
+        "/app.js",
+        "/transport.js",
+        "/style.css",
+    ] {
         assert_eq!(
             send(&portal, "GET", uri, None, None, None, Value::Null)
                 .await
@@ -133,43 +193,32 @@ async fn login_requires_same_origin_and_never_exposes_profile_without_a_session(
             StatusCode::UNAUTHORIZED
         );
     }
-    let input = json!({"username":"Alice","password":PASSWORD});
-    assert_eq!(
-        send(
-            &portal,
-            "POST",
-            "/api/login",
-            None,
-            None,
-            Some("https://other.example"),
-            input.clone()
-        )
-        .await
-        .status(),
-        StatusCode::FORBIDDEN
-    );
+    let mut auth = TestSession {
+        cookie: String::new(),
+        assertion: assertion(&entries[0]),
+    };
     let response = send(
         &portal,
-        "POST",
-        "/api/login",
+        "GET",
+        "/login",
+        Some(&auth),
         None,
         None,
-        Some("http://localhost:38656"),
-        input,
+        Value::Null,
     )
     .await;
-    assert_eq!(response.status(), StatusCode::OK);
-    let cookie = response.headers()[header::SET_COOKIE]
-        .to_str()
-        .unwrap()
-        .to_owned();
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    assert_eq!(response.headers()[header::LOCATION], "/");
+    assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+    let cookie = response.headers()[header::SET_COOKIE].to_str().unwrap();
     assert!(cookie.contains("HttpOnly") && cookie.contains("SameSite=Strict"));
+    auth.cookie = cookie.split(';').next().unwrap().into();
     let data = json_body(
         send(
             &portal,
             "GET",
             "/api/session",
-            Some(cookie.split(';').next().unwrap()),
+            Some(&auth),
             None,
             None,
             Value::Null,
@@ -178,28 +227,66 @@ async fn login_requires_same_origin_and_never_exposes_profile_without_a_session(
     )
     .await;
     assert_eq!(data["username"], "alice");
+    assert_eq!(data["auth_provider"], "github");
     assert!(data.get("password_hash").is_none());
-    for name in ["bob", "unknown"] {
+    let page = send(&portal, "GET", "/", Some(&auth), None, None, Value::Null).await;
+    let body = to_bytes(page.into_body(), 2_000_000).await.unwrap();
+    assert!(!String::from_utf8_lossy(&body).contains("web-password-form"));
+    for uri in ["/api/login", "/api/password"] {
         assert_eq!(
             send(
                 &portal,
                 "POST",
-                "/api/login",
-                None,
+                uri,
+                Some(&auth),
                 None,
                 Some("http://localhost:38656"),
-                json!({"username":name,"password":"wrong-password"})
+                json!({"password":"synthetic"})
             )
             .await
             .status(),
-            StatusCode::UNAUTHORIZED
+            StatusCode::NOT_FOUND
         );
     }
+    let unknown = Account {
+        id: uuid::Uuid::new_v4().to_string(),
+        ..entries[0].clone()
+    };
+    auth.assertion = assertion(&unknown);
+    assert_eq!(
+        send(
+            &portal,
+            "GET",
+            "/login",
+            Some(&auth),
+            None,
+            None,
+            Value::Null
+        )
+        .await
+        .status(),
+        StatusCode::FORBIDDEN
+    );
+    // Same email in both JWTs does not let a different provider subject use the profile.
+    assert_eq!(
+        send(
+            &portal,
+            "GET",
+            "/api/session",
+            Some(&auth),
+            None,
+            None,
+            Value::Null
+        )
+        .await
+        .status(),
+        StatusCode::UNAUTHORIZED
+    );
 }
 
 #[tokio::test]
 async fn commands_are_session_scoped_and_require_csrf_even_for_reads() {
-    let (_dir, portal, entries) = fixture();
+    let (_dir, portal, entries, _server) = configured_fixture().await;
     let (_alice, _alice_lock) = fake_host(&portal, &entries[0]).await;
     let (_bob, _bob_lock) = fake_host(&portal, &entries[1]).await;
     let request = serde_json::to_value(control::Request::new("snapshot")).unwrap();
@@ -261,88 +348,14 @@ async fn commands_are_session_scoped_and_require_csrf_even_for_reads() {
         profile_dir(&portal.root, &entries[0]),
         profile_dir(&portal.root, &entries[1])
     );
-}
-
-#[tokio::test]
-async fn changing_a_password_revokes_all_old_sessions_and_logout_revokes_the_new_one() {
-    let (_dir, portal, entries) = fixture();
-    let (cookie, csrf) = session_cookie(&portal, &entries[0]).await;
-    let (other, _) = session_cookie(&portal, &entries[0]).await;
-    let response = send(
-        &portal,
-        "POST",
-        "/api/password",
-        Some(&cookie),
-        Some(&csrf),
-        Some("http://localhost:38656"),
-        json!({"current_password":PASSWORD,"new_password":"new-synthetic-password"}),
-    )
-    .await;
-    assert_eq!(response.status(), StatusCode::OK);
-    let new = response.headers()[header::SET_COOKIE]
-        .to_str()
-        .unwrap()
-        .split(';')
-        .next()
-        .unwrap()
-        .to_owned();
-    for old in [&cookie, &other] {
-        assert_eq!(
-            send(
-                &portal,
-                "GET",
-                "/api/session",
-                Some(old),
-                None,
-                None,
-                Value::Null
-            )
-            .await
-            .status(),
-            StatusCode::UNAUTHORIZED
-        );
-    }
-    let session = json_body(
-        send(
-            &portal,
-            "GET",
-            "/api/session",
-            Some(&new),
-            None,
-            None,
-            Value::Null,
-        )
-        .await,
-    )
-    .await;
-    let updated = accounts(&portal.root).unwrap();
-    assert!(verify_password(
-        &updated[0].password_hash,
-        "new-synthetic-password"
-    ));
-    assert!(!verify_password(&updated[0].password_hash, PASSWORD));
-    let saved = fs::read_to_string(portal.root.join("accounts.json")).unwrap();
-    assert!(!saved.contains(PASSWORD) && !saved.contains("new-synthetic-password"));
-    assert_eq!(
-        send(
-            &portal,
-            "POST",
-            "/api/logout",
-            Some(&new),
-            session["csrf_token"].as_str(),
-            Some("http://localhost:38656"),
-            json!({})
-        )
-        .await
-        .status(),
-        StatusCode::OK
-    );
+    let (mut alice, _) = session_cookie(&portal, &entries[0]).await;
+    alice.assertion = assertion(&entries[1]);
     assert_eq!(
         send(
             &portal,
             "GET",
             "/api/session",
-            Some(&new),
+            Some(&alice),
             None,
             None,
             Value::Null
@@ -354,10 +367,74 @@ async fn changing_a_password_revokes_all_old_sessions_and_logout_revokes_the_new
 }
 
 #[tokio::test]
-async fn disabling_an_account_and_expiration_are_checked_on_every_request() {
-    let (_dir, portal, entries) = fixture();
+async fn logout_revokes_local_sessions_and_the_access_assertion_even_after_restart() {
+    let (_dir, portal, entries, _server) = configured_fixture().await;
+    let (cookie, csrf) = session_cookie(&portal, &entries[0]).await;
+    assert_eq!(
+        send(
+            &portal,
+            "POST",
+            "/api/logout",
+            Some(&cookie),
+            None,
+            Some("http://localhost:38656"),
+            json!({})
+        )
+        .await
+        .status(),
+        StatusCode::FORBIDDEN
+    );
+    let response = send(
+        &portal,
+        "POST",
+        "/api/logout",
+        Some(&cookie),
+        Some(&csrf),
+        Some("http://localhost:38656"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(
+        response.headers()[header::SET_COOKIE]
+            .to_str()
+            .unwrap()
+            .contains("Max-Age=0")
+    );
+    assert_eq!(
+        json_body(response).await["logout_url"],
+        "/cdn-cgi/access/logout"
+    );
+    for uri in ["/api/session", "/login"] {
+        assert_eq!(
+            send(&portal, "GET", uri, Some(&cookie), None, None, Value::Null)
+                .await
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+    }
+    let identity = portal
+        .access
+        .as_ref()
+        .unwrap()
+        .verify(&access::tests::headers(&cookie.assertion))
+        .await
+        .unwrap();
+    assert!(store::access_revoked(&portal.root, &identity).unwrap());
+    let new_portal = Portal::new(portal.root.clone(), PathBuf::from("/unused")).unwrap();
+    assert!(store::access_revoked(&new_portal.root, &identity).unwrap());
+    assert!(
+        !fs::read_to_string(portal.root.join("access-revocations.json"))
+            .unwrap()
+            .contains(&cookie.assertion)
+    );
+}
+
+#[tokio::test]
+async fn disabling_expiry_rebinding_and_local_revocation_are_checked_on_every_request() {
+    let (_dir, portal, entries, _server) = configured_fixture().await;
     let (cookie, _) = session_cookie(&portal, &entries[0]).await;
-    edit_accounts(&portal.root, |entries| {
+    store::edit_accounts(&portal.root, |entries| {
         entries[0].enabled = false;
         Ok(())
     })
@@ -376,13 +453,67 @@ async fn disabling_an_account_and_expiration_are_checked_on_every_request() {
         .status(),
         StatusCode::UNAUTHORIZED
     );
+    assert_eq!(
+        send(
+            &portal,
+            "GET",
+            "/login",
+            Some(&cookie),
+            None,
+            None,
+            Value::Null
+        )
+        .await
+        .status(),
+        StatusCode::FORBIDDEN
+    );
     let (cookie, _) = session_cookie(&portal, &entries[1]).await;
     portal
         .sessions
         .lock()
         .await
         .values_mut()
-        .for_each(|session| session.expires = Instant::now() - Duration::from_secs(1));
+        .for_each(|s| s.expires = Instant::now() - Duration::from_secs(1));
+    assert_eq!(
+        send(
+            &portal,
+            "GET",
+            "/api/session",
+            Some(&cookie),
+            None,
+            None,
+            Value::Null
+        )
+        .await
+        .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    let (cookie, _) = session_cookie(&portal, &entries[1]).await;
+    store::edit_accounts(&portal.root, |entries| {
+        entries[1].access_valid_after = access::now() + 1;
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(
+        send(
+            &portal,
+            "GET",
+            "/login",
+            Some(&cookie),
+            None,
+            None,
+            Value::Null
+        )
+        .await
+        .status(),
+        StatusCode::FORBIDDEN
+    );
+    store::edit_accounts(&portal.root, |entries| {
+        entries[1].access_valid_after = 0;
+        entries[1].access_binding = None;
+        Ok(())
+    })
+    .unwrap();
     assert_eq!(
         send(
             &portal,
@@ -401,6 +532,89 @@ async fn disabling_an_account_and_expiration_are_checked_on_every_request() {
         assert!(portal.login_limit("limited").await);
     }
     assert!(!portal.login_limit("limited").await);
+}
+
+#[tokio::test]
+async fn access_expiry_bounds_local_session_lifetime() {
+    let (_dir, portal, entries, _server) = configured_fixture().await;
+    let mut value = access::tests::claims(&entries[0].id);
+    value["exp"] = json!(access::now() + 10);
+    let token = access::tests::token(&value, "synthetic-key");
+    let identity = portal
+        .access
+        .as_ref()
+        .unwrap()
+        .verify(&access::tests::headers(&token))
+        .await
+        .unwrap();
+    let (_, session) = portal.issue_session(&entries[0], identity).await.unwrap();
+    assert!(session.expires.duration_since(Instant::now()) <= Duration::from_secs(10));
+    let mut expired = value;
+    expired["exp"] = json!(access::now() - 1);
+    let auth = TestSession {
+        cookie: String::new(),
+        assertion: access::tests::token(&expired, "synthetic-key"),
+    };
+    assert_eq!(
+        send(
+            &portal,
+            "GET",
+            "/login",
+            Some(&auth),
+            None,
+            None,
+            Value::Null
+        )
+        .await
+        .status(),
+        StatusCode::UNAUTHORIZED
+    );
+}
+
+#[test]
+fn legacy_accounts_preserve_ids_current_profile_hashes_and_credentials_without_auto_binding() {
+    let (dir, portal, entries) = fixture();
+    let mut value = json!(entries);
+    for e in value.as_array_mut().unwrap() {
+        e.as_object_mut().unwrap().remove("access_binding");
+        e.as_object_mut().unwrap().remove("access_valid_after");
+    }
+    value[0]["username"] = json!("elvis");
+    value[0]["current_profile"] = json!(true);
+    write_private(&portal.root.join("accounts.json"), &value.to_string()).unwrap();
+    let loaded = accounts(&portal.root).unwrap();
+    assert_eq!(loaded[0].id, entries[0].id);
+    assert!(loaded[0].access_binding.is_none());
+    assert_eq!(
+        profile_dir(&portal.root, &loaded[0]),
+        dir.path().join("profile")
+    );
+    let credential = profile_dir(&portal.root, &loaded[1]).join("data/credentials/SYNTHETIC_KEY");
+    security::private_dir(credential.parent().unwrap()).unwrap();
+    write_private(&credential, "synthetic-credential").unwrap();
+    store::edit_accounts(&portal.root, |entries| {
+        entries[0].access_binding = Some(access::Binding {
+            issuer: access::tests::config().issuer,
+            idp_id: access::tests::config().github_idp_id,
+            provider_user_id: "123456".into(),
+        });
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(
+        accounts(&portal.root).unwrap()[0].password_hash,
+        "retired-synthetic-hash"
+    );
+    assert_eq!(
+        fs::read_to_string(credential).unwrap(),
+        "synthetic-credential"
+    );
+    store::edit_accounts(&portal.root, |entries| {
+        entries[1].access_binding = entries[0].access_binding.clone();
+        Ok(())
+    })
+    .unwrap();
+    assert!(accounts(&portal.root).is_err());
 }
 
 #[test]
@@ -463,6 +677,8 @@ fn worker_credentials_and_provider_homes_are_not_inherited_from_the_operator() {
         "GRAPH_WEBHOOK_SECRET",
         "GITHUB_OAUTH_TOKENS",
         "CLOUDFLARE_TUNNEL_TOKEN",
+        "CLOUDFLARE_API_TOKEN",
+        "PTA_ACCESS_GITHUB_CLIENT_SECRET",
         "CODEX_HOME",
         "CLAUDE_CONFIG_DIR",
     ] {
@@ -476,7 +692,7 @@ fn worker_credentials_and_provider_homes_are_not_inherited_from_the_operator() {
 
 #[tokio::test]
 async fn callbacks_route_only_to_the_matching_enabled_profile_without_administration_headers() {
-    let (_dir, portal, entries) = fixture();
+    let (_dir, portal, entries, _issuer) = configured_fixture().await;
     let (first, _first_lock) = fake_host(&portal, &entries[0]).await;
     let (second, _second_lock) = fake_host(&portal, &entries[1]).await;
     for (entry, server) in entries.iter().zip([&first, &second]) {
@@ -511,7 +727,7 @@ async fn callbacks_route_only_to_the_matching_enabled_profile_without_administra
         );
         assert!(!requests.last().unwrap().headers.contains_key("cookie"));
     }
-    edit_accounts(&portal.root, |entries| {
+    store::edit_accounts(&portal.root, |entries| {
         entries[0].enabled = false;
         Ok(())
     })
@@ -552,7 +768,7 @@ fn remote_http_and_public_bindings_are_rejected_and_secure_cookies_are_host_only
         ..Settings::default()
     };
     config.validate().unwrap();
-    let cookie = config.cookie("synthetic", false);
+    let cookie = config.cookie("synthetic", 43_200);
     assert!(
         cookie.starts_with("__Host-pta-session=")
             && cookie.contains("; Secure")
@@ -563,5 +779,50 @@ fn remote_http_and_public_bindings_are_rejected_and_secure_cookies_are_host_only
         ..Settings::default()
     };
     upper.validate().unwrap();
-    assert!(upper.cookie("synthetic", false).contains("; Secure"));
+    assert!(upper.cookie("synthetic", 43_200).contains("; Secure"));
+}
+
+#[tokio::test]
+async fn only_exact_graph_posts_bypass_access_and_legacy_settings_fail_closed() {
+    let (_dir, portal, entries, _server) = configured_fixture().await;
+    let exact = format!("/webhooks/{}/graph/notifications", entries[0].id);
+    for (method, path) in [
+        ("GET", exact.clone()),
+        ("POST", format!("{exact}/extra")),
+        ("POST", format!("/webhooks/{}/api/control", entries[0].id)),
+        ("POST", "/webhooks/not-a-profile/graph/notifications".into()),
+        ("POST", "/graph/notifications".into()),
+    ] {
+        assert_eq!(
+            send(&portal, method, &path, None, None, None, json!({}))
+                .await
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+    }
+    let (_dir, legacy, _) = fixture();
+    assert!(settings(&legacy.root).unwrap().access.is_none());
+    assert_eq!(
+        send(&legacy, "GET", "/login", None, None, None, Value::Null)
+            .await
+            .status(),
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+}
+
+#[tokio::test]
+async fn the_portal_refuses_a_password_era_host_without_changing_its_profile() {
+    let (_dir, portal, entries, _server) = configured_fixture().await;
+    let (_host, _lock) = fake_host(&portal, &entries[0]).await;
+    let dir = profile_dir(&portal.root, &entries[0]);
+    let path = dir.join("control.json");
+    let mut descriptor: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    descriptor
+        .as_object_mut()
+        .unwrap()
+        .remove("web_access_support");
+    write_private(&path, &descriptor.to_string()).unwrap();
+    let before = fs::read(dir.join("config.toml")).unwrap();
+    assert!(portal.worker(&entries[0]).await.is_err());
+    assert_eq!(fs::read(dir.join("config.toml")).unwrap(), before);
 }

@@ -108,6 +108,7 @@ impl Portal {
         let dir = profile_dir(&self.root, account);
         let mut workers = self.workers.lock().await;
         if control::existing_host_at(&dir).is_ok() {
+            control::require_web_access_host_at(&dir)?;
             if !account.current_profile {
                 let mut config = read_config(&dir.join("config.toml"))?;
                 let public_url = if self.settings.https() {
