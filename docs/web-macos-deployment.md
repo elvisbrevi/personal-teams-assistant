@@ -31,6 +31,7 @@ export PTA_ACCESS_RUNTIME_DIR="$PTA_ACCESS_PROFILE_DIR/web/runtime/access-build"
 export PTA_ACCESS_SOURCE_DIR="$(mktemp -d /tmp/pta-access-source.XXXXXX)"
 git clone --branch feat/cloudflare-access \
   https://github.com/elvisbrevi/personal-teams-assistant "$PTA_ACCESS_SOURCE_DIR"
+git -C "$PTA_ACCESS_SOURCE_DIR" checkout --detach 4ea9255e676713203dbbffea1de1f2bbf79701c2
 git -C "$PTA_ACCESS_SOURCE_DIR" rev-parse HEAD
 cargo install --path "$PTA_ACCESS_SOURCE_DIR" --locked --root "$PTA_ACCESS_RUNTIME_DIR"
 "$PTA_ACCESS_RUNTIME_DIR/bin/pta" --version
@@ -38,7 +39,9 @@ cargo install --path "$PTA_ACCESS_SOURCE_DIR" --locked --root "$PTA_ACCESS_RUNTI
 "$PTA_ACCESS_RUNTIME_DIR/bin/pta" --json web status
 ```
 
-Require `web_access_support: true`. Verify the source commit against the handoff
+The pinned [Access implementation commit](https://github.com/elvisbrevi/personal-teams-assistant/commit/4ea9255e676713203dbbffea1de1f2bbf79701c2)
+passed all project gates. Require `web_access_support: true`. Verify the source
+commit against the handoff
 before installation. The old 0.6.9 registry package has no Access support; no new
 crate publication is implied by this change. Both binaries must come from the
 same verified build. Compilation should finish before stopping a running service.

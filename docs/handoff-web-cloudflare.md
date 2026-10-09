@@ -10,13 +10,17 @@ The workspace began clean on `work`, at
 [`3674b80`](https://github.com/elvisbrevi/personal-teams-assistant/commit/3674b80).
 The current changes preserve all existing profile IDs/directories, credentials,
 Microsoft PKCE/scopes, Tauri/CLI IPC and separate tunnels. Implementation delivery
-is on `feat/cloudflare-access`; follow the
+is on [`feat/cloudflare-access`](https://github.com/elvisbrevi/personal-teams-assistant/tree/feat/cloudflare-access),
+with verified implementation commit
+[`4ea9255`](https://github.com/elvisbrevi/personal-teams-assistant/commit/4ea9255e676713203dbbffea1de1f2bbf79701c2). Follow the
 [Mac transition guide](web-macos-deployment.md) using its verified source commit.
 
 The previous handoff contained superseded installation/publication instructions.
 The published
 [`personal-teams-assistant 0.6.9`](https://crates.io/crates/personal-teams-assistant/0.6.9)
-and Mac password-portal installation were already completed. No new crate was
+and Mac password-portal installation were already completed. The live registry
+API reconfirmed 0.6.9, not yanked, created at 2026-10-09 03:28:44 UTC, with checksum
+`b6b85760f24b8f02672105a1f955853cf476549acaaca21ff3f81fc6f33bcb6f`. No new crate was
 published for Access, and the existing 0.6.9 registry package still has password
 login. The new source build retains package version 0.6.9; check the advertised
 `web_access_support` capability and exact source commit, not version alone.
@@ -141,6 +145,8 @@ bun build desktop/ui/app.js --no-bundle --outfile /tmp/app-check.js
 - Default GUI features: **139 unit + 39 integration** tests passed.
 - No default features: **137 unit + 39 integration** tests passed.
 - `transport.js` syntax build and six synthetic Access setup-helper tests passed.
+- Gitleaks 8.30.1 scanned the complete deliverable source snapshot with redacted
+  output and found no secrets. Its downloaded binary checksum was verified.
 - The actual headless sibling binaries built with `--locked` and native CA roots.
 - Real-process smoke QA in temporary synthetic profiles passed native CLI/IPC,
   account creation/association, duplicate binding rejection, retained IDs/current
