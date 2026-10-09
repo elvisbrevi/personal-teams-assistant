@@ -1,5 +1,31 @@
 # Handoff: web portal and Cloudflare publication
 
+## Crate publication follow-up
+
+The user authorized publishing the crate if needed. The published
+[`0.6.8` crate](https://crates.io/crates/personal-teams-assistant/0.6.8)
+does not contain the web portal, login assets or embedded web-access guide.
+Version `0.6.9` was prepared on `main` in
+[`34aea2995b3ceadeaae24303277efab5dd081f02`](https://github.com/elvisbrevi/personal-teams-assistant/commit/34aea2995b3ceadeaae24303277efab5dd081f02),
+with matching Cargo manifest, lockfile and Tauri versions.
+
+All required local gates passed again with the new version. The clean-tree
+`cargo publish --dry-run --locked` also passed, including compilation of the
+packaged default GUI build. Gitleaks scanned all 71 packaged files and found
+no secrets. Version `0.6.9` returned 404 from crates.io before publication.
+
+**The crate has not been published.** The authorized real
+`cargo publish --locked` stopped with `no token found`, before upload. This
+cloud session has no Cargo registry token or Cargo login credential. The user
+was asked to configure `CARGO_REGISTRY_TOKEN` securely; never request or print
+its value in chat. No new publication approval is needed.
+
+To continue, use the clean, updated `main`, check that `0.6.9` is still absent
+from crates.io, then run `cargo publish --locked` with the configured registry
+credential. On the Mac, `cargo login` obtains the credential through a private
+terminal prompt. Verify crates.io and its downloadable package after publishing.
+The crate release does not start the Mac portal or its tunnel.
+
 ## Current continuation status
 
 **Cloudflare configuration is complete; the Mac origin is not started yet.**
@@ -241,6 +267,8 @@ from environment secret bindings or protected files, never chat, argv, git or lo
 
 ## Last user request
 
-The user authorized merging `work` and pushing to `main`. Cloudflare setup is
-complete; the Mac origin/account/services and end-to-end HTTPS verification remain
-pending as described above. Publishing the Git branch does not start the portal.
+The user authorized merging `work` and pushing to `main`, which is complete,
+then publishing the crate if needed. The crate is prepared as described above,
+with registry authentication still missing. Cloudflare setup is complete; the
+Mac origin/account/services and end-to-end HTTPS verification remain pending.
+Publishing the Git branch or crate does not start the portal.
