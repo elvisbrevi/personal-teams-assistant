@@ -24,6 +24,16 @@ Assistant (Teams service)
 Application (host)
   app open|hide|quit       Shows or hides the window, or closes the host (stopping the assistant and tunnel first).
 
+Web portal
+  web status              Web URL, settings and account profiles (never passwords).
+  web configure           JSON on stdin: bind, public_url (HTTPS behind Cloudflare Tunnel), session_hours.
+  web users list          Lists web accounts and their isolated profile directories.
+  web users add USER      Password on protected stdin (12+ characters); creates an isolated profile.
+                           --current-profile instead grants this account access to the existing desktop profile.
+  web users password USER Password on protected stdin; revokes existing sessions.
+  web users disable|enable USER  Revokes sessions and disables or enables web access; preserves data.
+                           Run the portal with personal-teams-assistant --web; no public registration.
+
 Configuration
   config show              Saved configuration.
   config get FIELD         Reads a field by dotted path (e.g. policy.dry_run).
@@ -161,7 +171,7 @@ fn validate_args(args: &[String]) -> Result<()> {
         let a = args[i].as_str();
         match a {
             "--json" | "--non-interactive" | "--offline" | "--no-browser" | "--wait"
-            | "--content" => {}
+            | "--content" | "--current-profile" => {}
             "--limit" => {
                 i += 1;
                 ensure!(
@@ -197,6 +207,9 @@ fn validate_args(args: &[String]) -> Result<()> {
             | "chat"
             | "help"]
             | ["app", "open" | "hide" | "quit"]
+            | ["web", "status" | "configure"]
+            | ["web", "users", "list"]
+            | ["web", "users", "add" | "password" | "disable" | "enable", _]
             | ["skill", "show" | "path"]
             | ["skill", "install", _]
             | ["config", "show" | "apply" | "validate"]
@@ -252,6 +265,10 @@ fn validate_args(args: &[String]) -> Result<()> {
             p[0] == "auth" && p.get(1) == Some(&"microsoft") && p.get(2) == Some(&"finish"),
         ),
         ("--content", p[0] == "audit"),
+        (
+            "--current-profile",
+            p.as_slice().starts_with(&["web", "users", "add"]),
+        ),
         ("--limit", ["audit", "logs"].contains(&p[0])),
     ] {
         ensure!(
@@ -307,13 +324,16 @@ async fn execute(mut args: Vec<String>) -> Result<Reply> {
     args.retain(|a| a != "--json" && a != "--non-interactive");
     let command = positional(&args, 0)?;
     let action = args.get(1).map(String::as_str).unwrap_or("");
+    if command == "web" {
+        return super::web::admin(&args);
+    }
     if !matches!(command, "capabilities" | "skill") && !offline {
         retire_outdated_host(command, action, !non_interactive && !json_output).await?;
     }
     match command {
         "capabilities" => {
             return Ok(Reply::success(
-                json!({"contract":control::CONTRACT,"commands":HELP,"skill_version":env!("CARGO_PKG_VERSION"),"activity_registration_support":true}),
+                json!({"contract":control::CONTRACT,"commands":HELP,"skill_version":env!("CARGO_PKG_VERSION"),"activity_registration_support":true,"web_support":true}),
             ));
         }
         "skill" => return crate::app::skill::command(action, args.get(2).map(String::as_str)),
@@ -969,6 +989,9 @@ mod help_tests {
             &["logs"],
             &["chat"],
             &["app", "open"],
+            &["web", "status"],
+            &["web", "configure"],
+            &["web", "users", "list"],
             &["skill", "show"],
             &["config", "show"],
             &["config", "set", "policy.dry_run", "true"],

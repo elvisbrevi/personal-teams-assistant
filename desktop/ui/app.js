@@ -1,4 +1,4 @@
-const rawInvoke = window.__TAURI__.core.invoke;
+const rawInvoke = window.ptaTransport.invoke;
 const READS = ['snapshot', 'chat', 'github_repositories', 'self_chat_status', 'llm_providers', 'audit', 'activity_status', 'activity_history', 'activity_pending'];
 // Revision of the profile files the last reply saw. The form's own revision (`current.revision`)
 // changes only when it reloads or writes, so saving a stale form fails instead of overwriting
@@ -8,6 +8,9 @@ async function invoke(method, args = {}) {
   let result = await rawInvoke('command', { request: {
     method, args, revision: READS.includes(method) ? null : current?.revision ?? null, contract: 1
   }});
+  if (window.ptaTransport.browser && result.code === 'authorization_pending' && method === 'connect_microsoft') {
+    result = await browserMicrosoftLogin(result.data.authorization_url);
+  }
   if (result.code === 'authorization_pending' && ['connect_microsoft', 'finish_github_login'].includes(method)) {
     const finish = method === 'connect_microsoft' ? 'finish_microsoft' : 'finish_github_login';
     const deadline = Date.now() + 600_000;
@@ -20,6 +23,10 @@ async function invoke(method, args = {}) {
   if (result.revision) lastRevision = result.revision;
   if (result.revision && current && !READS.includes(method)) current.revision = result.revision;
   if (!result.ok) throw result.message || result.code;
+  if (window.ptaTransport.browser && method === 'activity_open') {
+    selectedActivity = result.data.id; activityEditing = false; activityPayload = '';
+    showTab('registration');
+  }
   return result.data;
 }
 
@@ -1172,7 +1179,7 @@ $('#activity-form').onsubmit = event => { event.preventDefault(); busy($('#activ
 $('#activity-refine').onclick = () => busy($('#activity-refine'), () => resolveActivity('refine'));
 $('#activity-dismiss').onclick = () => busy($('#activity-dismiss'), () => resolveActivity('dismiss'));
 setInterval(() => { if (current) loadRegistration().catch(() => {}); }, 5_000);
-if (window.__TAURI__.event?.listen) {
+if (window.__TAURI__?.event?.listen) {
   // Pushed on every start/stop, including from the tray and `pta`.
   window.__TAURI__.event.listen('assistant-phase', event => {
     transition = transitions[event.payload] ? event.payload : null;
@@ -1230,7 +1237,10 @@ $('#github-connect').onclick = () => busy($('#github-connect'), async () => {
   $('#github-device').hidden = false;
   notify('Code ready. Authorize the GitHub App with the repositories you want.');
 });
-$('#github-open').onclick = () => invoke('open_github_login').catch(fail);
+$('#github-open').onclick = () => {
+  if (window.ptaTransport.browser) window.open('https://github.com/login/device', '_blank', 'noopener,noreferrer');
+  else invoke('open_github_login').catch(fail);
+};
 $('#github-finish').onclick = () => busy($('#github-finish'), async () => {
   await invoke('finish_github_login');
   $('#github-device').hidden = true;
@@ -1302,3 +1312,66 @@ $('#chat-form').onsubmit = async event => {
 };
 
 reload().then(async () => { await loadActivity(); await loadRegistration(); if (activityWindow) showTab('registration'); }).catch(fail);
+
+function browserMicrosoftLogin(url) {
+  const dialog = $('#web-microsoft-dialog');
+  const address = new URL(url);
+  if (address.protocol !== 'https:' || address.hostname !== 'login.microsoftonline.com') throw new Error('Invalid Microsoft sign-in address.');
+  $('#web-microsoft-link').href = address.href;
+  $('#web-microsoft-redirect').value = '';
+  $('#web-microsoft-status').textContent = '';
+  dialog.showModal();
+  return new Promise((resolve, reject) => {
+    let cancelled = false;
+    const close = () => { $('#web-microsoft-redirect').value = ''; $('#web-microsoft-link').removeAttribute('href'); dialog.close(); };
+    const cancel = async event => {
+      event?.preventDefault(); cancelled = true;
+      await rawInvoke('command', { request: { method: 'cancel_microsoft', args: {}, contract: 1 } }).catch(() => {});
+      close(); reject(new Error('Microsoft sign-in cancelled.'));
+    };
+    dialog.oncancel = cancel;
+    $('#web-microsoft-cancel').onclick = cancel;
+    $('#web-microsoft-form').onsubmit = async event => {
+      event.preventDefault();
+      const button = $('#web-microsoft-finish');
+      button.disabled = true;
+      $('#web-microsoft-status').textContent = 'Finishing sign-in…';
+      try {
+        let args = { redirect_url: $('#web-microsoft-redirect').value.trim() };
+        $('#web-microsoft-redirect').value = '';
+        const deadline = Date.now() + 600_000;
+        let result;
+        do {
+          result = await rawInvoke('command', { request: { method: 'finish_microsoft', args, revision: null, contract: 1 } });
+          args = {};
+          if (result.code === 'authorization_pending') await new Promise(done => setTimeout(done, 2000));
+        } while (!cancelled && result.code === 'authorization_pending' && Date.now() < deadline);
+        if (cancelled) return;
+        if (!result.ok) throw new Error(result.message || result.code);
+        close(); resolve(result);
+      } catch (error) { $('#web-microsoft-status').textContent = error.message || String(error); }
+      finally { button.disabled = false; }
+    };
+  });
+}
+
+if (window.ptaTransport.browser) {
+  window.ptaTransport.ready.then(identity => {
+    $('#web-account').hidden = $('#panel-web-account').hidden = $('#web-hosting-note').hidden = false;
+    $('#web-username').textContent = identity.username;
+    for (const id of ['#public-url', '#bind', '#tunnel-config', '#cloudflare-tunnel']) $(id).disabled = true;
+    $('#web-logout').onclick = () => busy($('#web-logout'), async () => {
+      await window.ptaTransport.request('/api/logout', {}); window.location.replace('/login');
+    });
+    $('#web-password-form').onsubmit = event => {
+      event.preventDefault();
+      busy($('#web-password-form button'), async () => {
+        await window.ptaTransport.request('/api/password', {
+          current_password: $('#web-current-password').value, new_password: $('#web-new-password').value,
+        });
+        $('#web-current-password').value = $('#web-new-password').value = '';
+        window.location.reload();
+      });
+    };
+  }).catch(fail);
+}

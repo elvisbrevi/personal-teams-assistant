@@ -32,6 +32,7 @@ mod github;
 mod gui;
 mod headless;
 mod skill;
+mod web;
 
 /// What the process owning the host can do beyond operations: a Tauri window, or nothing.
 pub(crate) trait Shell: Send + Sync {
@@ -313,6 +314,7 @@ fn cloudflared_command(
 pub(crate) fn configure_credentials(config_dir: &Path) -> Result<()> {
     security::keyring_profile(Some("default"))?;
     security::file_credential_store(Some(&config_dir.join("credentials")));
+    security::prefer_file_credentials(control::isolated_profile_dir()?.is_some());
     Ok(())
 }
 
@@ -514,6 +516,7 @@ async fn start(state: &DesktopState) -> Result<()> {
 
 async fn start_service(state: &DesktopState) -> Result<()> {
     let config = read_config(&state.config_path)?;
+    web::validate_profile_identity(state.config_path.parent().unwrap(), &config)?;
     let map = KnowledgeMap::load(&state.map_path)?;
     validate_local(&config, &map)?;
     validate_teams_setup(&config)?;
@@ -1200,6 +1203,13 @@ pub fn run() {
         return;
     }
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.as_slice() == ["--web"] {
+        if web::run().is_err() {
+            eprintln!("Web portal stopped. Check pta web status and the listener configuration.");
+            std::process::exit(1);
+        }
+        return;
+    }
     if args.first().map(String::as_str) == Some("--import-secret") {
         let result = args
             .get(1)

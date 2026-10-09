@@ -38,6 +38,17 @@ Its credentials are stored with `pta credentials set` in private profile files o
 
 GUI and CLI share the same profile, Keychain/Credential Manager credentials and service. Reinstalling does not ask for credentials again: the `dev.personalteams.assistant` profile, the data directory and the connected Microsoft account are kept.
 
+### Web and phone access
+
+The same GUI can run in a browser, including settings, messages, activity decisions
+and history, knowledge and the test chat. Each login has its own Teams account,
+configuration, credentials and data. Create users with `pta web users add USER`
+(password on protected stdin), configure the HTTPS origin with `pta web configure`,
+and run `personal-teams-assistant --web` on an always-on machine behind Cloudflare
+Tunnel. `--current-profile` gives one account access to the existing desktop profile
+without copying its history or reconnecting Teams. See the
+[web and Cloudflare setup guide](desktop/skills/personal-teams-assistant/references/web-access.md).
+
 ### Update
 
 ```sh

@@ -27,6 +27,9 @@ pub struct Server {
     pub data_dir: PathBuf,
     #[serde(default)]
     pub cloudflare_tunnel: bool,
+    /// Optional path reserved by the web portal for this profile's Graph callbacks.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub webhook_prefix: String,
 }
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -170,6 +173,17 @@ impl Config {
             "public_url must be an HTTPS origin"
         );
         ensure!(
+            self.server.webhook_prefix.is_empty()
+                || self
+                    .server
+                    .webhook_prefix
+                    .strip_prefix("/webhooks/")
+                    .is_some_and(|id| {
+                        uuid::Uuid::parse_str(id).is_ok_and(|uuid| uuid.to_string() == id)
+                    }),
+            "invalid webhook prefix"
+        );
+        ensure!(
             (256..=32000).contains(&self.policy.max_context_chars),
             "invalid context limit"
         );
@@ -186,11 +200,52 @@ impl Config {
     pub fn scopes(&self) -> &'static str {
         "offline_access User.Read Chat.Read ChatMessage.Send"
     }
+
+    pub fn graph_callback(&self, lifecycle: bool) -> String {
+        format!(
+            "{}{}/graph/{}",
+            self.server.public_url.trim_end_matches('/'),
+            self.server.webhook_prefix,
+            if lifecycle {
+                "lifecycle"
+            } else {
+                "notifications"
+            }
+        )
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{Config, Language};
+
+    #[test]
+    fn graph_callbacks_keep_existing_urls_and_isolate_web_profiles() {
+        let mut config = Config::desktop_template().unwrap();
+        assert_eq!(
+            config.graph_callback(false),
+            "https://assistant.example.com/graph/notifications"
+        );
+        assert_eq!(
+            config.graph_callback(true),
+            "https://assistant.example.com/graph/lifecycle"
+        );
+        config.server.webhook_prefix = "/webhooks/00000000-0000-0000-0000-000000000001".into();
+        config.validate().unwrap();
+        assert_eq!(
+            config.graph_callback(false),
+            "https://assistant.example.com/webhooks/00000000-0000-0000-0000-000000000001/graph/notifications"
+        );
+        for invalid in [
+            "/other",
+            "/webhooks/../alice",
+            "/webhooks/a?token=b",
+            "/webhooks/00000000-0000-0000-0000-000000000001/extra",
+        ] {
+            config.server.webhook_prefix = invalid.into();
+            assert!(config.validate().is_err());
+        }
+    }
 
     #[test]
     fn reply_language_defaults_to_spanish_and_accepts_english() {

@@ -67,6 +67,8 @@ struct Endpoint {
     wiki_support: bool,
     #[serde(default)]
     activity_registration_support: bool,
+    #[serde(default)]
+    web_support: bool,
     contract: u32,
     port: u16,
     token: String,
@@ -78,8 +80,32 @@ struct Endpoint {
 
 const IDENTIFIER: &str = "dev.personalteams.assistant";
 
+pub(super) fn isolated_profile_dir() -> Result<Option<PathBuf>> {
+    std::env::var_os("PTA_PROFILE_DIR")
+        .map(|value| {
+            let dir = PathBuf::from(value);
+            ensure!(dir.is_absolute(), "PTA_PROFILE_DIR must be absolute");
+            let standard = standard_profile_dir()?;
+            let same = dir == standard
+                || dir
+                    .canonicalize()
+                    .ok()
+                    .zip(standard.canonicalize().ok())
+                    .is_some_and(|(dir, standard)| dir == standard);
+            Ok((!same).then_some(dir))
+        })
+        .transpose()
+        .map(Option::flatten)
+}
+
 /// Profile directory shared by GUI, headless host and CLI; matches Tauri's app_config_dir.
 pub fn profile_dir() -> Result<PathBuf> {
+    if let Some(dir) = isolated_profile_dir()? {
+        return Ok(dir);
+    }
+    standard_profile_dir()
+}
+fn standard_profile_dir() -> Result<PathBuf> {
     #[cfg(target_os = "macos")]
     let base = PathBuf::from(std::env::var_os("HOME").context("home directory unavailable")?)
         .join("Library/Application Support");
@@ -92,6 +118,9 @@ pub fn profile_dir() -> Result<PathBuf> {
 /// Data directory for a new profile; matches Tauri's app_data_dir. Existing profiles keep
 /// `server.data_dir`.
 pub fn default_data_dir() -> Result<PathBuf> {
+    if let Some(dir) = isolated_profile_dir()? {
+        return Ok(dir.join("data"));
+    }
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     return Ok(xdg_dir("XDG_DATA_HOME", ".local/share")?.join(IDENTIFIER));
     #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -111,7 +140,7 @@ pub fn existing_host() -> Result<()> {
     // The lock proves ownership. A stale descriptor or reused PID does not.
     existing_host_at(&profile_dir()?)
 }
-fn existing_host_at(dir: &Path) -> Result<()> {
+pub(super) fn existing_host_at(dir: &Path) -> Result<()> {
     let file = fs::OpenOptions::new()
         .read(true)
         .write(true)
@@ -214,7 +243,14 @@ fn host_executable() -> Result<PathBuf> {
 pub async fn client(request: Request, start_host: bool) -> Result<Reply> {
     if existing_host().is_err() {
         ensure!(start_host, "host is stopped");
-        let mut command = std::process::Command::new(host_executable()?);
+        let binary = host_executable()?;
+        let mut command = if let Some(dir) = isolated_profile_dir()? {
+            security::private_dir(&dir)?;
+            security::private_dir(&dir.join("home"))?;
+            super::web::profile_command(&binary, &dir)
+        } else {
+            std::process::Command::new(binary)
+        };
         command
             .arg("--host")
             .stdin(std::process::Stdio::null())
@@ -237,6 +273,11 @@ pub async fn client(request: Request, start_host: bool) -> Result<Reply> {
         }
         ensure!(ready, "desktop host did not become ready");
     }
+    client_at(request, &profile_dir()?).await
+}
+/// Select a profile from the authenticated session, never from browser input.
+pub(super) async fn client_at(request: Request, dir: &Path) -> Result<Reply> {
+    existing_host_at(dir)?;
     // Model-backed operations wait for the model without a deadline.
     let mut client = reqwest::Client::builder()
         .no_proxy()
@@ -248,9 +289,15 @@ pub async fn client(request: Request, start_host: bool) -> Result<Reply> {
     for attempt in 0..20 {
         // A newly claimed lock can precede descriptor replacement. Retry only
         // connection establishment failures, before any request was delivered.
-        let endpoint: Endpoint =
-            serde_json::from_slice(&fs::read(profile_dir()?.join("control.json"))?)?;
+        let endpoint: Endpoint = serde_json::from_slice(&fs::read(dir.join("control.json"))?)?;
         ensure!(endpoint.contract == CONTRACT, "incompatible host contract");
+        ensure!(
+            endpoint.web_support
+                || request.args["config"]["server"]
+                    .get("webhook_prefix")
+                    .is_none(),
+            "incompatible web profile host: update the host and CLI together"
+        );
         ensure!(
             endpoint.activity_registration_support
                 || (!request.method.starts_with("activity_")
@@ -330,6 +377,7 @@ pub(crate) fn launch(
         &serde_json::to_string(&Endpoint {
             wiki_support: true,
             activity_registration_support: true,
+            web_support: true,
             contract: CONTRACT,
             port: listener.local_addr()?.port(),
             token: token.clone(),
@@ -899,6 +947,7 @@ mod tests {
                 port: 1,
                 token: "stale-token".into(),
                 binary: None,
+                web_support: true,
             })
             .unwrap(),
         )
@@ -915,6 +964,7 @@ mod tests {
                 port: 2,
                 token: "new-instance".into(),
                 binary: None,
+                web_support: true,
             })
             .unwrap(),
         )
@@ -940,6 +990,7 @@ mod tests {
                     port: 1,
                     token: "instance".into(),
                     binary,
+                    web_support: true,
                 })
                 .unwrap(),
             )

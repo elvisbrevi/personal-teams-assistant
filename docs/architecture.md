@@ -37,6 +37,7 @@ src/                          core: pipeline, Graph adapters, LLM, knowledge, to
   app.rs                      host: Host/Shell, state, start/stop, OAuth, tunnel, settings, `run` entry
   app/gui.rs                  Tauri shell (`gui` feature): window, tray, the WebView's `command`
   app/headless.rs             headless shell: foreground, SIGTERM/Ctrl-C, `--start`
+  app/web.rs, app/web/         browser GUI, password sessions, isolated per-user host processes
   app/control.rs              profile paths, IPC channel (contract 1), single dispatcher, update
   app/cli.rs                  `pta`: help, parsing, argument validation, translation to IPC methods
   app/github.rs               GitHub App with Device Flow, clone/sync without a token in URL/argv
@@ -44,7 +45,7 @@ src/                          core: pipeline, Graph adapters, LLM, knowledge, to
   app/activity.rs             host scheduler, asynchronous activity IPC, shared Graph token owner
   main.rs, bin/pta.rs         binaries (`app::run`, `app::cli::run`)
 desktop/                      app resources: tauri.conf.json, Info.plist, capabilities/, icons/
-  ui/                         plain HTML/CSS/JS; calls `control::command` through invoke
+  ui/                         shared HTML/CSS/JS; transport.js selects Tauri invoke or authenticated web API
   skills/                     operating skill (canonical source)
 site/                         static landing outside the Cargo package: `public/` (HTML and CSS without
                               JavaScript or a build, `_headers`, `404.html`, GUI screenshots with
@@ -80,6 +81,58 @@ flowchart LR
 - **The CLI starts the host** (`host_executable`: sibling binary or `host-path.txt`) with `--host` in its own process group and waits for the descriptor. The host inherits `pta`'s environment (`NAME`/`NAME_FILE` credentials, `PTA_HEADLESS`).
 - **Service.** `runtime::serve` runs as a Tokio task inside the host. `app.rs::start` launches it, waits for `ready` (60 s) and then starts `cloudflared` if needed. `stop` kills the tunnel, sends `true` on the `watch` and waits 20 s before aborting. Closing the channel also counts as a stop.
 - **Activity registration.** `control::launch` owns a separate 30-second scheduler. Runs/refinements return immediately and run in a tracked task; reads remain available, and settings/identity mutations are blocked during a run. It does not need Teams reception or a public listener. `runtime::serve` returns its Graph handle on readiness so the recorder shares the existing OAuth refresh owner; a stopped service's handle can still read chats. Quitting the host aborts registration and recovers any in-flight write as uncertain.
+
+### Browser GUI and independent accounts
+
+`personal-teams-assistant --web` serves the same `desktop/ui` assets on a separate
+loopback listener (default `127.0.0.1:38656`), with an HTTPS origin provided by
+Cloudflare Tunnel or a TLS proxy. `pta web configure` writes private `web/settings.json`;
+`pta web users add/password/disable/enable/list` manages private `web/accounts.json`
+under an operator-local file lock. There is no public registration. Passwords are
+salted Argon2id hashes; values are supplied on protected stdin or the password form.
+In-memory random sessions expire, use HttpOnly/SameSite=Strict cookies (Secure and
+`__Host-` on HTTPS), and are invalidated by logout, password changes and account
+version changes. Every browser POST needs the exact configured Origin, and commands,
+logout and password changes also need a session-specific CSRF header. Host headers
+are checked; the portal never trusts forwarded identity headers or a browser profile selector.
+
+Each web account gets an opaque-ID directory `web/profiles/<id>/`, its own settings,
+map, SQLite data, file credentials and provider home, and a separate instance of
+the same headless host binary. `PTA_PROFILE_DIR` selects that explicit absolute
+profile; the existing desktop profile and Keychain identifiers remain unchanged
+when it is absent. New web profiles use DeepSeek, with their own key, by default.
+The portal and CLI scrub inherited app/provider credentials when launching isolated
+hosts, preserve proxy/CA configuration, and use private credential files on all OSes.
+These are application profiles under one trusted operator's OS account, not OS-level tenants.
+
+One account may instead use `pta web users add USER --current-profile` to operate
+the existing GUI/headless host and its actual data without a copy or re-login.
+The portal selects each IPC descriptor from the authenticated account, strips browser
+transport headers and uses the existing instance bearer. IPC itself still rejects
+Origin and never accepts cookies. A web command allowlist, immutable hosting/data
+paths, canonical repository roots and confined imports prevent access to another
+profile's data through GUI operations. Current-profile repositories already in the
+saved desktop map remain available. Tenant/user identities cannot be reused across
+profiles: portal operations and host start check them, and a duplicate new Microsoft
+login is logged out locally before an assistant can start.
+
+Graph URLs use optional `server.webhook_prefix` (empty and omitted for existing
+profiles, `/webhooks/<opaque-id>` for isolated profiles). The portal forwards only
+the matching notifications/lifecycle POST to that host's loopback service, with no
+browser cookies or administration token. All existing Graph batch checks remain
+in that host. One Cloudflare hostname covers the GUI and every user's callbacks.
+The prefix is canonical and validated; it does not change OAuth scopes or redirects.
+On a remote device the GUI offers the existing loopback redirect paste/forward
+workflow, while GitHub uses its existing device flow. Activities open in the web tab.
+
+The portal owns its own lock, starts enabled profile hosts for offline scheduling,
+remembers explicit Assistant Start/Stop state in private `web/resume/<id>` files,
+and stops only processes it started on exit. Disabling an account revokes access
+immediately and its portal-owned host on reconciliation. The setup helper
+`scripts/configure-web-cloudflare.py` needs a Cloudflare API token, creates a
+dedicated remotely managed Tunnel/DNS route, saves its connector token privately
+and refuses to replace unrelated DNS or Tunnel routes. The existing static landing
+and desktop tunnel remain separate. See the [web operating guide](../desktop/skills/personal-teams-assistant/references/web-access.md).
 
 ### Headless host (Linux and servers)
 
@@ -138,7 +191,7 @@ Invariants:
 
 | Section | Relevant fields |
 | --- | --- |
-| `server` | `bind` (must be loopback), `public_url` (HTTPS origin), `data_dir`, `cloudflare_tunnel` |
+| `server` | `bind` (must be loopback), `public_url` (HTTPS origin), `data_dir`, `cloudflare_tunnel`, optional canonical `webhook_prefix` for portal profiles |
 | `graph` | `tenant_id`, `client_id`, `user_id` (UUID; nil until login), `discover_all_chats` or `allowed_chats`, `self_chat {id,user_id,enabled_at}`, `channels` (legacy, must be empty) |
 | `llm` | `style`; `language` (`es` by default or `en`: the language of everything sent to Teams, overrides the style); `chain`: ordered list `{provider, model, effort, enabled}` (`codex`, `claude`, `deepseek`; one of each, at least one active). Legacy `provider`/`model`: apply only with an empty `chain` (DeepSeek, effort `max`) |
 | `policy` | `dry_run`, `greeting`, `max_context_chars` (256–32000), `max_message_age_seconds` (30–3600), `sensitive_patterns`, `allowed_senders`; `max_answer_chars` and `max_detailed_answer_chars` are kept for compatibility but no longer applied |
@@ -305,7 +358,7 @@ To add an operation: a method in `control::operate` (window or browser only thro
 
 ## 11. GUI
 
-`ui/` is plain HTML/CSS/JS without a build, in English, with a sidebar and a light/dark theme following the system. Everything goes through `invoke('command', {request})` with the same methods as the CLI; there are no GUI-only IPC methods. It respects the CSP in `tauri.conf.json`: no inline styles or scripts (only CSSOM properties from JS) and no `innerHTML`.
+`ui/` is plain HTML/CSS/JS without a build, in English, with a sidebar and a light/dark theme following the system. `transport.js` selects Tauri `invoke('command', {request})` or same-origin `/api/control` with the existing contract. The browser reuses every tab and adds account sign-out/password controls, remote Microsoft login and phone-sized navigation. There are no GUI-only IPC methods. It respects the CSP in `tauri.conf.json`: no inline styles or scripts (only CSSOM properties from JS) and no `innerHTML`. The portal's CSP additionally permits same-origin fetch; session cookies are never available to JS.
 
 - **Tray/menu bar**: «Open settings and chat», a single item that reads «Start assistant» while stopped and «Stop assistant» while running (disabled «Starting assistant…»/«Stopping assistant…» in between), and «Quit». The icon carries a status dot drawn over the app icon (green running, amber starting or stopping, none stopped) and the tooltip names the state. Both follow `DesktopState.phase` (`AssistantPhase`: a `watch` that `start`/`stop` and the service ending on its own publish), so changes made from the window or `pta` show there too. A failed tray start/stop appears in the window when it is open, otherwise as a native notification.
 - **Home** (default tab): the assistant's state (running, observing, Teams pending, stopped) with Start/Restart/Stop; tiles for the Microsoft account, mode, reception, tunnel, models, sources and personal chat; «Setup», computed from the snapshot (required credentials — `GRAPH_WEBHOOK_SECRET` and `STATE_ENCRYPTION_KEY` count as ready because they are generated at start —, an active model, the Entra registration with the same rules as `validate_teams_setup`, account, public URL, at least one enabled source with external processing and an audience, assistant started and, optionally, sending on); and the recent activity from `audit`. The sidebar flags errors or uncertain sends of the last 24 h.

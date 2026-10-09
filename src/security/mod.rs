@@ -15,6 +15,16 @@ use subtle::ConstantTimeEq;
 
 static KEYRING_PROFILE: OnceLock<RwLock<Option<String>>> = OnceLock::new();
 static FILE_STORE: OnceLock<RwLock<Option<PathBuf>>> = OnceLock::new();
+static PREFER_FILE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Isolated web profiles must not fall back to the desktop account's OS keychain.
+pub fn prefer_file_credentials(prefer: bool) {
+    PREFER_FILE.store(prefer, std::sync::atomic::Ordering::Relaxed);
+}
+fn prefers_files() -> bool {
+    !cfg!(any(target_os = "macos", target_os = "windows"))
+        || PREFER_FILE.load(std::sync::atomic::Ordering::Relaxed)
+}
 
 /// Select the one local profile whose credentials may be read by this process.
 pub fn keyring_profile(profile: Option<&str>) -> Result<()> {
@@ -49,7 +59,6 @@ pub fn file_credential_store(dir: Option<&Path>) {
         .unwrap() = dir.map(Path::to_path_buf);
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 fn file_store_path(profile: &str, name: &str) -> Option<PathBuf> {
     FILE_STORE
         .get()
@@ -118,6 +127,12 @@ fn keyring_entry(profile: &str, name: &str) -> Result<keyring::Entry> {
 pub fn put_desktop_secret(profile: &str, name: &str, value: &str) -> Result<()> {
     validate_profile(profile)?;
     validate_secret(name, value)?;
+    if prefers_files() {
+        return file_write(
+            &file_store_path(profile, name).context("credential store is unavailable")?,
+            value,
+        );
+    }
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     {
         keyring_entry(profile, name)?.set_password(value)?;
@@ -133,6 +148,11 @@ pub fn put_desktop_secret(profile: &str, name: &str, value: &str) -> Result<()> 
 pub fn delete_desktop_secret(profile: &str, name: &str) -> Result<()> {
     validate_profile(profile)?;
     validate_name(name)?;
+    if prefers_files() {
+        return file_delete(
+            &file_store_path(profile, name).context("credential store is unavailable")?,
+        );
+    }
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     {
         keyring_entry(profile, name)?.delete_credential()?;
@@ -166,6 +186,12 @@ pub fn secret_source(name: &str) -> Result<Option<&'static str>> {
     }
     if std::env::var_os(name).is_some() {
         return Ok(Some("environment"));
+    }
+    if prefers_files() {
+        return Ok(active_profile()
+            .and_then(|profile| file_store_path(&profile, name))
+            .filter(|path| path.is_file())
+            .map(|_| "system"));
     }
     #[cfg(target_os = "macos")]
     if let Some(profile) = active_profile() {
@@ -216,6 +242,14 @@ pub fn secret(name: &str) -> Result<String> {
     } else if let Ok(value) = std::env::var(name) {
         value
     } else {
+        if prefers_files() {
+            let path = active_profile()
+                .and_then(|profile| file_store_path(&profile, name))
+                .with_context(|| format!("missing credential: {name}"))?;
+            let value = file_read(&path)?.with_context(|| format!("missing credential: {name}"))?;
+            validate_secret(name, &value)?;
+            return Ok(value);
+        }
         #[cfg(any(target_os = "macos", target_os = "windows"))]
         {
             let profile = active_profile().context(format!("missing credential: {name}"))?;

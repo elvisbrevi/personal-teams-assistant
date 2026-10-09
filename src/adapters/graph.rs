@@ -1023,10 +1023,7 @@ impl Graph {
                 return Err(error);
             }
         };
-        let callback = format!(
-            "{}/graph/notifications",
-            self.config.server.public_url.trim_end_matches('/')
-        );
+        let callback = self.config.graph_callback(false);
         for s in &remote {
             let resource = s["resource"].as_str().unwrap_or("").trim_start_matches('/');
             let locally_owned = self
@@ -1121,7 +1118,7 @@ impl Graph {
                     }
                 }
             } else {
-                let payload = json!({"changeType":"created","resource":resource,"notificationUrl":format!("{}/graph/notifications",self.config.server.public_url.trim_end_matches('/')),"lifecycleNotificationUrl":format!("{}/graph/lifecycle",self.config.server.public_url.trim_end_matches('/')),"includeResourceData":false,"expirationDateTime":expires.to_rfc3339(),"clientState":self.client_state});
+                let payload = json!({"changeType":"created","resource":resource,"notificationUrl":self.config.graph_callback(false),"lifecycleNotificationUrl":self.config.graph_callback(true),"includeResourceData":false,"expirationDateTime":expires.to_rfc3339(),"clientState":self.client_state});
                 match self
                     .request(Method::POST, "subscriptions", Some(payload), false)
                     .await

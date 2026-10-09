@@ -306,3 +306,39 @@ button.ref small { font-weight: 400; color: var(--muted); text-decoration: none;
 #activity-history th, #activity-history td { padding: .6rem; text-align: left; border-bottom: 1px solid var(--border); vertical-align: top; }
 #activity-history th { white-space: nowrap; }
 .table-scroll { overflow-x: auto; }
+
+.web-account { display: flex; align-items: center; gap: .5rem; flex-wrap: wrap; margin-top: .6rem; }
+.web-account > span { overflow-wrap: anywhere; font-size: .85rem; color: var(--muted); }
+.login-page { display: grid; min-height: 100dvh; place-items: center; padding: 1rem; }
+.login-card { width: min(100%, 420px); padding: 2rem; margin: 0; }
+.login-card .brand div { display: block; }
+.login-card h1 { margin-top: 1.4rem; }
+.login-card button { width: 100%; min-height: 44px; }
+dialog { width: min(560px, calc(100vw - 2rem)); max-height: calc(100dvh - 2rem); overflow-y: auto; background: var(--surface); color: var(--text); border: 1px solid var(--border); border-radius: 14px; padding: 1.5rem; }
+dialog::backdrop { background: #0007; }
+dialog p { overflow-wrap: anywhere; }
+@media (max-width: 680px) {
+  .sidebar { flex-wrap: wrap; overflow: visible; }
+  .sidebar nav { flex: 1; justify-content: space-around; min-width: 0; }
+  .sidebar .brand { display: none; }
+  .sidebar-foot { display: flex; width: 100%; align-items: center; justify-content: space-between; }
+  .web-account { margin-top: 0; flex-wrap: nowrap; min-width: 0; }
+  .web-account > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .web-account button { min-height: 40px; }
+  input:not([type=checkbox]), textarea, select { font-size: 16px; }
+  nav button { min-width: 44px; min-height: 44px; }
+  nav button { flex: 1; flex-direction: column; gap: .15rem; padding: .35rem .1rem; }
+  nav button span { position: static; width: auto; height: auto; overflow: visible; clip: auto; font-size: .65rem; }
+  .grid { grid-template-columns: 1fr; }
+  .columns, .tiles { grid-template-columns: 1fr; }
+  .panel { padding: 1rem; min-width: 0; }
+  .hero-state { align-items: flex-start; }
+  .hero .actions { width: 100%; }
+  .toolbar { align-items: stretch; }
+  .segmented { flex-wrap: wrap; }
+  .chain-row { grid-template-columns: 1fr; }
+  .chain-row .rank { grid-column: auto; }
+  .history { max-height: 55dvh; min-height: 240px; }
+  .bubble { max-width: 95%; }
+  .toast { top: auto; bottom: 1rem; }
+}

@@ -6,6 +6,7 @@
   <meta name="color-scheme" content="light dark">
   <title>Personal Teams Assistant</title>
   <link rel="stylesheet" href="style.css">
+  <script src="transport.js" defer></script>
   <script src="app.js" defer></script>
 </head>
 <body>
@@ -36,6 +37,7 @@
       </nav>
       <div class="sidebar-foot">
         <span id="status" class="pill muted" role="status"><i></i><span>Loading…</span></span>
+        <div id="web-account" class="web-account" hidden><span id="web-username"></span><button id="web-logout" class="secondary small">Sign out</button></div>
       </div>
     </aside>
 
@@ -85,6 +87,14 @@
           <h1>Settings</h1>
           <p>Changes are saved together with the bar at the bottom. If the assistant is running, it restarts to apply them.</p>
         </header>
+        <div id="panel-web-account" class="panel" hidden>
+          <h2>Your web account</h2>
+          <p class="hint">Your configuration, Teams account, credentials and history belong to your profile. Changing the password signs out your other sessions.</p>
+          <form id="web-password-form">
+            <div class="grid"><label>Current password<input id="web-current-password" type="password" autocomplete="current-password" required maxlength="256"></label><label>New password<input id="web-new-password" type="password" autocomplete="new-password" required minlength="12" maxlength="256"></label></div>
+            <button type="submit" class="secondary">Change password</button>
+          </form>
+        </div>
         <div class="panel" id="panel-credentials">
           <h2>Credentials</h2>
           <p class="hint">Their values are never shown. Type in a field only to store or replace a credential; it applies right away. Environment variables and secret files take priority.</p>
@@ -109,6 +119,7 @@
         </div>
         <div class="panel" id="panel-server">
           <h2>Public URL and tunnel</h2>
+          <p id="web-hosting-note" class="hint" hidden>The portal operator manages this profile's address and tunnel. Your assistant uses its own Teams callbacks through the same public address.</p>
           <p class="hint">Microsoft Graph delivers messages to a public HTTPS URL that must reach the local port. For a tunnel managed in Cloudflare, turn on the option, store <code>CLOUDFLARE_TUNNEL_TOKEN</code> in Credentials and leave the local file empty; you can also use a local file with a final 404 rule. If another supervisor runs the tunnel, leave both off.</p>
           <div class="grid">
             <label>Public HTTPS URL<input id="public-url" class="cfg" placeholder="https://assistant.example.com" spellcheck="false"></label>
@@ -297,5 +308,15 @@
       </div>
     </main>
   </div>
+  <dialog id="web-microsoft-dialog" aria-labelledby="web-microsoft-title">
+    <h2 id="web-microsoft-title">Connect your Microsoft account</h2>
+    <p>Open Microsoft sign-in on this device. When it finishes at a localhost address that cannot open, copy that full address and paste it below.</p>
+    <p><a id="web-microsoft-link" target="_blank" rel="noopener noreferrer">Open Microsoft sign-in</a></p>
+    <form id="web-microsoft-form">
+      <label>Final redirect address<textarea id="web-microsoft-redirect" rows="3" autocomplete="off" spellcheck="false" required></textarea></label>
+      <p id="web-microsoft-status" class="hint" role="status"></p>
+      <div class="actions"><button id="web-microsoft-finish" type="submit">Finish sign-in</button><button id="web-microsoft-cancel" type="button" class="secondary">Cancel</button></div>
+    </form>
+  </dialog>
 </body>
 </html>

@@ -8,6 +8,7 @@ description: Operating Personal Teams Assistant. Use this skill to configure the
 3. **Operate.** Load only the relevant reference and carry out the whole request:
    - Configuration, credentials, mode, import or language models (Codex/Claude CLIs, DeepSeek and their fallback order): [configuration.md](references/configuration.md).
    - Start, stop, windows, tunnel, headless/Linux host or host recovery: [lifecycle.md](references/lifecycle.md).
+   - Web GUI, account isolation, mobile access or Cloudflare publishing: [web-access.md](references/web-access.md).
    - OAuth, repositories, sources (including the user's own Teams messages) or the personal chat: [auth-and-knowledge.md](references/auth-and-knowledge.md).
    - Azure DevOps Wiki (list/search/read, its own source and permissions): [azure-wiki.md](references/azure-wiki.md). Needs a host that announces Wiki support (0.3.0 or later).
    - Simulation, activity reviews, diagnostics and the audit log: [tests-and-diagnostics.md](references/tests-and-diagnostics.md).

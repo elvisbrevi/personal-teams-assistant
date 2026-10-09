@@ -46,6 +46,7 @@ gui = ["dep:tauri", "dep:tauri-plugin-opener", "dep:tauri-build", "dep:notify-ru
 anyhow = "1"
 async-trait = "0.1"
 axum = "0.8"
+argon2 = "0.5"
 aes-gcm-siv = "0.11"
 base64 = "0.22"
 chrono = { version = "0.4", features = ["serde"] }

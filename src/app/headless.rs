@@ -57,7 +57,7 @@ pub(crate) fn run(host_lock: fs::File, start_service: bool) -> Result<()> {
     })
 }
 
-async fn shutdown_signal() {
+pub(super) async fn shutdown_signal() {
     #[cfg(unix)]
     {
         if let Ok(mut terminate) =
