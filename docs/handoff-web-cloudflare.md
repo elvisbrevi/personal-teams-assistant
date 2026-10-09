@@ -1,5 +1,78 @@
 # Handoff: web portal and Cloudflare publication
 
+## Current continuation status
+
+**Cloudflare configuration is complete; the Mac origin is not started yet.**
+The user updated the token actually loaded by this environment, ID
+`005cf5b38ffa573d4edfe8aae87886a4`. The setup helper then succeeded.
+Do not ask for permission edits or a replacement token again. An earlier
+credential mismatch involved a different dashboard token, ID
+`6bd42bbaa798a84c4a1e51b6cb47cf73`; that diagnostic issue is resolved by the
+user's update to the credential we actually use.
+
+Verified Cloudflare resources:
+
+- Remotely managed dedicated tunnel: `personal-teams-assistant-web`,
+  ID `08cce5df-23a0-45e3-92f6-e65f2d8abe3e`.
+- Proxied CNAME: `assistant.elvisbrevi.cl` points to
+  `08cce5df-23a0-45e3-92f6-e65f2d8abe3e.cfargotunnel.com`.
+- Exact ingress: `assistant.elvisbrevi.cl` →
+  `http://127.0.0.1:38656`, preserving the public Host header, then
+  `http_status:404` catch-all.
+- Dedicated connector credential saved privately at
+  `/workspace/.pta-web-secrets/cloudflared-token` (0600, parent 0700).
+  Its value has never been printed or stored in the repository.
+- Tunnel status: **inactive**, **0 connector connections**.
+- Cloudflare reports an **active universal certificate pack** for
+  `elvisbrevi.cl` and `*.elvisbrevi.cl`, covering this subdomain.
+
+The old Mac tunnel and landing were not modified. No production web account
+was created. No Teams sends or assistant startup were performed. DNS and the
+certificate alone do not establish an operational portal.
+
+The user selected **their Mac with the installed application** as the permanent
+origin and **`elvis --current-profile`** as the initial account. These choices are
+settled. This cloud session has no execution access to the Mac. Do not migrate
+the cloud development profile. Complete the local install/account/services
+using the [Mac deployment guide](web-macos-deployment.md). Its helper safely
+reuses the existing dedicated tunnel and obtains the connector token privately
+on the Mac. Check compatibility before reusing a running older GUI host; see
+the guide's capability check and transition instructions.
+
+The implementation was fetched and fast-forwarded on `work` to
+[`926007b8e67ff543441915b3687a40e3621837d0`](https://github.com/elvisbrevi/personal-teams-assistant/commit/926007b8e67ff543441915b3687a40e3621837d0).
+The integration into `main` also includes this updated handoff and the new Mac
+deployment guide. Continue from `origin/main` for the complete deployment
+documentation, preserving any subsequent working-tree changes.
+
+The Linux runtime build passed:
+
+```sh
+source /workspace/.cloud-setup/pta-env.sh
+cargo build --locked --no-default-features --features reqwest/rustls-tls-native-roots --bins
+```
+
+Both sibling binaries are in `target/debug`. A real-process smoke check in a
+temporary isolated profile passed: `/login` 200, unauthenticated
+`/api/session` 401, unrelated Host 421, and CSP, nosniff, no-referrer and no-store
+headers present. It was shut down and removed; no Graph sends were made.
+The unchanged development profile's web account list is empty. For integration
+into `main`, all required local gates passed again: formatting, Clippy with and
+without GUI, 129 unit and 39 integration tests with GUI, 127 unit and 39
+integration tests without GUI, and the JavaScript syntax build. The Mac guide's
+shell/Python syntax and private plist generation were checked in temporary test
+paths, including refusal to overwrite existing services. Nothing was installed
+on the Mac from this session.
+
+The zone is `aa9e93243e63fe077f154b6a3fdaac55`; its account is
+`26f1f3a05cbfe51ade90a57362c15fad`. Recheck environment readiness on continuation.
+The last status reported the credential ready and HTTP policy enforced.
+The startup policy lacks `assistant.elvisbrevi.cl` and tunnel-edge TCP grants.
+External HTTPS through this cloud proxy still fails CONNECT with 403, and no
+connector was started. Use the selected Mac's network for the real origin and
+connector, then verify `https://assistant.elvisbrevi.cl/login`, login/logout and
+the existing profile from a phone. **End-to-end HTTPS remains unverified.**
+
 ## Goal and authorization
 
 The user wants all existing desktop GUI functions available from a phone through
@@ -16,10 +89,10 @@ or credentials. Communicate with the user in Spanish; repository content is Engl
 ## Workspace and instructions
 
 - Repository: `/workspace/personal-teams-assistant`.
-- Branch: `work`; remote continuation branch: `origin/work`. The implementation
-  and this handoff are committed together for the user-requested push. In a fresh
-  checkout, fetch and check out `origin/work` rather than starting from `main`.
-  Preserve any further working-tree changes. No PR was created.
+- Implementation branch: `work`; complete continuation branch after integration:
+  `origin/main`. The user authorized merging and pushing to `main`, including the
+  updated handoff and Mac deployment guide. Preserve further working-tree changes.
+  No PR was created.
 - Read `AGENTS.md` and `docs/architecture.md` before changing code.
 - Read `desktop/skills/personal-teams-assistant/SKILL.md` before operating the app.
   Its `references/web-access.md` is the deployment and account-management guide.
@@ -101,10 +174,12 @@ Do not repeat all completed checks merely because this is a new session. If code
 changes, run the appropriate checks and all gates required by `AGENTS.md` before
 delivering the new implementation.
 
-## Exact publication status and blocker
+## Original pre-deployment status (historical)
 
-**The portal has not been publicly deployed. No new Cloudflare DNS record or tunnel
-has been created by this work. No production web account has been created.**
+At the original handoff, the portal had not been publicly deployed and no new
+Cloudflare DNS record, tunnel or production web account had been created. The
+current status above supersedes this historical section: the dedicated tunnel
+and DNS are now configured, with origin startup still pending.
 
 The user created/configured `CLOUDFLARE_API_TOKEN`, but the previous running
 environment did not receive it. Both the direct environment and the setup script
@@ -123,84 +198,49 @@ from environment secret bindings or protected files, never chat, argv, git or lo
 
 ## Next steps
 
-1. Fetch/check out the `work` branch and confirm that the implementation and new
-   files are present. Inspect the new environment's credential readiness and policy.
-   Check token presence by name only; never print its value. If it is still
-   unavailable, explain that exact blocker.
+1. Work on the selected Mac with the existing application owner's OS account.
+   Preserve the profile, databases, credential names, Microsoft session and
+   encryption key. The cloud development workspace is not the production origin.
+   Use the [Mac deployment guide](web-macos-deployment.md); no new hostname,
+   tunnel or username decision is needed.
 
-2. Read the deployment guide and inspect the chosen profile with the new CLI's
-   local `web status` / `web users list` commands. These are local admin operations.
-   Use the built binaries in `target/debug` if available, not an older installed CLI.
-   Avoid unrelated start/stop operations on the existing desktop profile.
+2. Install the web-capable sibling binaries from the verified `work` commit into
+   the dedicated runtime directory. Inspect the existing profile with
+   `web status` and `web users list`. Check `web_support` and
+   `activity_registration_support` before reusing a running desktop host.
+   The guide explains transitioning from an older host without replacing its
+   data. Preserve the assistant's prior Start/Stop state.
 
-3. Run the authorized Cloudflare setup when the API token is ready:
+3. Run the idempotent Cloudflare helper on the Mac to obtain the existing
+   dedicated tunnel's connector credential into a private service directory.
+   It should reuse `08cce5df-23a0-45e3-92f6-e65f2d8abe3e`, preserve the verified
+   routes and proxied CNAME, and write the credential with mode 0600. Use a
+   protected API-token file, environment binding or the guide's private terminal
+   prompt. Never put either API or connector token values in chat, argv or Git.
+   Do not use `CLOUDFLARE_TUNNEL_TOKEN` from the old desktop tunnel.
 
-   ```sh
-   cd /workspace/personal-teams-assistant
-   python3 scripts/configure-web-cloudflare.py \
-     --domain elvisbrevi.cl --hostname assistant.elvisbrevi.cl \
-     --token-file /workspace/.pta-web-secrets/cloudflared-token
-   ```
+4. Configure the portal's HTTPS public URL and create `elvis --current-profile`
+   if that account does not already exist. Choose its password through protected
+   stdin using the guide's terminal prompt. Do not ask for a password in chat,
+   copy the existing profile, overwrite an account, or change Graph scopes.
 
-   The helper creates or reuses the dedicated remotely managed tunnel named
-   `personal-teams-assistant-web`, configures the origin
-   `http://127.0.0.1:38656`, preserves the public Host header, adds a 404 catch-all,
-   writes the new connector token privately (0600), and creates a proxied CNAME.
-   It refuses to replace unrelated DNS or different tunnel routes. Read API errors
-   safely; never dump API bodies or credentials. The token output file belongs
-   outside the repository. The command above is for this workspace; use a durable
-   private service directory when installing on a permanent host.
+5. Start the Mac's two dedicated LaunchAgents for the portal and connector.
+   They preserve the desktop tunnel's separate service. Confirm the dedicated
+   tunnel has active connections and a healthy status through Cloudflare.
 
-4. Select/confirm an always-on origin host and durable service lifecycle before
-   claiming permanent publication. The managed development workspace is not proven
-   to be a permanent production server. Cloudflare Tunnel supplies access/TLS, but
-   the Rust portal and per-user assistants still need a running origin. The user
-   has not yet selected a permanent server. Preserve existing data and credentials
-   rather than silently migrating the default profile to another machine.
+6. Verify `https://assistant.elvisbrevi.cl/login` from the Mac and a phone:
+   TLS verification enabled, HTTP 200, expected security headers, authenticated
+   existing settings/history, Secure/HttpOnly/SameSite cookie and logout.
+   Earlier synthetic isolation checks passed; do not send real Teams messages
+   as a smoke test. If optional Cloudflare Access is added later, exact
+   `/webhooks/*` paths must bypass interactive Access.
 
-5. Configure the portal's own public URL with JSON on stdin:
-
-   ```sh
-   target/debug/pta web configure <<'JSON'
-   {"bind":"127.0.0.1:38656","public_url":"https://assistant.elvisbrevi.cl","session_hours":12}
-   JSON
-   ```
-
-   Create the initial web account using a password through protected stdin (12–256
-   characters). Obtain the username/profile choice and a secure password setup if
-   needed; do not invent a public weak password or ask for a password in chat.
-   `--current-profile` is available for the owner's existing GUI/history; ordinary
-   accounts create isolated profiles for their own Teams identities.
-
-6. Start the portal and its dedicated connector as separately managed services:
-
-   ```sh
-   target/debug/personal-teams-assistant --web
-   # Separate service; only the credential path goes in the command environment:
-   TUNNEL_TOKEN_FILE=/workspace/.pta-web-secrets/cloudflared-token cloudflared tunnel run
-   ```
-
-   The previous workspace installed Cloudflared at
-   `/workspace/.cloud-setup/bin/cloudflared`. Check availability and supported
-   `TUNNEL_TOKEN_FILE` configuration again. Do not supply token contents in argv.
-
-7. Diagnose real network failures against the supported policy; do not bypass it.
-   The old HTTP policy allowed `api.cloudflare.com`, but did not yet allow
-   `assistant.elvisbrevi.cl`. It had no verified Cloudflare edge TCP grants.
-   A new environment may differ. Tunnel edge connectivity and external HTTPS
-   verification require the applicable permitted routes. Do not claim success from
-   DNS setup alone. If Cloudflare Access is used, Graph's exact `/webhooks/*` paths
-   must bypass interactive Access; the application still authenticates web users.
-
-8. Verify `https://assistant.elvisbrevi.cl/login`, expected security headers,
-   HTTPS cookies, authenticated mobile access and independent user state. Reuse
-   synthetic checks for isolation; do not send real Teams messages as a smoke test.
-   Report precisely which stages are complete and any actual remaining blocker.
+7. Report the actual origin and HTTPS results, and update this handoff. Until
+   those checks pass, describe Cloudflare configuration as complete and the
+   operational web publication as pending.
 
 ## Last user request
 
-The user requested this handoff to continue in another session that loads the new
-environment variables, then explicitly requested a Git push. This document is the
-continuation context. The goal remains public web access with independent users,
-not a new implementation from scratch. Pushing the code does not publish the portal;
-the Cloudflare/origin setup above is still pending.
+The user authorized merging `work` and pushing to `main`. Cloudflare setup is
+complete; the Mac origin/account/services and end-to-end HTTPS verification remain
+pending as described above. Publishing the Git branch does not start the portal.
