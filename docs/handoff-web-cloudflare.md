@@ -42,13 +42,65 @@ The older
 [`0.6.8` crate](https://crates.io/crates/personal-teams-assistant/0.6.8)
 lacks these web components. Use `0.6.9` for a registry installation that needs
 the web portal. Publication does not install or start the Mac portal or tunnel:
-service installation/startup and end-to-end HTTPS verification at
-`assistant.elvisbrevi.cl` remain pending under the
+service installation/startup and HTTPS verification were completed separately
+in the Mac continuation below, following the
 [Mac deployment guide](web-macos-deployment.md).
 
-## Current continuation status
+## Mac deployment status
 
-**Cloudflare configuration is complete; the Mac origin is not started yet.**
+**The portal is running and reachable over HTTPS as of 2026-10-09.**
+The user installed the published crate and started the desktop app. Diagnostics
+found the desktop Teams service running on `127.0.0.1:3000`, but no portal
+listener on `38656`, no web account and no dedicated web LaunchAgents. The
+dedicated Cloudflare tunnel was inactive. Starting the desktop app alone does
+not start `personal-teams-assistant --web`.
+
+The Mac continuation configured the web origin as
+[`https://assistant.elvisbrevi.cl`](https://assistant.elvisbrevi.cl/login),
+retrieved the existing dedicated connector credential into the private file
+`~/Library/Application Support/dev.personalteams.assistant/web/runtime/cloudflared-token`,
+and installed and started these user LaunchAgents:
+
+- `dev.personalteams.assistant.web`: the already installed
+  `~/.cargo/bin/personal-teams-assistant --web`.
+- `dev.personalteams.assistant.web.tunnel`: the existing `cloudflared` with
+  `--token-file` pointing to that private connector file.
+
+Both services were verified running. Cloudflare reported the dedicated tunnel
+as **healthy**, with **4 connections**. DNS and ingress were read back and
+already correct; no Cloudflare routes or the desktop Teams tunnel were changed.
+
+The `elvis` account was created with `--current-profile`, with the password
+chosen in a private Mac dialog and supplied to `pta` on stdin. No password or
+session token was printed, written to documentation or put in command arguments.
+The account reuses the existing desktop profile, Microsoft session and data.
+
+Verified over HTTPS, with TLS verification enabled:
+
+- `/login` returned 200 and the sign-in form, also visibly confirmed in a browser.
+- Unauthenticated `/api/session` returned 401.
+- Sign-in as `elvis` returned 200; the authenticated session identified the
+  existing current profile.
+- The authenticated panel, `/app.js` and `/transport.js` returned 200.
+- The session cookie had the `__Host-` name, Secure, HttpOnly and SameSite=Strict.
+- CSP, nosniff, no-referrer and no-store headers were present.
+
+The desktop host and Teams tunnel remained running, with one active Graph
+subscription and the same configuration revision. No Teams messages were sent
+for verification. Phone QA and a logout/revocation check remain unverified.
+The Mac must remain awake and connected; these LaunchAgents run while the
+ordinary application owner's macOS account is logged in.
+
+A request using Python's default HTTP User-Agent received Cloudflare error
+1010 because Browser Integrity Check is enabled. A browser User-Agent reached
+the origin normally once the connector started. Browser Integrity Check was
+left enabled.
+
+## Cloud continuation status (historical)
+
+**At the end of the cloud session, Cloudflare configuration was complete and
+the Mac origin was not started yet.** The Mac deployment status above supersedes
+the historical tunnel state and pending Mac installation in this section.
 The user updated the token actually loaded by this environment, ID
 `005cf5b38ffa573d4edfe8aae87886a4`. The setup helper then succeeded.
 Do not ask for permission edits or a replacement token again. An earlier
