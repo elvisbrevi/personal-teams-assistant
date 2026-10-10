@@ -11,8 +11,9 @@ Mac awake, connected and logged into the ordinary application owner's macOS acco
 These steps run **on that Mac**, without a `PTA_PROFILE_DIR` override. They update
 the existing Cargo host/CLI together and preserve Tauri, data, credentials,
 Microsoft OAuth/scopes, the encryption key and separate desktop Teams tunnel.
-The October 10 Mac rollout is complete; its live Mac results and deferred phone
-check are recorded in the latest handoff. The earlier cloud session had no Mac
+The October 10 Mac rollout is complete; its live Mac results, renewed Microsoft
+MFA, verified web Start and remaining phone checks are recorded in the latest
+handoff. The earlier cloud session had no Mac
 execution channel.
 
 ## Inspect and build before the transition
@@ -37,7 +38,7 @@ export PTA_ACCESS_RUNTIME_DIR="$PTA_ACCESS_PROFILE_DIR/web/runtime/access-build"
 export PTA_ACCESS_SOURCE_DIR="$(mktemp -d /tmp/pta-access-source.XXXXXX)"
 git clone --branch codex/cloudflare-access-rollout \
   https://github.com/elvisbrevi/personal-teams-assistant "$PTA_ACCESS_SOURCE_DIR"
-git -C "$PTA_ACCESS_SOURCE_DIR" checkout --detach beee74ae1608537239a78f8fdac8a043ea8a735a
+git -C "$PTA_ACCESS_SOURCE_DIR" checkout --detach 5607d2bb936a9e292eccee387092f65c0a6fa984
 git -C "$PTA_ACCESS_SOURCE_DIR" rev-parse HEAD
 cargo install --path "$PTA_ACCESS_SOURCE_DIR" --locked --root "$PTA_ACCESS_RUNTIME_DIR"
 "$PTA_ACCESS_RUNTIME_DIR/bin/pta" --version
@@ -45,7 +46,7 @@ cargo install --path "$PTA_ACCESS_SOURCE_DIR" --locked --root "$PTA_ACCESS_RUNTI
 "$PTA_ACCESS_RUNTIME_DIR/bin/pta" --json web status
 ```
 
-The pinned [Access implementation commit](https://github.com/elvisbrevi/personal-teams-assistant/commit/beee74ae1608537239a78f8fdac8a043ea8a735a)
+The pinned [Access implementation commit](https://github.com/elvisbrevi/personal-teams-assistant/commit/5607d2bb936a9e292eccee387092f65c0a6fa984)
 passed all project gates. Require `web_access_support: true`. Verify the source
 commit against the handoff
 before installation. The old 0.6.9 registry package has no Access support; no new

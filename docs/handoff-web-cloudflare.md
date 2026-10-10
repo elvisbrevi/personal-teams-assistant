@@ -4,10 +4,12 @@
 
 **Cloudflare Access with the dedicated GitHub OAuth App is configured and
 installed on the Mac. Real Mac sign-in, local profile access, logout, immediate
-replay rejection and fresh sign-in passed. Physical-phone QA remains explicitly
-deferred by the owner.** The independent Microsoft connectivity probe failed;
-its stored session, credentials and original configuration were preserved. Do not
-claim live Graph connectivity or phone verification from the Access results.
+replay rejection and fresh sign-in passed. The owner's phone screenshot confirms
+authenticated Home access as `elvis`. Microsoft MFA renewal is complete, live
+Graph account verification passes and web Start was verified in observation
+mode.** The owner also reported that web Start now succeeds. Complete phone
+Settings/activity-history/logout QA and live Teams delivery remain unverified;
+do not infer those results from Home access or service startup.
 
 The workspace began clean on `work`, at
 [`3674b80`](https://github.com/elvisbrevi/personal-teams-assistant/commit/3674b80).
@@ -32,7 +34,7 @@ login. The new source build retains package version 0.6.9; check the advertised
 
 Configuration and deployment are complete on the owner's Mac as `elvis`, without
 `PTA_PROFILE_DIR`. The tested deployed source is
-[`beee74ae1608537239a78f8fdac8a043ea8a735a`](https://github.com/elvisbrevi/personal-teams-assistant/commit/beee74ae1608537239a78f8fdac8a043ea8a735a)
+[`5607d2bb936a9e292eccee387092f65c0a6fa984`](https://github.com/elvisbrevi/personal-teams-assistant/commit/5607d2bb936a9e292eccee387092f65c0a6fa984)
 on [`codex/cloudflare-access-rollout`](https://github.com/elvisbrevi/personal-teams-assistant/tree/codex/cloudflare-access-rollout).
 The unchanged package version is 0.6.9; the published registry package still has
 the password portal. Use the pinned source and `web_access_support`, not the
@@ -95,8 +97,10 @@ The original configuration/knowledge-map fingerprints and revision remain
 unchanged. Credential names and system-store origins, Keychain service,
 `STATE_ENCRYPTION_KEY`, Microsoft PKCE/scopes and `data_dir` were preserved.
 Microsoft and repository GitHub still report locally connected. The assistant
-was **stopped before cutover and remains stopped**, with activity registration
-disabled; neither Teams nor a model was invoked as a test. The current host is
+was stopped before cutover, briefly started under observation with a synthetic
+sender filter for the verification below, then stopped again. Its original
+configuration/revision was restored, with activity registration disabled. No
+Teams message was sent and no model was invoked as a live test. The current host is
 native Tauri (`headless: false`); the portal reuses that host through private IPC.
 
 Existing service labels and plists are retained:
@@ -116,6 +120,12 @@ are 0600 under a private directory and are never in Git or this handoff.
 accounts/settings JSON, the portal plist, installed sibling binaries and preflight
 metadata. Restore that web JSON/binary pair together if rollback is required;
 never replace profile data or the encryption key.
+
+The latest binary replacement and full-gate results are recorded separately in
+`microsoft-renewal-deployed.json` and `microsoft-renewal-*.log`. Its private sibling
+binary backup is recorded there; `microsoft-start-verification.json` records the
+successful web Start, account read and restored final configuration. Earlier
+`deployed-source.json` describes the preceding Access rollout.
 
 ### Graph callbacks
 
@@ -156,15 +166,34 @@ assistant intentionally stopped, live Teams callback delivery was not tested.
   across portal restart. Access logout displayed successful sign-out. A subsequent
   real GitHub flow returned to `/login` and produced a new authenticated 200
   `elvis` session after the Strict-cookie fix below.
-- The independent `pta test connectivity` live Microsoft account read returned
-  `operation_failed`. Local Microsoft linkage remains present and configuration,
-  scopes and credentials were not changed to address it. The underlying cause
-  is unconfirmed; this is a separate limit on live Graph verification, not proof
-  that cached local linkage establishes current Microsoft connectivity.
+- The initially failing Microsoft account read was diagnosed: the saved session
+  decrypts with the existing key and matches the configured tenant/user/client,
+  but Entra refresh returned HTTP 400, `invalid_grant`, `AADSTS50078` (expired MFA).
+  The owner completed fresh interactive verification using the original public
+  client/PKCE/loopback flow. No logout, key replacement or scope change was needed.
+  `pta auth microsoft finish` and `pta test connectivity` then passed, including
+  after deploying both corrected binaries. The live account is verified; sending
+  and webhook reception are not inferred from that read.
+- The shared browser's actual **Start assistant** button started the native host's
+  service. Authenticated `/api/session` and `/api/control` snapshot returned 200;
+  the UI showed **Running in observation mode**, and the host reported
+  `running: true`, `tunnel_running: true`, `dry_run: true`. The test temporarily
+  restricted allowed senders to a synthetic UUID, preventing real messages from
+  reaching models, and kept activity registration disabled. Durable sent-message
+  counts did not increase. The initial attempt waited in a macOS Keychain read
+  and the browser timed out; the owner subsequently reported successful Start
+  and both UI/host state confirmed it. No ACL or secret was changed by the agent.
+  The service was then stopped and the exact original configuration/map/revision
+  restored. Final state: stopped, native GUI available, Microsoft read passes.
 
-The owner explicitly selected **"I will test it later"** for physical-phone QA.
-No connected phone-control tool is available in this session. Do not report a
-phone pass, production second-person login or live Graph delivery as completed.
+The owner initially deferred physical-phone QA, then supplied an authenticated
+phone Home screenshot for `elvis` and reported Start failing on both phone and
+computer. After Microsoft renewal the owner reported web Start succeeds, without
+specifying the device in that last report. Phone Home access is supported by the
+screenshot; the Mac Start result above was directly checked. Settings, activity
+history and phone logout/re-entry still need explicit confirmation. No connected
+phone-control tool is available. Do not report complete phone QA, production
+second-person login or live Teams delivery as completed.
 
 ### Fixes found by actual deployment
 
@@ -184,12 +213,24 @@ The previously validated implementation needed these live compatibility fixes:
    303 chain, producing a login loop and then 429. New session bootstrap now serves
    the shared panel document as a first-party response before asset/API requests.
    Strict/HttpOnly/Secure, CSRF and JWT validation remain enforced. The deployed
-   fix is the pinned source above; fresh login after Access logout passed.
+   fix is
+   [`beee74ae1608537239a78f8fdac8a043ea8a735a`](https://github.com/elvisbrevi/personal-teams-assistant/commit/beee74ae1608537239a78f8fdac8a043ea8a735a);
+   fresh login after Access logout passed.
+4. Expired Microsoft MFA caused Start to return a generic configuration error.
+   Entra's fixed `invalid_grant`/`interaction_required` codes now produce a typed
+   authorization error, preserved when the service exits before readiness. GUI,
+   CLI and web report `not_ready` with a Settings reconnection instruction.
+   Provider descriptions stay private and failed renewal retains the encrypted
+   session. The 60-second readiness timeout still stops/aborts the service.
+   This fix is the latest pinned source above. Both regression tests failed
+   before the fix; classified/unknown responses, session preservation, shared
+   startup error handling and timeout cleanup now pass with synthetic data.
 
 Regression tests failed before the fixes and passed after them. On the final Rust
 implementation all required gates passed: formatting, both Clippy variants,
-**140 unit + 39 integration** tests with GUI and **138 unit + 39 integration**
-without GUI. Seven synthetic setup-helper tests and the JavaScript build passed.
+**143 unit + 39 integration** tests with GUI and **141 unit + 39 integration**
+without GUI. Seven synthetic setup-helper tests and the JavaScript build passed
+during the preceding Access fixes; those files were unchanged in the MFA fix.
 Gitleaks scanned the fix diff with redacted output and found no secrets. No
 production two-user test or physical-phone result is inferred from these counts.
 
