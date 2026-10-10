@@ -36,7 +36,7 @@ set +x
 export PTA_ACCESS_PROFILE_DIR="$HOME/Library/Application Support/dev.personalteams.assistant"
 export PTA_ACCESS_RUNTIME_DIR="$PTA_ACCESS_PROFILE_DIR/web/runtime/access-build"
 export PTA_ACCESS_SOURCE_DIR="$(mktemp -d /tmp/pta-access-source.XXXXXX)"
-git clone --branch codex/cloudflare-access-rollout \
+git clone --branch main \
   https://github.com/elvisbrevi/personal-teams-assistant "$PTA_ACCESS_SOURCE_DIR"
 git -C "$PTA_ACCESS_SOURCE_DIR" checkout --detach 5607d2bb936a9e292eccee387092f65c0a6fa984
 git -C "$PTA_ACCESS_SOURCE_DIR" rev-parse HEAD

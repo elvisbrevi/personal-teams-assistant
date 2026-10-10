@@ -35,7 +35,13 @@ login. The new source build retains package version 0.6.9; check the advertised
 Configuration and deployment are complete on the owner's Mac as `elvis`, without
 `PTA_PROFILE_DIR`. The tested deployed source is
 [`5607d2bb936a9e292eccee387092f65c0a6fa984`](https://github.com/elvisbrevi/personal-teams-assistant/commit/5607d2bb936a9e292eccee387092f65c0a6fa984)
-on [`codex/cloudflare-access-rollout`](https://github.com/elvisbrevi/personal-teams-assistant/tree/codex/cloudflare-access-rollout).
+now included in [`main`](https://github.com/elvisbrevi/personal-teams-assistant/tree/main).
+The owner authorized integration on 2026-10-10. The rollout branch was merged by
+fast-forward, preserving the validated implementation and fix commits, and
+published to `origin/main`. The original
+[`codex/cloudflare-access-rollout`](https://github.com/elvisbrevi/personal-teams-assistant/tree/codex/cloudflare-access-rollout)
+branch remains available. Integration did not change the deployed binaries,
+configuration or services.
 The unchanged package version is 0.6.9; the published registry package still has
 the password portal. Use the pinned source and `web_access_support`, not the
 version string alone. No new crate was published or GitHub Actions workflow added.
@@ -236,15 +242,15 @@ production two-user test or physical-phone result is inferred from these counts.
 
 ### Remaining closure
 
-1. From an actual phone, sign in with `elvisbrevi`, check the retained settings and
-   Activities history, sign out and sign back in. Record the actual result; this
-   is deferred at the owner's request.
-2. Diagnose the failed live Microsoft connectivity check before claiming live
-   Graph account/callback health. Preserve the current stopped assistant state,
-   OAuth flow/scopes, session, credentials and separate Teams tunnel.
-3. Keep the Mac awake/connected/logged in. Normal source maintenance/release may
-   later integrate the rollout branch; no crate publication or main merge was
-   performed in this continuation.
+1. Complete the phone's retained Settings/Activities-history and logout/re-entry
+   checks. Phone Home access and the owner's later web Start report are recorded
+   above; do not substitute them for the remaining checks.
+2. The live Microsoft account read now passes after MFA renewal. Live Teams
+   callback reception and message delivery were not tested. Preserve the OAuth
+   flow/scopes, session, credentials and separate Teams tunnel; no real Teams
+   sends were authorized as verification.
+3. Keep the Mac awake/connected/logged in. The rollout is published in `main`;
+   a crate release remains a separate operation and was not performed.
 
 ## Earlier cloud continuation snapshot
 
