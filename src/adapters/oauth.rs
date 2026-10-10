@@ -16,6 +16,17 @@ pub trait AccessToken: Send + Sync {
     async fn access_token(&self) -> Result<String>;
     async fn invalidate(&self) {}
 }
+/// A saved Microsoft session requires interactive renewal; provider text stays private.
+#[derive(Debug)]
+pub struct AuthorizationRequired;
+impl std::fmt::Display for AuthorizationRequired {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(
+            "Microsoft session needs renewal. Reconnect Microsoft in Settings and complete verification, then start the assistant again.",
+        )
+    }
+}
+impl std::error::Error for AuthorizationRequired {}
 #[derive(Serialize, Deserialize)]
 struct Tokens {
     access_token: String,
@@ -131,10 +142,20 @@ impl OAuth {
             .form(&fields)
             .send()
             .await?;
-        ensure!(
-            response.status().is_success(),
-            "Entra token exchange failed; interactive authorization may be needed"
-        );
+        if !response.status().is_success() {
+            // Classify only OAuth's fixed codes. Never expose the provider's description.
+            let status = response.status();
+            if matches!(status.as_u16(), 400 | 401)
+                && let Ok(error) = super::bounded_json::<serde_json::Value>(response, 64_000).await
+                && matches!(
+                    error["error"].as_str(),
+                    Some("invalid_grant" | "interaction_required")
+                )
+            {
+                return Err(AuthorizationRequired.into());
+            }
+            anyhow::bail!("Entra token exchange failed; interactive authorization may be needed");
+        }
         super::bounded_json(response, 64_000).await
     }
     pub async fn complete_desktop(&self, state: &str, code: &str) -> Result<String> {
@@ -196,9 +217,7 @@ impl OAuth {
 impl AccessToken for OAuth {
     async fn access_token(&self) -> Result<String> {
         let mut guard = self.tokens.lock().await;
-        let current = guard
-            .as_ref()
-            .context("interactive Entra authorization required")?;
+        let current = guard.as_ref().context(AuthorizationRequired)?;
         if current.expires_at > chrono::Utc::now().timestamp() + 120 {
             return Ok(current.access_token.clone());
         }
@@ -238,6 +257,50 @@ mod tests {
     };
     fn config() -> Arc<Config> {
         Arc::new(toml::from_str(include_str!("../../config.example.toml")).unwrap())
+    }
+    #[tokio::test]
+    async fn rejected_refresh_requires_reauthorization_and_preserves_saved_session() {
+        for (status, code, needs_authorization) in [
+            (400, "invalid_grant", true),
+            (401, "interaction_required", true),
+            (400, "invalid_client", false),
+            (400, "unknown", false),
+            (500, "invalid_grant", false),
+        ] {
+            let server = MockServer::start().await;
+            let dir = tempfile::tempdir().unwrap();
+            let store = Arc::new(Store::open(&dir.path().join("tokens.db")).unwrap());
+            let vault = Vault::new(&STANDARD.encode([5; 32])).unwrap();
+            let old = Tokens {
+                access_token: "test-old-access".into(),
+                refresh_token: "test-old-refresh".into(),
+                expires_at: 0,
+            };
+            let sealed = vault.seal(&serde_json::to_vec(&old).unwrap()).unwrap();
+            store.put_token(&sealed).unwrap();
+            let mut oauth =
+                OAuth::new(config(), reqwest::Client::new(), store.clone(), vault).unwrap();
+            oauth.token_endpoint = format!("{}/token", server.uri());
+            Mock::given(method("POST"))
+                .and(path("/token"))
+                .and(body_string_contains("grant_type=refresh_token"))
+                .respond_with(
+                    ResponseTemplate::new(status).set_body_json(serde_json::json!({
+                        "error":code, "error_codes":[50078],
+                        "error_description":"private provider text invalid_grant test-old-refresh"
+                    })),
+                )
+                .expect(1)
+                .mount(&server)
+                .await;
+            let error = oauth.access_token().await.unwrap_err();
+            assert_eq!(
+                error.downcast_ref::<AuthorizationRequired>().is_some(),
+                needs_authorization
+            );
+            assert!(!error.to_string().contains("test-old-refresh"));
+            assert_eq!(store.token().unwrap().unwrap(), sealed);
+        }
     }
     #[tokio::test]
     async fn refresh_is_serialized_rotated_and_encrypted() {

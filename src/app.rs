@@ -136,6 +136,9 @@ fn fail<E: Into<anyhow::Error>>(error: E) -> String {
     if let Some(message) = error.downcast_ref::<SetupError>() {
         return format!("[not_ready] {}", message.0);
     }
+    if let Some(message) = error.downcast_ref::<crate::adapters::oauth::AuthorizationRequired>() {
+        return format!("[not_ready] {message}");
+    }
     if error.downcast_ref::<reqwest::Error>().is_some() {
         return "[network] Dependency request failed. Check connectivity and authorization.".into();
     }
@@ -514,6 +517,28 @@ async fn start(state: &DesktopState) -> Result<()> {
     result
 }
 
+async fn service_ready(
+    task: &mut tokio::task::JoinHandle<Result<()>>,
+    ready_rx: oneshot::Receiver<Arc<crate::adapters::graph::Graph>>,
+    stop: &watch::Sender<bool>,
+) -> Result<Arc<crate::adapters::graph::Graph>> {
+    match tokio::time::timeout(std::time::Duration::from_secs(60), ready_rx).await {
+        Ok(Ok(graph)) => Ok(graph),
+        Ok(Err(_)) => {
+            // The service failed before readiness; retain its sanitized error category.
+            let _ = stop.send(true);
+            task.await??;
+            anyhow::bail!("assistant failed to become ready")
+        }
+        Err(_) => {
+            let _ = stop.send(true);
+            task.abort();
+            let _ = task.await;
+            anyhow::bail!("assistant failed to become ready")
+        }
+    }
+}
+
 async fn start_service(state: &DesktopState) -> Result<()> {
     let config = read_config(&state.config_path)?;
     web::validate_profile_identity(state.config_path.parent().unwrap(), &config)?;
@@ -564,22 +589,13 @@ async fn start_service(state: &DesktopState) -> Result<()> {
     let path = state.config_path.to_string_lossy().into_owned();
     let (ready_tx, ready_rx) = oneshot::channel();
     let phase = state.phase.clone();
-    let task = tokio::spawn(async move {
+    let mut task = tokio::spawn(async move {
         let result = runtime::serve(&path, receiver, ready_tx).await;
         // Also when the service ends on its own (an error), not only through `stop`.
         set_phase(&phase, AssistantPhase::Stopped);
         result
     });
-    let graph = tokio::time::timeout(std::time::Duration::from_secs(60), ready_rx)
-        .await
-        .ok()
-        .and_then(Result::ok);
-    let Some(graph) = graph else {
-        let _ = stop.send(true);
-        task.abort();
-        let _ = task.await;
-        anyhow::bail!("assistant failed to become ready");
-    };
+    let graph = service_ready(&mut task, ready_rx, &stop).await?;
     let tunnel_result = async {
         if tunnel_config_path.is_none() && tunnel_token.is_none() {
             return Ok(None);
@@ -1439,6 +1455,41 @@ mod tests {
         assert!(message.contains("test chat"));
         let internal = fail(anyhow::anyhow!("private token value"));
         assert!(!internal.contains("private token value"));
+    }
+
+    #[tokio::test]
+    async fn startup_keeps_the_authorization_error_for_gui_cli_and_web() {
+        let (ready, receiver) = oneshot::channel();
+        let (stop, _) = watch::channel(false);
+        let mut task = tokio::spawn(async move {
+            drop(ready);
+            Err(crate::adapters::oauth::AuthorizationRequired.into())
+        });
+        let error = match service_ready(&mut task, receiver, &stop).await {
+            Ok(_) => panic!("a rejected Microsoft session cannot start"),
+            Err(error) => error,
+        };
+        assert!(
+            error
+                .downcast_ref::<crate::adapters::oauth::AuthorizationRequired>()
+                .is_some()
+        );
+        let message = fail(error);
+        assert!(message.starts_with("[not_ready] Microsoft session needs renewal."));
+        assert!(message.contains("Settings"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn readiness_timeout_still_stops_and_aborts_the_service() {
+        let (ready, receiver) = oneshot::channel();
+        let (stop, stop_rx) = watch::channel(false);
+        let mut task = tokio::spawn(async move {
+            let _ready = ready;
+            std::future::pending::<Result<()>>().await
+        });
+        assert!(service_ready(&mut task, receiver, &stop).await.is_err());
+        assert!(*stop_rx.borrow());
+        assert!(task.is_finished());
     }
 
     #[test]

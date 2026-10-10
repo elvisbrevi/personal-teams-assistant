@@ -1,5 +1,13 @@
 `pta doctor --offline` validates local files without opening the database in recovery mode or calling providers. `pta doctor` inspects configuration, credentials and connection; its result says explicitly that it did not test the network. Errors and pending items have a non-zero exit code.
 
+Microsoft's saved session can require renewed interactive verification even when
+the account still appears connected locally. `pta start` and `pta test connectivity`
+then return `not_ready` with a fixed instruction to reconnect Microsoft in Settings.
+Use `pta auth microsoft login`, complete the browser verification and check
+`pta auth microsoft finish` followed by `pta test connectivity`. Preserve the profile,
+encryption key and scopes; do not log out or replace credentials to renew MFA.
+Failed token renewal never deletes the saved session or prints provider text.
+
 `pta chat` or `pta test simulate` read a SimulationRequest JSON on stdin: session, text, group, mentioned, sources. Use enabled sources that allow external processing. The simulation calls the configured providers and may cost; it never sends messages to Graph or widens audiences.
 
 `pta test self-chat` checks the membership of the configured conversation. It does not prove sending or reception. For the real check, the person writes a new question there and verifies the answer. Read `pta audit list --limit 20` and `pta self-chat status`. Repeat after a restart. The assistant's answers must be ignored without producing another send.
