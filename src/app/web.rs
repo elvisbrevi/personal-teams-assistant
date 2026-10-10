@@ -471,7 +471,11 @@ async fn login(
         Ok(value) => value,
         Err(status) => return status.into_response(),
     };
-    let mut response = Redirect::to("/").into_response();
+    // End the cross-site OAuth navigation so Strict cookies accompany asset/API requests.
+    let mut response = asset(
+        "text/html; charset=utf-8",
+        include_str!("../../desktop/ui/index.html"),
+    );
     response.headers_mut().insert(
         header::SET_COOKIE,
         portal

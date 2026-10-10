@@ -119,7 +119,10 @@ hashes are never used to authenticate. Local association/reassociation is the
 recovery path; there is no public registration or password endpoint/form.
 
 `GET /login` exchanges a verified, enabled, explicitly associated identity for a
-random local session and redirects to the panel without another form. Sessions
+random local session and serves the shared panel document without another form.
+This ends the cross-site OAuth navigation before asset/API requests need the
+SameSite=Strict cookie, avoiding a redirect loop without weakening its protection.
+An existing first-party session may redirect to `/`. Sessions
 are bound to the exact Access assertion, provider binding, Access subject and
 account version, and expire at the earlier of local duration or JWT expiration.
 Cookies are HttpOnly/SameSite=Strict and host-only Secure on HTTPS. Every browser

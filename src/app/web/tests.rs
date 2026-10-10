@@ -207,12 +207,16 @@ async fn access_bootstraps_the_existing_profile_without_a_password_form() {
         Value::Null,
     )
     .await;
-    assert_eq!(response.status(), StatusCode::SEE_OTHER);
-    assert_eq!(response.headers()[header::LOCATION], "/");
+    // Finish the cross-site OAuth navigation before SameSite=Strict is needed.
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(response.headers().get(header::LOCATION).is_none());
     assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
     let cookie = response.headers()[header::SET_COOKIE].to_str().unwrap();
     assert!(cookie.contains("HttpOnly") && cookie.contains("SameSite=Strict"));
     auth.cookie = cookie.split(';').next().unwrap().into();
+    let body = to_bytes(response.into_body(), 2_000_000).await.unwrap();
+    assert!(String::from_utf8_lossy(&body).contains("transport.js"));
+    assert!(!String::from_utf8_lossy(&body).contains("web-password-form"));
     let data = json_body(
         send(
             &portal,

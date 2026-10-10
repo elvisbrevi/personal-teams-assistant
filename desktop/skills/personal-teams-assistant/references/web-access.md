@@ -136,6 +136,11 @@ profile retains its separate existing Teams callback hostname/tunnel.
 
 ## Sessions, logout and remote operations
 
+The first authenticated `/login` response serves the shared panel document. This
+finishes the cross-site GitHub/Access navigation before asset/API requests need
+the Strict cookie. An existing first-party session may redirect to `/`; the
+initial login never relies on that redirect or relaxes SameSite protection.
+
 Access assertions are verified against the official team HTTPS public keys for
 signature, issuer, audience, not-before and expiration. Each session is bound to
 the exact verified assertion, provider identity, Access subject and local account
