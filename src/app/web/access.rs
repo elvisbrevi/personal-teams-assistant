@@ -85,10 +85,26 @@ impl Binding {
 
 #[derive(Deserialize)]
 pub(super) struct Identity {
+    #[serde(deserialize_with = "deserialize_provider_subject")]
     pub id: String,
     pub user_uuid: String,
     pub account_id: String,
     pub idp: IdentityProvider,
+}
+fn deserialize_provider_subject<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<String, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Subject {
+        Text(String),
+        Integer(u64),
+    }
+    match Subject::deserialize(deserializer)? {
+        Subject::Text(id) => Ok(id),
+        Subject::Integer(0) => Err(serde::de::Error::custom("GitHub user ID must be positive")),
+        Subject::Integer(id) => Ok(id.to_string()),
+    }
 }
 #[derive(Deserialize)]
 pub(super) struct IdentityProvider {

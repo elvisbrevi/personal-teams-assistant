@@ -114,7 +114,7 @@ def callback_paths(file, hostname):
 def domains(app):
     values = [app.get("domain")] + (app.get("self_hosted_domains") or [])
     values += [d.get("uri") or d.get("hostname") for d in (app.get("destinations") or []) if d.get("type") == "public"]
-    return [value for value in values if value]
+    return list(dict.fromkeys(value for value in values if value))
 
 
 def normalized_policy(policy):
@@ -136,6 +136,8 @@ def upsert_app(token, base, previous, definition):
         raise SetupError("Access application readback did not match the requested hostname/provider.")
     if [normalized_policy(p) for p in policies] != [normalized_policy(p) for p in wanted]:
         raise SetupError("Access policy readback did not match; deployment must wait for inspection.")
+    if definition.get("http_only_cookie_attribute") and actual.get("http_only_cookie_attribute") is not True:
+        raise SetupError("Access cookie readback did not confirm HttpOnly; deployment must wait for inspection.")
     return actual
 
 
@@ -202,7 +204,7 @@ def configure(args):
             "policies":[{"name":"Graph callback only","decision":"bypass","include":[{"everyone":{}}]}]})
     main = upsert_app(token, base, by_domain.get(args.hostname), {**definitions[0],"type":"self_hosted",
         "session_duration":"12h","app_launcher_visible":False,"allowed_idps":[provider["id"]],
-        "auto_redirect_to_identity":True,"http_only_cookie":True,
+        "auto_redirect_to_identity":True,"http_only_cookie_attribute":True,
         "policies":[{"name":"Authorized GitHub identities","decision":"allow", "include":[{"email":{"email":email}} for email in emails],
             "require":[{"login_method":{"id":provider["id"]}}]}]})
     if not re.fullmatch(r"[0-9a-f]{64}", main.get("aud", "")):

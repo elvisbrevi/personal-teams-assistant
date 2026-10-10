@@ -80,16 +80,32 @@ class SetupTests(unittest.TestCase):
         main = writes[-1][1]
         self.assertEqual(main["allowed_idps"], [PROVIDER])
         self.assertTrue(main["auto_redirect_to_identity"])
+        self.assertTrue(main["http_only_cookie_attribute"])
         self.assertEqual(main["policies"][0]["require"], [{"login_method":{"id":PROVIDER}}])
         self.assertNotIn({"everyone":{}}, main["policies"][0]["include"])
         settings = json.loads(self.args.settings_file.read_text())
         self.assertEqual(settings["access"]["github_idp_id"], PROVIDER)
         self.assertEqual(self.args.settings_file.stat().st_mode & 0o777, 0o600)
         self.assertNotIn("secret", self.args.settings_file.read_text())
+        for app in self.apps.values():
+            app["self_hosted_domains"] = [app["domain"]]
+            app["destinations"] = [{"type":"public", "uri":app["domain"]}]
         self.calls.clear()
         self.run_setup()
         self.assertFalse(any(method == "POST" for method, _, _ in self.calls))
         self.assertEqual(len(self.apps), 3)
+
+    def test_cookie_readback_is_required_before_writing_settings(self):
+        def missing_cookie(token, method, path, data=None):
+            response = self.fake_api(token, method, path, data)
+            value = response["result"]
+            if method == "GET" and isinstance(value, dict) and value.get("domain") == self.args.hostname:
+                response["result"] = {**value, "http_only_cookie_attribute": False}
+            return response
+        with patch.object(setup, "api", missing_cookie), contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaisesRegex(setup.SetupError, "cookie"):
+                setup.configure(self.args)
+        self.assertFalse(self.args.settings_file.exists())
 
     def test_dry_run_has_no_writes_or_secret_output(self):
         self.args.dry_run = True

@@ -109,8 +109,11 @@ Legacy settings remain readable for inspection; a portal cannot start without
 Access. `pta web users add/bind/unbind/revoke/disable/enable/list` manages private
 `web/accounts.json` under the existing operator-local lock. `bind` takes the
 operator's verified Access identity JSON on stdin. Its binding is the issuer,
-GitHub IdP ID and provider subject (`id` from get-identity), never an email, name
-or email-associated Access `sub`. Bindings cannot belong to two accounts. Existing
+GitHub IdP ID and provider subject (`id` from get-identity). GitHub's positive
+integer IDs are normalized losslessly to decimal strings; legacy string subjects
+remain readable. Floats, negative/zero integers and other JSON types are rejected.
+The binding is never an email, name or email-associated Access `sub`.
+Bindings cannot belong to two accounts. Existing
 IDs, profile selection and retired password hashes survive additive schema reads;
 hashes are never used to authenticate. Local association/reassociation is the
 recovery path; there is no public registration or password endpoint/form.

@@ -36,7 +36,11 @@ from `https://assistant.elvisbrevi.cl/cdn-cgi/access/get-identity` in the signed
 browser. Save that response locally in a private file. The local operator checks
 that it is the intended person's identity from the configured GitHub provider,
 then supplies it to `users bind USER`. The response must include `id` (provider
-subject), `idp.id`, `idp.type` (`github`), `account_id` and `user_uuid`. Never paste
+subject), `idp.id`, `idp.type` (`github`), `account_id` and `user_uuid`. GitHub
+returns `id` as a positive JSON integer; the CLI and runtime normalize it
+losslessly to the same decimal string used for the local binding. Legacy string
+subjects remain supported. Supply the official response unchanged; do not edit
+its subject or convert it through floating-point JavaScript numbers. Never paste
 Access cookies, JWTs or OAuth secrets into chat, command arguments or documentation.
 Missing or unsupported provider subjects fail closed; do not substitute an email
 or Access `sub`. The runtime repeats the identity lookup using the verified JWT;

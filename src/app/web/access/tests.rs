@@ -104,6 +104,47 @@ async fn signed_jwt_and_pinned_identity_are_both_required() {
 }
 
 #[tokio::test]
+async fn numeric_github_subjects_match_operator_bindings_without_precision_loss() {
+    for (id, expected) in [
+        (json!(123456), "123456"),
+        (json!("123456"), "123456"),
+        (json!(9007199254740993_u64), "9007199254740993"),
+        (json!(u64::MAX), "18446744073709551615"),
+    ] {
+        let (verifier, server) = mock_verifier().await;
+        let mut input = identity(SUBJECT, "unused");
+        input["id"] = id;
+        mount_identity(&server, input.clone()).await;
+        let verified = verifier
+            .verify(&headers(&token(&claims(SUBJECT), "synthetic-key")))
+            .await
+            .unwrap();
+        let operator_identity: Identity = serde_json::from_value(input).unwrap();
+        assert_eq!(verified.binding.provider_user_id, expected);
+        assert!(operator_identity.binding(&config()).unwrap() == verified.binding);
+    }
+    for id in [
+        json!(0),
+        json!(-1),
+        json!(1.5),
+        json!(true),
+        Value::Null,
+        json!({}),
+    ] {
+        let (verifier, server) = mock_verifier().await;
+        let mut input = identity(SUBJECT, "unused");
+        input["id"] = id;
+        mount_identity(&server, input).await;
+        assert!(
+            verifier
+                .verify(&headers(&token(&claims(SUBJECT), "synthetic-key")))
+                .await
+                .is_err()
+        );
+    }
+}
+
+#[tokio::test]
 async fn invalid_signature_issuer_audience_time_type_and_service_tokens_are_rejected() {
     let (verifier, server) = mock_verifier().await;
     mount_identity(&server, identity(SUBJECT, "123456")).await;
