@@ -2,10 +2,11 @@
 
 The origin remains the owner's Mac and the initial account is `elvis`, attached
 to the existing desktop profile. The dedicated portal and tunnel LaunchAgents
-were installed on 2026-10-09; inspect them before changing anything. The latest
-cloud inspection found the tunnel down with no connectors, so the historical
-HTTPS success is not current availability evidence. Keep the Mac awake, connected
-and logged into the ordinary application owner's macOS account.
+were installed on 2026-10-09; inspect them before changing anything. Cloudflare
+reinspection on 2026-10-10 at 10:00 America/Santiago found the dedicated web tunnel
+healthy with four connections, superseding the earlier down observation. This
+does not verify the Mac binary version, origin response or Access login. Keep the
+Mac awake, connected and logged into the ordinary application owner's macOS account.
 
 These steps run **on that Mac**, without a `PTA_PROFILE_DIR` override. They update
 the existing Cargo host/CLI together and preserve Tauri, data, credentials,
@@ -14,7 +15,10 @@ No Mac execution channel is attached to the current cloud session.
 
 ## Inspect and build before the transition
 
-Read the repository's `AGENTS.md`, architecture and Access operating guide. Do
+Read the repository's `AGENTS.md`, architecture, latest branch handoff and Access
+operating guide before checking out the pinned implementation for compilation;
+retain the latest handoff's continuation state, as that older source commit has
+the earlier documentation snapshot. Do
 not reset or clean an existing checkout. Inspect its status, the installed
 versions, `pta --json status`, `pta --json web status`, `pta web users list`, and
 the two existing `dev.personalteams.assistant.web[.tunnel]` LaunchAgents. Record
@@ -50,11 +54,15 @@ same verified build. Compilation should finish before stopping a running service
 
 The actual Cloudflare token in the cloud session is
 `005cf5b38ffa573d4edfe8aae87886a4`, for account
-`26f1f3a05cbfe51ade90a57362c15fad`. Its reads work, but the attempted application
-and GitHub IdP creation returned HTTP 403 `auth.forbidden`. Add account permissions
-`Access: Apps and Policies Write` and `Access: Identity Providers Write` (or the
-combined `Access: Organizations, Identity Providers, and Groups Write`). Update
-the existing configured credential, never send token values through chat.
+`26f1f3a05cbfe51ade90a57362c15fad`. Its reads work. Original October 9 application
+and GitHub IdP creation attempts returned HTTP 403 `auth.forbidden`; on October 10
+the user reported adding account permissions `Access: Apps and Policies Write`
+and `Access: Identity Providers Write` (or the combined
+`Access: Organizations, Identity Providers, and Groups Write`). Necessary writes
+have not been retested since that update; use real configuration operations to
+verify current authorization. Inspect the Mac's available protected credential,
+as the cloud binding does not imply a local Mac binding. Never send token values
+through chat or request token-policy management just to inspect permissions.
 
 Check for an existing dedicated OAuth App in GitHub Developer Settings. If none
 exists, create **`personal-teams-assistant-login`** as an OAuth App, separate from
@@ -70,7 +78,9 @@ bindings or 0600 files using `CLOUDFLARE_API_TOKEN[_FILE]`,
 `PTA_ACCESS_GITHUB_CLIENT_ID[_FILE]` and
 `PTA_ACCESS_GITHUB_CLIENT_SECRET[_FILE]`. The helper inspects before creating,
 refuses conflicting resources and reports the exact API operation/permission on
-403. Finish the GitHub provider's authorization/Test in Cloudflare Zero Trust.
+403. If the dedicated provider was already configured manually with this OAuth
+App, the helper reuses it and its client secret need not be transferred to the
+Mac. Finish the GitHub provider's authorization/Test in Cloudflare Zero Trust.
 
 Export the **actual Mac accounts'** callbacks with the new CLI, while still only
 reading legacy account data:
