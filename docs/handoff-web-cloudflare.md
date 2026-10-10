@@ -2,15 +2,17 @@
 
 ## Current outcome (2026-10-10)
 
-**The Access implementation is complete and locally verified. Production Access
-configuration, the Mac upgrade and real Mac/phone sign-in remain pending.** Continue
-on the owner's Mac using the local installation and signed-in browser. Do
-not report this migration as deployed or verified over the public hostname.
+**Cloudflare Access with the dedicated GitHub OAuth App is configured and
+installed on the Mac. Real Mac sign-in, local profile access, logout, immediate
+replay rejection and fresh sign-in passed. Physical-phone QA remains explicitly
+deferred by the owner.** The independent Microsoft connectivity probe failed;
+its stored session, credentials and original configuration were preserved. Do not
+claim live Graph connectivity or phone verification from the Access results.
 
 The workspace began clean on `work`, at
 [`3674b80`](https://github.com/elvisbrevi/personal-teams-assistant/commit/3674b80).
 The current changes preserve all existing profile IDs/directories, credentials,
-Microsoft PKCE/scopes, Tauri/CLI IPC and separate tunnels. Implementation delivery
+Microsoft PKCE/scopes, Tauri/CLI IPC and separate tunnels. Original implementation delivery
 is on [`feat/cloudflare-access`](https://github.com/elvisbrevi/personal-teams-assistant/tree/feat/cloudflare-access),
 with verified implementation commit
 [`4ea9255`](https://github.com/elvisbrevi/personal-teams-assistant/commit/4ea9255e676713203dbbffea1de1f2bbf79701c2). Follow the
@@ -26,7 +28,184 @@ published for Access, and the existing 0.6.9 registry package still has password
 login. The new source build retains package version 0.6.9; check the advertised
 `web_access_support` capability and exact source commit, not version alone.
 
-## Latest continuation snapshot
+## Latest Mac rollout (2026-10-10)
+
+Configuration and deployment are complete on the owner's Mac as `elvis`, without
+`PTA_PROFILE_DIR`. The tested deployed source is
+[`beee74ae1608537239a78f8fdac8a043ea8a735a`](https://github.com/elvisbrevi/personal-teams-assistant/commit/beee74ae1608537239a78f8fdac8a043ea8a735a)
+on [`codex/cloudflare-access-rollout`](https://github.com/elvisbrevi/personal-teams-assistant/tree/codex/cloudflare-access-rollout).
+The unchanged package version is 0.6.9; the published registry package still has
+the password portal. Use the pinned source and `web_access_support`, not the
+version string alone. No new crate was published or GitHub Actions workflow added.
+The original unrelated untracked `output/` directory was preserved.
+
+### Configured and read back
+
+- Dedicated
+  [`personal-teams-assistant-login` GitHub OAuth App](https://github.com/settings/applications/3920526),
+  owned by `elvisbrevi`. Its homepage is
+  `https://small-forest-4923.cloudflareaccess.com`; its exact callback is
+  `https://small-forest-4923.cloudflareaccess.com/cdn-cgi/access/callback`.
+  Device Flow and redirect wildcards are disabled. The repository GitHub
+  connection was not reused or modified. GitHub's required security confirmation
+  was completed by the owner; the generated secret was captured privately.
+- Dedicated GitHub IdP `df223db7-1f61-482f-931c-863a6b1922b4`.
+  Actual **POST identity_providers succeeded**, and GET readback matched the
+  dedicated OAuth client. This verifies the reported IdP write permission.
+- Access application `personal-teams-assistant-web`, ID
+  `e9e6ba9d-b856-4b39-bc94-fac2d02693f6`, protecting the whole
+  `assistant.elvisbrevi.cl` hostname, including its API. Actual **POST apps
+  succeeded**. Audience:
+  `e3513b368c8cc140a54c6db1d517dda3f3ef4304d3ad75c99850bdee797ddf48`.
+- Exactly one Allow policy, `Authorized GitHub identities`, includes only the
+  owner's verified primary GitHub email, confirmed on
+  [GitHub email settings](https://github.com/settings/emails), and requires the
+  dedicated GitHub login method. No everyone/domain-wide admission is present.
+  Session duration is 12 hours and the actual
+  `http_only_cookie_attribute` is true. GET application/policy readback passed;
+  the helper's subsequent **PUT reuse also succeeded** without creating another
+  app/provider. Unrelated Workers and `agent-workflow.elvisbrevi.cl` apps remain.
+- Team domain is unchanged: `small-forest-4923.cloudflareaccess.com`.
+  The existing protected Cloudflare API token was reused; no token-policy
+  management permission or replacement credential was requested.
+- Dedicated tunnel `08cce5df-23a0-45e3-92f6-e65f2d8abe3e` remains **healthy with
+  four connections**. Its connector LaunchAgent/PID was preserved throughout.
+  CNAME and ingress remain `assistant.elvisbrevi.cl` → that tunnel →
+  `http://127.0.0.1:38656`, preserving Host, with the existing 404 catch-all.
+  No Tunnel, DNS, landing or desktop Teams route was changed.
+
+### Installed and preserved
+
+Both default-GUI host and CLI were built in a separate staging checkout before
+cutover. Required gates passed before deploying fixes. The ordinary Cargo pair
+was first installed from the source, then both tested staged files were replaced
+atomically for the fixes and verified byte-for-byte against that staged pair.
+`codesign --verify --strict` passed. Both the CLI and running host announce
+`web_access_support: true`; native Tauri remains available and opens normally.
+
+The existing enabled `elvis` account retains ID
+`0b87fed6-24aa-4037-940e-300670570f4b`, `current_profile: true` and the original
+`dev.personalteams.assistant` profile. The official signed-in Access identity
+response matched the configured account/GitHub IdP, the verified email and
+GitHub API numeric ID `916745`. The unchanged response was supplied to local
+`pta web users bind elvis`; its provider-subject binding is `916745`.
+No profile copy, replacement account or email-based association was performed.
+
+The original configuration/knowledge-map fingerprints and revision remain
+unchanged. Credential names and system-store origins, Keychain service,
+`STATE_ENCRYPTION_KEY`, Microsoft PKCE/scopes and `data_dir` were preserved.
+Microsoft and repository GitHub still report locally connected. The assistant
+was **stopped before cutover and remains stopped**, with activity registration
+disabled; neither Teams nor a model was invoked as a test. The current host is
+native Tauri (`headless: false`); the portal reuses that host through private IPC.
+
+Existing service labels and plists are retained:
+`dev.personalteams.assistant.web` and `.web.tunnel`. Both were verified running,
+with the portal listening only on `127.0.0.1:38656`. A restart initially raced
+LaunchAgent unloading and returned bootstrap error 5; inspection confirmed the
+job absent, and re-bootstrap after unloading completed succeeded. No root
+service or replacement plist was introduced.
+
+Private staging is
+`~/Library/Application Support/dev.personalteams.assistant/web/runtime/access-build/`.
+It retains `source-path.txt`, `deployed-source.json` (source/binary fingerprints),
+`production-callbacks.json`, official identity JSON, private OAuth bindings,
+helper-generated settings, readback metadata and gate logs. Runtime credentials
+are 0600 under a private directory and are never in Git or this handoff.
+`rollback-path.txt` identifies the private pre-transition backup containing web
+accounts/settings JSON, the portal plist, installed sibling binaries and preflight
+metadata. Restore that web JSON/binary pair together if rollback is required;
+never replace profile data or the encryption key.
+
+### Graph callbacks
+
+The new CLI exported actual production callbacks before account schema writes.
+Its `paths` list is **empty**, because `elvis` is the only portal account and uses
+its current desktop profile, retaining the separate existing Teams callback URL.
+No wildcard or invented callback Bypass app was created. Re-export/reconfigure
+exact notification/lifecycle exceptions before adding an isolated account.
+
+Synthetic local POSTs showed an unknown exact canonical callback returns 404
+without starting a host, while an extra path suffix remains protected (401).
+At the edge, an unrelated canonical webhook URL redirects to Access (302).
+Existing synthetic Graph validation/clientState regressions passed. With the
+assistant intentionally stopped, live Teams callback delivery was not tested.
+
+### Live Mac verification
+
+- TLS verification enabled. Anonymous panel, API and unrelated webhook requests
+  redirect to Access (302); no password login form is exposed.
+- Real GitHub login and the official Access identity lookup passed. Authenticated
+  `/api/session` returned 200 with `username: elvis`, `current_profile: true` and
+  `auth_provider: github`, without a second password sign-in.
+- Authenticated configuration/snapshot, audit, activity status, activity history
+  and pending activity reads returned 200/`ok: true`. All six shared UI sections
+  are present. No settings save, activity registration or chat send was used.
+- CSP, nosniff, no-referrer and no-store headers were checked on the authenticated
+  HTTPS session. Local and Access cookies are unavailable to page JavaScript.
+  Cookie Secure/HttpOnly/Strict and JWT lifetime bounds passed the synthetic
+  HTTP regression tests; raw live cookie values were never extracted or printed.
+- Retired `/api/login` and `/api/password` returned 404 for an authenticated user.
+  Valid read commands returned 200; missing/invalid CSRF returned 403.
+  Native IPC still rejects a browser Origin (403).
+- Direct loopback identity-only, cookie-only and malformed-assertion requests
+  returned 401; a foreign Host returned 421. Invalid crypto/audience/time/provider,
+  disabled/unknown users, two-user isolation and expiration passed synthetic tests.
+- Logout returned 200, then session access and bootstrap with the same assertion
+  returned 401 immediately. Revocation was retained in the private durable store
+  across portal restart. Access logout displayed successful sign-out. A subsequent
+  real GitHub flow returned to `/login` and produced a new authenticated 200
+  `elvis` session after the Strict-cookie fix below.
+- The independent `pta test connectivity` live Microsoft account read returned
+  `operation_failed`. Local Microsoft linkage remains present and configuration,
+  scopes and credentials were not changed to address it. The underlying cause
+  is unconfirmed; this is a separate limit on live Graph verification, not proof
+  that cached local linkage establishes current Microsoft connectivity.
+
+The owner explicitly selected **"I will test it later"** for physical-phone QA.
+No connected phone-control tool is available in this session. Do not report a
+phone pass, production second-person login or live Graph delivery as completed.
+
+### Fixes found by actual deployment
+
+The previously validated implementation needed these live compatibility fixes:
+
+1. Cloudflare returns GitHub `id` as a JSON integer. String-only deserialization
+   caused HTTP 503 and refused operator binding. Positive integers now normalize
+   losslessly to the existing string binding, preserving signature/issuer/audience,
+   account/IdP/subject validation. Negative/zero/float/other types still fail closed.
+2. Cloudflare returns the same application domain in three representations.
+   The helper now deduplicates representations within one app, retaining its
+   rejection of overlapping distinct/unmanaged resources. It uses the official
+   HttpOnly attribute and requires its readback before writing local settings.
+   These fixes are in
+   [`e0c9b32b5db0ba74004531782e86b64d577b680d`](https://github.com/elvisbrevi/personal-teams-assistant/commit/e0c9b32b5db0ba74004531782e86b64d577b680d).
+3. A real cross-site GitHub return omitted the Strict cookie through the original
+   303 chain, producing a login loop and then 429. New session bootstrap now serves
+   the shared panel document as a first-party response before asset/API requests.
+   Strict/HttpOnly/Secure, CSRF and JWT validation remain enforced. The deployed
+   fix is the pinned source above; fresh login after Access logout passed.
+
+Regression tests failed before the fixes and passed after them. On the final Rust
+implementation all required gates passed: formatting, both Clippy variants,
+**140 unit + 39 integration** tests with GUI and **138 unit + 39 integration**
+without GUI. Seven synthetic setup-helper tests and the JavaScript build passed.
+Gitleaks scanned the fix diff with redacted output and found no secrets. No
+production two-user test or physical-phone result is inferred from these counts.
+
+### Remaining closure
+
+1. From an actual phone, sign in with `elvisbrevi`, check the retained settings and
+   Activities history, sign out and sign back in. Record the actual result; this
+   is deferred at the owner's request.
+2. Diagnose the failed live Microsoft connectivity check before claiming live
+   Graph account/callback health. Preserve the current stopped assistant state,
+   OAuth flow/scopes, session, credentials and separate Teams tunnel.
+3. Keep the Mac awake/connected/logged in. Normal source maintenance/release may
+   later integrate the rollout branch; no crate publication or main merge was
+   performed in this continuation.
+
+## Earlier cloud continuation snapshot
 
 Read-only API inspection at **2026-10-10 10:00 America/Santiago** reconfirmed:
 
@@ -151,7 +330,9 @@ Reinspect locally; do not recreate those resources from stale assumptions.
 - `web users bind/unbind/revoke/disable/enable` and `web callbacks`, documented
   in CLI help and the embedded operating skill. Recovery remains local. Revoke
   also requires a newly issued Access assertion, preventing old-token rebootstrap.
-- `/login` creates a CSRF-bound session and redirects without a password form.
+- `/login` creates a CSRF-bound session and serves the shared panel document
+  without a password form, ending the cross-site navigation before Strict-cookie
+  asset/API requests.
   Password assets, `/api/login` and `/api/password` are removed in the new binary.
   Legacy JSON remains readable and retired password hashes remain inert, with
   no profile/credential deletion or permissive authentication fallback.
@@ -176,7 +357,7 @@ shared UI transport/account controls, `scripts/configure-web-access.py` and
 `scripts/test-configure-web-access.py`. Architecture, README, Mac guide and
 `desktop/skills/personal-teams-assistant/references/web-access.md` are updated.
 
-## Verification completed
+## Original implementation verification
 
 All `AGENTS.md` gates passed on the final implementation:
 
@@ -217,7 +398,7 @@ both required Clippy configurations, both Cargo test configurations and the six
 synthetic Access setup-helper tests successfully. The implementation is unchanged;
 these repeated checks still do not establish production deployment or browser QA.
 
-## Concrete continuation
+## Original rollout checklist (historical)
 
 1. Continue on the owner's Mac under the ordinary application owner, without a
    `PTA_PROFILE_DIR` override. Read `AGENTS.md`, `docs/architecture.md`, this latest
