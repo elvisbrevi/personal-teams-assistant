@@ -16,6 +16,12 @@ MFA, verified web Start and remaining phone checks are recorded in the latest
 handoff. The earlier cloud session had no Mac
 execution channel.
 
+Registry
+[`0.7.0`](https://crates.io/crates/personal-teams-assistant/0.7.0) was published
+after this rollout, including Access and the updated migration manual/help.
+The following source pin is its verified release commit. Publishing did not
+reinstall the Mac's existing validated 0.6.9 Access source pair or change services.
+
 ## Inspect and build before the transition
 
 Read the repository's `AGENTS.md`, architecture, latest branch handoff and Access
@@ -38,7 +44,7 @@ export PTA_ACCESS_RUNTIME_DIR="$PTA_ACCESS_PROFILE_DIR/web/runtime/access-build"
 export PTA_ACCESS_SOURCE_DIR="$(mktemp -d /tmp/pta-access-source.XXXXXX)"
 git clone --branch main \
   https://github.com/elvisbrevi/personal-teams-assistant "$PTA_ACCESS_SOURCE_DIR"
-git -C "$PTA_ACCESS_SOURCE_DIR" checkout --detach 5607d2bb936a9e292eccee387092f65c0a6fa984
+git -C "$PTA_ACCESS_SOURCE_DIR" checkout --detach e131453ddfa0060c4353f84c80e8972e3a3d116e
 git -C "$PTA_ACCESS_SOURCE_DIR" rev-parse HEAD
 cargo install --path "$PTA_ACCESS_SOURCE_DIR" --locked --root "$PTA_ACCESS_RUNTIME_DIR"
 "$PTA_ACCESS_RUNTIME_DIR/bin/pta" --version
@@ -46,11 +52,11 @@ cargo install --path "$PTA_ACCESS_SOURCE_DIR" --locked --root "$PTA_ACCESS_RUNTI
 "$PTA_ACCESS_RUNTIME_DIR/bin/pta" --json web status
 ```
 
-The pinned [Access implementation commit](https://github.com/elvisbrevi/personal-teams-assistant/commit/5607d2bb936a9e292eccee387092f65c0a6fa984)
+The pinned [Access release commit](https://github.com/elvisbrevi/personal-teams-assistant/commit/e131453ddfa0060c4353f84c80e8972e3a3d116e)
 passed all project gates. Require `web_access_support: true`. Verify the source
 commit against the handoff
-before installation. The old 0.6.9 registry package has no Access support; no new
-crate publication is implied by this change. Both binaries must come from the
+before installation. The old 0.6.9 registry package has no Access support; registry
+0.7.0 includes it. Both binaries must come from the
 same verified build. Compilation should finish before stopping a running service.
 
 ## Credentials, GitHub and Access

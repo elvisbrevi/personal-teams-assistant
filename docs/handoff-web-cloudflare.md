@@ -25,10 +25,45 @@ The published
 [`personal-teams-assistant 0.6.9`](https://crates.io/crates/personal-teams-assistant/0.6.9)
 and Mac password-portal installation were already completed. The live registry
 API reconfirmed 0.6.9, not yanked, created at 2026-10-09 03:28:44 UTC, with checksum
-`b6b85760f24b8f02672105a1f955853cf476549acaaca21ff3f81fc6f33bcb6f`. No new crate was
-published for Access, and the existing 0.6.9 registry package still has password
-login. The new source build retains package version 0.6.9; check the advertised
+`b6b85760f24b8f02672105a1f955853cf476549acaaca21ff3f81fc6f33bcb6f`. At that initial
+rollout no crate had been published for Access; registry 0.6.9 still has password
+login. The installed Access source build retains package version 0.6.9; check its
 `web_access_support` capability and exact source commit, not version alone.
+
+## Crates.io release (2026-10-10)
+
+[`personal-teams-assistant 0.7.0`](https://crates.io/crates/personal-teams-assistant/0.7.0)
+is published and not yanked, created at **2026-10-10 22:27:23 UTC**. It contains
+the Access/GitHub migration, Strict-cookie bootstrap and Microsoft renewal fixes.
+The minor version signals the replacement of password authentication: prepare
+Access before updating an older portal, update the host and CLI together, then
+bind the existing verified GitHub identities. Preserve profiles and credentials.
+
+Release source on `main`:
+[`e131453ddfa0060c4353f84c80e8972e3a3d116e`](https://github.com/elvisbrevi/personal-teams-assistant/commit/e131453ddfa0060c4353f84c80e8972e3a3d116e).
+Manifest, lockfile and Tauri version all match 0.7.0; dependency versions were not
+changed. README, CLI help and the embedded skill now cover release migration,
+required Access settings, mandatory identity binding and Microsoft renewal.
+The skill links to the online Mac guide and identifies the configuration helper
+as a repository script rather than an installed Cargo executable.
+
+All project gates passed: formatting, both Clippy variants, **143 unit + 39
+integration** tests with GUI, **141 unit + 39 integration** without GUI, JavaScript
+syntax and seven synthetic Access-helper tests. Publication used a separate clean
+`main` clone and the existing protected Cargo token. `cargo publish --dry-run
+--locked` compiled the packaged GUI; Gitleaks scanned the extracted package with
+redacted output and found no secrets. `cargo publish --locked` then succeeded.
+
+The registry download matches the local package **byte for byte**, with 71 files,
+the clean release VCS commit, Access implementation and updated documentation.
+Retired password login assets, local data and `output/` are absent. SHA-256:
+`adeca5173b8fa78e9dc7714d273cd6ecca11bdeb19ccaa7b1c3209f9338a0f91`.
+
+Publishing did not reinstall the Mac's validated 0.6.9 Access source binaries or
+alter its service state, accounts, credentials or tunnels. That installed pair's
+source and live verification remain recorded below. Release evidence and logs
+are in the private `/tmp/pta-crates-0.7.0._ru8e1_6/` staging directory; full-gate logs
+are in `/tmp/pta-release-070-checks-u8wjj2ss/`. No GitHub Actions was added.
 
 ## Latest Mac rollout (2026-10-10)
 
@@ -42,9 +77,10 @@ published to `origin/main`. The original
 [`codex/cloudflare-access-rollout`](https://github.com/elvisbrevi/personal-teams-assistant/tree/codex/cloudflare-access-rollout)
 branch remains available. Integration did not change the deployed binaries,
 configuration or services.
-The unchanged package version is 0.6.9; the published registry package still has
-the password portal. Use the pinned source and `web_access_support`, not the
-version string alone. No new crate was published or GitHub Actions workflow added.
+The installed source pair's version remains 0.6.9; registry 0.6.9 has the password
+portal, while the subsequently published registry 0.7.0 contains Access. Use the
+pinned deployed source and `web_access_support` to identify this Mac installation.
+No GitHub Actions workflow was added.
 The original unrelated untracked `output/` directory was preserved.
 
 ### Configured and read back
@@ -249,8 +285,8 @@ production two-user test or physical-phone result is inferred from these counts.
    callback reception and message delivery were not tested. Preserve the OAuth
    flow/scopes, session, credentials and separate Teams tunnel; no real Teams
    sends were authorized as verification.
-3. Keep the Mac awake/connected/logged in. The rollout is published in `main`;
-   a crate release remains a separate operation and was not performed.
+3. Keep the Mac awake/connected/logged in. The rollout is published in `main` and
+   registry 0.7.0; the already validated Mac source installation was preserved.
 
 ## Earlier cloud continuation snapshot
 
