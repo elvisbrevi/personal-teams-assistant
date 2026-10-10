@@ -25,12 +25,14 @@ Application (host)
   app open|hide|quit       Shows or hides the window, or closes the host (stopping the assistant and tunnel first).
 
 Web portal
+  Requires Cloudflare Access and a dedicated GitHub OAuth App; see pta skill show.
   web status              Web URL, settings and account profiles (never passwords).
-  web configure           JSON on stdin: bind, public_url, session_hours and Cloudflare Access configuration.
+  web configure           JSON on stdin: bind, public_url, session_hours and access.
+                           access: issuer, audience, account_id, github_idp_id from Cloudflare.
   web callbacks           Exact Graph callback paths for Cloudflare Access bypass applications.
   web users list          Lists web accounts and their isolated profile directories.
   web users add USER      Creates an isolated profile, blocked until an Access identity is associated locally.
-                           --current-profile instead grants this account access to the existing desktop profile.
+                           --current-profile attaches it to the existing desktop profile; identity binding is still required.
   web users bind USER     Verified Access get-identity JSON on stdin; associates the GitHub provider subject.
   web users unbind|revoke USER  Removes the association or revokes all local sessions; preserves the profile.
   web users disable|enable USER  Revokes sessions and disables or enables web access; preserves data.
@@ -59,6 +61,7 @@ Messages and diagnostics
   logs [--limit N]         Host events.
   chat | test simulate     Real pipeline with a SimulationRequest JSON on stdin; never sends to Teams.
   test connectivity        Reads the connected Microsoft account (without sending).
+                           If Microsoft requires renewed verification: auth microsoft login, then finish.
 
 Accounts
   auth microsoft status|login|finish|cancel|logout

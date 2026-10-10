@@ -7,10 +7,12 @@ existing dedicated Tunnel. Its HTTPS hostname and complete API must be protected
 by Cloudflare Access. GitHub owns the interactive sign-in; there is no second
 password form, public registration or password authentication endpoint.
 
-Read [the Mac deployment guide](../../../../docs/web-macos-deployment.md) for the
-production transition. A registry install of 0.6.9 predating the Access change
-still has the password portal. Install the verified Access source build, including
-the compatible host/CLI pair, before associating identities.
+Read [the Mac deployment guide](https://github.com/elvisbrevi/personal-teams-assistant/blob/main/docs/web-macos-deployment.md) for the
+production transition. Registry version 0.7.0 includes Access; the preceding 0.6.9
+registry package still has the password portal. Configure Access before updating
+a password-based portal and install the compatible host/CLI pair before
+associating identities. Both the registry release and pinned source support the
+same account migration without replacing existing profiles.
 
 ## Operator-local accounts and recovery
 
@@ -119,6 +121,9 @@ python3 scripts/configure-web-access.py \
   --settings-file /private/path/access-settings.json
 pta web configure < /private/path/access-settings.json
 ```
+
+Run this helper from a checkout of the project's `main` branch; Cargo installs
+the binaries and embedded skill, while the setup script stays in the repository.
 
 The real helper-generated settings contain `bind`, `public_url`, `session_hours`
 and `access` (`issuer`, `audience`, `account_id`, `github_idp_id`). Audience/provider

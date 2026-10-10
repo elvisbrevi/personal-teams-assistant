@@ -52,6 +52,13 @@ without copying its history or reconnecting Teams. See the
 
 ### Update
 
+Version 0.7.0 replaces the web portal's password login with Cloudflare Access
+and a dedicated GitHub OAuth App. Before updating a password-based portal,
+prepare Access using the [migration guide](desktop/skills/personal-teams-assistant/references/web-access.md),
+update the host and CLI together, then associate existing users with their
+verified GitHub identities.
+The native app, CLI, Microsoft session and existing profiles are preserved.
+
 ```sh
 cargo install personal-teams-assistant --locked
 pta status
