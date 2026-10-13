@@ -219,35 +219,40 @@ impl Reference {
             Some("created_by_me" | "edited_by_me")
         );
         // The Wiki reader records "last recorded editor" as the only author role; audits
-        // before 0.6.1 hold its Spanish form.
-        let role = match self.author_role.as_deref() {
-            None | Some("last recorded editor" | "último editor registrado") => match language {
-                Language::Es => "último editor registrado",
-                Language::En => "last recorded editor",
-            },
-            Some(other) => other,
-        };
-        match (language, &self.author) {
-            (Language::Es, _) if own => format!(
-                "- {link}: wiki del proyecto {project}; documentación con contribución propia verificada."
-            ),
-            (Language::Es, Some(name)) => {
-                format!("- {link}: wiki del proyecto {project}; {role}: {name}.")
+        // before 0.6.1 hold its Spanish form. Either reads as who last edited the page.
+        let editor =
+            self.author
+                .as_deref()
+                .map(|name| match (language, self.author_role.as_deref()) {
+                    (
+                        Language::Es,
+                        None | Some("last recorded editor" | "último editor registrado"),
+                    ) => {
+                        format!("última edición de {name}")
+                    }
+                    (
+                        Language::En,
+                        None | Some("last recorded editor" | "último editor registrado"),
+                    ) => {
+                        format!("last edited by {name}")
+                    }
+                    (_, Some(role)) => format!("{role}: {name}"),
+                });
+        match (language, editor) {
+            (Language::Es, _) if own => {
+                format!("- {link}: wiki del proyecto {project}; documentación en la que participé.")
             }
-            (Language::Es, None) => format!(
-                "- {link}: wiki del proyecto {project}; no se pudo verificar quién la documentó."
-            ),
+            (Language::Es, Some(editor)) => {
+                format!("- {link}: wiki del proyecto {project}; {editor}.")
+            }
+            (Language::Es, None) => {
+                format!("- {link}: wiki del proyecto {project}; autoría desconocida.")
+            }
             (Language::En, _) if own => {
-                format!(
-                    "- {link}: {project} project wiki; documentation I contributed to (verified)."
-                )
+                format!("- {link}: {project} project wiki; documentation I contributed to.")
             }
-            (Language::En, Some(name)) => {
-                format!("- {link}: {project} project wiki; {role}: {name}.")
-            }
-            (Language::En, None) => format!(
-                "- {link}: {project} project wiki; it couldn't be verified who documented it."
-            ),
+            (Language::En, Some(editor)) => format!("- {link}: {project} project wiki; {editor}."),
+            (Language::En, None) => format!("- {link}: {project} project wiki; author unknown."),
         }
     }
 }
@@ -521,11 +526,11 @@ mod tests {
             assert!(a.starts_with("El procedimiento documentado exige revisar.\n\n**Fuentes**\n- [Procedure](https://dev.azure.com/test/Project/_wiki/wikis/wiki?pagePath=%2FProcedure): wiki del proyecto Project; "));
             assert_eq!(a.matches("**Fuentes**").count(), 1);
             if mode == "other" {
-                assert!(a.contains("último editor registrado: Ana"));
+                assert!(a.contains("última edición de Ana"));
                 assert!(!a.contains("creador"));
             }
             if mode == "unknown" {
-                assert!(a.contains("no se pudo verificar quién"));
+                assert!(a.contains("autoría desconocida"));
             }
         }
     }
@@ -592,7 +597,7 @@ mod tests {
         )
         .unwrap();
         assert!(a.starts_with("The procedure says so.\n\n**Sources**\n- [Procedure]("));
-        assert!(a.ends_with("): Project project wiki; last recorded editor: Ana."));
+        assert!(a.ends_with("): Project project wiki; last edited by Ana."));
         assert!(!a.contains("Fuentes") && !a.contains("último editor"));
 
         let mut own = reference("p", "wiki");
@@ -603,7 +608,7 @@ mod tests {
         };
         let a = complete_answer("Not documented.", &[], &e, "", Language::En).unwrap();
         assert!(a.contains("\n\n**Pages consulted**\n- [Procedure]("));
-        assert!(a.ends_with("Project project wiki; documentation I contributed to (verified)."));
+        assert!(a.ends_with("Project project wiki; documentation I contributed to."));
 
         let mut unknown = reference("p", "wiki");
         unknown.authority = Some("unknown".into());
@@ -612,7 +617,7 @@ mod tests {
             ..Default::default()
         };
         let a = complete_answer("Steps.", &["p".into()], &e, "", Language::En).unwrap();
-        assert!(a.ends_with("it couldn't be verified who documented it."));
+        assert!(a.ends_with("author unknown."));
     }
     #[test]
     fn missing_invented_and_out_of_scope_sources_fail_closed() {

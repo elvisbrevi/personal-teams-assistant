@@ -1325,7 +1325,7 @@ async fn wiki_priority_current_request_mixed_citations_and_complete_gate_without
                     result
                         .answer
                         .unwrap()
-                        .contains("contribución propia verificada")
+                        .contains("documentación en la que participé")
                 );
             } else if ids.is_empty() {
                 // No model selected a page: the consulted pages are linked instead of
@@ -2502,7 +2502,7 @@ async fn unregistered_work_is_reviewed_across_activity_wiki_and_teams_with_verif
             "](https://dev.azure.com/example/Payments/_git/payments-api/pullrequest/46)",
             "](https://dev.azure.com/example/Payments/_git/payments-api/commit/cccccccc33)",
             "](https://dev.azure.com/example/Payments/_workitems/edit/100)",
-            "[Runbook](https://dev.azure.com/example/Payments/_wiki/wikis/abcdeabc-abcd-abcd-abcd-abcdeabcdea2?pagePath=%2FRunbook): wiki del proyecto Payments; documentación con contribución propia verificada.",
+            "[Runbook](https://dev.azure.com/example/Payments/_wiki/wikis/abcdeabc-abcd-abcd-abcd-abcdeabcdea2?pagePath=%2FRunbook): wiki del proyecto Payments; documentación en la que participé.",
         ] {
             assert!(sources_section.contains(link), "{link}\n{answer}");
         }
