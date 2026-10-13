@@ -160,6 +160,7 @@ impl Pipeline {
             .filter(|r| matches!(&r.access, Access::Tool { tool } if tool.reviews_activity()))
             .collect();
         let mut review = false;
+        let mut thanks = false;
         let is_greeting = if link_reply.is_some() {
             false
         } else if greeting(&current) {
@@ -200,6 +201,10 @@ impl Pipeline {
                 },
             );
             false
+        } else if !own_chat && shared_link(&current) {
+            thanks = true;
+            audit.step("intent", "shared link");
+            false
         } else {
             if available.is_empty() {
                 audit.reason = "no_authorized_resource".into();
@@ -224,7 +229,9 @@ impl Pipeline {
                 Intent::Personal => own_chat,
                 Intent::Statement => false,
             };
-            if !decision.confident() || !answers {
+            // Sharing a link with a longer note informs too; the sender is thanked.
+            thanks = decision.intent == Intent::Statement && !own_chat && has_link(&current);
+            if !decision.confident() || !(answers || thanks) {
                 if decision.intent == Intent::Personal {
                     leave_to_person(&mut audit);
                 } else {
@@ -243,6 +250,8 @@ impl Pipeline {
                 "link"
             } else if is_greeting {
                 Intent::Greeting.as_str()
+            } else if thanks {
+                "shared_link"
             } else if review {
                 Intent::ActivityReview.as_str()
             } else {
@@ -258,6 +267,9 @@ impl Pipeline {
         } else if is_greeting {
             audit.reason = "deterministic_greeting".into();
             self.config.policy.greeting.clone()
+        } else if thanks {
+            audit.reason = "deterministic_thanks".into();
+            thanks_reply(self.config.llm.language, &message.sender_name)
         } else {
             let previous = self.store.context(&message.conversation)?;
             let history = self.history(&message, &mut audit, &mut history).await;
@@ -2080,28 +2092,13 @@ fn explicit_wiki(question: &str) -> bool {
         .any(|w| w.eq_ignore_ascii_case("wiki") || w.eq_ignore_ascii_case("wikis"))
 }
 fn question_request(question: &str) -> bool {
+    // A `?` in a link's query string («…/Epica?workitem=1») asks nothing.
+    let question = without_links(question);
     if question.contains(['?', '¿']) {
         return true;
     }
-    let normalized = question
-        .to_lowercase()
-        .replace('ó', "o")
-        .replace('é', "e")
-        .replace('í', "i")
-        .replace('á', "a")
-        .replace('ú', "u");
-    let normalized = normalized.trim_start_matches(|c: char| !c.is_alphanumeric());
-    // «necesito que…», «cuando puedas…» ask someone to act; the intent classifier decides who.
-    if [
-        "necesito que ",
-        "cuando puedas",
-        "i need you to ",
-        "when you can",
-        "please ",
-    ]
-    .iter()
-    .any(|p| normalized.starts_with(p))
-    {
+    let normalized = request_start(&question);
+    if asks_to_act(&normalized) {
         return false;
     }
     [
@@ -2151,6 +2148,83 @@ fn question_request(question: &str) -> bool {
     ]
     .iter()
     .any(|prefix| normalized.starts_with(prefix))
+}
+/// Lowercase, without accents or leading punctuation, to compare how a request starts.
+fn request_start(text: &str) -> String {
+    let normalized = text
+        .to_lowercase()
+        .replace('ó', "o")
+        .replace('é', "e")
+        .replace('í', "i")
+        .replace('á', "a")
+        .replace('ú', "u");
+    normalized
+        .trim_start_matches(|c: char| !c.is_alphanumeric())
+        .to_owned()
+}
+/// «necesito que…», «cuando puedas…» ask someone to act; the intent classifier decides who.
+fn asks_to_act(normalized: &str) -> bool {
+    [
+        "necesito que ",
+        "cuando puedas",
+        "i need you to ",
+        "when you can",
+        "please ",
+    ]
+    .iter()
+    .any(|p| normalized.starts_with(p))
+}
+fn has_link(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    lower.contains("https://") || lower.contains("http://")
+}
+/// The text without its links; a word glued to a link («Hotfix:https://…») keeps its start.
+fn without_links(text: &str) -> String {
+    text.split_whitespace()
+        .map(|w| {
+            let lower = w.to_ascii_lowercase();
+            lower
+                .find("https://")
+                .or_else(|| lower.find("http://"))
+                .map_or(w, |i| &w[..i])
+        })
+        .filter(|w| !w.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+/// Words a shared link may carry as its label («Hotfix:», «Te paso la HU del hotfix»).
+const SHARED_LINK_LABEL_WORDS: usize = 8;
+/// Only shares links, at most with a short label: it asks nothing, so the sender is thanked.
+fn shared_link(text: &str) -> bool {
+    let label = without_links(text);
+    has_link(text)
+        && label
+            .split_whitespace()
+            .filter(|w| w.chars().any(char::is_alphanumeric))
+            .count()
+            <= SHARED_LINK_LABEL_WORDS
+        && !asks_to_act(&request_start(&label))
+}
+/// Deterministic answer to a shared link, with the sender's first name when it is known.
+pub fn thanks_reply(language: Language, sender_name: &str) -> String {
+    let thanks = match language {
+        Language::Es => "Gracias",
+        Language::En => "Thanks",
+    };
+    match first_name(sender_name) {
+        Some(name) => format!("{thanks} {name}."),
+        None => format!("{thanks}."),
+    }
+}
+/// The given name of a Teams display name: «Victoria Pérez» or «Pérez, Victoria».
+fn first_name(display_name: &str) -> Option<&str> {
+    let given = display_name
+        .split_once(',')
+        .map_or(display_name, |(_, given)| given);
+    given.split_whitespace().next().filter(|name| {
+        name.chars().any(char::is_alphabetic)
+            && name.chars().all(|c| c.is_alphabetic() || "-'".contains(c))
+    })
 }
 fn leave_to_person(audit: &mut Audit) {
     audit.reason = "personal_request".into();
@@ -2355,8 +2429,8 @@ fn status_question(question: &str) -> bool {
 mod tests {
     use super::{
         Language, LinkOffer, activity_review_request, confirmation, documentation_question,
-        holding_reply, link_request, personal_request, question_request, status_question,
-        with_registration, withheld_reason, work_mention,
+        holding_reply, link_request, personal_request, question_request, shared_link,
+        status_question, thanks_reply, with_registration, withheld_reason, work_mention,
     };
 
     #[test]
@@ -2517,6 +2591,54 @@ mod tests {
         ] {
             assert!(!question_request(q), "{q}");
         }
+    }
+
+    #[test]
+    fn a_shared_link_is_thanked_not_answered_as_a_question() {
+        // Real message answered as a question on 2026-10-13: the `?` was the URL's.
+        let shared = "Hotfi: \n https://dev.azure.com/o/Cobro%20Pago/_backlogs/backlog/Team/Epica?showParents=false&workitem=26321";
+        assert!(!question_request(shared));
+        assert!(shared_link(shared));
+        for q in [
+            "https://dev.azure.com/o/p/_workitems/edit/1?src=x",
+            "Hola! https://dev.azure.com/o/p/_workitems/edit/1",
+            "HU del hotfix:https://dev.azure.com/o/p/_workitems/edit/1",
+            "Te paso la HU del hotfix https://x.example/a https://x.example/b",
+        ] {
+            assert!(!question_request(q), "{q}");
+            assert!(shared_link(q), "{q}");
+        }
+        for q in [
+            "¿Puedes revisar esto? https://dev.azure.com/o/p/_workitems/edit/1",
+            "dame el estado de https://dev.azure.com/o/p/_workitems/edit/1",
+        ] {
+            assert!(question_request(q), "{q}");
+        }
+        for q in [
+            "Necesito que revises esto https://dev.azure.com/o/p/_workitems/edit/1",
+            "Please check https://dev.azure.com/o/p/_workitems/edit/1",
+            "Hotfix listo",
+            "Ayer conversamos con el equipo y quedamos en dejar todo el detalle aquí https://x.example/a",
+        ] {
+            assert!(!shared_link(q), "{q}");
+        }
+        assert_eq!(
+            thanks_reply(Language::Es, "Victoria Pérez Soto"),
+            "Gracias Victoria."
+        );
+        assert_eq!(
+            thanks_reply(Language::Es, "Pérez, Victoria"),
+            "Gracias Victoria."
+        );
+        assert_eq!(
+            thanks_reply(Language::En, "Victoria Pérez"),
+            "Thanks Victoria."
+        );
+        assert_eq!(thanks_reply(Language::Es, ""), "Gracias.");
+        assert_eq!(
+            thanks_reply(Language::Es, "victoria@example.com"),
+            "Gracias."
+        );
     }
 
     #[test]

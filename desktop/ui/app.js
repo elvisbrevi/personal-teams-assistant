@@ -636,6 +636,7 @@ const reasonLabels = {
   informational_message: 'Informational message: it asks for no answer.',
   personal_request: 'It asks you for a call, a meeting, a joint review or your availability: it is left to you.',
   deterministic_greeting: 'Greeting answered with the configured text.',
+  deterministic_thanks: 'Shared link: the sender was thanked.',
   supported_answer: 'Answer generated.',
   unsafe_proposal: 'Withheld: it contained sensitive data or did not fit in a Teams message.',
   unsafe_answer: 'Withheld: it contained sensitive data or did not fit in a Teams message.',
@@ -655,7 +656,7 @@ const reasonLabels = {
   links_not_configured: 'Linking asked for, but no source has a write credential.',
 };
 const kindLabels = { self: 'Personal chat', direct: 'Direct', group: 'Group', unsupported: 'Other' };
-const intentLabels = { question: 'question', activity_review: 'activity review', greeting: 'greeting', link: 'link work to work items' };
+const intentLabels = { question: 'question', activity_review: 'activity review', greeting: 'greeting', shared_link: 'shared link', link: 'link work to work items' };
 const linkLabels = { sending: 'sending', linked: 'linked', already_linked: 'already linked', failed: 'failed', uncertain: 'uncertain (check the work item; never retried)' };
 let messageRows = [];
 let messageFilter = 'all';

@@ -68,6 +68,7 @@ pub async fn run(
         resource: resource.clone(),
         conversation: format!("chats/simulation-{}", input.session),
         sender: "simulated-user".into(),
+        sender_name: String::new(),
         kind: if input.group {
             teams::ConversationKind::Group
         } else {
