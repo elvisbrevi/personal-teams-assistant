@@ -41,6 +41,9 @@ pta config set activity_registration.enabled true
 ```sh
 pta activity run                     # starts today's review and returns its run ID
 pta activity run 2026-10-07          # optionally backfill one of the last 31 days
+pta activity run 2026-10-07 --context-stdin <<'CONTEXT'
+I reviewed the payment guide for HU 4321 for one hour.
+CONTEXT
 pta --json activity status           # running flag, today's entries and runs
 pta --json activity pending          # all pending decisions, across days
 pta --json activity history 2026-10-07
@@ -49,6 +52,10 @@ pta activity open ENTRY_ID           # separate review of a particular activity
 ```
 
 Runs and refinements are asynchronous: after the accepted operation, poll `activity status` until `running=false`, then inspect pending/history. Configuration changes and other mutations are refused while the process runs. The host stays open for the scheduler even when Teams reception is stopped. Closing the host stops scheduling; on its next start, today's latest due slot can run once, without replaying missed historical intervals. A slot and its activity claims persist across restarts.
+
+Manual runs accept up to 6000 bytes of non-sensitive context through `--context-stdin` or the GUI's **Context for the agents** field. The existing configured provider chain receives this context as untrusted data for task planning. It stays with the run and its pending entries so later clarification retains it. Context does not replace verified evidence or change registration permissions; an authentication failure must be resolved before planning can run.
+
+The panel shows the selected sources, provider order, daily target, creation mode and schedule. **Process runs** shows the last step, redacted failure details, duration, results and source/model coverage warnings. `activity history` returns the same additive `diagnostics` object, containing `stage`, `error`, `finished_at`, `context`, `provider`, `settings` and `observation_mode`. Older runs explicitly lack failure details; their discarded errors cannot be recovered. **Copy diagnostic prompt** includes the recorded diagnostics and any additional context for use in Codex, Claude or another agent; it does not invoke a provider or register work.
 
 Resolve an entry with JSON on stdin. `parent` is an HU ID, not a task ID. An HU explicitly named outside the suggestions is re-read in the authorized catalog's scope. Fields in `fields` extend the saved additional fields.
 

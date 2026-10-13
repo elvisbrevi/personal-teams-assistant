@@ -479,6 +479,45 @@ let activityEditing = false;
 let activityRunning = false;
 let pendingActivities = [];
 let viewedActivity = null;
+const activityReviewContexts = new Map();
+
+function activityFailureHelp(error) {
+  if (/Azure DevOps.*HTTP 401/is.test(error)) return 'Azure DevOps rejected the saved read credential. Check its validity for the selected organization and update it in Settings → Credentials.';
+  if (/Azure DevOps.*HTTP 403/is.test(error)) return 'Azure DevOps denied access. Check the credential permissions and access to the selected project.';
+  return '';
+}
+function renderActivityRun(run) {
+  const d = run.diagnostics || {};
+  const failed = ['failed', 'interrupted'].includes(run.status);
+  const error = d.error || (failed ? 'This older run did not save its failure details. The original error cannot be recovered.' : '');
+  const prompt = el('button', { class: 'secondary small', textContent: 'Copy diagnostic prompt' });
+  prompt.onclick = () => busy(prompt, async () => {
+    const text = [
+      `Investigate the activity registration ${run.status} in Personal Teams Assistant ${live?.host_version || ''}.`,
+      `Day: ${run.day}. Run ID: ${run.id}. Started: ${new Date(run.created_at * 1000).toISOString()}.`,
+      d.finished_at ? `Finished: ${new Date(d.finished_at * 1000).toISOString()}.` : '',
+      `Last step: ${d.stage || 'Not recorded'}.`, `Error: ${error || 'None recorded'}`,
+      `Run configuration: ${JSON.stringify(d.settings || {})}. Agents: ${d.provider || 'Not recorded'}.`,
+      `Observation mode: ${d.observation_mode ?? 'Not recorded'}. Summary: ${JSON.stringify(run.summary)}.`,
+      d.context ? `Context supplied to this run: ${d.context}` : '',
+      $('#activity-review-context').value.trim() ? `Additional context: ${$('#activity-review-context').value.trim()}` : '',
+      'Trace the failing step, explain the cause, and propose the smallest fix. Inspect credentials by presence and metadata only; never print secret values. Verify with read-only checks first. Inspect task history before any new registration; never retry an uncertain write.'
+    ].filter(Boolean).join('\n\n');
+    if (!await copy(text)) throw 'Could not copy the diagnostic prompt.';
+    done('Diagnostic prompt copied. Paste it into Codex, Claude, or another agent.');
+  });
+  const duration = d.finished_at ? `${Math.max(0, d.finished_at - run.created_at)} s` : 'In progress';
+  const help = activityFailureHelp(error);
+  return el('div', { class: 'activity-card' },
+    el('div', { class: 'panel-head' }, badge(run.status, failed ? 'error' : run.status === 'completed' ? 'ok' : 'info'),
+      el('span', { textContent: new Date(run.created_at * 1000).toLocaleString() }), prompt),
+    el('p', { class: 'hint', textContent: `Run ${run.id} · ${d.finished_at ? duration : failed || run.status === 'completed' ? 'Duration not recorded' : duration} · ${d.stage || 'Step not recorded'}` }),
+    error ? el('p', { class: 'activity-issue', textContent: error }) : null,
+    help ? el('p', { textContent: help }) : null,
+    run.summary ? el('p', { textContent: `${run.summary.created} tasks created · ${run.summary.pending} need input · ${run.summary.recorded_hours.toFixed(2)} hours accounted for · ${run.summary.remaining_hours.toFixed(2)} hours remaining` }) : null,
+    ...(run.summary?.warnings || []).map(w => el('p', { class: 'activity-issue', textContent: w })),
+    d.context ? el('details', {}, el('summary', { textContent: 'Context supplied to the agents' }), el('p', { class: 'activity-run-context', textContent: d.context })) : null);
+}
 
 function renderRegistrationSettings() {
   const s = current.config.activity_registration;
@@ -535,21 +574,30 @@ async function loadRegistration() {
   }
   if (!$('#activity-day').value) field('#activity-day', history.day);
   activityRunning = history.running;
+  const latest = history.runs[0];
+  const settings = history.settings || live.config.activity_registration;
+  const llm = history.llm || live.config.llm;
+  const agents = llm.chain?.filter(p => p.enabled).map(p => `${p.provider} (${p.model})`).join(' → ') || `${llm.provider} (${llm.model})`;
+  const activeRun = history.runs.find(r => r.status === 'running');
   pendingActivities = pending.entries;
   const count = pending.entries.length;
   $('#nav-activities').hidden = !count;
   $('#nav-activities').textContent = count;
   $('#activity-notice').hidden = !count && !activityRunning;
   $('#activity-notice-text').textContent = activityRunning ? 'Reviewing your work…' : `${count} activities need your context or an HU.`;
-  $('#activity-running').textContent = activityRunning ? 'An activity operation is running. This view refreshes automatically.' : 'Ready. Scheduled reviews run while the app is open, even if Teams reception is stopped.';
+  $('#activity-running').textContent = activityRunning ? `${activeRun?.diagnostics?.stage || 'An activity operation is running'}. This view refreshes automatically.` : 'No activity operation is running. Scheduled reviews run while the app is open, even if Teams reception is stopped.';
+  $('#activity-setup').textContent = `Sources: ${settings.sources.join(', ') || 'None selected'} · Agents: ${agents} · Daily target: ${settings.daily_hours} h · ${history.observation_mode ? 'Observation mode' : settings.auto_register ? 'Automatic creation when verified' : 'Manual approval'} · ${settings.enabled ? settings.schedule === 'daily' ? `Scheduled at ${settings.at}` : `Every ${settings.interval_minutes} min (${settings.window_start}–${settings.window_end})` : 'Schedule disabled'} · Time zone: ${settings.time_zone === 'local' ? 'Host local time' : settings.time_zone}`;
+  const latestFailed = latest && ['failed', 'interrupted'].includes(latest.status);
+  $('#activity-result').textContent = latestFailed ? `Last review ${latest.status}${latest.diagnostics?.stage ? ` during: ${latest.diagnostics.stage}` : ''}. See the error and diagnostic prompt in Process runs below.` : '';
   $('#activity-run').disabled = activityRunning;
   const registered = history.entries.filter(e => e.state === 'done');
   const hours = registered.reduce((total, e) => total + (e.draft.hours || 0), 0);
   const summary = history.summary || history.runs.find(r => r.status === 'completed' && r.summary)?.summary;
   $('#activity-summary').replaceChildren(...[
     badge(`${registered.length} tasks created`, 'ok'), badge(`${hours.toFixed(2)} hours registered by this process`, 'info'),
-    summary ? badge(`Last review: ${summary.remaining_hours.toFixed(2)} hours remaining`, 'muted') : badge('No completed review for this day'),
-    summary?.partial ? badge('Some sources could not be fully read', 'warn') : null].filter(Boolean));
+    summary ? badge(`Last completed review: ${summary.recorded_hours.toFixed(2)} hours accounted for; ${summary.remaining_hours.toFixed(2)} remaining`, 'muted') : badge('Daily effort unavailable: no completed review'),
+    latestFailed ? badge('Last review failed', 'error') : null,
+    summary?.partial ? badge('Review has coverage or planning warnings', 'warn') : null].filter(Boolean));
   $('#activity-pending').replaceChildren(...pending.entries.map(entry => {
     const review = el('button', { class: 'secondary small', textContent: activityWindow ? 'Review' : 'Review in new window' });
     review.onclick = () => busy(review, async () => {
@@ -571,10 +619,8 @@ async function loadRegistration() {
         el('td', { textContent: e.draft.hours ? `${e.draft.hours.toFixed(2)} h` : 'Needs input' }), el('td', {}, badge(...state)));
     })));
   $('#activity-history').replaceChildren(history.entries.length ? table : el('p', { class: 'hint', textContent: 'No activities registered for this day.' }));
-  $('#activity-runs').replaceChildren(...history.runs.map(r => el('div', { class: 'activity-card' },
-    badge(r.status, r.status === 'failed' || r.status === 'interrupted' ? 'error' : 'muted'),
-    el('span', { textContent: ` ${new Date(r.created_at * 1000).toLocaleString()}` }),
-    r.summary?.warnings?.length ? el('p', { textContent: r.summary.warnings.join(' ') }) : null)));
+  $('#activity-runs').replaceChildren(...history.runs.map(renderActivityRun));
+  if (!history.runs.length) $('#activity-runs').append(el('p', { class: 'hint', textContent: 'No reviews have run for this day.' }));
   let entry = [...pending.entries, ...history.entries].find(e => e.id === selectedActivity);
   if (activityWindow && !selectedActivity && count) { entry = pending.entries[0]; selectedActivity = entry.id; }
   if (entry) renderActivityEditor(entry);
@@ -1169,10 +1215,14 @@ $('#activity-all').onclick = () => showTab('messages');
 $('#activity-notice-open').onclick = () => busy($('#activity-notice-open'), () => invoke('activity_open'));
 $('#activity-settings').onclick = () => showTab('settings', 'panel-registration');
 $('#activity-refresh').onclick = () => busy($('#activity-refresh'), loadRegistration);
-$('#activity-day').onchange = () => loadRegistration().catch(fail);
+$('#activity-day').onchange = () => {
+  field('#activity-review-context', activityReviewContexts.get($('#activity-day').value) || '');
+  loadRegistration().catch(fail);
+};
+$('#activity-review-context').oninput = () => activityReviewContexts.set($('#activity-day').value, $('#activity-review-context').value);
 $('#activity-run').onclick = () => busy($('#activity-run'), async () => {
   if (dirty) await save();
-  await invoke('activity_run', { day: $('#activity-day').value || null }); await loadRegistration();
+  await invoke('activity_run', { day: $('#activity-day').value || null, context: $('#activity-review-context').value.trim() }); await loadRegistration();
 });
 $('#activity-parent').onchange = () => { activityEditing = true; $('#activity-other-parent-label').hidden = $('#activity-parent').value !== 'other'; };
 $('#activity-form').oninput = () => { activityEditing = true; };

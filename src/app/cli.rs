@@ -77,7 +77,8 @@ Personal chat
 
 Activity registration
   activity status|pending  Current run, or activities needing context or an HU.
-  activity run [DAY]        Reviews and registers work (YYYY-MM-DD, today by default).
+  activity run [DAY] [--context-stdin]  Reviews and registers work (today by default).
+                           --context-stdin reads up to 6000 bytes of context for the agents.
   activity history [DAY]    Tasks and runs filtered by day.
   activity resolve ID       JSON on stdin: action=create|refine|dismiss, parent, title, description,
                            hours, context (Other), fields (additional required field values).
@@ -176,7 +177,7 @@ fn validate_args(args: &[String]) -> Result<()> {
         let a = args[i].as_str();
         match a {
             "--json" | "--non-interactive" | "--offline" | "--no-browser" | "--wait"
-            | "--content" | "--current-profile" => {}
+            | "--content" | "--current-profile" | "--context-stdin" => {}
             "--limit" => {
                 i += 1;
                 ensure!(
@@ -276,6 +277,10 @@ fn validate_args(args: &[String]) -> Result<()> {
         ),
         ("--content", p[0] == "audit"),
         (
+            "--context-stdin",
+            p.as_slice().starts_with(&["activity", "run"]),
+        ),
+        (
             "--current-profile",
             p.as_slice().starts_with(&["web", "users", "add"]),
         ),
@@ -369,7 +374,9 @@ async fn execute(mut args: Vec<String>) -> Result<Reply> {
             _ => unreachable!(),
         };
         let values = match action {
-            "run" | "history" => json!({"day":args.get(2)}),
+            "run" => json!({"day":args.iter().skip(2).find(|value| !value.starts_with("--")),
+                "context":if args.iter().any(|a| a == "--context-stdin") { stdin_text()? } else { String::new() }}),
+            "history" => json!({"day":args.get(2)}),
             "open" => json!({"id":args.get(2)}),
             "resolve" => json!({"id":positional(&args,2)?,"resolution":input()?}),
             _ => json!({}),
@@ -1043,6 +1050,25 @@ mod help_tests {
         }
         for lifecycle in ["  start ", "  status ", "  stop ", "  restart "] {
             assert!(HELP.contains(lifecycle), "{lifecycle}");
+        }
+    }
+    #[test]
+    fn activity_context_is_opt_in_stdin_only_for_runs() {
+        for command in [
+            vec!["activity", "run", "--context-stdin"],
+            vec!["activity", "run", "2026-10-13", "--context-stdin"],
+        ] {
+            assert!(
+                validate_args(&command.into_iter().map(String::from).collect::<Vec<_>>()).is_ok()
+            );
+        }
+        for command in [
+            vec!["activity", "history", "--context-stdin"],
+            vec!["activity", "run", "--context", "prompt"],
+        ] {
+            assert!(
+                validate_args(&command.into_iter().map(String::from).collect::<Vec<_>>()).is_err()
+            );
         }
     }
     #[test]

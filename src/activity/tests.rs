@@ -101,6 +101,8 @@ struct TestTools {
     call: bool,
     activity_override: std::sync::Mutex<Option<Vec<Linkable>>>,
     registered_activities: std::sync::Mutex<Vec<Linkable>>,
+    daily_error: std::sync::Mutex<Option<String>>,
+    review_error: std::sync::Mutex<Option<String>>,
 }
 #[async_trait]
 impl ReadOnlyTool for TestTools {
@@ -108,6 +110,9 @@ impl ReadOnlyTool for TestTools {
         unreachable!()
     }
     async fn review(&self, _: &ToolSpec, _: i64) -> Result<String> {
+        if let Some(error) = self.review_error.lock().unwrap().as_ref() {
+            anyhow::bail!("{error}");
+        }
         let at = Utc::now() - chrono::Duration::days(1);
         let mut activities = vec![Linkable {
             label: "Created Wiki payment guide".into(),
@@ -151,6 +156,9 @@ impl ReadOnlyTool for TestTools {
         _: &str,
         day: &str,
     ) -> Result<DailyWork> {
+        if let Some(error) = self.daily_error.lock().unwrap().as_ref() {
+            anyhow::bail!("{error}");
+        }
         Ok(DailyWork {
             organization: parent().organization,
             day: day.into(),
@@ -224,6 +232,8 @@ fn recorder(
         call,
         activity_override: std::sync::Mutex::new(None),
         registered_activities: std::sync::Mutex::new(Vec::new()),
+        daily_error: std::sync::Mutex::new(None),
+        review_error: std::sync::Mutex::new(None),
     });
     let map = KnowledgeMap {
         repositories: BTreeMap::new(),
@@ -259,6 +269,133 @@ fn recorder(
 }
 fn yesterday() -> NaiveDate {
     (Utc::now() - chrono::Duration::days(1)).date_naive()
+}
+
+#[tokio::test]
+async fn failed_daily_read_keeps_stage_error_and_context_after_reopening() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("activity.db");
+    // Upgrade the exact runs schema used by installations before diagnostics.
+    let legacy = rusqlite::Connection::open(&path).unwrap();
+    legacy.execute_batch("CREATE TABLE runs(id TEXT PRIMARY KEY,slot TEXT UNIQUE,day TEXT NOT NULL,status TEXT NOT NULL,summary TEXT NOT NULL DEFAULT '{}',created_at INTEGER NOT NULL);
+        INSERT INTO runs(id,day,status,summary,created_at) VALUES('legacy','2026-10-01','failed','null',1);").unwrap();
+    drop(legacy);
+    let (mut r, tools) = recorder(dir.path(), 0., false, false, false);
+    let secret = "hidden-reader-token";
+    r.redactor = Arc::new(Redactor::new(&[], vec![secret.into()]).unwrap());
+    *tools.daily_error.lock().unwrap() = Some(format!(
+        "Azure DevOps read /example/_apis/teams returned HTTP 401 {secret}"
+    ));
+    let id =
+        r.db.claim_run(None, &yesterday().to_string())
+            .unwrap()
+            .unwrap();
+    let context = "Reviewed the payment guide for HU 40.";
+    assert!(r.run(&id, yesterday(), context).await.is_err());
+    assert_eq!(tools.writes.load(Ordering::SeqCst), 0);
+    let db = store::Database::open(&path).unwrap();
+    let runs = db.runs(None).unwrap();
+    let run = runs.iter().find(|run| run["id"] == id).unwrap();
+    assert_eq!(run["status"], "failed");
+    assert_eq!(
+        run["diagnostics"]["stage"],
+        "Reading daily effort and open HUs"
+    );
+    assert_eq!(run["diagnostics"]["context"], context);
+    let error = run["diagnostics"]["error"].as_str().unwrap();
+    assert!(error.contains("HTTP 401"));
+    assert!(error.contains("daily effort"));
+    assert!(!error.contains(secret));
+    assert!(run["diagnostics"]["finished_at"].as_i64().is_some());
+    assert_eq!(
+        runs.iter().find(|run| run["id"] == "legacy").unwrap()["diagnostics"],
+        json!({})
+    );
+}
+
+#[derive(Default)]
+struct ContextModel {
+    contexts: std::sync::Mutex<Vec<String>>,
+    fail: bool,
+}
+#[async_trait]
+impl LlmProvider for ContextModel {
+    fn name(&self) -> &str {
+        "test-agent"
+    }
+    async fn generate(&self, _: GenerationInput<'_>) -> Result<String> {
+        unreachable!()
+    }
+    async fn plan_activity_tasks(
+        &self,
+        activities: &[Linkable],
+        parents: &[Target],
+        evidence: &str,
+        remaining: f64,
+        context: &str,
+    ) -> Result<Vec<Draft>> {
+        self.contexts.lock().unwrap().push(context.into());
+        if self.fail {
+            anyhow::bail!("agent unavailable");
+        }
+        Model
+            .plan_activity_tasks(activities, parents, evidence, remaining, context)
+            .await
+    }
+}
+
+#[tokio::test]
+async fn day_context_reaches_the_agent_and_survives_entry_refinement() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut r, tools) = recorder(dir.path(), 0., false, false, false);
+    r.config.activity_registration.auto_register = false;
+    let model = Arc::new(ContextModel::default());
+    r.llm = model.clone();
+    let context = "I spent one hour reviewing HU 40.";
+    r.run("context", yesterday(), context).await.unwrap();
+    assert_eq!(model.contexts.lock().unwrap()[0], context);
+    let entry = r.db.pending().unwrap().remove(0);
+    assert_eq!(entry.context, context);
+    let resolution: Resolution =
+        serde_json::from_value(json!({"action":"refine","context":"This was documentation work."}))
+            .unwrap();
+    r.resolve(&entry.id, resolution).await.unwrap();
+    assert!(model.contexts.lock().unwrap()[1].contains(context));
+    assert_eq!(tools.writes.load(Ordering::SeqCst), 0);
+    assert!(
+        r.run("too-long", yesterday(), &"x".repeat(6001))
+            .await
+            .is_err()
+    );
+    r.redactor = Arc::new(Redactor::new(&[], vec!["private-token".into()]).unwrap());
+    assert!(
+        r.run("sensitive", yesterday(), "private-token")
+            .await
+            .is_err()
+    );
+    assert_eq!(model.contexts.lock().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn source_and_agent_errors_remain_visible_as_partial_coverage() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut r, tools) = recorder(dir.path(), 0., false, false, false);
+    *tools.review_error.lock().unwrap() = Some("Azure DevOps read returned HTTP 403".into());
+    let summary = r.run("source-error", yesterday(), "").await.unwrap();
+    assert!(summary.partial);
+    assert!(summary.warnings[0].contains("activity"));
+    assert!(summary.warnings[0].contains("HTTP 403"));
+    *tools.review_error.lock().unwrap() = None;
+    r.llm = Arc::new(ContextModel {
+        fail: true,
+        ..Default::default()
+    });
+    let summary = r.run("agent-error", yesterday(), "HU 40").await.unwrap();
+    assert!(summary.partial);
+    assert!(summary.warnings[0].contains("test-agent"));
+    assert!(summary.warnings[0].contains("agent unavailable"));
+    assert_eq!(summary.pending, 1);
+    assert_eq!(tools.writes.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]
@@ -307,7 +444,7 @@ async fn commits_prs_pipelines_releases_and_approvals_register_once_with_evidenc
     })
     .collect();
     *tools.activity_override.lock().unwrap() = Some(activities.clone());
-    let summary = r.run("all-activity-kinds", yesterday()).await.unwrap();
+    let summary = r.run("all-activity-kinds", yesterday(), "").await.unwrap();
     assert_eq!(summary.created, 5);
     assert_eq!(summary.recorded_hours, 7.5);
     assert_eq!(summary.remaining_hours, 1.5);
@@ -335,7 +472,7 @@ async fn commits_prs_pipelines_releases_and_approvals_register_once_with_evidenc
             "preserve the verified evidence relation"
         );
     }
-    r.run("repeat-all-activity-kinds", yesterday())
+    r.run("repeat-all-activity-kinds", yesterday(), "")
         .await
         .unwrap();
     assert_eq!(tools.writes.load(Ordering::SeqCst), 5);
@@ -345,12 +482,12 @@ async fn commits_prs_pipelines_releases_and_approvals_register_once_with_evidenc
 async fn automatic_wiki_task_is_done_once_and_call_stays_pending() {
     let dir = tempfile::tempdir().unwrap();
     let (r, tools) = recorder(dir.path(), 3., false, false, true);
-    let summary = r.run("first", yesterday()).await.unwrap();
+    let summary = r.run("first", yesterday(), "").await.unwrap();
     assert_eq!(tools.writes.load(Ordering::SeqCst), 1);
     assert_eq!(summary.recorded_hours, 4.5);
     assert_eq!(summary.remaining_hours, 4.5);
     assert_eq!(summary.pending, 1);
-    r.run("again", yesterday()).await.unwrap();
+    r.run("again", yesterday(), "").await.unwrap();
     assert_eq!(tools.writes.load(Ordering::SeqCst), 1);
     let pending =
         r.db.entries(None)
@@ -401,7 +538,7 @@ async fn recovery_keeps_attempts_reserved_and_restores_interrupted_questions() {
     let dir = tempfile::tempdir().unwrap();
     let (mut r, tools) = recorder(dir.path(), 0., false, false, true);
     r.config.activity_registration.auto_register = false;
-    r.run("before_restart", yesterday()).await.unwrap();
+    r.run("before_restart", yesterday(), "").await.unwrap();
     let mut entries = r.db.pending().unwrap();
     entries[0].state = "sending".into();
     r.db.update(&entries[0], "pending").unwrap();
@@ -417,7 +554,7 @@ async fn recovery_keeps_attempts_reserved_and_restores_interrupted_questions() {
         r.db.entry(&entries[1].id).unwrap().unwrap().state,
         "pending"
     );
-    let summary = r.run("after_restart", yesterday()).await.unwrap();
+    let summary = r.run("after_restart", yesterday(), "").await.unwrap();
     assert_eq!(summary.remaining_hours, 7.5);
     assert_eq!(tools.writes.load(Ordering::SeqCst), 0);
 }
@@ -443,7 +580,7 @@ async fn insufficient_hours_required_fields_and_observation_prevent_writes() {
         let dir = tempfile::tempdir().unwrap();
         let (mut r, tools) = recorder(dir.path(), existing, required, false, false);
         r.config.policy.dry_run = observe;
-        r.run("test", yesterday()).await.unwrap();
+        r.run("test", yesterday(), "").await.unwrap();
         assert_eq!(tools.writes.load(Ordering::SeqCst), 0);
         assert_eq!(r.db.entries(None).unwrap()[0].state, "pending");
     }
@@ -452,10 +589,10 @@ async fn insufficient_hours_required_fields_and_observation_prevent_writes() {
 async fn uncertain_creation_is_reserved_and_never_repeated_after_restart() {
     let dir = tempfile::tempdir().unwrap();
     let (r, tools) = recorder(dir.path(), 0., false, true, false);
-    let summary = r.run("first", yesterday()).await.unwrap();
+    let summary = r.run("first", yesterday(), "").await.unwrap();
     assert_eq!(summary.remaining_hours, 7.5);
     r.db.recover().unwrap();
-    r.run("restart", yesterday()).await.unwrap();
+    r.run("restart", yesterday(), "").await.unwrap();
     assert_eq!(tools.writes.load(Ordering::SeqCst), 1);
     assert_eq!(r.db.entries(None).unwrap()[0].state, "uncertain");
 }
