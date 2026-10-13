@@ -104,6 +104,76 @@ async fn deterministic_greeting_sends_without_a_model() {
     assert!(store.next_job().unwrap().is_none());
 }
 #[tokio::test]
+async fn a_shared_link_is_thanked_by_name_without_a_model() {
+    let server = MockServer::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let store = support::store(&dir);
+    let graph = support::graph(&server, store.clone());
+    Mock::given(method("GET"))
+        .and(path("/chats/chat1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"chatType":"oneOnOne"})))
+        .mount(&server)
+        .await;
+    // The `?` of the work item URL must not make it a question.
+    let text = "Hotfi: \n https://dev.azure.com/o/Cobro%20Pago/_backlogs/backlog/Team/Epica?showParents=false&workitem=26321";
+    Mock::given(method("GET")).and(path("/chats/chat1/messages/123")).respond_with(ResponseTemplate::new(200).set_body_json(json!({"id":"123","messageType":"message","createdDateTime":chrono::Utc::now().to_rfc3339(),"deletedDateTime":null,"from":{"user":{"id":"sender","displayName":"Victoria Pérez"}},"body":{"contentType":"text","content":text},"mentions":[]}))).mount(&server).await;
+    Mock::given(method("POST"))
+        .and(path("/chats/chat1/messages"))
+        .and(body_partial_json(
+            json!({"body":{"contentType":"html","content":"<p>Gracias Victoria.</p>"}}),
+        ))
+        .respond_with(ResponseTemplate::new(201).set_body_json(json!({"id":"sent1"})))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let pipeline = Pipeline {
+        config: graph.config.clone(),
+        store: store.clone(),
+        adapter: graph,
+        knowledge: knowledge(&dir),
+        llm: Arc::new(NoLlm),
+        tools: Arc::new(NoTools),
+        redactor: redactor(),
+    };
+    store.enqueue("chats/chat1/messages/123").unwrap();
+    pipeline.process("chats/chat1/messages/123").await.unwrap();
+    let audit = store.audit("chats/chat1/messages/123").unwrap().unwrap();
+    assert_eq!(audit.status, "sent");
+    assert_eq!(audit.reason, "deterministic_thanks");
+    assert_eq!(audit.intent.as_deref(), Some("shared_link"));
+    assert!(audit.tools.is_empty());
+}
+#[tokio::test]
+async fn a_statement_sharing_a_link_is_thanked() {
+    let server = MockServer::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let store = support::store(&dir);
+    let graph = support::graph(&server, store.clone());
+    support::mock_message(
+        &server,
+        "Ayer conversamos con el equipo y quedamos en dejar todo el detalle del hotfix aquí https://dev.azure.com/o/p/_workitems/edit/1",
+    )
+    .await;
+    let mut config = (*graph.config).clone();
+    config.policy.dry_run = true;
+    let pipeline = Pipeline {
+        config: Arc::new(config),
+        store: store.clone(),
+        adapter: graph,
+        knowledge: knowledge(&dir),
+        llm: Arc::new(Triage(Intent::Statement)),
+        tools: Arc::new(NoTools),
+        redactor: redactor(),
+    };
+    store.enqueue("chats/chat1/messages/123").unwrap();
+    pipeline.process("chats/chat1/messages/123").await.unwrap();
+    let audit = store.audit("chats/chat1/messages/123").unwrap().unwrap();
+    assert_eq!(audit.status, "dry_run");
+    assert_eq!(audit.reason, "deterministic_thanks");
+    assert_eq!(audit.proposed.as_deref(), Some("Gracias."));
+    assert!(audit.tools.is_empty());
+}
+#[tokio::test]
 async fn graph_and_deepseek_end_to_end_without_an_external_reviewer() {
     let server = MockServer::start().await;
     let dir = tempfile::tempdir().unwrap();
@@ -1255,7 +1325,7 @@ async fn wiki_priority_current_request_mixed_citations_and_complete_gate_without
                     result
                         .answer
                         .unwrap()
-                        .contains("contribución propia verificada")
+                        .contains("documentación en la que participé")
                 );
             } else if ids.is_empty() {
                 // No model selected a page: the consulted pages are linked instead of
@@ -1808,6 +1878,7 @@ impl MessageAdapter for MemoryTeams {
             resource: resource.into(),
             conversation: "chats/chat1".into(),
             sender: "sender".into(),
+            sender_name: String::new(),
             kind: personal_teams_assistant::adapters::teams::ConversationKind::Direct,
             mentions: vec![],
             text: "¿Cuál es el horario de soporte?".into(),
@@ -1934,6 +2005,7 @@ async fn graph_history_returns_earlier_messages_oldest_first_with_author_and_tim
         resource: "chats/chat1/messages/123".into(),
         conversation: "chats/chat1".into(),
         sender: me.clone(),
+        sender_name: String::new(),
         kind: personal_teams_assistant::adapters::teams::ConversationKind::Direct,
         mentions: vec![],
         text: "pregunta actual".into(),
@@ -1981,6 +2053,7 @@ impl MessageAdapter for HistoryTeams {
             resource: resource.into(),
             conversation: self.conversation.clone(),
             sender: self.sender.clone(),
+            sender_name: String::new(),
             kind: personal_teams_assistant::adapters::teams::ConversationKind::Direct,
             mentions: vec![],
             text: self.text.into(),
@@ -2429,7 +2502,7 @@ async fn unregistered_work_is_reviewed_across_activity_wiki_and_teams_with_verif
             "](https://dev.azure.com/example/Payments/_git/payments-api/pullrequest/46)",
             "](https://dev.azure.com/example/Payments/_git/payments-api/commit/cccccccc33)",
             "](https://dev.azure.com/example/Payments/_workitems/edit/100)",
-            "[Runbook](https://dev.azure.com/example/Payments/_wiki/wikis/abcdeabc-abcd-abcd-abcd-abcdeabcdea2?pagePath=%2FRunbook): wiki del proyecto Payments; documentación con contribución propia verificada.",
+            "[Runbook](https://dev.azure.com/example/Payments/_wiki/wikis/abcdeabc-abcd-abcd-abcd-abcdeabcdea2?pagePath=%2FRunbook): wiki del proyecto Payments; documentación en la que participé.",
         ] {
             assert!(sources_section.contains(link), "{link}\n{answer}");
         }
@@ -2600,6 +2673,7 @@ impl MessageAdapter for NotesTeams {
             resource: resource.into(),
             conversation: "chats/48:notes".into(),
             sender: self.user.clone(),
+            sender_name: String::new(),
             kind: personal_teams_assistant::adapters::teams::ConversationKind::Direct,
             mentions: vec![],
             text: self.texts.lock().unwrap()[resource].clone(),

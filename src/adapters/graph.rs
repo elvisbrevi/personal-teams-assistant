@@ -1236,14 +1236,12 @@ impl MessageAdapter for Graph {
         } else {
             m.body.content
         };
+        let user = m.from.and_then(|f| f.user);
         Ok(IncomingMessage {
             resource,
             conversation,
-            sender: m
-                .from
-                .and_then(|f| f.user)
-                .map(|u| u.id)
-                .unwrap_or_default(),
+            sender: user.as_ref().map(|u| u.id.clone()).unwrap_or_default(),
+            sender_name: user.and_then(|u| u.display_name).unwrap_or_default(),
             kind,
             mentions: m
                 .mentions

@@ -23,6 +23,8 @@ pub struct IncomingMessage {
     pub resource: String,
     pub conversation: String,
     pub sender: String,
+    /// The sender's Teams display name; empty when Graph does not return it.
+    pub sender_name: String,
     pub kind: ConversationKind,
     pub mentions: Vec<String>,
     pub text: String,
@@ -538,6 +540,8 @@ pub struct IdentitySet {
 #[derive(Debug, Deserialize)]
 pub struct Identity {
     pub id: String,
+    #[serde(default, rename = "displayName")]
+    pub display_name: Option<String>,
 }
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -704,6 +708,7 @@ mod tests {
             resource: String::new(),
             conversation: String::new(),
             sender: "other".into(),
+            sender_name: String::new(),
             kind: ConversationKind::Group,
             mentions: vec![],
             text: "@owner hola".into(),
