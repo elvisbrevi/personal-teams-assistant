@@ -21,6 +21,17 @@ impl Database {
         db.execute_batch(
             "CREATE TABLE IF NOT EXISTS totals(day TEXT PRIMARY KEY,summary TEXT NOT NULL);",
         )?;
+        let has_diagnostics = db
+            .prepare("PRAGMA table_info(runs)")?
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+            .iter()
+            .any(|name| name == "diagnostics");
+        if !has_diagnostics {
+            db.execute_batch(
+                "ALTER TABLE runs ADD COLUMN diagnostics TEXT NOT NULL DEFAULT '{}';",
+            )?;
+        }
         Ok(Self { db: Mutex::new(db) })
     }
     /// Called once by the owning host at startup. A write in flight is never retried.
@@ -40,8 +51,8 @@ impl Database {
             self.update(&entry, &previous)?;
         }
         self.db.lock().unwrap().execute(
-            "UPDATE runs SET status='interrupted' WHERE status='running'",
-            [],
+            "UPDATE runs SET status='interrupted', diagnostics=json_set(diagnostics,'$.error',?1,'$.finished_at',?2) WHERE status='running'",
+            params!["The host stopped during this review. Inspect task history before running another review; uncertain writes are never retried.", Utc::now().timestamp()],
         )?;
         Ok(())
     }
@@ -50,9 +61,23 @@ impl Database {
         let changed=self.db.lock().unwrap().execute("INSERT OR IGNORE INTO runs(id,slot,day,status,created_at) VALUES(?1,?2,?3,'running',?4)",params![id,slot,day,Utc::now().timestamp()])?;
         Ok((changed == 1).then_some(id))
     }
-    pub fn finish_run(&self, id: &str, summary: Option<&Summary>) -> Result<()> {
+    pub fn describe_run(&self, id: &str, diagnostics: &Value) -> Result<()> {
         self.db.lock().unwrap().execute(
-            "UPDATE runs SET status=?2,summary=?3 WHERE id=?1",
+            "UPDATE runs SET diagnostics=?2 WHERE id=?1 AND status='running'",
+            params![id, serde_json::to_string(diagnostics)?],
+        )?;
+        Ok(())
+    }
+    pub fn stage_run(&self, id: &str, stage: &str) -> Result<()> {
+        self.db.lock().unwrap().execute(
+            "UPDATE runs SET diagnostics=json_set(diagnostics,'$.stage',?2) WHERE id=?1 AND status='running'",
+            params![id, stage],
+        )?;
+        Ok(())
+    }
+    pub fn finish_run(&self, id: &str, summary: Option<&Summary>, error: &str) -> Result<()> {
+        self.db.lock().unwrap().execute(
+            "UPDATE runs SET status=?2,summary=?3,diagnostics=json_set(diagnostics,'$.error',?4,'$.finished_at',?5) WHERE id=?1",
             params![
                 id,
                 if summary.is_some() {
@@ -60,14 +85,16 @@ impl Database {
                 } else {
                     "failed"
                 },
-                serde_json::to_string(&summary)?
+                serde_json::to_string(&summary)?,
+                error,
+                Utc::now().timestamp(),
             ],
         )?;
         Ok(())
     }
     pub fn runs(&self, day: Option<&str>) -> Result<Vec<Value>> {
         let db = self.db.lock().unwrap();
-        let mut stmt=db.prepare("SELECT id,day,status,summary,created_at FROM runs WHERE (?1 IS NULL OR day=?1) ORDER BY created_at DESC LIMIT 100")?;
+        let mut stmt=db.prepare("SELECT id,day,status,summary,created_at,diagnostics FROM runs WHERE (?1 IS NULL OR day=?1) ORDER BY created_at DESC,rowid DESC LIMIT 100")?;
         let rows = stmt.query_map([day], |r| {
             Ok((
                 r.get::<_, String>(0)?,
@@ -75,9 +102,10 @@ impl Database {
                 r.get::<_, String>(2)?,
                 r.get::<_, String>(3)?,
                 r.get::<_, i64>(4)?,
+                r.get::<_, String>(5)?,
             ))
         })?;
-        rows.map(|r|{let (id,day,status,summary,at)=r?;Ok(json!({"id":id,"day":day,"status":status,"summary":serde_json::from_str::<Value>(&summary)?,"created_at":at}))}).collect()
+        rows.map(|r|{let (id,day,status,summary,at,diagnostics)=r?;Ok(json!({"id":id,"day":day,"status":status,"summary":serde_json::from_str::<Value>(&summary)?,"created_at":at,"diagnostics":serde_json::from_str::<Value>(&diagnostics)?}))}).collect()
     }
     pub fn claimed(&self, key: &str) -> Result<bool> {
         Ok(self.db.lock().unwrap().query_row(

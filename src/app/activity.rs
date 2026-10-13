@@ -114,6 +114,7 @@ pub(super) async fn inspect(
     pending: bool,
 ) -> Result<Value> {
     recover(state).await?;
+    let config = read_config(&state.config_path)?;
     let day = day(state, date)?.to_string();
     let db = database(state)?;
     let entries = if pending {
@@ -130,10 +131,15 @@ pub(super) async fn inspect(
         })
         .collect();
     Ok(
-        json!({"day":day,"running":active(state).await,"entries":entries,"runs":db.runs(Some(&day))?,"summary":db.summary(&day)?}),
+        json!({"day":day,"running":active(state).await,"entries":entries,"runs":db.runs(Some(&day))?,"summary":db.summary(&day)?,"settings":config.activity_registration,"llm":config.llm,"observation_mode":config.policy.dry_run}),
     )
 }
-pub(super) async fn run(host: &Arc<Host>, date: Option<&str>, slot: Option<&str>) -> Result<Value> {
+pub(super) async fn run(
+    host: &Arc<Host>,
+    date: Option<&str>,
+    slot: Option<&str>,
+    context: &str,
+) -> Result<Value> {
     recover(&host.state).await?;
     let mut task = host.state.activity_task.lock().await;
     ensure!(
@@ -141,6 +147,7 @@ pub(super) async fn run(host: &Arc<Host>, date: Option<&str>, slot: Option<&str>
         "an activity registration is already running"
     );
     let recorder = recorder(&host.state).await?;
+    crate::activity::validate_context(context, &recorder.redactor)?;
     let day = day(&host.state, date)?;
     let today = recorder
         .config
@@ -162,10 +169,29 @@ pub(super) async fn run(host: &Arc<Host>, date: Option<&str>, slot: Option<&str>
     );
     let h = host.clone();
     let run_id = id.clone();
+    let context = context.trim().to_owned();
     *task = Some(tokio::spawn(async move {
-        let result = recorder.run(&run_id, day).await;
-        let _ = recorder.db.finish_run(&run_id, result.as_ref().ok());
-        let (title,body)=match result {Ok(summary) if summary.pending>0=>("Activity details needed",format!("{} activities need context or an HU. Open Activity registration to review them.",summary.pending)),Ok(summary)=>("Activity registration finished",format!("{} tasks created; {:.2} hours remain for {day}.",summary.created,summary.remaining_hours)),Err(_)=>("Activity registration failed","Check the selected sources, credentials and task fields. No uncertain write is retried.".into())};
+        let result = recorder.run(&run_id, day, &context).await;
+        let (title, body) = match result {
+            Ok(summary) if summary.pending > 0 => (
+                "Activity details needed",
+                format!(
+                    "{} activities need context or an HU. Open Activity registration to review them.",
+                    summary.pending
+                ),
+            ),
+            Ok(summary) => (
+                "Activity registration finished",
+                format!(
+                    "{} tasks created; {:.2} hours remain for {day}.",
+                    summary.created, summary.remaining_hours
+                ),
+            ),
+            Err(error) => (
+                "Activity registration failed",
+                recorder.error_detail(&error),
+            ),
+        };
         let _ = h.shell.notify_activity(title, &body, None);
     }));
     Ok(json!({"id":id,"day":day.to_string(),"running":true}))
@@ -189,16 +215,25 @@ pub(super) async fn resolve(host: &Arc<Host>, id: String, resolution: Resolution
     *task = Some(tokio::spawn(async move {
         let result = recorder.resolve(&entry_id, resolution).await;
         let body = match result {
-            Ok(e) if e.state == "done" => "Task created in Done.",
-            Ok(e) if e.state == "dismissed" => "Activity dismissed.",
-            Ok(_) => "Review the updated suggestion and any required fields.",
-            Err(_) => {
-                "The operation did not complete. Refresh and check the activity status before proceeding."
+            Ok(e) if e.state == "done" => "Task created in Done.".into(),
+            Ok(e) if e.state == "dismissed" => "Activity dismissed.".into(),
+            Ok(_) => "Review the updated suggestion and any required fields.".into(),
+            Err(error) => {
+                let detail = recorder.error_detail(&error);
+                if let Ok(Some(mut entry)) = recorder.db.entry(&entry_id)
+                    && ["pending", "refining"].contains(&entry.state.as_str())
+                {
+                    let previous = entry.state.clone();
+                    entry.state = "pending".into();
+                    entry.issue = detail.clone();
+                    let _ = recorder.db.update(&entry, &previous);
+                }
+                detail
             }
         };
         let _ = h
             .shell
-            .notify_activity("Activity registration", body, Some(&entry_id));
+            .notify_activity("Activity registration", &body, Some(&entry_id));
     }));
     Ok(json!({"id":id,"running":true}))
 }
@@ -234,7 +269,7 @@ pub(super) async fn schedule(host: Arc<Host>) {
                 && !active(&host.state).await
                 && let Ok(config) = read_config(&host.state.config_path)
                 && let Ok(Some(slot)) = config.activity_registration.slot(Utc::now())
-                && run(&host, None, Some(&slot)).await.is_err()
+                && run(&host, None, Some(&slot), "").await.is_err()
             {
                 tracing::warn!(event = "activity_schedule_not_ready");
             }

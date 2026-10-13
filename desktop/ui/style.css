@@ -302,6 +302,9 @@ button.ref small { font-weight: 400; color: var(--muted); text-decoration: none;
 .activity-evidence-link { overflow-wrap: anywhere; }
 .activity-card { border-bottom: 1px solid var(--border); padding: .8rem 0; }
 .activity-card:last-child { border-bottom: 0; }
+.activity-card p, #activity-setup { overflow-wrap: anywhere; }
+.activity-runs-title { margin-top: 1rem; font-size: 1rem; }
+.activity-run-context { white-space: pre-wrap; }
 #activity-history table { width: 100%; border-collapse: collapse; }
 #activity-history th, #activity-history td { padding: .6rem; text-align: left; border-bottom: 1px solid var(--border); vertical-align: top; }
 #activity-history th { white-space: nowrap; }

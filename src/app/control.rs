@@ -622,9 +622,18 @@ async fn operate(
         )
         .await
         .map_err(fail)?,
-        "activity_run" => activity::run(host, args.get("day").and_then(Value::as_str), None)
-            .await
-            .map_err(fail)?,
+        "activity_run" => activity::run(
+            host,
+            args.get("day").and_then(Value::as_str),
+            None,
+            match args.get("context") {
+                None | Some(Value::Null) => "",
+                Some(Value::String(context)) => context,
+                _ => return Err("[invalid_input] Context must be text.".into()),
+            },
+        )
+        .await
+        .map_err(fail)?,
         "activity_resolve" => activity::resolve(host, arg(args, "id")?, arg(args, "resolution")?)
             .await
             .map_err(fail)?,

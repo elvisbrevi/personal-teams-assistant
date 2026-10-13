@@ -330,10 +330,7 @@ impl Resolution {
             ["create", "refine", "dismiss"].contains(&self.action.as_str()),
             "invalid resolution action"
         );
-        ensure!(
-            self.context.len() <= 6000 && redactor.clean(&self.context),
-            "invalid context"
-        );
+        validate_context(&self.context, redactor)?;
         validate_fields(&self.fields)?;
         ensure!(
             redactor.clean(&serde_json::to_string(&self.fields)?),
@@ -341,6 +338,14 @@ impl Resolution {
         );
         Ok(())
     }
+}
+
+pub fn validate_context(context: &str, redactor: &Redactor) -> Result<()> {
+    ensure!(
+        context.len() <= 6000 && redactor.clean(context),
+        "context must be at most 6000 bytes and contain no sensitive data"
+    );
+    Ok(())
 }
 
 fn already_linked(activity: &Linkable, work: &DailyWork) -> bool {
@@ -409,6 +414,13 @@ fn activity_key(activity: &Linkable) -> String {
 }
 
 impl Recorder {
+    pub fn error_detail(&self, error: &anyhow::Error) -> String {
+        self.redactor
+            .redact(&format!("{error:#}"))
+            .chars()
+            .take(4000)
+            .collect()
+    }
     fn writer(&self) -> Result<&ToolSpec> {
         let s = &self.config.activity_registration;
         let mut scope = s.clone();
@@ -438,6 +450,7 @@ impl Recorder {
                 &day.to_string(),
             )
             .await
+            .context("Reading Azure DevOps daily effort and open HUs")
     }
     fn hours(&self, day: &str, work: &DailyWork) -> Result<f64> {
         let local = self
@@ -472,9 +485,30 @@ impl Recorder {
                 .all(|t| self.redactor.clean(t))
             && !draft.description.contains("://")
     }
-    pub async fn run(&self, run: &str, day: NaiveDate) -> Result<Summary> {
+    pub async fn run(&self, run: &str, day: NaiveDate, context: &str) -> Result<Summary> {
+        validate_context(context, &self.redactor)?;
+        self.db.describe_run(
+            run,
+            &serde_json::json!({
+                "context":context,"settings":self.config.activity_registration,
+                "provider":self.llm.name(),"observation_mode":self.config.policy.dry_run,
+                "stage":"Checking registration settings"
+            }),
+        )?;
+        let result = self.review(run, day, context).await;
+        let error = result
+            .as_ref()
+            .err()
+            .map(|e| self.error_detail(e))
+            .unwrap_or_default();
+        self.db.finish_run(run, result.as_ref().ok(), &error)?;
+        result
+    }
+    async fn review(&self, run: &str, day: NaiveDate, context: &str) -> Result<Summary> {
         let writer = self.writer()?;
         let settings = &self.config.activity_registration;
+        self.db
+            .stage_run(run, "Reading daily effort and open HUs")?;
         let work = self.daily_work(day).await?;
         let mut summary = Summary {
             recorded_hours: self.hours(&day.to_string(), &work)?,
@@ -492,21 +526,29 @@ impl Recorder {
             let Access::Tool { tool } = &source.access else {
                 continue;
             };
+            self.db.stage_run(run, &format!("Reading source {id}"))?;
             match self.tools.registration_review(tool, days).await {
                 Ok(text) => {
-                    let mut found: Evidence = serde_json::from_str(&text)?;
+                    let mut found: Evidence = serde_json::from_str(&text)
+                        .with_context(|| format!("Invalid evidence from source {id}"))?;
                     found.sanitize(&self.redactor);
                     summary.partial |= found.partial;
+                    if found.partial {
+                        summary
+                            .warnings
+                            .push(format!("Source {id} has incomplete coverage."));
+                    }
                     evidence.push_str(&found.text);
                     if let Some(offer) = found.links {
                         offers.push(offer);
                     }
                 }
-                Err(_) => {
+                Err(error) => {
                     summary.partial = true;
-                    summary
-                        .warnings
-                        .push(format!("Could not read source {id}."));
+                    summary.warnings.push(format!(
+                        "Could not read source {id}: {}",
+                        self.error_detail(&error)
+                    ));
                 }
             }
         }
@@ -538,6 +580,7 @@ impl Recorder {
             .into_values()
             .collect();
         if offer.activities.is_empty() {
+            self.db.stage_run(run, "Saving review results")?;
             summary.pending = self
                 .db
                 .pending()?
@@ -553,6 +596,8 @@ impl Recorder {
                 .take(self.config.policy.max_context_chars)
                 .collect::<String>(),
         );
+        self.db
+            .stage_run(run, "Planning tasks with the configured agents")?;
         let drafts = self
             .llm
             .plan_activity_tasks(
@@ -560,10 +605,18 @@ impl Recorder {
                 &parents,
                 &evidence,
                 summary.remaining_hours,
-                "",
+                context,
             )
-            .await
-            .unwrap_or_default();
+            .await;
+        let drafts = match drafts {
+            Ok(drafts) => drafts,
+            Err(error) => {
+                summary.partial = true;
+                summary.warnings.push(format!("Task planning failed ({}): {}. Activities with verified artifacts remain pending for manual review.",self.llm.name(),self.error_detail(&error)));
+                Vec::new()
+            }
+        };
+        self.db.stage_run(run, "Validating proposed tasks")?;
         let mut used = BTreeSet::new();
         for draft in drafts {
             if !self.valid_draft(&draft, &parents)
@@ -593,6 +646,7 @@ impl Recorder {
             }
             used.extend(activities.iter().map(|a| a.key.clone()));
             let mut entry = self.entry(run, day, draft, activities, &parents, &evidence);
+            entry.context = context.into();
             if entry.draft.ignore {
                 entry.state = "dismissed".into();
             }
@@ -605,10 +659,13 @@ impl Recorder {
                 && entry.draft.question.is_empty()
                 && !entry.activities.iter().any(|a| a.context_required)
                 && entry.state == "pending"
-                && self.apply(&mut entry, writer).await.is_err()
+                && let Err(error) = self.apply(&mut entry, writer).await
                 && entry.state == "pending"
             {
-                entry.issue="Could not verify the task fields or HU. Review the source and try the pending activity again.".into();
+                entry.issue = format!(
+                    "Could not verify the task fields or HU: {}",
+                    self.error_detail(&error)
+                );
                 self.db.update(&entry, "pending")?;
             }
         }
@@ -622,9 +679,11 @@ impl Recorder {
                 continue;
             }
             let draft = Draft {activities:vec![a.key.clone()],parent:None,title:a.short.clone(),description:String::new(),hours:None,confidence:0.,question:"Which HU does this activity belong to, what did you do, and how long did it take?".into(),suggested_parents:parents.iter().take(3).map(|p|p.id).collect(),ignore:false};
-            self.db
-                .insert(&self.entry(run, day, draft, vec![a], &parents, &evidence))?;
+            let mut entry = self.entry(run, day, draft, vec![a], &parents, &evidence);
+            entry.context = context.into();
+            self.db.insert(&entry)?;
         }
+        self.db.stage_run(run, "Saving review results")?;
         let entries = self.db.entries(Some(&day.to_string()))?;
         summary.pending = entries.iter().filter(|e| e.state == "pending").count();
         summary.created = entries
@@ -737,6 +796,7 @@ impl Recorder {
                 )
                 .await;
             entry.state = "pending".into();
+            let error = result.as_ref().err().map(|e| self.error_detail(e));
             if let Ok(drafts) = result
                 && let Some(draft) = drafts.into_iter().find(|d| {
                     !d.ignore
@@ -752,13 +812,18 @@ impl Recorder {
                 entry.draft = draft;
                 entry.issue.clear();
             } else {
-                entry.issue = "The model could not resolve the activity. Edit the details or add more context.".into();
+                entry.issue = error.map_or_else(|| "The model could not resolve the activity. Edit the details or add more context.".into(), |e| format!("The model could not resolve the activity: {e}"));
             }
             self.db.update(&entry, "refining")?;
         } else {
             // A user's explicit resolution confirms purpose/attendance as well as effort.
-            if self.apply(&mut entry, self.writer()?).await.is_err() && entry.state == "pending" {
-                entry.issue="Could not verify the task fields or HU. Check the source and required fields before proceeding.".into();
+            if let Err(error) = self.apply(&mut entry, self.writer()?).await
+                && entry.state == "pending"
+            {
+                entry.issue = format!(
+                    "Could not verify the task fields or HU: {}",
+                    self.error_detail(&error)
+                );
                 self.db.update(&entry, "pending")?;
             }
         }
@@ -864,9 +929,18 @@ impl Recorder {
                 ));
                 "done"
             }
-            Ok((LinkStatus::Failed, _)) => "failed",
+            Ok((LinkStatus::Failed, _)) => {
+                entry.issue = "Azure DevOps rejected the task creation request. Inspect the completed state, required fields and write credential permissions before deciding how to proceed.".into();
+                "failed"
+            },
             // No successful response/body or a deadline means human inspection, never retry.
-            _ => "uncertain",
+            result => {
+                entry.issue = match result {
+                    Err(error) => format!("Task creation result is uncertain: {}. Inspect Azure DevOps; this write will not be retried.", self.error_detail(&error)),
+                    _ => "Task creation result is uncertain. Inspect Azure DevOps; this write will not be retried.".into(),
+                };
+                "uncertain"
+            },
         }
         .into();
         self.db.update(entry, "sending")?;

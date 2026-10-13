@@ -177,8 +177,11 @@
         <header class="page-head"><h1>Activity registration</h1><p>Completed tasks, activities that need your context, and the daily effort still to register.</p></header>
         <div class="panel">
           <div class="toolbar"><label>Day<input id="activity-day" type="date"></label><button id="activity-run">Review this day</button><button id="activity-refresh" class="secondary">Refresh</button><button id="activity-settings" class="secondary">Configure</button></div>
+          <label>Context for the agents <small>Included when you review this day. Add the work performed, HU, effort, or details the sources cannot explain.</small><textarea id="activity-review-context" rows="3" maxlength="6000" placeholder="For HU 4321, I reviewed the payment guide for one hour and attended the deployment call."></textarea></label>
           <p id="activity-running" class="hint" role="status"></p>
           <div id="activity-summary" class="stats"></div>
+          <p id="activity-result" class="activity-issue" role="status"></p>
+          <p id="activity-setup" class="hint"></p>
         </div>
         <div class="panel"><h2>Needs your input</h2><div id="activity-pending" class="list"></div></div>
         <div id="activity-editor" class="panel" hidden>
@@ -193,7 +196,7 @@
             <div class="actions"><button id="activity-create" type="submit">Create task in Done</button><button id="activity-refine" type="button" class="secondary">Ask assistant with this context</button><button id="activity-dismiss" type="button" class="secondary">Dismiss activity</button></div>
           </form>
         </div>
-        <div class="panel"><h2>Daily history</h2><div id="activity-history" class="table-scroll"></div><details><summary>Process runs</summary><div id="activity-runs" class="list"></div></details></div>
+        <div class="panel"><h2>Daily history</h2><div id="activity-history" class="table-scroll"></div><h3 class="activity-runs-title">Process runs</h3><div id="activity-runs" class="list"></div></div>
       </section>
       <section id="messages" hidden>
         <header class="page-head">
