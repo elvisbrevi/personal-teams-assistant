@@ -218,6 +218,7 @@ const UI_CATALOG = { es: {
   'Task type': 'Tipo de tarea',
   'Completed state': 'Estado completado',
   'Effort field': 'Campo de esfuerzo',
+  'The task field where your real hours go, for example Microsoft.VSTS.Scheduling.CompletedWork or a custom field of your process.': 'El campo de la tarea donde van tus horas reales, por ejemplo Microsoft.VSTS.Scheduling.CompletedWork o un campo propio de tu proceso.',
   'Additional required fields': 'Campos obligatorios adicionales',
   'JSON object with Azure DevOps field reference names and values.': 'Objeto JSON con nombres de referencia de campos de Azure DevOps y sus valores.',
   'Select a source with a write credential': 'Selecciona una fuente con credencial de escritura',
