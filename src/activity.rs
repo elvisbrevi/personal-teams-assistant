@@ -5,7 +5,7 @@ mod tests;
 use crate::{
     ado::{
         link::{LinkStatus, Linkable, Target},
-        registration::{DailyWork, TaskFields},
+        registration::{DailyWork, LOOKBACK_DAYS, TaskFields},
     },
     config::Config,
     evidence::Evidence,
@@ -440,6 +440,11 @@ impl Recorder {
     }
     pub async fn daily_work(&self, day: NaiveDate) -> Result<DailyWork> {
         let settings = &self.config.activity_registration;
+        let today = settings.zoned(Utc::now()).date_naive();
+        ensure!(
+            day <= today && (today - day).num_days() < LOOKBACK_DAYS,
+            "choose a day within the last 14 days"
+        );
         let (start, end) = settings.bounds(day)?;
         self.tools
             .daily_work(
@@ -516,7 +521,7 @@ impl Recorder {
         };
         summary.remaining_hours = (settings.daily_hours - summary.recorded_hours).max(0.);
         let (start, end) = settings.bounds(day)?;
-        let days = (Utc::now() - start).num_days() + 1;
+        let days = LOOKBACK_DAYS;
         let mut offers = Vec::new();
         let mut evidence = String::new();
         for id in &settings.sources {

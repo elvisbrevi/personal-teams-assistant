@@ -40,7 +40,7 @@ pta config set activity_registration.enabled true
 
 ```sh
 pta activity run                     # starts today's review and returns its run ID
-pta activity run 2026-10-07          # optionally backfill one of the last 31 days
+pta activity run 2026-10-07          # optionally backfill one of the last 14 days
 pta activity run 2026-10-07 --context-stdin <<'CONTEXT'
 I reviewed the payment guide for HU 4321 for one hour.
 CONTEXT
@@ -76,6 +76,8 @@ JSON
 `refine` passes **Other / more context** to the model and updates the suggestion; it does not write. `create` confirms the exact task details. `dismiss` keeps the decision in history and suppresses the same activity on later runs. Provide only supported facts. After any timeout, refresh the entry instead of repeating a write.
 
 ## Evidence, calls and required fields
+
+Registration searches only the user's own activity in the last 14 days. Task/HU discovery is filtered in Azure DevOps to items assigned to, created by or last changed by the catalog author within that window. Parent HUs reached through those recent tasks, or explicitly named in verified activity, are read by ID for validation even when older. The two-week window supplies context; only the selected day's verified activities and effort are registered. Runs and creation confirmations reject days outside the last 14 local dates. History and existing decisions remain available.
 
 The process reviews all supported performed-work evidence from the selected sources: commits you authored, pull requests you created, pipeline runs you queued, releases you created, stage approvals you gave, Wiki pages you created or edited, work described in your own messages and call-ended events in authorized Teams chats (including meeting chats). A Wiki change mentioning an HU can still need a task; a verified task mention or existing evidence relation prevents duplication, and unresolved work item mentions require clarification. It keeps the Graph scopes already consented: **no calendar, attendance report or call-record permission** is added. A call event proves a call happened, not that you attended it. Without confirmed participation and purpose, it asks what the call covered and which HU it belongs to. It uses the event's duration as context, not as proof of your time. Generic messages are not tasks. Calendar-only meetings or calls without a readable chat event are outside this coverage; add their context to a pending activity.
 
