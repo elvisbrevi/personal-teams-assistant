@@ -224,6 +224,7 @@
           </div>
           <form id="activity-form" class="editor-block" novalidate>
             <h3>Task to create</h3>
+            <label id="activity-date-attribution-label" hidden>Why this work belongs to the selected day <small>The artifacts have a different date. Explain why this work should be registered on the day you selected.</small><textarea id="activity-date-attribution" rows="3" maxlength="6000"></textarea></label>
             <label>HU or bug <small>Required. The task is created under it: a user story, backlog item or bug that is not closed.</small><select id="activity-parent"></select></label>
             <label id="activity-other-parent-label" hidden>Other HU or bug ID <small>Any one that is not closed: new, active or in development. Tasks, features and epics cannot hold tasks.</small><input id="activity-other-parent" type="number" inputmode="numeric" min="1" step="1"></label>
             <label>Task title<input id="activity-title" maxlength="160" autocomplete="off"></label>

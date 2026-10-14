@@ -875,6 +875,7 @@ function renderActivityEditor(entry) {
     $('#activity-editor-day').textContent = dayText(entry.day);
     $('#activity-editor-title').textContent = entryTitle(entry, t('Review activity'));
     $('#activity-evidence').replaceChildren(...entry.activities.map(a => el('li', {}, link(tx(a.label), a.url),
+      a.date && a.date !== entry.day ? el('small', { textContent: ` · ${t('Artifact date: {date}', { date: dayText(a.date) })}` }) : null,
       a.context_required ? badge(t('Needs your confirmation'), 'warn') : null)));
     const question = entry.draft.question || confirmationNote(entry);
     $('#activity-ask').hidden = !needsInput;
@@ -883,6 +884,8 @@ function renderActivityEditor(entry) {
     renderParents(entry);
     field('#activity-title', entryTitle(entry, '')); field('#activity-description', entry.draft.description);
     field('#activity-hours', entry.draft.hours); field('#activity-context', '');
+    $('#activity-date-attribution-label').hidden = !entry.activities.some(a => a.date && a.date !== entry.day);
+    field('#activity-date-attribution', entry.date_attribution || '');
     // Required fields have their own inputs; the JSON keeps only the rest.
     const requiredRefs = new Set((entry.required || []).map(f => f.reference));
     field('#activity-fields', JSON.stringify(Object.fromEntries(Object.entries(entry.fields).filter(([key]) => !requiredRefs.has(key))), null, 2));
@@ -901,6 +904,9 @@ function renderActivityEditor(entry) {
 
 /** What the form still lacks before asking the host to create the task. */
 function activityFormProblem() {
+  if (viewedActivity.activities.some(a => a.date && a.date !== viewedActivity.day) && !$('#activity-date-attribution').value.trim()) {
+    return [t('Explain why this work belongs to the selected day.'), '#activity-date-attribution'];
+  }
   const parent = $('#activity-parent').value === 'other' ? $('#activity-other-parent').value : $('#activity-parent').value;
   const hours = Number($('#activity-hours').value);
   if (!parent || !(Number(parent) > 0)) return [t('Choose the HU or bug the task goes under before creating it.'), $('#activity-parent').value === 'other' ? '#activity-other-parent' : '#activity-parent'];
@@ -940,7 +946,7 @@ async function resolveActivity(action) {
   }
   const evidence = action === 'refine' ? draftEvidence : null;
   draftEvidence = null;
-  if (action === 'refine' && !evidence && !$('#activity-context').value.trim()) return showActivityProblem(t('Write your answer for the assistant first.'), '#activity-context');
+  if (action === 'refine' && !evidence && !$('#activity-context').value.trim() && !$('#activity-date-attribution').value.trim()) return showActivityProblem(t('Write your answer for the assistant first.'), '#activity-context');
   let fields = {};
   if (action !== 'dismiss') {
     try { fields = jsonFields($('#activity-fields').value); } catch (error) { return showActivityProblem(String(error), '#activity-fields'); }
@@ -955,7 +961,8 @@ async function resolveActivity(action) {
   const resolution = action === 'dismiss' ? { action } : {
     action, parent: parentValue ? Number(parentValue) : null, title: $('#activity-title').value.trim(),
     description: $('#activity-description').value.trim(), hours: $('#activity-hours').value ? Number($('#activity-hours').value) : null,
-    context: [$('#activity-context').value.trim(), evidence ? t('Write the completion evidence: the result and the artifacts by name, without chat content.') : ''].filter(Boolean).join('\n'), fields
+    context: [$('#activity-context').value.trim(), evidence ? t('Write the completion evidence: the result and the artifacts by name, without chat content.') : ''].filter(Boolean).join('\n'),
+    date_attribution: $('#activity-date-attribution').value.trim(), fields
   };
   // A refusal (too long, sensitive, invalid) is shown next to the buttons, not as a toast.
   try { await invoke('activity_resolve', { id: selectedActivity, resolution }); }

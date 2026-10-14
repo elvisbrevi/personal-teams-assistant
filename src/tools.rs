@@ -173,7 +173,12 @@ pub trait ReadOnlyTool: Send + Sync {
     async fn review(&self, _spec: &ToolSpec, _days: i64) -> Result<String> {
         anyhow::bail!("activity review unsupported")
     }
-    async fn registration_review(&self, spec: &ToolSpec, days: i64) -> Result<String> {
+    async fn registration_review(
+        &self,
+        spec: &ToolSpec,
+        days: i64,
+        _context: &str,
+    ) -> Result<String> {
         self.review(spec, days).await
     }
     async fn daily_work(
@@ -298,10 +303,38 @@ fn lookup_id(question: &str) -> Result<String> {
 }
 #[async_trait]
 impl ReadOnlyTool for Tools {
-    async fn registration_review(&self, spec: &ToolSpec, days: i64) -> Result<String> {
+    async fn registration_review(
+        &self,
+        spec: &ToolSpec,
+        days: i64,
+        context: &str,
+    ) -> Result<String> {
         spec.validate()?;
         let days = days.clamp(1, crate::ado::registration::LOOKBACK_DAYS);
-        if let ToolSpec::AzureDevopsWiki {
+        if let ToolSpec::AzureDevopsStatus {
+            repository,
+            path,
+            secret_ref,
+            ..
+        } = spec
+        {
+            let operation = async {
+                let catalog =
+                    crate::knowledge::read_repository_file(&self.repositories, repository, path)?;
+                let key = crate::security::resolve(secret_ref, &self.bindings)?;
+                let evidence = crate::ado::review::review(
+                    &self.client,
+                    &key,
+                    &catalog,
+                    days,
+                    self.store.clone(),
+                    context,
+                )
+                .await?;
+                Ok::<_, anyhow::Error>(serde_json::to_string(&evidence)?)
+            };
+            tokio::time::timeout(std::time::Duration::from_secs(180), operation).await?
+        } else if let ToolSpec::AzureDevopsWiki {
             repository,
             path,
             secret_ref,
@@ -685,6 +718,7 @@ impl ReadOnlyTool for Tools {
                         &catalog,
                         days,
                         self.store.clone(),
+                        "",
                     )
                     .await?
                 }

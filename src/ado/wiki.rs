@@ -503,6 +503,8 @@ pub fn registration_edits_evidence(
                 date: e.date.get(..10).unwrap_or(&e.date).to_owned(),
                 occurred_at: e.date.clone(),
                 context_required: e.unverified > 0,
+                related_work_items: e.work_items.clone(),
+                aliases: e.reference.aliases.clone(),
                 ..Default::default()
             })
             .collect(),
@@ -785,6 +787,22 @@ impl<'a> Reader<'a> {
             .context("Wiki content not returned")?
             .to_owned();
         let title = path.rsplit('/').next().unwrap_or("Wiki").to_owned();
+        let mut aliases = Vec::new();
+        if let Some(id) = v["id"].as_u64() {
+            for project in [&wiki.project, &wiki.project_id] {
+                for identity in [&wiki.name, &wiki.id] {
+                    aliases.push(
+                        super::project_url(
+                            self.source(wiki)?,
+                            project,
+                            "dev.azure.com",
+                            &["_wiki", "wikis", identity, &id.to_string()],
+                        )?
+                        .to_string(),
+                    );
+                }
+            }
+        }
         let reference = Reference {
             id: page_reference_id(wiki, version, path),
             kind: "wiki".into(),
@@ -803,7 +821,7 @@ impl<'a> Reader<'a> {
             } else {
                 wiki.project.clone()
             },
-            aliases: vec![],
+            aliases,
             parent: None,
             revision: Some(revision.clone()),
             authority: Some("unknown".into()),
