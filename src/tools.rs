@@ -298,6 +298,7 @@ fn lookup_id(question: &str) -> Result<String> {
 impl ReadOnlyTool for Tools {
     async fn registration_review(&self, spec: &ToolSpec, days: i64) -> Result<String> {
         spec.validate()?;
+        let days = days.clamp(1, crate::ado::registration::LOOKBACK_DAYS);
         if let ToolSpec::AzureDevopsWiki {
             repository,
             path,
@@ -306,7 +307,6 @@ impl ReadOnlyTool for Tools {
             ..
         } = spec
         {
-            let days = days.clamp(1, 31);
             let operation = async {
                 let catalog =
                     crate::knowledge::read_repository_file(&self.repositories, repository, path)?;
@@ -324,7 +324,7 @@ impl ReadOnlyTool for Tools {
             };
             tokio::time::timeout(std::time::Duration::from_secs(180), operation).await?
         } else if matches!(spec, ToolSpec::TeamsMessages {}) {
-            let since = chrono::Utc::now() - chrono::Duration::days(days.clamp(1, 31));
+            let since = chrono::Utc::now() - chrono::Duration::days(days);
             let found = tokio::time::timeout(
                 std::time::Duration::from_secs(180),
                 self.graph.registration_activity(since),

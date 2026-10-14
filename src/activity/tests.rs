@@ -9,7 +9,7 @@ use crate::{
 };
 use async_trait::async_trait;
 use serde_json::json;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
 
 fn parent() -> Target {
     Target {
@@ -103,13 +103,15 @@ struct TestTools {
     registered_activities: std::sync::Mutex<Vec<Linkable>>,
     daily_error: std::sync::Mutex<Option<String>>,
     review_error: std::sync::Mutex<Option<String>>,
+    review_days: AtomicI64,
 }
 #[async_trait]
 impl ReadOnlyTool for TestTools {
     async fn execute(&self, _: &ToolSpec, _: &str, _: &str) -> Result<String> {
         unreachable!()
     }
-    async fn review(&self, _: &ToolSpec, _: i64) -> Result<String> {
+    async fn review(&self, _: &ToolSpec, days: i64) -> Result<String> {
+        self.review_days.store(days, Ordering::SeqCst);
         if let Some(error) = self.review_error.lock().unwrap().as_ref() {
             anyhow::bail!("{error}");
         }
@@ -234,6 +236,7 @@ fn recorder(
         registered_activities: std::sync::Mutex::new(Vec::new()),
         daily_error: std::sync::Mutex::new(None),
         review_error: std::sync::Mutex::new(None),
+        review_days: AtomicI64::new(0),
     });
     let map = KnowledgeMap {
         repositories: BTreeMap::new(),
@@ -269,6 +272,39 @@ fn recorder(
 }
 fn yesterday() -> NaiveDate {
     (Utc::now() - chrono::Duration::days(1)).date_naive()
+}
+
+#[tokio::test]
+async fn registration_uses_two_weeks_of_context_but_only_records_the_selected_day() {
+    let dir = tempfile::tempdir().unwrap();
+    let (r, tools) = recorder(dir.path(), 0., false, false, false);
+    let activity = |day: NaiveDate, id| Linkable {
+        organization: parent().organization,
+        url: format!("https://dev.azure.com/example/Payments/_build/results?buildId={id}"),
+        date: day.to_string(),
+        occurred_at: day.and_hms_opt(9, 0, 0).unwrap().and_utc().to_rfc3339(),
+        ..Default::default()
+    };
+    *tools.activity_override.lock().unwrap() = Some(vec![
+        activity(yesterday(), 1),
+        activity(yesterday() - chrono::Duration::days(7), 2),
+    ]);
+    let summary = r.run("daily-window", yesterday(), "").await.unwrap();
+    assert_eq!(tools.review_days.load(Ordering::SeqCst), 14);
+    assert_eq!(summary.created, 1);
+    assert_eq!(
+        tools.registered_activities.lock().unwrap()[0].date,
+        yesterday().to_string()
+    );
+    *tools.daily_error.lock().unwrap() = Some("daily read must not run for an older day".into());
+    let old_day = Utc::now().date_naive() - chrono::Duration::days(14);
+    let error = r.run("outside-window", old_day, "").await.unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("choose a day within the last 14 days")
+    );
+    assert_eq!(tools.writes.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]

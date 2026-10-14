@@ -11,6 +11,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 
+pub const LOOKBACK_DAYS: i64 = 14;
+
 #[derive(Clone, Debug, Default)]
 pub struct DailyWork {
     pub organization: String,
@@ -155,20 +157,43 @@ pub async fn daily_work(
         "registration write source must select one organization"
     );
     let source = &catalog.sources[0];
+    daily_work_in_source(client, key, source, start, end, effort, day).await
+}
+async fn daily_work_in_source(
+    client: &Client,
+    key: &str,
+    source: &super::Source,
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+    effort: &str,
+    day: &str,
+) -> Result<DailyWork> {
+    let now = Utc::now();
+    let since = now - chrono::Duration::days(LOOKBACK_DAYS);
+    let email = &source.author_email;
+    let personal_scope = format!(
+        "[System.ChangedDate] >= '{}' AND [System.ChangedDate] <= '{}' AND ([System.AssignedTo] = '{email}' OR [System.ChangedBy] = '{email}' OR [System.CreatedBy] = '{email}')",
+        since.to_rfc3339(),
+        now.to_rfc3339()
+    );
     let mut out = DailyWork {
         organization: source.organization.clone(),
         day: day.into(),
         ..Default::default()
     };
     for project in &source.projects {
+        let mut parent_ids = BTreeSet::new();
         let query = format!(
-            "SELECT [System.Id] FROM WorkItems WHERE [System.TeamProject] = @project AND [System.ChangedDate] >= '{}' AND ([System.WorkItemType] = 'Task' OR [System.WorkItemType] = 'Tarea') ORDER BY [System.ChangedDate] DESC",
-            start.to_rfc3339()
+            "SELECT [System.Id] FROM WorkItems WHERE [System.TeamProject] = @project AND {personal_scope} AND ([System.WorkItemType] = 'Task' OR [System.WorkItemType] = 'Tarea') ORDER BY [System.ChangedDate] DESC"
         );
         let ids = wiql(client, key, source, project, &query).await?;
         ensure!(ids.len() < 80, "daily effort query reached its limit");
         let items = work_items(client, key, source, project, &ids.into_iter().collect()).await?;
         for item in items {
+            parent_ids.extend(super::relation_ids(
+                &item,
+                "System.LinkTypes.Hierarchy-Reverse",
+            ));
             let id = item["id"].as_u64().context("missing task id")?;
             for r in item["relations"].as_array().into_iter().flatten() {
                 if let Some(url) = r["url"].as_str() {
@@ -211,9 +236,16 @@ pub async fn daily_work(
             }
             out.task_ids.insert(id);
         }
-        let query = "SELECT [System.Id] FROM WorkItems WHERE [System.TeamProject] = @project AND ([System.WorkItemType] = 'User Story' OR [System.WorkItemType] = 'Product Backlog Item' OR [System.WorkItemType] = 'HU' OR [System.WorkItemType] = 'Requirement') ORDER BY [System.ChangedDate] DESC";
-        let ids = wiql(client, key, source, project, query).await?;
-        for item in work_items(client, key, source, project, &ids.into_iter().collect()).await? {
+        let query = format!(
+            "SELECT [System.Id] FROM WorkItems WHERE [System.TeamProject] = @project AND {personal_scope} AND ([System.WorkItemType] = 'User Story' OR [System.WorkItemType] = 'Product Backlog Item' OR [System.WorkItemType] = 'HU' OR [System.WorkItemType] = 'Requirement') ORDER BY [System.ChangedDate] DESC"
+        );
+        // Older HUs are context only when reached through the user's recent tasks.
+        let ids = wiql(client, key, source, project, &query)
+            .await?
+            .into_iter()
+            .chain(parent_ids.into_iter().take(40))
+            .collect();
+        for item in work_items(client, key, source, project, &ids).await? {
             if let Ok(reference) = item_reference(source, project, &item)
                 && let Some(parent) = Target::from_item(&item, reference.url, &source.organization)
                 && parent.holds_tasks()
@@ -424,6 +456,128 @@ fn completed_response(created: &Value, task: &TaskFields) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn daily_search_is_personal_and_recent_with_related_parents() {
+        use wiremock::{
+            Mock, MockServer, Request, ResponseTemplate,
+            matchers::{method, path},
+        };
+        let server = MockServer::start().await;
+        let source = super::super::Source {
+            organization: server.uri(),
+            projects: vec!["Payments".into()],
+            author_email: "me@example.com".into(),
+        };
+        let start = (Utc::now() - chrono::Duration::days(1))
+            .date_naive()
+            .and_hms_opt(0, 0, 0)
+            .unwrap()
+            .and_utc();
+        let end = start + chrono::Duration::days(1);
+        let earliest = Utc::now() - chrono::Duration::days(14);
+        Mock::given(method("POST"))
+            .and(path("/Payments/_apis/wit/wiql"))
+            .respond_with(|request: &Request| {
+                let body: Value = request.body_json().unwrap();
+                let id = if body["query"].as_str().unwrap().contains("= 'Task'") {
+                    7
+                } else {
+                    40
+                };
+                ResponseTemplate::new(200).set_body_json(json!({"workItems":[{"id":id}]}))
+            })
+            .expect(2)
+            .mount(&server)
+            .await;
+        let organization = server.uri();
+        Mock::given(method("GET"))
+            .and(path("/Payments/_apis/wit/workitems"))
+            .respond_with(move |request: &Request| {
+                let ids = request
+                    .url
+                    .query_pairs()
+                    .find(|(name, _)| name == "ids")
+                    .unwrap()
+                    .1;
+                let items: Vec<_> = ids
+                    .split(',')
+                    .map(|id| {
+                        let id: u64 = id.parse().unwrap();
+                        json!({"id":id,"fields":{
+                        "System.TeamProject":"Payments","System.Title":"Verified work",
+                        "System.WorkItemType":if id == 7 { "Task" } else { "User Story" },
+                        "System.State":"Active","System.AssignedTo":{"uniqueName":"me@example.com"}
+                    },"relations":if id == 7 { vec![json!({
+                        "rel":"System.LinkTypes.Hierarchy-Reverse",
+                        "url":format!("{organization}/_apis/wit/workItems/41")
+                    })] } else { vec![] }})
+                    })
+                    .collect();
+                ResponseTemplate::new(200).set_body_json(json!({"value":items}))
+            })
+            .expect(2)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/Payments/_apis/wit/workitems/7/revisions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"value":[
+                {"fields":{"System.ChangedDate":(start - chrono::Duration::days(1)).to_rfc3339(),
+                    "System.AssignedTo":{"uniqueName":"me@example.com"},
+                    "Microsoft.VSTS.Scheduling.CompletedWork":5.0}},
+                {"fields":{"System.ChangedDate":(start + chrono::Duration::hours(9)).to_rfc3339(),
+                    "System.AssignedTo":{"uniqueName":"me@example.com"},
+                    "Microsoft.VSTS.Scheduling.CompletedWork":6.5}}
+            ]})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = Client::builder()
+            .no_proxy()
+            .resolve("dev.azure.com", *server.address())
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
+            .unwrap();
+        let work = daily_work_in_source(
+            &client,
+            "test-token",
+            &source,
+            start,
+            end,
+            "Microsoft.VSTS.Scheduling.CompletedWork",
+            &start.date_naive().to_string(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(work.hours, 1.5);
+        let latest = Utc::now() - chrono::Duration::days(14);
+        let requests = server.received_requests().await.unwrap();
+        let pattern = regex::Regex::new(r"\[System\.ChangedDate\] >= '([^']+)'").unwrap();
+        for request in requests.iter().filter(|r| r.method == "POST") {
+            assert!(
+                request
+                    .url
+                    .query_pairs()
+                    .any(|(k, v)| k == "timePrecision" && v == "true")
+            );
+            let body: Value = request.body_json().unwrap();
+            let query = body["query"].as_str().unwrap();
+            for field in ["System.AssignedTo", "System.ChangedBy", "System.CreatedBy"] {
+                assert!(query.contains(&format!("[{field}] = 'me@example.com'")));
+            }
+            let captured = pattern.captures(query).unwrap();
+            let since = DateTime::parse_from_rfc3339(&captured[1]).unwrap();
+            assert!(
+                since >= earliest && since <= latest,
+                "exactly fourteen days of context"
+            );
+        }
+        assert!(
+            requests
+                .iter()
+                .any(|r| r.url.query_pairs().any(|(k, v)| k == "ids" && v == "40,41")),
+            "fetch the related HU by ID even when it is outside the recent personal search"
+        );
+    }
     #[test]
     fn daily_effort_counts_changes_only_inside_the_day() {
         let at = |s: &str| DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc);

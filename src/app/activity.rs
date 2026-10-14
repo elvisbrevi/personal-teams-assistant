@@ -155,8 +155,8 @@ pub(super) async fn run(
         .zoned(Utc::now())
         .date_naive();
     ensure!(
-        day <= today && (today - day).num_days() < 31,
-        "choose a day within the last 31 days"
+        day <= today && (today - day).num_days() < crate::ado::registration::LOOKBACK_DAYS,
+        "choose a day within the last 14 days"
     );
     let Some(id) = recorder.db.claim_run(slot, &day.to_string())? else {
         return Ok(json!({"already_run":true}));

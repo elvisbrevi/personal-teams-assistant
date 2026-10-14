@@ -165,7 +165,9 @@ async fn wiql(
     query: &str,
 ) -> Result<Vec<u64>> {
     let mut url = project_url(source, project, "dev.azure.com", &["_apis", "wit", "wiql"])?;
-    url.query_pairs_mut().append_pair("$top", "80");
+    url.query_pairs_mut()
+        .append_pair("$top", "80")
+        .append_pair("timePrecision", "true");
     let value = request(client, key, Method::POST, url, Some(json!({"query":query}))).await?;
     Ok(value["workItems"]
         .as_array()
