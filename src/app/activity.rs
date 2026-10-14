@@ -359,5 +359,9 @@ mod tests {
                 .validate(&redactor)
                 .is_ok()
         );
+        // Custom fields of inherited processes may be named with a GUID.
+        let guid = json!({"Custom.b505c83e-3745-4d8b-b76b-b3086a0c4c71":"<p>Done</p>"});
+        assert!(resolution(guid, "").validate(&redactor).is_ok());
+        assert!(reason(resolution(json!({"-Custom.X":"x"}), "")).contains("reserved"));
     }
 }
