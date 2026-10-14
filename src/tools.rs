@@ -701,7 +701,7 @@ impl ReadOnlyTool for Tools {
     }
     async fn review(&self, spec: &ToolSpec, days: i64) -> Result<String> {
         spec.validate()?;
-        let days = days.clamp(1, 31);
+        let days = days.clamp(1, crate::ado::MAX_WINDOW_DAYS);
         let since = chrono::Utc::now() - chrono::Duration::days(days);
         let operation = async {
             let evidence = match spec {
@@ -770,8 +770,8 @@ impl ReadOnlyTool for Tools {
         else {
             anyhow::bail!("status pages unsupported");
         };
-        // A deployment plan is often written weeks before its date: a month of own pages.
-        let days = crate::ado::recent_window(question).max(30);
+        // A deployment plan is often written weeks before its date: the longest window.
+        let days = crate::ado::MAX_WINDOW_DAYS;
         let since = chrono::Utc::now() - chrono::Duration::days(days);
         let operation = async {
             let catalog =
