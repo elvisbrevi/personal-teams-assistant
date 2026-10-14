@@ -692,7 +692,8 @@ impl Pipeline {
                     "activity review",
                     format!("last {days} days in {} sources", sources.len()),
                 );
-                self.review_evidence(&sources, days, resource, &message, &mut audit)
+                let recorded = self.recorded_activity(&available, days, &mut audit);
+                self.review_evidence(&sources, days, recorded, resource, &message, &mut audit)
                     .await?
             } else {
                 let mut evidence = String::new();
@@ -806,6 +807,14 @@ impl Pipeline {
                             audit.step("wiki pages", "the user's own Wiki pages could not be read");
                         }
                     }
+                }
+                // What the Activities section recorded, by day: the user's work as registered.
+                if status_route
+                    && let Some(status) = sources.iter().find(|r| r.id == "azure-devops-status")
+                    && let Some(data) =
+                        self.recorded_activity(&available, crate::ado::MAX_WINDOW_DAYS, &mut audit)
+                {
+                    reads.push((status, Read::Typed(data)));
                 }
                 // The text a source writes within `budget`, with its verified registry if typed.
                 // The Wiki keeps room for its coverage note; its need counts that room too.
@@ -1194,6 +1203,7 @@ impl Pipeline {
         &self,
         sources: &[&crate::knowledge::Resource],
         days: i64,
+        recorded: Option<crate::evidence::Evidence>,
         resource: &str,
         message: &crate::adapters::teams::IncomingMessage,
         audit: &mut Audit,
@@ -1258,6 +1268,10 @@ impl Pipeline {
                 }
             }
         }
+        if let Some(recorded) = recorded {
+            parts.push(("the Activities section", recorded.text));
+            registry.references.extend(recorded.references);
+        }
         let lengths: Vec<usize> = parts.iter().map(|(_, p)| p.chars().count()).collect();
         let mut evidence = String::new();
         let mut cut = Vec::new();
@@ -1294,6 +1308,57 @@ impl Pipeline {
         registry.references.retain(|r| seen.insert(r.id.clone()));
         registry.links = Some(LinkOffer::merge(offers));
         Ok((evidence, registry))
+    }
+    /// The work the Activities section recorded in the last `days` days (in the registration's
+    /// time zone), by day, when this conversation may see it: Azure DevOps activity must be
+    /// authorized here, and an entry shows only if every source its activities come from is.
+    /// A missing or unreadable database leaves it out.
+    fn recorded_activity(
+        &self,
+        available: &[&crate::knowledge::Resource],
+        days: i64,
+        audit: &mut Audit,
+    ) -> Option<crate::evidence::Evidence> {
+        use crate::activity::recorded::Origin;
+        use crate::tools::ToolSpec;
+        let allowed: Vec<Origin> = available
+            .iter()
+            .filter_map(|r| match &r.access {
+                Access::Tool {
+                    tool: ToolSpec::AzureDevopsStatus { .. },
+                } => Some(Origin::Activity),
+                Access::Tool {
+                    tool: ToolSpec::AzureDevopsWiki { .. },
+                } => Some(Origin::Wiki),
+                Access::Tool {
+                    tool: ToolSpec::TeamsMessages {},
+                } => Some(Origin::Teams),
+                _ => None,
+            })
+            .collect();
+        if !allowed.contains(&Origin::Activity) {
+            return None;
+        }
+        let today = self
+            .config
+            .activity_registration
+            .zoned(chrono::Utc::now())
+            .date_naive();
+        let since = today - chrono::Duration::days(days.clamp(1, crate::ado::MAX_WINDOW_DAYS) - 1);
+        let entries = crate::activity::store::Database::recent(
+            &self.config.server.data_dir.join("activity-registration.db"),
+            &since.to_string(),
+        )
+        .ok()?;
+        let mut evidence = crate::activity::recorded::evidence(
+            &entries,
+            &allowed,
+            &since.to_string(),
+            &today.to_string(),
+        )?;
+        evidence.sanitize(&self.redactor);
+        audit.tools.push("read_recorded_activities".into());
+        Some(evidence)
     }
     /// Await a model call without a deadline. If it is still running when the holding
     /// deadline passes, send the deterministic notice once; the intent is recorded first so

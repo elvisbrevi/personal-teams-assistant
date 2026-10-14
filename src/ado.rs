@@ -344,8 +344,11 @@ pub fn requested_work_items(question: &str) -> Vec<u64> {
     progress::requested(question)
 }
 
+/// The longest period any activity or status read looks back: five weeks.
+pub const MAX_WINDOW_DAYS: i64 = 35;
+
 /// Days of activity a request asks about: «hoy»/today 1, «ayer»/yesterday 2, this week 7,
-/// this month 30, «últimos N días»/last N days (at most 31); two weeks otherwise.
+/// this month 30, «últimos N días»/last N days (at most five weeks); two weeks otherwise.
 pub fn recent_window(question: &str) -> i64 {
     let q = question
         .to_lowercase()
@@ -362,10 +365,10 @@ pub fn recent_window(question: &str) -> i64 {
             .ok()
     };
     if let Some(days) = count("(?:dias|days)\\b") {
-        return days.clamp(1, 31);
+        return days.clamp(1, MAX_WINDOW_DAYS);
     }
     if let Some(weeks) = count("(?:semanas|weeks)\\b") {
-        return (weeks * 7).clamp(1, 31);
+        return (weeks * 7).clamp(1, MAX_WINDOW_DAYS);
     }
     let words: Vec<&str> = q.split(|c: char| !c.is_alphanumeric()).collect();
     let phrase = format!(" {} ", words.join(" "));
@@ -1888,7 +1891,8 @@ mod tests {
         assert_eq!(recent_window("trabajo de ayer sin registrar"), 2);
         assert_eq!(recent_window("¿qué hice este mes sin tarea?"), 30);
         assert_eq!(recent_window("los últimos 3 días"), 3);
-        assert_eq!(recent_window("last 90 days"), 31);
+        assert_eq!(recent_window("last 90 days"), 35);
+        assert_eq!(recent_window("las últimas 8 semanas"), 35);
         assert_eq!(recent_window("las últimas 3 semanas"), 21);
         assert_eq!(recent_window("¿qué hice en la semana 40?"), 14);
         let catalog = "[[sources]]\norganization='https://dev.azure.com/example/'\nprojects=['*']\nauthor_email='x@example.com'\n";

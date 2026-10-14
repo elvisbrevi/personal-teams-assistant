@@ -57,7 +57,11 @@ the question is read even after it was handed over (its state, since when and
 who holds it now, its tasks, linked code and comments), and your own recent Wiki
 pages, such as a production deployment plan, give commitments and blockers. A
 withheld or observed answer can now be improved with your context and sent by
-hand from the Messages tab or with `pta answer refine|send`.
+hand from the Messages tab or with `pta answer refine|send`. Version 0.7.14 also
+recognizes «PAP» deployment pages and keeps their installation date and pending
+production items in the answer, describes a named HU only when you took part in
+it, never looks back more than five weeks, and adds the work recorded in the
+Activities section, by day, to status answers and activity reviews.
 
 Version 0.7.12 reviews explicitly mentioned activity even when its artifacts have
 a different date. Such work stays pending until you explain why it belongs to the

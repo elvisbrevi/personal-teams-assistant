@@ -3250,6 +3250,8 @@ impl LlmProvider for StatusLlm {
             "Enviado a validación since 2026-10-10",
             "Fecha del paso a producción: 2026-10-20",
             "solicitadas a Francisco",
+            "Work recorded in the app's Activities section, by day",
+            "Registered as task #26401 under #23553 «Pagos QR»: «Registro a1» (2 h)",
         ] {
             assert!(
                 input.evidence.contains(expected),
@@ -3257,8 +3259,10 @@ impl LlmProvider for StatusLlm {
                 input.evidence
             );
         }
+        // Work drawn from a chat this conversation may not read stays out.
+        assert!(!input.evidence.contains("Registro a2"));
         Ok(personal_teams_assistant::llm::GeneratedAnswer {
-            answer: "1) La HU #23553 ya la envié a validación el 10/10; ahora está a cargo de Luis Felipe.\n2) Mi compromiso es el paso a producción del 20/10.\n3) Depende de las variables de Consul en producción, que pedí a Francisco.".into(),
+            answer: "1) La HU #23553 ya la envié a validación el 10/10; ahora está a cargo de Luis Felipe, y hoy registré la tarea #26401.\n2) Mi compromiso es el paso a producción del 20/10.\n3) Depende de las variables de Consul en producción, que pedí a Francisco.".into(),
             detailed: false,
             used_sources: Vec::new(),
             provider: None,
@@ -3274,6 +3278,82 @@ async fn a_status_round_reads_the_named_hu_and_the_users_deployment_page() {
     let graph = support::graph(&server, store.clone());
     let mut cfg = (*graph.config).clone();
     cfg.policy.dry_run = true;
+    // The Activities section recorded today's registered task and a chat this conversation
+    // may not read.
+    cfg.server.data_dir = dir.path().into();
+    let today = cfg
+        .activity_registration
+        .zoned(chrono::Utc::now())
+        .date_naive()
+        .to_string();
+    let activities = personal_teams_assistant::activity::store::Database::open(
+        &dir.path().join("activity-registration.db"),
+    )
+    .unwrap();
+    for (key, url, state, task) in [
+        (
+            "a1",
+            "https://dev.azure.com/example/Payments/_git/api/pullrequest/12",
+            "done",
+            Some(26401),
+        ),
+        (
+            "a2",
+            "https://teams.microsoft.com/l/message/19:abc/1",
+            "pending",
+            None,
+        ),
+    ] {
+        let hu = personal_teams_assistant::ado::link::Target {
+            id: 23553,
+            title: "Pagos QR".into(),
+            url: "https://dev.azure.com/example/Payments/_workitems/edit/23553".into(),
+            organization: "https://dev.azure.com/example".into(),
+            project: "Payments".into(),
+            state: "Enviado a validación".into(),
+            ..Default::default()
+        };
+        assert!(
+            activities
+                .insert(&personal_teams_assistant::activity::Entry {
+                    id: key.into(),
+                    run: "r1".into(),
+                    day: today.clone(),
+                    state: state.into(),
+                    draft: personal_teams_assistant::activity::Draft {
+                        activities: vec![key.into()],
+                        parent: Some(23553),
+                        title: format!("Registro {key}"),
+                        description: "Ajuste del flujo de pago QR.".into(),
+                        evidence: String::new(),
+                        hours: Some(2.0),
+                        confidence: 0.9,
+                        question: String::new(),
+                        suggested_parents: Vec::new(),
+                        ignore: false,
+                    },
+                    activities: vec![personal_teams_assistant::ado::link::Linkable {
+                        key: key.into(),
+                        url: url.into(),
+                        ..Default::default()
+                    }],
+                    parents: vec![hu],
+                    evidence: String::new(),
+                    context: String::new(),
+                    fields: Default::default(),
+                    issue: String::new(),
+                    task_id: task,
+                    task_url: task.map(|id| {
+                        format!("https://dev.azure.com/example/Payments/_workitems/edit/{id}")
+                    }),
+                    updated_at: 1,
+                    required: Vec::new(),
+                    date_attribution: String::new(),
+                })
+                .unwrap()
+        );
+    }
+    drop(activities);
     let mut status = wiki_resource();
     status.id = "azure-devops-status".into();
     status.access = Access::Tool {
@@ -3330,8 +3410,13 @@ async fn a_status_round_reads_the_named_hu_and_the_users_deployment_page() {
         serde_json::from_value(rows[0]["audit"].clone()).unwrap();
     assert_eq!(
         audit.tools,
-        vec!["read_own_wiki_pages", "get_azure_devops_status"]
+        vec![
+            "read_own_wiki_pages",
+            "get_azure_devops_status",
+            "read_recorded_activities"
+        ]
     );
+    assert!(answer.contains("](https://dev.azure.com/example/Payments/_workitems/edit/26401)"));
     assert_eq!(audit.source.as_deref(), Some("azure-devops-status,manuals"));
     assert!(server.received_requests().await.unwrap().is_empty());
 }

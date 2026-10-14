@@ -477,9 +477,13 @@ pub fn edits_evidence(
     }
 }
 
-/// Own pages a status answer reads at most, and the characters of each.
+/// Own pages a status answer reads at most, and the characters of each in rank order: a
+/// deployment plan is long (environments, checklists) and its date and pending items are
+/// often far down.
 const STATUS_PAGES: usize = 3;
-const STATUS_PAGE_CHARS: usize = 2200;
+const STATUS_PAGE_CHARS: [usize; STATUS_PAGES] = [3600, 1600, 1600];
+/// Words that pull a plan's date and pending items into its excerpt, whatever was asked.
+const STATUS_EXCERPT_TERMS: &str = "fecha fechas instalación ventana pendiente pendientes producción prod responsable date window pending production";
 /// Title or content words of a production deployment plan («paso a producción»).
 const DEPLOYMENT_WORDS: [&str; 10] = [
     "paso a prod",
@@ -507,7 +511,12 @@ fn status_score(edit: &WikiEdit, requested: &[u64]) -> usize {
     if requested.iter().any(names) {
         score += 4;
     }
-    if DEPLOYMENT_WORDS.iter().any(|w| title.contains(w)) {
+    // «PAP» (paso a producción) names a deployment plan only as a whole word.
+    if DEPLOYMENT_WORDS.iter().any(|w| title.contains(w))
+        || title
+            .split(|c: char| !c.is_alphanumeric())
+            .any(|w| w == "pap")
+    {
         score += 2;
     } else if DEPLOYMENT_WORDS.iter().any(|w| content.contains(w)) {
         score += 1;
@@ -560,7 +569,7 @@ pub fn status_evidence(
             source_ids: Vec::new(),
         });
     }
-    for edit in chosen {
+    for (edit, chars) in chosen.into_iter().zip(STATUS_PAGE_CHARS) {
         let named: Vec<&Reference> = linked
             .iter()
             .filter(|r| {
@@ -571,8 +580,8 @@ pub fn status_evidence(
             .collect();
         let excerpt = crate::knowledge::excerpt(
             &edit.content,
-            &format!("{question} {}", edit.title),
-            STATUS_PAGE_CHARS,
+            &format!("{question} {} {STATUS_EXCERPT_TERMS}", edit.title),
+            chars,
         );
         let text = format!(
             "Wiki page the user {} on {}: \"{}\" ({}){}.\n{}",
@@ -2138,6 +2147,12 @@ mod tests {
             },
             content: content.into(),
         };
+        // A long deployment plan whose date and pending items come after other sections.
+        let filler =
+            "## Detalle\nUn párrafo técnico sobre builds y entornos de prueba.\n".repeat(80);
+        let plan = format!(
+            "# PAP\n{filler}### Fecha y hora de la instalación\n| Fecha | Inicio |\n| 15-10-2026 | 09:00 |\n\nPROD mantiene pendientes: variables propias de Consul, aprobador humano.\n"
+        );
         let edits = [
             edit(
                 "Notas de reunión",
@@ -2157,15 +2172,46 @@ mod tests {
                 "Detalle de la HU 23553.",
                 vec![],
             ),
+            edit(
+                "OpenShift y CI-CD",
+                "2026-10-14T11:00:00Z",
+                "Despliegue en producción con OpenShift.",
+                vec![],
+            ),
+            edit(
+                "PAP - HU 23796 - Detalle de SPS",
+                "2026-10-14T09:00:00Z",
+                &plan,
+                vec![],
+            ),
         ];
         let evidence = status_evidence(&edits, &[], false, "avance HU #23553", &[23553], 30);
         let titles: Vec<&str> = evidence.references.iter().map(|r| r.id.as_str()).collect();
-        // The page naming the HU, then the deployment plan; an unrelated page is left out.
-        assert_eq!(titles, ["wiki:Diseño", "wiki:Paso a producción Pagos QR"]);
+        // The page naming the HU, then the deployment plans by title (a «PAP» too, newest
+        // first); pages that only mention a deployment and unrelated ones are left out.
+        assert_eq!(
+            titles,
+            [
+                "wiki:Diseño",
+                "wiki:PAP - HU 23796 - Detalle de SPS",
+                "wiki:Paso a producción Pagos QR"
+            ]
+        );
         assert!(
             evidence
                 .text
                 .contains("Pendiente: variables de Consul en producción")
+        );
+        // The plan's date and pending items reach the excerpt despite the long page.
+        assert!(
+            evidence.text.contains("| 15-10-2026 | 09:00 |"),
+            "{}",
+            evidence.text
+        );
+        assert!(
+            evidence
+                .text
+                .contains("PROD mantiene pendientes: variables propias de Consul")
         );
         // Without any related page, the two most recent ones.
         let evidence = status_evidence(&edits[..1], &[], false, "¿qué hice?", &[], 7);

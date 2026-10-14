@@ -155,8 +155,9 @@ pub(super) async fn field_names(
     }
     names
 }
-/// Commits and pull requests linked to `items`, and the latest date one was linked.
-fn linked_code(items: &[&Value]) -> (usize, usize, Option<String>) {
+/// Commits and pull requests linked to `items` on or after `since` (yyyy-mm-dd), and the
+/// latest date one was linked.
+fn linked_code(items: &[&Value], since: &str) -> (usize, usize, Option<String>) {
     let (mut commits, mut pulls, mut latest): (usize, usize, Option<String>) = (0, 0, None);
     for relation in items
         .iter()
@@ -164,6 +165,12 @@ fn linked_code(items: &[&Value]) -> (usize, usize, Option<String>) {
         .filter(|r| r["rel"].as_str() == Some("ArtifactLink"))
     {
         let url = relation["url"].as_str().unwrap_or("");
+        let date = day(relation["attributes"]["authorizedDate"]
+            .as_str()
+            .unwrap_or(""));
+        if date < since {
+            continue;
+        }
         if url.starts_with("vstfs:///Git/Commit/") {
             commits += 1;
         } else if url.starts_with("vstfs:///Git/PullRequestId/") {
@@ -171,10 +178,8 @@ fn linked_code(items: &[&Value]) -> (usize, usize, Option<String>) {
         } else {
             continue;
         }
-        if let Some(date) = relation["attributes"]["authorizedDate"].as_str()
-            && latest.as_deref().is_none_or(|l| day(date) > l)
-        {
-            latest = Some(day(date).to_owned());
+        if latest.as_deref().is_none_or(|l| date > l) {
+            latest = Some(date.to_owned());
         }
     }
     (commits, pulls, latest)
@@ -216,44 +221,63 @@ async fn items(
         .collect())
 }
 
-/// State and assignment changes from the item's update history, oldest first.
-fn changes(updates: &Value, email: &str) -> (Vec<String>, Vec<String>, bool) {
-    let mut states = Vec::new();
-    let mut assignments = Vec::new();
-    let mut was_users = false;
+/// What a work item's update history says, for the window and about the user.
+#[derive(Debug, Default)]
+struct History {
+    /// State changes on or after the window's start, oldest first.
+    states: Vec<String>,
+    /// Assignment changes on or after the window's start, oldest first.
+    assignments: Vec<String>,
+    /// The user was assigned to it at some point.
+    assigned: bool,
+    /// The user changed it at some point.
+    changed: bool,
+}
+/// Reads the item's update history; facts older than `since` (yyyy-mm-dd) are left out, but
+/// the whole history tells whether the user ever held or changed it.
+fn changes(updates: &Value, email: &str, since: &str) -> History {
+    let mut history = History::default();
     for update in updates["value"].as_array().into_iter().flatten() {
         let fields = &update["fields"];
-        let date = fields["System.ChangedDate"]["newValue"]
+        let date = day(fields["System.ChangedDate"]["newValue"]
             .as_str()
             .or_else(|| update["revisedDate"].as_str())
-            .unwrap_or("");
+            .unwrap_or(""));
+        history.changed |= super::same_user(&update["revisedBy"], email);
         let by = display_name(&update["revisedBy"]);
+        let recent = date >= since;
         let state = &fields["System.State"];
-        if let Some(new) = state["newValue"].as_str() {
-            states.push(match state["oldValue"].as_str() {
-                Some(old) => format!("{} {old} → {new} (by {by})", day(date)),
-                None => format!("{} created as {new} (by {by})", day(date)),
+        if let Some(new) = state["newValue"].as_str()
+            && recent
+        {
+            history.states.push(match state["oldValue"].as_str() {
+                Some(old) => format!("{date} {old} → {new} (by {by})"),
+                None => format!("{date} created as {new} (by {by})"),
             });
         }
         let assigned = &fields["System.AssignedTo"];
         if assigned.get("newValue").is_some() || assigned.get("oldValue").is_some() {
             for side in ["oldValue", "newValue"] {
-                was_users |= super::same_user(&assigned[side], email);
+                history.assigned |= super::same_user(&assigned[side], email);
             }
-            let old = display_name(&assigned["oldValue"]);
-            let new = display_name(&assigned["newValue"]);
-            assignments.push(format!(
-                "{} {} → {} (by {by})",
-                day(date),
-                if old.is_empty() { "unassigned" } else { &old },
-                if new.is_empty() { "unassigned" } else { &new },
-            ));
+            if recent {
+                let old = display_name(&assigned["oldValue"]);
+                let new = display_name(&assigned["newValue"]);
+                history.assignments.push(format!(
+                    "{date} {} → {} (by {by})",
+                    if old.is_empty() { "unassigned" } else { &old },
+                    if new.is_empty() { "unassigned" } else { &new },
+                ));
+            }
         }
     }
-    (states, assignments, was_users)
+    history
 }
 
-/// One line per section of a requested work item, and the references it names.
+/// One line per section of a requested work item, and the references it names. Only a work
+/// item the user took part in is described (assigned now or before, changed or created by
+/// them, holding a child item of theirs or a comment of theirs), and only with facts from the
+/// last five weeks besides its current state; any other is named as not the user's work.
 async fn describe(
     client: &Client,
     key: &str,
@@ -263,6 +287,10 @@ async fn describe(
     let id = item["id"].as_u64().context("missing work item ID")?;
     let project = field(item, "System.TeamProject").to_owned();
     let id_text = id.to_string();
+    let since = (chrono::Utc::now() - chrono::Duration::days(super::MAX_WINDOW_DAYS))
+        .format("%Y-%m-%d")
+        .to_string();
+    let email = source.author_email.as_str();
     let updates_url = project_url(
         source,
         &project,
@@ -301,51 +329,87 @@ async fn describe(
         items(client, key, source, &related)
     );
     let related = related.unwrap_or_default();
+    let mut tasks: Vec<&Value> = related
+        .iter()
+        .filter(|i| i["id"].as_u64().is_some_and(|id| children.contains(&id)))
+        .collect();
+    tasks.sort_by(|a, b| field(b, "System.ChangedDate").cmp(field(a, "System.ChangedDate")));
+    let history = updates
+        .as_ref()
+        .ok()
+        .map(|updates| changes(updates, email, &since));
+    let comments: Option<Vec<&Value>> = comments.as_ref().ok().map(|c| {
+        c["comments"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .take(COMMENTS)
+            .collect()
+    });
+    let holds = |identity: &Value| super::same_user(identity, email);
+    let assigned_now = holds(&item["fields"]["System.AssignedTo"]);
+    let took_part = assigned_now
+        || holds(&item["fields"]["System.CreatedBy"])
+        || holds(&item["fields"]["System.ChangedBy"])
+        || history.as_ref().is_some_and(|h| h.assigned || h.changed)
+        || tasks.iter().any(|t| {
+            ["System.AssignedTo", "System.CreatedBy", "System.ChangedBy"]
+                .iter()
+                .any(|f| holds(&t["fields"][*f]))
+        })
+        || comments.iter().flatten().any(|c| holds(&c["createdBy"]));
     let mut references = vec![item_reference(source, &project, item)?];
     let mut text = format!(
         "Requested work item (named in the request): {} {}.\n",
         field(item, "System.WorkItemType"),
         label(item)
     );
-    let since = field(item, "Microsoft.VSTS.Common.StateChangeDate");
+    let state_since = field(item, "Microsoft.VSTS.Common.StateChangeDate");
     let owner = display_name(&item["fields"]["System.AssignedTo"]);
+    let owner = if owner.is_empty() { "nobody" } else { &owner };
+    if !took_part {
+        text.push_str(&format!(
+            "- Assigned to now: {owner}. The user has not taken part in it (never assigned, no change, child item or comment of theirs{}): it is not the user's work, so its details were not read; say so and who holds it.\n",
+            if history.is_none() {
+                "; its history could not be read"
+            } else {
+                ""
+            }
+        ));
+        return Ok((text, references));
+    }
     text.push_str(&format!(
-        "- Current state: {}{}. Assigned to now: {}. Last change {} by {}.\n",
+        "- Current state: {}{}. Assigned to now: {owner}. Last change {} by {}.\n",
         field(item, "System.State"),
-        if since.is_empty() {
+        if state_since.is_empty() {
             String::new()
         } else {
-            format!(" since {}", day(since))
+            format!(" since {}", day(state_since))
         },
-        if owner.is_empty() { "nobody" } else { &owner },
         day(field(item, "System.ChangedDate")),
         display_name(&item["fields"]["System.ChangedBy"]),
     ));
-    let mut assigned_to_user =
-        super::same_user(&item["fields"]["System.AssignedTo"], &source.author_email);
-    match &updates {
-        Ok(updates) => {
-            let (states, assignments, was_users) = changes(updates, &source.author_email);
-            assigned_to_user |= was_users;
-            if !states.is_empty() {
-                let recent = &states[states.len().saturating_sub(4)..];
+    text.push_str(&format!(
+        "- The user took part in it{}. Facts below are from {since} on (five weeks).\n",
+        if assigned_now || history.as_ref().is_some_and(|h| h.assigned) {
+            " and is or was assigned to it"
+        } else {
+            ""
+        }
+    ));
+    match &history {
+        Some(history) => {
+            if !history.states.is_empty() {
+                let recent = &history.states[history.states.len().saturating_sub(4)..];
                 text.push_str(&format!("- State changes: {}.\n", recent.join("; ")));
             }
-            if !assignments.is_empty() {
-                let recent = &assignments[assignments.len().saturating_sub(3)..];
+            if !history.assignments.is_empty() {
+                let recent = &history.assignments[history.assignments.len().saturating_sub(3)..];
                 text.push_str(&format!("- Assignment changes: {}.\n", recent.join("; ")));
             }
         }
-        Err(_) => text.push_str("- Its history could not be read.\n"),
+        None => text.push_str("- Its history could not be read.\n"),
     }
-    text.push_str(&format!(
-        "- {}.\n",
-        if assigned_to_user {
-            "The user is or was assigned to it"
-        } else {
-            "The user has not been assigned to it"
-        }
-    ));
     let dates = planned_dates(item);
     if !dates.is_empty() {
         let references: BTreeSet<String> = dates.iter().map(|(r, _)| r.clone()).collect();
@@ -369,11 +433,6 @@ async fn describe(
             label(parent)
         ));
     }
-    let mut tasks: Vec<&Value> = related
-        .iter()
-        .filter(|i| i["id"].as_u64().is_some_and(|id| children.contains(&id)))
-        .collect();
-    tasks.sort_by(|a, b| field(b, "System.ChangedDate").cmp(field(a, "System.ChangedDate")));
     if !tasks.is_empty() {
         let mut states: BTreeMap<&str, usize> = BTreeMap::new();
         for task in &tasks {
@@ -388,7 +447,11 @@ async fn describe(
                 .collect::<Vec<_>>()
                 .join(", ")
         ));
-        for task in tasks.iter().take(LISTED_CHILDREN) {
+        for task in tasks
+            .iter()
+            .filter(|t| day(field(t, "System.ChangedDate")) >= since.as_str())
+            .take(LISTED_CHILDREN)
+        {
             if let Ok(reference) = item_reference(source, &project, task) {
                 references.push(reference);
             }
@@ -408,22 +471,22 @@ async fn describe(
     }
     let mut with_children = vec![item];
     with_children.extend(tasks.iter().copied());
-    let (commits, pulls, latest) = linked_code(&with_children);
+    let (commits, pulls, latest) = linked_code(&with_children, &since);
     if commits + pulls > 0 {
         text.push_str(&format!(
-            "- Linked code (the item and its children): {commits} commit(s), {pulls} pull request(s){}.\n",
+            "- Code linked to the item or its children in the last five weeks: {commits} commit(s), {pulls} pull request(s){}.\n",
             latest.map_or_else(String::new, |d| format!("; latest linked {d}"))
         ));
     } else {
-        text.push_str("- No commit or pull request is linked to the item or its children.\n");
+        text.push_str(
+            "- No commit or pull request was linked to the item or its children in the last five weeks.\n",
+        );
     }
     match &comments {
-        Ok(comments) => {
-            let lines: Vec<String> = comments["comments"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .take(COMMENTS)
+        Some(comments) => {
+            let lines: Vec<String> = comments
+                .iter()
+                .filter(|c| day(c["createdDate"].as_str().unwrap_or("")) >= since.as_str())
                 .map(|c| {
                     format!(
                         "{} {}: «{}»",
@@ -434,7 +497,7 @@ async fn describe(
                 })
                 .collect();
             if lines.is_empty() {
-                text.push_str("- No comments.\n");
+                text.push_str("- No comments in the last five weeks.\n");
             } else {
                 text.push_str(&format!(
                     "- Recent comments (newest first): {}.\n",
@@ -442,7 +505,7 @@ async fn describe(
                 ));
             }
         }
-        Err(_) => text.push_str("- Its comments could not be read.\n"),
+        None => text.push_str("- Its comments could not be read.\n"),
     }
     Ok((text, references))
 }
@@ -488,7 +551,7 @@ mod tests {
     #[test]
     fn history_names_state_and_owner_changes_and_whether_the_user_held_it() {
         let updates = json!({"value":[
-            {"revisedBy":{"displayName":"Elvis Brevi"},"fields":{
+            {"revisedBy":{"displayName":"Elvis Brevi","uniqueName":"elvis@example.com"},"fields":{
                 "System.ChangedDate":{"newValue":"2026-09-20T12:00:00Z"},
                 "System.State":{"newValue":"New"},
                 "System.AssignedTo":{"newValue":{"displayName":"Elvis Brevi","uniqueName":"elvis@example.com"}}}},
@@ -498,20 +561,29 @@ mod tests {
                 "System.AssignedTo":{"oldValue":{"displayName":"Elvis Brevi","uniqueName":"elvis@example.com"},
                     "newValue":{"displayName":"Luis Felipe","uniqueName":"luis@example.com"}}}}
         ]});
-        let (states, assignments, was_users) = changes(&updates, "Elvis@example.com");
+        let history = changes(&updates, "Elvis@example.com", "2026-09-10");
         assert_eq!(
-            states,
+            history.states,
             [
                 "2026-09-20 created as New (by Elvis Brevi)",
                 "2026-10-10 En desarrollo → Enviado a validación (by Elvis Brevi)"
             ]
         );
         assert_eq!(
-            assignments[1],
+            history.assignments[1],
             "2026-10-10 Elvis Brevi → Luis Felipe (by Elvis Brevi)"
         );
-        assert!(was_users);
-        assert!(!changes(&updates, "other@example.com").2);
+        assert!(history.assigned);
+        // Older facts stay out of the window; the whole history still says the user held it.
+        let recent = changes(&updates, "Elvis@example.com", "2026-10-01");
+        assert_eq!(
+            recent.states,
+            ["2026-10-10 En desarrollo → Enviado a validación (by Elvis Brevi)"]
+        );
+        assert_eq!(recent.assignments.len(), 1);
+        assert!(recent.assigned);
+        let other = changes(&updates, "other@example.com", "2026-09-10");
+        assert!(!other.assigned && !other.changed);
     }
 
     #[test]
@@ -546,11 +618,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_named_hu_handed_over_reads_its_owner_history_tasks_code_and_comments() {
+    async fn a_named_hu_is_described_only_if_the_user_took_part_and_within_five_weeks() {
         use wiremock::{
             Mock, MockServer, Request, ResponseTemplate,
             matchers::{method, path},
         };
+        // Dates relative to today: the window is the last five weeks.
+        let at = |days: i64| {
+            (chrono::Utc::now() - chrono::Duration::days(days))
+                .format("%Y-%m-%dT%H:%M:%SZ")
+                .to_string()
+        };
+        let d = |days: i64| at(days)[..10].to_owned();
         let server = MockServer::start().await;
         super::super::TEST_SERVER
             .with(|s| *s.borrow_mut() = Some(url::Url::parse(&server.uri()).unwrap()));
@@ -559,25 +638,34 @@ mod tests {
             projects: vec!["Payments".into()],
             author_email: "elvis@example.com".into(),
         };
+        let elvis = json!({"displayName":"Elvis Brevi","uniqueName":"elvis@example.com"});
+        let luis = json!({"displayName":"Luis Felipe","uniqueName":"luis@example.com"});
         let hu = json!({"id":23553,"fields":{
             "System.TeamProject":"Payments","System.WorkItemType":"User Story",
             "System.Title":"Pagos QR","System.State":"Enviado a validación",
-            "System.AssignedTo":{"displayName":"Luis Felipe","uniqueName":"luis@example.com"},
-            "System.ChangedBy":{"displayName":"Elvis Brevi","uniqueName":"elvis@example.com"},
-            "System.ChangedDate":"2026-10-10T15:00:00Z",
-            "Microsoft.VSTS.Common.StateChangeDate":"2026-10-10T15:00:00Z",
-            "Custom.FechaCompromiso":"2026-10-24T03:00:00Z"},
+            "System.AssignedTo":luis,"System.ChangedBy":elvis,"System.CreatedBy":luis,
+            "System.ChangedDate":at(4),
+            "Microsoft.VSTS.Common.StateChangeDate":at(4),
+            "Custom.FechaCompromiso":at(-10)},
             "relations":[
                 {"rel":"System.LinkTypes.Hierarchy-Forward","url":"https://dev.azure.com/example/_apis/wit/workItems/23601"},
+                {"rel":"System.LinkTypes.Hierarchy-Forward","url":"https://dev.azure.com/example/_apis/wit/workItems/23602"},
                 {"rel":"System.LinkTypes.Hierarchy-Reverse","url":"https://dev.azure.com/example/_apis/wit/workItems/23000"},
-                {"rel":"ArtifactLink","url":"vstfs:///Git/PullRequestId/p%2Fr%2F12","attributes":{"name":"Pull Request","authorizedDate":"2026-10-08T10:00:00Z"}}]});
+                {"rel":"ArtifactLink","url":"vstfs:///Git/PullRequestId/p%2Fr%2F12","attributes":{"name":"Pull Request","authorizedDate":at(6)}},
+                {"rel":"ArtifactLink","url":"vstfs:///Git/PullRequestId/p%2Fr%2F3","attributes":{"name":"Pull Request","authorizedDate":at(60)}}]});
         let task = json!({"id":23601,"fields":{
             "System.TeamProject":"Payments","System.WorkItemType":"Task","System.Title":"Implementar QR",
-            "System.State":"Done","System.AssignedTo":{"displayName":"Elvis Brevi"},
-            "System.ChangedDate":"2026-10-09T12:00:00Z"},
-            "relations":[{"rel":"ArtifactLink","url":"vstfs:///Git/Commit/p%2Fr%2Fabc","attributes":{"name":"Fixed in Commit","authorizedDate":"2026-10-09T11:00:00Z"}}]});
+            "System.State":"Done","System.AssignedTo":elvis,"System.ChangedDate":at(5)},
+            "relations":[{"rel":"ArtifactLink","url":"vstfs:///Git/Commit/p%2Fr%2Fabc","attributes":{"name":"Fixed in Commit","authorizedDate":at(5)}}]});
+        let old_task = json!({"id":23602,"fields":{
+            "System.TeamProject":"Payments","System.WorkItemType":"Task","System.Title":"Diseñar QR",
+            "System.State":"Done","System.AssignedTo":elvis,"System.ChangedDate":at(50)}});
         let epic = json!({"id":23000,"fields":{"System.TeamProject":"Payments","System.WorkItemType":"Feature",
-            "System.Title":"Pagos","System.State":"Active","System.ChangedDate":"2026-10-01T12:00:00Z"}});
+            "System.Title":"Pagos","System.State":"Active","System.ChangedDate":at(13)}});
+        // Someone else's HU: never assigned to the user, changed or commented by them.
+        let foreign = json!({"id":24000,"fields":{"System.TeamProject":"Payments","System.WorkItemType":"User Story",
+            "System.Title":"Reporte de cobros","System.State":"Active","System.AssignedTo":luis,
+            "System.CreatedBy":luis,"System.ChangedBy":luis,"System.ChangedDate":at(2)}});
         let outside = json!({"id":999,"fields":{"System.TeamProject":"Other","System.Title":"x","System.State":"New"}});
         Mock::given(method("GET"))
             .and(path("/example/_apis/wit/workitems"))
@@ -588,7 +676,7 @@ mod tests {
                     .find(|(k, _)| k == "ids")
                     .map(|(_, v)| v.into_owned())
                     .unwrap_or_default();
-                let value: Vec<Value> = [&hu, &task, &epic, &outside]
+                let value: Vec<Value> = [&hu, &task, &old_task, &epic, &foreign, &outside]
                     .into_iter()
                     .filter(|item| {
                         ids.split(',')
@@ -596,29 +684,41 @@ mod tests {
                     })
                     .cloned()
                     .collect();
-                ResponseTemplate::new(200).set_body_json(json!({"value": value}))
+                ResponseTemplate::new(200).set_body_json(json!({ "value": value }))
             })
             .mount(&server)
             .await;
         Mock::given(method("GET"))
             .and(path("/example/Payments/_apis/wit/workItems/23553/updates"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({"value":[
-                {"revisedBy":{"displayName":"Elvis Brevi"},"fields":{
-                    "System.ChangedDate":{"newValue":"2026-09-20T12:00:00Z"},
+                {"revisedBy":luis,"fields":{
+                    "System.ChangedDate":{"newValue":at(60)},
                     "System.State":{"oldValue":"New","newValue":"En desarrollo"},
-                    "System.AssignedTo":{"newValue":{"displayName":"Elvis Brevi","uniqueName":"elvis@example.com"}}}},
-                {"revisedBy":{"displayName":"Elvis Brevi"},"fields":{
-                    "System.ChangedDate":{"newValue":"2026-10-10T15:00:00Z"},
+                    "System.AssignedTo":{"newValue":elvis}}},
+                {"revisedBy":elvis,"fields":{
+                    "System.ChangedDate":{"newValue":at(4)},
                     "System.State":{"oldValue":"En desarrollo","newValue":"Enviado a validación"},
-                    "System.AssignedTo":{"oldValue":{"displayName":"Elvis Brevi","uniqueName":"elvis@example.com"},
-                        "newValue":{"displayName":"Luis Felipe","uniqueName":"luis@example.com"}}}}]})))
+                    "System.AssignedTo":{"oldValue":elvis,"newValue":luis}}}]})))
             .mount(&server)
             .await;
         Mock::given(method("GET"))
             .and(path("/example/Payments/_apis/wit/workItems/23553/comments"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({"comments":[
                 {"text":"<div>Faltan las variables de Consul en producción; las pedí a Francisco.</div>",
-                 "createdBy":{"displayName":"Elvis Brevi"},"createdDate":"2026-10-11T09:00:00Z"}]})))
+                 "createdBy":elvis,"createdDate":at(3)},
+                {"text":"Comentario antiguo","createdBy":luis,"createdDate":at(50)}]})))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/example/Payments/_apis/wit/workItems/24000/updates"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"value":[
+                {"revisedBy":luis,"fields":{"System.ChangedDate":{"newValue":at(2)},
+                    "System.State":{"newValue":"Active"},"System.AssignedTo":{"newValue":luis}}}]})))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/example/Payments/_apis/wit/workItems/24000/comments"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"comments":[]})))
             .mount(&server)
             .await;
         Mock::given(method("GET"))
@@ -630,28 +730,41 @@ mod tests {
             )
             .mount(&server)
             .await;
-        let described = read(&reqwest::Client::new(), "key", &source, &[23553, 999])
-            .await
-            .unwrap();
+        let described = read(
+            &reqwest::Client::new(),
+            "key",
+            &source,
+            &[23553, 999, 24000],
+        )
+        .await
+        .unwrap();
         super::super::TEST_SERVER.with(|s| *s.borrow_mut() = None);
         // The item outside the catalog's projects is not described.
-        assert_eq!(described.len(), 1);
+        assert_eq!(described.len(), 2);
         let (id, text, references) = &described[0];
         assert_eq!(*id, 23553);
         for expected in [
-            "Requested work item (named in the request): User Story #23553 Pagos QR — Enviado a validación.",
-            "Current state: Enviado a validación since 2026-10-10. Assigned to now: Luis Felipe. Last change 2026-10-10 by Elvis Brevi.",
-            "2026-10-10 En desarrollo → Enviado a validación (by Elvis Brevi)",
-            "2026-10-10 Elvis Brevi → Luis Felipe (by Elvis Brevi)",
-            "The user is or was assigned to it.",
-            "Dates on the item: Fecha de compromiso 2026-10-24.",
-            "Parent: Feature #23000 Pagos — Active.",
-            "Child items: 1 (1 Done).",
-            "Task #23601 Implementar QR — Done (Elvis Brevi, changed 2026-10-09).",
-            "1 commit(s), 1 pull request(s); latest linked 2026-10-09.",
-            "2026-10-11 Elvis Brevi: «Faltan las variables de Consul en producción; las pedí a Francisco.»",
+            "Requested work item (named in the request): User Story #23553 Pagos QR — Enviado a validación.".to_owned(),
+            format!("Current state: Enviado a validación since {}. Assigned to now: Luis Felipe. Last change {} by Elvis Brevi.", d(4), d(4)),
+            "The user took part in it and is or was assigned to it.".to_owned(),
+            format!("{} En desarrollo → Enviado a validación (by Elvis Brevi)", d(4)),
+            format!("{} Elvis Brevi → Luis Felipe (by Elvis Brevi)", d(4)),
+            format!("Dates on the item: Fecha de compromiso {}.", d(-10)),
+            "Parent: Feature #23000 Pagos — Active.".to_owned(),
+            "Child items: 2 (2 Done).".to_owned(),
+            format!("Task #23601 Implementar QR — Done (Elvis Brevi, changed {}).", d(5)),
+            format!("1 commit(s), 1 pull request(s); latest linked {}.", d(5)),
+            format!("{} Elvis Brevi: «Faltan las variables de Consul en producción; las pedí a Francisco.»", d(3)),
         ] {
-            assert!(text.contains(expected), "{expected}\n{text}");
+            assert!(text.contains(&expected), "{expected}\n{text}");
+        }
+        // Nothing older than five weeks: the first state change, the old task, PR and comment.
+        for older in [
+            format!("{} New → En desarrollo", d(60)),
+            "Diseñar QR".to_owned(),
+            "Comentario antiguo".to_owned(),
+        ] {
+            assert!(!text.contains(&older), "{older}\n{text}");
         }
         let urls: Vec<&str> = references.iter().map(|r| r.url.as_str()).collect();
         assert_eq!(
@@ -662,5 +775,14 @@ mod tests {
                 "https://dev.azure.com/example/Payments/_workitems/edit/23601",
             ]
         );
+        // Someone else's HU is named with who holds it, without its details.
+        let (id, text, references) = &described[1];
+        assert_eq!(*id, 24000);
+        assert!(
+            text.contains("Assigned to now: Luis Felipe. The user has not taken part in it"),
+            "{text}"
+        );
+        assert!(!text.contains("Current state") && !text.contains("Child items"));
+        assert_eq!(references.len(), 1);
     }
 }

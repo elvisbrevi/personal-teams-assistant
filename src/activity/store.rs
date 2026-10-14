@@ -200,6 +200,22 @@ impl Database {
     pub fn pending(&self) -> Result<Vec<Entry>> {
         self.in_states("state IN ('pending','refining')")
     }
+    /// Entries recorded on `since` (yyyy-mm-dd) or later, newest day first, read without
+    /// opening the database for writing: the Teams pipeline reads them as context while the
+    /// host's recorder owns the file. A missing database has no entries.
+    pub fn recent(path: &Path, since: &str) -> Result<Vec<Entry>> {
+        if !path.exists() {
+            return Ok(Vec::new());
+        }
+        let db = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        db.busy_timeout(std::time::Duration::from_secs(2))?;
+        let mut stmt = db.prepare(
+            "SELECT payload FROM entries WHERE day>=?1 ORDER BY day DESC, updated_at DESC LIMIT 300",
+        )?;
+        stmt.query_map([since], |r| r.get::<_, String>(0))?
+            .map(|r| Ok(serde_json::from_str(&r?)?))
+            .collect()
+    }
     pub fn save_summary(&self, day: &str, summary: &Summary) -> Result<()> {
         self.db.lock().unwrap().execute("INSERT INTO totals(day,summary) VALUES(?1,?2) ON CONFLICT(day) DO UPDATE SET summary=excluded.summary",params![day,serde_json::to_string(summary)?])?;
         Ok(())

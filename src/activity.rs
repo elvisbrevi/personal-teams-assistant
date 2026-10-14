@@ -1,5 +1,6 @@
 //! Scheduled registration of verified work, with durable clarification and write records.
 pub(crate) mod context;
+pub mod recorded;
 pub mod store;
 #[cfg(test)]
 mod tests;
