@@ -5,7 +5,7 @@ mod tests;
 use crate::{
     ado::{
         link::{LinkStatus, Linkable, Target},
-        registration::{DailyWork, Field, LOOKBACK_DAYS, TaskFields},
+        registration::{DailyWork, Field, LOOKBACK_DAYS, TaskFields, Written},
     },
     config::Config,
     evidence::Evidence,
@@ -301,6 +301,14 @@ pub struct Entry {
     /// DevOps when a task is first prepared there; their values go in `fields`.
     #[serde(default)]
     pub required: Vec<Field>,
+}
+/// Adds the fields of `more` that `fields` lacks, by reference, keeping their order.
+fn merge_fields(fields: &mut Vec<Field>, more: &[Field]) {
+    for field in more {
+        if !fields.iter().any(|f| f.reference == field.reference) {
+            fields.push(field.clone());
+        }
+    }
 }
 /// The latest required fields learned in an entry's HU project, or in any of its HUs' projects.
 fn learned_for(learned: &BTreeMap<(String, String), Vec<Field>>, entry: &Entry) -> Vec<Field> {
@@ -1106,9 +1114,11 @@ impl Recorder {
             .tools
             .task_fields(writer, &parent, &settings.task_kind)
             .await?;
-        let required = schema.inputs(&settings.effort_field);
+        // What the user filled before stays visible; the schema and the rules may add fields.
+        let mut required = schema.inputs(&settings.effort_field);
+        merge_fields(&mut required, &entry.required);
         if entry.required != required {
-            entry.required = required;
+            entry.required = required.clone();
             self.share_required(entry, &parent)?;
         }
         if let Some(issue) = schema.issue(&fields, self.config.llm.language) {
@@ -1126,15 +1136,46 @@ impl Recorder {
                 a.organization = parent.organization.clone();
             }
         }
-        // Server-side conditional rules are checked without writing before the single write.
-        if !self
+        // Server-side rules, including the completed state's, are checked without writing.
+        let check = self
             .tools
             .validate_task(writer, &parent, &fields, &activities)
-            .await?
-        {
+            .await?;
+        merge_fields(&mut required, &check.missing);
+        if entry.required != required {
+            entry.required = required;
+            self.share_required(entry, &parent)?;
+        }
+        let state = &settings.done_state;
+        if !check.missing.is_empty() {
+            let names = check
+                .missing
+                .iter()
+                .map(|f| {
+                    if f.name.is_empty() {
+                        &f.reference
+                    } else {
+                        &f.name
+                    }
+                    .as_str()
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
             let issue = self.say(
-                "Azure DevOps rejected the proposed fields. Check the completed state and required fields; add them under Additional fields.",
-                "Azure DevOps rechazó los campos propuestos. Revisa el estado completado y los campos obligatorios; agrégalos en Campos adicionales.",
+                format!("To leave the task in {state}, Azure DevOps requires: {names}. Fill them in and create the task again."),
+                format!("Para dejar la tarea en {state}, Azure DevOps exige: {names}. Complétalos y vuelve a crear la tarea."),
+            );
+            return self.hold(entry, issue);
+        }
+        if !check.errors.is_empty() {
+            let detail = self.redactor.redact(&check.errors.join(" "));
+            let issue = self.say(
+                format!(
+                    "Azure DevOps rejected the task: {detail} Correct it and create the task again."
+                ),
+                format!(
+                    "Azure DevOps rechazó la tarea: {detail} Corrígelo y vuelve a crear la tarea."
+                ),
             );
             return self.hold(entry, issue);
         }
@@ -1143,29 +1184,57 @@ impl Recorder {
         self.db.update(entry, "pending")?;
         let result = self
             .tools
-            .register_task(writer, &parent, &fields, &activities)
+            .register_task(writer, &parent, &fields, &activities, &check)
             .await;
+        let task_url = |id: u64| {
+            format!(
+                "{}/{}/_workitems/edit/{id}",
+                parent.organization.trim_end_matches('/'),
+                url::form_urlencoded::byte_serialize(parent.project.as_bytes())
+                    .collect::<String>()
+                    .replace('+', "%20")
+            )
+        };
+        let detail = |written: &Written| {
+            if written.detail.is_empty() {
+                String::new()
+            } else {
+                format!(": {}", self.redactor.redact(&written.detail))
+            }
+        };
         entry.state = match result {
-            Ok((LinkStatus::Linked, Some(id))) => {
+            Ok(written) if written.status == LinkStatus::Linked && written.id.is_some() => {
+                let id = written.id.unwrap_or_default();
                 entry.task_id = Some(id);
-                entry.task_url = Some(format!(
-                    "{}/{}/_workitems/edit/{id}",
-                    parent.organization.trim_end_matches('/'),
-                    url::form_urlencoded::byte_serialize(parent.project.as_bytes())
-                        .collect::<String>()
-                        .replace('+', "%20")
-                ));
+                entry.task_url = Some(task_url(id));
                 "done"
             }
-            Ok((LinkStatus::Failed, _)) => {
+            Ok(written) if written.status == LinkStatus::Failed => {
+                let detail = detail(&written);
                 entry.issue = self.say(
-                    "Azure DevOps rejected the task creation request. Inspect the completed state, required fields and write credential permissions before deciding how to proceed.",
-                    "Azure DevOps rechazó la creación de la tarea. Revisa el estado completado, los campos obligatorios y los permisos de la credencial de escritura antes de decidir cómo seguir.",
+                    format!("Azure DevOps rejected the task creation{detail}. Nothing was created; inspect the completed state, required fields and write credential permissions before deciding how to proceed."),
+                    format!("Azure DevOps rechazó la creación de la tarea{detail}. No se creó nada; revisa el estado completado, los campos obligatorios y los permisos de la credencial de escritura antes de decidir cómo seguir."),
                 );
                 "failed"
             }
+            // The task exists but did not reach the completed state: never retried.
+            Ok(written) if written.id.is_some() && check.through.is_some() => {
+                let id = written.id.unwrap_or_default();
+                let (detail, initial) = (detail(&written), check.through.clone().unwrap_or_default());
+                entry.task_id = Some(id);
+                entry.task_url = Some(task_url(id));
+                entry.issue = self.say(
+                    format!("Task #{id} was created in «{initial}», but Azure DevOps did not move it to {state}{detail}. Complete it in Azure DevOps; this will not be retried."),
+                    format!("Se creó la tarea #{id} en «{initial}», pero Azure DevOps no la pasó a {state}{detail}. Complétala en Azure DevOps; esto no se reintentará."),
+                );
+                "uncertain"
+            }
             // No successful response/body or a deadline means human inspection, never retry.
             result => {
+                if let Ok(Written { id: Some(id), .. }) = &result {
+                    entry.task_id = Some(*id);
+                    entry.task_url = Some(task_url(*id));
+                }
                 entry.issue = match result {
                     Err(error) => {
                         let detail = self.error_detail(&error);

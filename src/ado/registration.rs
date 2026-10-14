@@ -38,6 +38,112 @@ pub struct TaskFields {
 pub struct TaskSchema {
     pub fields: Vec<Field>,
     pub completed_states: Vec<String>,
+    /// States a new task may be created in (the process transitions from none); empty when
+    /// unknown, which allows creating it completed.
+    #[serde(default)]
+    pub initial_states: Vec<String>,
+}
+/// What Azure DevOps rules ask before a completed task can be registered, found without
+/// writing (`validateOnly`).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Check {
+    /// Fields still empty that the rules require, with their metadata for the form.
+    pub missing: Vec<Field>,
+    /// Other rule errors, as Azure DevOps words them.
+    pub errors: Vec<String>,
+    /// The state a new task starts in when the process cannot create it completed; the
+    /// registration then moves it to the completed state.
+    pub through: Option<String>,
+    /// Fields the completed state requires empty, such as remaining work.
+    pub clear: Vec<String>,
+}
+/// The outcome of a task registration's writes.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Written {
+    pub status: LinkStatus,
+    pub id: Option<u64>,
+    /// Azure DevOps' own explanation of a rejected write, when it gave one.
+    pub detail: String,
+}
+/// One rule error of a rejected work item write.
+struct Rule {
+    field: String,
+    flags: String,
+    message: String,
+}
+/// The rule errors in a rejected write's body, or its message.
+fn rules(body: &Value, status: u16) -> Vec<Rule> {
+    let text = |value: &Value| {
+        value
+            .as_str()
+            .unwrap_or_default()
+            .chars()
+            .take(300)
+            .collect::<String>()
+    };
+    let custom = &body["customProperties"];
+    match custom["RuleValidationErrors"]
+        .as_array()
+        .filter(|list| !list.is_empty())
+    {
+        Some(list) => list
+            .iter()
+            .take(10)
+            .map(|rule| Rule {
+                field: text(&rule["fieldReferenceName"]),
+                flags: text(&rule["fieldStatusFlags"]).to_lowercase(),
+                message: text(&rule["errorMessage"]),
+            })
+            .collect(),
+        None => vec![Rule {
+            field: text(&custom["FieldReferenceName"]),
+            flags: text(&custom["FieldStatusFlags"]).to_lowercase(),
+            message: Some(text(&body["message"]))
+                .filter(|m| !m.is_empty())
+                .unwrap_or_else(|| format!("HTTP {status}")),
+        }],
+    }
+}
+fn explain(rules: &[Rule]) -> String {
+    rules
+        .iter()
+        .map(|r| r.message.as_str())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+/// Sends one JSON Patch; a rejection returns its rule errors, a transport failure an error.
+async fn send_patch(
+    client: &Client,
+    key: &str,
+    method: Method,
+    url: url::Url,
+    patch: Value,
+) -> Result<std::result::Result<Value, Vec<Rule>>> {
+    let response = client
+        .request(method, url)
+        .basic_auth("", Some(key))
+        .header("Content-Type", "application/json-patch+json")
+        .body(patch.to_string())
+        .send()
+        .await?;
+    let status = response.status();
+    let body = crate::adapters::bounded_json::<Value>(response, 1_000_000).await;
+    if status.is_success() {
+        return body.map(Ok);
+    }
+    Ok(Err(rules(&body.unwrap_or(Value::Null), status.as_u16())))
+}
+/// A missing value (`invalidEmpty`) of a user field is asked for; anything else is an error.
+fn classify(rule: Rule, missing: &mut BTreeSet<String>, errors: &mut Vec<String>) {
+    if rule.flags.contains("invalidempty")
+        && !rule.flags.contains("invalidnotempty")
+        && !rule.field.is_empty()
+        && !rule.field.starts_with("System.")
+    {
+        missing.insert(rule.field);
+    } else if !errors.contains(&rule.message) {
+        errors.push(rule.message);
+    }
 }
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub struct Field {
@@ -420,9 +526,28 @@ pub async fn task_schema(
         .filter(|s| s["category"].as_str() == Some("Completed"))
         .filter_map(|s| s["name"].as_str().map(str::to_owned))
         .collect();
+    // Processes may only create a task in its first state; then it moves to the completed one.
+    let type_url = project_url(
+        source,
+        &parent.project,
+        "dev.azure.com",
+        &["_apis", "wit", "workitemtypes", kind],
+    )?;
+    let initial_states = request(client, key, Method::GET, type_url, None)
+        .await
+        .ok()
+        .and_then(|found| found["transitions"][""].as_array().cloned())
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|t| t["to"].as_str())
+        .filter(|state| !state.is_empty())
+        .take(10)
+        .map(str::to_owned)
+        .collect();
     Ok(TaskSchema {
         fields,
         completed_states,
+        initial_states,
     })
 }
 fn html(text: &str) -> String {
@@ -502,6 +627,142 @@ pub fn task_patch(
     }
     Value::Array(patch)
 }
+fn task_source<'a>(
+    catalog: &'a Catalog,
+    parent: &Target,
+    task: &TaskFields,
+    activities: &[Linkable],
+) -> Result<&'a super::Source> {
+    ensure!(
+        parent.holds_tasks() && super::link::TASK_KINDS.contains(&task.kind.as_str()),
+        "invalid task parent or type"
+    );
+    catalog
+        .sources
+        .iter()
+        .find(|s| {
+            s.organization == parent.organization
+                && activities.iter().all(|a| a.organization == s.organization)
+        })
+        .context("task outside scope")
+}
+fn create_url(
+    source: &super::Source,
+    parent: &Target,
+    kind: &str,
+    validate: bool,
+) -> Result<url::Url> {
+    let mut url = project_url(
+        source,
+        &parent.project,
+        "dev.azure.com",
+        &["_apis", "wit", "workitems", &format!("${kind}")],
+    )?;
+    if validate {
+        url.query_pairs_mut().append_pair("validateOnly", "true");
+    }
+    Ok(url)
+}
+/// Asks Azure DevOps, without writing, what the completed task still needs. When the process
+/// only creates tasks in an initial state, the completed state's rules are read from a
+/// validation in that state (its state error is expected) and the creation is validated in the
+/// initial state.
+pub async fn check_task(
+    client: &Client,
+    key: &str,
+    catalog_text: &str,
+    parent: &Target,
+    task: &TaskFields,
+    activities: &[Linkable],
+) -> Result<Check> {
+    let catalog = Catalog::parse(catalog_text)?;
+    let source = task_source(&catalog, parent, task, activities)?;
+    let schema = task_schema(client, key, catalog_text, parent, &task.kind).await?;
+    check_with(client, key, source, &schema, parent, task, activities).await
+}
+async fn check_with(
+    client: &Client,
+    key: &str,
+    source: &super::Source,
+    schema: &TaskSchema,
+    parent: &Target,
+    task: &TaskFields,
+    activities: &[Linkable],
+) -> Result<Check> {
+    ensure!(
+        schema.issue(task, Language::En).is_none(),
+        "invalid task fields"
+    );
+    let mut check = Check {
+        through: schema
+            .initial_states
+            .first()
+            .filter(|_| !schema.initial_states.contains(&task.state))
+            .cloned(),
+        ..Default::default()
+    };
+    let mut missing = BTreeSet::new();
+    let url = create_url(source, parent, &task.kind, true)?;
+    let completed = task_patch(parent, &source.author_email, task, activities, schema);
+    let rejected = send_patch(client, key, Method::POST, url.clone(), completed).await?;
+    for rule in rejected.err().unwrap_or_default() {
+        if check.through.is_some() {
+            if rule.field == "System.State" || rule.message.contains("'State'") {
+                continue;
+            }
+            if rule.flags.contains("invalidnotempty") && !rule.field.is_empty() {
+                check.clear.push(rule.field);
+                continue;
+            }
+        }
+        classify(rule, &mut missing, &mut check.errors);
+    }
+    if let Some(initial) = &check.through {
+        let first = TaskFields {
+            state: initial.clone(),
+            ..task.clone()
+        };
+        let created = task_patch(parent, &source.author_email, &first, activities, schema);
+        let rejected = send_patch(client, key, Method::POST, url, created).await?;
+        for rule in rejected.err().unwrap_or_default() {
+            classify(rule, &mut missing, &mut check.errors);
+        }
+    }
+    for reference in missing.into_iter().take(10) {
+        let mut field = schema
+            .fields
+            .iter()
+            .find(|f| f.reference == reference)
+            .cloned()
+            .unwrap_or_else(|| Field {
+                name: reference.clone(),
+                reference: reference.clone(),
+                ..Default::default()
+            });
+        field.required = true;
+        if field.kind.is_empty() {
+            let url = project_url(
+                source,
+                &parent.project,
+                "dev.azure.com",
+                &["_apis", "wit", "fields", &reference],
+            )?;
+            if let Ok(found) = request(client, key, Method::GET, url, None).await {
+                field.kind = found["type"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .chars()
+                    .take(40)
+                    .collect();
+            }
+        }
+        check.missing.push(field);
+    }
+    Ok(check)
+}
+/// The registration's writes: one creation, in the completed state or in the initial state the
+/// check found, and then one move to the completed state that also clears the fields it requires
+/// empty. Nothing is retried: a creation whose move fails is reported with its ID.
 pub async fn write_task(
     client: &Client,
     key: &str,
@@ -509,57 +770,72 @@ pub async fn write_task(
     parent: &Target,
     task: &TaskFields,
     activities: &[Linkable],
-    validate: bool,
-) -> Result<(LinkStatus, Option<u64>)> {
-    ensure!(
-        parent.holds_tasks() && super::link::TASK_KINDS.contains(&task.kind.as_str()),
-        "invalid task parent or type"
-    );
+    check: &Check,
+) -> Result<Written> {
     let catalog = Catalog::parse(catalog_text)?;
-    let source = catalog
-        .sources
-        .iter()
-        .find(|s| {
-            s.organization == parent.organization
-                && activities.iter().all(|a| a.organization == s.organization)
-        })
-        .context("task outside scope")?;
+    let source = task_source(&catalog, parent, task, activities)?;
     let schema = task_schema(client, key, catalog_text, parent, &task.kind).await?;
+    write_with(
+        client, key, source, &schema, parent, task, activities, check,
+    )
+    .await
+}
+#[allow(clippy::too_many_arguments)]
+async fn write_with(
+    client: &Client,
+    key: &str,
+    source: &super::Source,
+    schema: &TaskSchema,
+    parent: &Target,
+    task: &TaskFields,
+    activities: &[Linkable],
+    check: &Check,
+) -> Result<Written> {
     ensure!(
         schema.issue(task, Language::En).is_none(),
         "invalid task fields"
     );
-    let mut url = project_url(
-        source,
-        &parent.project,
-        "dev.azure.com",
-        &["_apis", "wit", "workitems", &format!("${}", task.kind)],
-    )?;
-    if validate {
-        url.query_pairs_mut().append_pair("validateOnly", "true");
-    }
-    let body = task_patch(parent, &source.author_email, task, activities, &schema);
-    let Ok(response) = client
-        .post(url)
-        .basic_auth("", Some(key))
-        .header("Content-Type", "application/json-patch+json")
-        .body(body.to_string())
-        .send()
-        .await
-    else {
-        return Ok((LinkStatus::Uncertain, None));
+    let written = |status, id, detail: String| Ok(Written { status, id, detail });
+    let first = TaskFields {
+        state: check.through.clone().unwrap_or_else(|| task.state.clone()),
+        ..task.clone()
     };
-    if !response.status().is_success() {
-        return Ok((LinkStatus::Failed, None));
-    }
-    let Ok(created) = crate::adapters::bounded_json::<Value>(response, 1_000_000).await else {
-        return Ok((LinkStatus::Uncertain, None));
+    let url = create_url(source, parent, &task.kind, false)?;
+    let patch = task_patch(parent, &source.author_email, &first, activities, schema);
+    let created = match send_patch(client, key, Method::POST, url, patch).await {
+        Err(_) => return written(LinkStatus::Uncertain, None, String::new()),
+        Ok(Err(rules)) => return written(LinkStatus::Failed, None, explain(&rules)),
+        Ok(Ok(created)) => created,
     };
-    let id = created["id"].as_u64().filter(|id| *id > 0);
-    if !validate && !completed_response(&created, task) {
-        return Ok((LinkStatus::Uncertain, id));
+    let Some(id) = created["id"].as_u64().filter(|id| *id > 0) else {
+        return written(LinkStatus::Uncertain, None, String::new());
+    };
+    let completed = if check.through.is_some() {
+        let mut ops = vec![json!({"op":"add","path":"/fields/System.State","value":task.state})];
+        ops.extend(
+            check
+                .clear
+                .iter()
+                .map(|field| json!({"op":"remove","path":format!("/fields/{field}")})),
+        );
+        let url = project_url(
+            source,
+            &parent.project,
+            "dev.azure.com",
+            &["_apis", "wit", "workitems", &id.to_string()],
+        )?;
+        match send_patch(client, key, Method::PATCH, url, Value::Array(ops)).await {
+            Err(_) => return written(LinkStatus::Uncertain, Some(id), String::new()),
+            Ok(Err(rules)) => return written(LinkStatus::Uncertain, Some(id), explain(&rules)),
+            Ok(Ok(updated)) => updated,
+        }
+    } else {
+        created
+    };
+    if !completed_response(&completed, task) {
+        return written(LinkStatus::Uncertain, Some(id), String::new());
     }
-    Ok((LinkStatus::Linked, id))
+    written(LinkStatus::Linked, Some(id), String::new())
 }
 
 fn completed_response(created: &Value, task: &TaskFields) -> bool {
@@ -719,6 +995,7 @@ mod tests {
                 field("Custom.Area", "Área", json!("Pagos")),
             ],
             completed_states: vec!["Done".into()],
+            initial_states: Vec::new(),
         };
         let inputs: Vec<_> = schema
             .inputs(effort)
@@ -759,6 +1036,7 @@ mod tests {
                 field("Custom.Mes", "Mes"),
             ],
             completed_states: vec!["Done".into()],
+            initial_states: Vec::new(),
         };
         let task = TaskFields {
             title: "Diagnose".into(),
@@ -779,6 +1057,145 @@ mod tests {
         assert!(
             issue.ends_with("Este tipo tiene: Esfuerzo Real (Custom.EsfuerzoReal), Estimated work (Custom.Estimatedwork)."),
             "{issue}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_process_that_creates_tasks_waiting_completes_them_in_a_second_write() {
+        use wiremock::{
+            Mock, MockServer, Request, ResponseTemplate,
+            matchers::{method, path, path_regex},
+        };
+        let server = MockServer::start().await;
+        let source = super::super::Source {
+            organization: server.uri(),
+            projects: vec!["Payments".into()],
+            author_email: "me@example.com".into(),
+        };
+        // Tasks start «En espera»; Done needs URL Commit and an empty Remaining Work.
+        Mock::given(method("POST"))
+            .and(path_regex(r"/Payments/_apis/wit/workitems/.*Task$"))
+            .respond_with(|request: &Request| {
+                let patch: Value = request.body_json().unwrap();
+                let value = |field: &str| {
+                    patch.as_array().unwrap().iter()
+                        .find(|op| op["path"] == format!("/fields/{field}"))
+                        .map(|op| op["value"].clone())
+                };
+                let validate = request.url.query_pairs().any(|(k, v)| k == "validateOnly" && v == "true");
+                if value("System.State") == Some(json!("Done")) {
+                    let mut rules = vec![
+                        json!({"fieldReferenceName":null,"fieldStatusFlags":"none","errorMessage":"The field 'State' contains the value 'Done' that is not in the list of supported values"}),
+                        json!({"fieldReferenceName":"Microsoft.VSTS.Scheduling.RemainingWork","fieldStatusFlags":"required, invalidNotEmpty","errorMessage":"TF401320: Rule Error for field Remaining Work. Error code: Required, InvalidNotEmpty."}),
+                    ];
+                    if value("Custom.URLCommit").is_none() {
+                        rules.push(json!({"fieldReferenceName":"Custom.URLCommit","fieldStatusFlags":"required, invalidEmpty","errorMessage":"TF401320: Rule Error for field URL Commit. Error code: Required, InvalidEmpty."}));
+                    }
+                    return ResponseTemplate::new(400).set_body_json(json!({"message":"The field 'State' contains the value 'Done' that is not in the list of supported values.","customProperties":{"RuleValidationErrors":rules}}));
+                }
+                assert_eq!(value("System.State"), Some(json!("En espera")));
+                assert_eq!(value("Microsoft.VSTS.Scheduling.RemainingWork"), Some(json!(0)));
+                let id = if validate { 0 } else { 900 };
+                ResponseTemplate::new(200).set_body_json(json!({"id":id,"fields":{"System.State":"En espera"}}))
+            })
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/Payments/_apis/wit/fields/Custom.URLCommit"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"type":"string"})))
+            .mount(&server)
+            .await;
+        Mock::given(method("PATCH"))
+            .and(path("/Payments/_apis/wit/workitems/900"))
+            .respond_with(|request: &Request| {
+                let patch: Value = request.body_json().unwrap();
+                assert_eq!(
+                    patch,
+                    json!([
+                        {"op":"add","path":"/fields/System.State","value":"Done"},
+                        {"op":"remove","path":"/fields/Microsoft.VSTS.Scheduling.RemainingWork"}
+                    ])
+                );
+                ResponseTemplate::new(200).set_body_json(
+                    json!({"id":900,"fields":{"System.State":"Done","Custom.EsfuerzoReal":2.0}}),
+                )
+            })
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = Client::builder()
+            .no_proxy()
+            .resolve("dev.azure.com", *server.address())
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
+            .unwrap();
+        let field = |reference: &str, name: &str| Field {
+            name: name.into(),
+            reference: reference.into(),
+            ..Default::default()
+        };
+        let schema = TaskSchema {
+            fields: [
+                "System.Title",
+                "System.Description",
+                "System.State",
+                "System.Tags",
+            ]
+            .iter()
+            .map(|r| field(r, r))
+            .chain([
+                field("Custom.EsfuerzoReal", "Esfuerzo Real"),
+                field("Microsoft.VSTS.Scheduling.RemainingWork", "Remaining Work"),
+                field("Custom.URLCommit", "URL Commit"),
+            ])
+            .collect(),
+            completed_states: vec!["Done".into()],
+            initial_states: vec!["En espera".into()],
+        };
+        let parent = Target {
+            id: 26321,
+            title: "Servicio no disponible".into(),
+            organization: server.uri(),
+            project: "Payments".into(),
+            kind: "Bug".into(),
+            state: "En progreso".into(),
+            ..Default::default()
+        };
+        let mut task = TaskFields {
+            title: "Diagnose the payment query".into(),
+            description: "Diagnosed the failure.".into(),
+            hours: 2.,
+            day: "2026-10-13".into(),
+            kind: "Task".into(),
+            state: "Done".into(),
+            effort_field: "Custom.EsfuerzoReal".into(),
+            extra: BTreeMap::new(),
+        };
+        let check = check_with(&client, "k", &source, &schema, &parent, &task, &[])
+            .await
+            .unwrap();
+        assert_eq!(check.through.as_deref(), Some("En espera"));
+        assert_eq!(check.clear, ["Microsoft.VSTS.Scheduling.RemainingWork"]);
+        assert!(check.errors.is_empty(), "{:?}", check.errors);
+        assert_eq!(check.missing.len(), 1);
+        assert_eq!(check.missing[0].name, "URL Commit");
+        assert_eq!(check.missing[0].kind, "string");
+
+        task.extra.insert("Custom.URLCommit".into(), json!("N/A"));
+        let check = check_with(&client, "k", &source, &schema, &parent, &task, &[])
+            .await
+            .unwrap();
+        assert!(check.missing.is_empty() && check.errors.is_empty());
+        let written = write_with(&client, "k", &source, &schema, &parent, &task, &[], &check)
+            .await
+            .unwrap();
+        assert_eq!(
+            written,
+            Written {
+                status: LinkStatus::Linked,
+                id: Some(900),
+                detail: String::new()
+            }
         );
     }
 
@@ -831,6 +1248,7 @@ mod tests {
                 })
                 .collect(),
             completed_states: vec!["Done".into()],
+            initial_states: Vec::new(),
         };
         let activity = Linkable {
             url: "https://dev.azure.com/example/P/_wiki/wikis/docs?pagePath=api".into(),
