@@ -225,11 +225,9 @@ pub(super) async fn resolve(host: &Arc<Host>, id: String, resolution: Resolution
     let entry = recorder.db.entry(&id)?.ok_or(Rejected::Input(
         "The activity was not found. Refresh the list.",
     ))?;
-    resolution.validate(&recorder.redactor).map_err(|_| {
-        Rejected::Input(
-            "Check the context and additional fields: at most 6000 bytes of context, scalar field values and no sensitive data.",
-        )
-    })?;
+    resolution
+        .validate(&recorder.redactor)
+        .map_err(|error| rejection(&error))?;
     ensure!(
         entry.state == "pending",
         Rejected::Conflict("This activity is no longer pending. Refresh the list.")
@@ -273,6 +271,24 @@ pub(super) async fn resolve(host: &Arc<Host>, id: String, resolution: Resolution
     }));
     Ok(json!({"id":id,"running":true}))
 }
+/// The exact reason an activity resolution was refused, as a fixed text the GUI translates.
+fn rejection(error: &anyhow::Error) -> Rejected {
+    Rejected::Input(match error.to_string().as_str() {
+        "task field too large" => {
+            "A field value is too long (at most 8000 characters) or has control characters."
+        }
+        "task fields must be scalar values" => "Field values must be text, numbers or true/false.",
+        "too many task fields" => "There are too many additional fields (at most 30).",
+        "invalid additional task field" => {
+            "An additional field name is invalid or reserved: the app sets the System fields."
+        }
+        "task fields contain sensitive data" => {
+            "A field contains data that looks sensitive (an email address, phone number, ID number, token or password). Remove it and try again."
+        }
+        "invalid resolution action" => "The requested action is invalid.",
+        _ => "The context must be at most 6000 bytes and contain no sensitive data.",
+    })
+}
 pub(super) async fn shutdown(state: &DesktopState) {
     if let Some(task) = state.activity_task.lock().await.take() {
         task.abort();
@@ -311,5 +327,37 @@ pub(super) async fn schedule(host: Arc<Host>) {
             }
         }
         tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::activity::Resolution;
+
+    #[test]
+    fn a_refused_resolution_names_its_exact_reason() {
+        let redactor = Redactor::new(&[], vec![]).unwrap();
+        let resolution = |fields: serde_json::Value, context: &str| -> Resolution {
+            serde_json::from_value(json!({"action":"create","context":context,"fields":fields}))
+                .unwrap()
+        };
+        let reason = |r: Resolution| rejection(&r.validate(&redactor).unwrap_err()).to_string();
+        assert!(
+            reason(resolution(json!({"Custom.Evidence":"x".repeat(8001)}), ""))
+                .contains("too long")
+        );
+        assert!(reason(resolution(json!({"Custom.Evidence":["a"]}), "")).contains("text, numbers"));
+        assert!(reason(resolution(json!({"System.State":"Done"}), "")).contains("reserved"));
+        assert!(
+            reason(resolution(json!({"Custom.Contact":"ana@example.com"}), ""))
+                .contains("sensitive")
+        );
+        assert!(reason(resolution(json!({}), &"x".repeat(6001))).contains("6000 bytes"));
+        assert!(
+            resolution(json!({"Custom.Evidence":"x".repeat(8000)}), "")
+                .validate(&redactor)
+                .is_ok()
+        );
     }
 }

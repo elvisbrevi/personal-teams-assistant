@@ -619,11 +619,38 @@ const UI_CATALOG = { es: {
   'Restart during task creation. Inspect Azure DevOps; this write will not be retried.': 'Reinicio durante la creación de la tarea. Revisa Azure DevOps; esta escritura no se reintentará.',
   'Restart during clarification. Add context again if needed.': 'Reinicio durante la aclaración. Agrega el contexto de nuevo si hace falta.',
   'Which HU does this activity belong to, what did you do, and how long did it take?': '¿A qué HU corresponde esta actividad, qué hiciste y cuánto tiempo te tomó?',
+  'A field value is too long (at most 8000 characters) or has control characters.': 'Un campo es demasiado largo (máximo 8000 caracteres) o tiene caracteres de control.',
+  'Field values must be text, numbers or true/false.': 'Los valores de los campos deben ser texto, números o verdadero/falso.',
+  'There are too many additional fields (at most 30).': 'Hay demasiados campos adicionales (máximo 30).',
+  'An additional field name is invalid or reserved: the app sets the System fields.': 'Un nombre de campo adicional no es válido o está reservado: la app completa los campos System.',
+  'A field contains data that looks sensitive (an email address, phone number, ID number, token or password). Remove it and try again.': 'Un campo contiene datos que parecen sensibles (un correo, un teléfono, un RUT, un token o una contraseña). Quítalos e inténtalo de nuevo.',
+  'The requested action is invalid.': 'La acción solicitada no es válida.',
+  '{name} admits at most {n} characters.': '{name} admite como máximo {n} caracteres.',
+  'Write it with the assistant': 'Redactar con el asistente',
+  'Write the completion evidence: the result and the artifacts by name, without chat content.': 'Redacta la evidencia de finalización: el resultado y los artefactos por nombre, sin contenido de chats.',
+  // Activity names the host builds in English (stored with each activity)
+  'Work described in a chat without a description': 'Trabajo descrito en un chat sin descripción',
+  'Call in a chat without a description': 'Llamada en un chat sin descripción',
+  'Call ended in a chat without a description. Its purpose and the user\'s attendance are not verified.': 'Llamada terminada en un chat sin descripción. Su propósito y tu asistencia no están verificados.',
 } };
 
 /** Host texts with a variable part (older runs and entries were stored in English). */
 const UI_PATTERNS = { es: [
   [/^Reading source (.+)$/, 'Leyendo la fuente $1'],
+  // Activity names, most specific first.
+  [/^Own message in a chat without a description: ([\s\S]*)$/, 'Mensaje propio en un chat sin descripción: $1'],
+  [/^Own message in (.+?): ([\s\S]*)$/, 'Mensaje propio en $1: $2'],
+  [/^Call ended in (.+)\. Its purpose and the user's attendance are not verified\.$/, 'Llamada terminada en $1. Su propósito y tu asistencia no están verificados.'],
+  [/^Call in (.+)$/, 'Llamada en $1'],
+  [/^Work described in (.+)$/, 'Trabajo descrito en $1'],
+  [/^Teams message of (.+?) in (.+)$/, 'Mensaje de Teams del $1 en $2'],
+  [/^Created Wiki page «([\s\S]*)»$/, 'Página Wiki creada «$1»'],
+  [/^Edited Wiki page «([\s\S]*)»$/, 'Página Wiki editada «$1»'],
+  [/^Wiki page «([\s\S]*)»$/, 'Página Wiki «$1»'],
+  [/^Commit (\S+) in ([^:]+): ([\s\S]*)$/, 'Commit $1 en $2: $3'],
+  [/^Pipeline (.+), run #(\d+)$/, 'Pipeline $1, ejecución #$2'],
+  [/^run #(\d+)$/, 'ejecución #$1'],
+  [/^Release (.+) of (.+)$/, 'Release $1 de $2'],
   [/^Source (.+) has incomplete coverage\.$/, 'La fuente $1 tiene cobertura incompleta.'],
   [/^Could not read source ([^:]+): (.*)$/s, 'No se pudo leer la fuente $1: $2'],
   [/^Task planning failed \((.*?)\): (.*)\. Activities with verified artifacts remain pending for manual review\.$/s, 'La planificación de tareas falló ($1): $2. Las actividades con artefactos verificados quedan pendientes para revisión manual.'],

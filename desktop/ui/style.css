@@ -356,6 +356,8 @@ button.card > .icon { color: var(--faint); }
 .required-fields { margin: 1rem 0 .4rem; padding: .85rem 1rem .1rem; border: 1px solid var(--border); border-radius: 12px; background: var(--surface-2); }
 .required-fields h4 { margin: 0; font-size: .95rem; }
 .required-fields > .hint { margin: .2rem 0 0; }
+.with-action > label { margin-bottom: .45rem !important; }
+.with-action > button { margin-bottom: .8rem; }
 #activity-form .required-fields label { margin: .7rem 0 .8rem; }
 #activity-form .invalid { border-color: var(--error); box-shadow: 0 0 0 3px var(--error-soft); }
 #activity-form h3 + label { margin-top: 0; }

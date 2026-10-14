@@ -82,6 +82,7 @@ impl LlmProvider for Model {
                 parent: Some(40),
                 title: "Document payment flow".into(),
                 description: "Created payment documentation based on the verified work.".into(),
+                evidence: "Payment guide published in the Wiki.".into(),
                 hours: Some(1.5),
                 confidence: 0.95,
                 question: if a.context_required && context.is_empty() {

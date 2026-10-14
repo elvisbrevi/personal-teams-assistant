@@ -90,3 +90,20 @@ test('known host messages are translated and unknown ones stay as they are', () 
   assert.equal(es.tx('Something only the host knows'), 'Something only the host knows');
   assert.equal(load('en').tx('Reading source wiki'), 'Reading source wiki');
 });
+
+test('activity names stored in English read in the interface language', () => {
+  const es = load('es');
+  const cases = {
+    'Own message in a chat without a description: ok, le escribí a Felipe': 'Mensaje propio en un chat sin descripción: ok, le escribí a Felipe',
+    'Own message in [SopDev] Cobro y Pago Tarifas: revisé el 403\nen prod': 'Mensaje propio en [SopDev] Cobro y Pago Tarifas: revisé el 403\nen prod',
+    'Work described in a chat without a description': 'Trabajo descrito en un chat sin descripción',
+    'Work described in [SopDev] Cobro y Pago Tarifas': 'Trabajo descrito en [SopDev] Cobro y Pago Tarifas',
+    'Call in Daily Cobro Pago y Tarifas': 'Llamada en Daily Cobro Pago y Tarifas',
+    "Call ended in Daily Cobro Pago y Tarifas. Its purpose and the user's attendance are not verified.": 'Llamada terminada en Daily Cobro Pago y Tarifas. Su propósito y tu asistencia no están verificados.',
+    'Edited Wiki page «Guía de pagos»': 'Página Wiki editada «Guía de pagos»',
+    'Commit 1a2b3c4d in portal: fix the receipt': 'Commit 1a2b3c4d en portal: fix the receipt',
+    'Pipeline Portal Recaudación, run #29809': 'Pipeline Portal Recaudación, ejecución #29809',
+    'PR #12 Fix the receipt (portal)': 'PR #12 Fix the receipt (portal)',
+  };
+  for (const [english, spanish] of Object.entries(cases)) assert.equal(es.tx(english), spanish);
+});
