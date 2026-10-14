@@ -701,6 +701,43 @@ async fn a_bug_in_progress_holds_the_task_and_a_closed_one_offers_its_hu() {
 }
 
 #[tokio::test]
+async fn required_fields_are_learned_shared_and_then_filled() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut r, tools) = recorder(dir.path(), 0., true, false, true);
+    r.config.activity_registration.auto_register = false;
+    r.run("first", yesterday(), "").await.unwrap();
+    let pending = r.db.pending().unwrap();
+    assert_eq!(pending.len(), 2);
+    assert!(pending.iter().all(|e| e.required.is_empty()));
+    let create = |fields| Resolution {
+        action: "create".into(),
+        parent: Some(40),
+        title: Some("Document the payment flow".into()),
+        description: Some("Created the payment documentation.".into()),
+        hours: Some(1.5),
+        context: String::new(),
+        fields,
+    };
+    let held = r
+        .resolve(&pending[0].id, create(BTreeMap::new()))
+        .await
+        .unwrap();
+    assert_eq!(held.state, "pending");
+    assert!(held.issue.contains("Activity"), "{}", held.issue);
+    let references: Vec<_> = held.required.iter().map(|f| f.reference.as_str()).collect();
+    assert_eq!(references, ["Custom.Activity"]);
+    // The other activity of the project asks for the same field before its first attempt.
+    let other = r.db.entry(&pending[1].id).unwrap().unwrap();
+    assert_eq!(other.required, held.required);
+    assert_eq!(tools.writes.load(Ordering::SeqCst), 0);
+
+    let fields = BTreeMap::from([("Custom.Activity".into(), json!("Documentation"))]);
+    let done = r.resolve(&pending[0].id, create(fields)).await.unwrap();
+    assert_eq!(done.state, "done", "{}", done.issue);
+    assert_eq!(tools.writes.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
 async fn recovery_keeps_attempts_reserved_and_restores_interrupted_questions() {
     let dir = tempfile::tempdir().unwrap();
     let (mut r, tools) = recorder(dir.path(), 0., false, false, true);

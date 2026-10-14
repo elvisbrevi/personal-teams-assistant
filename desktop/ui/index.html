@@ -229,7 +229,8 @@
             <label>Task title<input id="activity-title" maxlength="160" autocomplete="off"></label>
             <label>Effort (hours) <small id="activity-hours-left"></small><input id="activity-hours" type="number" inputmode="decimal" min="0.01" max="24" step="any"></label>
             <label>Description <small>What you did. It is saved in the task.</small><textarea id="activity-description" rows="5" maxlength="6000"></textarea></label>
-            <details class="fold"><summary>Additional fields <small>Advanced</small></summary><label>Additional fields (JSON) <small>Azure DevOps field reference names and values, if your process requires them.</small><textarea id="activity-fields" rows="3" spellcheck="false"></textarea></label></details>
+            <div id="activity-required" class="required-fields" hidden></div>
+            <details class="fold"><summary>Additional fields <small>Advanced</small></summary><label>Additional fields (JSON) <small>Other Azure DevOps fields by reference name, only if you need them.</small><textarea id="activity-fields" rows="3" spellcheck="false"></textarea></label></details>
             <div id="activity-outcome" class="callout" role="status" aria-live="polite" hidden></div>
             <div class="editor-actions">
               <button id="activity-create" type="submit"><svg class="icon"><use href="#i-check"/></svg>Create task in Done</button>

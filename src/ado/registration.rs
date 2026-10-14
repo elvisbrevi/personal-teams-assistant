@@ -39,14 +39,43 @@ pub struct TaskSchema {
     pub fields: Vec<Field>,
     pub completed_states: Vec<String>,
 }
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub struct Field {
     pub name: String,
     pub reference: String,
     pub required: bool,
     pub allowed: Vec<Value>,
+    /// Azure DevOps data type (`string`, `integer`, `double`, `dateTime`, `boolean`,
+    /// `picklistString`…), read only for the fields the user must fill; empty when unknown.
+    #[serde(default)]
+    pub kind: String,
+    #[serde(default)]
+    pub help: String,
+    /// The process default, which Azure DevOps applies when the task is created.
+    #[serde(default)]
+    pub default: Value,
+}
+const REMAINING_WORK: &str = "Microsoft.VSTS.Scheduling.RemainingWork";
+/// The process fills a field with a default when the task is created without it.
+fn has_default(field: &Field) -> bool {
+    !field.default.is_null() && field.default.as_str() != Some("")
+}
+/// A required field the user supplies: Azure DevOps does not derive it and has no default for it.
+fn user_supplied(field: &Field) -> bool {
+    field.required && !field.reference.starts_with("System.") && !has_default(field)
 }
 impl TaskSchema {
+    /// The required fields the user fills in: not the system fields, the effort field or the
+    /// remaining work that code sets, nor those the process gives a default.
+    pub fn inputs(&self, effort_field: &str) -> Vec<Field> {
+        self.fields
+            .iter()
+            .filter(|f| {
+                user_supplied(f) && f.reference != effort_field && f.reference != REMAINING_WORK
+            })
+            .cloned()
+            .collect()
+    }
     /// What the configured fields still lack for this task type, told in `language`.
     pub fn issue(&self, task: &TaskFields, language: Language) -> Option<String> {
         if !self.completed_states.contains(&task.state) {
@@ -68,33 +97,34 @@ impl TaskSchema {
         ] {
             values.insert(key.into(), value);
         }
-        if self
-            .fields
-            .iter()
-            .any(|f| f.reference == "Microsoft.VSTS.Scheduling.RemainingWork")
-        {
-            values.insert("Microsoft.VSTS.Scheduling.RemainingWork".into(), json!(0));
+        if self.fields.iter().any(|f| f.reference == REMAINING_WORK) {
+            values.insert(REMAINING_WORK.into(), json!(0));
         }
-        // System identity, path IDs and timestamps are supplied/derived by Azure DevOps.
+        // System identity, path IDs and timestamps are supplied/derived by Azure DevOps, and
+        // process defaults are applied on creation.
         let missing: Vec<_> = self
             .fields
             .iter()
             .filter(|f| {
-                f.required
-                    && !f.reference.starts_with("System.")
+                user_supplied(f)
                     && values
                         .get(&f.reference)
                         .is_none_or(|v| v.is_null() || v.as_str() == Some(""))
             })
-            .map(|f| f.reference.as_str())
+            .map(|f| {
+                if f.name.is_empty() {
+                    &f.reference
+                } else {
+                    &f.name
+                }
+                .as_str()
+            })
             .collect();
         if !missing.is_empty() {
             let missing = missing.join(", ");
             return Some(language.say(
-                format!("Required fields: {missing}. Add their values under Additional fields."),
-                format!(
-                    "Campos obligatorios: {missing}. Agrega sus valores en Campos adicionales."
-                ),
+                format!("Azure DevOps requires these fields: {missing}. Fill them in and create the task again."),
+                format!("Azure DevOps exige estos campos: {missing}. Complétalos y vuelve a crear la tarea."),
             ));
         }
         for (key, value) in &values {
@@ -114,6 +144,11 @@ impl TaskSchema {
                 ));
             };
             if !field.allowed.is_empty() && !field.allowed.contains(value) {
+                let key = if field.name.is_empty() {
+                    key
+                } else {
+                    &field.name
+                };
                 let allowed = field
                     .allowed
                     .iter()
@@ -306,9 +341,35 @@ pub async fn task_schema(
                 reference: f["referenceName"].as_str()?.into(),
                 required: f["alwaysRequired"].as_bool().unwrap_or(false),
                 allowed: f["allowedValues"].as_array().cloned().unwrap_or_default(),
+                help: f["helpText"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .chars()
+                    .take(300)
+                    .collect(),
+                default: f["defaultValue"].clone(),
+                kind: String::new(),
             })
         })
-        .collect();
+        .collect::<Vec<_>>();
+    // The data type tells the GUI which input to show; a failed read only leaves it unknown.
+    let mut fields = fields;
+    for field in fields.iter_mut().filter(|f| user_supplied(f)).take(10) {
+        let url = project_url(
+            source,
+            &parent.project,
+            "dev.azure.com",
+            &["_apis", "wit", "fields", &field.reference],
+        )?;
+        if let Ok(found) = request(client, key, Method::GET, url, None).await {
+            field.kind = found["type"]
+                .as_str()
+                .unwrap_or_default()
+                .chars()
+                .take(40)
+                .collect();
+        }
+    }
     let completed_states = states["value"]
         .as_array()
         .context("invalid task states")?
@@ -591,6 +652,54 @@ mod tests {
             "fetch the related HU by ID even when it is outside the recent personal search"
         );
     }
+    #[test]
+    fn the_user_fills_only_required_fields_without_a_default_or_code_value() {
+        let field = |reference: &str, name: &str, default: Value| Field {
+            name: name.into(),
+            reference: reference.into(),
+            required: true,
+            default,
+            ..Default::default()
+        };
+        let effort = "Microsoft.VSTS.Scheduling.CompletedWork";
+        let schema = TaskSchema {
+            fields: vec![
+                field("System.Title", "Title", Value::Null),
+                field(effort, "Completed Work", Value::Null),
+                field(
+                    "Microsoft.VSTS.Scheduling.RemainingWork",
+                    "Remaining Work",
+                    Value::Null,
+                ),
+                field("Microsoft.VSTS.Common.Activity", "Activity", Value::Null),
+                field("Custom.Mes", "Mes", json!("")),
+                field("Custom.Area", "Área", json!("Pagos")),
+            ],
+            completed_states: vec!["Done".into()],
+        };
+        let inputs: Vec<_> = schema
+            .inputs(effort)
+            .into_iter()
+            .map(|f| f.reference)
+            .collect();
+        assert_eq!(inputs, ["Microsoft.VSTS.Common.Activity", "Custom.Mes"]);
+        let task = TaskFields {
+            title: "Diagnose".into(),
+            description: "Diagnosed it.".into(),
+            hours: 1.,
+            day: "2026-10-13".into(),
+            kind: "Task".into(),
+            state: "Done".into(),
+            effort_field: effort.into(),
+            extra: BTreeMap::new(),
+        };
+        // Friendly names, as the form shows them; the defaulted field is not asked for.
+        assert_eq!(
+            schema.issue(&task, Language::En).unwrap(),
+            "Azure DevOps requires these fields: Activity, Mes. Fill them in and create the task again."
+        );
+    }
+
     #[test]
     fn daily_effort_counts_changes_only_inside_the_day() {
         let at = |s: &str| DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc);

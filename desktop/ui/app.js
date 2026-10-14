@@ -782,6 +782,51 @@ function renderActivityOutcome(entry) {
   box.replaceChildren(...content);
 }
 
+/** The inputs of the fields the task type requires: `{ field, input, read }`. */
+let requiredInputs = [];
+function rememberedField(reference) {
+  try { return JSON.parse(localStorage.getItem(`pta-field:${reference}`) ?? 'null') ?? undefined; } catch { return undefined; }
+}
+
+/** One input per field Azure DevOps requires, typed from its metadata: a list of its allowed values,
+ * a number, a date or text. With `keep`, what the user already typed stays. */
+function renderRequired(entry, keep) {
+  const typed = keep ? new Map(requiredInputs.map(r => [r.field.reference, r.read()])) : new Map();
+  requiredInputs = (entry.required || []).map((field, index) => {
+    const id = `activity-required-${index}`;
+    const kind = (field.kind || '').toLowerCase();
+    const allowed = field.allowed?.length ? field.allowed : kind === 'boolean' ? [true, false] : [];
+    // A list remembers the last choice (an activity type, a month); free values start empty.
+    const current = typed.get(field.reference) ?? entry.fields[field.reference]
+      ?? (allowed.length ? rememberedField(field.reference) : undefined) ?? (field.default || undefined);
+    let input, read;
+    if (allowed.length) {
+      input = el('select', { id }, el('option', { value: '', textContent: t('Choose…') }),
+        ...allowed.map((value, at) => el('option', { value: String(at), textContent: value === true ? t('Yes') : value === false ? t('No') : String(value) })));
+      const at = allowed.findIndex(value => JSON.stringify(value) === JSON.stringify(current));
+      input.value = at >= 0 ? String(at) : '';
+      read = () => input.value === '' ? undefined : allowed[Number(input.value)];
+    } else if (kind === 'datetime') {
+      input = el('input', { id, type: 'date', value: typeof current === 'string' ? current.slice(0, 10) : '' });
+      read = () => input.value || undefined;
+    } else if (kind === 'html' || kind === 'plaintext') {
+      input = el('textarea', { id, rows: 3, value: current ?? '' });
+      read = () => input.value.trim() || undefined;
+    } else {
+      const numeric = kind === 'integer' || kind === 'double';
+      input = el('input', { id, type: numeric ? 'number' : 'text', step: numeric ? 'any' : undefined,
+        inputMode: numeric ? (kind === 'integer' ? 'numeric' : 'decimal') : undefined, value: current ?? '' });
+      read = () => { const text = input.value.trim(); return !text ? undefined : numeric ? Number(text) : text; };
+    }
+    const label = el('label', {}, field.name || field.reference, field.help ? el('small', { textContent: ` ${field.help}` }) : null, input);
+    return { field, input, read, label };
+  });
+  $('#activity-required').hidden = !requiredInputs.length;
+  $('#activity-required').replaceChildren(...(requiredInputs.length ? [el('h4', { textContent: t('Required by Azure DevOps') }),
+    el('p', { class: 'hint', textContent: t('Your Azure DevOps process asks for these fields to create the task.') }), ...requiredInputs.map(r => r.label)] : []));
+}
+const requiredName = r => r.field.name || r.field.reference;
+
 function renderActivityEditor(entry) {
   viewedActivity = entry;
   $('#activity-editor').hidden = false;
@@ -802,7 +847,10 @@ function renderActivityEditor(entry) {
     renderParents(entry);
     field('#activity-title', entry.draft.title); field('#activity-description', entry.draft.description);
     field('#activity-hours', entry.draft.hours); field('#activity-context', '');
-    field('#activity-fields', JSON.stringify(entry.fields, null, 2));
+    // Required fields have their own inputs; the JSON keeps only the rest.
+    const requiredRefs = new Set((entry.required || []).map(f => f.reference));
+    field('#activity-fields', JSON.stringify(Object.fromEntries(Object.entries(entry.fields).filter(([key]) => !requiredRefs.has(key))), null, 2));
+    renderRequired(entry, false);
   }
   const [label, tone] = activityStates[entry.state] || [entry.state, 'muted'];
   $('#activity-editor-state').className = `badge ${tone}`;
@@ -824,12 +872,16 @@ function activityFormProblem() {
   if (!$('#activity-hours').value || !(hours >= 0.01 && hours <= 24)) return [t('Enter the effort in hours (between 0.01 and 24).'), '#activity-hours'];
   if (!$('#activity-description').value.trim()) return [t('Describe the work done before creating the task.'), '#activity-description'];
   if ($('#activity-description').value.includes('://')) return [t("Remove the links from the description: the activity's links are added to the task automatically."), '#activity-description'];
+  const empty = requiredInputs.filter(r => { const value = r.read(); return value === undefined || (typeof value === 'number' && !Number.isFinite(value)); });
+  if (empty.length) return [t('Complete the fields Azure DevOps requires: {names}.', { names: empty.map(requiredName).join(', ') }), `#${empty[0].input.id}`];
+  const fraction = requiredInputs.find(r => r.field.kind?.toLowerCase() === 'integer' && !Number.isInteger(r.read()));
+  if (fraction) return [t('{name} must be a whole number.', { name: requiredName(fraction) }), `#${fraction.input.id}`];
   return null;
 }
 
 /** Shows what is missing next to the buttons and marks the field, without opening the phone keyboard. */
 function showActivityProblem(text, selector) {
-  activityResult = { id: selectedActivity, tone: 'warn', text };
+  activityResult = { id: selectedActivity, tone: 'warn', text, local: true };
   if (viewedActivity) renderActivityOutcome(viewedActivity);
   for (const marked of document.querySelectorAll('#activity-editor .invalid')) { marked.classList.remove('invalid'); marked.removeAttribute('aria-invalid'); }
   const target = selector && $(selector);
@@ -851,6 +903,7 @@ async function resolveActivity(action) {
   let fields = {};
   if (action !== 'dismiss') {
     try { fields = jsonFields($('#activity-fields').value); } catch (error) { return showActivityProblem(String(error), '#activity-fields'); }
+    for (const r of requiredInputs) if (r.read() !== undefined) fields[r.field.reference] = r.read();
   }
   const choice = $('#activity-parent').value;
   const parentValue = choice === 'other' ? $('#activity-other-parent').value : choice;
@@ -860,6 +913,11 @@ async function resolveActivity(action) {
     context: $('#activity-context').value.trim(), fields
   };
   await invoke('activity_resolve', { id: selectedActivity, resolution });
+  if (action === 'create') {
+    for (const r of requiredInputs) {
+      if (r.field.allowed?.length && r.read() !== undefined) try { localStorage.setItem(`pta-field:${r.field.reference}`, JSON.stringify(r.read())); } catch { /* not remembered */ }
+    }
+  }
   activityOperation = { id: selectedActivity, action, day: viewedActivity.day, parentBefore: viewedActivity.draft.parent ?? null, choice };
   activityResult = null;
   activityRunning = true;
@@ -911,12 +969,17 @@ function finishActivityOperation(operation, entry) {
     if (selectedActivity === entry.id) {
       const parent = (entry.draft.parent ?? null) !== operation.parentBefore || operation.choice === 'other' ? entry.draft.parent ?? '' : operation.choice;
       renderParents(entry, parent);
+      // Fields Azure DevOps just asked for appear, with what was typed in the others.
+      renderRequired(entry, true);
+      const empty = requiredInputs.find(r => r.read() === undefined);
+      if (empty) { empty.input.classList.add('invalid'); empty.input.setAttribute('aria-invalid', 'true'); }
       activityEditing = true;
     }
   }
   if (selectedActivity === operation.id) {
     renderActivityEditor(entry || viewedActivity);
-    $('#activity-outcome').scrollIntoView({ behavior: 'smooth', block: 'center' });
+    const ask = requiredInputs.some(r => r.input.classList.contains('invalid'));
+    $(ask ? '#activity-required' : '#activity-outcome').scrollIntoView({ behavior: 'smooth', block: ask ? 'start' : 'center' });
   }
 }
 
@@ -1492,6 +1555,8 @@ $('#activity-form').oninput = event => {
   activityEditing = true;
   event.target.classList?.remove('invalid');
   event.target.removeAttribute?.('aria-invalid');
+  // A problem found in the form goes away once the user edits it; the host's ones stay.
+  if (activityResult?.local && viewedActivity) { activityResult = null; renderActivityOutcome(viewedActivity); }
 };
 $('#activity-context').oninput = () => { activityEditing = true; };
 $('#activity-form').onsubmit = event => { event.preventDefault(); busy($('#activity-create'), () => resolveActivity('create')); };

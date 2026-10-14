@@ -5,7 +5,7 @@ mod tests;
 use crate::{
     ado::{
         link::{LinkStatus, Linkable, Target},
-        registration::{DailyWork, LOOKBACK_DAYS, TaskFields},
+        registration::{DailyWork, Field, LOOKBACK_DAYS, TaskFields},
     },
     config::Config,
     evidence::Evidence,
@@ -297,6 +297,22 @@ pub struct Entry {
     pub task_id: Option<u64>,
     pub task_url: Option<String>,
     pub updated_at: i64,
+    /// Fields the task type requires from the user in the HU's project, learned from Azure
+    /// DevOps when a task is first prepared there; their values go in `fields`.
+    #[serde(default)]
+    pub required: Vec<Field>,
+}
+/// The latest required fields learned in an entry's HU project, or in any of its HUs' projects.
+fn learned_for(learned: &BTreeMap<(String, String), Vec<Field>>, entry: &Entry) -> Vec<Field> {
+    let chosen = entry
+        .parents
+        .iter()
+        .filter(|p| Some(p.id) == entry.draft.parent);
+    chosen
+        .chain(entry.parents.iter())
+        .find_map(|p| learned.get(&(p.organization.clone(), p.project.clone())))
+        .cloned()
+        .unwrap_or_default()
 }
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct Summary {
@@ -672,6 +688,7 @@ impl Recorder {
             }
         };
         self.db.stage_run(run, "Validating proposed tasks")?;
+        let learned = self.learned_required()?;
         let mut used = BTreeSet::new();
         for draft in drafts {
             if !self.valid_draft(&draft, &parents)
@@ -702,6 +719,7 @@ impl Recorder {
             used.extend(activities.iter().map(|a| a.key.clone()));
             let mut entry = self.entry(run, day, draft, activities, &parents, &evidence);
             entry.context = context.into();
+            entry.required = learned_for(&learned, &entry);
             if entry.draft.ignore {
                 entry.state = "dismissed".into();
             }
@@ -747,6 +765,7 @@ impl Recorder {
             };
             let mut entry = self.entry(run, day, draft, vec![a], &parents, &evidence);
             entry.context = context.into();
+            entry.required = learned_for(&learned, &entry);
             self.db.insert(&entry)?;
         }
         self.db.stage_run(run, "Saving review results")?;
@@ -785,7 +804,45 @@ impl Recorder {
             task_id: None,
             task_url: None,
             updated_at: Utc::now().timestamp(),
+            required: Vec::new(),
         }
+    }
+    /// What each project's tasks were last found to require, by organization and project.
+    fn learned_required(&self) -> Result<BTreeMap<(String, String), Vec<Field>>> {
+        let mut entries = self.db.entries(None)?;
+        entries.sort_by_key(|e| e.updated_at);
+        let mut learned = BTreeMap::new();
+        for entry in entries {
+            if let Some(parent) = entry
+                .parents
+                .iter()
+                .find(|p| Some(p.id) == entry.draft.parent)
+                && !entry.required.is_empty()
+            {
+                learned.insert(
+                    (parent.organization.clone(), parent.project.clone()),
+                    entry.required.clone(),
+                );
+            }
+        }
+        Ok(learned)
+    }
+    /// The other pending activities that can go in the same project show the same fields.
+    fn share_required(&self, entry: &Entry, parent: &Target) -> Result<()> {
+        for mut other in self.db.pending()? {
+            if other.id != entry.id
+                && other.state == "pending"
+                && other.required != entry.required
+                && other
+                    .parents
+                    .iter()
+                    .any(|p| p.organization == parent.organization && p.project == parent.project)
+            {
+                other.required = entry.required.clone();
+                self.db.update(&other, "pending")?;
+            }
+        }
+        Ok(())
     }
     pub async fn resolve(&self, id: &str, resolution: Resolution) -> Result<Entry> {
         resolution.validate(&self.redactor)?;
@@ -1049,6 +1106,11 @@ impl Recorder {
             .tools
             .task_fields(writer, &parent, &settings.task_kind)
             .await?;
+        let required = schema.inputs(&settings.effort_field);
+        if entry.required != required {
+            entry.required = required;
+            self.share_required(entry, &parent)?;
+        }
         if let Some(issue) = schema.issue(&fields, self.config.llm.language) {
             return self.hold(entry, issue);
         }
