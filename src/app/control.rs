@@ -897,6 +897,8 @@ async fn operate(
             save_settings(state, config, map, tunnel).await?;
             json!({"enabled":false})
         }
+        "answer_refine" => refine_answer(state, args).await?,
+        "answer_send" => send_answer(state, args).await?,
         "audit" | "logs" => {
             let config = read_config(&state.config_path).map_err(fail)?;
             let limit = args.get("limit").and_then(Value::as_u64).unwrap_or(50) as usize;

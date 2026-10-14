@@ -70,6 +70,9 @@ pub struct Audit {
     /// Links written to Azure DevOps for this message (a confirmed plan in the personal
     /// chat), each recorded as `sending` before its request and never retried.
     pub links: Vec<crate::ado::link::LinkRecord>,
+    /// Context the user gave in the app to improve an answer that was not sent (redacted
+    /// text; never sent to Teams). Present while it is improved and after.
+    pub refinement: Option<String>,
     /// Processing steps in order. Details name decisions and counts, never message content.
     pub trace: Vec<TraceStep>,
 }
@@ -109,7 +112,8 @@ impl Store {
             CREATE TABLE IF NOT EXISTS outputs(nonce TEXT PRIMARY KEY,conversation TEXT NOT NULL,message_id TEXT,created_at INTEGER NOT NULL DEFAULT (unixepoch()));
             CREATE TABLE IF NOT EXISTS activity_cache(key TEXT PRIMARY KEY,value TEXT NOT NULL,updated_at INTEGER NOT NULL DEFAULT (unixepoch()));
             UPDATE jobs SET status='pending' WHERE status='processing' AND resource NOT LIKE 'simulation:%';
-            UPDATE jobs SET status='uncertain',audit='{"reason":"restart_during_send"}' WHERE status='sending';"#)?;
+            UPDATE jobs SET status='uncertain',audit='{"reason":"restart_during_send"}' WHERE status='sending';
+            UPDATE jobs SET status='ignored',audit=json_set(coalesce(audit,'{}'),'$.status','ignored','$.reason','refinement_failed') WHERE status='refining';"#)?;
         Ok(Self { db: Mutex::new(db) })
     }
     /// Diagnostic connections never recover or mutate jobs.
@@ -213,7 +217,14 @@ impl Store {
                     .transpose()?
                     .unwrap_or_else(|| serde_json::json!({}));
                 if !content && let Some(obj) = audit.as_object_mut() {
-                    for field in ["proposed", "sent", "question", "resolved_question", "topic"] {
+                    for field in [
+                        "proposed",
+                        "sent",
+                        "question",
+                        "resolved_question",
+                        "topic",
+                        "refinement",
+                    ] {
                         obj.remove(field);
                     }
                     if let Some(messages) = obj

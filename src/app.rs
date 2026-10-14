@@ -60,6 +60,8 @@ struct Running {
     stop: watch::Sender<bool>,
     task: tokio::task::JoinHandle<Result<()>>,
     tunnel: Option<tokio::process::Child>,
+    /// The service's pipeline, to improve and send unsent answers from the app.
+    pipeline: Arc<crate::pipeline::Pipeline>,
 }
 
 /// Where the assistant service is in its lifecycle. `start`/`stop` and the service ending on
@@ -157,6 +159,15 @@ fn fail<E: Into<anyhow::Error>>(error: E) -> String {
         Some(Rejected::Conflict(message)) => return format!("[conflict] {message}"),
         None => {}
     }
+    if let Some(refusal) = error.downcast_ref::<crate::pipeline::DraftRefusal>() {
+        return match refusal {
+            crate::pipeline::DraftRefusal::GuidanceTooLong
+            | crate::pipeline::DraftRefusal::SensitiveGuidance => {
+                format!("[invalid_input] {refusal}")
+            }
+            _ => format!("[conflict] {refusal}"),
+        };
+    }
     if let Some(message) = error.downcast_ref::<crate::adapters::oauth::AuthorizationRequired>() {
         return format!("[not_ready] {message}");
     }
@@ -165,6 +176,71 @@ fn fail<E: Into<anyhow::Error>>(error: E) -> String {
     }
     tracing::warn!(event = "desktop_operation_failed");
     "The operation did not complete. Check the configuration and try again.".into()
+}
+
+/// The running assistant's pipeline: improving or sending an answer reads and writes Teams
+/// with its session.
+async fn running_pipeline(
+    state: &DesktopState,
+) -> std::result::Result<Arc<crate::pipeline::Pipeline>, String> {
+    state
+        .running
+        .lock()
+        .await
+        .as_ref()
+        .filter(|r| !r.task.is_finished())
+        .map(|r| r.pipeline.clone())
+        .ok_or_else(|| "[not_ready] Start the assistant to improve or send an answer.".to_owned())
+}
+
+/// A job key from the GUI or CLI: its canonical form is checked again when Teams is read.
+fn answer_resource(args: &serde_json::Value) -> std::result::Result<String, String> {
+    match args.get("resource").and_then(serde_json::Value::as_str) {
+        Some(resource)
+            if !resource.is_empty()
+                && resource.len() <= 512
+                && !resource.chars().any(char::is_control)
+                && !resource.starts_with("simulation:") =>
+        {
+            Ok(resource.to_owned())
+        }
+        _ => Err("[invalid_input] Invalid message.".into()),
+    }
+}
+
+/// Improve an unsent answer with the user's context. Returns at once; the answer is written
+/// in the background and the job shows `refining` until it ends.
+async fn refine_answer(
+    state: &DesktopState,
+    args: &serde_json::Value,
+) -> std::result::Result<serde_json::Value, String> {
+    let resource = answer_resource(args)?;
+    let context = match args.get("context") {
+        None | Some(serde_json::Value::Null) => "",
+        Some(serde_json::Value::String(context)) => context.as_str(),
+        _ => return Err("[invalid_input] Context must be text.".into()),
+    };
+    let pipeline = running_pipeline(state).await?;
+    pipeline
+        .begin_refinement(&resource, context)
+        .map_err(fail)?;
+    tokio::spawn(async move {
+        if pipeline.refine(&resource).await.is_err() {
+            tracing::warn!(event = "answer_refinement_failed");
+        }
+    });
+    Ok(serde_json::json!({"refining": true}))
+}
+
+/// Send an unsent answer once, at the user's request.
+async fn send_answer(
+    state: &DesktopState,
+    args: &serde_json::Value,
+) -> std::result::Result<serde_json::Value, String> {
+    let resource = answer_resource(args)?;
+    let pipeline = running_pipeline(state).await?;
+    let status = pipeline.send_draft(&resource).await.map_err(fail)?;
+    Ok(serde_json::json!({"status": status}))
 }
 
 fn validate_teams_setup(config: &Config) -> Result<()> {
@@ -540,11 +616,11 @@ async fn start(state: &DesktopState) -> Result<()> {
 
 async fn service_ready(
     task: &mut tokio::task::JoinHandle<Result<()>>,
-    ready_rx: oneshot::Receiver<Arc<crate::adapters::graph::Graph>>,
+    ready_rx: oneshot::Receiver<runtime::Service>,
     stop: &watch::Sender<bool>,
-) -> Result<Arc<crate::adapters::graph::Graph>> {
+) -> Result<runtime::Service> {
     match tokio::time::timeout(std::time::Duration::from_secs(60), ready_rx).await {
-        Ok(Ok(graph)) => Ok(graph),
+        Ok(Ok(service)) => Ok(service),
         Ok(Err(_)) => {
             // The service failed before readiness; retain its sanitized error category.
             let _ = stop.send(true);
@@ -616,7 +692,7 @@ async fn start_service(state: &DesktopState) -> Result<()> {
         set_phase(&phase, AssistantPhase::Stopped);
         result
     });
-    let graph = service_ready(&mut task, ready_rx, &stop).await?;
+    let service = service_ready(&mut task, ready_rx, &stop).await?;
     let tunnel_result = async {
         if tunnel_config_path.is_none() && tunnel_token.is_none() {
             return Ok(None);
@@ -656,8 +732,13 @@ async fn start_service(state: &DesktopState) -> Result<()> {
         }
     };
     *state.loaded_config.lock().await = Some(config);
-    *state.activity_graph.lock().await = Some(graph);
-    *running = Some(Running { stop, task, tunnel });
+    *state.activity_graph.lock().await = Some(service.graph);
+    *running = Some(Running {
+        stop,
+        task,
+        tunnel,
+        pipeline: service.pipeline,
+    });
     Ok(())
 }
 

@@ -181,6 +181,11 @@ pub trait ReadOnlyTool: Send + Sync {
     ) -> Result<String> {
         self.review(spec, days).await
     }
+    /// For a status answer: the user's own recent Wiki pages with their content (production
+    /// deployment plans, dates and pending items), as `Evidence` JSON.
+    async fn status_pages(&self, _spec: &ToolSpec, _question: &str) -> Result<String> {
+        anyhow::bail!("status pages unsupported")
+    }
     async fn daily_work(
         &self,
         _spec: &ToolSpec,
@@ -753,6 +758,41 @@ impl ReadOnlyTool for Tools {
         };
         tokio::time::timeout(std::time::Duration::from_secs(180), operation).await?
     }
+    async fn status_pages(&self, spec: &ToolSpec, question: &str) -> Result<String> {
+        spec.validate()?;
+        let ToolSpec::AzureDevopsWiki {
+            repository,
+            path,
+            secret_ref,
+            wiki_ids,
+            ..
+        } = spec
+        else {
+            anyhow::bail!("status pages unsupported");
+        };
+        // A deployment plan is often written weeks before its date: a month of own pages.
+        let days = crate::ado::recent_window(question).max(30);
+        let since = chrono::Utc::now() - chrono::Duration::days(days);
+        let operation = async {
+            let catalog =
+                crate::knowledge::read_repository_file(&self.repositories, repository, path)?;
+            let key = crate::security::resolve(secret_ref, &self.bindings)?;
+            let reader = crate::ado::wiki::Reader::new(&self.client, &key, &catalog, wiki_ids)?
+                .with_deadline(50)
+                .own_scope()
+                .await?;
+            let (edits, linked, partial) = reader.own_edits(since).await?;
+            Ok::<_, anyhow::Error>(serde_json::to_string(&crate::ado::wiki::status_evidence(
+                &edits,
+                &linked,
+                partial,
+                question,
+                &crate::ado::requested_work_items(question),
+                days,
+            ))?)
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(60), operation).await?
+    }
     async fn work_item(
         &self,
         spec: &ToolSpec,
@@ -857,6 +897,12 @@ impl ScopedTool {
     pub async fn review(&self, days: i64) -> std::result::Result<String, ToolError> {
         self.executor
             .review(&self.spec, days)
+            .await
+            .map_err(|_| ToolError)
+    }
+    pub async fn status_pages(&self, question: &str) -> std::result::Result<String, ToolError> {
+        self.executor
+            .status_pages(&self.spec, question)
             .await
             .map_err(|_| ToolError)
     }

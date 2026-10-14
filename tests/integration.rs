@@ -3162,3 +3162,366 @@ async fn a_review_proposes_where_to_register_each_piece_and_applies_it_on_confir
         }
     }
 }
+
+/// A status round: the named HU comes from the status tool (whoever holds it now) and the
+/// user's deployment page from their own Wiki pages; the Wiki is not searched.
+struct StatusTools;
+#[async_trait]
+impl ReadOnlyTool for StatusTools {
+    async fn execute(&self, spec: &ToolSpec, question: &str, _: &str) -> Result<String> {
+        use personal_teams_assistant::evidence::{Block, Evidence};
+        assert!(
+            matches!(spec, ToolSpec::AzureDevopsStatus { .. }),
+            "a status round does not search the Wiki"
+        );
+        assert!(question.contains("HU #23553"), "{question}");
+        let hu = "Requested work item (named in the request): User Story #23553 Pagos QR — Enviado a validación.\n- Current state: Enviado a validación since 2026-10-10. Assigned to now: Luis Felipe. Last change 2026-10-10 by Elvis Brevi.\n- State changes: 2026-10-10 En desarrollo → Enviado a validación (by Elvis Brevi).\n- The user is or was assigned to it.";
+        Ok(serde_json::to_string(&Evidence {
+            text: format!("Azure DevOps activity since 2026-09-30 (last 14 days).\n{hu}\n"),
+            blocks: vec![Block {
+                text: hu.into(),
+                source_ids: vec!["work_item:23553".into()],
+            }],
+            references: vec![review_reference(
+                "work_item:23553",
+                "work_item",
+                "#23553 Pagos QR — Enviado a validación",
+                "https://dev.azure.com/example/Payments/_workitems/edit/23553",
+                &["#23553", "HU 23553", "Pagos QR"],
+            )],
+            ..Default::default()
+        })?)
+    }
+    async fn status_pages(&self, spec: &ToolSpec, question: &str) -> Result<String> {
+        use personal_teams_assistant::evidence::{Block, Evidence};
+        assert!(matches!(spec, ToolSpec::AzureDevopsWiki { .. }));
+        assert!(question.contains("HU #23553"));
+        let page = "Wiki page the user created on 2026-10-12: \"Paso a producción Pagos QR\" (Payments / Payments.wiki); it names #23553.\nFecha del paso a producción: 2026-10-20.\nPendiente: variables de Consul en producción, solicitadas a Francisco.";
+        Ok(serde_json::to_string(&Evidence {
+            text: page.into(),
+            blocks: vec![Block {
+                text: page.into(),
+                source_ids: vec!["wiki:paso".into()],
+            }],
+            references: vec![review_reference(
+                "wiki:paso",
+                "wiki",
+                "Payments / Payments.wiki / Paso a producción Pagos QR",
+                "https://dev.azure.com/example/Payments/_wiki/wikis/abcdeabc-abcd-abcd-abcd-abcdeabcdea2?pagePath=%2FPaso",
+                &[],
+            )],
+            ..Default::default()
+        })?)
+    }
+}
+struct StatusLlm;
+#[async_trait]
+impl LlmProvider for StatusLlm {
+    fn name(&self) -> &str {
+        "synthetic-status"
+    }
+    async fn classify_intent(&self, _: &str, _: &str) -> Result<IntentDecision> {
+        Ok(IntentDecision {
+            intent: Intent::Question,
+            confidence: 0.96,
+        })
+    }
+    async fn select_references(
+        &self,
+        _: &str,
+        references: &[personal_teams_assistant::evidence::Reference],
+    ) -> Result<Vec<String>> {
+        Ok(references
+            .iter()
+            .filter(|r| r.kind == "wiki")
+            .map(|r| r.id.clone())
+            .collect())
+    }
+    async fn generate(&self, _: GenerationInput<'_>) -> Result<String> {
+        unreachable!()
+    }
+    async fn generate_response(
+        &self,
+        input: GenerationInput<'_>,
+    ) -> Result<personal_teams_assistant::llm::GeneratedAnswer> {
+        assert!(!input.review);
+        for expected in [
+            "Assigned to now: Luis Felipe",
+            "Enviado a validación since 2026-10-10",
+            "Fecha del paso a producción: 2026-10-20",
+            "solicitadas a Francisco",
+        ] {
+            assert!(
+                input.evidence.contains(expected),
+                "{expected}\n{}",
+                input.evidence
+            );
+        }
+        Ok(personal_teams_assistant::llm::GeneratedAnswer {
+            answer: "1) La HU #23553 ya la envié a validación el 10/10; ahora está a cargo de Luis Felipe.\n2) Mi compromiso es el paso a producción del 20/10.\n3) Depende de las variables de Consul en producción, que pedí a Francisco.".into(),
+            detailed: false,
+            used_sources: Vec::new(),
+            provider: None,
+            fallbacks: Vec::new(),
+        })
+    }
+}
+#[tokio::test]
+async fn a_status_round_reads_the_named_hu_and_the_users_deployment_page() {
+    let server = MockServer::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let store = support::store(&dir);
+    let graph = support::graph(&server, store.clone());
+    let mut cfg = (*graph.config).clone();
+    cfg.policy.dry_run = true;
+    let mut status = wiki_resource();
+    status.id = "azure-devops-status".into();
+    status.access = Access::Tool {
+        tool: ToolSpec::AzureDevopsStatus {
+            repository: "private".into(),
+            path: "catalog.toml".into(),
+            secret_ref: "secret://ado/read".into(),
+            link_secret_ref: None,
+        },
+    };
+    let mut map = knowledge(&dir);
+    map.resources = vec![wiki_resource(), status];
+    let pipeline = Pipeline {
+        config: Arc::new(cfg),
+        store: store.clone(),
+        adapter: graph,
+        knowledge: map,
+        llm: Arc::new(StatusLlm),
+        tools: Arc::new(StatusTools),
+        redactor: redactor(),
+    };
+    let sources: Vec<String> = vec!["manuals".into(), "azure-devops-status".into()];
+    let result = simulation::run(
+        &pipeline,
+        SimulationRequest {
+            session: "status".into(),
+            text: "Hola Elvis, ronda de actualización. Te pido 3 cosas cortas: 1) Avance de lo que tienes en curso: HU #23553 2) Compromiso: qué cierras y para qué fecha. 3) Riesgos o bloqueos (dependencias, accesos, definiciones pendientes).".into(),
+            group: false,
+            mentioned: false,
+            sources: sources.clone(),
+        },
+        Some(&sources),
+    )
+    .await
+    .unwrap();
+    assert_eq!(result.status, "dry_run", "{}", result.reason);
+    assert_eq!(result.reason, "supported_answer");
+    let answer = result.answer.unwrap();
+    for link in [
+        "](https://dev.azure.com/example/Payments/_workitems/edit/23553)",
+        "[Paso a producción Pagos QR](https://dev.azure.com/example/Payments/_wiki/wikis/abcdeabc-abcd-abcd-abcd-abcdeabcdea2?pagePath=%2FPaso)",
+    ] {
+        assert!(answer.contains(link), "{link}\n{answer}");
+    }
+    let rows = personal_teams_assistant::state::Store::inspect(
+        &dir.path().join("test.db"),
+        false,
+        1,
+        None,
+        true,
+    )
+    .unwrap();
+    let audit: personal_teams_assistant::state::Audit =
+        serde_json::from_value(rows[0]["audit"].clone()).unwrap();
+    assert_eq!(
+        audit.tools,
+        vec!["read_own_wiki_pages", "get_azure_devops_status"]
+    );
+    assert_eq!(audit.source.as_deref(), Some("azure-devops-status,manuals"));
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+/// Withholds its first answer (an invented reference); with the user's context it writes a
+/// clean one, or fails when asked to.
+struct DraftLlm {
+    seen: std::sync::Mutex<Vec<(String, String)>>,
+    fail_refinement: bool,
+}
+#[async_trait]
+impl LlmProvider for DraftLlm {
+    fn name(&self) -> &str {
+        "draft"
+    }
+    async fn classify_intent(&self, _: &str, _: &str) -> Result<IntentDecision> {
+        Ok(IntentDecision {
+            intent: Intent::Question,
+            confidence: 0.9,
+        })
+    }
+    async fn generate(&self, _: GenerationInput<'_>) -> Result<String> {
+        unreachable!()
+    }
+    async fn generate_response(
+        &self,
+        input: GenerationInput<'_>,
+    ) -> Result<personal_teams_assistant::llm::GeneratedAnswer> {
+        let refining = !input.previous_draft.is_empty();
+        if refining {
+            self.seen
+                .lock()
+                .unwrap()
+                .push((input.guidance.to_owned(), input.previous_draft.to_owned()));
+            anyhow::ensure!(!self.fail_refinement, "provider unavailable");
+        }
+        Ok(personal_teams_assistant::llm::GeneratedAnswer {
+            used_sources: if refining {
+                Vec::new()
+            } else {
+                vec!["invented".into()]
+            },
+            answer: if refining {
+                "Ya está en validación y la tiene Luis Felipe; el paso a producción es el 20/10."
+            } else {
+                "No tengo a mano el avance de esa HU."
+            }
+            .into(),
+            detailed: false,
+            provider: None,
+            fallbacks: Vec::new(),
+        })
+    }
+}
+#[tokio::test]
+async fn an_unsent_answer_is_improved_with_context_and_sent_once_by_hand() {
+    use personal_teams_assistant::pipeline::DraftRefusal;
+    let dir = tempfile::tempdir().unwrap();
+    let store = support::store(&dir);
+    let teams = Arc::new(HistoryTeams {
+        conversation: "chats/chat1".into(),
+        sender: "sender".into(),
+        text: "cual es el avance de la hu",
+        sent: Default::default(),
+    });
+    let llm = Arc::new(DraftLlm {
+        seen: Default::default(),
+        fail_refinement: false,
+    });
+    let pipeline = Pipeline {
+        config: Arc::new(support::config()),
+        store: store.clone(),
+        adapter: teams.clone(),
+        knowledge: knowledge(&dir),
+        llm: llm.clone(),
+        tools: Arc::new(NoTools),
+        redactor: redactor(),
+    };
+    let resource = "chats/chat1/messages/123";
+    store.enqueue(resource).unwrap();
+    pipeline.process(resource).await.unwrap();
+    let audit = store.audit(resource).unwrap().unwrap();
+    assert!(
+        audit.reason.starts_with("invalid_references"),
+        "{}",
+        audit.reason
+    );
+    assert!(teams.sent.lock().unwrap().is_empty());
+
+    // Context with personal data is refused before anything changes.
+    let refusal = pipeline
+        .begin_refinement(resource, "escríbele a luis@example.com")
+        .unwrap_err();
+    assert!(matches!(
+        refusal.downcast_ref::<DraftRefusal>(),
+        Some(DraftRefusal::SensitiveGuidance)
+    ));
+    let context = "Ya está en validación con Luis Felipe; el paso a producción es el 20/10.";
+    pipeline.begin_refinement(resource, context).unwrap();
+    assert_eq!(store.status(resource).unwrap().as_deref(), Some("refining"));
+    // A second request cannot start another improvement, nor send the old answer meanwhile.
+    assert!(pipeline.begin_refinement(resource, context).is_err());
+    assert!(pipeline.send_draft(resource).await.is_err());
+    pipeline.refine(resource).await.unwrap();
+    let audit = store.audit(resource).unwrap().unwrap();
+    assert_eq!(audit.status, "ignored");
+    assert_eq!(audit.reason, "draft_ready");
+    assert_eq!(audit.refinement.as_deref(), Some(context));
+    assert!(audit.proposed.as_deref().unwrap().contains("Luis Felipe"));
+    assert!(audit.trace.iter().any(|s| s.step == "draft"));
+    // The model received the context and the answer it improves; nothing was sent.
+    assert_eq!(
+        llm.seen.lock().unwrap().as_slice(),
+        [(
+            context.to_owned(),
+            "No tengo a mano el avance de esa HU.".to_owned()
+        )]
+    );
+    assert!(teams.sent.lock().unwrap().is_empty());
+
+    assert_eq!(pipeline.send_draft(resource).await.unwrap(), "sent");
+    let audit = store.audit(resource).unwrap().unwrap();
+    assert_eq!(audit.status, "sent");
+    assert_eq!(audit.reason, "manual_send");
+    assert_eq!(audit.graph_message_id.as_deref(), Some("sent-1"));
+    // Sent once: neither a second send nor another improvement.
+    assert!(matches!(
+        pipeline
+            .send_draft(resource)
+            .await
+            .unwrap_err()
+            .downcast_ref::<DraftRefusal>(),
+        Some(DraftRefusal::NotDraftable)
+    ));
+    assert!(pipeline.begin_refinement(resource, "otra vez").is_err());
+    assert_eq!(
+        teams.sent.lock().unwrap().as_slice(),
+        ["Ya está en validación y la tiene Luis Felipe; el paso a producción es el 20/10."]
+    );
+}
+#[tokio::test]
+async fn a_failed_improvement_keeps_the_earlier_proposal_and_a_restart_never_requeues_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = support::store(&dir);
+    let teams = Arc::new(HistoryTeams {
+        conversation: "chats/chat1".into(),
+        sender: "sender".into(),
+        text: "cual es el avance de la hu",
+        sent: Default::default(),
+    });
+    let pipeline = Pipeline {
+        config: Arc::new(support::config()),
+        store: store.clone(),
+        adapter: teams.clone(),
+        knowledge: knowledge(&dir),
+        llm: Arc::new(DraftLlm {
+            seen: Default::default(),
+            fail_refinement: true,
+        }),
+        tools: Arc::new(NoTools),
+        redactor: redactor(),
+    };
+    let resource = "chats/chat1/messages/123";
+    store.enqueue(resource).unwrap();
+    pipeline.process(resource).await.unwrap();
+    pipeline.begin_refinement(resource, "").unwrap();
+    assert!(pipeline.refine(resource).await.is_err());
+    let audit = store.audit(resource).unwrap().unwrap();
+    assert_eq!(audit.status, "ignored");
+    assert_eq!(audit.reason, "refinement_failed");
+    assert_eq!(
+        audit.proposed.as_deref(),
+        Some("No tengo a mano el avance de esa HU.")
+    );
+    assert!(teams.sent.lock().unwrap().is_empty());
+
+    // Interrupted while improving: reopening the database never queues it as a new message.
+    pipeline.begin_refinement(resource, "contexto").unwrap();
+    drop(pipeline);
+    drop(store);
+    let reopened = support::store(&dir);
+    assert_eq!(
+        reopened.status(resource).unwrap().as_deref(),
+        Some("ignored")
+    );
+    let audit = reopened.audit(resource).unwrap().unwrap();
+    assert_eq!(audit.reason, "refinement_failed");
+    assert_eq!(
+        audit.proposed.as_deref(),
+        Some("No tengo a mano el avance de esa HU.")
+    );
+    assert!(reopened.next_job().unwrap().is_none());
+}

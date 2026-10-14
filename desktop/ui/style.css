@@ -209,6 +209,9 @@ button.secondary.busy::after, button.danger.busy::after { border-color: var(--br
 .message-body { border-top: 1px solid var(--border); padding: .4rem .95rem .95rem; display: grid; gap: .5rem; }
 .field-block > strong { display: block; font-size: .85rem; margin-top: .45rem; color: var(--muted); }
 .field-block > p, .field-block > pre { margin: .2rem 0 0; white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; }
+.draft-actions label { display: block; margin-top: .35rem; font-size: .92rem; }
+.draft-actions .actions { margin-top: .6rem; }
+.draft-actions > .hint { margin: .4rem 0 0; }
 .field-block > pre, .field-block > .md { background: var(--surface-2); border: 1px solid var(--border); border-radius: 9px; padding: .65rem .75rem; margin-top: .2rem; }
 .done-note { display: flex; align-items: center; gap: .6rem; margin: .2rem 0 .4rem; color: var(--ok); font-weight: 600; }
 .done-note .icon { width: 20px; height: 20px; stroke-width: 2.4; }

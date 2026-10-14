@@ -19,12 +19,19 @@ fn stop_requested(stop: &tokio::sync::watch::Receiver<bool>) -> bool {
     *stop.borrow() || stop.has_changed().is_err()
 }
 
+/// What a ready service hands its host: the Graph handle (the shared OAuth refresh owner)
+/// and the message pipeline, which improves and sends unsent answers at the user's request.
+pub struct Service {
+    pub graph: Arc<Graph>,
+    pub pipeline: Arc<Pipeline>,
+}
+
 /// Run the Teams service owned by the desktop host until `stop_rx` turns true or closes.
 /// `ready` fires once the listener is bound and background tasks are running.
 pub async fn serve(
     path: &str,
     stop_rx: tokio::sync::watch::Receiver<bool>,
-    ready: tokio::sync::oneshot::Sender<Arc<Graph>>,
+    ready: tokio::sync::oneshot::Sender<Service>,
 ) -> Result<()> {
     let config = Arc::new(Config::load(path)?);
     let knowledge = KnowledgeMap::load(&config.knowledge_map)?;
@@ -192,7 +199,10 @@ pub async fn serve(
         renewer.abort_handle(),
         personal_poller.abort_handle(),
     ]);
-    let _ = ready.send(graph.clone());
+    let _ = ready.send(Service {
+        graph: graph.clone(),
+        pipeline: pipeline.clone(),
+    });
     let app = webhook::router(Arc::new(WebState { graph }));
     tracing::info!(event = "started", dry_run = config.policy.dry_run);
     axum::serve(listener, app)
