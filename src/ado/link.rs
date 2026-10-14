@@ -41,6 +41,12 @@ pub struct Linkable {
     /// The user's work items code suggested for it, best first.
     #[serde(default)]
     pub suggested: Vec<u64>,
+    /// Work item associations from verified own activity; used to match explicit context.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub related_work_items: Vec<u64>,
+    /// Alternate artifact routes verified from source metadata (e.g. a Wiki page ID).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub aliases: Vec<String>,
 }
 /// A work item a link may point from, or a new task's parent, as read from Azure DevOps.
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]

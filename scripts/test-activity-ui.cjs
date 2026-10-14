@@ -16,6 +16,26 @@ function localized(language, extra) {
 }
 const entry = { id: '11111111-1111-4111-8111-111111111111' };
 
+test('other-day activity needs an explicit date explanation before creation', () => {
+  const nodes = Object.fromEntries(Object.entries({
+    '#activity-date-attribution': '', '#activity-parent': '40', '#activity-hours': '1',
+    '#activity-title': 'Document the checklist', '#activity-description': 'Published the checklist.',
+  }).map(([id, value]) => [id, { value }]));
+  const context = localized('es', {
+    $: id => nodes[id], requiredInputs: [], activitySummary: null,
+    viewedActivity: { day: '2026-10-13', activities: [{ date: '2026-10-14' }] },
+  });
+  vm.runInContext(source.slice(source.indexOf('function activityFormProblem()'), source.indexOf('\nfunction showActivityProblem(')), context);
+  const problem = vm.runInContext('activityFormProblem()', context);
+  assert.match(problem[0], /Explica por qué este trabajo corresponde al día elegido/);
+  assert.equal(problem[1], '#activity-date-attribution');
+  nodes['#activity-date-attribution'].value = 'Worked before midnight; published afterward.';
+  assert.equal(vm.runInContext('activityFormProblem()', context), null);
+  nodes['#activity-date-attribution'].value = '';
+  context.viewedActivity.activities[0].date = '2026-10-13';
+  assert.equal(vm.runInContext('activityFormProblem()', context), null);
+});
+
 test('browser review opens the selected activity without a native window request', async () => {
   const calls = [], rendered = [], tabs = [];
   const context = vm.createContext({

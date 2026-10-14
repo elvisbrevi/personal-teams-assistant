@@ -493,6 +493,182 @@ impl LlmProvider for ContextModel {
 }
 
 #[tokio::test]
+async fn chilean_work_day_bounds_preserve_artifact_dates_after_midnight() {
+    let settings = Settings {
+        time_zone: "America/Santiago".into(),
+        ..Default::default()
+    };
+    let (start, end) = settings.bounds("2026-10-13".parse().unwrap()).unwrap();
+    assert_eq!(start.to_rfc3339(), "2026-10-13T03:00:00+00:00");
+    assert_eq!(end.to_rfc3339(), "2026-10-14T03:00:00+00:00");
+    for at in ["2026-10-14T03:00:06Z", "2026-10-14T03:12:56Z"] {
+        let at = DateTime::parse_from_rfc3339(at).unwrap();
+        assert!(
+            at >= end,
+            "The verified edit or commit belongs to October 14 in Chile"
+        );
+    }
+}
+
+#[tokio::test]
+async fn explicit_other_day_context_requires_date_attribution_and_is_claimed_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut r, tools) = recorder(dir.path(), 2., false, false, false);
+    r.config.activity_registration.auto_register = false;
+    let model = Arc::new(ContextModel::default());
+    r.llm = model.clone();
+    r.run("original", yesterday(), "").await.unwrap();
+    let entry = r.db.pending().unwrap().remove(0);
+    r.resolve(
+        &entry.id,
+        serde_json::from_value(json!({"action":"dismiss"})).unwrap(),
+    )
+    .await
+    .unwrap();
+    let url = "https://dev.azure.com/example/Payments/_wiki/wikis/docs?pagePath=checklist";
+    *tools.activity_override.lock().unwrap() = Some(vec![Linkable {
+        label: "Edited the production checklist".into(),
+        short: "Production checklist".into(),
+        organization: parent().organization,
+        url: url.into(),
+        date: Utc::now().date_naive().to_string(),
+        occurred_at: Utc::now()
+            .date_naive()
+            .and_hms_opt(0, 0, 0)
+            .unwrap()
+            .and_utc()
+            .to_rfc3339(),
+        related_work_items: vec![40],
+        ..Default::default()
+    }]);
+    let context = format!("I edited the production checklist for HU 40: {url}");
+    r.run("unmentioned-other-day", yesterday(), "")
+        .await
+        .unwrap();
+    assert!(r.db.pending().unwrap().is_empty());
+    r.config.activity_registration.auto_register = true;
+    let summary = r
+        .run("with-new-context", yesterday(), &context)
+        .await
+        .unwrap();
+    assert_eq!(tools.writes.load(Ordering::SeqCst), 0);
+    assert_eq!(summary.recorded_hours, 2.);
+    assert_eq!(summary.remaining_hours, 7.);
+    assert_eq!(
+        r.db.entries(Some(&yesterday().to_string())).unwrap().len(),
+        2
+    );
+    assert_eq!(
+        model.contexts.lock().unwrap().last().map(String::as_str),
+        Some(context.as_str()),
+        "The new context was saved with the run but never reached the planner"
+    );
+    let entry = r.db.pending().unwrap().remove(0);
+    assert!(entry.draft.question.contains(&entry.day));
+    assert!(
+        entry
+            .draft
+            .question
+            .contains(&Utc::now().date_naive().to_string())
+    );
+    assert_eq!(
+        entry.activities[0].date,
+        Utc::now().date_naive().to_string()
+    );
+    r.run("repeat-context", yesterday(), &context)
+        .await
+        .unwrap();
+    assert_eq!(r.db.pending().unwrap().len(), 1);
+    r.run("actual-day", Utc::now().date_naive(), "")
+        .await
+        .unwrap();
+    assert_eq!(r.db.pending().unwrap().len(), 1);
+    let create = || serde_json::from_value(json!({"action":"create"})).unwrap();
+    let held = r.resolve(&entry.id, create()).await.unwrap();
+    assert_eq!(held.state, "pending");
+    assert_eq!(tools.writes.load(Ordering::SeqCst), 0);
+    r.resolve(
+        &entry.id,
+        serde_json::from_value(json!({
+            "action":"refine", "context":"Please improve the completion evidence."
+        }))
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        r.resolve(&entry.id, create()).await.unwrap().state,
+        "pending"
+    );
+    assert_eq!(tools.writes.load(Ordering::SeqCst), 0);
+    r.resolve(&entry.id, serde_json::from_value(json!({
+        "action":"refine", "date_attribution":"The work was done before midnight; I published the checklist afterward."
+    })).unwrap()).await.unwrap();
+    let confirmed = r.db.entry(&entry.id).unwrap().unwrap();
+    let context_before_repeat = confirmed.context.clone();
+    let repeated = r
+        .resolve(
+            &entry.id,
+            serde_json::from_value(json!({
+                "action":"refine", "date_attribution":confirmed.date_attribution
+            }))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(repeated.context, context_before_repeat);
+    let created = r.resolve(&entry.id, create()).await.unwrap();
+    assert_eq!(created.state, "done");
+    assert_eq!(created.day, yesterday().to_string());
+    assert!(created.date_attribution.contains("before midnight"));
+    assert_eq!(
+        created.activities[0].date,
+        Utc::now().date_naive().to_string()
+    );
+    assert_eq!(tools.writes.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn explicit_other_day_message_stays_pending_when_the_agent_is_unavailable() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut r, tools) = recorder(dir.path(), 0., false, false, false);
+    let at = Utc::now()
+        .date_naive()
+        .and_hms_opt(0, 0, 0)
+        .unwrap()
+        .and_utc();
+    let url = "https://teams.microsoft.com/l/message/own-chat/123";
+    *tools.activity_override.lock().unwrap() = Some(vec![Linkable {
+        label: "Own message describing completed work".into(),
+        short: "Work described in Teams".into(),
+        organization: "https://teams.microsoft.com".into(),
+        url: url.into(),
+        date: at.date_naive().to_string(),
+        occurred_at: at.to_rfc3339(),
+        ..Default::default()
+    }]);
+    r.llm = Arc::new(ContextModel {
+        fail: true,
+        ..Default::default()
+    });
+    let summary = r
+        .run(
+            "explicit-message",
+            yesterday(),
+            &format!("I completed the work discussed here: {url}"),
+        )
+        .await
+        .unwrap();
+    assert!(summary.partial);
+    assert_eq!(summary.pending, 1);
+    assert_eq!(tools.writes.load(Ordering::SeqCst), 0);
+    let entry = r.db.pending().unwrap().remove(0);
+    assert_eq!(entry.activities[0].date, at.date_naive().to_string());
+    assert!(entry.draft.question.contains(&entry.day));
+    assert!(entry.date_attribution.is_empty());
+}
+
+#[tokio::test]
 async fn day_context_reaches_the_agent_and_survives_entry_refinement() {
     let dir = tempfile::tempdir().unwrap();
     let (mut r, tools) = recorder(dir.path(), 0., false, false, false);
@@ -654,6 +830,7 @@ async fn automatic_wiki_task_is_done_once_and_call_stays_pending() {
                 title: None,
                 description: None,
                 hours: None,
+                date_attribution: String::new(),
                 fields: BTreeMap::new(),
             },
         )
@@ -666,6 +843,7 @@ async fn automatic_wiki_task_is_done_once_and_call_stays_pending() {
         Resolution {
             action: "create".into(),
             context: String::new(),
+            date_attribution: String::new(),
             parent: None,
             title: None,
             description: None,
@@ -697,6 +875,7 @@ async fn a_bug_in_progress_holds_the_task_and_a_closed_one_offers_its_hu() {
         ),
         hours: Some(1.5),
         context: String::new(),
+        date_attribution: String::new(),
         fields: BTreeMap::new(),
     };
     let held = r.resolve(&entry.id, create(26330)).await.unwrap();
@@ -761,6 +940,7 @@ async fn required_fields_are_learned_shared_and_then_filled() {
         description: Some("Created the payment documentation.".into()),
         hours: Some(1.5),
         context: String::new(),
+        date_attribution: String::new(),
         fields,
     };
     let held = r
@@ -797,6 +977,7 @@ async fn completed_state_rules_are_asked_for_and_a_stuck_move_is_reported_once()
         description: Some("Diagnosed the production failure.".into()),
         hours: Some(1.5),
         context: String::new(),
+        date_attribution: String::new(),
         fields,
     };
     // The rules of the completed state become inputs before anything is written.

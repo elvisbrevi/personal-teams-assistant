@@ -53,7 +53,11 @@ pta activity open ENTRY_ID           # separate review of a particular activity
 
 Runs and refinements are asynchronous: after the accepted operation, poll `activity status` until `running=false`, then inspect pending/history. Configuration changes and other mutations are refused while the process runs. The host stays open for the scheduler even when Teams reception is stopped. Closing the host stops scheduling; on its next start, today's latest due slot can run once, without replaying missed historical intervals. A slot and its activity claims persist across restarts.
 
-Manual runs accept up to 6000 bytes of non-sensitive context through `--context-stdin` or the GUI's **Context for the agents** field. The existing configured provider chain receives this context as untrusted data for task planning. It stays with the run and its pending entries so later clarification retains it. Context does not replace verified evidence or change registration permissions; an authentication failure must be resolved before planning can run.
+Manual runs accept up to 6000 bytes of non-sensitive context through `--context-stdin` or the GUI's **Context for the agents** field. Discovery matches explicit artifact links (including taskboard work item links and Wiki page ID links) and work item IDs against verified own activity in the selected sources. Mentioned builds and releases remain available to review even when related code is already linked to a work item; existing direct task links and saved decisions still prevent duplication. The existing configured provider chain receives this context as untrusted data for task planning. It stays with the run and its pending entries so later clarification retains it. Context does not replace verified evidence or change registration permissions; an authentication failure must be resolved before planning can run. A context that identifies no new verified activity gets a visible warning rather than silently finishing as if it was considered.
+
+Automatically discovered activity belongs to the selected day. Explicitly mentioned activity is an exception: its artifact may be dated on another day. The review keeps that candidate, displays the artifact date and requested work day, and asks why the work belongs to the selected day. It remains pending even with automatic registration enabled. Fill **Why this work belongs to the selected day**, or supply `date_attribution` in CLI resolution JSON, to confirm that attribution. Ordinary refinement context does not confirm the date. The explanation is saved with the entry; the artifact timestamp and date are preserved, and repeated reviews on either day reuse its existing decision. Discovery retains its bounded lookback and existing source authorizations.
+
+On a server, `local` means the server's time zone. For Chilean work days and scheduling, set `activity_registration.time_zone` to `"America/Santiago"`; this follows seasonal offset changes. The requested day and daily effort budget use that zone.
 
 The panel shows the selected sources, provider order, daily target, creation mode and schedule. **Process runs** shows the last step, redacted failure details, duration, results and source/model coverage warnings. `activity history` returns the same additive `diagnostics` object, containing `stage`, `error`, `finished_at`, `context`, `provider`, `settings` and `observation_mode`. A run without a completed result has `summary: null`; progress remains visible without formatting unavailable effort totals, including interrupted runs with a legacy empty summary. Older runs explicitly lack failure details; their discarded errors cannot be recovered. **Copy diagnostic prompt** includes the recorded diagnostics and any additional context for use in Codex, Claude or another agent; it does not invoke a provider or register work.
 
@@ -77,11 +81,22 @@ pta activity resolve ENTRY_ID <<'JSON'
 JSON
 ```
 
+For an explicitly selected artifact published on a different day:
+
+```sh
+pta activity resolve ENTRY_ID <<'JSON'
+{"action":"refine","date_attribution":"I did the work before midnight and published the artifact afterward."}
+JSON
+```
+
+This confirms the date attribution and updates the draft without creating a task.
+Review the draft, HU, effort and required fields before the normal `create` action.
+
 `refine` passes **Answer the assistant** (`context`) to the model and updates the suggestion; it does not write. `create` confirms the exact task details. `dismiss` keeps the decision in history and suppresses the same activity on later runs. Provide only supported facts. After any timeout, refresh the entry instead of repeating a write.
 
 ## Evidence, calls and required fields
 
-Registration searches only the user's own activity in the last 14 days. Task/HU discovery is filtered in Azure DevOps to items assigned to, created by or last changed by the catalog author within that window. Parent HUs reached through those recent tasks, or explicitly named in verified activity, are read by ID for validation even when older. The two-week window supplies context; only the selected day's verified activities and effort are registered. Runs and creation confirmations reject days outside the last 14 local dates. History and existing decisions remain available.
+Registration searches only the user's own activity in the last 14 days. Task/HU discovery is filtered in Azure DevOps to items assigned to, created by or last changed by the catalog author within that window. Parent HUs reached through those recent tasks, or explicitly named in verified activity or context, are read by ID for validation even when older. The two-week window supplies context; automatic discovery registers the selected day's verified work, while an explicitly mentioned other-day artifact needs confirmed date attribution. Effort is charged to the selected work day. Runs and creation confirmations reject selected work days outside the last 14 local dates. History and existing decisions remain available.
 
 The process reviews all supported performed-work evidence from the selected sources: commits you authored, pull requests you created, pipeline runs you queued, releases you created, stage approvals you gave, Wiki pages you created or edited, work described in your own messages and call-ended events in authorized Teams chats (including meeting chats). A Wiki change mentioning an HU can still need a task; a verified task mention or existing evidence relation prevents duplication, and unresolved work item mentions require clarification. It keeps the Graph scopes already consented: **no calendar, attendance report or call-record permission** is added. A call event proves a call happened, not that you attended it. Without confirmed participation and purpose, it asks what the call covered and which HU it belongs to. It uses the event's duration as context, not as proof of your time. Generic messages are not tasks. Calendar-only meetings or calls without a readable chat event are outside this coverage; add their context to a pending activity.
 

@@ -271,6 +271,7 @@ struct Line {
 pub(super) fn summarize(
     source: &Source,
     activity: &ProjectActivity,
+    context: &crate::activity::context::ExplicitContext,
 ) -> Result<(String, Vec<Reference>, usize, LinkOffer)> {
     let project = activity.project.as_str();
     let mut references = Vec::new();
@@ -327,6 +328,7 @@ pub(super) fn summarize(
         }
     };
     let mut unregistered: Vec<Line> = Vec::new();
+    let mut explicit = Vec::new();
     let mut registered_commits = BTreeSet::new();
     // Commits of the user's pull requests are reported with their pull request.
     let mut in_pull_request = BTreeSet::new();
@@ -376,6 +378,10 @@ pub(super) fn summarize(
         );
         linked_items.sort_unstable();
         linked_items.dedup();
+        pr_link.related_work_items = linked_items.clone();
+        if context.mentions(&pr_link) {
+            explicit.push(pr_link.clone());
+        }
         let own_commits = pr
             .commits
             .iter()
@@ -446,6 +452,10 @@ pub(super) fn summarize(
         if let Some(item) = commits_linked.get(&commit.sha) {
             linked_items.push(*item);
         }
+        commit_link.related_work_items = linked_items.clone();
+        if context.mentions(&commit_link) {
+            explicit.push(commit_link.clone());
+        }
         let what = format!(
             "commit {short_sha} in {}: \"{}\"",
             commit.repo,
@@ -487,6 +497,10 @@ pub(super) fn summarize(
         let mut linked_items = run.work_items.clone();
         if let Some(item) = builds_linked.get(&run.id) {
             linked_items.push(*item);
+        }
+        run_link.related_work_items = linked_items.clone();
+        if context.mentions(&run_link) {
+            explicit.push(run_link.clone());
         }
         let what = format!(
             "pipeline run #{} of \"{}\", queued by the user: {}",
@@ -536,6 +550,10 @@ pub(super) fn summarize(
             .iter()
             .filter_map(|b| builds_linked.get(b).copied())
             .collect();
+        release_link.related_work_items = items_of_builds.clone();
+        if context.mentions(&release_link) {
+            explicit.push(release_link.clone());
+        }
         let what = format!(
             "release {} of \"{}\", created by the user: {}",
             short(&release.name, 80),
@@ -714,15 +732,34 @@ pub(super) fn summarize(
     }
     // What a confirmed reply in the personal chat may link: the listed unlinked work and the
     // user's own work items, each with its verified link.
+    if !explicit.is_empty() {
+        text.push_str("Explicitly mentioned activity to review (a related work item does not prove deployment or validation effort was registered):\n");
+        for a in &explicit {
+            text.push_str(&format!("- {} · {}\n", a.date, a.label));
+        }
+    }
+    let mut seen = BTreeSet::new();
     let mut offer = LinkOffer {
-        activities: unregistered
+        activities: explicit
             .into_iter()
+            .chain(unregistered.into_iter().map(|line| line.linkable))
+            .filter(|a| seen.insert((a.url.clone(), a.occurred_at.clone())))
             .take(MAX_LINES)
-            .map(|line| line.linkable)
             .collect(),
         ..Default::default()
     };
-    for item in items.values().copied().chain(activity.parents.iter()) {
+    let mentioned = context.work_items(&source.organization);
+    for item in items
+        .values()
+        .copied()
+        .chain(activity.parents.iter())
+        .chain(
+            activity
+                .other_items
+                .iter()
+                .filter(|i| i["id"].as_u64().is_some_and(|id| mentioned.contains(&id))),
+        )
+    {
         let Ok(reference) = item_reference(source, project, item) else {
             continue;
         };
@@ -1195,7 +1232,9 @@ pub async fn review(
     catalog_text: &str,
     days: i64,
     store: Arc<Store>,
+    context: &str,
 ) -> Result<Evidence> {
+    let context = crate::activity::context::ExplicitContext::new(context);
     let catalog = Catalog::parse(catalog_text)?.own(client, key).await?;
     let since = Utc::now() - Duration::days(days);
     let mut jobs = tokio::task::JoinSet::new();
@@ -1249,7 +1288,7 @@ pub async fn review(
         if empty {
             continue;
         }
-        let (section, refs, candidates, offer) = summarize(source, activity)?;
+        let (section, refs, candidates, offer) = summarize(source, activity, &context)?;
         found.push((candidates, section));
         references.extend(refs);
         offers.push(offer);
@@ -1423,7 +1462,8 @@ mod tests {
             }],
             failed: vec![],
         };
-        let (text, references, candidates, offer) = summarize(&source(), &activity).unwrap();
+        let (text, references, candidates, offer) =
+            summarize(&source(), &activity, &Default::default()).unwrap();
         let (unregistered, registered) = text.split_once("Registered in work items:").expect(&text);
         // Each unlinked piece is offered for linking with the artifact Azure DevOps stores.
         let artifacts: Vec<_> = offer
@@ -1530,7 +1570,8 @@ mod tests {
             }],
             ..Default::default()
         };
-        let (text, references, candidates, _) = summarize(&source(), &activity).unwrap();
+        let (text, references, candidates, _) =
+            summarize(&source(), &activity, &Default::default()).unwrap();
         assert_eq!(candidates, 0, "{text}");
         assert!(text.contains("PR #48 \"Shared fix\" in payments-api (completed): linked to #555 and 1 that could not be verified"), "{text}");
         assert!(text.contains("pipeline run #901 of \"Nightly\", queued by the user: succeeded: linked to 2 work item(s) that could not be verified"), "{text}");
@@ -1570,7 +1611,8 @@ mod tests {
             }],
             ..Default::default()
         };
-        let (text, references, candidates, _) = summarize(&source(), &activity).unwrap();
+        let (text, references, candidates, _) =
+            summarize(&source(), &activity, &Default::default()).unwrap();
         assert_eq!(candidates, 2, "{text}");
         let (unregistered, _) = text.split_once("Registered in work items:").unwrap();
         let (pr, run) = unregistered.split_once("pipeline run #91").unwrap();
@@ -1587,6 +1629,64 @@ mod tests {
                 .any(|r| r.url.ends_with("/_workitems/edit/300"))
         );
         assert!(terms("Merge pull request 12 from feature/x into main").is_empty());
+    }
+
+    #[test]
+    fn explicit_build_and_release_context_survives_existing_code_task_links() {
+        let mut task = item(
+            26297,
+            &["vstfs:///Git/Commit/project%2Frepo-1%2F16a36bdabae37440b73aa258f04d9a2ce2e9340c"],
+        );
+        task["fields"]["System.WorkItemType"] = json!("Task");
+        task["fields"]["System.State"] = json!("Done");
+        let activity = ProjectActivity {
+            project: "Payments".into(),
+            items: vec![task],
+            commits: vec![Commit {
+                date: "2026-10-13T22:45:40Z".into(),
+                ..commit(
+                    "16a36bdabae37440b73aa258f04d9a2ce2e9340c",
+                    "Merged PR 5118: Hu/24663",
+                )
+            }],
+            runs: vec![Run {
+                id: 29809,
+                definition: "Portal Recaudación".into(),
+                result: "succeeded".into(),
+                date: "2026-10-13T22:47:45Z".into(),
+                sha: "16a36bdabae37440b73aa258f04d9a2ce2e9340c".into(),
+                work_items: vec![24663, 26297],
+            }],
+            releases: vec![Release {
+                id: 2760,
+                name: "Release-1568".into(),
+                definition: "Portal Recaudación".into(),
+                status: "active".into(),
+                date: "2026-10-13T22:56:28Z".into(),
+                builds: vec![29247, 19259, 29588, 29809],
+            }],
+            ..Default::default()
+        };
+        let (text, references, candidates, offer) =
+            summarize(&source(), &activity, &Default::default()).unwrap();
+        assert!(text.contains("pipeline run #29809"), "{text}");
+        assert!(
+            references.iter().any(|r| r.url.contains("releaseId=2760")),
+            "The release is verified even though it is not offered"
+        );
+        assert_eq!(candidates, 0, "{text}");
+        assert!(
+            offer.activities.is_empty(),
+            "The artifacts exist in evidence but none is offered to registration"
+        );
+        let context = crate::activity::context::ExplicitContext::new(
+            "I built and deployed HU 24663: https://dev.azure.com/example/Payments/_releaseProgress?releaseId=2760",
+        );
+        let (_, _, _, offer) = summarize(&source(), &activity, &context).unwrap();
+        let urls: Vec<_> = offer.activities.iter().map(|a| a.url.as_str()).collect();
+        assert_eq!(urls.len(), 2, "{urls:?}");
+        assert!(urls.iter().any(|u| u.contains("buildId=29809")));
+        assert!(urls.iter().any(|u| u.contains("releaseId=2760")));
     }
 
     #[test]
@@ -1611,7 +1711,8 @@ mod tests {
             }],
             ..Default::default()
         };
-        let (text, _, candidates, _) = summarize(&source(), &activity).unwrap();
+        let (text, _, candidates, _) =
+            summarize(&source(), &activity, &Default::default()).unwrap();
         assert_eq!(candidates, 0, "{text}");
         assert!(text.contains("Without a linked work item: nothing found."));
         assert!(text.contains("pipeline run #900"));

@@ -1,4 +1,5 @@
 //! Scheduled registration of verified work, with durable clarification and write records.
+pub(crate) mod context;
 pub mod store;
 #[cfg(test)]
 mod tests;
@@ -307,6 +308,9 @@ pub struct Entry {
     /// DevOps when a task is first prepared there; their values go in `fields`.
     #[serde(default)]
     pub required: Vec<Field>,
+    /// The user's explanation for attributing an explicitly selected other-day artifact here.
+    #[serde(default)]
+    pub date_attribution: String,
 }
 /// Adds the fields of `more` that `fields` lacks, by reference, keeping their order.
 fn merge_fields(fields: &mut Vec<Field>, more: &[Field]) {
@@ -351,6 +355,9 @@ pub struct Resolution {
     pub hours: Option<f64>,
     #[serde(default)]
     pub context: String,
+    /// Explicit user confirmation of why an other-day artifact belongs to this work day.
+    #[serde(default)]
+    pub date_attribution: String,
     #[serde(default)]
     pub fields: BTreeMap<String, Value>,
 }
@@ -361,6 +368,7 @@ impl Resolution {
             "invalid resolution action"
         );
         validate_context(&self.context, redactor)?;
+        validate_context(&self.date_attribution, redactor)?;
         validate_fields(&self.fields)?;
         ensure!(
             redactor.clean(&serde_json::to_string(&self.fields)?),
@@ -601,6 +609,7 @@ impl Recorder {
         };
         summary.remaining_hours = (settings.daily_hours - summary.recorded_hours).max(0.);
         let (start, end) = settings.bounds(day)?;
+        let explicit = context::ExplicitContext::new(context);
         let days = LOOKBACK_DAYS;
         let mut offers = Vec::new();
         let mut evidence = String::new();
@@ -612,7 +621,7 @@ impl Recorder {
                 continue;
             };
             self.db.stage_run(run, &format!("Reading source {id}"))?;
-            match self.tools.registration_review(tool, days).await {
+            match self.tools.registration_review(tool, days, context).await {
                 Ok(text) => {
                     let mut found: Evidence = serde_json::from_str(&text)
                         .with_context(|| format!("Invalid evidence from source {id}"))?;
@@ -625,7 +634,36 @@ impl Recorder {
                         ));
                     }
                     evidence.push_str(&found.text);
-                    if let Some(offer) = found.links {
+                    if let Some(mut offer) = found.links {
+                        // Select before merging: older automatic results must not fill the
+                        // bounded offer and crowd out explicit context or the selected day.
+                        offer.activities.retain_mut(|a| {
+                            let in_day = DateTime::parse_from_rfc3339(&a.occurred_at).map_or_else(
+                                |_| a.date == day.to_string(),
+                                |d| d >= start && d < end,
+                            );
+                            if !(in_day || explicit.mentions(a))
+                                || already_linked(a, &work)
+                                || self.db.claimed(&activity_key(a)).unwrap_or(true)
+                            {
+                                return false;
+                            }
+                            if let Ok(at) = DateTime::parse_from_rfc3339(&a.occurred_at) {
+                                if at > Utc::now() {
+                                    return false;
+                                }
+                                a.date = if settings.time_zone == "local" {
+                                    at.with_timezone(&Local).date_naive().to_string()
+                                } else {
+                                    at.with_timezone(
+                                        &settings.time_zone.parse::<chrono_tz::Tz>().unwrap(),
+                                    )
+                                    .date_naive()
+                                    .to_string()
+                                };
+                            }
+                            !self.db.claimed(&activity_key(a)).unwrap_or(true)
+                        });
                         offers.push(offer);
                     }
                 }
@@ -640,20 +678,23 @@ impl Recorder {
             }
         }
         let mut offer = crate::ado::link::LinkOffer::merge(offers);
-        offer.activities.retain(|a| {
-            let today = DateTime::parse_from_rfc3339(&a.occurred_at).map_or_else(
-                |_| a.date == day.to_string(),
-                |d| d >= start && d < end && d <= Utc::now(),
-            );
-            today && !already_linked(a, &work)
-        });
-        for a in &mut offer.activities {
-            a.date = day.to_string();
+        for id in explicit.work_items(&work.organization) {
+            if !offer
+                .work_items
+                .iter()
+                .chain(&work.parents)
+                .any(|p| p.id == id)
+            {
+                match self.tools.work_item(writer, id).await {
+                    Ok(Some(parent)) => offer.work_items.push(parent),
+                    Ok(None) => {}
+                    Err(error) => {
+                        summary.partial = true;
+                        summary.warnings.push(self.unverified(&error));
+                    }
+                }
+            }
         }
-        // Recheck the local-day key after conversion from the source's UTC date.
-        offer
-            .activities
-            .retain(|a| !self.db.claimed(&activity_key(a)).unwrap_or(true));
         let parents: Vec<_> = offer
             .work_items
             .into_iter()
@@ -667,6 +708,12 @@ impl Recorder {
             .into_values()
             .collect();
         if offer.activities.is_empty() {
+            if !context.trim().is_empty() {
+                summary.warnings.push(self.say(
+                    "The supplied context did not identify new verified activity. Its artifacts may already have a task or a saved decision; check this day's history and the artifact links.",
+                    "El contexto indicado no identificó actividad nueva verificada. Sus artefactos pueden tener una tarea o una decisión guardada; revisa el historial del día y los enlaces de los artefactos.",
+                ));
+            }
             self.db.stage_run(run, "Saving review results")?;
             summary.pending = self
                 .db
@@ -677,12 +724,19 @@ impl Recorder {
             self.db.save_summary(&day.to_string(), &summary)?;
             return Ok(summary);
         }
-        let evidence = self.redactor.redact(
-            &evidence
-                .chars()
-                .take(self.config.policy.max_context_chars)
-                .collect::<String>(),
+        let header = format!(
+            "Requested work day: {day}; time zone: {}. Activity dates are artifact dates in this zone; other-day activity needs explicit date attribution.\n",
+            settings.time_zone
         );
+        let budget = self
+            .config
+            .policy
+            .max_context_chars
+            .saturating_sub(header.chars().count());
+        let evidence = header
+            + &self
+                .redactor
+                .redact(&evidence.chars().take(budget).collect::<String>());
         self.db
             .stage_run(run, "Planning tasks with the configured agents")?;
         let drafts = self
@@ -739,6 +793,7 @@ impl Recorder {
             used.extend(activities.iter().map(|a| a.key.clone()));
             let mut entry = self.entry(run, day, draft, activities, &parents, &evidence);
             entry.context = context.into();
+            self.ask_date_attribution(&mut entry);
             entry.required = learned_for(&learned, &entry);
             if entry.draft.ignore {
                 entry.state = "dismissed".into();
@@ -751,6 +806,7 @@ impl Recorder {
                 && entry.draft.confidence >= 0.85
                 && entry.draft.question.is_empty()
                 && !entry.activities.iter().any(|a| a.context_required)
+                && entry.activities.iter().all(|a| a.date == entry.day)
                 && entry.state == "pending"
                 && let Err(error) = self.apply(&mut entry, writer).await
                 && entry.state == "pending"
@@ -765,7 +821,10 @@ impl Recorder {
             .filter(|a| !used.contains(&a.key))
         {
             // A plain chat message is context unless the model identifies concrete work.
-            if a.url.starts_with("https://teams.microsoft.com/") && !a.context_required {
+            if a.url.starts_with("https://teams.microsoft.com/")
+                && !a.context_required
+                && !explicit.mentions(&a)
+            {
                 continue;
             }
             let question = self.say(
@@ -786,6 +845,7 @@ impl Recorder {
             };
             let mut entry = self.entry(run, day, draft, vec![a], &parents, &evidence);
             entry.context = context.into();
+            self.ask_date_attribution(&mut entry);
             entry.required = learned_for(&learned, &entry);
             self.db.insert(&entry)?;
         }
@@ -826,6 +886,31 @@ impl Recorder {
             task_url: None,
             updated_at: Utc::now().timestamp(),
             required: Vec::new(),
+            date_attribution: String::new(),
+        }
+    }
+    fn date_question(&self, entry: &Entry) -> Option<String> {
+        let dates: BTreeSet<_> = entry
+            .activities
+            .iter()
+            .map(|a| a.date.as_str())
+            .filter(|d| *d != entry.day && !d.is_empty())
+            .collect();
+        if dates.is_empty() || !entry.date_attribution.trim().is_empty() {
+            return None;
+        }
+        let dates = dates.into_iter().collect::<Vec<_>>().join(", ");
+        let (day, zone) = (&entry.day, &self.config.activity_registration.time_zone);
+        Some(self.say(
+            format!("The artifacts are dated {dates} ({zone}), but you selected {day}. Why should this work be registered on {day}? Explain the date attribution before creating the task."),
+            format!("Los artefactos tienen fecha {dates} ({zone}), pero seleccionaste {day}. ¿Por qué corresponde registrar este trabajo el {day}? Explica la atribución de fecha antes de crear la tarea."),
+        ))
+    }
+    fn ask_date_attribution(&self, entry: &mut Entry) {
+        if let Some(question) = self.date_question(entry) {
+            entry.draft.ignore = false;
+            entry.draft.question = question.clone();
+            entry.issue = question;
         }
     }
     /// What each project's tasks were last found to require, by organization and project.
@@ -894,18 +979,27 @@ impl Recorder {
             entry.draft.hours = Some(hours);
         }
         entry.fields.extend(resolution.fields);
+        if !resolution.date_attribution.trim().is_empty()
+            && entry.date_attribution != resolution.date_attribution.trim()
+        {
+            entry.date_attribution = resolution.date_attribution.trim().to_owned();
+            entry.context.push_str(&format!(
+                "\nDate attribution confirmed by the user: {}",
+                entry.date_attribution
+            ));
+        }
         if !resolution.context.trim().is_empty() {
             entry
                 .context
                 .push_str(&format!("\n{}", resolution.context.trim()));
-            ensure!(
-                entry.context.len() <= 12000,
-                self.say(
-                    "The context added to this activity is too long (at most 12000 bytes).",
-                    "El contexto agregado a esta actividad es demasiado largo (máximo 12000 bytes).",
-                )
-            );
         }
+        ensure!(
+            entry.context.len() <= 12000,
+            self.say(
+                "The context added to this activity is too long (at most 12000 bytes).",
+                "El contexto agregado a esta actividad es demasiado largo (máximo 12000 bytes).",
+            )
+        );
         if let Some(parent) = resolution.parent {
             if !entry.parents.iter().any(|p| p.id == parent)
                 && let Some(issue) = self.add_parent(&mut entry, parent).await?
@@ -977,6 +1071,7 @@ impl Recorder {
                     ),
                 };
             }
+            self.ask_date_attribution(&mut entry);
             self.db.update(&entry, "refining")?;
         } else {
             // A user's explicit resolution confirms purpose/attendance as well as effort.
@@ -1049,6 +1144,9 @@ impl Recorder {
         self.db.update(entry, "pending")
     }
     async fn apply(&self, entry: &mut Entry, writer: &ToolSpec) -> Result<()> {
+        if let Some(question) = self.date_question(entry) {
+            return self.hold(entry, question);
+        }
         if self.config.policy.dry_run {
             let issue = self.say(
                 "Observation mode is on, so no task was created. Turn it off in Settings → Answers to create tasks.",

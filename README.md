@@ -52,6 +52,12 @@ without copying its history or reconnecting Teams. See the
 
 ### Update
 
+Version 0.7.12 reviews explicitly mentioned activity even when its artifacts have
+a different date. Such work stays pending until you explain why it belongs to the
+selected day, through the GUI or `date_attribution` in the CLI. Existing task links
+and saved decisions still prevent duplicate registration. For Chilean work days on
+a server, select `America/Santiago` instead of the server's local time zone.
+
 Version 0.7.0 replaces the web portal's password login with Cloudflare Access
 and a dedicated GitHub OAuth App. Before updating a password-based portal,
 prepare Access using the [migration guide](desktop/skills/personal-teams-assistant/references/web-access.md),
