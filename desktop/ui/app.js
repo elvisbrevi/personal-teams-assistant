@@ -5,6 +5,14 @@ const READS = ['snapshot', 'chat', 'github_repositories', 'self_chat_status', 'l
 // changes made elsewhere (e.g. with `pta`).
 let lastRevision = null;
 async function invoke(method, args = {}) {
+  if (window.ptaTransport.browser && method === 'activity_open') {
+    selectedActivity = args.id || pendingActivities[0]?.id || null;
+    activityEditing = false; activityPayload = '';
+    const entry = pendingActivities.find(e => e.id === selectedActivity);
+    if (entry) renderActivityEditor(entry);
+    showTab('registration', entry ? 'activity-editor' : null);
+    return { visible: true, id: selectedActivity };
+  }
   let result = await rawInvoke('command', { request: {
     method, args, revision: READS.includes(method) ? null : current?.revision ?? null, contract: 1
   }});
@@ -23,10 +31,6 @@ async function invoke(method, args = {}) {
   if (result.revision) lastRevision = result.revision;
   if (result.revision && current && !READS.includes(method)) current.revision = result.revision;
   if (!result.ok) throw result.message || result.code;
-  if (window.ptaTransport.browser && method === 'activity_open') {
-    selectedActivity = result.data.id; activityEditing = false; activityPayload = '';
-    showTab('registration');
-  }
   return result.data;
 }
 
@@ -599,7 +603,7 @@ async function loadRegistration() {
     latestFailed ? badge('Last review failed', 'error') : null,
     summary?.partial ? badge('Review has coverage or planning warnings', 'warn') : null].filter(Boolean));
   $('#activity-pending').replaceChildren(...pending.entries.map(entry => {
-    const review = el('button', { class: 'secondary small', textContent: activityWindow ? 'Review' : 'Review in new window' });
+    const review = el('button', { class: 'secondary small', textContent: activityWindow || window.ptaTransport.browser ? 'Review' : 'Review in new window' });
     review.onclick = () => busy(review, async () => {
       if (activityWindow) { selectedActivity = entry.id; activityEditing = false; renderActivityEditor(entry); }
       else await invoke('activity_open', { id: entry.id });
