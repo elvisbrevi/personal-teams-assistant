@@ -65,6 +65,46 @@ fn user_supplied(field: &Field) -> bool {
     field.required && !field.reference.starts_with("System.") && !has_default(field)
 }
 impl TaskSchema {
+    /// The configured effort field is not in this task type: name the hour fields it has, real
+    /// or completed work first, so the user can pick the one their tasks use.
+    fn missing_effort_field(&self, effort: &str, language: Language) -> String {
+        let hours = |f: &&Field| {
+            let text = format!("{} {}", f.name, f.reference).to_lowercase();
+            ["work", "effort", "esfuerzo", "hora", "hour", "hh", "tiempo"]
+                .iter()
+                .any(|w| text.contains(w))
+        };
+        let mut candidates: Vec<_> = self
+            .fields
+            .iter()
+            .filter(|f| !f.reference.starts_with("System.") && f.reference != REMAINING_WORK)
+            .filter(hours)
+            .collect();
+        candidates.sort_by_key(|f| {
+            let text = format!("{} {}", f.name, f.reference).to_lowercase();
+            !["real", "complet", "actual"]
+                .iter()
+                .any(|w| text.contains(w))
+        });
+        let list = candidates
+            .iter()
+            .take(5)
+            .map(|f| format!("{} ({})", f.name, f.reference))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let (english, spanish) = if list.is_empty() {
+            (String::new(), String::new())
+        } else {
+            (
+                format!(" This type has: {list}."),
+                format!(" Este tipo tiene: {list}."),
+            )
+        };
+        language.say(
+            format!("This task type has no {effort} field, where the effort hours are written. In Settings → Activity registration → Effort field, set the field your tasks use for real hours.{english}"),
+            format!("Este tipo de tarea no tiene el campo {effort}, donde se escriben las horas de esfuerzo. En Ajustes → Registro de actividades → Campo de esfuerzo, indica el campo que usan tus tareas para las horas reales.{spanish}"),
+        )
+    }
     /// The required fields the user fills in: not the system fields, the effort field or the
     /// remaining work that code sets, nor those the process gives a default.
     pub fn inputs(&self, effort_field: &str) -> Vec<Field> {
@@ -84,6 +124,9 @@ impl TaskSchema {
                 format!("Choose a completed state in Settings. Available: {states}."),
                 format!("Elige un estado completado en Ajustes. Disponibles: {states}."),
             ));
+        }
+        if !self.fields.iter().any(|f| f.reference == task.effort_field) {
+            return Some(self.missing_effort_field(&task.effort_field, language));
         }
         let mut values = task.extra.clone();
         values.insert(task.effort_field.clone(), json!(task.hours));
@@ -697,6 +740,45 @@ mod tests {
         assert_eq!(
             schema.issue(&task, Language::En).unwrap(),
             "Azure DevOps requires these fields: Activity, Mes. Fill them in and create the task again."
+        );
+    }
+
+    #[test]
+    fn a_missing_effort_field_names_the_hour_fields_the_type_has() {
+        let field = |reference: &str, name: &str| Field {
+            name: name.into(),
+            reference: reference.into(),
+            ..Default::default()
+        };
+        let schema = TaskSchema {
+            fields: vec![
+                field("System.Title", "Title"),
+                field("Microsoft.VSTS.Scheduling.RemainingWork", "Remaining Work"),
+                field("Custom.Estimatedwork", "Estimated work"),
+                field("Custom.EsfuerzoReal", "Esfuerzo Real"),
+                field("Custom.Mes", "Mes"),
+            ],
+            completed_states: vec!["Done".into()],
+        };
+        let task = TaskFields {
+            title: "Diagnose".into(),
+            description: "Diagnosed it.".into(),
+            hours: 2.,
+            day: "2026-10-13".into(),
+            kind: "Task".into(),
+            state: "Done".into(),
+            effort_field: "Microsoft.VSTS.Scheduling.CompletedWork".into(),
+            extra: BTreeMap::new(),
+        };
+        let issue = schema.issue(&task, Language::Es).unwrap();
+        assert!(
+            issue.contains("Microsoft.VSTS.Scheduling.CompletedWork"),
+            "{issue}"
+        );
+        assert!(issue.contains("Campo de esfuerzo"), "{issue}");
+        assert!(
+            issue.ends_with("Este tipo tiene: Esfuerzo Real (Custom.EsfuerzoReal), Estimated work (Custom.Estimatedwork)."),
+            "{issue}"
         );
     }
 
