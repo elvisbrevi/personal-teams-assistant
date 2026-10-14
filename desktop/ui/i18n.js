@@ -470,6 +470,8 @@ const UI_CATALOG = { es: {
   'Context: {n} earlier messages': 'Contexto: {n} mensajes anteriores',
   'Failed first': 'Fallaron antes',
   'References: {cited} cited of {total}': 'Referencias: {cited} citadas de {total}',
+  'Cited references': 'Referencias citadas',
+  'Wiki pages read, not cited': 'Páginas Wiki leídas, no citadas',
   '(chosen by code; no model chose them)': '(elegidas por código; ningún modelo las eligió)',
   'Final review (earlier version)': 'Revisión final (versión anterior)',
   'unavailable': 'no disponible',

@@ -68,6 +68,12 @@ fn knowledge(dir: &tempfile::TempDir) -> KnowledgeMap {
         }],
     }
 }
+fn used_ref(id: &str, mention: &str) -> personal_teams_assistant::evidence::Used {
+    personal_teams_assistant::evidence::Used {
+        id: id.into(),
+        mention: mention.into(),
+    }
+}
 fn redactor() -> Arc<Redactor> {
     Arc::new(Redactor::new(&[], vec![]).unwrap())
 }
@@ -372,10 +378,20 @@ async fn model_reference_selection_maps_only_known_registry_entries() {
         serde_json::from_value(synthetic_wiki_result()).unwrap();
     let refs: Vec<_> = wiki.pages.into_iter().map(|p| p.reference).collect();
     for (used, valid) in [
-        (json!({"used":["r1"]}), true),
-        (json!({"used":["r1","invented"]}), false),
-        (json!({"used":["r3"]}), false),
-        (json!({"used":["r1"],"confidence":0.9}), false),
+        (
+            json!({"used":[{"key":"r1","mention":"procedimiento"}]}),
+            true,
+        ),
+        (
+            json!({"used":[{"key":"r1","mention":""},{"key":"invented","mention":""}]}),
+            false,
+        ),
+        (json!({"used":[{"key":"r3","mention":""}]}), false),
+        (json!({"used":["r1"]}), false),
+        (
+            json!({"used":[{"key":"r1","mention":""}],"confidence":0.9}),
+            false,
+        ),
     ] {
         let server = MockServer::start().await;
         Mock::given(method("POST")).and(path("/chat/completions")).respond_with(move |r: &wiremock::Request| {
@@ -394,7 +410,10 @@ async fn model_reference_selection_maps_only_known_registry_entries() {
             .await;
         assert_eq!(selected.is_ok(), valid);
         if valid {
-            assert_eq!(selected.unwrap(), vec![refs[0].id.clone()]);
+            assert_eq!(
+                selected.unwrap(),
+                vec![used_ref(&refs[0].id, "procedimiento")]
+            );
         }
     }
 }
@@ -1319,19 +1338,21 @@ async fn wiki_priority_current_request_mixed_citations_and_complete_gate_without
             )
             .await
             .unwrap();
-            if ids.len() == 2 {
+            if ids.len() == 2 || ids.is_empty() {
+                // Both pages chosen, or no model could choose: the pages are linked in one
+                // closing sentence, the third-party one with who last edited it, and no
+                // sources section is appended.
                 assert_eq!(result.status, "dry_run", "{}", result.reason);
+                let answer = result.answer.unwrap();
                 assert!(
-                    result
-                        .answer
-                        .unwrap()
-                        .contains("documentación en la que participé")
+                    answer.starts_with("El procedimiento documentado exige validar la configuración.\n\nMás detalle en [page1](https://dev.azure.com/test/"),
+                    "{answer}"
                 );
-            } else if ids.is_empty() {
-                // No model selected a page: the consulted pages are linked instead of
-                // withholding the answer.
-                assert_eq!(result.status, "dry_run", "{}", result.reason);
-                assert!(result.answer.unwrap().contains("**Páginas consultadas**"));
+                assert!(
+                    answer.ends_with("&anchor=page2) (última edición de Ana)."),
+                    "{answer}"
+                );
+                assert!(!answer.contains("Fuentes") && !answer.contains("Páginas consultadas"));
             } else {
                 // An invented reference is still withheld by code.
                 assert_eq!(result.status, "ignored");
@@ -1374,8 +1395,8 @@ impl LlmProvider for FollowUpLlm {
         &self,
         _: &str,
         references: &[personal_teams_assistant::evidence::Reference],
-    ) -> Result<Vec<String>> {
-        Ok(references.iter().map(|r| r.id.clone()).collect())
+    ) -> Result<Vec<personal_teams_assistant::evidence::Used>> {
+        Ok(references.iter().map(|r| used_ref(&r.id, "")).collect())
     }
     async fn generate(&self, _: GenerationInput<'_>) -> Result<String> {
         unreachable!()
@@ -1454,7 +1475,7 @@ async fn follow_up_without_subject_searches_the_previous_topic_and_keeps_it_for_
         .unwrap();
         assert_eq!(result.status, "dry_run", "{}", result.reason);
         let answer = result.answer.unwrap();
-        assert!(answer.contains("\n\n**Fuentes**\n- [page1]("));
+        assert!(answer.contains("\n\nMás detalle en [page1]("), "{answer}");
         let context = store.context("chats/simulation-follow").unwrap().unwrap();
         assert_eq!(
             context.question,
@@ -1465,7 +1486,7 @@ async fn follow_up_without_subject_searches_the_previous_topic_and_keeps_it_for_
             }
         );
         assert!(context.answer.starts_with("Envía un `POST`"));
-        assert!(!context.answer.contains("Fuentes"));
+        assert!(!context.answer.contains("](https://") && !context.answer.contains("Más detalle"));
         assert!(server.received_requests().await.unwrap().is_empty());
     }
 }
@@ -1492,8 +1513,8 @@ impl LlmProvider for TopicLlm {
         &self,
         _: &str,
         references: &[personal_teams_assistant::evidence::Reference],
-    ) -> Result<Vec<String>> {
-        Ok(references.iter().map(|r| r.id.clone()).collect())
+    ) -> Result<Vec<personal_teams_assistant::evidence::Used>> {
+        Ok(references.iter().map(|r| used_ref(&r.id, "")).collect())
     }
     async fn generate(&self, _: GenerationInput<'_>) -> Result<String> {
         unreachable!()
@@ -2393,12 +2414,12 @@ impl LlmProvider for ReviewLlm {
         &self,
         _: &str,
         references: &[personal_teams_assistant::evidence::Reference],
-    ) -> Result<Vec<String>> {
+    ) -> Result<Vec<personal_teams_assistant::evidence::Used>> {
         // The model picks the Wiki page; code links the entities it sees named.
         Ok(references
             .iter()
             .filter(|r| r.kind == "wiki")
-            .map(|r| r.id.clone())
+            .map(|r| used_ref(&r.id, ""))
             .collect())
     }
     async fn generate(&self, _: GenerationInput<'_>) -> Result<String> {
@@ -2496,16 +2517,20 @@ async fn unregistered_work_is_reviewed_across_activity_wiki_and_teams_with_verif
         assert_eq!(result.status, "dry_run", "{question}: {}", result.reason);
         assert_eq!(result.reason, "supported_answer");
         let answer = result.answer.unwrap();
-        // Each piece of evidence the answer names gets its verified link.
-        let (_, sources_section) = answer.split_once("\n\n**Fuentes**\n").expect(&answer);
+        // Each piece of evidence the answer names gets its verified link on its own words,
+        // without a sources section.
         for link in [
-            "](https://dev.azure.com/example/Payments/_git/payments-api/pullrequest/46)",
-            "](https://dev.azure.com/example/Payments/_git/payments-api/commit/cccccccc33)",
-            "](https://dev.azure.com/example/Payments/_workitems/edit/100)",
-            "[Runbook](https://dev.azure.com/example/Payments/_wiki/wikis/abcdeabc-abcd-abcd-abcd-abcdeabcdea2?pagePath=%2FRunbook): wiki del proyecto Payments; documentación en la que participé.",
+            "[PR #46](https://dev.azure.com/example/Payments/_git/payments-api/pullrequest/46)",
+            "[commit cccccccc](https://dev.azure.com/example/Payments/_git/payments-api/commit/cccccccc33)",
+            "[#100 Task 100](https://dev.azure.com/example/Payments/_workitems/edit/100)",
+            "editaste la [página Runbook](https://dev.azure.com/example/Payments/_wiki/wikis/abcdeabc-abcd-abcd-abcd-abcdeabcdea2?pagePath=%2FRunbook).",
         ] {
-            assert!(sources_section.contains(link), "{link}\n{answer}");
+            assert!(answer.contains(link), "{link}\n{answer}");
         }
+        assert!(
+            !answer.contains("Fuentes") && !answer.contains("Más detalle"),
+            "{answer}"
+        );
         assert!(result.partial);
         let rows = personal_teams_assistant::state::Store::inspect(
             &dir.path().join("test.db"),
@@ -2866,7 +2891,7 @@ impl LlmProvider for LinkLlm {
         &self,
         _: &str,
         _: &[personal_teams_assistant::evidence::Reference],
-    ) -> Result<Vec<String>> {
+    ) -> Result<Vec<personal_teams_assistant::evidence::Used>> {
         Ok(Vec::new())
     }
     async fn plan_links(
@@ -3129,7 +3154,7 @@ async fn a_review_proposes_where_to_register_each_piece_and_applies_it_on_confir
             // The activities, then where each goes and why, then one confirmation question.
             let (_, proposal) = sent.split_once("**Propuesta de registro**\n").expect(&sent);
             assert!(proposal.starts_with("- [PR #46](https://dev.azure.com/example/Payments/_git/payments-api/pullrequest/46), [actividad del 2026-09-21](https://dev.azure.com/example/Payments/_releaseProgress?_a=release-pipeline-progress&releaseId=7) → vincular a [#100 Payment timeouts](https://dev.azure.com/example/Payments/_workitems/edit/100): Mismo componente de pagos.\n- [Commit cccccccc](https://dev.azure.com/example/Payments/_git/payments-api/commit/cccccccc33) → crear la tarea «Corregir el reporte de pagos» en [#50 Payments reliability](https://dev.azure.com/example/Payments/_workitems/edit/50): Mismo componente de pagos.\n\n¿Quieres que las registre?"), "{sent}");
-            assert!(sent.find("**Propuesta").unwrap() < sent.find("**Fuentes**").unwrap());
+            assert!(!sent.contains("**Fuentes**"));
             // One activity named like a RUT never withholds the answer.
             assert!(!sent.contains("REDACTED"), "{sent}");
             assert!(sent.contains("](https://dev.azure.com/example/Payments/_workitems/edit/50)"));
@@ -3230,11 +3255,11 @@ impl LlmProvider for StatusLlm {
         &self,
         _: &str,
         references: &[personal_teams_assistant::evidence::Reference],
-    ) -> Result<Vec<String>> {
+    ) -> Result<Vec<personal_teams_assistant::evidence::Used>> {
         Ok(references
             .iter()
             .filter(|r| r.kind == "wiki")
-            .map(|r| r.id.clone())
+            .map(|r| used_ref(&r.id, ""))
             .collect())
     }
     async fn generate(&self, _: GenerationInput<'_>) -> Result<String> {

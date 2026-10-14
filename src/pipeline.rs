@@ -159,11 +159,13 @@ impl Pipeline {
         if audit.status == "sent"
             && let Some(question) = audit.resolved_question.as_ref().or(audit.question.as_ref())
         {
-            // The body without its sources: copied citation URLs would fail verification.
+            // The text without links: copied URLs would fail the next answer's verification.
             self.store.save_context(
                 &message.conversation,
                 &self.redactor.redact(question),
-                &self.redactor.redact(without_sources(&answer)),
+                &self
+                    .redactor
+                    .redact(&crate::evidence::unlinked(without_sources(&answer))),
             )?;
         }
         Ok(audit.status)
@@ -982,22 +984,25 @@ impl Pipeline {
                     .withhold(resource, &message, &mut audit, "unsafe_proposal".into())
                     .await;
             }
-            // A model suggests which references the text used, but cannot withhold the answer:
-            // without its selection, code links the entities it sees named and the consulted
-            // Wiki pages, and verifies every ID and URL.
+            // A model suggests which references the text used and the words that name them,
+            // but cannot withhold the answer: without its selection, code links the entities it
+            // sees named, and it verifies every ID and URL.
             let mut used_sources = generated.used_sources.clone();
+            let mut mentions = std::collections::BTreeMap::new();
             if !registry.references.is_empty() {
-                // Code links the entities it sees named; a model chooses among the rest
-                // (Wiki pages, messages, entities paraphrased without their identifier).
+                // Code links the entities it sees named by a distinctive name; a model chooses
+                // among the rest (Wiki pages, messages, entities paraphrased or named by a
+                // common word) and marks the words to link.
                 for id in crate::evidence::named_references(&generated.answer, &registry) {
                     if !used_sources.contains(&id) {
                         used_sources.push(id);
                     }
                 }
+                let linked = crate::evidence::code_linked(&generated.answer, &registry);
                 let remaining: Vec<_> = registry
                     .references
                     .iter()
-                    .filter(|r| !used_sources.contains(&r.id))
+                    .filter(|r| !used_sources.contains(&r.id) || !linked.contains(&r.id))
                     .cloned()
                     .collect();
                 if remaining.is_empty() {
@@ -1015,20 +1020,38 @@ impl Pipeline {
                         )
                         .await?
                     {
-                        Ok(ids) => {
+                        Ok(chosen) => {
                             audit.reference_selection = Some("llm".into());
-                            audit.step("references", format!("the model chose {}", ids.len()));
-                            for id in ids {
-                                if !used_sources.contains(&id) {
-                                    used_sources.push(id);
+                            audit.step("references", format!("the model chose {}", chosen.len()));
+                            for used in chosen {
+                                if !used.mention.is_empty() {
+                                    mentions.insert(used.id.clone(), used.mention);
+                                }
+                                if !used_sources.contains(&used.id) {
+                                    used_sources.push(used.id);
                                 }
                             }
                         }
                         Err(_) => {
                             audit.reference_selection = Some("code".into());
+                            // Without a model, an answer that may rest on the Wiki still links
+                            // the pages it read, in one closing sentence.
+                            let wiki = |id: &String| {
+                                registry
+                                    .references
+                                    .iter()
+                                    .any(|r| &r.id == id && r.kind == "wiki")
+                            };
+                            if !used_sources.iter().any(wiki) {
+                                for r in registry.references.iter().filter(|r| r.kind == "wiki") {
+                                    if !used_sources.contains(&r.id) {
+                                        used_sources.push(r.id.clone());
+                                    }
+                                }
+                            }
                             audit.step(
                                 "references",
-                                "no model could choose them; code links what it sees named",
+                                "no model could choose them; code links what it sees named and the Wiki pages read",
                             );
                         }
                     }
@@ -1039,6 +1062,7 @@ impl Pipeline {
                 match crate::evidence::complete_answer(
                     &generated.answer,
                     &used_sources,
+                    &mentions,
                     &registry,
                     &evidence,
                     self.config.llm.language,
@@ -1105,7 +1129,7 @@ impl Pipeline {
             if resource.starts_with("simulation:")
                 && let Some(question) = context_question
             {
-                // The body without appended sources: copied citation URLs would fail verification.
+                // The body before code linked it: copied URLs would fail the next verification.
                 self.store.save_context(
                     &message.conversation,
                     &self.redactor.redact(&question),
@@ -2029,7 +2053,7 @@ fn working(audit: &Audit) -> &'static str {
         "processing"
     }
 }
-/// The answer body without the appended sources section.
+/// The answer body without the sources section that versions before 0.7.15 appended to it.
 fn without_sources(answer: &str) -> &str {
     [
         "\n\n**Fuentes**",
@@ -2257,23 +2281,10 @@ fn link_results(links: &[LinkRecord], language: Language) -> String {
     }
     lines.join("\n")
 }
-/// Put the registration section after the review's body and before its sources section.
+/// Put the registration section at the end of the review, where its question is the last
+/// thing the user reads.
 fn with_registration(answer: &str, section: &str) -> String {
-    let start = [
-        "\n\n**Fuentes**",
-        "\n\n**Sources**",
-        "\n\n**Páginas consultadas**",
-        "\n\n**Pages consulted**",
-    ]
-    .iter()
-    .filter_map(|header| answer.find(header))
-    .min()
-    .unwrap_or(answer.len());
-    format!(
-        "{}\n\n{section}{}",
-        answer[..start].trim_end(),
-        &answer[start..]
-    )
+    format!("{}\n\n{section}", answer.trim_end())
 }
 /// The section that ends a review: where each piece of work would be registered and why,
 /// grouped by destination, and the request to confirm.
@@ -2798,12 +2809,12 @@ mod tests {
     };
 
     #[test]
-    fn the_registration_goes_before_the_sources_and_keeps_links_with_parentheses() {
+    fn the_registration_ends_the_review_and_keeps_links_with_parentheses() {
         let section = "**Propuesta de registro**\n- [PR #1](https://dev.azure.com/o/Red%20(RPF)/_git/r/pullrequest/1) → vincular a [#2 HU](https://dev.azure.com/o/Red%20(RPF)/_workitems/edit/2): razón\n\n¿Quieres que las registre?";
-        let answer = with_registration("Cuerpo.\n\n**Fuentes**\n- [PR #1](https://x)", section);
+        let answer = with_registration("Cuerpo con [PR #1](https://x).\n", section);
         assert_eq!(
             answer,
-            format!("Cuerpo.\n\n{section}\n\n**Fuentes**\n- [PR #1](https://x)")
+            format!("Cuerpo con [PR #1](https://x).\n\n{section}")
         );
         assert_eq!(with_registration("Cuerpo.", "S"), "Cuerpo.\n\nS");
         let html = crate::adapters::teams::html(section);

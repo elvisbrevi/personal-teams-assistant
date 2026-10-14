@@ -1,8 +1,12 @@
 //! A work item a status request names («avance de la HU #23553»), read directly in the
 //! catalog's scope whoever holds it now: its state and since when, the current owner, state
 //! and assignment changes, planned dates, child tasks, linked code and recent comments. The
-//! user's own recent activity alone misses an HU already handed over to someone else.
-use super::{Source, field, item_reference, label, organization_url, project_url, request};
+//! user's own recent activity alone misses an HU already handed over to someone else. A pull
+//! request the request names («PR !4848») is read by ID too, so the answer can link it.
+use super::{
+    Source, artifact, field, item_reference, label, organization_url, project_url, request,
+    same_user, unreadable,
+};
 use crate::evidence::Reference;
 use anyhow::{Context, Result};
 use reqwest::{Client, Method};
@@ -60,6 +64,132 @@ pub(super) fn requested(question: &str) -> Vec<u64> {
     }
     ids.truncate(REQUESTED);
     ids
+}
+
+/// Pull requests the request names: «PR !4848», «PR #4848», «PR 4848», «pull request 4848» or
+/// a bare «!4848».
+pub(super) fn requested_pull_requests(question: &str) -> Vec<u64> {
+    let mut ids: Vec<u64> = Vec::new();
+    for pattern in [
+        r"(?i)\b(?:PR|pull\s+request)\s*[#!]?\s*(\d{1,9})\b",
+        r"(?:^|[^\w!])!(\d{1,9})\b",
+    ] {
+        if let Ok(re) = regex::Regex::new(pattern) {
+            for c in re.captures_iter(question) {
+                if let Ok(id) = c[1].parse()
+                    && !ids.contains(&id)
+                {
+                    ids.push(id);
+                }
+            }
+        }
+    }
+    ids.truncate(REQUESTED);
+    ids
+}
+
+/// A named pull request, read by ID in the organization: its title, repository, state, author,
+/// dates and branches, with a verified reference. It is kept only in a project the catalog
+/// configures (`*`: any project the credential reads), because a review request often concerns
+/// another team's repository. Not found (404) or out of scope is `None`.
+pub(super) async fn pull_request(
+    client: &Client,
+    key: &str,
+    source: &Source,
+    id: u64,
+) -> Result<Option<(String, Reference)>> {
+    let number = id.to_string();
+    let url = organization_url(source, &["_apis", "git", "pullrequests", &number])?;
+    let pr = match request(client, key, Method::GET, url, None).await {
+        Ok(pr) => pr,
+        Err(error) if unreadable(&error) => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let project = pr["repository"]["project"]["name"].as_str().unwrap_or("");
+    let repo = pr["repository"]["name"].as_str().unwrap_or("");
+    let repo_id = pr["repository"]["id"].as_str().unwrap_or(repo);
+    let in_scope = source.projects == ["*"]
+        || source
+            .projects
+            .iter()
+            .any(|p| p.eq_ignore_ascii_case(project));
+    if pr["pullRequestId"].as_u64() != Some(id)
+        || project.is_empty()
+        || repo.is_empty()
+        || !in_scope
+    {
+        return Ok(None);
+    }
+    let title: String = pr["title"]
+        .as_str()
+        .unwrap_or("")
+        .chars()
+        .take(120)
+        .collect();
+    let reference = artifact(
+        source,
+        project,
+        "pull_request",
+        &format!("{repo_id}:{id}"),
+        format!("PR #{id} {title} ({repo})"),
+        vec![
+            format!("PR #{id}"),
+            format!("PR !{id}"),
+            format!("PR {id}"),
+            format!("pull request {id}"),
+            format!("!{id}"),
+        ],
+        &["_git", repo, "pullrequest", &number],
+        &[],
+        None,
+        None,
+    )?;
+    let date = |name: &str| {
+        pr[name]
+            .as_str()
+            .and_then(|d| d.get(..10))
+            .filter(|d| !d.starts_with("0001"))
+            .unwrap_or("")
+            .to_owned()
+    };
+    let branch = |name: &str| {
+        pr[name]
+            .as_str()
+            .unwrap_or("")
+            .trim_start_matches("refs/heads/")
+            .to_owned()
+    };
+    let author = if same_user(&pr["createdBy"], &source.author_email) {
+        "the user".to_owned()
+    } else {
+        pr["createdBy"]["displayName"]
+            .as_str()
+            .unwrap_or("someone else")
+            .to_owned()
+    };
+    let mut text = format!(
+        "Requested pull request (named in the request): PR #{id} «{title}» in repository {repo} (project {project}): {}{}, created by {author}",
+        pr["status"].as_str().unwrap_or("unknown"),
+        if pr["isDraft"].as_bool() == Some(true) {
+            " (draft)"
+        } else {
+            ""
+        },
+    );
+    let created = date("creationDate");
+    if !created.is_empty() {
+        text.push_str(&format!(" on {created}"));
+    }
+    let closed = date("closedDate");
+    if !closed.is_empty() {
+        text.push_str(&format!(", closed on {closed}"));
+    }
+    let (from, to) = (branch("sourceRefName"), branch("targetRefName"));
+    if !from.is_empty() && !to.is_empty() {
+        text.push_str(&format!(", branch {from} → {to}"));
+    }
+    text.push('.');
+    Ok(Some((text, reference)))
 }
 
 /// Plain text of a comment's HTML, on one line and bounded.
@@ -546,6 +676,75 @@ mod tests {
         assert!(requested("¿falló el run #345 o el build #346?").is_empty());
         assert!(requested("Release #12 y PR #88").is_empty());
         assert!(requested("1) avance 2) compromiso").is_empty());
+        assert!(requested("¿Me pasas el ticket del PR !4848?").is_empty());
+    }
+
+    #[test]
+    fn requested_pull_requests_take_every_usual_form() {
+        assert_eq!(
+            requested_pull_requests("el ticket del PR !4848 y el PR #12, pull request 77 o !9"),
+            [4848, 12, 77, 9]
+        );
+        assert_eq!(requested_pull_requests("PR 5122 de TLS Redis"), [5122]);
+        assert!(requested_pull_requests("¡Hola! la HU #23553 y PROD 3").is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_named_pull_request_is_read_by_id_in_the_configured_scope() {
+        use wiremock::{
+            Mock, MockServer, ResponseTemplate,
+            matchers::{method, path},
+        };
+        let server = MockServer::start().await;
+        super::super::TEST_SERVER
+            .with(|s| *s.borrow_mut() = Some(url::Url::parse(&server.uri()).unwrap()));
+        let mut source = Source {
+            organization: "https://dev.azure.com/example/".into(),
+            projects: vec!["*".into()],
+            author_email: "elvis@example.com".into(),
+        };
+        Mock::given(method("GET"))
+            .and(path("/example/_apis/git/pullrequests/4848"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "pullRequestId":4848,"title":"Template dotnet10","status":"active","isDraft":false,
+                "createdBy":{"displayName":"Elvis Brevi","uniqueName":"Elvis@example.com"},
+                "creationDate":"2026-10-13T15:00:00Z","closedDate":"0001-01-01T00:00:00",
+                "sourceRefName":"refs/heads/feature/dotnet10-template","targetRefName":"refs/heads/main",
+                "repository":{"id":"r1","name":"sag.transversal.templates.pipelines",
+                    "project":{"name":"Soluciones Transversales"}}})))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/example/_apis/git/pullrequests/77"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+        let client = reqwest::Client::new();
+        let (text, reference) = pull_request(&client, "key", &source, 4848)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            text,
+            "Requested pull request (named in the request): PR #4848 «Template dotnet10» in repository sag.transversal.templates.pipelines (project Soluciones Transversales): active, created by the user on 2026-10-13, branch feature/dotnet10-template → main."
+        );
+        assert_eq!(
+            reference.url,
+            "https://dev.azure.com/example/Soluciones%20Transversales/_git/sag.transversal.templates.pipelines/pullrequest/4848"
+        );
+        assert_eq!(reference.kind, "pull_request");
+        assert!(reference.aliases.contains(&"PR !4848".to_string()));
+        assert!(
+            pull_request(&client, "key", &source, 77)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        // A project the catalog does not configure is out of scope.
+        source.projects = vec!["Cobro Pago y Tarifas".into()];
+        let outside = pull_request(&client, "key", &source, 4848).await.unwrap();
+        super::super::TEST_SERVER.with(|s| *s.borrow_mut() = None);
+        assert!(outside.is_none());
     }
 
     #[test]

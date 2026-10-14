@@ -2,7 +2,8 @@
 use crate::{config::Language, security::Redactor};
 use anyhow::{Result, ensure};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
+use std::ops::Range;
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Evidence {
@@ -41,6 +42,13 @@ pub struct Reference {
     pub authority: Option<String>,
     pub author: Option<String>,
     pub author_role: Option<String>,
+}
+/// A reference a drafted answer uses, with the words of the answer that name it (empty when
+/// the answer uses it without naming it). Code links those words if they are in the answer.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Used {
+    pub id: String,
+    pub mention: String,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TeamsMessage {
@@ -204,56 +212,38 @@ impl Reference {
         );
         Ok(())
     }
-    /// One bullet of the appended sources list. Wiki links show the page title; project and
-    /// verified attribution follow the link so the reader sees provenance without the URL.
-    fn citation(&self, language: Language) -> String {
-        let label = self.label.replace(['[', ']', '\n', '\r'], " ");
-        if self.kind != "wiki" {
-            return format!("- [{label}]({})", self.url);
+    /// The title a Wiki link shows: the page, without its project and wiki.
+    fn title(&self) -> &str {
+        self.label
+            .rsplit(" / ")
+            .next()
+            .unwrap_or(&self.label)
+            .trim()
+    }
+    /// Who documented a third-party Wiki page, said right after its link («última edición de
+    /// Ana»). Own pages and pages without a known author add nothing: the link says where the
+    /// documentation is, and missing authorship is never invented.
+    fn attribution(&self, language: Language) -> Option<String> {
+        if self.kind != "wiki"
+            || matches!(
+                self.authority.as_deref(),
+                Some("created_by_me" | "edited_by_me")
+            )
+        {
+            return None;
         }
-        let title = label.rsplit(" / ").next().unwrap_or(&label).trim();
-        let project = label.split(" / ").next().unwrap_or(&self.project).trim();
-        let link = format!("[{title}]({})", self.url);
-        let own = matches!(
-            self.authority.as_deref(),
-            Some("created_by_me" | "edited_by_me")
-        );
+        let name = self.author.as_deref()?;
         // The Wiki reader records "last recorded editor" as the only author role; audits
         // before 0.6.1 hold its Spanish form. Either reads as who last edited the page.
-        let editor =
-            self.author
-                .as_deref()
-                .map(|name| match (language, self.author_role.as_deref()) {
-                    (
-                        Language::Es,
-                        None | Some("last recorded editor" | "último editor registrado"),
-                    ) => {
-                        format!("última edición de {name}")
-                    }
-                    (
-                        Language::En,
-                        None | Some("last recorded editor" | "último editor registrado"),
-                    ) => {
-                        format!("last edited by {name}")
-                    }
-                    (_, Some(role)) => format!("{role}: {name}"),
-                });
-        match (language, editor) {
-            (Language::Es, _) if own => {
-                format!("- {link}: wiki del proyecto {project}; documentación en la que participé.")
+        Some(match (language, self.author_role.as_deref()) {
+            (Language::Es, None | Some("last recorded editor" | "último editor registrado")) => {
+                format!("última edición de {name}")
             }
-            (Language::Es, Some(editor)) => {
-                format!("- {link}: wiki del proyecto {project}; {editor}.")
+            (Language::En, None | Some("last recorded editor" | "último editor registrado")) => {
+                format!("last edited by {name}")
             }
-            (Language::Es, None) => {
-                format!("- {link}: wiki del proyecto {project}; autoría desconocida.")
-            }
-            (Language::En, _) if own => {
-                format!("- {link}: {project} project wiki; documentation I contributed to.")
-            }
-            (Language::En, Some(editor)) => format!("- {link}: {project} project wiki; {editor}."),
-            (Language::En, None) => format!("- {link}: {project} project wiki; author unknown."),
-        }
+            (_, Some(role)) => format!("{role}: {name}"),
+        })
     }
 }
 /// Split `total` characters among parts: short parts keep everything, the rest share what is
@@ -280,9 +270,9 @@ pub fn shares(lengths: &[usize], total: usize) -> Vec<usize> {
     }
     caps
 }
-/// Non-Wiki references the code sees named in the answer (aliases or `#id`). Added to the
-/// model's selection, and the whole selection when no model can choose, so a named work item,
-/// pipeline or stage always gets its verified link.
+/// References the code sees named in the answer: aliases or `#id`, and Wiki pages by a
+/// distinctive title. Added to the model's selection, and the whole selection when no model
+/// can choose, so a named work item, pipeline or stage always gets its verified link.
 pub fn named_references(body: &str, evidence: &Evidence) -> Vec<String> {
     let lower = body.to_lowercase();
     let ids: Vec<String> = regex::Regex::new(r"#(\d+)\b")
@@ -295,8 +285,10 @@ pub fn named_references(body: &str, evidence: &Evidence) -> Vec<String> {
     evidence
         .references
         .iter()
-        .filter(|r| r.kind != "wiki")
         .filter(|r| {
+            if r.kind == "wiki" {
+                return distinctive(r.title()) && names(&lower, r.title());
+            }
             r.aliases.iter().any(|a| names(&lower, a))
                 || ids.iter().any(|id| {
                     regex::Regex::new(&format!(r"{id}\b")).is_ok_and(|re| re.is_match(&r.label))
@@ -324,50 +316,219 @@ fn word_position(lower_text: &str, name: &str) -> Option<usize> {
 /// Where the answer first names a reference: an alias, its `#id` or a Wiki page title.
 /// References the text does not name sort last.
 fn first_mention(lower_body: &str, reference: &Reference) -> usize {
-    let mut candidates: Vec<String> = reference
-        .aliases
+    spoken_names(reference)
         .iter()
-        .filter(|a| !a.is_empty())
-        .map(|a| a.to_lowercase())
-        .collect();
-    if reference.kind == "wiki" {
-        candidates.push(
-            reference
-                .label
-                .rsplit(" / ")
-                .next()
-                .unwrap_or(&reference.label)
-                .trim()
-                .to_lowercase(),
-        );
-    } else if let Some(number) = regex::Regex::new(r"#\d+")
-        .ok()
-        .and_then(|re| re.find(&reference.label).map(|m| m.as_str().to_owned()))
-    {
-        candidates.push(number);
-    }
-    candidates
-        .iter()
-        .filter_map(|name| word_position(lower_body, name))
+        .filter_map(|name| word_position(lower_body, &name.to_lowercase()))
         .min()
         .unwrap_or(usize::MAX)
 }
-/// Runs before the privacy checks, against the complete rendered answer. Wiki pages selected
-/// as used are listed under **Fuentes**; when none is, every consulted page is listed under
-/// **Páginas consultadas** (in English, **Sources** and **Pages consulted**), so a Wiki-based
-/// answer always links its pages. URLs in the body must be verified references or appear
-/// literally in `evidence_text`.
+/// The names a reference goes by in prose: a Wiki page's title (its aliases are API URLs), or
+/// an entity's aliases and the `#id` of its label.
+fn spoken_names(reference: &Reference) -> Vec<String> {
+    if reference.kind == "wiki" {
+        return vec![reference.title().to_owned()];
+    }
+    let mut names: Vec<String> = reference
+        .aliases
+        .iter()
+        .map(|a| a.trim())
+        .filter(|a| !a.is_empty())
+        .map(str::to_owned)
+        .collect();
+    if let Some(number) = regex::Regex::new(r"#\d+")
+        .ok()
+        .and_then(|re| re.find(&reference.label).map(|m| m.as_str().to_owned()))
+    {
+        names.push(number);
+    }
+    names
+}
+/// A name that identifies its entity on its own: one with a digit or a symbol (`#26477`,
+/// `PR !4848`, `sag.portalpagos.ms.solicitud`) or of several words. A single plain word
+/// («Desarrollo», «QA») is too common to link without saying what it is.
+fn distinctive(name: &str) -> bool {
+    name.chars()
+        .any(|c| c.is_ascii_digit() || matches!(c, '#' | '!' | '.' | '/' | '_' | '-'))
+        || name.split_whitespace().count() > 1
+}
+/// Words that say what the single-word name after them is: «stage QA», «la página Inicio»,
+/// «commit cccccccc».
+const KIND_WORDS: [&str; 16] = [
+    "commit",
+    "stage",
+    "etapa",
+    "ambiente",
+    "entorno",
+    "environment",
+    "pipeline",
+    "release",
+    "build",
+    "repositorio",
+    "repository",
+    "repo",
+    "página",
+    "pagina",
+    "page",
+    "wiki",
+];
+/// The longest name the model may mark as naming a reference.
+const MENTION_CHARS: usize = 120;
+/// Byte ranges no link may touch: code, links already written and bare URLs.
+fn protected(body: &str) -> Vec<Range<usize>> {
+    [
+        r"(?s)```.*?(?:```|\z)",
+        r"`[^`\n]*`",
+        r"\[[^\]\n]*\]\((?:[^()\s]|\([^()\s]*\))*\)",
+        r"https?://[^\s<>)\]]+",
+    ]
+    .iter()
+    .filter_map(|pattern| regex::Regex::new(pattern).ok())
+    .flat_map(|re| re.find_iter(body).map(|m| m.range()).collect::<Vec<_>>())
+    .collect()
+}
+fn free(span: &Range<usize>, taken: &[Range<usize>]) -> bool {
+    !taken
+        .iter()
+        .any(|t| t.start < span.end && span.start < t.end)
+}
+/// Whole-word, case-insensitive occurrences of `name` in `text`, as byte ranges of `text`.
+fn occurrences(text: &str, name: &str) -> Vec<Range<usize>> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Vec::new();
+    }
+    let Ok(re) = regex::Regex::new(&format!("(?i){}", regex::escape(name))) else {
+        return Vec::new();
+    };
+    re.find_iter(text)
+        .filter(|m| {
+            !text[..m.start()]
+                .chars()
+                .next_back()
+                .is_some_and(char::is_alphanumeric)
+                && !text[m.end()..]
+                    .chars()
+                    .next()
+                    .is_some_and(char::is_alphanumeric)
+        })
+        .map(|m| m.range())
+        .collect()
+}
+/// Where code links `reference` in `body` without a model: the earliest distinctive name of it
+/// outside `taken` (or a single word right after a word saying what it is, «stage QA»), joined
+/// with the names of it that follow, so «#26477 — PR Pipeline Transversal» is one link.
+fn code_span(body: &str, reference: &Reference, taken: &[Range<usize>]) -> Option<Range<usize>> {
+    let names = spoken_names(reference);
+    let mut best: Option<Range<usize>> = None;
+    for name in &names {
+        for mut span in occurrences(body, name) {
+            if !distinctive(name) {
+                let head = &body[..span.start];
+                let trimmed = head.trim_end_matches(' ');
+                let word = trimmed
+                    .char_indices()
+                    .rev()
+                    .take_while(|(_, c)| c.is_alphanumeric())
+                    .last()
+                    .map(|(at, _)| at);
+                let Some(word) = word.filter(|_| trimmed.len() < head.len()) else {
+                    continue;
+                };
+                if !KIND_WORDS.contains(&trimmed[word..].to_lowercase().as_str()) {
+                    continue;
+                }
+                span.start = word;
+            }
+            if free(&span, taken)
+                && best.as_ref().is_none_or(|b| {
+                    span.start < b.start || (span.start == b.start && span.end > b.end)
+                })
+            {
+                best = Some(span);
+            }
+        }
+    }
+    let mut span = best?;
+    loop {
+        let rest = &body[span.end..];
+        let at = span.end + rest.len()
+            - rest
+                .trim_start_matches([' ', '—', '–', '-', ':', '«', '"'])
+                .len();
+        if at == span.end || at - span.end > 8 {
+            break;
+        }
+        let Some(mut end) = names
+            .iter()
+            .filter_map(|n| {
+                occurrences(&body[at..], n)
+                    .first()
+                    .filter(|o| o.start == 0)
+                    .map(|o| at + o.end)
+            })
+            .max()
+        else {
+            break;
+        };
+        // A quoted name keeps its closing quote inside the link, or is left out.
+        match body[span.end..at].chars().next_back() {
+            Some('«') if body[end..].starts_with('»') => end += '»'.len_utf8(),
+            Some('"') if body[end..].starts_with('"') => end += 1,
+            Some('«' | '"') => break,
+            _ => {}
+        }
+        let joined = span.start..end;
+        if !free(&joined, taken) {
+            break;
+        }
+        span = joined;
+    }
+    Some(span)
+}
+/// Where the words the model marked as naming a reference appear in `body`, outside `taken`.
+fn mention_span(body: &str, mention: &str, taken: &[Range<usize>]) -> Option<Range<usize>> {
+    let mention = mention.trim().trim_matches(['*', '_']).trim();
+    if mention.chars().count() > MENTION_CHARS
+        || mention.contains(['\n', '\r', '[', ']', '`', '*', '~', '{', '}', '|'])
+    {
+        return None;
+    }
+    occurrences(body, mention)
+        .into_iter()
+        .find(|span| free(span, taken))
+}
+/// References code links where the answer names them, without a model's help.
+pub fn code_linked(body: &str, evidence: &Evidence) -> BTreeSet<String> {
+    let taken = protected(body);
+    evidence
+        .references
+        .iter()
+        .filter(|r| code_span(body, r, &taken).is_some())
+        .map(|r| r.id.clone())
+        .collect()
+}
+/// The answer with each link reduced to its text. Saved as conversation context: copied
+/// URLs would fail the next answer's URL check.
+pub fn unlinked(answer: &str) -> String {
+    regex::Regex::new(r"\[([^\]\n]+)\]\((?:[^()\s]|\([^()\s]*\))*\)")
+        .map(|re| re.replace_all(answer, "$1").into_owned())
+        .unwrap_or_else(|_| answer.to_owned())
+}
+/// Runs before the privacy checks. Every reference selected as used is verified; each one the
+/// answer names becomes a link on those very words («[#26477 — PR Pipeline Transversal](…)»),
+/// first where code sees a distinctive name, then on the words a model marked in `mentions`.
+/// A Wiki page the text uses without naming it is linked in one closing sentence, so a
+/// Wiki-based answer always links its pages; third-party pages say who last edited them. No
+/// sources section is appended: the full list stays in the audit. URLs in the body must be
+/// verified references or appear literally in `evidence_text`.
 pub fn complete_answer(
     body: &str,
     used: &[String],
+    mentions: &BTreeMap<String, String>,
     evidence: &Evidence,
     evidence_text: &str,
     language: Language,
 ) -> Result<String> {
-    let (sources, consulted_pages) = match language {
-        Language::Es => ("**Fuentes**", "**Páginas consultadas**"),
-        Language::En => ("**Sources**", "**Pages consulted**"),
-    };
     let selected: BTreeSet<_> = used.iter().collect();
     ensure!(selected.len() == used.len(), "duplicate used source");
     for id in &selected {
@@ -440,35 +601,90 @@ pub fn complete_answer(
             "unverified answer URL"
         );
     }
-    let mut answer = body.trim_end().to_owned();
-    let mut linked = BTreeSet::new();
-    // Sources follow the answer: the first thing it names is cited first.
+    // Links follow the answer: the first thing it names is linked first.
     let mut cited: Vec<&Reference> = evidence
         .references
         .iter()
         .filter(|r| selected.contains(&r.id))
         .collect();
     cited.sort_by_key(|r| first_mention(&lower, r));
-    for r in cited {
+    for r in &cited {
         r.validate()?;
-        if linked.insert((r.url.clone(), r.label.clone())) {
-            if linked.len() == 1 {
-                answer.push_str(&format!("\n\n{sources}"));
+    }
+    // The same entity captured twice (another URL form of its organization) is linked once;
+    // stages of one release share its URL but are different entities.
+    let same = |a: &Reference, b: &Reference| {
+        a.url == b.url
+            && a.kind == b.kind
+            && (a.kind == "wiki" || a.aliases.iter().any(|x| b.aliases.contains(x)))
+    };
+    let mut taken = protected(body);
+    let mut placed: Vec<&Reference> = cited
+        .iter()
+        .copied()
+        .filter(|r| body.contains(&format!("]({})", r.url)))
+        .collect();
+    let mut links: Vec<(Range<usize>, &Reference)> = Vec::new();
+    for by_model in [false, true] {
+        for r in &cited {
+            if placed.iter().any(|p| same(p, r)) {
+                continue;
             }
-            answer.push_str(&format!("\n{}", r.citation(language)));
+            let span = if by_model {
+                mentions
+                    .get(&r.id)
+                    .and_then(|m| mention_span(body, m, &taken))
+            } else {
+                code_span(body, r, &taken)
+            };
+            if let Some(span) = span.filter(|s| !body[s.clone()].contains(['[', ']', '\n'])) {
+                taken.push(span.clone());
+                links.push((span, r));
+                placed.push(r);
+            }
         }
     }
-    if consulted_only {
-        let mut consulted = BTreeSet::new();
-        for r in evidence.references.iter().filter(|r| r.kind == "wiki") {
-            r.validate()?;
-            if consulted.insert((r.url.clone(), r.label.clone())) {
-                if consulted.len() == 1 {
-                    answer.push_str(&format!("\n\n{consulted_pages}"));
-                }
-                answer.push_str(&format!("\n{}", r.citation(language)));
-            }
+    let attribution = |r: &Reference| {
+        r.attribution(language)
+            .filter(|_| {
+                r.author
+                    .as_deref()
+                    .is_none_or(|name| !lower.contains(&name.to_lowercase()))
+            })
+            .map(|a| format!(" ({a})"))
+            .unwrap_or_default()
+    };
+    links.sort_by_key(|(span, _)| std::cmp::Reverse(span.start));
+    let mut answer = body.to_owned();
+    for (span, r) in links {
+        let link = format!("[{}]({}){}", &body[span.clone()], r.url, attribution(r));
+        answer.replace_range(span, &link);
+    }
+    let mut answer = answer.trim_end().to_owned();
+    let mut pages: Vec<&Reference> = Vec::new();
+    for r in cited.iter().filter(|r| r.kind == "wiki") {
+        if !placed.iter().chain(&pages).any(|p| same(p, r)) {
+            pages.push(r);
         }
+    }
+    let pages: Vec<String> = pages
+        .iter()
+        .map(|r| {
+            let title = r.title().replace(['[', ']', '\n', '\r'], " ");
+            format!("[{}]({}){}", title.trim(), r.url, attribution(r))
+        })
+        .collect();
+    if let Some((last, first)) = pages.split_last() {
+        let (lead, and) = match language {
+            Language::Es => ("Más detalle en", "y"),
+            Language::En => ("More detail in", "and"),
+        };
+        let list = if first.is_empty() {
+            last.clone()
+        } else {
+            format!("{} {and} {last}", first.join(", "))
+        };
+        answer.push_str(&format!("\n\n{lead} {list}."));
     }
     Ok(answer)
 }
@@ -500,8 +716,12 @@ mod tests {
             author_role: None,
         }
     }
+    fn none() -> BTreeMap<String, String> {
+        BTreeMap::new()
+    }
+    const PAGE: &str = "https://dev.azure.com/test/Project/_wiki/wikis/wiki?pagePath=%2FProcedure";
     #[test]
-    fn all_wiki_authority_modes_include_verified_source_and_precise_attribution() {
+    fn wiki_pages_are_linked_where_named_or_in_one_closing_sentence() {
         for mode in ["created_by_me", "edited_by_me", "other", "unknown"] {
             let mut r = reference("p", "wiki");
             r.authority = Some(mode.into());
@@ -516,23 +736,193 @@ mod tests {
             let a = complete_answer(
                 "El procedimiento documentado exige revisar.",
                 &["p".into()],
+                &none(),
                 &e,
                 "",
                 Language::Es,
             )
             .unwrap();
-            assert!(a.contains("pagePath=%2FProcedure"));
-            // One sources section; the link text is the page title, not the full location.
-            assert!(a.starts_with("El procedimiento documentado exige revisar.\n\n**Fuentes**\n- [Procedure](https://dev.azure.com/test/Project/_wiki/wikis/wiki?pagePath=%2FProcedure): wiki del proyecto Project; "));
-            assert_eq!(a.matches("**Fuentes**").count(), 1);
-            if mode == "other" {
-                assert!(a.contains("última edición de Ana"));
-                assert!(!a.contains("creador"));
-            }
-            if mode == "unknown" {
-                assert!(a.contains("autoría desconocida"));
-            }
+            // No sources section: one closing sentence links the page by its title, and only
+            // a third-party page says who last edited it.
+            let attribution = if mode == "other" {
+                " (última edición de Ana)"
+            } else {
+                ""
+            };
+            assert_eq!(
+                a,
+                format!(
+                    "El procedimiento documentado exige revisar.\n\nMás detalle en [Procedure]({PAGE}){attribution}."
+                )
+            );
+            assert!(!a.contains("Fuentes") && !a.contains("autoría"));
+            // Named by the answer, the page is linked on those words instead.
+            let a = complete_answer(
+                "Según la página Procedure, hay que revisar.",
+                &["p".into()],
+                &none(),
+                &e,
+                "",
+                Language::Es,
+            )
+            .unwrap();
+            assert_eq!(
+                a,
+                format!("Según la [página Procedure]({PAGE}){attribution}, hay que revisar.")
+            );
+            let marked = BTreeMap::from([("p".to_string(), "procedimiento documentado".into())]);
+            let a = complete_answer(
+                "El procedimiento documentado exige revisar.",
+                &["p".into()],
+                &marked,
+                &e,
+                "",
+                Language::Es,
+            )
+            .unwrap();
+            assert_eq!(
+                a,
+                format!("El [procedimiento documentado]({PAGE}){attribution} exige revisar.")
+            );
         }
+        // An answer that already names the editor does not repeat it.
+        let mut r = reference("p", "wiki");
+        r.authority = Some("other".into());
+        r.author = Some("Ana".into());
+        let e = Evidence {
+            references: vec![r],
+            ..Default::default()
+        };
+        let a = complete_answer(
+            "Ana documentó que hay que revisar.",
+            &["p".into()],
+            &none(),
+            &e,
+            "",
+            Language::Es,
+        )
+        .unwrap();
+        assert!(
+            a.ends_with(&format!("Más detalle en [Procedure]({PAGE}).")),
+            "{a}"
+        );
+    }
+    #[test]
+    fn named_entities_become_links_on_their_own_words() {
+        let mut item = reference("w26477", "work_item");
+        item.label = "#26477 PR Pipeline Transversal — New".into();
+        item.url = "https://dev.azure.com/test/Project/_workitems/edit/26477".into();
+        item.aliases = vec![
+            "#26477".into(),
+            "HU 26477".into(),
+            "work item 26477".into(),
+            "PR Pipeline Transversal".into(),
+        ];
+        let mut copy = item.clone();
+        copy.id = "w26477-other-organization-form".into();
+        copy.aliases = vec!["#26477".into(), "work item 26477".into()];
+        let mut stage = reference("stage", "stage_configuration");
+        stage.label = "Stage Desarrollo, configured in release #29".into();
+        stage.url =
+            "https://dev.azure.com/test/Project/_release?definitionId=29&_a=definition-tasks"
+                .into();
+        stage.aliases = vec!["Desarrollo".into()];
+        let mut pr = reference("pr4848", "pull_request");
+        pr.label = "PR #4848 Template dotnet10 (templates.pipelines)".into();
+        pr.project = "Soluciones Transversales".into();
+        pr.url = "https://dev.azure.com/test/Soluciones%20Transversales/_git/templates.pipelines/pullrequest/4848".into();
+        pr.aliases = vec![
+            "PR #4848".into(),
+            "PR !4848".into(),
+            "PR 4848".into(),
+            "pull request 4848".into(),
+            "!4848".into(),
+        ];
+        let page = reference("pap", "wiki");
+        let e = Evidence {
+            references: vec![page, item, copy, stage, pr],
+            ..Default::default()
+        };
+        let body = "Tengo identificado el **#26477 — PR Pipeline Transversal**, pero está en **Cobro Pago y Tarifas**. No tengo el ticket en **Sección Desarrollo / Apoyo Coor-Dev** con el enlace al PR !4848.";
+        let used = named_references(body, &e);
+        assert_eq!(
+            used,
+            [
+                "w26477",
+                "w26477-other-organization-form",
+                "stage",
+                "pr4848"
+            ]
+        );
+        // «Sección Desarrollo» is a project, not the stage: a single common word is linked
+        // only with a model's mark or right after a word saying what it is.
+        assert_eq!(
+            code_linked(body, &e),
+            BTreeSet::from([
+                "w26477".to_string(),
+                "w26477-other-organization-form".into(),
+                "pr4848".into()
+            ])
+        );
+        let a = complete_answer(body, &used, &none(), &e, "", Language::Es).unwrap();
+        assert_eq!(
+            a,
+            "Tengo identificado el **[#26477 — PR Pipeline Transversal](https://dev.azure.com/test/Project/_workitems/edit/26477)**, pero está en **Cobro Pago y Tarifas**. No tengo el ticket en **Sección Desarrollo / Apoyo Coor-Dev** con el enlace al [PR !4848](https://dev.azure.com/test/Soluciones%20Transversales/_git/templates.pipelines/pullrequest/4848)."
+        );
+        let html = crate::adapters::teams::html(&a);
+        assert!(
+            html.contains("<b><a href=\"https://dev.azure.com/test/Project/_workitems/edit/26477\">#26477 — PR Pipeline Transversal</a></b>"),
+            "{html}"
+        );
+        // The consulted page that no one selected stays in the audit only.
+        let a = complete_answer(body, &used, &none(), &e, "", Language::Es).unwrap();
+        assert!(!a.contains("pagePath") && !a.contains("Páginas consultadas"));
+        // A stage named as such is linked on its name.
+        let a = complete_answer(
+            "Falta el stage Desarrollo de #26477.",
+            &["stage".into(), "w26477".into()],
+            &none(),
+            &e,
+            "",
+            Language::Es,
+        )
+        .unwrap();
+        assert!(a.starts_with("Falta el [stage Desarrollo](https://dev.azure.com/test/Project/_release?definitionId=29&_a=definition-tasks) de [#26477]("), "{a}");
+    }
+    #[test]
+    fn model_marks_never_link_inside_code_or_existing_links() {
+        let e = Evidence {
+            references: vec![reference("w", "work_item")],
+            ..Default::default()
+        };
+        let marked = BTreeMap::from([("w".to_string(), "**la tarea**".into())]);
+        let a = complete_answer(
+            "Revisa `#42` y la tarea pendiente.",
+            &["w".into()],
+            &marked,
+            &e,
+            "",
+            Language::Es,
+        )
+        .unwrap();
+        assert_eq!(
+            a,
+            "Revisa `#42` y [la tarea](https://dev.azure.com/test/Project/_workitems/edit/42) pendiente."
+        );
+        // A link the answer already has is kept, and words missing from it are ignored.
+        let body = "Ver [#42](https://dev.azure.com/test/Project/_workitems/edit/42).";
+        let marked = BTreeMap::from([("w".to_string(), "otra cosa".into())]);
+        assert_eq!(
+            complete_answer(body, &["w".into()], &marked, &e, "", Language::Es).unwrap(),
+            body
+        );
+        assert_eq!(
+            unlinked("Ver [#42](https://x.test/a_(b)) y [A](https://b.test)."),
+            "Ver #42 y A."
+        );
+        assert!(distinctive("#26477") && distinctive("PR !4848"));
+        assert!(distinctive("sag.portalpagos.ms.solicitud") && distinctive("Portal Recaudación"));
+        assert!(!distinctive("Desarrollo") && !distinctive("QA"));
     }
     #[test]
     fn aliases_match_whole_words_only() {
@@ -545,7 +935,7 @@ mod tests {
     }
 
     #[test]
-    fn sources_follow_the_order_the_answer_names_them() {
+    fn each_named_reference_is_linked_where_the_answer_names_it() {
         let mut first = reference("w12", "work_item");
         first.label = "#12 First task — Active".into();
         first.url = "https://dev.azure.com/test/Project/_workitems/edit/12".into();
@@ -565,59 +955,52 @@ mod tests {
         let a = complete_answer(
             "I merged PR #7, which belongs in #12.",
             &["w123".into(), "w12".into(), "pr7".into()],
+            &none(),
             &e,
             "",
             Language::En,
         )
         .unwrap();
-        let sources = a.split_once("**Sources**").unwrap().1;
-        let order: Vec<_> = ["pullrequest/7", "edit/12)", "edit/123"]
-            .iter()
-            .map(|u| sources.find(u).unwrap())
-            .collect();
-        assert!(order[0] < order[1] && order[1] < order[2], "{sources}");
+        // A reference the text uses without naming it stays in the audit only.
+        assert_eq!(
+            a,
+            "I merged [PR #7](https://dev.azure.com/test/Project/_git/repo/pullrequest/7), which belongs in [#12](https://dev.azure.com/test/Project/_workitems/edit/12)."
+        );
     }
 
     #[test]
-    fn english_answers_get_english_sources_and_attribution() {
+    fn english_answers_get_english_links_and_attribution() {
         let mut other = reference("p", "wiki");
         other.authority = Some("other".into());
         other.author = Some("Ana".into());
         other.author_role = Some("last recorded editor".into());
+        let mut second = reference("q", "wiki");
+        second.label = "Project / Wiki / Deploy guide".into();
+        second.url =
+            "https://dev.azure.com/test/Project/_wiki/wikis/wiki?pagePath=%2FDeploy".into();
+        second.authority = Some("unknown".into());
         let e = Evidence {
-            references: vec![other],
+            references: vec![other, second],
             ..Default::default()
         };
         let a = complete_answer(
             "The procedure says so.",
-            &["p".into()],
+            &["p".into(), "q".into()],
+            &none(),
             &e,
             "",
             Language::En,
         )
         .unwrap();
-        assert!(a.starts_with("The procedure says so.\n\n**Sources**\n- [Procedure]("));
-        assert!(a.ends_with("): Project project wiki; last edited by Ana."));
-        assert!(!a.contains("Fuentes") && !a.contains("último editor"));
-
-        let mut own = reference("p", "wiki");
-        own.authority = Some("created_by_me".into());
-        let e = Evidence {
-            references: vec![own],
-            ..Default::default()
-        };
-        let a = complete_answer("Not documented.", &[], &e, "", Language::En).unwrap();
-        assert!(a.contains("\n\n**Pages consulted**\n- [Procedure]("));
-        assert!(a.ends_with("Project project wiki; documentation I contributed to."));
-
-        let mut unknown = reference("p", "wiki");
-        unknown.authority = Some("unknown".into());
-        let e = Evidence {
-            references: vec![unknown],
-            ..Default::default()
-        };
-        let a = complete_answer("Steps.", &["p".into()], &e, "", Language::En).unwrap();
-        assert!(a.ends_with("author unknown."));
+        assert_eq!(
+            a,
+            format!(
+                "The procedure says so.\n\nMore detail in [Procedure]({PAGE}) (last edited by Ana) and [Deploy guide](https://dev.azure.com/test/Project/_wiki/wikis/wiki?pagePath=%2FDeploy)."
+            )
+        );
+        // Consulted pages that the answer does not use are not listed.
+        let a = complete_answer("Not documented.", &[], &none(), &e, "", Language::En).unwrap();
+        assert_eq!(a, "Not documented.");
     }
     #[test]
     fn missing_invented_and_out_of_scope_sources_fail_closed() {
@@ -625,21 +1008,35 @@ mod tests {
             references: vec![reference("p", "wiki"), reference("w", "work_item")],
             ..Default::default()
         };
-        // No page selected as used: the consulted pages are listed instead of withholding.
-        let a = complete_answer("No está documentado.", &[], &e, "", Language::Es).unwrap();
-        assert!(a.contains("**Páginas consultadas**\n- [Procedure]("));
-        assert!(!a.contains("**Fuentes**"));
-        assert!(
-            complete_answer("Procedimiento", &["invented".into()], &e, "", Language::Es).is_err()
+        // No page selected as used: the answer goes as written, without consulted pages.
+        assert_eq!(
+            complete_answer("No está documentado.", &[], &none(), &e, "", Language::Es).unwrap(),
+            "No está documentado."
         );
-        assert!(complete_answer("Según #42", &["p".into()], &e, "", Language::Es).is_err());
-        assert!(complete_answer("Según #99", &["p".into()], &e, "", Language::Es).is_err());
+        assert!(
+            complete_answer(
+                "Procedimiento",
+                &["invented".into()],
+                &none(),
+                &e,
+                "",
+                Language::Es
+            )
+            .is_err()
+        );
+        assert!(
+            complete_answer("Según #42", &["p".into()], &none(), &e, "", Language::Es).is_err()
+        );
+        assert!(
+            complete_answer("Según #99", &["p".into()], &none(), &e, "", Language::Es).is_err()
+        );
         assert_eq!(named_references("Según #42", &e), vec!["w".to_string()]);
         assert!(named_references("Según #99", &e).is_empty());
         assert!(
             complete_answer(
                 "https://dev.azure.com/other/Project/_workitems/edit/42",
                 &["p".into()],
+                &none(),
                 &e,
                 "",
                 Language::Es
@@ -651,6 +1048,7 @@ mod tests {
         let a = complete_answer(
             "En test: `https://api-test.example.cl/api/v1/solicitudes/crear`.",
             &["p".into()],
+            &none(),
             &e,
             evidence_text,
             Language::Es,
@@ -660,7 +1058,7 @@ mod tests {
         // Formatting right after the URL (a table cell, a color) is not part of it.
         let a = complete_answer(
             "| Ambiente | URL |\n|---|---|\n| test |https://api-test.example.cl/api/v1/solicitudes/crear|\n\n{blue:https://api-test.example.cl/api/v1/solicitudes/crear}",
-            &["p".into()],
+            &["p".into()], &none(),
             &e,
             evidence_text,
             Language::Es,
@@ -671,6 +1069,7 @@ mod tests {
             complete_answer(
                 "En test: https://api-prod.example.cl/api/v1/solicitudes/crear",
                 &["p".into()],
+                &none(),
                 &e,
                 evidence_text,
                 Language::Es
@@ -680,17 +1079,23 @@ mod tests {
         let a = complete_answer(
             "Revisar #42",
             &["p".into(), "w".into()],
+            &none(),
             &e,
             "",
             Language::Es,
         )
         .unwrap();
-        assert!(a.contains("_workitems/edit/42"));
-        assert!(a.contains("pagePath"));
+        assert_eq!(
+            a,
+            format!(
+                "Revisar [#42](https://dev.azure.com/test/Project/_workitems/edit/42)\n\nMás detalle en [Procedure]({PAGE})."
+            )
+        );
         assert!(
             complete_answer(
                 "Concreta el tema",
                 &[],
+                &none(),
                 &Evidence::default(),
                 "",
                 Language::Es
@@ -700,16 +1105,38 @@ mod tests {
         let mut bad = e.clone();
         bad.references[0].url =
             "https://dev.azure.com/other/Project/_wiki/wikis/wiki?pagePath=%2FProcedure".into();
-        assert!(complete_answer("Procedimiento", &["p".into()], &bad, "", Language::Es).is_err());
-        assert!(complete_answer("Procedimiento", &[], &bad, "", Language::Es).is_err());
+        assert!(
+            complete_answer(
+                "Procedimiento",
+                &["p".into()],
+                &none(),
+                &bad,
+                "",
+                Language::Es
+            )
+            .is_err()
+        );
+        // A reference the answer does not use never reaches it.
+        assert!(complete_answer("Procedimiento", &[], &none(), &bad, "", Language::Es).is_ok());
         bad.references[0] = reference("p", "wiki");
         bad.references[0].organization = "mailto:invalid".into();
-        assert!(complete_answer("Procedimiento", &["p".into()], &bad, "", Language::Es).is_err());
+        assert!(
+            complete_answer(
+                "Procedimiento",
+                &["p".into()],
+                &none(),
+                &bad,
+                "",
+                Language::Es
+            )
+            .is_err()
+        );
         bad.references[1].kind = "pipeline_run".into();
         assert!(
             complete_answer(
                 "Work item 42",
                 &["p".into(), "w".into()],
+                &none(),
                 &bad,
                 "",
                 Language::Es
@@ -723,6 +1150,7 @@ mod tests {
             complete_answer(
                 "Build 42",
                 &["p".into(), "w".into()],
+                &none(),
                 &bad,
                 "",
                 Language::Es
@@ -751,22 +1179,29 @@ mod tests {
         let a = complete_answer(
             "Stage Deploy ejecutado en #40",
             &["stage:run:40".into()],
+            &none(),
             &e,
             "",
             Language::Es,
         )
         .unwrap();
-        assert!(a.contains("buildId=40"));
-        assert!(!a.contains("definitionId"));
+        assert_eq!(
+            a,
+            "[Stage Deploy](https://dev.azure.com/test/Project/_build/results?buildId=40) ejecutado en #40"
+        );
         let b = complete_answer(
             "Stage Deploy configurado",
             &["stage:config:5:2".into()],
+            &none(),
             &e,
             "",
             Language::Es,
         )
         .unwrap();
-        assert!(b.contains("configured in release #5"));
+        assert_eq!(
+            b,
+            "[Stage Deploy](https://dev.azure.com/test/Project/_release?definitionId=5&_a=definition-tasks) configurado"
+        );
     }
     #[test]
     fn redacted_names_become_unavailable_and_message_authors_stay_attached() {
