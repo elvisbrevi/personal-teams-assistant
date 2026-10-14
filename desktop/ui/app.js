@@ -788,6 +788,20 @@ function rememberedField(reference) {
   try { return JSON.parse(localStorage.getItem(`pta-field:${reference}`) ?? 'null') ?? undefined; } catch { return undefined; }
 }
 
+const toHtml = text => text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\n/g, '<br>');
+const fromHtml = html => String(html).replace(/<br\s*\/?>/gi, '\n').replace(/<\/(p|div|li)>/gi, '\n').replace(/<[^>]+>/g, '')
+  .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').trim();
+/** A starting value from the activity for a field that asks for a link or evidence; the user edits it. */
+function suggestedValue(field, entry) {
+  const label = `${field.name} ${field.reference}`;
+  const azure = entry.activities.filter(a => a.url.startsWith('https://dev.azure.com/'));
+  if (/url|link|enlace/i.test(label)) {
+    return (azure.find(a => /\/commit\/|pullrequest/i.test(a.url)) || azure[0])?.url;
+  }
+  if (/evidenc/i.test(label)) return entry.activities.map(a => `- ${a.label}`).join('\n') || undefined;
+  return undefined;
+}
+
 /** One input per field Azure DevOps requires, typed from its metadata: a list of its allowed values,
  * a number, a date or text. With `keep`, what the user already typed stays. */
 function renderRequired(entry, keep) {
@@ -798,7 +812,7 @@ function renderRequired(entry, keep) {
     const allowed = field.allowed?.length ? field.allowed : kind === 'boolean' ? [true, false] : [];
     // A list remembers the last choice (an activity type, a month); free values start empty.
     const current = typed.get(field.reference) ?? entry.fields[field.reference]
-      ?? (allowed.length ? rememberedField(field.reference) : undefined) ?? (field.default || undefined);
+      ?? (allowed.length ? rememberedField(field.reference) : suggestedValue(field, entry)) ?? (field.default || undefined);
     let input, read;
     if (allowed.length) {
       input = el('select', { id }, el('option', { value: '', textContent: t('Choose…') }),
@@ -809,7 +823,11 @@ function renderRequired(entry, keep) {
     } else if (kind === 'datetime') {
       input = el('input', { id, type: 'date', value: typeof current === 'string' ? current.slice(0, 10) : '' });
       read = () => input.value || undefined;
-    } else if (kind === 'html' || kind === 'plaintext') {
+    } else if (kind === 'html') {
+      // Azure DevOps keeps HTML: lines stay lines and the text is escaped.
+      input = el('textarea', { id, rows: 4, value: current === undefined ? '' : fromHtml(current) });
+      read = () => input.value.trim() ? toHtml(input.value.trim()) : undefined;
+    } else if (kind === 'plaintext') {
       input = el('textarea', { id, rows: 3, value: current ?? '' });
       read = () => input.value.trim() || undefined;
     } else {

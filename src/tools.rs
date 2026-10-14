@@ -194,13 +194,14 @@ pub trait ReadOnlyTool: Send + Sync {
     ) -> Result<crate::ado::registration::TaskSchema> {
         anyhow::bail!("task field reads unsupported")
     }
+    /// What Azure DevOps rules still ask for the completed task, without writing.
     async fn validate_task(
         &self,
         _spec: &ToolSpec,
         _parent: &crate::ado::link::Target,
         _task: &crate::ado::registration::TaskFields,
         _activities: &[crate::ado::link::Linkable],
-    ) -> Result<bool> {
+    ) -> Result<crate::ado::registration::Check> {
         anyhow::bail!("task validation unsupported")
     }
     async fn register_task(
@@ -209,7 +210,8 @@ pub trait ReadOnlyTool: Send + Sync {
         _parent: &crate::ado::link::Target,
         _task: &crate::ado::registration::TaskFields,
         _activities: &[crate::ado::link::Linkable],
-    ) -> Result<(crate::ado::link::LinkStatus, Option<u64>)> {
+        _check: &crate::ado::registration::Check,
+    ) -> Result<crate::ado::registration::Written> {
         anyhow::bail!("task registration unsupported")
     }
     /// Whether the source can link work to work items (it has a write credential).
@@ -377,22 +379,20 @@ impl ReadOnlyTool for Tools {
         parent: &crate::ado::link::Target,
         task: &crate::ado::registration::TaskFields,
         activities: &[crate::ado::link::Linkable],
-    ) -> Result<bool> {
+    ) -> Result<crate::ado::registration::Check> {
         let (catalog, key) = self.registration_catalog(spec, true)?;
-        let (status, _) = tokio::time::timeout(
-            std::time::Duration::from_secs(30),
-            crate::ado::registration::write_task(
+        tokio::time::timeout(
+            std::time::Duration::from_secs(45),
+            crate::ado::registration::check_task(
                 &self.client,
                 &key,
                 &catalog,
                 parent,
                 task,
                 activities,
-                true,
             ),
         )
-        .await??;
-        Ok(status == crate::ado::link::LinkStatus::Linked)
+        .await?
     }
     async fn register_task(
         &self,
@@ -400,10 +400,11 @@ impl ReadOnlyTool for Tools {
         parent: &crate::ado::link::Target,
         task: &crate::ado::registration::TaskFields,
         activities: &[crate::ado::link::Linkable],
-    ) -> Result<(crate::ado::link::LinkStatus, Option<u64>)> {
+        check: &crate::ado::registration::Check,
+    ) -> Result<crate::ado::registration::Written> {
         let (catalog, key) = self.registration_catalog(spec, true)?;
         tokio::time::timeout(
-            std::time::Duration::from_secs(30),
+            std::time::Duration::from_secs(45),
             crate::ado::registration::write_task(
                 &self.client,
                 &key,
@@ -411,11 +412,15 @@ impl ReadOnlyTool for Tools {
                 parent,
                 task,
                 activities,
-                false,
+                check,
             ),
         )
         .await
-        .unwrap_or(Ok((crate::ado::link::LinkStatus::Uncertain, None)))
+        .unwrap_or(Ok(crate::ado::registration::Written {
+            status: crate::ado::link::LinkStatus::Uncertain,
+            id: None,
+            detail: String::new(),
+        }))
     }
     async fn execute(&self, spec: &ToolSpec, question: &str, conversation: &str) -> Result<String> {
         spec.validate()?;

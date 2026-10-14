@@ -2,7 +2,7 @@ use super::*;
 use crate::{
     ado::{
         link::LinkOffer,
-        registration::{Field, TaskSchema},
+        registration::{Check, Field, TaskSchema, Written},
     },
     config::Language,
     knowledge::Resource,
@@ -10,7 +10,7 @@ use crate::{
 };
 use async_trait::async_trait;
 use serde_json::json;
-use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
 
 fn parent() -> Target {
     Target {
@@ -35,6 +35,7 @@ fn schema(required: bool) -> TaskSchema {
         "System.Tags",
         "Microsoft.VSTS.Scheduling.CompletedWork",
         "Microsoft.VSTS.Scheduling.RemainingWork",
+        "Custom.Evidence",
     ]
     .into_iter()
     .map(|name| Field {
@@ -54,6 +55,7 @@ fn schema(required: bool) -> TaskSchema {
     TaskSchema {
         fields,
         completed_states: vec!["Done".into()],
+        initial_states: Vec::new(),
     }
 }
 struct Model;
@@ -105,6 +107,10 @@ struct TestTools {
     daily_error: std::sync::Mutex<Option<String>>,
     review_error: std::sync::Mutex<Option<String>>,
     review_days: AtomicI64,
+    /// The process requires evidence to complete tasks it creates in «New».
+    done_rules: AtomicBool,
+    /// The move to the completed state is rejected after the creation.
+    stuck: AtomicBool,
 }
 #[async_trait]
 impl ReadOnlyTool for TestTools {
@@ -206,10 +212,29 @@ impl ReadOnlyTool for TestTools {
         &self,
         _: &ToolSpec,
         _: &Target,
-        _: &TaskFields,
+        task: &TaskFields,
         _: &[Linkable],
-    ) -> Result<bool> {
-        Ok(true)
+    ) -> Result<Check> {
+        // A process that creates tasks in «New» and requires evidence to complete them.
+        let rules = self.done_rules.load(Ordering::SeqCst);
+        Ok(if rules && !task.extra.contains_key("Custom.Evidence") {
+            Check {
+                missing: vec![Field {
+                    name: "Evidence".into(),
+                    reference: "Custom.Evidence".into(),
+                    required: true,
+                    kind: "html".into(),
+                    ..Default::default()
+                }],
+                through: Some("New".into()),
+                ..Default::default()
+            }
+        } else {
+            Check {
+                through: rules.then(|| "New".into()),
+                ..Default::default()
+            }
+        })
     }
     async fn register_task(
         &self,
@@ -217,7 +242,9 @@ impl ReadOnlyTool for TestTools {
         _: &Target,
         task: &TaskFields,
         activities: &[Linkable],
-    ) -> Result<(LinkStatus, Option<u64>)> {
+        check: &Check,
+    ) -> Result<Written> {
+        assert!(check.missing.is_empty() && check.errors.is_empty());
         assert_eq!(task.state, "Done");
         assert_eq!(task.hours, 1.5);
         assert!(
@@ -229,10 +256,25 @@ impl ReadOnlyTool for TestTools {
             .unwrap()
             .extend_from_slice(activities);
         let index = self.writes.fetch_add(1, Ordering::SeqCst);
+        let id = Some(501 + index as u64);
         Ok(if self.uncertain {
-            (LinkStatus::Uncertain, None)
+            Written {
+                status: LinkStatus::Uncertain,
+                id: None,
+                detail: String::new(),
+            }
+        } else if self.stuck.load(Ordering::SeqCst) {
+            Written {
+                status: LinkStatus::Uncertain,
+                id,
+                detail: "TF401320: Rule Error for field URL Commit.".into(),
+            }
         } else {
-            (LinkStatus::Linked, Some(501 + index as u64))
+            Written {
+                status: LinkStatus::Linked,
+                id,
+                detail: String::new(),
+            }
         })
     }
 }
@@ -264,6 +306,8 @@ fn recorder(
         daily_error: std::sync::Mutex::new(None),
         review_error: std::sync::Mutex::new(None),
         review_days: AtomicI64::new(0),
+        done_rules: AtomicBool::new(false),
+        stuck: AtomicBool::new(false),
     });
     let map = KnowledgeMap {
         repositories: BTreeMap::new(),
@@ -734,6 +778,71 @@ async fn required_fields_are_learned_shared_and_then_filled() {
     let fields = BTreeMap::from([("Custom.Activity".into(), json!("Documentation"))]);
     let done = r.resolve(&pending[0].id, create(fields)).await.unwrap();
     assert_eq!(done.state, "done", "{}", done.issue);
+    assert_eq!(tools.writes.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn completed_state_rules_are_asked_for_and_a_stuck_move_is_reported_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut r, tools) = recorder(dir.path(), 0., false, false, true);
+    r.config.activity_registration.auto_register = false;
+    tools.done_rules.store(true, Ordering::SeqCst);
+    r.run("first", yesterday(), "").await.unwrap();
+    let pending = r.db.pending().unwrap();
+    let create = |fields| Resolution {
+        action: "create".into(),
+        parent: Some(40),
+        title: Some("Diagnose the payment query".into()),
+        description: Some("Diagnosed the production failure.".into()),
+        hours: Some(1.5),
+        context: String::new(),
+        fields,
+    };
+    // The rules of the completed state become inputs before anything is written.
+    let held = r
+        .resolve(&pending[0].id, create(BTreeMap::new()))
+        .await
+        .unwrap();
+    assert_eq!(held.state, "pending");
+    assert!(
+        held.issue.contains("Para dejar la tarea en Done") && held.issue.contains("Evidence"),
+        "{}",
+        held.issue
+    );
+    assert_eq!(held.required[0].reference, "Custom.Evidence");
+    assert_eq!(
+        r.db.entry(&pending[1].id).unwrap().unwrap().required,
+        held.required
+    );
+    assert_eq!(tools.writes.load(Ordering::SeqCst), 0);
+
+    // Created in «New» but not moved to Done: reported with its link, never retried.
+    tools.stuck.store(true, Ordering::SeqCst);
+    let fields = BTreeMap::from([(
+        "Custom.Evidence".into(),
+        json!("Reported the Consul 403 to support."),
+    )]);
+    let stuck = r.resolve(&pending[0].id, create(fields)).await.unwrap();
+    assert_eq!(stuck.state, "uncertain");
+    assert_eq!(stuck.task_id, Some(501));
+    assert!(
+        stuck
+            .task_url
+            .as_deref()
+            .unwrap()
+            .ends_with("/_workitems/edit/501")
+    );
+    assert!(
+        stuck.issue.contains("Se creó la tarea #501 en «New»")
+            && stuck.issue.contains("URL Commit"),
+        "{}",
+        stuck.issue
+    );
+    assert!(
+        r.resolve(&pending[0].id, create(BTreeMap::new()))
+            .await
+            .is_err()
+    );
     assert_eq!(tools.writes.load(Ordering::SeqCst), 1);
 }
 
