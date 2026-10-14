@@ -72,12 +72,15 @@ fn time(value: &str) -> Result<NaiveTime> {
     ensure!(value.len() == 5, "time must be HH:MM");
     Ok(NaiveTime::parse_from_str(value, "%H:%M")?)
 }
+/// An Azure DevOps field reference name. Inherited processes may name custom fields with a
+/// GUID (`Custom.b505c83e-3745-…`), so hyphens are allowed after the first character.
 pub fn valid_field(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= 150
+        && name.starts_with(|c: char| c.is_ascii_alphanumeric())
         && name
             .chars()
-            .all(|c| c.is_ascii_alphanumeric() || "._".contains(c))
+            .all(|c| c.is_ascii_alphanumeric() || "._-".contains(c))
 }
 pub fn validate_fields(fields: &BTreeMap<String, Value>) -> Result<()> {
     ensure!(fields.len() <= 30, "too many task fields");
