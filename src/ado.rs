@@ -42,7 +42,7 @@ async fn cached_read(
     Ok(value)
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Catalog {
     sources: Vec<Source>,
@@ -1611,13 +1611,36 @@ pub async fn status(
     question: &str,
     store: Arc<Store>,
 ) -> Result<Evidence> {
-    let catalog = Catalog::parse(catalog_text)?.own(client, key).await?;
+    let configured = Catalog::parse(catalog_text)?;
+    let catalog = configured.clone().own(client, key).await?;
     let days = recent_window(question);
     let since = Utc::now() - Duration::days(days);
     let mut sections = Vec::new();
     let mut references = Vec::new();
     let mut blocked = false;
     let mut partial_projects = 0;
+    // A pull request the request names is read by ID, so the answer can link it.
+    let pull_requests = progress::requested_pull_requests(question);
+    let mut pull_request_blocks = Vec::new();
+    let mut pull_requests_found = BTreeSet::new();
+    let mut pull_requests_unread = false;
+    for id in &pull_requests {
+        for source in &configured.sources {
+            match progress::pull_request(client, key, source, *id).await {
+                Ok(Some((text, reference))) => {
+                    pull_requests_found.insert(*id);
+                    pull_request_blocks.push(Block {
+                        text,
+                        source_ids: vec![reference.id.clone()],
+                    });
+                    references.push(reference);
+                    break;
+                }
+                Ok(None) => {}
+                Err(_) => pull_requests_unread = true,
+            }
+        }
+    }
     // A work item the request names is read first and directly, whoever holds it now.
     let requested = progress::requested(question);
     let mut requested_blocks = Vec::new();
@@ -1727,8 +1750,29 @@ pub async fn status(
             missing.join(", ")
         ));
     }
-    partial_projects += usize::from(requested_unread);
+    for block in &pull_request_blocks {
+        output.push_str(&block.text);
+        output.push('\n');
+    }
+    let missing: Vec<String> = pull_requests
+        .iter()
+        .filter(|id| !pull_requests_found.contains(*id))
+        .map(|id| format!("PR !{id}"))
+        .collect();
+    if !missing.is_empty() {
+        output.push_str(&format!(
+            "Requested pull request not found in the projects in scope{}: {}.\n",
+            if pull_requests_unread {
+                " (a read failed)"
+            } else {
+                ""
+            },
+            missing.join(", ")
+        ));
+    }
+    partial_projects += usize::from(requested_unread || pull_requests_unread);
     let mut blocks = requested_blocks;
+    blocks.extend(pull_request_blocks);
     if sections.is_empty() {
         output.push_str("No recent own activity could be verified in the projects read.\n");
     } else {
@@ -1777,6 +1821,7 @@ pub async fn status(
             .filter(|l| {
                 l.starts_with("Impediments:")
                     || l.starts_with("Requested work item not found")
+                    || l.starts_with("Requested pull request not found")
                     || l.starts_with("Partial coverage:")
                     || l.starts_with("Azure DevOps activity")
                     || l.starts_with("No recent own activity")

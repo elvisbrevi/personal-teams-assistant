@@ -63,6 +63,13 @@ production items in the answer, describes a named HU only when you took part in
 it, never looks back more than five weeks, and adds the work recorded in the
 Activities section, by day, to status answers and activity reviews.
 
+Version 0.7.15 drops the «Fuentes» and «Páginas consultadas» sections: each work
+item, pull request, pipeline, stage or Wiki page is linked on the words of the
+answer that name it («[#26477 — PR Pipeline Transversal](…)», «[PR !4848](…)»),
+and a pull request named in a status question is read so it can be linked. The
+full list of cited references and Wiki pages read stays in the message history
+(Messages tab and `pta audit show`).
+
 Version 0.7.12 reviews explicitly mentioned activity even when its artifacts have
 a different date. Such work stays pending until you explain why it belongs to the
 selected day, through the GUI or `date_attribution` in the CLI. Existing task links

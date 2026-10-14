@@ -1130,6 +1130,19 @@ function messageField(container, label, text, pre = false) {
   container.append(el('div', { class: 'field-block' }, el('strong', { textContent: label }), body));
 }
 
+/** What the answer cited and the Wiki pages it read without citing: the answer links them in
+ *  its text, and this record keeps the full list. */
+function referencesField(container, audit) {
+  const cited = new Set(audit.used_sources || []);
+  const seen = new Set();
+  const once = ref => !seen.has(ref.url) && seen.add(ref.url);
+  const used = (audit.references || []).filter(ref => cited.has(ref.id) && once(ref));
+  const pages = (audit.references || []).filter(ref => ref.kind === 'wiki' && !cited.has(ref.id) && once(ref));
+  const list = refs => el('ul', {}, ...refs.map(ref => el('li', {}, link(ref.label || ref.id, ref.url))));
+  if (used.length) container.append(el('div', { class: 'field-block' }, el('strong', { textContent: t('Cited references') }), list(used)));
+  if (pages.length) container.append(el('div', { class: 'field-block' }, el('strong', { textContent: t('Wiki pages read, not cited') }), list(pages)));
+}
+
 function matchesFilter(row, filter) {
   const [, tone] = messageState(row);
   return filter === 'all' || (filter === 'sent' && tone === 'ok')
@@ -1226,6 +1239,7 @@ function renderMessages() {
     messageField(body, t('Outcome'), reasonText(audit.reason));
     if (row.status === 'sent') messageField(body, t('Answer sent'), audit.sent || audit.proposed, 'markdown');
     else messageField(body, row.status === 'dry_run' ? t('Proposal (observation mode)') : audit.reason === 'draft_ready' ? t('Improved answer (not sent)') : t('Proposed answer (not sent)'), audit.proposed, 'markdown');
+    referencesField(body, audit);
     if (audit.refinement) messageField(body, t('Your context for the assistant'), audit.refinement, true);
     if (row.status === 'refining') messageField(body, t('Improving'), t('The assistant is rewriting the answer with your context; it will not be sent until you send it.'));
     if (unsentDraft(row)) body.append(draftActions(row));
