@@ -43,6 +43,7 @@ cargo clippy --all-targets --no-default-features -- -D warnings
 cargo test
 cargo test --no-default-features
 bun build desktop/ui/app.js --no-bundle --outfile /tmp/app-check.js   # if the GUI changed
+node --test scripts/test-activity-ui.cjs                            # if the GUI changed
 ```
 
 Update the architecture and the skill when behavior, commands or schemas change.

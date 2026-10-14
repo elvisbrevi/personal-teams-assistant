@@ -307,6 +307,46 @@ async fn registration_uses_two_weeks_of_context_but_only_records_the_selected_da
     assert_eq!(tools.writes.load(Ordering::SeqCst), 1);
 }
 
+#[test]
+fn unfinished_run_has_no_summary_before_and_after_recovery() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("activity.db");
+    let db = store::Database::open(&path).unwrap();
+    let interrupted = db.claim_run(None, "2026-10-13").unwrap().unwrap();
+    db.stage_run(&interrupted, "Planning tasks with the configured agents")
+        .unwrap();
+    let running = &db.runs(Some("2026-10-13")).unwrap()[0];
+    assert_eq!(running["status"], "running");
+    assert_eq!(running["summary"], Value::Null);
+    drop(db);
+
+    let db = store::Database::open(&path).unwrap();
+    db.recover().unwrap();
+    let recovered = &db.runs(None).unwrap()[0];
+    assert_eq!(recovered["status"], "interrupted");
+    assert_eq!(recovered["summary"], Value::Null);
+    assert_eq!(
+        recovered["diagnostics"]["stage"],
+        "Planning tasks with the configured agents"
+    );
+
+    let completed = db.claim_run(None, "2026-10-13").unwrap().unwrap();
+    let summary = Summary {
+        recorded_hours: 1.5,
+        remaining_hours: 7.5,
+        pending: 3,
+        ..Default::default()
+    };
+    db.finish_run(&completed, Some(&summary), "").unwrap();
+    let finished = &db.runs(None).unwrap()[0];
+    assert_eq!(finished["status"], "completed");
+    assert_eq!(finished["summary"], serde_json::to_value(summary).unwrap());
+
+    let failed = db.claim_run(None, "2026-10-13").unwrap().unwrap();
+    db.finish_run(&failed, None, "read failed").unwrap();
+    assert_eq!(db.runs(None).unwrap()[0]["summary"], Value::Null);
+}
+
 #[tokio::test]
 async fn failed_daily_read_keeps_stage_error_and_context_after_reopening() {
     let dir = tempfile::tempdir().unwrap();

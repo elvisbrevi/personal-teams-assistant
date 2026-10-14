@@ -105,7 +105,17 @@ impl Database {
                 r.get::<_, String>(5)?,
             ))
         })?;
-        rows.map(|r|{let (id,day,status,summary,at,diagnostics)=r?;Ok(json!({"id":id,"day":day,"status":status,"summary":serde_json::from_str::<Value>(&summary)?,"created_at":at,"diagnostics":serde_json::from_str::<Value>(&diagnostics)?}))}).collect()
+        rows.map(|r| {
+            let (id, day, status, summary, at, diagnostics) = r?;
+            let summary = serde_json::from_str::<Value>(&summary)?;
+            // The stored empty default means no result yet, including recovered runs.
+            let summary = if summary == json!({}) {
+                Value::Null
+            } else {
+                summary
+            };
+            Ok(json!({"id":id,"day":day,"status":status,"summary":summary,"created_at":at,"diagnostics":serde_json::from_str::<Value>(&diagnostics)?}))
+        }).collect()
     }
     pub fn claimed(&self, key: &str) -> Result<bool> {
         Ok(self.db.lock().unwrap().query_row(
