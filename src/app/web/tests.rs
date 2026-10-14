@@ -183,6 +183,7 @@ async fn access_bootstraps_the_existing_profile_without_a_password_form() {
         "/login",
         "/api/session",
         "/app.js",
+        "/i18n.js",
         "/transport.js",
         "/style.css",
     ] {

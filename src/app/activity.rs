@@ -144,10 +144,12 @@ pub(super) async fn run(
     let mut task = host.state.activity_task.lock().await;
     ensure!(
         task.as_ref().is_none_or(|t| t.is_finished()),
-        "an activity registration is already running"
+        Rejected::Conflict("An activity operation is already running. Wait for it to finish.")
     );
     let recorder = recorder(&host.state).await?;
-    crate::activity::validate_context(context, &recorder.redactor)?;
+    crate::activity::validate_context(context, &recorder.redactor).map_err(|_| {
+        Rejected::Input("The context must be at most 6000 bytes and contain no sensitive data.")
+    })?;
     let day = day(&host.state, date)?;
     let today = recorder
         .config
@@ -156,15 +158,19 @@ pub(super) async fn run(
         .date_naive();
     ensure!(
         day <= today && (today - day).num_days() < crate::ado::registration::LOOKBACK_DAYS,
-        "choose a day within the last 14 days"
+        Rejected::Input("Choose a day within the last 14 days.")
     );
     let Some(id) = recorder.db.claim_run(slot, &day.to_string())? else {
         return Ok(json!({"already_run":true}));
     };
     // Failure to display an OS notification never prevents an already authorized run.
+    let language = recorder.config.llm.language;
     let _ = host.shell.notify_activity(
-        "Registering work",
-        &format!("Reviewing your activity for {day}."),
+        &language.say("Registering work", "Registrando trabajo"),
+        &language.say(
+            format!("Reviewing your activity for {day}."),
+            format!("Revisando tu actividad del {day}."),
+        ),
         None,
     );
     let h = host.clone();
@@ -174,25 +180,37 @@ pub(super) async fn run(
         let result = recorder.run(&run_id, day, &context).await;
         let (title, body) = match result {
             Ok(summary) if summary.pending > 0 => (
-                "Activity details needed",
-                format!(
-                    "{} activities need context or an HU. Open Activity registration to review them.",
-                    summary.pending
+                language.say("Activity details needed", "Faltan detalles de actividades"),
+                language.say(
+                    format!(
+                        "{} activities need context or an HU. Open Activities to review them.",
+                        summary.pending
+                    ),
+                    format!(
+                        "{} actividades necesitan contexto o una HU. Abre Actividades para revisarlas.",
+                        summary.pending
+                    ),
                 ),
             ),
             Ok(summary) => (
-                "Activity registration finished",
-                format!(
-                    "{} tasks created; {:.2} hours remain for {day}.",
-                    summary.created, summary.remaining_hours
+                language.say("Activity registration finished", "Registro de actividades terminado"),
+                language.say(
+                    format!(
+                        "{} tasks created; {:.2} hours remain for {day}.",
+                        summary.created, summary.remaining_hours
+                    ),
+                    format!(
+                        "{} tareas creadas; quedan {:.2} horas para el {day}.",
+                        summary.created, summary.remaining_hours
+                    ),
                 ),
             ),
             Err(error) => (
-                "Activity registration failed",
+                language.say("Activity registration failed", "El registro de actividades falló"),
                 recorder.error_detail(&error),
             ),
         };
-        let _ = h.shell.notify_activity(title, &body, None);
+        let _ = h.shell.notify_activity(&title, &body, None);
     }));
     Ok(json!({"id":id,"day":day.to_string(),"running":true}))
 }
@@ -201,23 +219,39 @@ pub(super) async fn resolve(host: &Arc<Host>, id: String, resolution: Resolution
     let mut task = host.state.activity_task.lock().await;
     ensure!(
         task.as_ref().is_none_or(|t| t.is_finished()),
-        "wait for the current activity operation"
+        Rejected::Conflict("An activity operation is already running. Wait for it to finish.")
     );
     let recorder = recorder(&host.state).await?;
-    let entry = recorder.db.entry(&id)?.context("activity not found")?;
-    resolution.validate(&recorder.redactor)?;
+    let entry = recorder.db.entry(&id)?.ok_or(Rejected::Input(
+        "The activity was not found. Refresh the list.",
+    ))?;
+    resolution.validate(&recorder.redactor).map_err(|_| {
+        Rejected::Input(
+            "Check the context and additional fields: at most 6000 bytes of context, scalar field values and no sensitive data.",
+        )
+    })?;
     ensure!(
         entry.state == "pending",
-        "refresh: this activity is no longer pending"
+        Rejected::Conflict("This activity is no longer pending. Refresh the list.")
     );
     let h = host.clone();
     let entry_id = id.clone();
+    let language = recorder.config.llm.language;
     *task = Some(tokio::spawn(async move {
         let result = recorder.resolve(&entry_id, resolution).await;
         let body = match result {
-            Ok(e) if e.state == "done" => "Task created in Done.".into(),
-            Ok(e) if e.state == "dismissed" => "Activity dismissed.".into(),
-            Ok(_) => "Review the updated suggestion and any required fields.".into(),
+            Ok(e) if e.state == "done" => language.say(
+                format!("Task #{} created in Done.", e.task_id.unwrap_or_default()),
+                format!("Tarea #{} creada en Done.", e.task_id.unwrap_or_default()),
+            ),
+            Ok(e) if e.state == "dismissed" => {
+                language.say("Activity dismissed.", "Actividad descartada.")
+            }
+            Ok(e) if !e.issue.is_empty() => e.issue,
+            Ok(_) => language.say(
+                "Review the updated suggestion and any required fields.",
+                "Revisa la sugerencia actualizada y los campos obligatorios.",
+            ),
             Err(error) => {
                 let detail = recorder.error_detail(&error);
                 if let Ok(Some(mut entry)) = recorder.db.entry(&entry_id)
@@ -231,9 +265,11 @@ pub(super) async fn resolve(host: &Arc<Host>, id: String, resolution: Resolution
                 detail
             }
         };
-        let _ = h
-            .shell
-            .notify_activity("Activity registration", &body, Some(&entry_id));
+        let _ = h.shell.notify_activity(
+            &language.say("Activities", "Actividades"),
+            &body,
+            Some(&entry_id),
+        );
     }));
     Ok(json!({"id":id,"running":true}))
 }

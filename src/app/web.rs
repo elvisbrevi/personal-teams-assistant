@@ -330,6 +330,7 @@ fn router(portal: Arc<Portal>) -> Router {
             }),
         )
         .route("/app.js", get(app_js))
+        .route("/i18n.js", get(i18n_js))
         .route("/transport.js", get(transport_js))
         .route("/api/session", get(session))
         .route("/api/logout", post(logout))
@@ -420,6 +421,19 @@ async fn app_js(
     asset(
         "text/javascript; charset=utf-8",
         include_str!("../../desktop/ui/app.js"),
+    )
+}
+async fn i18n_js(
+    State(portal): State<Arc<Portal>>,
+    Extension(identity): Extension<access::Verified>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(status) = portal.authenticate(&headers, &identity, false).await {
+        return status.into_response();
+    }
+    asset(
+        "text/javascript; charset=utf-8",
+        include_str!("../../desktop/ui/i18n.js"),
     )
 }
 async fn transport_js(

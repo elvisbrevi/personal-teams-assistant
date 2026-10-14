@@ -67,7 +67,8 @@ pub struct Llm {
     pub provider: String,
     pub model: String,
     pub style: String,
-    /// Language of everything sent to Teams: the model's answer and the app's fixed texts.
+    /// Language of what the user reads: the app's interface, Teams replies and fixed texts, and
+    /// the activity drafts and notices written for them.
     #[serde(default)]
     pub language: Language,
     /// Providers in priority order. Every model call starts again from the first enabled one
@@ -75,14 +76,24 @@ pub struct Llm {
     #[serde(default)]
     pub chain: Vec<LlmChoice>,
 }
-/// Language of the replies and notices the assistant writes in Teams. The app's own interface
-/// and audit log are in English.
+/// Language of what the user reads: the app's interface (translated from its English source),
+/// Teams replies and notices, and activity drafts. The CLI, audit log and diagnostics stay in
+/// English.
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Language {
     #[default]
     Es,
     En,
+}
+impl Language {
+    /// The text written for the user in this language.
+    pub fn say(self, english: impl Into<String>, spanish: impl Into<String>) -> String {
+        match self {
+            Self::Es => spanish.into(),
+            Self::En => english.into(),
+        }
+    }
 }
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]

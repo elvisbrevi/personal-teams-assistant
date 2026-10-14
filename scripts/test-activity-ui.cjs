@@ -5,8 +5,15 @@ const test = require('node:test');
 const vm = require('node:vm');
 
 const source = fs.readFileSync(path.join(__dirname, '../desktop/ui/app.js'), 'utf8');
+const i18n = fs.readFileSync(path.join(__dirname, '../desktop/ui/i18n.js'), 'utf8');
 const invokeSource = source.slice(0, source.indexOf('\nconst $ ='));
-const renderSource = source.slice(source.indexOf('function activityFailureHelp('), source.indexOf('\nfunction renderRegistrationSettings('));
+const renderSource = source.slice(source.indexOf('const activityStates = {'), source.indexOf('\nfunction renderRegistrationSettings('));
+/** A context with the interface strings in `language`, as a browser that stored it would load them. */
+function localized(language, extra) {
+  const context = vm.createContext({ localStorage: { getItem: () => language, setItem() {} }, navigator: { language: 'en-US' }, Intl, ...extra });
+  vm.runInContext(i18n, context);
+  return context;
+}
 const entry = { id: '11111111-1111-4111-8111-111111111111' };
 
 test('browser review opens the selected activity without a native window request', async () => {
@@ -52,7 +59,7 @@ test('native review still delegates to the host window', async () => {
 });
 
 test('run cards render absent results and completed effort totals', () => {
-  const context = vm.createContext({
+  const context = localized('en', {
     el: (tag, props, ...children) => ({ tag, props, children }), badge: () => ({}),
   });
   vm.runInContext(renderSource, context);
@@ -66,4 +73,19 @@ test('run cards render absent results and completed effort totals', () => {
     if (summary) assert.match(JSON.stringify(card), /1\.50 hours accounted for.*7\.50 hours remaining/);
     else assert.doesNotMatch(JSON.stringify(card), /hours accounted for/);
   }
+});
+
+test('run cards follow the interface language', () => {
+  const context = localized('es', {
+    el: (tag, props, ...children) => ({ tag, props, children }), badge: (text, tone) => ({ text, tone }),
+  });
+  vm.runInContext(renderSource, context);
+  context.run = { id: entry.id, day: '2026-10-13', created_at: 1791931969, status: 'completed',
+    summary: { created: 1, pending: 2, recorded_hours: 1.5, remaining_hours: 7.5, warnings: ['Source wiki has incomplete coverage.'] },
+    diagnostics: { stage: 'Saving review results', finished_at: 1791932000 } };
+  const card = JSON.stringify(vm.runInContext('renderActivityRun(run)', context));
+  assert.match(card, /1,50 horas contabilizadas · faltan 7,50 horas/);
+  assert.match(card, /Guardando los resultados de la revisión/);
+  assert.match(card, /La fuente wiki tiene cobertura incompleta\./);
+  assert.match(card, /"text":"Completada","tone":"ok"/);
 });
