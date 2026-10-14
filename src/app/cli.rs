@@ -58,6 +58,9 @@ Language models
 Messages and diagnostics
   audit list [--limit N] [--content]   Received messages, their outcome and the step log.
   audit show RESOURCE [--content]      One message; --content includes question and answer.
+  answer refine RESOURCE [--context-stdin]  Rewrites an unsent answer (withheld or observed) with your
+                           context from stdin (up to 4000 characters), in the background; it is not sent.
+  answer send RESOURCE     Sends an unsent answer once, after your review (never retried).
   logs [--limit N]         Host events.
   chat | test simulate     Real pipeline with a SimulationRequest JSON on stdin; never sends to Teams.
   test connectivity        Reads the connected Microsoft account (without sending).
@@ -265,6 +268,7 @@ fn validate_args(args: &[String]) -> Result<()> {
             ]
             | ["audit", "list"]
             | ["audit", "show", _]
+            | ["answer", "refine" | "send", _]
     );
     ensure!(valid, "unknown command or invalid argument count");
     for (flag, allowed) in [
@@ -278,7 +282,8 @@ fn validate_args(args: &[String]) -> Result<()> {
         ("--content", p[0] == "audit"),
         (
             "--context-stdin",
-            p.as_slice().starts_with(&["activity", "run"]),
+            p.as_slice().starts_with(&["activity", "run"])
+                || p.as_slice().starts_with(&["answer", "refine"]),
         ),
         (
             "--current-profile",
@@ -382,6 +387,26 @@ async fn execute(mut args: Vec<String>) -> Result<Reply> {
             _ => json!({}),
         };
         return call(method, values, None, true).await;
+    }
+    if command == "answer" {
+        let resource = positional(&args, 2)?;
+        return match action {
+            "refine" => {
+                let context = if args.iter().any(|a| a == "--context-stdin") {
+                    stdin_text()?
+                } else {
+                    String::new()
+                };
+                call(
+                    "answer_refine",
+                    json!({"resource":resource,"context":context}),
+                    None,
+                    true,
+                )
+                .await
+            }
+            _ => call("answer_send", json!({"resource":resource}), None, true).await,
+        };
     }
     if command == "doctor" && args.iter().any(|a| a == "--offline") {
         let dir = control::profile_dir()?;
@@ -1035,6 +1060,8 @@ mod help_tests {
             &["tunnel", "status"],
             &["test", "providers"],
             &["audit", "list"],
+            &["answer", "refine", "resource"],
+            &["answer", "send", "resource"],
         ];
         for command in commands {
             let args: Vec<String> = command.iter().map(|a| a.to_string()).collect();
@@ -1057,6 +1084,7 @@ mod help_tests {
         for command in [
             vec!["activity", "run", "--context-stdin"],
             vec!["activity", "run", "2026-10-13", "--context-stdin"],
+            vec!["answer", "refine", "chats/x/messages/y", "--context-stdin"],
         ] {
             assert!(
                 validate_args(&command.into_iter().map(String::from).collect::<Vec<_>>()).is_ok()
@@ -1065,6 +1093,7 @@ mod help_tests {
         for command in [
             vec!["activity", "history", "--context-stdin"],
             vec!["activity", "run", "--context", "prompt"],
+            vec!["answer", "send", "chats/x/messages/y", "--context-stdin"],
         ] {
             assert!(
                 validate_args(&command.into_iter().map(String::from).collect::<Vec<_>>()).is_err()

@@ -51,6 +51,8 @@ pub async fn providers(config: &Config) -> Result<Value> {
                         history: "",
                         review: false,
                         proposing: false,
+                        guidance: "",
+                        previous_draft: "",
                     })
                     .await?;
                 let chars = generated.answer.trim().chars().count();

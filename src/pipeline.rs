@@ -50,6 +50,131 @@ impl Pipeline {
         resource: &str,
         local_sources: Option<&[String]>,
     ) -> Result<()> {
+        self.run(resource, local_sources, false).await
+    }
+
+    /// Mark an answer that was not sent (withheld by the checks, or observed) as being
+    /// improved with the user's context, so a second request cannot start another. The
+    /// writing itself is [`Self::refine`]; the result is sent only by [`Self::send_draft`].
+    pub fn begin_refinement(&self, resource: &str, guidance: &str) -> Result<()> {
+        let guidance = guidance.trim();
+        if guidance.chars().count() > GUIDANCE_CHARS
+            || guidance
+                .chars()
+                .any(|c| c.is_control() && c != '\n' && c != '\t')
+        {
+            return Err(DraftRefusal::GuidanceTooLong.into());
+        }
+        if !self.redactor.clean(guidance) {
+            return Err(DraftRefusal::SensitiveGuidance.into());
+        }
+        let status = self.store.status(resource)?.unwrap_or_default();
+        let mut audit = self
+            .store
+            .audit(resource)?
+            .ok_or(DraftRefusal::NotDraftable)?;
+        if resource.starts_with("simulation:") || !unsent_draft(&status, &audit) {
+            return Err(DraftRefusal::NotDraftable.into());
+        }
+        audit.status = "refining".into();
+        audit.reason = "refining".into();
+        audit.refinement = Some(guidance.to_owned());
+        audit.step(
+            "refine",
+            "the user asked to improve the unsent answer with more context",
+        );
+        self.store.record(resource, &audit)
+    }
+
+    /// Write the answer again with the user's context, the previous draft and fresh evidence,
+    /// without sending it. If writing fails the earlier proposal is kept.
+    pub async fn refine(&self, resource: &str) -> Result<()> {
+        let earlier = self
+            .store
+            .audit(resource)?
+            .ok_or(DraftRefusal::NotDraftable)?;
+        if self.store.status(resource)?.as_deref() != Some("refining")
+            || earlier.refinement.is_none()
+        {
+            return Err(DraftRefusal::NotDraftable.into());
+        }
+        let result = self.run(resource, None, true).await;
+        if result.is_err() || self.store.status(resource)?.as_deref() == Some("refining") {
+            let mut restored = earlier;
+            restored.status = "ignored".into();
+            restored.reason = "refinement_failed".into();
+            restored.step(
+                "refine",
+                "the improved answer could not be written; the earlier proposal is kept",
+            );
+            self.store.record(resource, &restored)?;
+        }
+        result
+    }
+
+    /// Send, at the user's request from the app, an answer that was not sent. Like every send
+    /// it happens at most once: `sending` is recorded before the request and a failure is
+    /// `uncertain`, never retried. Sensitive data and Teams' size limit are still checked.
+    pub async fn send_draft(&self, resource: &str) -> Result<String> {
+        let status = self.store.status(resource)?.unwrap_or_default();
+        let mut audit = self
+            .store
+            .audit(resource)?
+            .ok_or(DraftRefusal::NotDraftable)?;
+        if resource.starts_with("simulation:") || !unsent_draft(&status, &audit) {
+            return Err(DraftRefusal::NotDraftable.into());
+        }
+        let answer = audit.proposed.clone().unwrap_or_default();
+        if !self.valid_answer(&answer) {
+            return Err(DraftRefusal::Unsafe.into());
+        }
+        let message = self.adapter.fetch(resource).await?;
+        if audit.question.as_deref() != Some(self.redactor.redact(&message.text).as_str()) {
+            return Err(DraftRefusal::Changed.into());
+        }
+        audit.status = "sending".into();
+        audit.step(
+            "manual send",
+            "the user sent the unsent answer from the app",
+        );
+        self.store.record(resource, &audit)?;
+        match self.adapter.send(&message, &answer).await {
+            Ok(id) => {
+                audit.status = "sent".into();
+                audit.reason = "manual_send".into();
+                audit.sent = Some(answer.clone());
+                audit.graph_message_id = Some(id);
+                audit.step("send", "answer sent to Teams");
+            }
+            Err(_) => {
+                audit.status = "uncertain".into();
+                audit.reason = "send_result_unknown_manual_review".into();
+                audit.step(
+                    "send",
+                    "uncertain result; review it manually (never retried)",
+                );
+            }
+        }
+        self.store.record(resource, &audit)?;
+        if audit.status == "sent"
+            && let Some(question) = audit.resolved_question.as_ref().or(audit.question.as_ref())
+        {
+            // The body without its sources: copied citation URLs would fail verification.
+            self.store.save_context(
+                &message.conversation,
+                &self.redactor.redact(question),
+                &self.redactor.redact(without_sources(&answer)),
+            )?;
+        }
+        Ok(audit.status)
+    }
+
+    async fn run(
+        &self,
+        resource: &str,
+        local_sources: Option<&[String]>,
+        drafting: bool,
+    ) -> Result<()> {
         anyhow::ensure!(
             local_sources.is_none() || resource.starts_with("simulation:"),
             "local source selection requires a simulation"
@@ -64,9 +189,21 @@ impl Pipeline {
             .as_ref()
             .map(|e| e.links.clone())
             .unwrap_or_default();
+        // Improving an unsent answer keeps its history, its proposal until a new one is
+        // written, and the intent it was answered with.
+        let draft = earlier.as_ref().filter(|_| drafting).map(|e| {
+            (
+                e.refinement.clone().unwrap_or_default(),
+                e.proposed.clone().unwrap_or_default(),
+                e.intent.clone(),
+                e.trace.clone(),
+            )
+        });
         let withheld_notice = earlier.and_then(|e| e.withheld_notice);
         let mut holding = Holding {
-            enabled: !self.config.policy.dry_run && !resource.starts_with("simulation:"),
+            enabled: !self.config.policy.dry_run
+                && !resource.starts_with("simulation:")
+                && !drafting,
             sent: holding_reply.is_some(),
             deadline: tokio::time::Instant::now() + HOLDING_AFTER,
         };
@@ -94,11 +231,19 @@ impl Pipeline {
             received_at: Some(message.created_at_millis),
             ..Default::default()
         };
+        if let Some((guidance, previous, _, trace)) = &draft {
+            audit.refinement = Some(guidance.clone());
+            audit.proposed = Some(previous.clone()).filter(|p| !p.is_empty());
+            audit.trace = trace.clone();
+            audit.status = "refining".into();
+            audit.reason = "refining".into();
+        }
         audit.step("received", "message read from Teams");
         if !message.eligible_in(
             &self.config.graph.user_id,
             &self.config.policy.allowed_senders,
-            if holding.sent {
+            // The user asked to improve the answer: its age no longer matters.
+            if holding.sent || drafting {
                 i64::MAX
             } else {
                 self.config.policy.max_message_age_seconds
@@ -134,24 +279,27 @@ impl Pipeline {
         // A reply to an activity review in the personal chat may ask to link the work it found
         // to work items; that conversation is handled before any intent decision.
         let mut link_plan = None;
-        let link_reply =
-            if own_chat && !resource.starts_with("simulation:") && !self.config.policy.dry_run {
-                self.link_conversation(
-                    resource,
-                    &message,
-                    &current,
-                    &mut audit,
-                    &available,
-                    earlier_links,
-                )
-                .await?
-                .map(|turn| {
-                    link_plan = turn.plan;
-                    turn.reply
-                })
-            } else {
-                None
-            };
+        let link_reply = if own_chat
+            && !resource.starts_with("simulation:")
+            && !self.config.policy.dry_run
+            && !drafting
+        {
+            self.link_conversation(
+                resource,
+                &message,
+                &current,
+                &mut audit,
+                &available,
+                earlier_links,
+            )
+            .await?
+            .map(|turn| {
+                link_plan = turn.plan;
+                turn.reply
+            })
+        } else {
+            None
+        };
         let mut history: Option<String> = None;
         // Sources an activity review may read, already authorized for this conversation.
         let review_sources: Vec<_> = available
@@ -161,7 +309,12 @@ impl Pipeline {
             .collect();
         let mut review = false;
         let mut thanks = false;
-        let is_greeting = if link_reply.is_some() {
+        let is_greeting = if let Some((_, _, intent, _)) = &draft {
+            // The user wants this message answered: no intent decision can drop it now.
+            review = intent.as_deref() == Some(Intent::ActivityReview.as_str());
+            audit.step("intent", "kept from the unsent answer");
+            false
+        } else if link_reply.is_some() {
             false
         } else if greeting(&current) {
             audit.step("intent", "greeting");
@@ -446,15 +599,19 @@ impl Pipeline {
             } else {
                 tool_candidates
             };
+            // A status round («avance, compromiso, bloqueos») reads Azure DevOps and, besides,
+            // the user's own recent Wiki pages: a production deployment plan gives the
+            // committed date and its pending items (missing configuration, accesses).
+            let status_route = !review
+                && !wiki_requested
+                && status_question(&tool_question)
+                && tool_candidates.contains_key("azure-devops-status");
             let selected_tool = if review {
                 // An activity review reads every source that can review activity, below.
                 None
             } else if wiki_requested && wiki_ids.len() == 1 {
                 Some(wiki_ids[0].clone())
-            } else if !wiki_requested
-                && status_question(&tool_question)
-                && tool_candidates.contains_key("azure-devops-status")
-            {
+            } else if status_route {
                 Some("azure-devops-status".to_owned())
             } else if wiki_ids.len() == 1
                 && available.iter().all(|r| {
@@ -506,9 +663,20 @@ impl Pipeline {
                 // The one case that combines tools: activity, Wiki edits and own messages.
                 sources = review_sources.clone();
             }
+            let status_wikis: Vec<&crate::knowledge::Resource> = if status_route {
+                available
+                    .iter()
+                    .copied()
+                    .filter(|r| wiki_ids.contains(&r.id))
+                    .take(2)
+                    .collect()
+            } else {
+                Vec::new()
+            };
             audit.source = (!sources.is_empty()).then(|| {
                 sources
                     .iter()
+                    .chain(&status_wikis)
                     .map(|r| r.id.as_str())
                     .collect::<Vec<_>>()
                     .join(",")
@@ -538,12 +706,33 @@ impl Pipeline {
                     Typed(crate::evidence::Evidence),
                     Text(String),
                 }
+                // The user's own Wiki pages are read alongside the status tool; a failure only
+                // marks coverage partial.
+                let status_reads: Vec<_> = status_wikis
+                    .iter()
+                    .filter_map(|source| match &source.access {
+                        Access::Tool { tool } => {
+                            audit.tools.push("read_own_wiki_pages".into());
+                            let scoped = ScopedTool {
+                                executor: self.tools.clone(),
+                                spec: tool.clone(),
+                                conversation: message.conversation.clone(),
+                            };
+                            let question = tool_question.clone();
+                            Some((
+                                source,
+                                tokio::spawn(async move { scoped.status_pages(&question).await }),
+                            ))
+                        }
+                        _ => None,
+                    })
+                    .collect();
                 let mut reads = Vec::new();
                 for source in &sources {
                     let raw = match &source.access {
                         Access::Tool { tool } => {
                             audit.tools.push(tool.name().into());
-                            audit.status = "processing".into();
+                            audit.status = working(&audit).into();
                             audit.reason = "tool_started".into();
                             self.store.record(resource, &audit)?;
                             ScopedTool {
@@ -598,6 +787,25 @@ impl Pipeline {
                         _ => Read::Text(self.redactor.redact(&raw)),
                     };
                     reads.push((source, read));
+                }
+                for (source, read) in status_reads {
+                    match read.await.ok().and_then(Result::ok).and_then(|raw| {
+                        serde_json::from_str::<crate::evidence::Evidence>(&raw).ok()
+                    }) {
+                        Some(mut data) => {
+                            data.sanitize(&self.redactor);
+                            data.links = None;
+                            reads.push((source, Read::Typed(data)));
+                        }
+                        None => {
+                            registry.partial = true;
+                            registry.warnings.push(format!(
+                                "The user's Wiki pages in {} were not read.",
+                                source.id
+                            ));
+                            audit.step("wiki pages", "the user's own Wiki pages could not be read");
+                        }
+                    }
                 }
                 // The text a source writes within `budget`, with its verified registry if typed.
                 // The Wiki keeps room for its coverage note; its need counts that room too.
@@ -671,7 +879,9 @@ impl Pipeline {
             self.checkpoint(resource, &audit, "generating")?;
             // In the personal chat, with a source that can register work, the app proposes
             // where to register it instead of the model asking.
+            // An improved draft is sent by hand, after which no plan could be confirmed.
             let proposing = review
+                && !drafting
                 && own_chat
                 && registry
                     .links
@@ -693,6 +903,8 @@ impl Pipeline {
                         history: &history,
                         review,
                         proposing,
+                        guidance: draft.as_ref().map_or("", |d| d.0.as_str()),
+                        previous_draft: draft.as_ref().map_or("", |d| d.1.as_str()),
                     }),
                 )
                 .await??;
@@ -865,6 +1077,15 @@ impl Pipeline {
                 .withhold(resource, &message, &mut audit, "unsafe_answer".into())
                 .await;
         }
+        if drafting {
+            audit.status = "ignored".into();
+            audit.reason = "draft_ready".into();
+            audit.step(
+                "draft",
+                "improved answer ready; it is sent only when the user sends it from the app",
+            );
+            return self.store.record(resource, &audit);
+        }
         if self.config.policy.dry_run {
             audit.status = "dry_run".into();
             audit.step(
@@ -993,7 +1214,7 @@ impl Pipeline {
             };
             reads.spawn(async move { (index, scoped.review(days).await) });
         }
-        audit.status = "processing".into();
+        audit.status = working(audit).into();
         audit.reason = "tool_started".into();
         self.store.record(resource, audit)?;
         let mut results = Vec::new();
@@ -1134,10 +1355,12 @@ impl Pipeline {
             .self_chat
             .as_ref()
             .is_some_and(|c| message.conversation == format!("chats/{}", c.id));
+        // An answer the user is improving in the app is never announced again.
         if !own_chat
             || self.config.policy.dry_run
             || resource.starts_with("simulation:")
             || audit.withheld_notice.is_some()
+            || audit.refinement.is_some()
         {
             return Ok(());
         }
@@ -1671,7 +1894,7 @@ impl Pipeline {
     }
     fn checkpoint(&self, resource: &str, audit: &Audit, stage: &str) -> Result<()> {
         let mut saved = audit.clone();
-        saved.status = "processing".into();
+        saved.status = working(audit).into();
         saved.reason = stage.into();
         self.store.record(resource, &saved)
     }
@@ -1681,6 +1904,78 @@ impl Pipeline {
             && crate::adapters::teams::html(answer).len() <= 27_800
             && self.redactor.clean(answer)
     }
+}
+
+/// Characters of context the user may give to improve an unsent answer.
+pub const GUIDANCE_CHARS: usize = 4000;
+
+/// Why an unsent answer cannot be improved or sent. Fixed texts, safe to show as they are.
+#[derive(Debug)]
+pub enum DraftRefusal {
+    /// It was sent, is being sent or improved, or has no proposal.
+    NotDraftable,
+    /// It contains sensitive data or does not fit in a Teams message.
+    Unsafe,
+    /// The message was edited after the answer was written.
+    Changed,
+    GuidanceTooLong,
+    SensitiveGuidance,
+}
+impl std::fmt::Display for DraftRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::NotDraftable => {
+                "This answer can no longer be improved or sent: it was already sent, is being sent or improved, or has no proposal."
+            }
+            Self::Unsafe => {
+                "This answer contains sensitive data or does not fit in a Teams message; improve it first."
+            }
+            Self::Changed => {
+                "The message changed after the answer was written; improve the answer again before sending it."
+            }
+            Self::GuidanceTooLong => {
+                "The context must be plain text of at most 4000 characters."
+            }
+            Self::SensitiveGuidance => {
+                "The context contains sensitive data (credentials, emails, phone numbers or IDs); remove it."
+            }
+        })
+    }
+}
+impl std::error::Error for DraftRefusal {}
+
+/// An answer that exists but was not sent: withheld by the checks, observed in observation
+/// mode, or improved earlier. Only those can be improved or sent from the app.
+fn unsent_draft(status: &str, audit: &Audit) -> bool {
+    matches!(status, "ignored" | "dry_run")
+        && audit.sent.is_none()
+        && audit.question.is_some()
+        && audit
+            .proposed
+            .as_deref()
+            .is_some_and(|p| !p.trim().is_empty())
+}
+/// The job state while it is worked on: an answer being improved is never `processing`, which
+/// a restart would queue again as a new message.
+fn working(audit: &Audit) -> &'static str {
+    if audit.refinement.is_some() {
+        "refining"
+    } else {
+        "processing"
+    }
+}
+/// The answer body without the appended sources section.
+fn without_sources(answer: &str) -> &str {
+    [
+        "\n\n**Fuentes**",
+        "\n\n**Sources**",
+        "\n\n**Páginas consultadas**",
+        "\n\n**Pages consulted**",
+    ]
+    .iter()
+    .filter_map(|marker| answer.find(marker))
+    .min()
+    .map_or(answer, |at| &answer[..at])
 }
 
 /// A link plan waits this long for its confirmation; a review's offer, for the request.
@@ -2409,7 +2704,10 @@ fn status_question(question: &str) -> bool {
                 | "avance"
                 | "avances"
                 | "impedimentos"
+                | "compromiso"
                 | "compromisos"
+                | "bloqueos"
+                | "bloqueantes"
                 | "pipeline"
                 | "pipelines"
                 | "release"
@@ -2417,6 +2715,7 @@ fn status_question(question: &str) -> bool {
                 | "progress"
                 | "blockers"
                 | "impediments"
+                | "commitment"
                 | "commitments"
         )
     }) || (q.contains("esta semana")

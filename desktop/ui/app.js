@@ -1,5 +1,7 @@
 const rawInvoke = window.ptaTransport.invoke;
-const READS = ['snapshot', 'chat', 'github_repositories', 'self_chat_status', 'llm_providers', 'audit', 'activity_status', 'activity_history', 'activity_pending'];
+// Also the answer operations: they do not depend on the profile files, so they neither check
+// nor advance the form's revision.
+const READS = ['snapshot', 'chat', 'github_repositories', 'self_chat_status', 'llm_providers', 'audit', 'activity_status', 'activity_history', 'activity_pending', 'answer_refine', 'answer_send'];
 // Revision of the profile files the last reply saw. The form's own revision (`current.revision`)
 // changes only when it reloads or writes, so saving a stale form fails instead of overwriting
 // changes made elsewhere (e.g. with `pta`).
@@ -1042,7 +1044,7 @@ function finishActivityOperation(operation, entry) {
 const statusLabels = {
   sent: [t('Answered'), 'ok'], dry_run: [t('Observed (not sent)'), 'info'], sending: [t('Sending'), 'active'],
   processing: [t('In progress'), 'active'], pending: [t('Queued'), 'active'], failed: [t('Error'), 'error'],
-  uncertain: [t('Uncertain send'), 'error'],
+  uncertain: [t('Uncertain send'), 'error'], refining: [t('Improving'), 'active'],
 };
 const reasonLabels = {
   ineligible_message: t('Not addressed to the assistant: your own, from a group without a mention, too old, empty or an answer of the app.'),
@@ -1069,6 +1071,10 @@ const reasonLabels = {
   links_cancelled: t('Link plan cancelled; nothing was linked.'),
   links_unresolved: t('The link request could not be resolved; nothing was planned.'),
   links_not_configured: t('Linking asked for, but no source has a write credential.'),
+  refining: t('Improving the answer with your context.'),
+  draft_ready: t('Improved answer ready: review it and send it from here.'),
+  refinement_failed: t('The improved answer could not be written; the earlier proposal is kept.'),
+  manual_send: t('Sent by you from the app after reviewing it.'),
 };
 const kindLabels = { self: t('Personal chat'), direct: t('Direct'), group: t('Group'), unsupported: t('Other') };
 const intentLabels = { question: t('question'), activity_review: t('activity review'), greeting: t('greeting'), shared_link: t('shared link'), link: t('link work to work items') };
@@ -1081,7 +1087,8 @@ function messageState(row) {
   const reason = row.audit.reason || '';
   if (row.status === 'ignored') {
     if (reason === 'ineligible_message') return [t('Not addressed'), 'muted'];
-    if (/^(unsafe_|invalid_references|reference_selection_failed|final_gate)/.test(reason)) return [t('Withheld'), 'warn'];
+    if (reason === 'draft_ready') return [t('Draft ready'), 'info'];
+    if (/^(unsafe_|invalid_references|reference_selection_failed|final_gate|refinement_failed)/.test(reason)) return [t('Withheld'), 'warn'];
     return [t('No answer'), 'muted'];
   }
   return statusLabels[row.status] || [row.status, 'muted'];
@@ -1125,12 +1132,78 @@ function messageField(container, label, text, pre = false) {
 
 function matchesFilter(row, filter) {
   const [, tone] = messageState(row);
-  return filter === 'all' || (filter === 'sent' && tone === 'ok') || (filter === 'withheld' && (tone === 'warn' || (tone === 'muted' && row.audit.reason !== 'ineligible_message')))
+  return filter === 'all' || (filter === 'sent' && tone === 'ok')
+    || (filter === 'withheld' && (tone === 'warn' || row.audit.reason === 'draft_ready' || (tone === 'muted' && row.audit.reason !== 'ineligible_message')))
     || (filter === 'error' && tone === 'error') || (filter === 'active' && tone === 'active');
+}
+
+/** Context typed to improve an unsent answer, kept across the list's refreshes. */
+const answerContext = new Map();
+let sendArmed = null;
+/** An answer that exists but was not sent (withheld, observed or improved) can be improved or sent. */
+const unsentDraft = row => ['ignored', 'dry_run'].includes(row.status) && !!row.audit.proposed?.trim()
+  && !row.audit.sent && !!row.audit.question && !row.resource.startsWith('simulation:');
+
+function draftActions(row) {
+  const context = el('textarea', { class: 'answer-context', rows: 3, maxLength: 4000,
+    placeholder: t('E.g. It is already in validation and Luis Felipe owns it; the production deployment is planned for 10/20 and the production variables are still missing.'),
+    value: answerContext.get(row.resource) || '' });
+  context.setAttribute('data-resource', row.resource);
+  context.oninput = () => answerContext.set(row.resource, context.value);
+  const improve = el('button', { class: 'secondary', type: 'button', textContent: t('Improve answer') });
+  improve.onclick = () => busy(improve, async () => {
+    await invoke('answer_refine', { resource: row.resource, context: context.value });
+    answerContext.delete(row.resource);
+    notify(t('Improving the answer with your context…'), 'info');
+    await followRefinement(row.resource);
+  });
+  const send = el('button', { type: 'button', textContent: t('Send to Teams') });
+  send.onclick = () => {
+    // Sending is final: the first tap asks, the second one sends.
+    if (sendArmed !== row.resource) {
+      sendArmed = row.resource;
+      send.textContent = t('Tap again to send');
+      setTimeout(() => {
+        if (sendArmed === row.resource) { sendArmed = null; send.textContent = t('Send to Teams'); }
+      }, 4000);
+      return;
+    }
+    sendArmed = null;
+    send.textContent = t('Send to Teams');
+    busy(send, async () => {
+      const result = await invoke('answer_send', { resource: row.resource });
+      if (result.status === 'sent') done(t('Answer sent to Teams.'));
+      else notify(t('It is unknown whether the send arrived: check it in Teams (never retried).'), 'error');
+      await loadMessages();
+    });
+  };
+  return el('div', { class: 'field-block draft-actions' },
+    el('strong', { textContent: t('Improve or send this answer') }),
+    el('label', {}, t('Context for the assistant'), context),
+    el('div', { class: 'actions' }, improve, send),
+    el('p', { class: 'hint', textContent: t('Improving rewrites the answer with your context and the sources read again, without sending it. Sending posts the answer shown above once, as you.') }));
+}
+
+/** Follows an answer being improved until it is ready, kept or failed. */
+async function followRefinement(resource) {
+  const deadline = Date.now() + 25 * 60_000;
+  while (Date.now() < deadline) {
+    await sleep(3000);
+    await loadMessages();
+    const row = messageRows.find(r => r.resource === resource);
+    if (row?.status === 'refining') continue;
+    if (row?.audit.reason === 'draft_ready') done(t('Improved answer ready: review it and send it from here.'));
+    else if (row?.audit.reason === 'refinement_failed') fail(t('The improved answer could not be written; the earlier proposal is kept.'));
+    else if (row) notify(reasonText(row.audit.reason), 'info');
+    return;
+  }
 }
 
 function renderMessages() {
   const list = $('#messages-list');
+  // A refresh rebuilds the list: the context being typed keeps its focus and cursor.
+  const typing = document.activeElement?.classList?.contains('answer-context') ? document.activeElement : null;
+  const typingAt = typing ? [typing.dataset.resource, typing.selectionStart, typing.selectionEnd] : null;
   const hideIneligible = $('#messages-hide-ineligible').checked;
   const rows = messageRows.filter(row => !(hideIneligible && ineligible(row)) && matchesFilter(row, messageFilter));
   const counts = messageRows.reduce((acc, row) => { const [label] = messageState(row); acc[label] = (acc[label] || 0) + 1; return acc; }, {});
@@ -1152,7 +1225,10 @@ function renderMessages() {
     if (audit.resolved_question) messageField(body, t('Interpreted with the context'), `${audit.resolved_question}${audit.topic ? ` · ${t('topic searched')}: ${audit.topic}` : ''}`);
     messageField(body, t('Outcome'), reasonText(audit.reason));
     if (row.status === 'sent') messageField(body, t('Answer sent'), audit.sent || audit.proposed, 'markdown');
-    else messageField(body, row.status === 'dry_run' ? t('Proposal (observation mode)') : t('Proposed answer (not sent)'), audit.proposed, 'markdown');
+    else messageField(body, row.status === 'dry_run' ? t('Proposal (observation mode)') : audit.reason === 'draft_ready' ? t('Improved answer (not sent)') : t('Proposed answer (not sent)'), audit.proposed, 'markdown');
+    if (audit.refinement) messageField(body, t('Your context for the assistant'), audit.refinement, true);
+    if (row.status === 'refining') messageField(body, t('Improving'), t('The assistant is rewriting the answer with your context; it will not be sent until you send it.'));
+    if (unsentDraft(row)) body.append(draftActions(row));
     const details = [];
     if (audit.intent) details.push(`${t('Intent')}: ${intentLabels[audit.intent] || audit.intent}`);
     if (audit.history_messages) details.push(t('Context: {n} earlier messages', { n: audit.history_messages }));
@@ -1185,6 +1261,8 @@ function renderMessages() {
     item.append(body);
     list.append(item);
   }
+  const restored = typingAt && [...list.querySelectorAll('.answer-context')].find(node => node.dataset.resource === typingAt[0]);
+  if (restored) { restored.focus(); restored.setSelectionRange(typingAt[1], typingAt[2]); }
 }
 
 function renderAttention() {
@@ -1654,7 +1732,8 @@ $('#messages-refresh').onclick = () => busy($('#messages-refresh'), loadMessages
 document.querySelectorAll('#messages-filters button').forEach(button => { button.onclick = () => setFilter(button.dataset.filter); });
 $('#messages-hide-ineligible').onchange = renderMessages;
 setInterval(() => {
-  if (tab === 'messages' && $('#messages-auto').checked) loadMessages().catch(() => {});
+  // Not while context is typed for an answer: a rebuilt list would move it under the user.
+  if (tab === 'messages' && $('#messages-auto').checked && !document.activeElement?.classList?.contains('answer-context')) loadMessages().catch(() => {});
 }, 10_000);
 $('#detect-llm').onclick = () => busy($('#detect-llm'), async () => {
   llmCatalog = await invoke('llm_providers'); renderChain(); done(t('CLIs detected again.'));

@@ -52,6 +52,13 @@ without copying its history or reconnecting Teams. See the
 
 ### Update
 
+Version 0.7.13 answers status rounds from the work item itself: an HU named in
+the question is read even after it was handed over (its state, since when and
+who holds it now, its tasks, linked code and comments), and your own recent Wiki
+pages, such as a production deployment plan, give commitments and blockers. A
+withheld or observed answer can now be improved with your context and sent by
+hand from the Messages tab or with `pta answer refine|send`.
+
 Version 0.7.12 reviews explicitly mentioned activity even when its artifacts have
 a different date. Such work stays pending until you explain why it belongs to the
 selected day, through the GUI or `date_attribution` in the CLI. Existing task links

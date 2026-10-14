@@ -1,5 +1,6 @@
 //! Bounded, read-only evidence from Azure DevOps. The catalog lives in the private knowledge repo.
 pub mod link;
+mod progress;
 pub mod registration;
 pub mod review;
 pub mod wiki;
@@ -136,6 +137,11 @@ fn organization_url(source: &Source, segments: &[&str]) -> Result<Url> {
     url.query_pairs_mut().append_pair("api-version", "7.1");
     Ok(url)
 }
+#[cfg(test)]
+thread_local! {
+    /// Tests send Azure DevOps reads to a mock server; captured references keep dev.azure.com.
+    static TEST_SERVER: std::cell::RefCell<Option<Url>> = const { std::cell::RefCell::new(None) };
+}
 async fn request(
     client: &Client,
     key: &str,
@@ -143,6 +149,17 @@ async fn request(
     url: Url,
     body: Option<Value>,
 ) -> Result<Value> {
+    #[cfg(test)]
+    let url = TEST_SERVER.with(|server| match server.borrow().as_ref() {
+        Some(server) => {
+            let mut local = url.clone();
+            let _ = local.set_scheme(server.scheme());
+            let _ = local.set_host(server.host_str());
+            let _ = local.set_port(server.port());
+            local
+        }
+        None => url,
+    });
     let endpoint = url.path().to_owned();
     let mut request = client.request(method, url).basic_auth("", Some(key));
     if let Some(body) = body {
@@ -320,6 +337,11 @@ fn same_user(identity: &Value, email: &str) -> bool {
         .as_str()
         .or_else(|| identity["mailAddress"].as_str())
         .is_some_and(|name| name.eq_ignore_ascii_case(email))
+}
+
+/// Work item IDs a status request names («HU #23553»), read directly whoever holds them.
+pub fn requested_work_items(question: &str) -> Vec<u64> {
+    progress::requested(question)
 }
 
 /// Days of activity a request asks about: «hoy»/today 1, «ayer»/yesterday 2, this week 7,
@@ -1001,11 +1023,29 @@ async fn work_item_activity(
         "SELECT [System.Id] FROM WorkItems WHERE [System.TeamProject] = @project AND [System.ChangedBy] = '{email}' AND [System.ChangedDate] >= '{}' ORDER BY [System.ChangedDate] DESC",
         since.format("%Y-%m-%d")
     );
-    let (active, recent_ids) = tokio::try_join!(
-        wiql(client, key, source, project, &active_query),
-        wiql(client, key, source, project, &recent_query)
-    )?;
-    let ids: BTreeSet<_> = recent_ids.into_iter().chain(active).take(80).collect();
+    // Work the user handed over (sent to validation, reassigned) is held by someone else now
+    // and last changed by them: it is still the user's commitment. A failed read loses only it.
+    let handed_query = format!(
+        "SELECT [System.Id] FROM WorkItems WHERE [System.TeamProject] = @project AND EVER [System.AssignedTo] = '{email}' AND [System.AssignedTo] <> '{email}' AND [System.ChangedDate] >= '{}' ORDER BY [System.ChangedDate] DESC",
+        since.format("%Y-%m-%d")
+    );
+    let (ids, handed) = tokio::join!(
+        async {
+            tokio::try_join!(
+                wiql(client, key, source, project, &active_query),
+                wiql(client, key, source, project, &recent_query)
+            )
+        },
+        wiql(client, key, source, project, &handed_query)
+    );
+    let (active, recent_ids) = ids?;
+    let handed: BTreeSet<u64> = handed.unwrap_or_default().into_iter().take(20).collect();
+    let ids: BTreeSet<_> = recent_ids
+        .into_iter()
+        .chain(active)
+        .take(80)
+        .chain(handed.iter().copied())
+        .collect();
     let mut items = work_items(client, key, source, project, &ids).await?;
     let parent_ids: BTreeSet<_> = items
         .iter()
@@ -1021,23 +1061,49 @@ async fn work_item_activity(
         .iter()
         .filter_map(|v| Some((v["id"].as_u64()?, v)))
         .collect();
+    let handed_over = |item: &Value| {
+        item["id"].as_u64().is_some_and(|id| handed.contains(&id))
+            && !same_user(&item["fields"]["System.AssignedTo"], email)
+    };
     let mut selected: Vec<_> = items
         .iter()
-        .filter(|item| recent(item, since) && belongs_to_user(item, email))
+        .filter(|item| recent(item, since) && (belongs_to_user(item, email) || handed_over(item)))
         .collect();
     selected.sort_by(|a, b| field(b, "System.ChangedDate").cmp(field(a, "System.ChangedDate")));
-    selected.truncate(8);
+    selected.truncate(10);
+    let date_fields: BTreeSet<String> = selected
+        .iter()
+        .flat_map(|item| progress::planned_dates(item))
+        .map(|(reference, _)| reference)
+        .collect();
+    let names = progress::field_names(client, key, source, project, &date_fields).await;
     let mut output = String::new();
     let mut references = Vec::new();
     let mut blocked = false;
     for item in &selected {
         references.push(item_reference(source, project, item)?);
+        let owner = item["fields"]["System.AssignedTo"]["displayName"]
+            .as_str()
+            .unwrap_or("");
         output.push_str(&format!(
             "Work item {} {} (last recorded change {}). ",
             field(item, "System.WorkItemType"),
             label(item),
             field(item, "System.ChangedDate")
         ));
+        if handed_over(item) {
+            output.push_str(&format!(
+                "Previously assigned to the user, now assigned to {}. ",
+                if owner.is_empty() { "nobody" } else { owner }
+            ));
+        }
+        let state_since = field(item, "Microsoft.VSTS.Common.StateChangeDate");
+        if !state_since.is_empty() {
+            output.push_str(&format!(
+                "In this state since {}. ",
+                state_since.get(..10).unwrap_or(state_since)
+            ));
+        }
         if let Some(parent) = relation_ids(item, "System.LinkTypes.Hierarchy-Reverse")
             .first()
             .and_then(|id| by_id.get(id))
@@ -1045,10 +1111,18 @@ async fn work_item_activity(
             references.push(item_reference(source, project, parent)?);
             output.push_str(&format!("Parent: {}. ", label(parent)));
         }
-        let due = field(item, "Microsoft.VSTS.Scheduling.TargetDate");
-        if !due.is_empty() {
+        let dates = progress::planned_dates(item);
+        if !dates.is_empty() {
             output.push_str(&format!(
-                "Recorded target date: {due}; not a personal commitment. "
+                "Dates on the item: {}. ",
+                dates
+                    .iter()
+                    .map(|(r, d)| format!(
+                        "{} {d}",
+                        names.get(r).map_or(r.as_str(), |n| n.as_str())
+                    ))
+                    .collect::<Vec<_>>()
+                    .join("; ")
             ));
         }
         let tags = field(item, "System.Tags");
@@ -1541,6 +1615,27 @@ pub async fn status(
     let mut references = Vec::new();
     let mut blocked = false;
     let mut partial_projects = 0;
+    // A work item the request names is read first and directly, whoever holds it now.
+    let requested = progress::requested(question);
+    let mut requested_blocks = Vec::new();
+    let mut found = BTreeSet::new();
+    let mut requested_unread = false;
+    for source in catalog.sources.iter().filter(|_| !requested.is_empty()) {
+        match progress::read(client, key, source, &requested).await {
+            Ok(described) => {
+                for (id, text, refs) in described {
+                    if found.insert(id) {
+                        requested_blocks.push(Block {
+                            text: text.trim_end().to_owned(),
+                            source_ids: refs.iter().map(|r| r.id.clone()).collect(),
+                        });
+                        references.extend(refs);
+                    }
+                }
+            }
+            Err(_) => requested_unread = true,
+        }
+    }
     let mut jobs = tokio::task::JoinSet::new();
     for source in &catalog.sources {
         for project in projects(client, key, source).await? {
@@ -1613,7 +1708,24 @@ pub async fn status(
         "Azure DevOps activity since {} (last {days} days).\n",
         since.format("%Y-%m-%d")
     );
-    let mut blocks = Vec::new();
+    for block in &requested_blocks {
+        output.push_str(&block.text);
+        output.push('\n');
+    }
+    let missing: Vec<String> = requested
+        .iter()
+        .filter(|id| !found.contains(*id))
+        .map(|id| format!("#{id}"))
+        .collect();
+    if !missing.is_empty() {
+        output.push_str(&format!(
+            "Requested work item not found in the projects in scope{}: {}; do not write its number.\n",
+            if requested_unread { " (a read failed)" } else { "" },
+            missing.join(", ")
+        ));
+    }
+    partial_projects += usize::from(requested_unread);
+    let mut blocks = requested_blocks;
     if sections.is_empty() {
         output.push_str("No recent own activity could be verified in the projects read.\n");
     } else {
@@ -1646,12 +1758,12 @@ pub async fn status(
             output.push('\n');
         }
     }
-    if ["imped", "blocker", "blocked"]
+    if ["imped", "blocker", "blocked", "bloque", "riesgo", "risk"]
         .iter()
         .any(|w| question.to_lowercase().contains(w))
         && !blocked
     {
-        output.push_str("Impediments: no explicit blocker was found in the activity read; the actual state needs the user's confirmation.\n");
+        output.push_str("Impediments: no work item is tagged as blocked; pending dependencies, accesses or definitions may still appear in comments or in the user's Wiki pages; without any, the actual state needs the user's confirmation.\n");
     }
     if partial_projects > 0 {
         output.push_str(&format!("Partial coverage: at least one read failed in {partial_projects} project(s); do not infer that there was no activity there.\n"));
@@ -1661,6 +1773,7 @@ pub async fn status(
             .lines()
             .filter(|l| {
                 l.starts_with("Impediments:")
+                    || l.starts_with("Requested work item not found")
                     || l.starts_with("Partial coverage:")
                     || l.starts_with("Azure DevOps activity")
                     || l.starts_with("No recent own activity")

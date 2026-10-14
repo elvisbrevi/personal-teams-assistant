@@ -387,6 +387,8 @@ pub struct WikiEdit {
     /// Named work items that could not be confirmed (missing, or outside the catalog).
     pub unverified: usize,
     pub reference: Reference,
+    /// The page's current Markdown, for status answers (deployment plans, pending items).
+    pub content: String,
 }
 /// Review evidence for the user's own Wiki edits, with the work items they name.
 pub fn edits_evidence(
@@ -473,6 +475,152 @@ pub fn edits_evidence(
         links: Some(offer),
         ..Default::default()
     }
+}
+
+/// Own pages a status answer reads at most, and the characters of each.
+const STATUS_PAGES: usize = 3;
+const STATUS_PAGE_CHARS: usize = 2200;
+/// Title or content words of a production deployment plan («paso a producción»).
+const DEPLOYMENT_WORDS: [&str; 10] = [
+    "paso a prod",
+    "pase a prod",
+    "paso a produc",
+    "pase a produc",
+    "puesta en produc",
+    "salida a produc",
+    "produccion",
+    "despliegue",
+    "deploy",
+    "release",
+];
+/// How much a page the user created or edited says about a status request: it names a
+/// requested work item, or it is a production deployment plan (by title, then by content).
+fn status_score(edit: &WikiEdit, requested: &[u64]) -> usize {
+    let title = fold(&edit.title);
+    let content = fold(&edit.content);
+    let names = |id: &u64| {
+        edit.work_items.contains(id)
+            || super::review::mentions(&edit.title).contains(id)
+            || super::review::mentions(&edit.content).contains(id)
+    };
+    let mut score = 0;
+    if requested.iter().any(names) {
+        score += 4;
+    }
+    if DEPLOYMENT_WORDS.iter().any(|w| title.contains(w)) {
+        score += 2;
+    } else if DEPLOYMENT_WORDS.iter().any(|w| content.contains(w)) {
+        score += 1;
+    }
+    score
+}
+/// Status evidence from the user's own recent Wiki pages with their content: a production
+/// deployment page gives a committed date and its pending items (missing configuration,
+/// accesses, who was asked for them). Pages that name a requested work item or plan a
+/// deployment come first; without those, the two most recent pages.
+pub fn status_evidence(
+    edits: &[WikiEdit],
+    linked: &[Reference],
+    partial: bool,
+    question: &str,
+    requested: &[u64],
+    days: i64,
+) -> Evidence {
+    let since = chrono::Utc::now() - chrono::Duration::days(days);
+    let mut ranked: Vec<(usize, &WikiEdit)> = edits
+        .iter()
+        .map(|e| (status_score(e, requested), e))
+        .collect();
+    ranked.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.date.cmp(&a.1.date)));
+    let scored = ranked.iter().filter(|(score, _)| *score > 0).count();
+    let chosen: Vec<&WikiEdit> = ranked
+        .iter()
+        .take(if scored == 0 {
+            2
+        } else {
+            scored.min(STATUS_PAGES)
+        })
+        .map(|(_, e)| *e)
+        .collect();
+    let mut evidence = Evidence {
+        text: format!(
+            "Wiki pages the user created or edited from {} to {} (production deployment plans, dates and pending items):\n",
+            since.format("%Y-%m-%d"),
+            chrono::Utc::now().format("%Y-%m-%d")
+        ),
+        partial,
+        ..Default::default()
+    };
+    if chosen.is_empty() {
+        let none = "No page created or edited by the user was found in the window.";
+        evidence.text.push_str(none);
+        evidence.text.push('\n');
+        evidence.blocks.push(crate::evidence::Block {
+            text: none.into(),
+            source_ids: Vec::new(),
+        });
+    }
+    for edit in chosen {
+        let named: Vec<&Reference> = linked
+            .iter()
+            .filter(|r| {
+                edit.work_items
+                    .iter()
+                    .any(|id| r.aliases.contains(&format!("#{id}")))
+            })
+            .collect();
+        let excerpt = crate::knowledge::excerpt(
+            &edit.content,
+            &format!("{question} {}", edit.title),
+            STATUS_PAGE_CHARS,
+        );
+        let text = format!(
+            "Wiki page the user {} on {}: \"{}\" ({}){}.\n{}",
+            if edit.created { "created" } else { "edited" },
+            edit.date.get(..10).unwrap_or(&edit.date),
+            edit.title,
+            edit.reference
+                .label
+                .rsplit_once(" / ")
+                .map_or(edit.reference.label.as_str(), |(location, _)| location),
+            if edit.work_items.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    "; it names {}",
+                    edit.work_items
+                        .iter()
+                        .map(|id| format!("#{id}"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            },
+            excerpt.trim_end()
+        );
+        evidence.text.push_str(&text);
+        evidence.text.push('\n');
+        let mut source_ids = vec![edit.reference.id.clone()];
+        source_ids.extend(named.iter().map(|r| r.id.clone()));
+        evidence
+            .blocks
+            .push(crate::evidence::Block { text, source_ids });
+        evidence.references.push(edit.reference.clone());
+        for reference in named {
+            if !evidence.references.iter().any(|r| r.id == reference.id) {
+                evidence.references.push(reference.clone());
+            }
+        }
+    }
+    if partial {
+        evidence
+            .text
+            .push_str("Partial coverage: the history of some wikis or pages could not be read.\n");
+        evidence.blocks.push(crate::evidence::Block {
+            text: "Partial coverage: the history of some wikis or pages could not be read.".into(),
+            source_ids: Vec::new(),
+        });
+    }
+    evidence
 }
 
 /// Task registration distinguishes a task reference from a description of the parent HU.
@@ -1246,6 +1394,7 @@ impl<'a> Reader<'a> {
                                 tasks: Vec::new(),
                                 unverified: 0,
                                 reference: page.reference,
+                                content: page.content,
                             });
                         }
                         Err(_) => partial = true,
@@ -1964,6 +2113,65 @@ mod tests {
         Mock, MockServer, ResponseTemplate,
         matchers::{method, path, query_param},
     };
+    #[test]
+    fn status_pages_put_the_named_hu_and_deployment_plans_first() {
+        let edit = |title: &str, date: &str, content: &str, work_items: Vec<u64>| WikiEdit {
+            title: title.into(),
+            date: date.into(),
+            created: true,
+            work_items,
+            tasks: Vec::new(),
+            unverified: 0,
+            reference: Reference {
+                id: format!("wiki:{title}"),
+                kind: "wiki".into(),
+                label: format!("Payments / Payments.wiki / {title}"),
+                url: "https://dev.azure.com/example/Payments/_wiki/wikis/x".into(),
+                organization: "https://dev.azure.com/example".into(),
+                project: "Payments".into(),
+                aliases: Vec::new(),
+                parent: None,
+                revision: None,
+                authority: Some("created_by_me".into()),
+                author: None,
+                author_role: None,
+            },
+            content: content.into(),
+        };
+        let edits = [
+            edit(
+                "Notas de reunión",
+                "2026-10-13T10:00:00Z",
+                "Temas varios.",
+                vec![],
+            ),
+            edit(
+                "Paso a producción Pagos QR",
+                "2026-10-12T10:00:00Z",
+                "Fecha: 2026-10-20.\nPendiente: variables de Consul en producción (Francisco).",
+                vec![],
+            ),
+            edit(
+                "Diseño",
+                "2026-10-11T10:00:00Z",
+                "Detalle de la HU 23553.",
+                vec![],
+            ),
+        ];
+        let evidence = status_evidence(&edits, &[], false, "avance HU #23553", &[23553], 30);
+        let titles: Vec<&str> = evidence.references.iter().map(|r| r.id.as_str()).collect();
+        // The page naming the HU, then the deployment plan; an unrelated page is left out.
+        assert_eq!(titles, ["wiki:Diseño", "wiki:Paso a producción Pagos QR"]);
+        assert!(
+            evidence
+                .text
+                .contains("Pendiente: variables de Consul en producción")
+        );
+        // Without any related page, the two most recent ones.
+        let evidence = status_evidence(&edits[..1], &[], false, "¿qué hice?", &[], 7);
+        assert_eq!(evidence.references.len(), 1);
+        assert!(evidence.links.is_none());
+    }
     const PID: &str = "00000000-0000-0000-0000-000000000001";
     const WID: &str = "00000000-0000-0000-0000-000000000002";
     const RID: &str = "00000000-0000-0000-0000-000000000003";

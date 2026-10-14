@@ -252,6 +252,8 @@ impl Portal {
             "self_chat_status",
             "llm_providers",
             "audit",
+            "answer_refine",
+            "answer_send",
             "activity_status",
             "activity_history",
             "activity_pending",
