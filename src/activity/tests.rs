@@ -173,7 +173,8 @@ impl ReadOnlyTool for TestTools {
     async fn work_item(&self, _: &ToolSpec, id: u64) -> Result<Option<Target>> {
         Ok(match id {
             40 => Some(parent()),
-            // An HU outside the review's offer, and an incident under it that cannot hold tasks.
+            // An HU outside the review's offer, a bug in progress under it that holds tasks,
+            // and a resolved bug under it that no longer does.
             41 => Some(Target {
                 id: 41,
                 title: "Payment incidents".into(),
@@ -181,8 +182,17 @@ impl ReadOnlyTool for TestTools {
             }),
             26321 => Some(Target {
                 id: 26321,
+                title: "Payment query service unavailable in production".into(),
+                kind: "Bug".into(),
+                state: "En progreso".into(),
+                parent: Some(41),
+                ..parent()
+            }),
+            26330 => Some(Target {
+                id: 26330,
                 title: "Consul denies the payment query configuration".into(),
                 kind: "Bug".into(),
+                state: "Resolved".into(),
                 parent: Some(41),
                 ..parent()
             }),
@@ -627,7 +637,7 @@ async fn automatic_wiki_task_is_done_once_and_call_stays_pending() {
 }
 
 #[tokio::test]
-async fn a_work_item_that_cannot_hold_tasks_keeps_the_edits_and_offers_its_hu() {
+async fn a_bug_in_progress_holds_the_task_and_a_closed_one_offers_its_hu() {
     let dir = tempfile::tempdir().unwrap();
     let (mut r, tools) = recorder(dir.path(), 0., false, false, false);
     r.config.activity_registration.auto_register = false;
@@ -644,9 +654,15 @@ async fn a_work_item_that_cannot_hold_tasks_keeps_the_edits_and_offers_its_hu() 
         context: String::new(),
         fields: BTreeMap::new(),
     };
-    let held = r.resolve(&entry.id, create(26321)).await.unwrap();
+    let held = r.resolve(&entry.id, create(26330)).await.unwrap();
     assert_eq!(held.state, "pending");
-    for part in ["#26321", "Bug", "no una HU abierta", "#41"] {
+    for part in [
+        "#26330",
+        "Bug",
+        "Resolved",
+        "no puede contener tareas",
+        "#41",
+    ] {
         assert!(held.issue.contains(part), "{}", held.issue);
     }
     assert_eq!(held.draft.parent, Some(41));
@@ -676,8 +692,10 @@ async fn a_work_item_that_cannot_hold_tasks_keeps_the_edits_and_offers_its_hu() 
     assert!(error.to_string().contains("Remove the links"), "{error}");
     assert_eq!(tools.writes.load(Ordering::SeqCst), 0);
 
-    let created = r.resolve(&entry.id, create(41)).await.unwrap();
-    assert_eq!(created.state, "done");
+    // A bug being worked on holds the task directly, though the review did not offer it.
+    let created = r.resolve(&entry.id, create(26321)).await.unwrap();
+    assert_eq!(created.state, "done", "{}", created.issue);
+    assert_eq!(created.draft.parent, Some(26321));
     assert!(created.issue.is_empty());
     assert_eq!(tools.writes.load(Ordering::SeqCst), 1);
 }

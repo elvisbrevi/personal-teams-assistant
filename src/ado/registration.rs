@@ -247,7 +247,7 @@ async fn daily_work_in_source(
             out.task_ids.insert(id);
         }
         let query = format!(
-            "SELECT [System.Id] FROM WorkItems WHERE [System.TeamProject] = @project AND {personal_scope} AND ([System.WorkItemType] = 'User Story' OR [System.WorkItemType] = 'Product Backlog Item' OR [System.WorkItemType] = 'HU' OR [System.WorkItemType] = 'Requirement') ORDER BY [System.ChangedDate] DESC"
+            "SELECT [System.Id] FROM WorkItems WHERE [System.TeamProject] = @project AND {personal_scope} AND ([System.WorkItemType] = 'User Story' OR [System.WorkItemType] = 'Product Backlog Item' OR [System.WorkItemType] = 'HU' OR [System.WorkItemType] = 'Requirement' OR [System.WorkItemType] = 'Issue' OR [System.WorkItemType] = 'Bug') ORDER BY [System.ChangedDate] DESC"
         );
         // Older HUs are context only when reached through the user's recent tasks.
         let ids = wiql(client, key, source, project, &query)
