@@ -63,8 +63,9 @@ pub struct Target {
     pub iteration: String,
 }
 impl Target {
-    /// Only an open HU (a user story or backlog item) may get a new task: not a task, a
-    /// feature or an epic, and not one that is done, closed, aborted or removed.
+    /// Only an HU (a user story, backlog item or Basic-process issue) or a bug that is not
+    /// closed may get a new task, whatever its active state (new, in development, in QA…): not
+    /// a task, a feature or an epic, and not one that is done, closed, aborted or removed.
     pub fn holds_tasks(&self) -> bool {
         let kind = self.kind.to_lowercase();
         let story = STORY_KINDS.iter().any(|k| kind == *k)
@@ -74,6 +75,10 @@ impl Target {
                 "backlog item",
                 "requirement",
                 "requisito",
+                "bug",
+                "defect",
+                "defecto",
+                "incident",
             ]
             .iter()
             .any(|k| kind.contains(k));
@@ -104,7 +109,7 @@ impl Target {
 }
 /// Work item types a new task is created as, by the user's own usage; `Task` by default.
 pub const TASK_KINDS: &[&str] = &["Task", "Tarea"];
-const STORY_KINDS: &[&str] = &["hu", "user story", "product backlog item", "pbi"];
+const STORY_KINDS: &[&str] = &["hu", "user story", "product backlog item", "pbi", "issue"];
 const CLOSED_STATES: &[&str] = &[
     "Done",
     "Closed",
@@ -502,14 +507,34 @@ mod tests {
             ..Default::default()
         };
         assert!(parent.holds_tasks());
-        // Not a task, a feature or an HU that is closed or aborted.
+        // An HU or a bug in any state that is not closed, as in development or QA.
+        for (kind, state) in [
+            ("Bug", "Active"),
+            ("Bug", "En progreso"),
+            ("Bug", "Committed"),
+            ("Defecto", "En desarrollo"),
+            ("Incidente", "New"),
+            ("Issue", "To Do"),
+            ("User Story", "En desarrollo"),
+        ] {
+            let item = Target {
+                kind: kind.into(),
+                state: state.into(),
+                ..Default::default()
+            };
+            assert!(item.holds_tasks(), "{kind} {state}");
+        }
+        // Not a task, a feature, an epic or an impediment, nor a closed, fixed or aborted one.
         for (kind, state) in [
             ("task", "Active"),
             ("Feature", "New"),
             ("Epic", "New"),
+            ("Impediment", "Open"),
             ("Product Backlog Item", "Abortada"),
             ("User Story", "Done"),
             ("Product Backlog Item", "Removed"),
+            ("Bug", "Resolved"),
+            ("Bug", "Closed"),
         ] {
             let item = Target {
                 kind: kind.into(),

@@ -755,9 +755,11 @@ function confirmationNote(entry) {
 function renderParents(entry, value) {
   const suggested = entry.draft.suggested_parents;
   const parents = [...entry.parents].sort((a, b) => Number(suggested.includes(b.id)) - Number(suggested.includes(a.id)));
-  $('#activity-parent').replaceChildren(el('option', { value: '', textContent: t('Select an HU') }),
-    ...parents.map(p => el('option', { value: p.id, textContent: `${suggested.includes(p.id) ? '★ ' : ''}#${p.id} ${p.title}${p.state ? ` · ${p.state}` : ''}` })),
-    el('option', { value: 'other', textContent: t('Other HU…') }));
+  // A bug says so; HUs are the usual parent and keep their name short.
+  const kind = p => /bug|defect|incident/i.test(p.kind) ? ` · ${p.kind}` : '';
+  $('#activity-parent').replaceChildren(el('option', { value: '', textContent: t('Select an HU or bug') }),
+    ...parents.map(p => el('option', { value: p.id, textContent: `${suggested.includes(p.id) ? '★ ' : ''}#${p.id} ${p.title}${kind(p)}${p.state ? ` · ${p.state}` : ''}` })),
+    el('option', { value: 'other', textContent: t('Other HU or bug…') }));
   field('#activity-parent', value ?? entry.draft.parent ?? '');
   $('#activity-other-parent-label').hidden = $('#activity-parent').value !== 'other';
 }
@@ -817,7 +819,7 @@ function renderActivityEditor(entry) {
 function activityFormProblem() {
   const parent = $('#activity-parent').value === 'other' ? $('#activity-other-parent').value : $('#activity-parent').value;
   const hours = Number($('#activity-hours').value);
-  if (!parent || !(Number(parent) > 0)) return [t('Choose the HU the task goes under before creating it.'), $('#activity-parent').value === 'other' ? '#activity-other-parent' : '#activity-parent'];
+  if (!parent || !(Number(parent) > 0)) return [t('Choose the HU or bug the task goes under before creating it.'), $('#activity-parent').value === 'other' ? '#activity-other-parent' : '#activity-parent'];
   if (!$('#activity-title').value.trim()) return [t('Write the task title.'), '#activity-title'];
   if (!$('#activity-hours').value || !(hours >= 0.01 && hours <= 24)) return [t('Enter the effort in hours (between 0.01 and 24).'), '#activity-hours'];
   if (!$('#activity-description').value.trim()) return [t('Describe the work done before creating the task.'), '#activity-description'];

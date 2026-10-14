@@ -510,8 +510,8 @@ impl Recorder {
             .is_some_and(|id| !parents.iter().any(|p| p.id == id))
         {
             self.say(
-                "Choose one of the listed HUs or enter the ID of another open HU.",
-                "Elige una de las HU de la lista o ingresa el ID de otra HU abierta.",
+                "Choose one of the listed HUs or enter the ID of another HU or bug that is not closed.",
+                "Elige una de las HU de la lista o ingresa el ID de otra HU o bug que no esté cerrado.",
             )
         } else if !draft.confidence.is_finite()
             || !(0.0..=1.0).contains(&draft.confidence)
@@ -918,9 +918,9 @@ impl Recorder {
             format!("No se pudieron verificar los campos de la tarea o la HU: {detail}"),
         )
     }
-    /// Reads an HU the user chose outside the offered ones and adds it. A work item that cannot
-    /// hold tasks (a bug, an incident, a task, a closed HU…) is explained instead, and its own
-    /// open parent HU, when it has one, is offered and preselected; nothing is written.
+    /// Reads an HU or bug the user chose outside the offered ones and adds it. A work item that
+    /// cannot hold tasks (a task, a feature, a closed HU or bug…) is explained instead, and its
+    /// own parent, when that one can hold tasks, is offered and preselected; nothing is written.
     async fn add_parent(&self, entry: &mut Entry, id: u64) -> Result<Option<String>> {
         let writer = self.writer()?;
         let Some(item) = self.tools.work_item(writer, id).await? else {
@@ -935,8 +935,8 @@ impl Recorder {
         }
         let title = self.redactor.redact(&item.title);
         let mut issue = self.say(
-            format!("#{id} «{title}» is a {} in state «{}», not an open HU. Tasks are created only under an open user story or backlog item; if it is related, mention #{id} in the description.", item.kind, item.state),
-            format!("#{id} «{title}» es un {} en estado «{}», no una HU abierta. Las tareas solo se crean bajo una historia de usuario o un backlog item abierto; si está relacionado, menciona #{id} en la descripción.", item.kind, item.state),
+            format!("#{id} «{title}» is a {} in state «{}», which cannot hold tasks. Tasks go under a user story, backlog item or bug that is not closed (new, active or in development); if it is related, mention #{id} in the description.", item.kind, item.state),
+            format!("#{id} «{title}» es un {} en estado «{}», que no puede contener tareas. Las tareas van bajo una historia de usuario, un backlog item o un bug que no esté cerrado (nuevo, activo o en desarrollo); si está relacionado, menciona #{id} en la descripción.", item.kind, item.state),
         );
         if let Some(parent) = item.parent
             && let Ok(Some(mut hu)) = self.tools.work_item(writer, parent).await
@@ -980,8 +980,8 @@ impl Recorder {
         }
         let Some(parent_id) = entry.draft.parent else {
             let issue = self.say(
-                "Choose the HU the task goes under before creating it.",
-                "Elige la HU donde va la tarea antes de crearla.",
+                "Choose the HU or bug the task goes under before creating it.",
+                "Elige la HU o el bug donde va la tarea antes de crearla.",
             );
             return self.hold(entry, issue);
         };
@@ -1031,8 +1031,8 @@ impl Recorder {
         ensure!(
             parent.holds_tasks() && parent.organization == work.organization,
             self.say(
-                format!("#{parent_id} is no longer an open HU in the authorized organization (it is a {} in state «{}»)", parent.kind, parent.state),
-                format!("#{parent_id} ya no es una HU abierta en la organización autorizada (es un {} en estado «{}»)", parent.kind, parent.state),
+                format!("#{parent_id} can no longer hold tasks in the authorized organization (it is a {} in state «{}»)", parent.kind, parent.state),
+                format!("#{parent_id} ya no puede contener tareas en la organización autorizada (es un {} en estado «{}»)", parent.kind, parent.state),
             )
         );
         let fields = TaskFields {
