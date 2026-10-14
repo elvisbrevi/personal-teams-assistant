@@ -626,10 +626,13 @@ function activitySetupText(settings, llm, observing) {
   ].join(' · ');
 }
 
+/** An entry's title as the user reads it: activity names come from the host in English. */
+const entryTitle = (entry, fallback) => tx(entry.draft.title) || fallback;
+
 function pendingCard(entry) {
   const open = el('button', { type: 'button', class: `card card-button${entry.id === selectedActivity ? ' selected' : ''}` },
     el('span', { class: 'card-main' },
-      el('strong', { textContent: entry.draft.title || t('Activity without a task') }),
+      el('strong', { textContent: entryTitle(entry, t('Activity without a task')) }),
       el('span', { class: entry.issue ? 'card-text warn-text' : 'card-text', textContent: tx(entry.issue || entry.draft.question) || t('Review the HU, description and effort before creating the task.') }),
       el('span', { class: 'card-meta' }, badge(dayText(entry.day), 'muted'), entry.draft.hours ? badge(hoursText(entry.draft.hours), 'info') : null,
         entry.state === 'refining' ? badge(t('Asking assistant'), 'info') : null)),
@@ -643,7 +646,7 @@ function pendingCard(entry) {
 function historyCard(entry) {
   const [label, tone] = activityStates[entry.state] || [entry.state, 'muted'];
   const parent = entry.parents.find(p => p.id === entry.draft.parent);
-  const title = entry.task_url ? link(`#${entry.task_id} ${entry.draft.title}`, entry.task_url) : el('strong', { textContent: entry.draft.title || t('Activity') });
+  const title = entry.task_url ? link(`#${entry.task_id} ${entryTitle(entry, '')}`, entry.task_url) : el('strong', { textContent: entryTitle(entry, t('Activity')) });
   const facts = el('p', { class: 'card-text' }, parent ? [`${t('HU')} `, link(`#${parent.id} ${parent.title}`, parent.url)] : t('No HU selected'),
     ` · ${entry.draft.hours ? hoursText(entry.draft.hours) : t('No effort yet')}`);
   let action = null;
@@ -784,6 +787,9 @@ function renderActivityOutcome(entry) {
 
 /** The inputs of the fields the task type requires: `{ field, input, read }`. */
 let requiredInputs = [];
+/** The evidence field the assistant is asked to write in the next refinement. */
+let draftEvidence = null;
+const evidenceField = field => /evidenc/i.test(`${field.name} ${field.reference}`);
 function rememberedField(reference) {
   try { return JSON.parse(localStorage.getItem(`pta-field:${reference}`) ?? 'null') ?? undefined; } catch { return undefined; }
 }
@@ -798,7 +804,12 @@ function suggestedValue(field, entry) {
   if (/url|link|enlace/i.test(label)) {
     return (azure.find(a => /\/commit\/|pullrequest/i.test(a.url)) || azure[0])?.url;
   }
-  if (/evidenc/i.test(label)) return entry.activities.map(a => `- ${a.label}`).join('\n') || undefined;
+  // Evidence is what the agent wrote about the result, plus the Azure DevOps artifacts' links;
+  // never chat text or Teams links, which may expose unrelated conversations.
+  if (/evidenc/i.test(label)) {
+    const links = azure.map(a => `- ${tx(a.short || a.label)}: ${a.url}`);
+    return [entry.draft.evidence || entry.draft.description, ...links].filter(Boolean).join('\n') || undefined;
+  }
   return undefined;
 }
 
@@ -811,7 +822,8 @@ function renderRequired(entry, keep) {
     const kind = (field.kind || '').toLowerCase();
     const allowed = field.allowed?.length ? field.allowed : kind === 'boolean' ? [true, false] : [];
     // A list remembers the last choice (an activity type, a month); free values start empty.
-    const current = typed.get(field.reference) ?? entry.fields[field.reference]
+    const stored = entry.fields[field.reference] === '' ? undefined : entry.fields[field.reference];
+    const current = typed.get(field.reference) ?? stored
       ?? (allowed.length ? rememberedField(field.reference) : suggestedValue(field, entry)) ?? (field.default || undefined);
     let input, read;
     if (allowed.length) {
@@ -836,7 +848,13 @@ function renderRequired(entry, keep) {
         inputMode: numeric ? (kind === 'integer' ? 'numeric' : 'decimal') : undefined, value: current ?? '' });
       read = () => { const text = input.value.trim(); return !text ? undefined : numeric ? Number(text) : text; };
     }
-    const label = el('label', {}, field.name || field.reference, field.help ? el('small', { textContent: ` ${field.help}` }) : null, input);
+    let label = el('label', {}, field.name || field.reference, field.help ? el('small', { textContent: ` ${field.help}` }) : null, input);
+    if (evidenceField(field)) {
+      // The agent writes the evidence from the verified work; the user reviews it.
+      const write = el('button', { type: 'button', class: 'secondary small' }, icon('spark'), t('Write it with the assistant'));
+      write.onclick = () => { draftEvidence = field.reference; busy(write, () => resolveActivity('refine')); };
+      label = el('div', { class: 'with-action' }, label, write);
+    }
     return { field, input, read, label };
   });
   $('#activity-required').hidden = !requiredInputs.length;
@@ -855,15 +873,15 @@ function renderActivityEditor(entry) {
   if (payload !== activityPayload && !activityEditing) {
     activityPayload = payload;
     $('#activity-editor-day').textContent = dayText(entry.day);
-    $('#activity-editor-title').textContent = entry.draft.title || t('Review activity');
-    $('#activity-evidence').replaceChildren(...entry.activities.map(a => el('li', {}, link(a.label, a.url),
+    $('#activity-editor-title').textContent = entryTitle(entry, t('Review activity'));
+    $('#activity-evidence').replaceChildren(...entry.activities.map(a => el('li', {}, link(tx(a.label), a.url),
       a.context_required ? badge(t('Needs your confirmation'), 'warn') : null)));
     const question = entry.draft.question || confirmationNote(entry);
     $('#activity-ask').hidden = !needsInput;
     $('#activity-question').textContent = question ? tx(question) : t('The draft looks complete. Check it below, or tell the assistant what to change.');
     $('#activity-refine-box').open = false;
     renderParents(entry);
-    field('#activity-title', entry.draft.title); field('#activity-description', entry.draft.description);
+    field('#activity-title', entryTitle(entry, '')); field('#activity-description', entry.draft.description);
     field('#activity-hours', entry.draft.hours); field('#activity-context', '');
     // Required fields have their own inputs; the JSON keeps only the rest.
     const requiredRefs = new Set((entry.required || []).map(f => f.reference));
@@ -892,6 +910,9 @@ function activityFormProblem() {
   if ($('#activity-description').value.includes('://')) return [t("Remove the links from the description: the activity's links are added to the task automatically."), '#activity-description'];
   const empty = requiredInputs.filter(r => { const value = r.read(); return value === undefined || (typeof value === 'number' && !Number.isFinite(value)); });
   if (empty.length) return [t('Complete the fields Azure DevOps requires: {names}.', { names: empty.map(requiredName).join(', ') }), `#${empty[0].input.id}`];
+  // Azure DevOps keeps at most 255 characters in a text field; the app accepts 8000 in others.
+  const long = requiredInputs.find(r => { const value = r.read(); return typeof value === 'string' && value.length > (r.field.kind?.toLowerCase() === 'string' ? 255 : 8000); });
+  if (long) return [t('{name} admits at most {n} characters.', { name: requiredName(long), n: long.field.kind?.toLowerCase() === 'string' ? 255 : 8000 }), `#${long.input.id}`];
   const fraction = requiredInputs.find(r => r.field.kind?.toLowerCase() === 'integer' && !Number.isInteger(r.read()));
   if (fraction) return [t('{name} must be a whole number.', { name: requiredName(fraction) }), `#${fraction.input.id}`];
   return null;
@@ -917,20 +938,28 @@ async function resolveActivity(action) {
     const problem = activityFormProblem();
     if (problem) return showActivityProblem(...problem);
   }
-  if (action === 'refine' && !$('#activity-context').value.trim()) return showActivityProblem(t('Write your answer for the assistant first.'), '#activity-context');
+  const evidence = action === 'refine' ? draftEvidence : null;
+  draftEvidence = null;
+  if (action === 'refine' && !evidence && !$('#activity-context').value.trim()) return showActivityProblem(t('Write your answer for the assistant first.'), '#activity-context');
   let fields = {};
   if (action !== 'dismiss') {
     try { fields = jsonFields($('#activity-fields').value); } catch (error) { return showActivityProblem(String(error), '#activity-fields'); }
-    for (const r of requiredInputs) if (r.read() !== undefined) fields[r.field.reference] = r.read();
+    // Asking for new evidence drops the current text, so the agent's version fills the field.
+    for (const r of requiredInputs) {
+      if (r.field.reference === evidence) fields[r.field.reference] = '';
+      else if (r.read() !== undefined) fields[r.field.reference] = r.read();
+    }
   }
   const choice = $('#activity-parent').value;
   const parentValue = choice === 'other' ? $('#activity-other-parent').value : choice;
   const resolution = action === 'dismiss' ? { action } : {
     action, parent: parentValue ? Number(parentValue) : null, title: $('#activity-title').value.trim(),
     description: $('#activity-description').value.trim(), hours: $('#activity-hours').value ? Number($('#activity-hours').value) : null,
-    context: $('#activity-context').value.trim(), fields
+    context: [$('#activity-context').value.trim(), evidence ? t('Write the completion evidence: the result and the artifacts by name, without chat content.') : ''].filter(Boolean).join('\n'), fields
   };
-  await invoke('activity_resolve', { id: selectedActivity, resolution });
+  // A refusal (too long, sensitive, invalid) is shown next to the buttons, not as a toast.
+  try { await invoke('activity_resolve', { id: selectedActivity, resolution }); }
+  catch (error) { return showActivityProblem(tx(String(error?.message ?? error))); }
   if (action === 'create') {
     for (const r of requiredInputs) {
       if (r.field.allowed?.length && r.read() !== undefined) try { localStorage.setItem(`pta-field:${r.field.reference}`, JSON.stringify(r.read())); } catch { /* not remembered */ }
@@ -965,7 +994,7 @@ function finishActivityOperation(operation, entry) {
     result('error', t('The activity could not be read again. Refresh the list.'));
   } else if (entry.state === 'done') {
     const parent = entry.parents.find(p => p.id === entry.draft.parent);
-    const task = entry.task_url ? link(`#${entry.task_id} ${entry.draft.title}`, entry.task_url) : `«${entry.draft.title}»`;
+    const task = entry.task_url ? link(`#${entry.task_id} ${entryTitle(entry, '')}`, entry.task_url) : `«${entryTitle(entry, '')}»`;
     flashActivity('ok', icon('check'), el('span', {}, t('Task created in Done:'), ' ', task,
       parent ? [` · ${t('HU')} `, link(`#${parent.id} ${parent.title}`, parent.url)] : null, ` · ${hoursText(entry.draft.hours)}`));
     done(t('Task #{id} created in Done.', { id: entry.task_id }));
@@ -973,7 +1002,7 @@ function finishActivityOperation(operation, entry) {
     $('#activity-flash').scrollIntoView({ behavior: 'smooth', block: 'center' });
     return;
   } else if (['dismissed', 'already_registered'].includes(entry.state)) {
-    flashActivity('info', entry.state === 'dismissed' ? t('Activity dismissed: «{title}». It will not be proposed again.', { title: entry.draft.title || t('Activity') }) : tx(entry.issue));
+    flashActivity('info', entry.state === 'dismissed' ? t('Activity dismissed: «{title}». It will not be proposed again.', { title: entryTitle(entry, t('Activity')) }) : tx(entry.issue));
     if (selectedActivity === operation.id) closeActivity();
     return;
   } else if (['failed', 'uncertain'].includes(entry.state)) {

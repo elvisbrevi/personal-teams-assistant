@@ -110,7 +110,7 @@ pub fn validate_fields(fields: &BTreeMap<String, Value>) -> Result<()> {
         ensure!(
             value
                 .as_str()
-                .is_none_or(|s| s.len() <= 2000 && !s.chars().any(|c| c.is_control() && c != '\n')),
+                .is_none_or(|s| s.len() <= 8000 && !s.chars().any(|c| c.is_control() && c != '\n')),
             "task field too large"
         );
     }
@@ -274,6 +274,9 @@ pub struct Draft {
     pub parent: Option<u64>,
     pub title: String,
     pub description: String,
+    /// The agent's completion evidence: the result and the artifacts by name, never chat text.
+    #[serde(default)]
+    pub evidence: String,
     pub hours: Option<f64>,
     pub confidence: f64,
     pub question: String,
@@ -503,7 +506,8 @@ impl Recorder {
                 "The title can have at most 160 characters.",
                 "El título puede tener como máximo 160 caracteres.",
             )
-        } else if draft.description.chars().count() > 6000 {
+        } else if draft.description.chars().count() > 6000 || draft.evidence.chars().count() > 2000
+        {
             self.say(
                 "The description can have at most 6000 characters.",
                 "La descripción puede tener como máximo 6000 caracteres.",
@@ -516,14 +520,19 @@ impl Recorder {
                 "The effort must be between 0.01 and 24 hours.",
                 "El esfuerzo debe estar entre 0,01 y 24 horas.",
             )
-        } else if draft.description.contains("://") {
+        } else if draft.description.contains("://") || draft.evidence.contains("://") {
             self.say(
                 "Remove the links from the description: the activity's links are added to the task automatically.",
                 "Quita los enlaces de la descripción: los enlaces de la actividad se agregan a la tarea automáticamente.",
             )
-        } else if ![&draft.title, &draft.description, &draft.question]
-            .iter()
-            .all(|t| self.redactor.clean(t))
+        } else if ![
+            &draft.title,
+            &draft.description,
+            &draft.evidence,
+            &draft.question,
+        ]
+        .iter()
+        .all(|t| self.redactor.clean(t))
         {
             self.say(
                 "The title or description contains data that looks sensitive (an email address, phone number, ID number, token or password). Remove it and try again.",
@@ -765,6 +774,7 @@ impl Recorder {
                 parent: None,
                 title: a.short.clone(),
                 description: String::new(),
+                evidence: String::new(),
                 hours: None,
                 confidence: 0.,
                 question,
