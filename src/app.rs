@@ -131,10 +131,31 @@ impl std::fmt::Display for SetupError {
 
 impl std::error::Error for SetupError {}
 
+/// Input or state the user can fix, with a fixed explanation that is safe to show as is.
+#[derive(Debug)]
+enum Rejected {
+    Input(&'static str),
+    Conflict(&'static str),
+}
+
+impl std::fmt::Display for Rejected {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let (Self::Input(message) | Self::Conflict(message)) = self;
+        formatter.write_str(message)
+    }
+}
+
+impl std::error::Error for Rejected {}
+
 fn fail<E: Into<anyhow::Error>>(error: E) -> String {
     let error = error.into();
     if let Some(message) = error.downcast_ref::<SetupError>() {
         return format!("[not_ready] {}", message.0);
+    }
+    match error.downcast_ref::<Rejected>() {
+        Some(Rejected::Input(message)) => return format!("[invalid_input] {message}"),
+        Some(Rejected::Conflict(message)) => return format!("[conflict] {message}"),
+        None => {}
     }
     if let Some(message) = error.downcast_ref::<crate::adapters::oauth::AuthorizationRequired>() {
         return format!("[not_ready] {message}");

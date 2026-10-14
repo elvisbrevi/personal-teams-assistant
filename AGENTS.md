@@ -12,7 +12,7 @@ Read [the architecture](docs/architecture.md) first: it explains components, pip
 - The product is a single Cargo package, `personal-teams-assistant`: the GUI and host `personal-teams-assistant`, the `pta` CLI and its skill. The same binary runs without a window (`--headless`, or built with `--no-default-features` for Linux). There are no other crates, `.app`/`.dmg`/installer bundles or standalone server.
 - Tauri is used only in `src/app/gui.rs` (resources in `desktop/`); operations go through `Host`/`Shell` and must build with and without the `gui` feature.
 - Delivery priority is the CLI and its shared core. If the GUI falls behind, note it in the architecture's «Known limits»; its parity does not block CLI work. Do not reinstall, publish or update the GUI unless the user asks.
-- Everything in the repository is in English: code, comments, documentation, prompts, the GUI, CLI messages and audit steps. What the assistant writes to Teams follows `llm.language` (Spanish by default). Detecting messages without a model keeps Spanish and English phrases, because users write in both.
+- Everything in the repository is in English: code, comments, documentation, prompts, the GUI's source text, CLI messages, IPC messages, diagnostics and audit steps. What the user reads follows `llm.language` (Spanish by default): the GUI (translated at runtime by `desktop/ui/i18n.js`, whose catalog is the only Spanish UI text), what the assistant writes to Teams, and the activity drafts and issues it writes for the user. Every new GUI string goes through `t()`/`tn()` (or static HTML) and gets its catalog entry; `scripts/test-ui-i18n.cjs` fails otherwise. Detecting messages without a model keeps Spanish and English phrases, because users write in both.
 
 ## Invariants that must not be broken
 
@@ -43,7 +43,7 @@ cargo clippy --all-targets --no-default-features -- -D warnings
 cargo test
 cargo test --no-default-features
 bun build desktop/ui/app.js --no-bundle --outfile /tmp/app-check.js   # if the GUI changed
-node --test scripts/test-activity-ui.cjs                            # if the GUI changed
+node --test scripts/test-activity-ui.cjs scripts/test-ui-i18n.cjs  # if the GUI changed
 ```
 
 Update the architecture and the skill when behavior, commands or schemas change.

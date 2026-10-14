@@ -414,6 +414,10 @@ fn activity_key(activity: &Linkable) -> String {
 }
 
 impl Recorder {
+    /// Text written for the user with an entry, in `llm.language` like the drafts.
+    fn say(&self, english: impl Into<String>, spanish: impl Into<String>) -> String {
+        self.config.llm.language.say(english, spanish)
+    }
     pub fn error_detail(&self, error: &anyhow::Error) -> String {
         self.redactor
             .redact(&format!("{error:#}"))
@@ -468,27 +472,67 @@ impl Recorder {
             .sum::<f64>();
         Ok(work.hours + local)
     }
-    fn valid_draft(&self, draft: &Draft, parents: &[Target]) -> bool {
-        draft.confidence.is_finite()
-            && (0.0..=1.0).contains(&draft.confidence)
-            && draft.title.chars().count() <= 160
-            && draft.description.chars().count() <= 6000
-            && draft.question.len() <= 1000
-            && draft.suggested_parents.len() <= 5
-            && draft
-                .hours
-                .is_none_or(|h| h.is_finite() && (0.01..=24.).contains(&h))
-            && draft
-                .parent
-                .is_none_or(|id| parents.iter().any(|p| p.id == id))
-            && draft
+    /// Why a draft cannot be kept, told so the user can fix it; `None` when it is valid.
+    fn draft_problem(&self, draft: &Draft, parents: &[Target]) -> Option<String> {
+        let problem = if draft.title.chars().count() > 160 {
+            self.say(
+                "The title can have at most 160 characters.",
+                "El título puede tener como máximo 160 caracteres.",
+            )
+        } else if draft.description.chars().count() > 6000 {
+            self.say(
+                "The description can have at most 6000 characters.",
+                "La descripción puede tener como máximo 6000 caracteres.",
+            )
+        } else if draft
+            .hours
+            .is_some_and(|h| !h.is_finite() || !(0.01..=24.).contains(&h))
+        {
+            self.say(
+                "The effort must be between 0.01 and 24 hours.",
+                "El esfuerzo debe estar entre 0,01 y 24 horas.",
+            )
+        } else if draft.description.contains("://") {
+            self.say(
+                "Remove the links from the description: the activity's links are added to the task automatically.",
+                "Quita los enlaces de la descripción: los enlaces de la actividad se agregan a la tarea automáticamente.",
+            )
+        } else if ![&draft.title, &draft.description, &draft.question]
+            .iter()
+            .all(|t| self.redactor.clean(t))
+        {
+            self.say(
+                "The title or description contains data that looks sensitive (an email address, phone number, ID number, token or password). Remove it and try again.",
+                "El título o la descripción contiene datos que parecen sensibles (un correo, un teléfono, un RUT, un token o una contraseña). Quítalos e inténtalo de nuevo.",
+            )
+        } else if draft
+            .parent
+            .is_some_and(|id| !parents.iter().any(|p| p.id == id))
+        {
+            self.say(
+                "Choose one of the listed HUs or enter the ID of another open HU.",
+                "Elige una de las HU de la lista o ingresa el ID de otra HU abierta.",
+            )
+        } else if !draft.confidence.is_finite()
+            || !(0.0..=1.0).contains(&draft.confidence)
+            || draft.question.len() > 1000
+            || draft.suggested_parents.len() > 5
+            || !draft
                 .suggested_parents
                 .iter()
                 .all(|id| parents.iter().any(|p| p.id == *id))
-            && [&draft.title, &draft.description, &draft.question]
-                .iter()
-                .all(|t| self.redactor.clean(t))
-            && !draft.description.contains("://")
+        {
+            self.say(
+                "The proposed task details are invalid.",
+                "Los detalles propuestos para la tarea no son válidos.",
+            )
+        } else {
+            return None;
+        };
+        Some(problem)
+    }
+    fn valid_draft(&self, draft: &Draft, parents: &[Target]) -> bool {
+        self.draft_problem(draft, parents).is_none()
     }
     pub async fn run(&self, run: &str, day: NaiveDate, context: &str) -> Result<Summary> {
         validate_context(context, &self.redactor)?;
@@ -539,9 +583,10 @@ impl Recorder {
                     found.sanitize(&self.redactor);
                     summary.partial |= found.partial;
                     if found.partial {
-                        summary
-                            .warnings
-                            .push(format!("Source {id} has incomplete coverage."));
+                        summary.warnings.push(self.say(
+                            format!("Source {id} has incomplete coverage."),
+                            format!("La fuente {id} tiene cobertura incompleta."),
+                        ));
                     }
                     evidence.push_str(&found.text);
                     if let Some(offer) = found.links {
@@ -550,9 +595,10 @@ impl Recorder {
                 }
                 Err(error) => {
                     summary.partial = true;
-                    summary.warnings.push(format!(
-                        "Could not read source {id}: {}",
-                        self.error_detail(&error)
+                    let detail = self.error_detail(&error);
+                    summary.warnings.push(self.say(
+                        format!("Could not read source {id}: {detail}"),
+                        format!("No se pudo leer la fuente {id}: {detail}"),
                     ));
                 }
             }
@@ -617,7 +663,11 @@ impl Recorder {
             Ok(drafts) => drafts,
             Err(error) => {
                 summary.partial = true;
-                summary.warnings.push(format!("Task planning failed ({}): {}. Activities with verified artifacts remain pending for manual review.",self.llm.name(),self.error_detail(&error)));
+                let (agents, detail) = (self.llm.name(), self.error_detail(&error));
+                summary.warnings.push(self.say(
+                    format!("Task planning failed ({agents}): {detail}. Activities with verified artifacts remain pending for manual review."),
+                    format!("La planificación de tareas falló ({agents}): {detail}. Las actividades con artefactos verificados quedan pendientes para revisión manual."),
+                ));
                 Vec::new()
             }
         };
@@ -667,10 +717,7 @@ impl Recorder {
                 && let Err(error) = self.apply(&mut entry, writer).await
                 && entry.state == "pending"
             {
-                entry.issue = format!(
-                    "Could not verify the task fields or HU: {}",
-                    self.error_detail(&error)
-                );
+                entry.issue = self.unverified(&error);
                 self.db.update(&entry, "pending")?;
             }
         }
@@ -683,7 +730,21 @@ impl Recorder {
             if a.url.starts_with("https://teams.microsoft.com/") && !a.context_required {
                 continue;
             }
-            let draft = Draft {activities:vec![a.key.clone()],parent:None,title:a.short.clone(),description:String::new(),hours:None,confidence:0.,question:"Which HU does this activity belong to, what did you do, and how long did it take?".into(),suggested_parents:parents.iter().take(3).map(|p|p.id).collect(),ignore:false};
+            let question = self.say(
+                "Which HU does this activity belong to, what did you do, and how long did it take?",
+                "¿A qué HU corresponde esta actividad, qué hiciste y cuánto tiempo te tomó?",
+            );
+            let draft = Draft {
+                activities: vec![a.key.clone()],
+                parent: None,
+                title: a.short.clone(),
+                description: String::new(),
+                hours: None,
+                confidence: 0.,
+                question,
+                suggested_parents: parents.iter().take(3).map(|p| p.id).collect(),
+                ignore: false,
+            };
             let mut entry = self.entry(run, day, draft, vec![a], &parents, &evidence);
             entry.context = context.into();
             self.db.insert(&entry)?;
@@ -744,18 +805,7 @@ impl Recorder {
             }
             return Ok(entry);
         }
-        if let Some(parent) = resolution.parent {
-            if !entry.parents.iter().any(|p| p.id == parent) {
-                let found = self
-                    .tools
-                    .work_item(self.writer()?, parent)
-                    .await?
-                    .context("HU could not be verified")?;
-                ensure!(found.holds_tasks(), "choose an open HU");
-                entry.parents.push(found);
-            }
-            entry.draft.parent = Some(parent);
-        }
+        // The user's edits stay with the entry, even when its HU still has to change.
         if let Some(title) = resolution.title {
             entry.draft.title = title;
         }
@@ -770,16 +820,37 @@ impl Recorder {
             entry
                 .context
                 .push_str(&format!("\n{}", resolution.context.trim()));
-            ensure!(entry.context.len() <= 12000, "context too large");
+            ensure!(
+                entry.context.len() <= 12000,
+                self.say(
+                    "The context added to this activity is too long (at most 12000 bytes).",
+                    "El contexto agregado a esta actividad es demasiado largo (máximo 12000 bytes).",
+                )
+            );
         }
-        ensure!(
-            self.valid_draft(&entry.draft, &entry.parents),
-            "invalid task details"
-        );
+        if let Some(parent) = resolution.parent {
+            if !entry.parents.iter().any(|p| p.id == parent)
+                && let Some(issue) = self.add_parent(&mut entry, parent).await?
+            {
+                if let Some(problem) = self.draft_problem(&entry.draft, &entry.parents) {
+                    anyhow::bail!(problem);
+                }
+                entry.issue = issue;
+                self.db.update(&entry, "pending")?;
+                return Ok(entry);
+            }
+            entry.draft.parent = Some(parent);
+        }
+        if let Some(problem) = self.draft_problem(&entry.draft, &entry.parents) {
+            anyhow::bail!(problem);
+        }
         if resolution.action == "refine" {
             ensure!(
                 !entry.context.trim().is_empty(),
-                "provide context for the model"
+                self.say(
+                    "Write the context for the assistant first.",
+                    "Primero escribe el contexto para el asistente.",
+                )
             );
             let work = self.daily_work(entry.day.parse()?).await?;
             let remaining = (self.config.activity_registration.daily_hours
@@ -817,7 +888,16 @@ impl Recorder {
                 entry.draft = draft;
                 entry.issue.clear();
             } else {
-                entry.issue = error.map_or_else(|| "The model could not resolve the activity. Edit the details or add more context.".into(), |e| format!("The model could not resolve the activity: {e}"));
+                entry.issue = match error {
+                    Some(e) => self.say(
+                        format!("The assistant could not resolve the activity: {e}"),
+                        format!("El asistente no pudo resolver la actividad: {e}"),
+                    ),
+                    None => self.say(
+                        "The assistant could not resolve the activity. Edit the details or add more context.",
+                        "El asistente no pudo resolver la actividad. Edita los detalles o agrega más contexto.",
+                    ),
+                };
             }
             self.db.update(&entry, "refining")?;
         } else {
@@ -825,57 +905,135 @@ impl Recorder {
             if let Err(error) = self.apply(&mut entry, self.writer()?).await
                 && entry.state == "pending"
             {
-                entry.issue = format!(
-                    "Could not verify the task fields or HU: {}",
-                    self.error_detail(&error)
-                );
+                entry.issue = self.unverified(&error);
                 self.db.update(&entry, "pending")?;
             }
         }
         Ok(entry)
     }
+    fn unverified(&self, error: &anyhow::Error) -> String {
+        let detail = self.error_detail(error);
+        self.say(
+            format!("Could not verify the task fields or HU: {detail}"),
+            format!("No se pudieron verificar los campos de la tarea o la HU: {detail}"),
+        )
+    }
+    /// Reads an HU the user chose outside the offered ones and adds it. A work item that cannot
+    /// hold tasks (a bug, an incident, a task, a closed HU…) is explained instead, and its own
+    /// open parent HU, when it has one, is offered and preselected; nothing is written.
+    async fn add_parent(&self, entry: &mut Entry, id: u64) -> Result<Option<String>> {
+        let writer = self.writer()?;
+        let Some(item) = self.tools.work_item(writer, id).await? else {
+            return Ok(Some(self.say(
+                format!("Work item #{id} was not found in the authorized organization and projects. Check the ID or choose one of the listed HUs."),
+                format!("No se encontró el work item #{id} en la organización y los proyectos autorizados. Revisa el ID o elige una de las HU de la lista."),
+            )));
+        };
+        if item.holds_tasks() {
+            entry.parents.push(item);
+            return Ok(None);
+        }
+        let title = self.redactor.redact(&item.title);
+        let mut issue = self.say(
+            format!("#{id} «{title}» is a {} in state «{}», not an open HU. Tasks are created only under an open user story or backlog item; if it is related, mention #{id} in the description.", item.kind, item.state),
+            format!("#{id} «{title}» es un {} en estado «{}», no una HU abierta. Las tareas solo se crean bajo una historia de usuario o un backlog item abierto; si está relacionado, menciona #{id} en la descripción.", item.kind, item.state),
+        );
+        if let Some(parent) = item.parent
+            && let Ok(Some(mut hu)) = self.tools.work_item(writer, parent).await
+            && hu.holds_tasks()
+            && hu.organization == item.organization
+        {
+            hu.title = self.redactor.redact(&hu.title);
+            issue.push(' ');
+            issue.push_str(&self.say(
+                format!(
+                    "Its parent HU #{} «{}» is now selected: check it and create the task again.",
+                    hu.id, hu.title
+                ),
+                format!(
+                    "Quedó seleccionada su HU padre #{} «{}»: revísala y vuelve a crear la tarea.",
+                    hu.id, hu.title
+                ),
+            ));
+            entry.draft.parent = Some(hu.id);
+            entry.draft.suggested_parents.retain(|p| *p != hu.id);
+            entry.draft.suggested_parents.insert(0, hu.id);
+            entry.draft.suggested_parents.truncate(5);
+            if !entry.parents.iter().any(|p| p.id == hu.id) {
+                entry.parents.push(hu);
+            }
+        }
+        Ok(Some(issue))
+    }
+    /// Keeps the entry pending with an explanation of what is still missing.
+    fn hold(&self, entry: &mut Entry, issue: String) -> Result<()> {
+        entry.issue = issue;
+        self.db.update(entry, "pending")
+    }
     async fn apply(&self, entry: &mut Entry, writer: &ToolSpec) -> Result<()> {
         if self.config.policy.dry_run {
-            entry.issue = "Observation mode: no task was created.".into();
-            self.db.update(entry, "pending")?;
-            return Ok(());
+            let issue = self.say(
+                "Observation mode is on, so no task was created. Turn it off in Settings → Answers to create tasks.",
+                "El modo observación está activo, así que no se creó ninguna tarea. Desactívalo en Ajustes → Respuestas para crear tareas.",
+            );
+            return self.hold(entry, issue);
         }
         let Some(parent_id) = entry.draft.parent else {
-            entry.issue = "Choose an HU before creating the task.".into();
-            self.db.update(entry, "pending")?;
-            return Ok(());
+            let issue = self.say(
+                "Choose the HU the task goes under before creating it.",
+                "Elige la HU donde va la tarea antes de crearla.",
+            );
+            return self.hold(entry, issue);
         };
         let Some(hours) = entry.draft.hours else {
-            entry.issue = "Provide the effort in hours before creating the task.".into();
-            self.db.update(entry, "pending")?;
-            return Ok(());
+            let issue = self.say(
+                "Enter the effort in hours before creating the task.",
+                "Ingresa el esfuerzo en horas antes de crear la tarea.",
+            );
+            return self.hold(entry, issue);
         };
+        if entry.draft.title.trim().is_empty() {
+            let issue = self.say("Write the task title.", "Escribe el título de la tarea.");
+            return self.hold(entry, issue);
+        }
+        if entry.draft.description.trim().is_empty() {
+            let issue = self.say(
+                "Describe the work done before creating the task.",
+                "Describe el trabajo realizado antes de crear la tarea.",
+            );
+            return self.hold(entry, issue);
+        }
         let settings = &self.config.activity_registration;
         let work = self.daily_work(entry.day.parse()?).await?;
         let remaining = (settings.daily_hours - self.hours(&entry.day, &work)?).max(0.);
-        if hours > remaining + 0.0001
-            || entry.draft.title.trim().is_empty()
-            || entry.draft.description.trim().is_empty()
-        {
-            entry.issue = format!(
-                "Provide a title, description and effort within the remaining {remaining:.2} hours."
+        if hours > remaining + 0.0001 {
+            let (target, day) = (settings.daily_hours, &entry.day);
+            let issue = self.say(
+                format!("The effort ({hours:.2} h) exceeds the {remaining:.2} h left of the {target} h daily target for {day}. Lower the effort or raise the daily target in Settings."),
+                format!("El esfuerzo ({hours:.2} h) supera las {remaining:.2} h que quedan de la meta diaria de {target} h del {day}. Reduce el esfuerzo o aumenta la meta diaria en Ajustes."),
             );
-            self.db.update(entry, "pending")?;
-            return Ok(());
+            return self.hold(entry, issue);
         }
         if entry.activities.iter().any(|a| already_linked(a, &work)) {
             entry.state = "already_registered".into();
-            self.db.update(entry, "pending")?;
-            return Ok(());
+            let issue = self.say(
+                "This activity is already linked to a task in Azure DevOps, so nothing was created.",
+                "Esta actividad ya está vinculada a una tarea en Azure DevOps, así que no se creó nada.",
+            );
+            return self.hold(entry, issue);
         }
-        let parent = self
-            .tools
-            .work_item(writer, parent_id)
-            .await?
-            .context("HU could not be verified")?;
+        let parent = self.tools.work_item(writer, parent_id).await?.with_context(|| {
+            self.say(
+                format!("HU #{parent_id} could not be read in the authorized organization and projects"),
+                format!("No se pudo leer la HU #{parent_id} en la organización y los proyectos autorizados"),
+            )
+        })?;
         ensure!(
             parent.holds_tasks() && parent.organization == work.organization,
-            "parent is not an open HU in the authorized organization"
+            self.say(
+                format!("#{parent_id} is no longer an open HU in the authorized organization (it is a {} in state «{}»)", parent.kind, parent.state),
+                format!("#{parent_id} ya no es una HU abierta en la organización autorizada (es un {} en estado «{}»)", parent.kind, parent.state),
+            )
         );
         let fields = TaskFields {
             title: entry.draft.title.clone(),
@@ -891,13 +1049,14 @@ impl Recorder {
             .tools
             .task_fields(writer, &parent, &settings.task_kind)
             .await?;
-        if let Some(issue) = schema.issue(&fields) {
-            entry.issue = issue;
-            self.db.update(entry, "pending")?;
-            return Ok(());
+        if let Some(issue) = schema.issue(&fields, self.config.llm.language) {
+            return self.hold(entry, issue);
         }
         if !self.redactor.clean(&serde_json::to_string(&fields.extra)?) {
-            anyhow::bail!("task fields contain sensitive data");
+            anyhow::bail!(self.say(
+                "the additional fields contain sensitive data",
+                "los campos adicionales contienen datos sensibles",
+            ));
         }
         let mut activities = entry.activities.clone();
         for a in &mut activities {
@@ -911,9 +1070,11 @@ impl Recorder {
             .validate_task(writer, &parent, &fields, &activities)
             .await?
         {
-            entry.issue="Azure DevOps rejected the proposed fields. Check the completed state and required fields; add them under Additional fields.".into();
-            self.db.update(entry, "pending")?;
-            return Ok(());
+            let issue = self.say(
+                "Azure DevOps rejected the proposed fields. Check the completed state and required fields; add them under Additional fields.",
+                "Azure DevOps rechazó los campos propuestos. Revisa el estado completado y los campos obligatorios; agrégalos en Campos adicionales.",
+            );
+            return self.hold(entry, issue);
         }
         entry.state = "sending".into();
         entry.issue.clear();
@@ -935,17 +1096,29 @@ impl Recorder {
                 "done"
             }
             Ok((LinkStatus::Failed, _)) => {
-                entry.issue = "Azure DevOps rejected the task creation request. Inspect the completed state, required fields and write credential permissions before deciding how to proceed.".into();
+                entry.issue = self.say(
+                    "Azure DevOps rejected the task creation request. Inspect the completed state, required fields and write credential permissions before deciding how to proceed.",
+                    "Azure DevOps rechazó la creación de la tarea. Revisa el estado completado, los campos obligatorios y los permisos de la credencial de escritura antes de decidir cómo seguir.",
+                );
                 "failed"
-            },
+            }
             // No successful response/body or a deadline means human inspection, never retry.
             result => {
                 entry.issue = match result {
-                    Err(error) => format!("Task creation result is uncertain: {}. Inspect Azure DevOps; this write will not be retried.", self.error_detail(&error)),
-                    _ => "Task creation result is uncertain. Inspect Azure DevOps; this write will not be retried.".into(),
+                    Err(error) => {
+                        let detail = self.error_detail(&error);
+                        self.say(
+                            format!("Task creation result is uncertain: {detail}. Inspect Azure DevOps; this write will not be retried."),
+                            format!("El resultado de la creación de la tarea es incierto: {detail}. Revisa Azure DevOps; esta escritura no se reintentará."),
+                        )
+                    }
+                    _ => self.say(
+                        "Task creation result is uncertain. Inspect Azure DevOps; this write will not be retried.",
+                        "El resultado de la creación de la tarea es incierto. Revisa Azure DevOps; esta escritura no se reintentará.",
+                    ),
                 };
                 "uncertain"
-            },
+            }
         }
         .into();
         self.db.update(entry, "sending")?;

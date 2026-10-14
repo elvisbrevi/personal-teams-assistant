@@ -4,6 +4,7 @@ use super::{
     link::{LinkStatus, Linkable, Target},
     project_url, request, same_user, wiql, work_items,
 };
+use crate::config::Language;
 use anyhow::{Context, Result, ensure};
 use chrono::{DateTime, Utc};
 use reqwest::{Client, Method};
@@ -46,11 +47,13 @@ pub struct Field {
     pub allowed: Vec<Value>,
 }
 impl TaskSchema {
-    pub fn issue(&self, task: &TaskFields) -> Option<String> {
+    /// What the configured fields still lack for this task type, told in `language`.
+    pub fn issue(&self, task: &TaskFields, language: Language) -> Option<String> {
         if !self.completed_states.contains(&task.state) {
-            return Some(format!(
-                "Choose a completed state. Available: {}.",
-                self.completed_states.join(", ")
+            let states = self.completed_states.join(", ");
+            return Some(language.say(
+                format!("Choose a completed state in Settings. Available: {states}."),
+                format!("Elige un estado completado en Ajustes. Disponibles: {states}."),
             ));
         }
         let mut values = task.extra.clone();
@@ -86,9 +89,12 @@ impl TaskSchema {
             .map(|f| f.reference.as_str())
             .collect();
         if !missing.is_empty() {
-            return Some(format!(
-                "Required fields: {}. Add their values under Additional fields.",
-                missing.join(", ")
+            let missing = missing.join(", ");
+            return Some(language.say(
+                format!("Required fields: {missing}. Add their values under Additional fields."),
+                format!(
+                    "Campos obligatorios: {missing}. Agrega sus valores en Campos adicionales."
+                ),
             ));
         }
         for (key, value) in &values {
@@ -102,17 +108,21 @@ impl TaskSchema {
                 continue;
             }
             let Some(field) = self.fields.iter().find(|f| f.reference == *key) else {
-                return Some(format!("Field {key} is unavailable for this task type."));
+                return Some(language.say(
+                    format!("Field {key} is unavailable for this task type."),
+                    format!("El campo {key} no está disponible para este tipo de tarea."),
+                ));
             };
             if !field.allowed.is_empty() && !field.allowed.contains(value) {
-                return Some(format!(
-                    "Choose an allowed value for {key}: {}.",
-                    field
-                        .allowed
-                        .iter()
-                        .map(Value::to_string)
-                        .collect::<Vec<_>>()
-                        .join(", ")
+                let allowed = field
+                    .allowed
+                    .iter()
+                    .map(Value::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                return Some(language.say(
+                    format!("Choose an allowed value for {key}: {allowed}."),
+                    format!("Elige un valor permitido para {key}: {allowed}."),
                 ));
             }
         }
@@ -411,7 +421,10 @@ pub async fn write_task(
         })
         .context("task outside scope")?;
     let schema = task_schema(client, key, catalog_text, parent, &task.kind).await?;
-    ensure!(schema.issue(task).is_none(), "invalid task fields");
+    ensure!(
+        schema.issue(task, Language::En).is_none(),
+        "invalid task fields"
+    );
     let mut url = project_url(
         source,
         &parent.project,

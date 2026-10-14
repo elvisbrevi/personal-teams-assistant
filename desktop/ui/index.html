@@ -2,11 +2,12 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="color-scheme" content="light dark">
   <title>Personal Teams Assistant</title>
   <link rel="stylesheet" href="style.css">
   <script src="transport.js" defer></script>
+  <script src="i18n.js" defer></script>
   <script src="app.js" defer></script>
 </head>
 <body>
@@ -20,20 +21,24 @@
     <symbol id="i-close" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></symbol>
     <symbol id="i-send" viewBox="0 0 24 24"><path d="M4 12 20 4l-6 16-3-7z"/><path d="m11 13 9-9"/></symbol>
     <symbol id="i-arrow" viewBox="0 0 24 24"><path d="M5 12h14M13 6l6 6-6 6"/></symbol>
+    <symbol id="i-back" viewBox="0 0 24 24"><path d="M15 5l-7 7 7 7"/></symbol>
+    <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20 11a8 8 0 0 0-14.6-4.5L4 8"/><path d="M4 4v4h4"/><path d="M4 13a8 8 0 0 0 14.6 4.5L20 16"/><path d="M20 20v-4h-4"/></symbol>
+    <symbol id="i-spark" viewBox="0 0 24 24"><path d="M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8z"/><path d="M19 16l.8 2.2L22 19l-2.2.8L19 22l-.8-2.2L16 19l2.2-.8z"/></symbol>
+    <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5"/><path d="m16 16 4.5 4.5"/></symbol>
   </svg>
   <div class="app">
     <aside class="sidebar">
       <div class="brand">
         <svg class="logo" viewBox="0 0 64 64" aria-hidden="true"><rect width="64" height="64" rx="14" fill="#17382f"/><path d="M14 16h36a3 3 0 0 1 3 3v22a3 3 0 0 1-3 3H27l-9 7v-7h-4a3 3 0 0 1-3-3V19a3 3 0 0 1 3-3z" fill="#fff"/><path d="M23 22h18v5h-6.5v12h-5V27H23z" fill="#17382f"/></svg>
-        <div><strong>Teams Assistant</strong><small id="version">Personal</small></div>
+        <div translate="no"><strong>Teams Assistant</strong><small id="version">Personal</small></div>
       </div>
       <nav aria-label="Sections">
         <button data-tab="overview" title="Home" aria-current="page"><svg class="icon"><use href="#i-home"/></svg><span>Home</span></button>
         <button data-tab="settings" title="Settings"><svg class="icon"><use href="#i-settings"/></svg><span>Settings</span></button>
         <button data-tab="messages" title="Messages"><svg class="icon"><use href="#i-inbox"/></svg><span>Messages</span><b id="nav-attention" class="nav-count" hidden></b></button>
-        <button data-tab="registration" title="Activity registration"><svg class="icon"><use href="#i-check"/></svg><span>Activities</span><b id="nav-activities" class="nav-count" hidden></b></button>
-        <button data-tab="knowledge" title="Knowledge"><svg class="icon"><use href="#i-book"/></svg><span>Knowledge</span></button>
-        <button data-tab="chat" title="Test chat"><svg class="icon"><use href="#i-chat"/></svg><span>Test chat</span></button>
+        <button data-tab="registration" title="Activities"><svg class="icon"><use href="#i-check"/></svg><span class="long">Activities</span><span class="short">Activity</span><b id="nav-activities" class="nav-count" hidden></b></button>
+        <button data-tab="knowledge" title="Knowledge"><svg class="icon"><use href="#i-book"/></svg><span class="long">Knowledge</span><span class="short">Sources</span></button>
+        <button data-tab="chat" title="Test chat"><svg class="icon"><use href="#i-chat"/></svg><span class="long">Test chat</span><span class="short">Test</span></button>
       </nav>
       <div class="sidebar-foot">
         <span id="status" class="pill muted" role="status"><i></i><span>Loading…</span></span>
@@ -43,7 +48,7 @@
 
     <main>
       <div id="notice" class="toast" role="alert" hidden><span id="notice-text"></span><button id="notice-close" class="icon-button" aria-label="Close notice"><svg class="icon"><use href="#i-close"/></svg></button></div>
-      <div id="activity-notice" class="panel offer" role="status" hidden><div class="panel-head"><strong id="activity-notice-text"></strong><button id="activity-notice-open" class="secondary small">Review activities</button></div></div>
+      <div id="activity-notice" class="banner" role="status" hidden><span id="activity-notice-text"></span><button id="activity-notice-open" class="secondary small">Review activities</button></div>
       <div id="restart-offer" class="panel offer" role="alertdialog" aria-labelledby="restart-offer-title" hidden>
         <h2 id="restart-offer-title">New version installed</h2>
         <p>The previous version of the assistant was stopped (service and tunnel). The assistant was running. Keep it running with the new version?</p>
@@ -88,7 +93,7 @@
           <p>Changes are saved together with the bar at the bottom. If the assistant is running, it restarts to apply them.</p>
         </header>
         <div id="panel-web-account" class="panel" hidden>
-          <h2>Your web account</h2>
+          <div class="panel-head"><h2>Your web account</h2><button id="web-logout-settings" class="secondary small">Sign out</button></div>
           <p class="hint">You signed in with GitHub. Your configuration, Teams account, credentials and history belong to your profile. Contact the portal operator to recover access.</p>
         </div>
         <div class="panel" id="panel-credentials">
@@ -118,9 +123,9 @@
           <p id="web-hosting-note" class="hint" hidden>The portal operator manages this profile's address and tunnel. Your assistant uses its own Teams callbacks through the same public address.</p>
           <p class="hint">Microsoft Graph delivers messages to a public HTTPS URL that must reach the local port. For a tunnel managed in Cloudflare, turn on the option, store <code>CLOUDFLARE_TUNNEL_TOKEN</code> in Credentials and leave the local file empty; you can also use a local file with a final 404 rule. If another supervisor runs the tunnel, leave both off.</p>
           <div class="grid">
-            <label>Public HTTPS URL<input id="public-url" class="cfg" placeholder="https://assistant.example.com" spellcheck="false"></label>
+            <label>Public HTTPS URL<input id="public-url" class="cfg" translate="no" placeholder="https://assistant.example.com" spellcheck="false"></label>
             <label>Local port<input id="bind" class="cfg" placeholder="127.0.0.1:38655" spellcheck="false"></label>
-            <label>cloudflared config (optional)<input id="tunnel-config" class="cfg" placeholder="/private/path/config.yml" spellcheck="false"></label>
+            <label>cloudflared config (optional)<input id="tunnel-config" class="cfg" translate="no" placeholder="/private/path/config.yml" spellcheck="false"></label>
           </div>
           <label class="check"><input id="cloudflare-tunnel" class="cfg" type="checkbox"> Start and stop Cloudflare Tunnel with the assistant (stored token)</label>
         </div>
@@ -130,7 +135,7 @@
             <input id="dry-run" class="cfg switch" type="checkbox">
             <span><strong>Observation mode</strong><small>Drafts and records proposals in Messages, but never sends anything to Teams. Turn it off once the proposals convince you.</small></span>
           </label>
-          <label>Answer language <small>What the assistant writes in Teams, including notices and sources. It overrides the style; the app itself stays in English.</small><select id="llm-language" class="cfg"><option value="es">Español</option><option value="en">English</option></select></label>
+          <label>Language <small>The language of this app, of what the assistant writes in Teams (including notices and sources) and of the tasks it drafts. It overrides the style.</small><select id="llm-language" class="cfg" translate="no"><option value="es">Español</option><option value="en">English</option></select></label>
           <label>Answer style<textarea id="llm-style" class="cfg" rows="3"></textarea></label>
         </div>
         <div class="panel" id="panel-registration">
@@ -153,11 +158,11 @@
           <fieldset class="activity-sources"><legend>Activity sources</legend><div id="registration-sources" class="list"></div></fieldset>
           <p class="hint">Sources must be enabled and allow external processing. Azure DevOps activity includes your commits, pull requests, pipeline runs, releases and stage approvals. Wiki covers your page creation and edits. Teams messages covers work described in your own messages and call events in authorized chats and meetings.</p>
           <div class="grid">
-            <label>Task type<select id="registration-kind" class="cfg"><option>Task</option><option>Tarea</option></select></label>
-            <label>Completed state<input id="registration-state" class="cfg" placeholder="Done"></label>
-            <label>Effort field<input id="registration-effort" class="cfg" placeholder="Microsoft.VSTS.Scheduling.CompletedWork" spellcheck="false"></label>
+            <label>Task type<select id="registration-kind" class="cfg" translate="no"><option value="Task">Task</option><option value="Tarea">Tarea</option></select></label>
+            <label>Completed state<input id="registration-state" class="cfg" translate="no" placeholder="Done"></label>
+            <label>Effort field<input id="registration-effort" class="cfg" translate="no" placeholder="Microsoft.VSTS.Scheduling.CompletedWork" spellcheck="false"></label>
           </div>
-          <label>Additional required fields <small>JSON object with Azure DevOps field reference names and values.</small><textarea id="registration-fields" class="cfg" rows="3" spellcheck="false" placeholder='{"Custom.ActivityType":"Documentation"}'></textarea></label>
+          <label>Additional required fields <small>JSON object with Azure DevOps field reference names and values.</small><textarea id="registration-fields" class="cfg" translate="no" rows="3" spellcheck="false" placeholder='{"Custom.ActivityType":"Documentation"}'></textarea></label>
         </div>
         <div class="panel" id="panel-self-chat">
           <div class="panel-head"><h2>Chat with myself</h2><span id="self-chat-badge" class="badge muted"></span></div>
@@ -174,29 +179,72 @@
       </section>
 
       <section id="registration" hidden>
-        <header class="page-head"><h1>Activity registration</h1><p>Completed tasks, activities that need your context, and the daily effort still to register.</p></header>
-        <div class="panel">
-          <div class="toolbar"><label>Day<input id="activity-day" type="date"></label><button id="activity-run">Review this day</button><button id="activity-refresh" class="secondary">Refresh</button><button id="activity-settings" class="secondary">Configure</button></div>
-          <label>Context for the agents <small>Included when you review this day. Add the work performed, HU, effort, or details the sources cannot explain.</small><textarea id="activity-review-context" rows="3" maxlength="6000" placeholder="For HU 4321, I reviewed the payment guide for one hour and attended the deployment call."></textarea></label>
-          <p id="activity-running" class="hint" role="status"></p>
+        <header class="page-head"><h1>Activities</h1><p>Register the work you did as completed tasks in Azure DevOps.</p></header>
+        <div class="panel step-panel" id="activity-day-panel">
+          <div class="step-title"><span class="step-number">1</span><div><h2>Review a day</h2><p class="hint">The agents read your activity and propose one task per piece of work.</p></div></div>
+          <div class="day-bar">
+            <label class="day-field">Day<input id="activity-day" type="date"></label>
+            <button id="activity-run" class="day-run"><svg class="icon"><use href="#i-search"/></svg><span>Review this day</span></button>
+          </div>
+          <details id="activity-context-box" class="fold">
+            <summary>Add context for the review <small>Optional</small></summary>
+            <label>Context for the agents <small>The work performed, its HU, effort or details the sources cannot explain.</small><textarea id="activity-review-context" rows="3" maxlength="6000" placeholder="For HU 4321, I reviewed the payment guide for one hour and attended the deployment call."></textarea></label>
+          </details>
+          <div id="activity-progress" class="callout info" role="status" hidden><span class="spinner" aria-hidden="true"></span><span id="activity-running"></span></div>
+          <p id="activity-result" class="callout error" role="status" hidden></p>
+          <div class="meter">
+            <div class="meter-head"><strong id="activity-hours-text"></strong><span id="activity-hours-note" class="hint"></span></div>
+            <div class="progress" aria-hidden="true"><span id="activity-hours-bar"></span></div>
+          </div>
           <div id="activity-summary" class="stats"></div>
-          <p id="activity-result" class="activity-issue" role="status"></p>
-          <p id="activity-setup" class="hint"></p>
+          <div class="panel-foot"><p id="activity-setup" class="hint"></p><div class="foot-actions"><button id="activity-refresh" class="link-button"><svg class="icon"><use href="#i-refresh"/></svg>Refresh</button><button id="activity-settings" class="link-button">Configure</button></div></div>
         </div>
-        <div class="panel"><h2>Needs your input</h2><div id="activity-pending" class="list"></div></div>
-        <div id="activity-editor" class="panel" hidden>
-          <h2 id="activity-editor-title">Review activity</h2><p id="activity-question"></p><p id="activity-issue" class="activity-issue" role="status"></p><div id="activity-evidence" class="list"></div>
-          <form id="activity-form">
-            <label>Suggested HU<select id="activity-parent"></select></label>
-            <label id="activity-other-parent-label" hidden>Other HU ID<input id="activity-other-parent" type="number" min="1" step="1"></label>
-            <div class="grid"><label>Task title<input id="activity-title" maxlength="160"></label><label>Effort (hours)<input id="activity-hours" type="number" min="0.01" max="24" step="0.01"></label></div>
-            <label>Description<textarea id="activity-description" rows="5" maxlength="6000"></textarea></label>
-            <label>Other / more context <small>Explain the work, choose a different HU, or tell the assistant which call you attended and what it covered.</small><textarea id="activity-context" rows="4" maxlength="6000"></textarea></label>
-            <label>Additional fields (JSON)<textarea id="activity-fields" rows="3" spellcheck="false"></textarea></label>
-            <div class="actions"><button id="activity-create" type="submit">Create task in Done</button><button id="activity-refine" type="button" class="secondary">Ask assistant with this context</button><button id="activity-dismiss" type="button" class="secondary">Dismiss activity</button></div>
+        <div class="panel step-panel" id="activity-pending-panel">
+          <div class="step-title"><span class="step-number">2</span><div><h2>Needs your input <span id="activity-pending-count" class="badge warn"></span></h2><p class="hint">Open an activity, complete its HU, description and effort, and create the task.</p></div></div>
+          <div id="activity-flash" class="callout" role="status" hidden></div>
+          <div id="activity-pending" class="cards"></div>
+        </div>
+        <div id="activity-editor" class="panel editor" hidden>
+          <div class="editor-head">
+            <button id="activity-back" type="button" class="icon-button back" aria-label="Back to the list"><svg class="icon"><use href="#i-back"/></svg></button>
+            <div class="grow"><div class="editor-meta"><small id="activity-editor-day" class="eyebrow"></small><span id="activity-editor-state" class="badge"></span></div><h2 id="activity-editor-title">Review activity</h2></div>
+          </div>
+          <div class="editor-block">
+            <h3>What was detected</h3>
+            <ul id="activity-evidence" class="evidence"></ul>
+          </div>
+          <div id="activity-ask" class="editor-block ask">
+            <h3><svg class="icon"><use href="#i-spark"/></svg>The assistant asks</h3>
+            <p id="activity-question"></p>
+            <details id="activity-refine-box" class="fold">
+              <summary>Answer the assistant</summary>
+              <label>Your answer or more context <small>Explain the work, which HU it belongs to, how long it took, or which call you attended and what it covered. The assistant updates the draft; nothing is created yet.</small><textarea id="activity-context" rows="4" maxlength="6000"></textarea></label>
+              <button id="activity-refine" type="button" class="secondary"><svg class="icon"><use href="#i-spark"/></svg>Update the draft</button>
+            </details>
+          </div>
+          <form id="activity-form" class="editor-block" novalidate>
+            <h3>Task to create</h3>
+            <label>HU <small>Required. The task is created under this HU (a user story or backlog item).</small><select id="activity-parent"></select></label>
+            <label id="activity-other-parent-label" hidden>Other HU ID <small>An open user story or backlog item; bugs and incidents cannot hold tasks.</small><input id="activity-other-parent" type="number" inputmode="numeric" min="1" step="1"></label>
+            <label>Task title<input id="activity-title" maxlength="160" autocomplete="off"></label>
+            <label>Effort (hours) <small id="activity-hours-left"></small><input id="activity-hours" type="number" inputmode="decimal" min="0.01" max="24" step="any"></label>
+            <label>Description <small>What you did. It is saved in the task.</small><textarea id="activity-description" rows="5" maxlength="6000"></textarea></label>
+            <details class="fold"><summary>Additional fields <small>Advanced</small></summary><label>Additional fields (JSON) <small>Azure DevOps field reference names and values, if your process requires them.</small><textarea id="activity-fields" rows="3" spellcheck="false"></textarea></label></details>
+            <div id="activity-outcome" class="callout" role="status" aria-live="polite" hidden></div>
+            <div class="editor-actions">
+              <button id="activity-create" type="submit"><svg class="icon"><use href="#i-check"/></svg>Create task in Done</button>
+              <button id="activity-dismiss" type="button" class="secondary">Dismiss</button>
+            </div>
           </form>
         </div>
-        <div class="panel"><h2>Daily history</h2><div id="activity-history" class="table-scroll"></div><h3 class="activity-runs-title">Process runs</h3><div id="activity-runs" class="list"></div></div>
+        <div class="panel step-panel" id="activity-history-panel">
+          <div class="step-title"><span class="step-number">3</span><div><h2>This day's activities</h2><p class="hint">Every activity found for the day: created tasks, pending ones and dismissed ones.</p></div></div>
+          <div id="activity-history" class="cards"></div>
+        </div>
+        <details class="panel fold-panel" id="activity-runs-panel">
+          <summary><span>Process runs and diagnostics</span><span id="activity-runs-count" class="badge muted"></span></summary>
+          <div id="activity-runs" class="list"></div>
+        </details>
       </section>
       <section id="messages" hidden>
         <header class="page-head">
@@ -234,9 +282,9 @@
           <details class="add-form">
             <summary>Add a file from a repository</summary>
             <div class="grid">
-              <label>Source ID<input id="source-id" placeholder="operations" spellcheck="false"></label>
+              <label>Source ID<input id="source-id" translate="no" placeholder="operations" spellcheck="false"></label>
               <label>Repository<select id="source-repo"></select></label>
-              <label>Relative file path<input id="source-path" placeholder="topics/operations.md" spellcheck="false"></label>
+              <label>Relative file path<input id="source-path" translate="no" placeholder="topics/operations.md" spellcheck="false"></label>
               <label>Topics, comma separated<input id="source-topics" placeholder="operations, support"></label>
             </div>
             <label>Description<input id="source-description" placeholder="Which questions it answers"></label>
@@ -251,8 +299,8 @@
           <details class="add-form">
             <summary>Add a local checkout</summary>
             <div class="grid">
-              <label>Alias<input id="repo-alias" placeholder="my_knowledge" spellcheck="false"></label>
-              <label>Checkout path<input id="repo-path" placeholder="/path/to/repository" spellcheck="false"></label>
+              <label>Alias<input id="repo-alias" translate="no" placeholder="my_knowledge" spellcheck="false"></label>
+              <label>Checkout path<input id="repo-path" translate="no" placeholder="/path/to/repository" spellcheck="false"></label>
             </div>
             <div class="actions"><button id="add-repo" class="secondary">Add repository</button></div>
           </details>

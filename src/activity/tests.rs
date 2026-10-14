@@ -4,6 +4,7 @@ use crate::{
         link::LinkOffer,
         registration::{Field, TaskSchema},
     },
+    config::Language,
     knowledge::Resource,
     llm::GenerationInput,
 };
@@ -170,7 +171,23 @@ impl ReadOnlyTool for TestTools {
         })
     }
     async fn work_item(&self, _: &ToolSpec, id: u64) -> Result<Option<Target>> {
-        Ok((id == 40).then(parent))
+        Ok(match id {
+            40 => Some(parent()),
+            // An HU outside the review's offer, and an incident under it that cannot hold tasks.
+            41 => Some(Target {
+                id: 41,
+                title: "Payment incidents".into(),
+                ..parent()
+            }),
+            26321 => Some(Target {
+                id: 26321,
+                title: "Consul denies the payment query configuration".into(),
+                kind: "Bug".into(),
+                parent: Some(41),
+                ..parent()
+            }),
+            _ => None,
+        })
     }
     async fn task_fields(&self, _: &ToolSpec, _: &Target, _: &str) -> Result<TaskSchema> {
         Ok(schema(self.required))
@@ -607,6 +624,62 @@ async fn automatic_wiki_task_is_done_once_and_call_stays_pending() {
     let totals = r.db.summary(&yesterday().to_string()).unwrap().unwrap();
     assert_eq!(totals.remaining_hours, 3.);
     assert_eq!(totals.pending, 0);
+}
+
+#[tokio::test]
+async fn a_work_item_that_cannot_hold_tasks_keeps_the_edits_and_offers_its_hu() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut r, tools) = recorder(dir.path(), 0., false, false, false);
+    r.config.activity_registration.auto_register = false;
+    r.run("first", yesterday(), "").await.unwrap();
+    let entry = r.db.pending().unwrap().remove(0);
+    let create = |parent| Resolution {
+        action: "create".into(),
+        parent: Some(parent),
+        title: Some("Diagnose the Consul 403".into()),
+        description: Some(
+            "Diagnosed the production startup failure. Related incident: #26321.".into(),
+        ),
+        hours: Some(1.5),
+        context: String::new(),
+        fields: BTreeMap::new(),
+    };
+    let held = r.resolve(&entry.id, create(26321)).await.unwrap();
+    assert_eq!(held.state, "pending");
+    for part in ["#26321", "Bug", "no una HU abierta", "#41"] {
+        assert!(held.issue.contains(part), "{}", held.issue);
+    }
+    assert_eq!(held.draft.parent, Some(41));
+    assert_eq!(held.draft.suggested_parents[0], 41);
+    let stored = r.db.entry(&entry.id).unwrap().unwrap();
+    assert_eq!(stored.draft.title, "Diagnose the Consul 403");
+    assert_eq!(stored.draft.hours, Some(1.5));
+    assert_eq!(stored.issue, held.issue);
+
+    r.config.llm.language = Language::En;
+    let missing = r.resolve(&entry.id, create(999)).await.unwrap();
+    assert!(
+        missing.issue.contains("#999 was not found"),
+        "{}",
+        missing.issue
+    );
+    let error = r
+        .resolve(
+            &entry.id,
+            Resolution {
+                description: Some("See https://dev.azure.com/example".into()),
+                ..create(41)
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("Remove the links"), "{error}");
+    assert_eq!(tools.writes.load(Ordering::SeqCst), 0);
+
+    let created = r.resolve(&entry.id, create(41)).await.unwrap();
+    assert_eq!(created.state, "done");
+    assert!(created.issue.is_empty());
+    assert_eq!(tools.writes.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]

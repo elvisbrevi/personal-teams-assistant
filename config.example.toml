@@ -20,8 +20,9 @@ channels = []
 provider = "deepseek"
 model = "deepseek-flash"
 style = "Natural and clear. Summarize by project and explain what the technical changes suggest. No promises or personal opinions."
-# Language of everything sent to Teams (answers, notices, sources): "es" or "en". Overrides any
-# language the style names. The app's interface, CLI and audit log are in English.
+# Language the user reads: the app's interface, everything sent to Teams (answers, notices,
+# sources) and the activity tasks it drafts: "es" or "en". Overrides any language the style names.
+# The CLI, audit log and diagnostics stay in English.
 language = "es"
 
 # Priority order. Every model call starts from the first enabled provider and falls back to the

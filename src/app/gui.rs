@@ -40,12 +40,13 @@ impl Shell for TauriShell {
         let title = title.to_owned();
         let body = body.to_owned();
         let entry = entry.map(str::to_owned);
+        let review = language(&self.0).say("Review activities", "Revisar actividades");
         std::thread::spawn(move || {
             let result = notify_rust::Notification::new()
                 .summary(&title)
                 .body(&body)
                 .appname("Personal Teams Assistant")
-                .action("default", "Review activities")
+                .action("default", &review)
                 .timeout(15_000)
                 .show();
             if let Ok(handle) = result {
@@ -77,7 +78,10 @@ fn open_activity(app: &tauri::AppHandle, entry: Option<&str>) -> Result<()> {
             "activity-registration",
             WebviewUrl::App(format!("index.html?activity={query}").into()),
         )
-        .title("Activity registration — Personal Teams Assistant")
+        .title(language(app).say(
+            "Activities — Personal Teams Assistant",
+            "Actividades — Personal Teams Assistant",
+        ))
         .inner_size(1000., 760.)
         .min_inner_size(640., 520.)
         .build()?;
@@ -94,6 +98,14 @@ fn show_main(app: &tauri::AppHandle) {
 
 fn host(app: &tauri::AppHandle) -> Arc<Host> {
     app.state::<Arc<Host>>().inner().clone()
+}
+
+/// The configured language of the tray, window titles and notifications (Spanish by default).
+fn language(app: &tauri::AppHandle) -> crate::config::Language {
+    app.try_state::<Arc<Host>>()
+        .and_then(|host| read_config(&host.state.config_path).ok())
+        .map(|config| config.llm.language)
+        .unwrap_or_default()
 }
 
 /// The WebView reaches the host only through this command, with the same contract as `pta`.
@@ -116,20 +128,43 @@ const BUSY_DOT: [u8; 3] = [0xff, 0x9f, 0x0a];
 /// The tray icon and its single start/stop item, drawn from the assistant's phase.
 struct Tray {
     icon: TrayIcon,
+    open: MenuItem<tauri::Wry>,
     toggle: MenuItem<tauri::Wry>,
+    quit: MenuItem<tauri::Wry>,
     stopped: Image<'static>,
     busy: Image<'static>,
     running: Image<'static>,
 }
 
 impl Tray {
-    fn render(&self, phase: AssistantPhase) {
+    fn render(&self, phase: AssistantPhase, language: crate::config::Language) {
+        let say = |english: &str, spanish: &str| language.say(english, spanish);
         let (text, image, status) = match phase {
-            AssistantPhase::Stopped => ("Start assistant", &self.stopped, "Stopped"),
-            AssistantPhase::Starting => ("Starting assistant…", &self.busy, "Starting…"),
-            AssistantPhase::Running => ("Stop assistant", &self.running, "Running"),
-            AssistantPhase::Stopping => ("Stopping assistant…", &self.busy, "Stopping…"),
+            AssistantPhase::Stopped => (
+                say("Start assistant", "Iniciar asistente"),
+                &self.stopped,
+                say("Stopped", "Detenido"),
+            ),
+            AssistantPhase::Starting => (
+                say("Starting assistant…", "Iniciando asistente…"),
+                &self.busy,
+                say("Starting…", "Iniciando…"),
+            ),
+            AssistantPhase::Running => (
+                say("Stop assistant", "Detener asistente"),
+                &self.running,
+                say("Running", "En ejecución"),
+            ),
+            AssistantPhase::Stopping => (
+                say("Stopping assistant…", "Deteniendo asistente…"),
+                &self.busy,
+                say("Stopping…", "Deteniendo…"),
+            ),
         };
+        let _ = self
+            .open
+            .set_text(say("Open settings and chat", "Abrir configuración y chat"));
+        let _ = self.quit.set_text(say("Quit", "Salir"));
         let _ = self.toggle.set_text(text);
         let _ = self.toggle.set_enabled(matches!(
             phase,
@@ -181,7 +216,7 @@ fn show_phase(app: &tauri::AppHandle, failure: Option<String>) {
     let _ = app.run_on_main_thread(move || {
         handle
             .state::<Tray>()
-            .render(*host(&handle).state.phase.borrow());
+            .render(*host(&handle).state.phase.borrow(), language(&handle));
         if let Some(message) = failure {
             report_failure(&handle, &message);
         }
@@ -208,22 +243,23 @@ fn follow_phase(app: &tauri::AppHandle) {
 /// The tray's single item starts a stopped assistant and stops a running one.
 fn toggle_assistant(app: &tauri::AppHandle) {
     let phase = *host(app).state.phase.borrow();
+    let language = language(app);
     let (method, pending, failure) = match phase {
         AssistantPhase::Stopped => (
             "start_assistant",
             AssistantPhase::Starting,
-            "The assistant did not start",
+            language.say("The assistant did not start", "El asistente no se inició"),
         ),
         AssistantPhase::Running => (
             "stop_assistant",
             AssistantPhase::Stopping,
-            "The assistant did not stop",
+            language.say("The assistant did not stop", "El asistente no se detuvo"),
         ),
         AssistantPhase::Starting | AssistantPhase::Stopping => return,
     };
     // Immediate feedback (this runs on the main thread), also while another operation holds
     // the dispatcher.
-    app.state::<Tray>().render(pending);
+    app.state::<Tray>().render(pending, language);
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
         let reply = control::dispatch(&host(&app), control::Request::new(method)).await;
@@ -311,7 +347,9 @@ pub(crate) fn run(host_lock: fs::File, restart_offer: bool) {
                 .build(app)?;
             app.manage(Tray {
                 icon,
+                open,
                 toggle,
+                quit,
                 busy: with_dot(&stopped, BUSY_DOT),
                 running: with_dot(&stopped, RUNNING_DOT),
                 stopped,
@@ -361,7 +399,13 @@ mod tests {
     #[test]
     fn window_assets_are_embedded_from_the_desktop_directory() {
         let context = super::context();
-        for asset in ["index.html", "app.js", "style.css"] {
+        for asset in [
+            "index.html",
+            "app.js",
+            "i18n.js",
+            "transport.js",
+            "style.css",
+        ] {
             assert!(
                 context.assets().get(&asset.into()).is_some(),
                 "{asset} is not embedded"
