@@ -75,6 +75,8 @@ function notify(text, tone = 'info') {
   const box = $('#notice');
   $('#notice-text').textContent = tx(String(text?.message ?? text));
   box.className = `toast ${tone}`;
+  // Errors interrupt a screen reader; confirmations and progress wait their turn.
+  box.setAttribute('role', tone === 'error' ? 'alert' : 'status');
   box.hidden = false;
   clearTimeout(noticeTimer);
   if (tone !== 'error') noticeTimer = setTimeout(() => { box.hidden = true; }, 6000);
@@ -104,15 +106,58 @@ function showTab(name, anchor) {
   if (name === 'messages') loadMessages().catch(fail);
   if (name === 'overview') loadActivity();
   if (name === 'registration') loadRegistration().catch(fail);
+  const target = anchor && document.getElementById(anchor);
+  // A Settings panel lives in one of its sections: open that section first.
+  const group = target?.closest('[data-settings-group]');
+  if (group) selectSettingsGroup(group.dataset.settingsGroup);
   renderSavebar();
   renderActivityNotice();
-  const target = anchor && document.getElementById(anchor);
   if (target) target.scrollIntoView({ behavior: 'smooth', block: 'start' });
   else window.scrollTo(0, 0);
 }
 
-function markDirty() { dirty = true; renderSavebar(); }
-function renderSavebar() { $('#savebar').hidden = !(dirty && ['settings', 'knowledge'].includes(tab)); }
+// ---------------------------------------------------------------- settings sections
+
+/** Settings sections with edits not saved yet, so a hidden section never hides them. */
+const dirtyGroups = new Set();
+
+function selectSettingsGroup(name, focus = false) {
+  for (const button of document.querySelectorAll('#settings-tabs [role=tab]')) {
+    const selected = button.dataset.group === name;
+    button.setAttribute('aria-selected', String(selected));
+    button.tabIndex = selected ? 0 : -1;
+    if (!selected) continue;
+    if (focus) button.focus();
+    // On a narrow screen the tab list scrolls sideways: keep the selected section in sight.
+    const bar = button.parentElement;
+    const offset = button.getBoundingClientRect().left - bar.getBoundingClientRect().left;
+    if (offset < 0 || offset + button.offsetWidth > bar.clientWidth) bar.scrollLeft += offset - 16;
+  }
+  for (const panel of document.querySelectorAll('[data-settings-group]')) panel.hidden = panel.dataset.settingsGroup !== name;
+}
+
+/** Marks which sections hold unsaved edits and which need something before the assistant works. */
+function renderSettingsFlags(attention = {}) {
+  for (const button of document.querySelectorAll('#settings-tabs [role=tab]')) {
+    const edited = button.querySelector('.flag.edited');
+    const warn = button.querySelector('.flag.warn');
+    if (edited) edited.hidden = !dirtyGroups.has(button.dataset.group);
+    if (warn && button.dataset.group in attention) warn.hidden = !attention[button.dataset.group];
+  }
+}
+
+function markDirty(event) {
+  dirty = true;
+  // Called as a listener (the event) or right after a click (the focused control).
+  const source = event?.target instanceof Element ? event.target : document.activeElement;
+  const group = source?.closest?.('[data-settings-group]');
+  if (group) dirtyGroups.add(group.dataset.settingsGroup);
+  renderSavebar();
+}
+function renderSavebar() {
+  $('#savebar').hidden = !(dirty && ['settings', 'knowledge'].includes(tab));
+  renderSettingsFlags();
+}
 
 // ---------------------------------------------------------------- status and overview
 
@@ -165,9 +210,15 @@ const transitions = {
   stopping: { tone: 'busy', pill: t('Stopping…'), title: t('Stopping the assistant…'), detail: t('It stops receiving Teams messages.') },
 };
 
-function tile(label, value, tone, detail) {
-  return el('div', { class: 'tile' }, el('small', { textContent: label }),
-    el('strong', {}, el('span', { class: `dot ${tone}` }), value), el('p', { textContent: detail }));
+/** One status row; selecting it opens where that part is changed (`go` = showTab arguments). */
+function tile(label, value, tone, detail, go) {
+  const row = el('button', { type: 'button', class: 'status-row' },
+    el('span', { class: 'status-label', textContent: label }),
+    el('span', { class: 'status-value' }, el('strong', {}, el('span', { class: `dot ${tone}`, 'aria-hidden': 'true' }), value),
+      el('small', { textContent: detail })),
+    icon('arrow'));
+  row.onclick = () => showTab(...go);
+  return row;
 }
 
 function renderTiles(s) {
@@ -180,18 +231,18 @@ function renderTiles(s) {
   try { if (urlReady(config)) host = new URL(config.server.public_url).host; } catch { /* shown as missing */ }
   $('#tiles').replaceChildren(
     tile(t('Microsoft account'), s.microsoft_connected ? t('Connected') : t('Not connected'), s.microsoft_connected ? 'ok' : 'warn',
-      s.microsoft_connected ? t('Reads and answers as you') : t('Connect it in Settings')),
+      s.microsoft_connected ? t('Reads and answers as you') : t('Connect it in Settings'), ['settings', 'panel-teams']),
     tile(t('Mode'), config.policy.dry_run ? t('Observation') : t('Sending on'), config.policy.dry_run ? 'info' : 'ok',
-      config.policy.dry_run ? t('Sends nothing to Teams') : t('Answers in Teams')),
+      config.policy.dry_run ? t('Sends nothing to Teams') : t('Answers in Teams'), ['settings', 'panel-behavior']),
     tile(t('Reception'), config.graph.discover_all_chats ? t('All my chats') : t('{n} chat(s)', { n: config.graph.allowed_chats.length }),
       s.running && s.active_subscriptions ? 'ok' : 'muted',
-      s.running ? t('{n} active subscription(s)', { n: s.active_subscriptions }) : t('Inactive while stopped')),
-    tile(t('Tunnel'), tunnelManaged ? (s.tunnel_running ? t('Running') : t('Stopped')) : t('External'), tunnelManaged && s.tunnel_running ? 'ok' : 'muted', host),
+      s.running ? t('{n} active subscription(s)', { n: s.active_subscriptions }) : t('Inactive while stopped'), ['settings', 'panel-teams']),
+    tile(t('Tunnel'), tunnelManaged ? (s.tunnel_running ? t('Running') : t('Stopped')) : t('External'), tunnelManaged && s.tunnel_running ? 'ok' : 'muted', host, ['settings', 'panel-server']),
     tile(t('Models'), first ? `${providerNames[first.provider] || first.provider}` : t('None active'), first ? 'ok' : 'warn',
-      first ? `${first.model}${rest.length ? ` · ${t('fallback')}: ${rest.map(c => providerNames[c.provider] || c.provider).join(' → ')}` : ` · ${t('no fallback')}`}` : t('Turn one on in Settings')),
-    tile(t('Sources'), t('{ready} of {total} ready', { ready, total: s.map.resources.length }), ready ? 'ok' : 'warn', t('Enabled, authorized and with an audience')),
+      first ? `${first.model}${rest.length ? ` · ${t('fallback')}: ${rest.map(c => providerNames[c.provider] || c.provider).join(' → ')}` : ` · ${t('no fallback')}`}` : t('Turn one on in Settings'), ['settings', 'panel-llm']),
+    tile(t('Sources'), t('{ready} of {total} ready', { ready, total: s.map.resources.length }), ready ? 'ok' : 'warn', t('Enabled, authorized and with an audience'), ['knowledge']),
     tile(t('Personal chat'), config.graph.self_chat ? t('Enabled') : t('Disabled'), config.graph.self_chat ? 'ok' : 'muted',
-      config.graph.self_chat ? t('Ask it from your Teams notes') : t('Optional')),
+      config.graph.self_chat ? t('Ask it from your Teams notes') : t('Optional'), ['settings', 'panel-self-chat']),
   );
 }
 
@@ -213,6 +264,8 @@ function renderSteps(s) {
   $('#setup-progress').textContent = t('{ready} of {total} ready', { ready: completed, total: required.length });
   $('#setup-bar').style.width = `${Math.round(completed / required.length * 100)}%`;
   const ready = completed === required.length;
+  // Once every step, optional ones included, is done the checklist has nothing left to say.
+  $('#setup-panel').hidden = steps.every(step => step.done);
   $('#setup-ready').hidden = !ready;
   $('#setup-steps').replaceChildren(...steps.map((step, index) => ({ step, index })).filter(({ step }) => !ready || !step.done).map(({ step, index }) => {
     const mark = el('span', { class: 'step-mark' }, step.done ? icon('check') : String(index + 1));
@@ -254,8 +307,15 @@ function renderLive() {
   $('#github-list').disabled = !s.github_connected;
   $('#github-disconnect').disabled = !s.github_connected;
   $('#self-chat-disable').disabled = !s.config.graph.self_chat;
+  // Enabling is the next step only while the personal chat is off.
+  $('#self-chat-enable').classList.toggle('secondary', Boolean(s.config.graph.self_chat));
   renderTiles(s);
   renderSteps(s);
+  renderSettingsFlags({
+    credentials: missingCredentials(s.credentials).length > 0,
+    teams: !s.microsoft_connected || !entraReady(s.config) || !urlReady(s.config),
+    models: !enabledChain(s.config).length,
+  });
 }
 
 /** Refreshes persisted state without touching unsaved form edits. */
@@ -283,8 +343,10 @@ async function reload() {
   field('#allowed-chats', config.graph.allowed_chats.join('\n'));
   $('#dry-run').checked = config.policy.dry_run;
   $('#discover-chats').checked = config.graph.discover_all_chats;
+  renderChatList();
   renderRegistrationSettings();
   dirty = false;
+  dirtyGroups.clear();
   renderSavebar();
   renderLive();
   renderCredentials(); renderRepositories(); renderResources(); renderChatSources();
@@ -298,6 +360,9 @@ setInterval(async () => {
 }, 15_000);
 
 // ---------------------------------------------------------------- settings
+
+/** The allowed-chats list only applies while not every chat is discovered; its value is kept either way. */
+function renderChatList() { $('#allowed-chats-field').hidden = $('#discover-chats').checked; }
 
 function rowText(primary, secondary, extra) {
   return el('div', {}, el('strong', {}, primary, extra), el('small', { textContent: secondary }));
@@ -324,7 +389,8 @@ function renderCredentials() {
     const title = el('span', { class: 'cred-name', textContent: name });
     const input = el('input', { type: 'password', autocomplete: 'new-password', spellcheck: false, hidden: retired,
       placeholder: empty ? t('Enter the credential') : t('Type only to replace it'), 'aria-label': t('New value of {name}', { name }) });
-    const save = el('button', { textContent: empty ? t('Save') : t('Replace'), disabled: true, hidden: retired });
+    // Storing a missing credential is the next step; replacing a stored one is not.
+    const save = el('button', { class: empty ? null : 'secondary', textContent: empty ? t('Save') : t('Replace'), disabled: true, hidden: retired });
     input.oninput = () => { save.disabled = !input.value.trim(); };
     input.onkeydown = event => { if (event.key === 'Enter' && !save.disabled) save.click(); };
     save.onclick = () => busy(save, async () => {
@@ -383,7 +449,7 @@ function renderChain() {
     const name = providerNames[row.provider] || row.provider;
     const rank = el('span', { class: 'rank', textContent: !row.enabled ? t('Off') : active++ === 0 ? t('Default') : t('Fallback {n}', { n: active - 1 }) });
     const toggle = el('input', { type: 'checkbox', checked: row.enabled, disabled: !row.enabled && !(info?.available), 'aria-label': t('Turn on {name}', { name }) });
-    toggle.onchange = () => { row.enabled = toggle.checked; markDirty(); renderChain(); };
+    toggle.onchange = () => { row.enabled = toggle.checked; markDirty({ target: list }); renderChain(); };
     const label = el('label', { class: 'check' }, toggle,
       el('div', {}, el('strong', { textContent: name }), el('small', { textContent: providerStatus(info) })));
     const models = (info?.models ?? []).map(model => [model.id, model.name]);
@@ -400,16 +466,16 @@ function renderChain() {
       row.model = model.value;
       const supported = efforts();
       if (!supported.includes(row.effort)) row.effort = info?.models.find(m => m.id === row.model)?.default_effort ?? supported[0];
-      markDirty();
+      markDirty({ target: list });
       renderChain();
     };
-    effort.onchange = () => { row.effort = effort.value; markDirty(); };
+    effort.onchange = () => { row.effort = effort.value; markDirty({ target: list }); };
     const order = el('div', { class: 'order' });
     for (const [text, offset, aria] of [['↑', -1, t('Raise the priority of {name}', { name })], ['↓', 1, t('Lower the priority of {name}', { name })]]) {
       const button = el('button', { class: 'secondary', textContent: text, 'aria-label': aria, disabled: !llmRows[index + offset] });
       button.onclick = () => {
         [llmRows[index], llmRows[index + offset]] = [llmRows[index + offset], llmRows[index]];
-        markDirty();
+        markDirty({ target: list });
         renderChain();
       };
       order.append(button);
@@ -559,8 +625,10 @@ function renderRegistrationSettings() {
   $('#registration-auto').checked = s.auto_register;
   for (const [id, value] of Object.entries({ hours: s.daily_hours, schedule: s.schedule, at: s.at,
     interval: s.interval_minutes, start: s.window_start, end: s.window_end, zone: s.time_zone,
-    weekdays: s.weekdays.join(', '), kind: s.task_kind, state: s.done_state, effort: s.effort_field,
+    kind: s.task_kind, state: s.done_state, effort: s.effort_field,
     fields: JSON.stringify(s.extra_fields, null, 2) })) field('#registration-' + id, value);
+  for (const day of document.querySelectorAll('#registration-weekdays input')) day.checked = s.weekdays.includes(Number(day.dataset.day));
+  renderScheduleFields();
   const sources = current.map.resources.filter(r => ['azure_devops_status', 'azure_devops_wiki', 'teams_messages'].includes(r.tool?.type));
   const writers = sources.filter(r => r.tool.type === 'azure_devops_status' && r.tool.link_secret_ref);
   $('#registration-writer').replaceChildren(el('option', { value: '', textContent: t('Select a source with a write credential') }),
@@ -575,6 +643,12 @@ function renderRegistrationSettings() {
   }));
   if (!sources.length) $('#registration-sources').append(el('p', { class: 'hint', textContent: t('Add Azure DevOps activity, Wiki or Teams messages sources in Knowledge to review your work.') }));
 }
+/** A daily schedule asks for its time; an interval schedule for its interval and window. Hidden values are kept. */
+function renderScheduleFields() {
+  const daily = $('#registration-schedule').value !== 'interval';
+  $('#registration-at-field').hidden = !daily;
+  for (const id of ['#registration-interval-field', '#registration-start-field', '#registration-end-field']) $(id).hidden = daily;
+}
 function jsonFields(text) {
   let value;
   try { value = JSON.parse(text.trim() || '{}'); } catch { throw t('Additional fields must be a JSON object.'); }
@@ -583,11 +657,16 @@ function jsonFields(text) {
 }
 function collectRegistrationSettings() {
   const s = current.config.activity_registration;
+  if (!document.querySelector('#registration-weekdays input:checked')) {
+    showTab('settings', 'panel-registration-schedule');
+    throw t('Choose at least one workday.');
+  }
   Object.assign(s, { enabled: $('#registration-enabled').checked, auto_register: $('#registration-auto').checked,
     daily_hours: Number($('#registration-hours').value), schedule: $('#registration-schedule').value,
     at: $('#registration-at').value, interval_minutes: Number($('#registration-interval').value),
     window_start: $('#registration-start').value, window_end: $('#registration-end').value,
-    time_zone: $('#registration-zone').value.trim(), weekdays: names($('#registration-weekdays').value).map(Number),
+    time_zone: $('#registration-zone').value.trim(),
+    weekdays: [...document.querySelectorAll('#registration-weekdays input:checked')].map(day => Number(day.dataset.day)),
     write_source: $('#registration-writer').value, task_kind: $('#registration-kind').value,
     done_state: $('#registration-state').value.trim(), effort_field: $('#registration-effort').value.trim(),
     extra_fields: jsonFields($('#registration-fields').value),
@@ -597,8 +676,8 @@ function collectRegistrationSettings() {
 
 function renderActivityNotice() {
   const count = pendingActivities.length;
-  // The Activities tab shows the same thing in full.
-  $('#activity-notice').hidden = tab === 'registration' || (!count && !activityRunning);
+  // Shown on Home only; elsewhere the Activities count in the navigation says the same.
+  $('#activity-notice').hidden = !count && !activityRunning;
   $('#activity-notice-text').textContent = activityRunning ? t('Reviewing your work…')
     : tn(count, '1 activity needs your context or an HU.', '{n} activities need your context or an HU.');
 }
@@ -1082,6 +1161,8 @@ const linkLabels = { sending: t('sending'), linked: t('linked'), already_linked:
 let messageRows = [];
 let messageFilter = 'all';
 const openMessages = new Set();
+/** The message to scroll to once Messages renders it (opened from Home). */
+let focusMessage = null;
 
 function messageState(row) {
   const reason = row.audit.reason || '';
@@ -1110,7 +1191,19 @@ function ago(at) {
   return t('just now');
 }
 const when = row => new Date(millis(row)).toLocaleString(uiLocale());
+const whenShort = row => new Date(millis(row)).toLocaleString(uiLocale(), { dateStyle: 'medium', timeStyle: 'short' });
 const ineligible = row => row.audit.reason === 'ineligible_message' && row.status === 'ignored';
+/** Lowercase without accents, so «revision» finds «revisión». */
+const folded = text => String(text ?? '').normalize('NFD').replace(/\p{Diacritic}/gu, '').toLowerCase();
+/** Whether a message's recorded text, outcome or kind contains every searched word. */
+function matchesSearch(row, query) {
+  const words = folded(query).split(/\s+/).filter(Boolean);
+  if (!words.length) return true;
+  const audit = row.audit;
+  const text = folded([audit.question, audit.resolved_question, audit.topic, audit.proposed, audit.sent, audit.refinement,
+    audit.provider, reasonText(audit.reason), messageState(row)[0], kindOf(row)].join(' '));
+  return words.every(word => text.includes(word));
+}
 
 function excerpt(row) {
   const audit = row.audit;
@@ -1218,21 +1311,34 @@ function renderMessages() {
   const typing = document.activeElement?.classList?.contains('answer-context') ? document.activeElement : null;
   const typingAt = typing ? [typing.dataset.resource, typing.selectionStart, typing.selectionEnd] : null;
   const hideIneligible = $('#messages-hide-ineligible').checked;
-  const rows = messageRows.filter(row => !(hideIneligible && ineligible(row)) && matchesFilter(row, messageFilter));
-  const counts = messageRows.reduce((acc, row) => { const [label] = messageState(row); acc[label] = (acc[label] || 0) + 1; return acc; }, {});
-  $('#messages-summary').textContent = `${t('{n} recent messages', { n: messageRows.length })} · ` + Object.entries(counts).map(([label, n]) => `${label}: ${n}`).join(' · ');
+  const query = $('#messages-search').value;
+  const visible = messageRows.filter(row => !(hideIneligible && ineligible(row)) && matchesSearch(row, query));
+  const rows = visible.filter(row => matchesFilter(row, messageFilter));
+  // Each filter shows how many of the visible messages it holds.
+  for (const button of document.querySelectorAll('#messages-filters button')) {
+    const count = visible.filter(row => matchesFilter(row, button.dataset.filter)).length;
+    button.querySelector('.count').textContent = count ? String(count) : '';
+  }
+  $('#messages-summary').textContent = rows.length === messageRows.length
+    ? t('{n} recent messages', { n: messageRows.length })
+    : t('Showing {shown} of {total} recent messages', { shown: rows.length, total: messageRows.length });
   list.replaceChildren();
   if (!rows.length) {
-    list.append(el('div', { class: 'empty' }, el('p', { textContent: messageRows.length ? t('No messages for this filter.') : t('No messages yet. They show up here when the assistant receives one from Teams.') })));
+    const searching = Boolean(query.trim());
+    const clear = searching ? el('button', { type: 'button', class: 'secondary small', textContent: t('Clear search') }) : null;
+    if (clear) clear.onclick = () => { field('#messages-search', ''); renderMessages(); $('#messages-search').focus(); };
+    list.append(el('div', { class: 'empty' }, el('p', { textContent: searching ? t('No messages match this search.')
+      : messageRows.length ? t('No messages for this filter.') : t('No messages yet. They show up here when the assistant receives one from Teams.') }), clear));
     return;
   }
   for (const row of rows) {
     const audit = row.audit;
     const [label, tone] = messageState(row);
     const item = el('details', { class: 'message', open: openMessages.has(row.resource) });
+    item.dataset.resource = row.resource;
     item.ontoggle = () => { if (item.open) openMessages.add(row.resource); else openMessages.delete(row.resource); };
     item.append(el('summary', {}, badge(label, tone), el('span', { class: 'kind', textContent: kindOf(row) }),
-      el('time', { textContent: when(row) }), el('span', { class: 'excerpt', textContent: excerpt(row) })));
+      el('time', { textContent: whenShort(row), title: when(row) }), el('span', { class: 'excerpt', textContent: excerpt(row) })));
     const body = el('div', { class: 'message-body' });
     messageField(body, t('Message'), audit.question, true);
     if (audit.resolved_question) messageField(body, t('Interpreted with the context'), `${audit.resolved_question}${audit.topic ? ` · ${t('topic searched')}: ${audit.topic}` : ''}`);
@@ -1277,6 +1383,22 @@ function renderMessages() {
   }
   const restored = typingAt && [...list.querySelectorAll('.answer-context')].find(node => node.dataset.resource === typingAt[0]);
   if (restored) { restored.focus(); restored.setSelectionRange(typingAt[1], typingAt[2]); }
+  // A message opened from Home: show it once it is in the list.
+  const focused = focusMessage && [...list.querySelectorAll('.message')].find(node => node.dataset.resource === focusMessage);
+  if (focused) {
+    focusMessage = null;
+    focused.scrollIntoView({ block: 'start' });
+    focused.querySelector('summary').focus({ preventScroll: true });
+  }
+}
+
+/** Opens one message in Messages, expanded, whatever filter or search was active. */
+function openMessage(resource) {
+  focusMessage = resource;
+  openMessages.add(resource);
+  field('#messages-search', '');
+  setFilter('all');
+  showTab('messages');
 }
 
 function renderAttention() {
@@ -1310,8 +1432,10 @@ async function loadActivity() {
   const recent = relevant.slice(0, 6);
   $('#activity-list').replaceChildren(...(recent.length ? recent.map(row => {
     const [label, tone] = messageState(row);
-    return el('div', { class: 'activity-row' }, badge(label, tone), el('time', { textContent: ago(millis(row)), title: when(row) }),
-      el('span', { class: 'excerpt', textContent: excerpt(row), title: excerpt(row) }));
+    const open = el('button', { type: 'button', class: 'activity-row', title: t('Open in Messages') }, badge(label, tone),
+      el('time', { textContent: ago(millis(row)), title: when(row) }), el('span', { class: 'excerpt', textContent: excerpt(row) }));
+    open.onclick = () => openMessage(row.resource);
+    return open;
   }) : [el('div', { class: 'empty' }, el('p', { textContent: t('No messages addressed to the assistant yet.') }))]));
 }
 
@@ -1355,6 +1479,9 @@ function sourceState(resource) {
   return badge(t('Ready'), 'ok');
 }
 
+/** Sources whose edit fold is open, kept across re-renders. */
+const openSources = new Set();
+
 function renderResources() {
   const container = $('#resources');
   container.replaceChildren();
@@ -1364,24 +1491,30 @@ function renderResources() {
     container.append(el('div', { class: 'empty' }, el('p', { textContent: t('No sources yet. Add a file from a repository or register the Wiki with pta sources add.') })));
   }
   for (const resource of resources) {
+    let state = sourceState(resource);
+    const facts = el('p', { class: 'resource-facts' });
+    // The row reads as a summary; the text fields live in the fold below and keep it current.
+    const renderFacts = () => facts.replaceChildren(
+      el('span', { textContent: resource.description || t('No description') }),
+      el('small', { textContent: [accessText(resource),
+        `${t('Topics')}: ${resource.topics.join(', ') || '—'}`,
+        `${t('Audience')}: ${resource.allowed_conversations.join(', ') || t('none')}`].join(' · ') }));
+    renderFacts();
     const input = (label, value, placeholder, onchange) => {
       const element = el('input', { value, placeholder, spellcheck: false });
-      element.oninput = () => { onchange(element.value); markDirty(); };
+      element.oninput = () => { onchange(element.value); renderFacts(); markDirty(); };
       return el('label', {}, label, element);
     };
-    const toggles = el('div', { class: 'actions' });
+    const toggles = el('div', { class: 'resource-toggles' });
     for (const [key, text] of [['enabled', t('Enabled')], ['external_processing', t('Authorize external processing')]]) {
       const box = el('input', { type: 'checkbox', checked: resource[key] });
       box.onchange = () => { resource[key] = box.checked; markDirty(); renderResources(); };
       toggles.append(el('label', { class: 'check' }, box, text));
     }
-    const remove = el('button', { class: 'danger small', textContent: t('Remove source') });
+    const remove = el('button', { type: 'button', class: 'danger small', textContent: t('Remove source') });
     remove.onclick = () => { current.map.resources = current.map.resources.filter(r => r !== resource); markDirty(); renderResources(); };
-    toggles.append(remove);
-    let state = sourceState(resource);
-    container.append(el('div', { class: 'resource' },
-      el('div', { class: 'resource-head' }, el('strong', { textContent: resource.id }), badge(kindName(resource), 'active'), el('span', { class: 'grow' }), state),
-      el('div', { class: 'access', textContent: accessText(resource) }),
+    const edit = el('details', { class: 'fold resource-edit', open: openSources.has(resource.id) },
+      el('summary', { textContent: t('Edit description, topics and audience') }),
       el('div', { class: 'grid' },
         input(t('Description'), resource.description, t('Which questions it answers'), value => { resource.description = value; }),
         input(t('Topics'), resource.topics.join(', '), t('Comma separated'), value => { resource.topics = names(value); }),
@@ -1391,7 +1524,11 @@ function renderResources() {
           state.replaceWith(next);
           state = next;
         })),
-      toggles));
+      el('div', { class: 'actions' }, remove));
+    edit.ontoggle = () => { if (edit.open) openSources.add(resource.id); else openSources.delete(resource.id); };
+    container.append(el('div', { class: 'resource' },
+      el('div', { class: 'resource-head' }, el('strong', { textContent: resource.id }), badge(kindName(resource), 'active'), el('span', { class: 'grow' }), state),
+      facts, toggles, edit));
   }
 }
 
@@ -1653,11 +1790,29 @@ function resizeComposer() {
 
 // ---------------------------------------------------------------- wiring
 
-document.querySelectorAll('nav button').forEach(button => { button.onclick = () => showTab(button.dataset.tab); });
+// After a section change, focus its heading so a screen reader starts there (no visible ring after a click).
+document.querySelectorAll('section > .page-head h1').forEach(heading => { heading.tabIndex = -1; });
+document.querySelectorAll('nav button').forEach(button => {
+  button.onclick = () => { showTab(button.dataset.tab); $(`#${button.dataset.tab} h1`)?.focus({ preventScroll: true }); };
+});
+const settingsTabs = [...document.querySelectorAll('#settings-tabs [role=tab]')];
+for (const button of settingsTabs) {
+  button.onclick = () => selectSettingsGroup(button.dataset.group);
+  // Arrow keys, Home and End move between sections, as in any tab list.
+  button.onkeydown = event => {
+    const at = settingsTabs.indexOf(button);
+    const next = { ArrowRight: at + 1, ArrowLeft: at - 1, Home: 0, End: settingsTabs.length - 1 }[event.key];
+    if (next === undefined) return;
+    event.preventDefault();
+    selectSettingsGroup(settingsTabs[(next + settingsTabs.length) % settingsTabs.length].dataset.group, true);
+  };
+}
 document.querySelectorAll('.cfg').forEach(input => {
   input.addEventListener('input', markDirty);
   input.addEventListener('change', markDirty);
 });
+$('#discover-chats').addEventListener('change', renderChatList);
+$('#registration-schedule').addEventListener('change', renderScheduleFields);
 $('#notice-close').onclick = () => { $('#notice').hidden = true; };
 $('#save').onclick = () => busy($('#save'), async () => { await save(); done(t('Settings saved.')); });
 $('#discard').onclick = () => busy($('#discard'), async () => { await reload(); notify(t('Changes discarded.')); });
@@ -1745,6 +1900,7 @@ if (window.__TAURI__?.event?.listen) {
 $('#messages-refresh').onclick = () => busy($('#messages-refresh'), loadMessages);
 document.querySelectorAll('#messages-filters button').forEach(button => { button.onclick = () => setFilter(button.dataset.filter); });
 $('#messages-hide-ineligible').onchange = renderMessages;
+$('#messages-search').oninput = renderMessages;
 setInterval(() => {
   // Not while context is typed for an answer: a rebuilt list would move it under the user.
   if (tab === 'messages' && $('#messages-auto').checked && !document.activeElement?.classList?.contains('answer-context')) loadMessages().catch(() => {});

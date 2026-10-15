@@ -1,0 +1,322 @@
+{
+ "providers": {
+  "providers": [
+   {
+    "available": true,
+    "credential": null,
+    "efforts": [
+     "minimal",
+     "low",
+     "medium",
+     "high",
+     "xhigh",
+     "max"
+    ],
+    "id": "codex",
+    "models": [
+     {
+      "default_effort": "low",
+      "efforts": [
+       "low",
+       "medium",
+       "high",
+       "xhigh",
+       "max"
+      ],
+      "id": "gpt-6-astra",
+      "name": "GPT-6-Astra"
+     },
+     {
+      "default_effort": "low",
+      "efforts": [
+       "low",
+       "medium",
+       "high",
+       "xhigh",
+       "max"
+      ],
+      "id": "gpt-6.1-sol",
+      "name": "GPT-6.1-Sol"
+     },
+     {
+      "default_effort": "medium",
+      "efforts": [
+       "low",
+       "medium",
+       "high",
+       "xhigh",
+       "max"
+      ],
+      "id": "gpt-6-sol",
+      "name": "GPT-6-Sol"
+     },
+     {
+      "default_effort": "medium",
+      "efforts": [
+       "low",
+       "medium",
+       "high",
+       "xhigh",
+       "max"
+      ],
+      "id": "gpt-6-luna",
+      "name": "GPT-6-Luna"
+     },
+     {
+      "default_effort": "low",
+      "efforts": [
+       "low",
+       "medium",
+       "high",
+       "xhigh",
+       "max"
+      ],
+      "id": "gpt-5.6-sol",
+      "name": "GPT-5.6-Sol"
+     },
+     {
+      "default_effort": "medium",
+      "efforts": [
+       "low",
+       "medium",
+       "high",
+       "xhigh",
+       "max"
+      ],
+      "id": "gpt-5.6-terra",
+      "name": "GPT-5.6-Terra"
+     },
+     {
+      "default_effort": "medium",
+      "efforts": [
+       "low",
+       "medium",
+       "high",
+       "xhigh",
+       "max"
+      ],
+      "id": "gpt-5.6-luna",
+      "name": "GPT-5.6-Luna"
+     },
+     {
+      "default_effort": "medium",
+      "efforts": [
+       "low",
+       "medium",
+       "high",
+       "xhigh"
+      ],
+      "id": "gpt-5.5",
+      "name": "GPT-5.5"
+     }
+    ],
+    "transport": "cli",
+    "version": "codex-cli 0.162.1"
+   },
+   {
+    "available": true,
+    "credential": null,
+    "efforts": [
+     "low",
+     "medium",
+     "high",
+     "xhigh",
+     "max"
+    ],
+    "id": "claude",
+    "models": [
+     {
+      "default_effort": "medium",
+      "efforts": [
+       "low",
+       "medium",
+       "high",
+       "xhigh",
+       "max"
+      ],
+      "id": "claude-opus-5-5",
+      "name": "Claude Opus 5.5"
+     },
+     {
+      "default_effort": "medium",
+      "efforts": [
+       "low",
+       "medium",
+       "high",
+       "xhigh",
+       "max"
+      ],
+      "id": "claude-sonnet-5-5",
+      "name": "Claude Sonnet 5.5"
+     },
+     {
+      "default_effort": "medium",
+      "efforts": [
+       "low",
+       "medium",
+       "high",
+       "xhigh",
+       "max"
+      ],
+      "id": "claude-fable-5-1",
+      "name": "Claude Fable 5.1"
+     },
+     {
+      "default_effort": "medium",
+      "efforts": [
+       "low",
+       "medium",
+       "high",
+       "xhigh",
+       "max"
+      ],
+      "id": "claude-haiku-4-5",
+      "name": "Claude Haiku 4.5"
+     }
+    ],
+    "transport": "cli",
+    "version": "2.1.300 (Claude Code)"
+   },
+   {
+    "available": true,
+    "credential": "DEEPSEEK_API_KEY",
+    "efforts": [
+     "none",
+     "low",
+     "high",
+     "max"
+    ],
+    "id": "deepseek",
+    "models": [
+     {
+      "default_effort": "max",
+      "efforts": [
+       "none",
+       "low",
+       "high",
+       "max"
+      ],
+      "id": "deepseek-flash",
+      "name": "DeepSeek Flash"
+     },
+     {
+      "default_effort": "max",
+      "efforts": [
+       "none",
+       "low",
+       "high",
+       "max"
+      ],
+      "id": "deepseek-v4-pro",
+      "name": "DeepSeek V4 Pro"
+     }
+    ],
+    "transport": "api",
+    "version": null
+   }
+  ]
+ },
+ "snapshot": {
+  "active_subscriptions": 0,
+  "config": {
+   "activity_registration": {
+    "at": "18:00",
+    "auto_register": true,
+    "daily_hours": 9.0,
+    "done_state": "Done",
+    "effort_field": "Microsoft.VSTS.Scheduling.CompletedWork",
+    "enabled": false,
+    "extra_fields": {},
+    "interval_minutes": 60,
+    "schedule": "daily",
+    "sources": [],
+    "task_kind": "Task",
+    "time_zone": "local",
+    "weekdays": [
+     1,
+     2,
+     3,
+     4,
+     5
+    ],
+    "window_end": "18:00",
+    "window_start": "09:00",
+    "write_source": ""
+   },
+   "graph": {
+    "allowed_chats": [],
+    "channels": [],
+    "client_id": "00000000-0000-0000-0000-000000000002",
+    "discover_all_chats": false,
+    "self_chat": null,
+    "tenant_id": "00000000-0000-0000-0000-000000000001",
+    "user_id": "00000000-0000-0000-0000-000000000000"
+   },
+   "knowledge_map": "/tmp/pta-profile/knowledge-map.toml",
+   "llm": {
+    "chain": [
+     {
+      "effort": "medium",
+      "enabled": true,
+      "model": "gpt-6.1-sol",
+      "provider": "codex"
+     },
+     {
+      "effort": "medium",
+      "enabled": true,
+      "model": "claude-opus-5-5",
+      "provider": "claude"
+     },
+     {
+      "effort": "max",
+      "enabled": true,
+      "model": "deepseek-flash",
+      "provider": "deepseek"
+     }
+    ],
+    "language": "es",
+    "model": "deepseek-flash",
+    "provider": "deepseek",
+    "style": "Natural and clear. Summarize by project and explain what the technical changes suggest. No promises or personal opinions."
+   },
+   "policy": {
+    "allowed_senders": [],
+    "dry_run": true,
+    "greeting": "\u00a1Hola!",
+    "max_answer_chars": 3000,
+    "max_context_chars": 16000,
+    "max_detailed_answer_chars": 8000,
+    "max_message_age_seconds": 300,
+    "sensitive_patterns": []
+   },
+   "secrets": {},
+   "server": {
+    "bind": "127.0.0.1:38655",
+    "cloudflare_tunnel": false,
+    "data_dir": "/tmp/pta-profile/data",
+    "public_url": "https://assistant.example.com"
+   }
+  },
+  "credentials": {
+   "DEEPSEEK_API_KEY": "missing",
+   "GRAPH_WEBHOOK_SECRET": "missing",
+   "STATE_ENCRYPTION_KEY": "missing"
+  },
+  "github_connected": false,
+  "headless": true,
+  "host_running": true,
+  "host_version": "0.7.15",
+  "loaded_config": null,
+  "map": {
+   "repositories": {},
+   "resources": []
+  },
+  "microsoft_connected": false,
+  "restart_offer": false,
+  "revision": "29f46a7b1faba700c253ba9f4fb3da0fff829de758b17a2e0e01fce1fbaba397",
+  "running": false,
+  "subscription_issue": null,
+  "tunnel_config": "",
+  "tunnel_running": false
+ }
+}
