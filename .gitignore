@@ -13,3 +13,5 @@
 /desktop/gen/
 /gen/
 .wrangler/
+/.claude/worktrees/
+/.claude/settings.local.json
