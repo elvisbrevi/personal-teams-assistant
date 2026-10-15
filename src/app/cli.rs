@@ -82,7 +82,8 @@ Activity registration
   activity status|pending  Current run, or activities needing context or an HU.
   activity run [DAY] [--context-stdin]  Reviews and registers work (today by default).
                            --context-stdin reads up to 6000 bytes of context for the agents.
-  activity history [DAY]    Tasks and runs filtered by day.
+  activity history [DAY|FROM..TO]  Tasks and runs of a day, or the tasks of every day
+                           from FROM to TO (YYYY-MM-DD).
   activity resolve ID       JSON on stdin: action=create|refine|dismiss, parent, title, description,
                            hours, context (Other), fields (additional required field values).
   activity open [ID]        Opens the activity review in a separate app window.
@@ -381,7 +382,10 @@ async fn execute(mut args: Vec<String>) -> Result<Reply> {
         let values = match action {
             "run" => json!({"day":args.iter().skip(2).find(|value| !value.starts_with("--")),
                 "context":if args.iter().any(|a| a == "--context-stdin") { stdin_text()? } else { String::new() }}),
-            "history" => json!({"day":args.get(2)}),
+            "history" => match args.get(2).and_then(|a| a.split_once("..")) {
+                Some((from, to)) => json!({"day":to,"from":from}),
+                None => json!({"day":args.get(2)}),
+            },
             "open" => json!({"id":args.get(2)}),
             "resolve" => json!({"id":positional(&args,2)?,"resolution":input()?}),
             _ => json!({}),

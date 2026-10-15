@@ -107,9 +107,9 @@ function showTab(name, anchor) {
   if (name === 'overview') loadActivity();
   if (name === 'registration') loadRegistration().catch(fail);
   const target = anchor && document.getElementById(anchor);
-  // A Settings panel lives in one of its sections: open that section first.
-  const group = target?.closest('[data-settings-group]');
-  if (group) selectSettingsGroup(group.dataset.settingsGroup);
+  // A panel inside a tab (a Settings section, an Activities view) opens that tab first.
+  const owner = target && document.querySelector(`[aria-controls="${target.closest('[role=tabpanel]')?.id}"]`);
+  if (owner) selectTab(owner.parentElement, owner.dataset.group);
   renderSavebar();
   renderActivityNotice();
   if (target) target.scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -121,19 +121,16 @@ function showTab(name, anchor) {
 /** Settings sections with edits not saved yet, so a hidden section never hides them. */
 const dirtyGroups = new Set();
 
-function selectSettingsGroup(name, focus = false) {
-  for (const button of document.querySelectorAll('#settings-tabs [role=tab]')) {
+/** Selects the tab `name` of a tab list and shows only its panel. */
+function selectTab(list, name, focus = false) {
+  for (const button of list.querySelectorAll('[role=tab]')) {
     const selected = button.dataset.group === name;
     button.setAttribute('aria-selected', String(selected));
     button.tabIndex = selected ? 0 : -1;
-    if (!selected) continue;
-    if (focus) button.focus();
-    // On a narrow screen the tab list scrolls sideways: keep the selected section in sight.
-    const bar = button.parentElement;
-    const offset = button.getBoundingClientRect().left - bar.getBoundingClientRect().left;
-    if (offset < 0 || offset + button.offsetWidth > bar.clientWidth) bar.scrollLeft += offset - 16;
+    document.getElementById(button.getAttribute('aria-controls')).hidden = !selected;
+    if (selected && focus) button.focus();
   }
-  for (const panel of document.querySelectorAll('[data-settings-group]')) panel.hidden = panel.dataset.settingsGroup !== name;
+  if (list.id === 'activity-tabs' && name === 'log') loadLog().catch(fail);
 }
 
 /** Marks which sections hold unsaved edits and which need something before the assistant works. */
@@ -575,6 +572,17 @@ const activityStates = { pending: [t('Needs input'), 'warn'], refining: [t('Aski
 const runStates = { running: [t('Running'), 'info'], completed: [t('Completed'), 'ok'], failed: [t('Failed'), 'error'], interrupted: [t('Interrupted'), 'error'] };
 const hoursText = hours => t('{hours} h', { hours: num(hours) });
 const dayText = day => new Date(`${day}T12:00:00`).toLocaleDateString(uiLocale(), { weekday: 'long', day: 'numeric', month: 'long' });
+/** The work the user approved (created tasks, and uncertain creations to check), by day, newest first. */
+function registeredDays(entries) {
+  const days = new Map();
+  for (const entry of entries.filter(e => e.state === 'done' || e.state === 'uncertain')) {
+    if (!days.has(entry.day)) days.set(entry.day, { day: entry.day, entries: [], hours: 0 });
+    const day = days.get(entry.day);
+    day.entries.push(entry);
+    day.hours += entry.draft.hours || 0;
+  }
+  return [...days.values()].sort((a, b) => b.day.localeCompare(a.day));
+}
 
 function activityFailureHelp(error) {
   if (/Azure DevOps.*HTTP 401/is.test(error)) return t('Azure DevOps rejected the saved read credential. Check its validity for the selected organization and update it in Settings → Credentials.');
@@ -739,9 +747,45 @@ function historyCard(entry) {
     facts, entry.issue ? el('p', { class: 'card-text warn-text', textContent: tx(entry.issue) }) : null);
 }
 
+/** One day of registered work: its tasks with their HU and hours. */
+function logDay(day) {
+  return el('section', { class: 'log-day' },
+    el('div', { class: 'log-day-head' }, el('h3', { textContent: dayText(day.day) }),
+      el('span', { class: 'log-day-sum', textContent: `${tn(day.entries.length, '1 task', '{n} tasks')} · ${hoursText(day.hours)}` })),
+    el('ul', { class: 'log-tasks' }, ...day.entries.map(entry => {
+      const parent = entry.parents.find(p => p.id === entry.draft.parent);
+      const title = entryTitle(entry, t('Activity'));
+      return el('li', {},
+        entry.task_url ? link(`#${entry.task_id} ${title}`, entry.task_url) : el('strong', { textContent: title }),
+        el('small', {}, parent ? [`${t('HU')} `, link(`#${parent.id} ${parent.title}`, parent.url), ' · '] : null,
+          el('span', { textContent: entry.draft.hours ? hoursText(entry.draft.hours) : t('No effort yet') })),
+        entry.state === 'uncertain' ? badge(activityStates.uncertain[0], 'error') : null);
+    })));
+}
+
+async function loadLog() {
+  const to = $('#activity-log-to'), from = $('#activity-log-from');
+  if (!to.value) {
+    // The last two weeks, ending on the host's today.
+    const today = (await invoke('activity_history')).day;
+    const [y, m, d] = today.split('-').map(Number);
+    field('#activity-log-to', today);
+    field('#activity-log-from', new Date(Date.UTC(y, m - 1, d - 13)).toISOString().slice(0, 10));
+  }
+  if (!from.value || from.value > to.value) field('#activity-log-from', to.value);
+  from.max = to.value; to.min = from.value;
+  const days = registeredDays((await invoke('activity_history', { from: from.value, day: to.value })).entries);
+  const tasks = days.reduce((n, d) => n + d.entries.length, 0);
+  $('#activity-log-total').textContent = tasks ? t('{tasks} · {hours} in {days}', {
+    tasks: tn(tasks, '1 task', '{n} tasks'), hours: hoursText(days.reduce((n, d) => n + d.hours, 0)), days: tn(days.length, '1 day', '{n} days') }) : '';
+  $('#activity-log').replaceChildren(...days.map(logDay));
+  if (!tasks) $('#activity-log').append(el('p', { class: 'empty-note', textContent: t('No tasks were registered in these days. The tasks you create in Review appear here.') }));
+}
+
 /** Opens an entry inline (browser and the activity window) or in the native activity window. */
 async function openActivity(entry, button) {
   if (!activityWindow && !window.ptaTransport.browser) return busy(button, () => invoke('activity_open', { id: entry.id }));
+  selectTab($('#activity-tabs'), 'review');
   selectedActivity = entry.id; activityEditing = false; activityPayload = '';
   if (activityResult?.id !== entry.id) activityResult = null;
   renderActivityEditor(entry);
@@ -1795,17 +1839,19 @@ document.querySelectorAll('section > .page-head h1').forEach(heading => { headin
 document.querySelectorAll('nav button').forEach(button => {
   button.onclick = () => { showTab(button.dataset.tab); $(`#${button.dataset.tab} h1`)?.focus({ preventScroll: true }); };
 });
-const settingsTabs = [...document.querySelectorAll('#settings-tabs [role=tab]')];
-for (const button of settingsTabs) {
-  button.onclick = () => selectSettingsGroup(button.dataset.group);
-  // Arrow keys, Home and End move between sections, as in any tab list.
-  button.onkeydown = event => {
-    const at = settingsTabs.indexOf(button);
-    const next = { ArrowRight: at + 1, ArrowLeft: at - 1, Home: 0, End: settingsTabs.length - 1 }[event.key];
-    if (next === undefined) return;
-    event.preventDefault();
-    selectSettingsGroup(settingsTabs[(next + settingsTabs.length) % settingsTabs.length].dataset.group, true);
-  };
+for (const list of document.querySelectorAll('[role=tablist]')) {
+  const tabs = [...list.querySelectorAll('[role=tab]')];
+  for (const button of tabs) {
+    button.onclick = () => selectTab(list, button.dataset.group);
+    // Arrow keys, Home and End move between tabs, as in any tab list.
+    button.onkeydown = event => {
+      const at = tabs.indexOf(button);
+      const next = { ArrowRight: at + 1, ArrowLeft: at - 1, Home: 0, End: tabs.length - 1 }[event.key];
+      if (next === undefined) return;
+      event.preventDefault();
+      selectTab(list, tabs[(next + tabs.length) % tabs.length].dataset.group, true);
+    };
+  }
 }
 document.querySelectorAll('.cfg').forEach(input => {
   input.addEventListener('input', markDirty);
@@ -1834,6 +1880,7 @@ $('#activity-all').onclick = () => showTab('messages');
 $('#activity-notice-open').onclick = () => busy($('#activity-notice-open'), () => invoke('activity_open'));
 $('#activity-settings').onclick = () => showTab('settings', 'panel-registration');
 $('#activity-refresh').onclick = () => busy($('#activity-refresh'), loadRegistration);
+$('#activity-log-from').onchange = $('#activity-log-to').onchange = () => loadLog().catch(fail);
 $('#activity-day').onchange = () => {
   field('#activity-review-context', activityReviewContexts.get($('#activity-day').value) || '');
   $('#activity-flash').hidden = true;

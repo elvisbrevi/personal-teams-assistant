@@ -3188,6 +3188,201 @@ async fn a_review_proposes_where_to_register_each_piece_and_applies_it_on_confir
     }
 }
 
+/// Records an activity the Activities section found on `day`, under HU #23553.
+fn record(
+    db: &personal_teams_assistant::activity::store::Database,
+    key: &str,
+    day: &str,
+    url: &str,
+    state: &str,
+    task: Option<u64>,
+) {
+    let hu = personal_teams_assistant::ado::link::Target {
+        id: 23553,
+        title: "Pagos QR".into(),
+        url: "https://dev.azure.com/example/Payments/_workitems/edit/23553".into(),
+        organization: "https://dev.azure.com/example".into(),
+        project: "Payments".into(),
+        state: "Enviado a validación".into(),
+        ..Default::default()
+    };
+    assert!(
+        db.insert(&personal_teams_assistant::activity::Entry {
+            id: key.into(),
+            run: "r1".into(),
+            day: day.into(),
+            state: state.into(),
+            draft: personal_teams_assistant::activity::Draft {
+                activities: vec![key.into()],
+                parent: Some(23553),
+                title: format!("Registro {key}"),
+                description: "Ajuste del flujo de pago QR.".into(),
+                evidence: String::new(),
+                hours: Some(2.0),
+                confidence: 0.9,
+                question: String::new(),
+                suggested_parents: Vec::new(),
+                ignore: false,
+            },
+            activities: vec![personal_teams_assistant::ado::link::Linkable {
+                key: key.into(),
+                url: url.into(),
+                ..Default::default()
+            }],
+            parents: vec![hu],
+            evidence: String::new(),
+            context: String::new(),
+            fields: Default::default(),
+            issue: String::new(),
+            task_id: task,
+            task_url: task
+                .map(|id| format!("https://dev.azure.com/example/Payments/_workitems/edit/{id}")),
+            updated_at: 1,
+            required: Vec::new(),
+            date_attribution: String::new(),
+        })
+        .unwrap()
+    );
+}
+
+/// A question about what the user did on a day the Activities section recorded is answered
+/// from that record alone: no tool is read.
+struct NoReads;
+#[async_trait]
+impl ReadOnlyTool for NoReads {
+    async fn execute(&self, _: &ToolSpec, question: &str, _: &str) -> Result<String> {
+        unreachable!("a recap reads no tool: {question}")
+    }
+}
+struct RecapLlm;
+#[async_trait]
+impl LlmProvider for RecapLlm {
+    fn name(&self) -> &str {
+        "synthetic-recap"
+    }
+    async fn classify_intent(&self, _: &str, _: &str) -> Result<IntentDecision> {
+        Ok(IntentDecision {
+            intent: Intent::Question,
+            confidence: 0.96,
+        })
+    }
+    async fn generate(&self, _: GenerationInput<'_>) -> Result<String> {
+        unreachable!()
+    }
+    async fn generate_response(
+        &self,
+        input: GenerationInput<'_>,
+    ) -> Result<personal_teams_assistant::llm::GeneratedAnswer> {
+        assert!(
+            input
+                .evidence
+                .contains("Registered as task #26410 under #23553 «Pagos QR»: «Registro y1» (2 h)"),
+            "{}",
+            input.evidence
+        );
+        // Only yesterday: the day before is another day.
+        assert!(
+            !input.evidence.contains("Registro y2"),
+            "{}",
+            input.evidence
+        );
+        Ok(personal_teams_assistant::llm::GeneratedAnswer {
+            answer:
+                "Ayer registré la tarea #26410 en la HU #23553: ajuste del flujo de pago QR (2 h)."
+                    .into(),
+            detailed: false,
+            used_sources: Vec::new(),
+            provider: None,
+            fallbacks: Vec::new(),
+        })
+    }
+}
+#[tokio::test]
+async fn what_the_user_did_on_a_day_comes_from_the_recorded_activities() {
+    let server = MockServer::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let store = support::store(&dir);
+    let graph = support::graph(&server, store.clone());
+    let mut cfg = (*graph.config).clone();
+    cfg.policy.dry_run = true;
+    cfg.server.data_dir = dir.path().into();
+    let today = cfg
+        .activity_registration
+        .zoned(chrono::Utc::now())
+        .date_naive();
+    let activities = personal_teams_assistant::activity::store::Database::open(
+        &dir.path().join("activity-registration.db"),
+    )
+    .unwrap();
+    let pr = "https://dev.azure.com/example/Payments/_git/api/pullrequest/";
+    for (key, back, task) in [("y1", 1, 26410), ("y2", 2, 26411)] {
+        let day = (today - chrono::Duration::days(back)).to_string();
+        record(
+            &activities,
+            key,
+            &day,
+            &format!("{pr}{task}"),
+            "done",
+            Some(task),
+        );
+    }
+    drop(activities);
+    let mut status = wiki_resource();
+    status.id = "azure-devops-status".into();
+    status.access = Access::Tool {
+        tool: ToolSpec::AzureDevopsStatus {
+            repository: "private".into(),
+            path: "catalog.toml".into(),
+            secret_ref: "secret://ado/read".into(),
+            link_secret_ref: None,
+        },
+    };
+    let mut map = knowledge(&dir);
+    map.resources = vec![wiki_resource(), status];
+    let pipeline = Pipeline {
+        config: Arc::new(cfg),
+        store: store.clone(),
+        adapter: graph,
+        knowledge: map,
+        llm: Arc::new(RecapLlm),
+        tools: Arc::new(NoReads),
+        redactor: redactor(),
+    };
+    let sources: Vec<String> = vec!["manuals".into(), "azure-devops-status".into()];
+    let result = simulation::run(
+        &pipeline,
+        SimulationRequest {
+            session: "recap".into(),
+            text: "¿Qué hice ayer?".into(),
+            group: false,
+            mentioned: false,
+            sources: sources.clone(),
+        },
+        Some(&sources),
+    )
+    .await
+    .unwrap();
+    assert_eq!(result.status, "dry_run", "{}", result.reason);
+    let answer = result.answer.unwrap();
+    assert!(
+        answer.contains("](https://dev.azure.com/example/Payments/_workitems/edit/26410)"),
+        "{answer}"
+    );
+    let rows = personal_teams_assistant::state::Store::inspect(
+        &dir.path().join("test.db"),
+        false,
+        1,
+        None,
+        true,
+    )
+    .unwrap();
+    let audit: personal_teams_assistant::state::Audit =
+        serde_json::from_value(rows[0]["audit"].clone()).unwrap();
+    assert_eq!(audit.tools, vec!["read_recorded_activities"]);
+    assert_eq!(audit.source.as_deref(), Some("azure-devops-status"));
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
+
 /// A status round: the named HU comes from the status tool (whoever holds it now) and the
 /// user's deployment page from their own Wiki pages; the Wiki is not searched.
 struct StatusTools;
@@ -3329,54 +3524,7 @@ async fn a_status_round_reads_the_named_hu_and_the_users_deployment_page() {
             None,
         ),
     ] {
-        let hu = personal_teams_assistant::ado::link::Target {
-            id: 23553,
-            title: "Pagos QR".into(),
-            url: "https://dev.azure.com/example/Payments/_workitems/edit/23553".into(),
-            organization: "https://dev.azure.com/example".into(),
-            project: "Payments".into(),
-            state: "Enviado a validación".into(),
-            ..Default::default()
-        };
-        assert!(
-            activities
-                .insert(&personal_teams_assistant::activity::Entry {
-                    id: key.into(),
-                    run: "r1".into(),
-                    day: today.clone(),
-                    state: state.into(),
-                    draft: personal_teams_assistant::activity::Draft {
-                        activities: vec![key.into()],
-                        parent: Some(23553),
-                        title: format!("Registro {key}"),
-                        description: "Ajuste del flujo de pago QR.".into(),
-                        evidence: String::new(),
-                        hours: Some(2.0),
-                        confidence: 0.9,
-                        question: String::new(),
-                        suggested_parents: Vec::new(),
-                        ignore: false,
-                    },
-                    activities: vec![personal_teams_assistant::ado::link::Linkable {
-                        key: key.into(),
-                        url: url.into(),
-                        ..Default::default()
-                    }],
-                    parents: vec![hu],
-                    evidence: String::new(),
-                    context: String::new(),
-                    fields: Default::default(),
-                    issue: String::new(),
-                    task_id: task,
-                    task_url: task.map(|id| {
-                        format!("https://dev.azure.com/example/Payments/_workitems/edit/{id}")
-                    }),
-                    updated_at: 1,
-                    required: Vec::new(),
-                    date_attribution: String::new(),
-                })
-                .unwrap()
-        );
+        record(&activities, key, &today, url, state, task);
     }
     drop(activities);
     let mut status = wiki_resource();

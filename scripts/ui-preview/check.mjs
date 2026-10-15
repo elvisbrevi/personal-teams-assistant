@@ -32,9 +32,11 @@ for (const [label, ctx] of [['desktop-light', {}], ['desktop-dark', { colorSchem
   for (const tab of ['overview', 'messages', 'registration', 'knowledge', 'chat', 'settings']) {
     await page.evaluate(t => showTab(t), tab);
     await page.waitForTimeout(300);
-    const groups = tab === 'settings' ? await page.$$eval('#settings-tabs [role=tab]', tabs => tabs.map(t => t.dataset.group)).catch(() => []) : [];
+    // Every tab of the section's tab list (Settings sections, Activities views) is scanned.
+    const list = { settings: '#settings-tabs', registration: '#activity-tabs' }[tab];
+    const groups = list ? await page.$$eval(`${list} [role=tab]`, tabs => tabs.map(t => t.dataset.group)).catch(() => []) : [];
     for (const group of groups.length ? groups : [null]) {
-      if (group) { await page.evaluate(g => selectSettingsGroup(g), group); await page.waitForTimeout(150); }
+      if (group) { await page.evaluate(([l, g]) => selectTab($(l), g), [list, group]); await page.waitForTimeout(250); }
       const report = await page.evaluate(async () => (await axe.run(document, { runOnly: { type: 'tag', values: ['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa', 'wcag22aa'] } })).violations
         .map(v => ({ id: v.id, impact: v.impact, nodes: v.nodes.length, sample: v.nodes[0]?.target?.join(' ') })));
       const key = `${label}/${tab}${group ? ':' + group : ''}`;
@@ -148,8 +150,18 @@ if (flag === '--axe-only') { await browser.close(); process.exit(0); }
   check('phone: Settings opens', await page.isVisible('#settings-tabs'));
   const overflow = await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth);
   check('phone: no horizontal page scroll', !overflow);
+  const tabsScroll = await page.$eval('#settings-tabs', n => n.scrollWidth > n.clientWidth);
+  check('phone: Settings sections all in sight, none scrolls sideways', !tabsScroll);
+  await page.click('nav [data-tab="registration"]');
+  await page.tap('#activity-tab-log');
+  await page.waitForTimeout(400);
+  const days = await page.$$eval('#activity-log .log-day h3', h => h.map(x => x.textContent));
+  check('phone: History lists the registered work by day, newest first', days.length === 4, days.join(' | '));
+  check('phone: History counts the approved tasks', /5 tareas/.test(await page.textContent('#activity-log-total')), await page.textContent('#activity-log-total'));
+  await page.tap('#activity-tab-review');
+  check('phone: Review comes back', await page.isVisible('#activity-day-panel') && !(await page.isVisible('#activity-view-log')));
   for (const g of ['general', 'teams', 'models', 'activity', 'credentials', 'advanced']) {
-    await page.evaluate(x => selectSettingsGroup(x), g);
+    await page.evaluate(x => selectTab($('#settings-tabs'), x), g);
     await page.waitForTimeout(150);
     await page.screenshot({ path: `${out}/phone-settings-${g}.png`, fullPage: true });
   }

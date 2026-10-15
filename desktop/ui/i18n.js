@@ -279,6 +279,18 @@ const UI_CATALOG = { es: {
   'Authorization pending in the browser.': 'Autorización pendiente en el navegador.',
 
   // Activities
+  'Activities views': 'Vistas de actividades',
+  'History': 'Historial',
+  'Registered work': 'Trabajo registrado',
+  'The tasks you approved, day by day. When someone asks what you did on a day or between two dates, the assistant answers from this record.': 'Las tareas que aprobaste, día a día. Cuando alguien pregunta qué hiciste un día o entre dos fechas, el asistente responde desde este registro.',
+  'From': 'Desde',
+  'To': 'Hasta',
+  '1 task': '1 tarea',
+  '{n} tasks': '{n} tareas',
+  '1 day': '1 día',
+  '{n} days': '{n} días',
+  '{tasks} · {hours} in {days}': '{tasks} · {hours} en {days}',
+  'No tasks were registered in these days. The tasks you create in Review appear here.': 'No se registraron tareas en estos días. Las tareas que crees en Revisar aparecen aquí.',
   'Register the work you did as completed tasks in Azure DevOps.': 'Registra el trabajo que hiciste como tareas completadas en Azure DevOps.',
   'Review a day': 'Revisa un día',
   'The agents read your activity and propose one task per piece of work.': 'Los agentes leen tu actividad y proponen una tarea por cada trabajo.',

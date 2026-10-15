@@ -237,6 +237,11 @@
 
       <section id="registration" hidden>
         <header class="page-head"><h1>Activities</h1><p>Register the work you did as completed tasks in Azure DevOps.</p></header>
+        <div id="activity-tabs" class="subnav" role="tablist" aria-label="Activities views">
+          <button role="tab" id="activity-tab-review" data-group="review" aria-controls="activity-view-review" aria-selected="true">Review</button>
+          <button role="tab" id="activity-tab-log" data-group="log" aria-controls="activity-view-log" aria-selected="false" tabindex="-1">History</button>
+        </div>
+        <div id="activity-view-review" role="tabpanel" aria-labelledby="activity-tab-review">
         <div class="panel step-panel" id="activity-day-panel">
           <div class="step-title"><span class="step-number">1</span><div><h2>Review a day</h2><p class="hint">The agents read your activity and propose one task per piece of work.</p></div></div>
           <div class="day-bar">
@@ -304,6 +309,19 @@
           <summary><span>Process runs and diagnostics</span><span id="activity-runs-count" class="badge muted"></span></summary>
           <div id="activity-runs" class="list"></div>
         </details>
+        </div>
+        <div id="activity-view-log" role="tabpanel" aria-labelledby="activity-tab-log" hidden>
+          <div class="panel">
+            <h2>Registered work</h2>
+            <p class="hint">The tasks you approved, day by day. When someone asks what you did on a day or between two dates, the assistant answers from this record.</p>
+            <div class="day-bar log-range">
+              <label class="day-field">From<input id="activity-log-from" type="date"></label>
+              <label class="day-field">To<input id="activity-log-to" type="date"></label>
+            </div>
+            <p id="activity-log-total" class="log-total" role="status"></p>
+            <div id="activity-log" class="log"></div>
+          </div>
+        </div>
       </section>
       <section id="messages" hidden>
         <header class="page-head">

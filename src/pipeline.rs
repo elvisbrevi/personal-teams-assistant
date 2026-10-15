@@ -604,12 +604,41 @@ impl Pipeline {
             // A status round («avance, compromiso, bloqueos») reads Azure DevOps and, besides,
             // the user's own recent Wiki pages: a production deployment plan gives the
             // committed date and its pending items (missing configuration, accesses).
-            let status_route = !review
+            // What the user did on a named day or period is answered from what the Activities
+            // section recorded for those days, when it recorded anything there: the user
+            // approved each task in it. Status rounds and named work items keep their tools.
+            let recap = if review
+                || wiki_requested
+                || status_words(&tool_question)
+                || !crate::ado::requested_work_items(&tool_question).is_empty()
+                || !work_mention(&tool_question)
+            {
+                None
+            } else {
+                crate::activity::recorded::requested_days(&tool_question, self.today()).and_then(
+                    |(since, until)| {
+                        let data = self.recorded_between(&available, since, until, &mut audit)?;
+                        audit.step("activity history", format!("{since} to {until}"));
+                        let source = available.iter().find(|r| {
+                            matches!(
+                                r.access,
+                                Access::Tool {
+                                    tool: crate::tools::ToolSpec::AzureDevopsStatus { .. }
+                                }
+                            )
+                        })?;
+                        Some((source, data))
+                    },
+                )
+            };
+            let status_route = recap.is_none()
+                && !review
                 && !wiki_requested
                 && status_question(&tool_question)
                 && tool_candidates.contains_key("azure-devops-status");
-            let selected_tool = if review {
-                // An activity review reads every source that can review activity, below.
+            let selected_tool = if review || recap.is_some() {
+                // An activity review reads every source that can review activity, below; a
+                // recap reads only the recorded days.
                 None
             } else if wiki_requested && wiki_ids.len() == 1 {
                 Some(wiki_ids[0].clone())
@@ -675,10 +704,11 @@ impl Pipeline {
             } else {
                 Vec::new()
             };
-            audit.source = (!sources.is_empty()).then(|| {
+            audit.source = (!sources.is_empty() || recap.is_some()).then(|| {
                 sources
                     .iter()
                     .chain(&status_wikis)
+                    .chain(recap.as_ref().map(|(source, _)| *source))
                     .map(|r| r.id.as_str())
                     .collect::<Vec<_>>()
                     .join(",")
@@ -809,6 +839,9 @@ impl Pipeline {
                             audit.step("wiki pages", "the user's own Wiki pages could not be read");
                         }
                     }
+                }
+                if let Some((source, data)) = recap {
+                    reads.push((source, Read::Typed(data)));
                 }
                 // What the Activities section recorded, by day: the user's work as registered.
                 if status_route
@@ -1334,13 +1367,32 @@ impl Pipeline {
         Ok((evidence, registry))
     }
     /// The work the Activities section recorded in the last `days` days (in the registration's
-    /// time zone), by day, when this conversation may see it: Azure DevOps activity must be
-    /// authorized here, and an entry shows only if every source its activities come from is.
-    /// A missing or unreadable database leaves it out.
+    /// time zone), by day, when this conversation may see it.
     fn recorded_activity(
         &self,
         available: &[&crate::knowledge::Resource],
         days: i64,
+        audit: &mut Audit,
+    ) -> Option<crate::evidence::Evidence> {
+        let today = self.today();
+        let since = today - chrono::Duration::days(days.clamp(1, crate::ado::MAX_WINDOW_DAYS) - 1);
+        self.recorded_between(available, since, today, audit)
+    }
+    fn today(&self) -> chrono::NaiveDate {
+        self.config
+            .activity_registration
+            .zoned(chrono::Utc::now())
+            .date_naive()
+    }
+    /// The work the Activities section recorded from `since` to `until`, by day, when this
+    /// conversation may see it: Azure DevOps activity must be authorized here, and an entry
+    /// shows only if every source its activities come from is. A missing or unreadable
+    /// database, or nothing to show, leaves it out.
+    fn recorded_between(
+        &self,
+        available: &[&crate::knowledge::Resource],
+        since: chrono::NaiveDate,
+        until: chrono::NaiveDate,
         audit: &mut Audit,
     ) -> Option<crate::evidence::Evidence> {
         use crate::activity::recorded::Origin;
@@ -1363,23 +1415,14 @@ impl Pipeline {
         if !allowed.contains(&Origin::Activity) {
             return None;
         }
-        let today = self
-            .config
-            .activity_registration
-            .zoned(chrono::Utc::now())
-            .date_naive();
-        let since = today - chrono::Duration::days(days.clamp(1, crate::ado::MAX_WINDOW_DAYS) - 1);
-        let entries = crate::activity::store::Database::recent(
+        let (since, until) = (since.to_string(), until.to_string());
+        let entries = crate::activity::store::Database::recorded(
             &self.config.server.data_dir.join("activity-registration.db"),
-            &since.to_string(),
+            &since,
+            &until,
         )
         .ok()?;
-        let mut evidence = crate::activity::recorded::evidence(
-            &entries,
-            &allowed,
-            &since.to_string(),
-            &today.to_string(),
-        )?;
+        let mut evidence = crate::activity::recorded::evidence(&entries, &allowed, &since, &until)?;
         evidence.sanitize(&self.redactor);
         audit.tools.push("read_recorded_activities".into());
         Some(evidence)
@@ -2437,7 +2480,10 @@ fn work_mention(text: &str) -> bool {
                 | "trabajos"
                 | "trabaje"
                 | "trabajado"
+                | "trabajando"
+                | "trabajaste"
                 | "hice"
+                | "hiciste"
                 | "hecho"
                 | "realizado"
                 | "realice"
@@ -2445,6 +2491,7 @@ fn work_mention(text: &str) -> bool {
                 | "registrados"
                 | "registrar"
                 | "actividad"
+                | "actividades"
                 | "imputar"
                 | "work"
                 | "worked"
@@ -2773,31 +2820,39 @@ fn status_question(question: &str) -> bool {
     }) {
         return false;
     }
-    words.iter().any(|w| {
-        matches!(
-            *w,
-            "hu" | "hus"
-                | "avance"
-                | "avances"
-                | "impedimentos"
-                | "compromiso"
-                | "compromisos"
-                | "bloqueos"
-                | "bloqueantes"
-                | "pipeline"
-                | "pipelines"
-                | "release"
-                | "releases"
-                | "progress"
-                | "blockers"
-                | "impediments"
-                | "commitment"
-                | "commitments"
-        )
-    }) || (q.contains("esta semana")
-        && (q.contains("he hecho") || q.contains("trabaj") || q.contains("hice")))
+    status_words(question)
+        || (q.contains("esta semana")
+            && (q.contains("he hecho") || q.contains("trabaj") || q.contains("hice")))
         || (q.contains("this week")
             && (q.contains("did") || q.contains("worked") || q.contains("done")))
+}
+/// Names HUs, progress, commitments, blockers, pipelines or releases: a status round.
+fn status_words(question: &str) -> bool {
+    question
+        .to_lowercase()
+        .split(|c: char| !c.is_alphanumeric())
+        .any(|w| {
+            matches!(
+                w,
+                "hu" | "hus"
+                    | "avance"
+                    | "avances"
+                    | "impedimentos"
+                    | "compromiso"
+                    | "compromisos"
+                    | "bloqueos"
+                    | "bloqueantes"
+                    | "pipeline"
+                    | "pipelines"
+                    | "release"
+                    | "releases"
+                    | "progress"
+                    | "blockers"
+                    | "impediments"
+                    | "commitment"
+                    | "commitments"
+            )
+        })
 }
 
 #[cfg(test)]

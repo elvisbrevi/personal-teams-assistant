@@ -180,6 +180,10 @@ impl Database {
         text.map(|s| serde_json::from_str(&s).context("invalid activity entry"))
             .transpose()
     }
+    /// Entries from `since` to `until` (yyyy-mm-dd, inclusive), newest day first.
+    pub fn between(&self, since: &str, until: &str) -> Result<Vec<Entry>> {
+        between(&self.db.lock().unwrap(), since, until)
+    }
     pub fn entries(&self, day: Option<&str>) -> Result<Vec<Entry>> {
         let db = self.db.lock().unwrap();
         let mut stmt=db.prepare("SELECT payload FROM entries WHERE (?1 IS NULL OR day=?1) ORDER BY updated_at DESC LIMIT 1000")?;
@@ -200,21 +204,16 @@ impl Database {
     pub fn pending(&self) -> Result<Vec<Entry>> {
         self.in_states("state IN ('pending','refining')")
     }
-    /// Entries recorded on `since` (yyyy-mm-dd) or later, newest day first, read without
-    /// opening the database for writing: the Teams pipeline reads them as context while the
-    /// host's recorder owns the file. A missing database has no entries.
-    pub fn recent(path: &Path, since: &str) -> Result<Vec<Entry>> {
+    /// Entries recorded from `since` to `until` (yyyy-mm-dd, inclusive), newest day first,
+    /// read without opening the database for writing: the Teams pipeline reads them as context
+    /// while the host's recorder owns the file. A missing database has no entries.
+    pub fn recorded(path: &Path, since: &str, until: &str) -> Result<Vec<Entry>> {
         if !path.exists() {
             return Ok(Vec::new());
         }
         let db = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
         db.busy_timeout(std::time::Duration::from_secs(2))?;
-        let mut stmt = db.prepare(
-            "SELECT payload FROM entries WHERE day>=?1 ORDER BY day DESC, updated_at DESC LIMIT 300",
-        )?;
-        stmt.query_map([since], |r| r.get::<_, String>(0))?
-            .map(|r| Ok(serde_json::from_str(&r?)?))
-            .collect()
+        between(&db, since, until)
     }
     pub fn save_summary(&self, day: &str, summary: &Summary) -> Result<()> {
         self.db.lock().unwrap().execute("INSERT INTO totals(day,summary) VALUES(?1,?2) ON CONFLICT(day) DO UPDATE SET summary=excluded.summary",params![day,serde_json::to_string(summary)?])?;
@@ -231,4 +230,12 @@ impl Database {
             .optional()?;
         text.map(|s| Ok(serde_json::from_str(&s)?)).transpose()
     }
+}
+fn between(db: &Connection, since: &str, until: &str) -> Result<Vec<Entry>> {
+    let mut stmt = db.prepare(
+        "SELECT payload FROM entries WHERE day>=?1 AND day<=?2 ORDER BY day DESC, updated_at DESC LIMIT 1000",
+    )?;
+    stmt.query_map([since, until], |r| r.get::<_, String>(0))?
+        .map(|r| Ok(serde_json::from_str(&r?)?))
+        .collect()
 }

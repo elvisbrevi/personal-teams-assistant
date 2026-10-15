@@ -53,7 +53,7 @@ The standard every change to `desktop/ui/` follows, so the native window, the we
 | Fields side by side | `.grid` (stretches); `.grid.fill` when a short field may stand alone |
 | Boolean with a consequence | `.switch-row` for the few mode switches; `.check` for ordinary options |
 | Exclusive filter of a list | `.segmented` buttons with `aria-pressed` and a `.count` |
-| Category tabs inside a section | `.subnav` with `role=tablist`/`tab`/`tabpanel`, roving `tabindex`, arrow/Home/End keys, `.flag.edited` and `.flag.warn` dots with screen-reader text |
+| Category tabs inside a section | `.subnav` with `role=tablist`/`tab`/`tabpanel`, roving `tabindex`, arrow/Home/End keys (`selectTab(list, name)`), `.flag.edited` and `.flag.warn` dots with screen-reader text; it wraps, and below 860px it is a grid of large choices |
 | Status of a part, linking to its setting | `.status-row` button (label, dot and value, detail, arrow) |
 | State of an item | `badge(text, tone)`: `ok`, `warn`, `error`, `info`, `active`, `muted`; the text always carries the meaning, the color only reinforces it |
 | Result or problem where it happened | `.callout` with a tone; global confirmations go to `notify()` (status) and failures to `fail()` (alert) |
@@ -67,7 +67,8 @@ The standard every change to `desktop/ui/` follows, so the native window, the we
 ## 7. Tokens
 
 - Colors are semantic custom properties in `:root` with a dark variant under `prefers-color-scheme: dark`; components never use raw hex values except the save bar's on-brand white.
-- Text contrast is at least 4.5:1 on every surface in both themes, `--faint` included (it carries small text). Check new pairs before adding them.
+- Text contrast is at least 4.5:1 on every surface in both themes, `--faint` included (it carries small text). `--border-strong` outlines controls (inputs, secondary and danger buttons, tabs, toggles) at 3:1 against their surfaces (WCAG 1.4.11); `--border` only separates. Check new pairs before adding them.
+- Secondary buttons sit on `--surface-2` with a `--border-strong` outline so they read as buttons on a phone; disabled ones fade to 45%.
 - Radius `--radius` (10px) for panels; 8px for controls; 99px only for badges and pills.
 - Spacing in rem steps (.25, .5, .75, 1, 1.25); panels pad 1.05rem 1.2rem and separate by .9rem.
 - Type: body 15px (16px on phones), `h1` 1.55rem, `h2` 1.05rem, hints .92rem, metadata .82–.86rem; tabular figures for counts and times.
@@ -77,13 +78,14 @@ The standard every change to `desktop/ui/` follows, so the native window, the we
 - Every control has a visible label (or an `aria-label` when it is an icon); placeholders never replace labels.
 - Keyboard: a skip link to `main`; changing section focuses its `h1` (no visible ring after a click); visible `:focus-visible` rings; tab lists follow the ARIA pattern.
 - Live regions: errors use `role=alert`, confirmations and progress `role=status`/`aria-live=polite`, without moving focus.
-- Targets: at least 24px on desktop and 44px on phones (inputs, buttons, checks).
+- Targets: at least 24px on desktop and 44px on phones (inputs, buttons — small and segmented ones too —, checks, tabs, workday toggles, icon buttons); the phone switch is native-sized.
+- Hover styles live under `@media (hover: hover)`: on a touch screen a tap would leave them stuck. A pressed button dims instead.
 - Never color alone: badges and dots come with text.
 
 ## 9. Responsive
 
 - Above 860px: sidebar. 681–860px: a top bar with short labels and an icon-only Settings. 680px and below (iPhone 15: 393px): a title bar with the state and Settings, a bottom tab bar of five sections, safe-area insets, 16px inputs and 44px controls.
-- No horizontal page scroll at any width; only tab lists scroll sideways, and they keep the selected tab in view.
+- No horizontal page scroll at any width, and the page does not bounce past its edges (`overflow-x: clip`, `overscroll-behavior: none` on the root): a phone user can never drag the whole screen. Tab lists wrap instead of scrolling sideways; only content that needs it (code blocks, wide tables) scrolls inside its own box.
 - Lists switch from aligned columns to wrapping lines of facts (Messages summaries, status rows).
 
 ## 10. Verification
