@@ -6,6 +6,7 @@ Read [the architecture](docs/architecture.md) first: it explains components, pip
 
 - Save, correct or organize facts in the knowledge base: [save-knowledge](.agents/skills/save-knowledge/SKILL.md).
 - Configure, operate or diagnose the installed application: [personal-teams-assistant](desktop/skills/personal-teams-assistant/SKILL.md) (also `pta skill show`).
+- Change the GUI (`desktop/ui/`): follow [the GUI design conventions](docs/ui-design-conventions.md).
 
 ## Priorities
 
@@ -45,5 +46,7 @@ cargo test --no-default-features
 bun build desktop/ui/app.js --no-bundle --outfile /tmp/app-check.js   # if the GUI changed
 node --test scripts/test-activity-ui.cjs scripts/test-ui-i18n.cjs  # if the GUI changed
 ```
+
+If the GUI changed and Playwright is available, also run the preview checks in [the GUI design conventions](docs/ui-design-conventions.md#10-verification) (axe WCAG 2.2 AA scans and interaction checks with synthetic data).
 
 Update the architecture and the skill when behavior, commands or schemas change.

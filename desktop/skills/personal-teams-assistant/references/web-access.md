@@ -1,7 +1,7 @@
 # Web access with Cloudflare Access and GitHub
 
-The same host binary serves the existing GUI in a browser: Home, Settings,
-Messages, Activities, Knowledge and Test chat. Native Tauri and the CLI keep their
+The same host binary serves the existing GUI in a browser: Home, Messages,
+Activities, Knowledge, Test chat and Settings. Native Tauri and the CLI keep their
 private loopback IPC. The portal is `personal-teams-assistant --web`, behind the
 existing dedicated Tunnel. Its HTTPS hostname and complete API must be protected
 by Cloudflare Access. GitHub owns the interactive sign-in; there is no second

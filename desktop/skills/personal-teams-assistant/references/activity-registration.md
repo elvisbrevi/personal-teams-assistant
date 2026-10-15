@@ -4,7 +4,7 @@ All functions use the same authenticated host operations from the CLI and GUI. N
 
 ## Configuration
 
-`activity_registration` is additive and defaults to disabled. In Settings → Activity registration, or through `pta config set activity_registration.FIELD JSON`, choose:
+`activity_registration` is additive and defaults to disabled. In Settings → Activity registration (workdays are toggles there), or through `pta config set activity_registration.FIELD JSON`, choose:
 
 | Field | Meaning / default |
 | --- | --- |
@@ -63,7 +63,7 @@ The panel shows the selected sources, provider order, daily target, creation mod
 
 The Activities tab is ordered as the work is done: (1) review a day, with the optional context and the day's effort against the target; (2) the activities that need input; the selected activity's form (what was detected, the assistant's question with **Answer the assistant**, then HU, title, effort, description and **Create task in Done**); (3) the day's activities; and the collapsed **Process runs and diagnostics**. On a phone the form replaces the list until **Back**. The form checks the HU, title, effort and description before asking the host, keeps what you typed if creation fails, shows progress and the result right above its buttons, and closes on success with a link to the created task. Dismissing asks for a second tap.
 
-In the web portal, **Review** opens the selected pending activity in the same page and scrolls to its form; the top **Review activities** notice opens the first pending activity, and links open in a new tab. The native app keeps **Review in new window**. Opening either form only selects existing work; it does not run a review or create a task.
+In the web portal, **Review** opens the selected pending activity in the same page and scrolls to its form; the **Review activities** notice on Home opens the first pending activity, and links open in a new tab. The native app keeps **Review in new window**. Opening either form only selects existing work; it does not run a review or create a task.
 
 Resolve an entry with JSON on stdin. `parent` is an HU or bug ID, not a task ID. One explicitly named outside the suggestions is re-read in the authorized catalog's scope. The parent can be a user story, backlog item, Basic-process issue or a bug (defect, incident) in any state that is not closed, so an HU or bug in development or QA works; a task, feature, epic, impediment or a done, closed, resolved, removed or aborted item is not written to: the entry stays pending with the edited title, description and effort and an issue naming its type and state, and when that work item's parent can hold tasks it is offered and preselected for the next `create`. Suggestions also include your recent bugs. An ID outside the scope is reported as not found. Fields in `fields` extend the saved additional fields.
 

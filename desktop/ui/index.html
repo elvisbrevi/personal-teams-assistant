@@ -26,19 +26,22 @@
     <symbol id="i-spark" viewBox="0 0 24 24"><path d="M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8z"/><path d="M19 16l.8 2.2L22 19l-2.2.8L19 22l-.8-2.2L16 19l2.2-.8z"/></symbol>
     <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5"/><path d="m16 16 4.5 4.5"/></symbol>
   </svg>
+  <a class="skip-link" href="#main">Skip to content</a>
   <div class="app">
     <aside class="sidebar">
       <div class="brand">
         <svg class="logo" viewBox="0 0 64 64" aria-hidden="true"><rect width="64" height="64" rx="14" fill="#17382f"/><path d="M14 16h36a3 3 0 0 1 3 3v22a3 3 0 0 1-3 3H27l-9 7v-7h-4a3 3 0 0 1-3-3V19a3 3 0 0 1 3-3z" fill="#fff"/><path d="M23 22h18v5h-6.5v12h-5V27H23z" fill="#17382f"/></svg>
         <div translate="no"><strong>Teams Assistant</strong><small id="version">Personal</small></div>
       </div>
+      <!-- Daily work first, then what feeds the answers; Settings stays apart at the end. -->
       <nav aria-label="Sections">
         <button data-tab="overview" title="Home" aria-current="page"><svg class="icon"><use href="#i-home"/></svg><span>Home</span></button>
-        <button data-tab="settings" title="Settings"><svg class="icon"><use href="#i-settings"/></svg><span>Settings</span></button>
         <button data-tab="messages" title="Messages"><svg class="icon"><use href="#i-inbox"/></svg><span>Messages</span><b id="nav-attention" class="nav-count" hidden></b></button>
         <button data-tab="registration" title="Activities"><svg class="icon"><use href="#i-check"/></svg><span class="long">Activities</span><span class="short">Activity</span><b id="nav-activities" class="nav-count" hidden></b></button>
+        <span class="nav-gap" aria-hidden="true"></span>
         <button data-tab="knowledge" title="Knowledge"><svg class="icon"><use href="#i-book"/></svg><span class="long">Knowledge</span><span class="short">Sources</span></button>
         <button data-tab="chat" title="Test chat"><svg class="icon"><use href="#i-chat"/></svg><span class="long">Test chat</span><span class="short">Test</span></button>
+        <button data-tab="settings" title="Settings" class="nav-settings"><svg class="icon"><use href="#i-settings"/></svg><span>Settings</span></button>
       </nav>
       <div class="sidebar-foot">
         <span id="status" class="pill muted" role="status"><i></i><span>Loading…</span></span>
@@ -46,9 +49,8 @@
       </div>
     </aside>
 
-    <main>
+    <main id="main" tabindex="-1">
       <div id="notice" class="toast" role="alert" hidden><span id="notice-text"></span><button id="notice-close" class="icon-button" aria-label="Close notice"><svg class="icon"><use href="#i-close"/></svg></button></div>
-      <div id="activity-notice" class="banner" role="status" hidden><span id="activity-notice-text"></span><button id="activity-notice-open" class="secondary small">Review activities</button></div>
       <div id="restart-offer" class="panel offer" role="alertdialog" aria-labelledby="restart-offer-title" hidden>
         <h2 id="restart-offer-title">New version installed</h2>
         <p>The previous version of the assistant was stopped (service and tunnel). The assistant was running. Keep it running with the new version?</p>
@@ -71,13 +73,19 @@
             <button id="stop" class="secondary">Stop</button>
           </div>
         </div>
-        <div id="tiles" class="tiles"></div>
+        <div id="activity-notice" class="banner" role="status" hidden><span id="activity-notice-text"></span><button id="activity-notice-open" class="secondary small">Review activities</button></div>
         <div class="columns">
-          <div class="panel">
-            <div class="panel-head"><h2>Setup</h2><span id="setup-progress" class="hint"></span></div>
-            <div class="progress" aria-hidden="true"><span id="setup-bar"></span></div>
-            <p id="setup-ready" class="done-note" hidden><svg class="icon"><use href="#i-check"/></svg>Ready to receive messages from Teams.</p>
-            <ol id="setup-steps" class="steps"></ol>
+          <div class="stack">
+            <div class="panel" id="setup-panel">
+              <div class="panel-head"><h2>Setup</h2><span id="setup-progress" class="hint"></span></div>
+              <div class="progress" aria-hidden="true"><span id="setup-bar"></span></div>
+              <p id="setup-ready" class="done-note" hidden><svg class="icon"><use href="#i-check"/></svg>Ready to receive messages from Teams.</p>
+              <ol id="setup-steps" class="steps"></ol>
+            </div>
+            <div class="panel">
+              <div class="panel-head"><h2>Status</h2><span class="hint">Select a row to change it.</span></div>
+              <div id="tiles" class="status-list"></div>
+            </div>
           </div>
           <div class="panel">
             <div class="panel-head"><h2>Recent activity</h2><button id="activity-all" class="link-button">See messages<svg class="icon"><use href="#i-arrow"/></svg></button></div>
@@ -92,89 +100,138 @@
           <h1>Settings</h1>
           <p>Changes are saved together with the bar at the bottom. If the assistant is running, it restarts to apply them.</p>
         </header>
-        <div id="panel-web-account" class="panel" hidden>
-          <div class="panel-head"><h2>Your web account</h2><button id="web-logout-settings" class="secondary small">Sign out</button></div>
-          <p class="hint">You signed in with GitHub. Your configuration, Teams account, credentials and history belong to your profile. Contact the portal operator to recover access.</p>
+        <div id="settings-tabs" class="subnav" role="tablist" aria-label="Settings sections">
+          <button role="tab" id="settings-tab-general" data-group="general" aria-controls="settings-general" aria-selected="true">General<span class="flag edited" hidden><span class="sr-only">Unsaved changes</span></span></button>
+          <button role="tab" id="settings-tab-teams" data-group="teams" aria-controls="settings-teams" aria-selected="false" tabindex="-1">Microsoft Teams<span class="flag warn" hidden><span class="sr-only">Needs attention</span></span><span class="flag edited" hidden><span class="sr-only">Unsaved changes</span></span></button>
+          <button role="tab" id="settings-tab-models" data-group="models" aria-controls="settings-models" aria-selected="false" tabindex="-1">Language models<span class="flag warn" hidden><span class="sr-only">Needs attention</span></span><span class="flag edited" hidden><span class="sr-only">Unsaved changes</span></span></button>
+          <button role="tab" id="settings-tab-activity" data-group="activity" aria-controls="settings-activity" aria-selected="false" tabindex="-1">Activity registration<span class="flag edited" hidden><span class="sr-only">Unsaved changes</span></span></button>
+          <button role="tab" id="settings-tab-credentials" data-group="credentials" aria-controls="settings-credentials" aria-selected="false" tabindex="-1">Credentials<span class="flag warn" hidden><span class="sr-only">Needs attention</span></span></button>
+          <button role="tab" id="settings-tab-advanced" data-group="advanced" aria-controls="settings-advanced" aria-selected="false" tabindex="-1">Advanced</button>
         </div>
-        <div class="panel" id="panel-credentials">
-          <h2>Credentials</h2>
-          <p class="hint">Their values are never shown. Type in a field only to store or replace a credential; it applies right away. Environment variables and secret files take priority.</p>
-          <div id="credentials" class="list"></div>
-        </div>
-        <div class="panel" id="panel-llm">
-          <div class="panel-head"><h2>Language models</h2><button id="detect-llm" class="secondary small">Detect CLIs again</button></div>
-          <p class="hint">They classify messages, write the answers and pick the references they use. The first active one answers; if it fails (for example, out of credits or with its usage limit reached) the next one answers, and the next call starts again with the first. Codex and Claude use their installed CLI with their own login; DeepSeek uses its API with <code>DEEPSEEK_API_KEY</code>.</p>
-          <ol id="llm-chain" class="chain" aria-label="Model priority order"></ol>
-        </div>
-        <div class="panel" id="panel-teams">
-          <div class="panel-head"><h2>Microsoft Teams and Entra</h2><span id="microsoft-state" class="badge muted"></span></div>
-          <p class="hint">Use your existing Entra registration (<em>Mobile and desktop</em> platform with <code>http://localhost</code> and delegated permissions). The user ID is filled in when you connect the account.</p>
-          <div class="grid">
-            <label>Entra tenant ID<input id="tenant-id" class="cfg" spellcheck="false"></label>
-            <label>Entra client ID<input id="client-id" class="cfg" spellcheck="false"></label>
-            <label>Teams user ID<input id="user-id" class="cfg" spellcheck="false"></label>
+
+        <div id="settings-general" class="settings-group" role="tabpanel" aria-labelledby="settings-tab-general" data-settings-group="general">
+          <div class="panel" id="panel-behavior">
+            <h2>Answers</h2>
+            <label class="switch-row">
+              <input id="dry-run" class="cfg switch" type="checkbox">
+              <span><strong>Observation mode</strong><small>Drafts and records proposals in Messages, but never sends anything to Teams. Turn it off once the proposals convince you.</small></span>
+            </label>
+            <label>Language <small>The language of this app, of what the assistant writes in Teams (including notices and sources) and of the tasks it drafts. It overrides the style.</small><select id="llm-language" class="cfg" translate="no"><option value="es">Español</option><option value="en">English</option></select></label>
+            <label>Answer style<textarea id="llm-style" class="cfg" rows="3"></textarea></label>
           </div>
-          <label class="check"><input id="discover-chats" class="cfg" type="checkbox"> Discover all my authorized chats</label>
-          <label>Allowed chats, one per line <small>Used only if you do not discover all chats.</small><textarea id="allowed-chats" class="cfg" rows="3" spellcheck="false"></textarea></label>
-          <div class="actions"><button id="teams-login" class="secondary">Connect Microsoft account</button></div>
-        </div>
-        <div class="panel" id="panel-server">
-          <h2>Public URL and tunnel</h2>
-          <p id="web-hosting-note" class="hint" hidden>The portal operator manages this profile's address and tunnel. Your assistant uses its own Teams callbacks through the same public address.</p>
-          <p class="hint">Microsoft Graph delivers messages to a public HTTPS URL that must reach the local port. For a tunnel managed in Cloudflare, turn on the option, store <code>CLOUDFLARE_TUNNEL_TOKEN</code> in Credentials and leave the local file empty; you can also use a local file with a final 404 rule. If another supervisor runs the tunnel, leave both off.</p>
-          <div class="grid">
-            <label>Public HTTPS URL<input id="public-url" class="cfg" translate="no" placeholder="https://assistant.example.com" spellcheck="false"></label>
-            <label>Local port<input id="bind" class="cfg" placeholder="127.0.0.1:38655" spellcheck="false"></label>
-            <label>cloudflared config (optional)<input id="tunnel-config" class="cfg" translate="no" placeholder="/private/path/config.yml" spellcheck="false"></label>
+          <div id="panel-web-account" class="panel" hidden>
+            <div class="panel-head"><h2>Your web account</h2><button id="web-logout-settings" class="secondary small">Sign out</button></div>
+            <p class="hint">You signed in with GitHub. Your configuration, Teams account, credentials and history belong to your profile. Contact the portal operator to recover access.</p>
           </div>
-          <label class="check"><input id="cloudflare-tunnel" class="cfg" type="checkbox"> Start and stop Cloudflare Tunnel with the assistant (stored token)</label>
         </div>
-        <div class="panel" id="panel-behavior">
-          <h2>Answers</h2>
-          <label class="switch-row">
-            <input id="dry-run" class="cfg switch" type="checkbox">
-            <span><strong>Observation mode</strong><small>Drafts and records proposals in Messages, but never sends anything to Teams. Turn it off once the proposals convince you.</small></span>
-          </label>
-          <label>Language <small>The language of this app, of what the assistant writes in Teams (including notices and sources) and of the tasks it drafts. It overrides the style.</small><select id="llm-language" class="cfg" translate="no"><option value="es">Español</option><option value="en">English</option></select></label>
-          <label>Answer style<textarea id="llm-style" class="cfg" rows="3"></textarea></label>
-        </div>
-        <div class="panel" id="panel-registration">
-          <h2>Activity registration</h2>
-          <p class="hint">Register performed work as completed tasks under the matching HU. The target is 9 hours by default; hours already registered are deducted. Unclear work, effort or call attendance stays pending for your input.</p>
-          <label class="check"><input id="registration-enabled" class="cfg" type="checkbox"> Run on a schedule while this app is open</label>
-          <label class="check"><input id="registration-auto" class="cfg" type="checkbox"> Automatically create tasks when the HU, description and effort are clear</label>
-          <p class="hint">Creates tasks with the separate write credential. Observation mode keeps all proposals pending.</p>
-          <div class="grid">
-            <label>Daily target (hours)<input id="registration-hours" class="cfg" type="number" min="0.25" max="24" step="0.25"></label>
-            <label>Schedule<select id="registration-schedule" class="cfg"><option value="daily">Once a day</option><option value="interval">Every interval within a window</option></select></label>
-            <label>Daily time<input id="registration-at" class="cfg" type="time"></label>
-            <label>Interval (minutes)<input id="registration-interval" class="cfg" type="number" min="5" max="1440"></label>
-            <label>Window starts<input id="registration-start" class="cfg" type="time"></label>
-            <label>Window ends<input id="registration-end" class="cfg" type="time"></label>
-            <label>Time zone<input id="registration-zone" class="cfg" placeholder="local or America/Santiago" spellcheck="false"></label>
-            <label>Workdays <small>1 = Monday … 7 = Sunday, separated by commas.</small><input id="registration-weekdays" class="cfg"></label>
+
+        <div id="settings-teams" class="settings-group" role="tabpanel" aria-labelledby="settings-tab-teams" data-settings-group="teams" hidden>
+          <div class="panel" id="panel-teams">
+            <div class="panel-head"><h2>Microsoft Teams and Entra</h2><span id="microsoft-state" class="badge muted"></span></div>
+            <p class="hint">Use your existing Entra registration (<em>Mobile and desktop</em> platform with <code>http://localhost</code> and delegated permissions). The user ID is filled in when you connect the account.</p>
+            <div class="grid">
+              <label>Entra tenant ID<input id="tenant-id" class="cfg" spellcheck="false"></label>
+              <label>Entra client ID<input id="client-id" class="cfg" spellcheck="false"></label>
+              <label>Teams user ID<input id="user-id" class="cfg" spellcheck="false"></label>
+            </div>
+            <label class="check"><input id="discover-chats" class="cfg" type="checkbox"> Discover all my authorized chats</label>
+            <label id="allowed-chats-field">Allowed chats, one per line <small>Used only if you do not discover all chats.</small><textarea id="allowed-chats" class="cfg" rows="3" spellcheck="false"></textarea></label>
+            <div class="actions"><button id="teams-login" class="secondary">Connect Microsoft account</button></div>
           </div>
-          <label>Azure DevOps write source<select id="registration-writer" class="cfg"></select></label>
-          <fieldset class="activity-sources"><legend>Activity sources</legend><div id="registration-sources" class="list"></div></fieldset>
-          <p class="hint">Sources must be enabled and allow external processing. Azure DevOps activity includes your commits, pull requests, pipeline runs, releases and stage approvals. Wiki covers your page creation and edits. Teams messages covers work described in your own messages and call events in authorized chats and meetings.</p>
-          <div class="grid">
-            <label>Task type<select id="registration-kind" class="cfg" translate="no"><option value="Task">Task</option><option value="Tarea">Tarea</option></select></label>
-            <label>Completed state<input id="registration-state" class="cfg" translate="no" placeholder="Done"></label>
-            <label>Effort field <small>The task field where your real hours go, for example Microsoft.VSTS.Scheduling.CompletedWork or a custom field of your process.</small><input id="registration-effort" class="cfg" translate="no" placeholder="Microsoft.VSTS.Scheduling.CompletedWork" spellcheck="false"></label>
+          <div class="panel" id="panel-self-chat">
+            <div class="panel-head"><h2>Chat with myself</h2><span id="self-chat-badge" class="badge muted"></span></div>
+            <p id="self-chat-state" class="hint"></p>
+            <label>Personal chat ID <small>Optional; validated against Microsoft. Empty = discover it.</small><input id="self-chat-id" spellcheck="false"></label>
+            <div class="actions"><button id="self-chat-enable">Validate and enable</button><button id="self-chat-disable" class="secondary">Disable</button><button id="self-chat-test" class="secondary">Check membership</button></div>
+            <p class="hint">New messages are processed. Authorize the chosen sources for this chat's exact audience. Every answer carries a PTA link that prevents loops even after an ambiguous send.</p>
           </div>
-          <label>Additional required fields <small>JSON object with Azure DevOps field reference names and values.</small><textarea id="registration-fields" class="cfg" translate="no" rows="3" spellcheck="false" placeholder='{"Custom.ActivityType":"Documentation"}'></textarea></label>
+          <div class="panel" id="panel-server">
+            <h2>Public URL and tunnel</h2>
+            <p id="web-hosting-note" class="hint" hidden>The portal operator manages this profile's address and tunnel. Your assistant uses its own Teams callbacks through the same public address.</p>
+            <p class="hint">Microsoft Graph delivers messages to a public HTTPS URL that must reach the local port. For a tunnel managed in Cloudflare, turn on the option, store <code>CLOUDFLARE_TUNNEL_TOKEN</code> in Credentials and leave the local file empty; you can also use a local file with a final 404 rule. If another supervisor runs the tunnel, leave both off.</p>
+            <div class="grid">
+              <label>Public HTTPS URL<input id="public-url" class="cfg" translate="no" placeholder="https://assistant.example.com" spellcheck="false"></label>
+              <label>Local port<input id="bind" class="cfg" placeholder="127.0.0.1:38655" spellcheck="false"></label>
+              <label>cloudflared config (optional)<input id="tunnel-config" class="cfg" translate="no" placeholder="/private/path/config.yml" spellcheck="false"></label>
+            </div>
+            <label class="check"><input id="cloudflare-tunnel" class="cfg" type="checkbox"> Start and stop Cloudflare Tunnel with the assistant (stored token)</label>
+          </div>
         </div>
-        <div class="panel" id="panel-self-chat">
-          <div class="panel-head"><h2>Chat with myself</h2><span id="self-chat-badge" class="badge muted"></span></div>
-          <p id="self-chat-state" class="hint"></p>
-          <label>Personal chat ID <small>Optional; validated against Microsoft. Empty = discover it.</small><input id="self-chat-id" spellcheck="false"></label>
-          <div class="actions"><button id="self-chat-enable">Validate and enable</button><button id="self-chat-disable" class="secondary">Disable</button><button id="self-chat-test" class="secondary">Check membership</button></div>
-          <p class="hint">New messages are processed. Authorize the chosen sources for this chat's exact audience. Every answer carries a PTA link that prevents loops even after an ambiguous send.</p>
+
+        <div id="settings-models" class="settings-group" role="tabpanel" aria-labelledby="settings-tab-models" data-settings-group="models" hidden>
+          <div class="panel" id="panel-llm">
+            <div class="panel-head"><h2>Language models</h2><button id="detect-llm" class="secondary small">Detect CLIs again</button></div>
+            <p class="hint">They classify messages, write the answers and pick the references they use. The first active one answers; if it fails (for example, out of credits or with its usage limit reached) the next one answers, and the next call starts again with the first. Codex and Claude use their installed CLI with their own login; DeepSeek uses its API with <code>DEEPSEEK_API_KEY</code>.</p>
+            <ol id="llm-chain" class="chain" aria-label="Model priority order"></ol>
+          </div>
         </div>
-        <div class="panel" id="panel-import">
-          <h2>Migrate this installation</h2>
-          <p class="hint">Imports your current <code>config.toml</code>, keeping its client ID, map and SQLite directory. Import the existing credentials to this computer too, especially <code>STATE_ENCRYPTION_KEY</code>.</p>
-          <div class="actions"><input id="legacy-path" aria-label="Path of the current config.toml" placeholder="/path/to/config.toml" spellcheck="false"><button id="import" class="secondary">Import</button></div>
+
+        <div id="settings-activity" class="settings-group" role="tabpanel" aria-labelledby="settings-tab-activity" data-settings-group="activity" hidden>
+          <div class="panel" id="panel-registration">
+            <h2>Activity registration</h2>
+            <p class="hint">Register performed work as completed tasks under the matching HU. The target is 9 hours by default; hours already registered are deducted. Unclear work, effort or call attendance stays pending for your input.</p>
+            <label class="check"><input id="registration-auto" class="cfg" type="checkbox"> Automatically create tasks when the HU, description and effort are clear</label>
+            <p class="hint">Creates tasks with the separate write credential. Observation mode keeps all proposals pending.</p>
+            <div class="grid fill">
+              <label>Daily target (hours)<input id="registration-hours" class="cfg" type="number" min="0.25" max="24" step="0.25"></label>
+            </div>
+          </div>
+          <div class="panel" id="panel-registration-schedule">
+            <h2>Schedule</h2>
+            <label class="check"><input id="registration-enabled" class="cfg" type="checkbox"> Run on a schedule while this app is open</label>
+            <div class="grid">
+              <label>Schedule<select id="registration-schedule" class="cfg"><option value="daily">Once a day</option><option value="interval">Every interval within a window</option></select></label>
+              <label id="registration-at-field">Daily time<input id="registration-at" class="cfg" type="time"></label>
+              <label id="registration-interval-field">Interval (minutes)<input id="registration-interval" class="cfg" type="number" min="5" max="1440"></label>
+              <label id="registration-start-field">Window starts<input id="registration-start" class="cfg" type="time"></label>
+              <label id="registration-end-field">Window ends<input id="registration-end" class="cfg" type="time"></label>
+              <label>Time zone<input id="registration-zone" class="cfg" placeholder="local or America/Santiago" spellcheck="false"></label>
+            </div>
+            <fieldset id="registration-weekdays" class="days">
+              <legend>Workdays</legend>
+              <label class="day"><input class="cfg" type="checkbox" data-day="1"><span>Mon</span></label>
+              <label class="day"><input class="cfg" type="checkbox" data-day="2"><span>Tue</span></label>
+              <label class="day"><input class="cfg" type="checkbox" data-day="3"><span>Wed</span></label>
+              <label class="day"><input class="cfg" type="checkbox" data-day="4"><span>Thu</span></label>
+              <label class="day"><input class="cfg" type="checkbox" data-day="5"><span>Fri</span></label>
+              <label class="day"><input class="cfg" type="checkbox" data-day="6"><span>Sat</span></label>
+              <label class="day"><input class="cfg" type="checkbox" data-day="7"><span>Sun</span></label>
+            </fieldset>
+          </div>
+          <div class="panel" id="panel-registration-sources">
+            <h2>Activity sources</h2>
+            <p class="hint">Sources must be enabled and allow external processing. Azure DevOps activity includes your commits, pull requests, pipeline runs, releases and stage approvals. Wiki covers your page creation and edits. Teams messages covers work described in your own messages and call events in authorized chats and meetings.</p>
+            <div id="registration-sources" class="list choice-list"></div>
+            <label>Azure DevOps write source<select id="registration-writer" class="cfg"></select></label>
+          </div>
+          <div class="panel" id="panel-registration-tasks">
+            <h2>Tasks in Azure DevOps</h2>
+            <div class="grid">
+              <label>Task type<select id="registration-kind" class="cfg" translate="no"><option value="Task">Task</option><option value="Tarea">Tarea</option></select></label>
+              <label>Completed state<input id="registration-state" class="cfg" translate="no" placeholder="Done"></label>
+              <label>Effort field <small>The task field where your real hours go, for example Microsoft.VSTS.Scheduling.CompletedWork or a custom field of your process.</small><input id="registration-effort" class="cfg" translate="no" placeholder="Microsoft.VSTS.Scheduling.CompletedWork" spellcheck="false"></label>
+            </div>
+            <details class="fold">
+              <summary>Additional required fields <small>Advanced</small></summary>
+              <label>Additional required fields <small>JSON object with Azure DevOps field reference names and values.</small><textarea id="registration-fields" class="cfg" translate="no" rows="3" spellcheck="false" placeholder='{"Custom.ActivityType":"Documentation"}'></textarea></label>
+            </details>
+          </div>
+        </div>
+
+        <div id="settings-credentials" class="settings-group" role="tabpanel" aria-labelledby="settings-tab-credentials" data-settings-group="credentials" hidden>
+          <div class="panel" id="panel-credentials">
+            <h2>Credentials</h2>
+            <p class="hint">Their values are never shown. Type in a field only to store or replace a credential; it applies right away. Environment variables and secret files take priority.</p>
+            <div id="credentials" class="list"></div>
+          </div>
+        </div>
+
+        <div id="settings-advanced" class="settings-group" role="tabpanel" aria-labelledby="settings-tab-advanced" data-settings-group="advanced" hidden>
+          <div class="panel" id="panel-import">
+            <h2>Migrate this installation</h2>
+            <p class="hint">Imports your current <code>config.toml</code>, keeping its client ID, map and SQLite directory. Import the existing credentials to this computer too, especially <code>STATE_ENCRYPTION_KEY</code>.</p>
+            <div class="actions"><input id="legacy-path" aria-label="Path of the current config.toml" placeholder="/path/to/config.toml" spellcheck="false"><button id="import" class="secondary">Import</button></div>
+          </div>
         </div>
       </section>
 
@@ -256,17 +313,20 @@
         <div class="panel">
           <div class="toolbar">
             <div id="messages-filters" class="segmented" role="group" aria-label="Filter messages">
-              <button data-filter="all" aria-pressed="true">All</button>
-              <button data-filter="sent" aria-pressed="false">Answered</button>
-              <button data-filter="withheld" aria-pressed="false">Withheld or unanswered</button>
-              <button data-filter="error" aria-pressed="false">Errors</button>
-              <button data-filter="active" aria-pressed="false">In progress</button>
+              <button data-filter="all" aria-pressed="true">All <span class="count"></span></button>
+              <button data-filter="sent" aria-pressed="false">Answered <span class="count"></span></button>
+              <button data-filter="withheld" aria-pressed="false">Withheld or unanswered <span class="count"></span></button>
+              <button data-filter="error" aria-pressed="false">Errors <span class="count"></span></button>
+              <button data-filter="active" aria-pressed="false">In progress <span class="count"></span></button>
             </div>
-            <button id="messages-refresh" class="secondary small">Refresh</button>
+            <div class="toolbar-end">
+              <label class="search"><span class="sr-only">Search messages</span><svg class="icon" aria-hidden="true"><use href="#i-search"/></svg><input id="messages-search" type="search" placeholder="Search messages" autocomplete="off" spellcheck="false"></label>
+              <button id="messages-refresh" class="secondary small"><svg class="icon" aria-hidden="true"><use href="#i-refresh"/></svg>Refresh</button>
+            </div>
           </div>
-          <div class="toolbar">
-            <label class="check"><input id="messages-auto" type="checkbox" checked> Refresh every 10 s</label>
+          <div class="toolbar toolbar-options">
             <label class="check"><input id="messages-hide-ineligible" type="checkbox" checked> Hide messages not addressed to the assistant</label>
+            <label class="check"><input id="messages-auto" type="checkbox" checked> Refresh every 10 s</label>
           </div>
           <p id="messages-summary" class="hint"></p>
           <div id="messages-list" aria-live="polite"></div>
@@ -310,7 +370,10 @@
         <div class="panel">
           <div class="panel-head"><h2>Private GitHub repositories</h2><span id="github-state" class="badge muted"></span></div>
           <p class="hint">Connect a GitHub App with the Contents: read permission, installed only on the repositories you choose. The organization may require approval. The token stays in the system store.</p>
-          <label>GitHub App client ID<input id="github-client-id" value="Iv23liswvVle1ENUJYBT" placeholder="Public client ID" spellcheck="false"></label>
+          <details class="fold">
+            <summary>Use another GitHub App <small>Advanced</small></summary>
+            <label>GitHub App client ID<input id="github-client-id" value="Iv23liswvVle1ENUJYBT" placeholder="Public client ID" spellcheck="false"></label>
+          </details>
           <div class="actions"><button id="github-connect" class="secondary">Connect GitHub</button><button id="github-list" class="secondary">See authorized repositories</button><button id="github-disconnect" class="secondary">Disconnect GitHub</button></div>
           <div id="github-device" class="device" hidden>
             <p>Copy this code and authorize the app on GitHub:</p>
