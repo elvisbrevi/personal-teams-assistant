@@ -56,7 +56,9 @@ pub struct Audit {
     pub history_messages: usize,
     /// Providers that failed before the one in `provider` answered, as `label: failure`.
     pub provider_fallbacks: Vec<String>,
-    /// What the message asked: `question`, `activity_review` or `greeting`.
+    /// What the message asked: `question`, `activity_review`, `greeting`, `shared_link` or
+    /// `link`; for a message left unanswered, `statement` (informational) or `personal` (a
+    /// request for the person), which an answer written at the user's request keeps.
     pub intent: Option<String>,
     /// How cited sources were chosen: `llm`, `code` (no model could choose them) or `none`.
     /// Audits written before 0.6.1 may say `jev`.
@@ -73,6 +75,10 @@ pub struct Audit {
     /// Context the user gave in the app to improve an answer that was not sent (redacted
     /// text; never sent to Teams). Present while it is improved and after.
     pub refinement: Option<String>,
+    /// Sources the user chose in the app for an answer written at their request; empty means
+    /// the sources authorized for the conversation.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub chosen_sources: Vec<String>,
     /// Processing steps in order. Details name decisions and counts, never message content.
     pub trace: Vec<TraceStep>,
 }

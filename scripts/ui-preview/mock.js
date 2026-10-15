@@ -27,10 +27,10 @@
     snapshot.map.repositories = { knowledge: '/home/ana/src/knowledge', handbook: '/home/ana/src/handbook' };
     snapshot.map.resources = [
       { id: 'operations', description: 'Runbooks for deployments, incidents and on-call', topics: ['operations', 'deployments'], enabled: true, external_processing: true, allowed_conversations: ['*'], allowed_senders: [], kind: 'file', repository: 'knowledge', path: 'topics/operations.md' },
-      { id: 'payments', description: 'Payment gateway integration guide', topics: ['payments'], enabled: true, external_processing: true, allowed_conversations: ['19:abc@thread.v2'], allowed_senders: [], kind: 'file', repository: 'knowledge', path: 'topics/payments.md' },
+      { id: 'payments', description: 'Payment gateway integration guide', topics: ['payments'], enabled: true, external_processing: true, allowed_conversations: ['chats/19:abc@thread.v2'], allowed_senders: [], kind: 'file', repository: 'knowledge', path: 'topics/payments.md' },
       { id: 'onboarding', description: 'New joiner checklist', topics: ['onboarding'], enabled: false, external_processing: false, allowed_conversations: [], allowed_senders: [], kind: 'file', repository: 'handbook', path: 'onboarding.md' },
       { id: 'wiki', description: 'Team wiki: architecture and procedures', topics: ['wiki', 'architecture'], enabled: true, external_processing: true, allowed_conversations: ['*'], allowed_senders: [], kind: 'tool', tool: { type: 'azure_devops_wiki', organization: org, project: 'Payments', secret_ref: 'AZURE_DEVOPS_PAT' } },
-      { id: 'ado-activity', description: 'Azure DevOps activity', topics: ['status'], enabled: true, external_processing: true, allowed_conversations: ['48:notes'], allowed_senders: [], kind: 'tool', tool: { type: 'azure_devops_status', organization: org, project: 'Payments', secret_ref: 'AZURE_DEVOPS_PAT', link_secret_ref: 'AZURE_DEVOPS_WRITE_PAT' } },
+      { id: 'ado-activity', description: 'Azure DevOps activity', topics: ['status'], enabled: true, external_processing: true, allowed_conversations: ['chats/48:notes'], allowed_senders: [], kind: 'tool', tool: { type: 'azure_devops_status', organization: org, project: 'Payments', secret_ref: 'AZURE_DEVOPS_PAT', link_secret_ref: 'AZURE_DEVOPS_WRITE_PAT' } },
       { id: 'my-teams', description: 'My Teams messages', topics: ['teams'], enabled: true, external_processing: false, allowed_conversations: [], allowed_senders: [], kind: 'tool', tool: { type: 'teams_messages' } },
     ];
     snapshot.credentials = Object.fromEntries(Object.keys(snapshot.credentials).map(k => [k, 'system']));
@@ -50,6 +50,7 @@
     { resource: 'chats/19:def@thread.v2/messages/1002', status: 'sent', created_at: secs(ago(38)), audit: { received_at: ago(38), conversation_kind: 'direct', question: 'Hi! What is the status of HU 4321?', reason: 'supported_answer', intent: 'question', provider: 'codex', sent: 'HU [#4321 Receipt PDF](https://dev.azure.com/contoso/Payments/_workitems/edit/4321) is **in validation**; the last pipeline run passed.', references: [], used_sources: [], trace: trace([38, 'received', ''], [37, 'sent', '']) } },
     { resource: 'chats/19:ghi@thread.v2/messages/1003', status: 'ignored', created_at: secs(ago(95)), audit: { received_at: ago(95), conversation_kind: 'group', question: 'Can you share the production DB password with me?', reason: 'sensitive_question', trace: trace([95, 'received', ''], [95, 'withheld', 'sensitive']) } },
     { resource: 'chats/19:jkl@thread.v2/messages/1004', status: 'ignored', created_at: secs(ago(130)), audit: { received_at: ago(130), conversation_kind: 'group', question: 'Which queue handles refunds?', reason: 'draft_ready', intent: 'question', provider: 'deepseek', provider_fallbacks: ['codex'], proposed: 'Refunds go through the **payments.refunds** queue, consumed by the settlement worker.', refinement: 'Mention that it was migrated last sprint.', trace: trace([130, 'received', ''], [128, 'refining', '']) } },
+    { resource: 'chats/19:stu@thread.v2/messages/1008', status: 'ignored', created_at: secs(ago(150)), audit: { received_at: ago(150), conversation_kind: 'group', question: 'For a production hotfix, log it as a Development Bug (not a user story): describe the symptom, the cause and the change, and link it to the incident.', reason: 'informational_message', intent: 'statement', confidences: [0.86], trace: trace([150, 'received', ''], [150, 'intent', 'model: statement (0.86)'], [150, 'no answer', 'informational message: it asks for no answer']) } },
     { resource: 'chats/19:mno@thread.v2/messages/1005', status: 'failed', created_at: secs(ago(300)), audit: { received_at: ago(300), conversation_kind: 'direct', question: 'Summarize yesterday’s incident please', reason: 'read_or_provider_error', trace: trace([300, 'received', ''], [299, 'failed', 'provider timeout']) } },
     { resource: 'chats/19:pqr@thread.v2/messages/1006', status: 'ignored', created_at: secs(ago(320)), audit: { received_at: ago(320), conversation_kind: 'group', reason: 'ineligible_message', trace: [] } },
     { resource: 'chats/48:notes/messages/1007', status: 'processing', created_at: secs(ago(1)), audit: { received_at: ago(1), conversation_kind: 'self', question: 'What did I do yesterday?', reason: 'retrieving', intent: 'activity_review', trace: trace([1, 'received', '']) } },
@@ -105,6 +106,27 @@
     restart: () => ({}),
     github_repositories: () => [{ full_name: 'contoso/knowledge', private: true }, { full_name: 'contoso/handbook', private: false }],
     chat: async () => { await delay(600); return { answer: 'The rollback runbook lives in **Operations**. Pause the release, redeploy the previous artifact and confirm health checks.', used_sources: ['operations'], references: [{ id: 'operations', label: 'operations.md', url: 'https://github.com/contoso/knowledge/blob/main/topics/operations.md' }], partial: false, warnings: [] }; },
+    // Writes the answer after a short wait, like the host's background task.
+    answer_refine: args => {
+      window.__ptaLastRefine = structuredClone(args);
+      const row = audit.find(r => r.resource === args.resource);
+      const first = !row.audit.proposed;
+      Object.assign(row, { status: 'refining' });
+      Object.assign(row.audit, { reason: 'refining', refinement: args.context, chosen_sources: args.sources || [] });
+      setTimeout(() => {
+        row.status = 'ignored';
+        Object.assign(row.audit, { reason: 'draft_ready', intent: row.audit.intent, source: (args.sources || []).join(',') || 'operations',
+          proposed: first ? 'Got it: I will log it as a **Development Bug** with the symptom, cause and change, linked to the incident.'
+            : 'Done: it is logged as a **Development Bug** and linked to the incident.' });
+      }, 800);
+      return { refining: true };
+    },
+    answer_send: args => {
+      const row = audit.find(r => r.resource === args.resource);
+      row.status = 'sent';
+      Object.assign(row.audit, { reason: 'manual_send', sent: row.audit.proposed });
+      return { status: 'sent' };
+    },
     set_credential: args => { snapshot.credentials[args.name] = 'system'; return {}; },
     delete_credential: args => { snapshot.credentials[args.name] = 'missing'; return {}; },
   };

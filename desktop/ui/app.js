@@ -1167,7 +1167,7 @@ function finishActivityOperation(operation, entry) {
 const statusLabels = {
   sent: [t('Answered'), 'ok'], dry_run: [t('Observed (not sent)'), 'info'], sending: [t('Sending'), 'active'],
   processing: [t('In progress'), 'active'], pending: [t('Queued'), 'active'], failed: [t('Error'), 'error'],
-  uncertain: [t('Uncertain send'), 'error'], refining: [t('Improving'), 'active'],
+  uncertain: [t('Uncertain send'), 'error'], refining: [t('Generating'), 'active'],
 };
 const reasonLabels = {
   ineligible_message: t('Not addressed to the assistant: your own, from a group without a mention, too old, empty or an answer of the app.'),
@@ -1194,13 +1194,14 @@ const reasonLabels = {
   links_cancelled: t('Link plan cancelled; nothing was linked.'),
   links_unresolved: t('The link request could not be resolved; nothing was planned.'),
   links_not_configured: t('Linking asked for, but no source has a write credential.'),
-  refining: t('Improving the answer with your context.'),
-  draft_ready: t('Improved answer ready: review it and send it from here.'),
-  refinement_failed: t('The improved answer could not be written; the earlier proposal is kept.'),
+  refining: t('Writing the answer at your request.'),
+  draft_ready: t('Answer ready: review it and send it from here.'),
+  refinement_failed: t('The answer could not be written again; the earlier proposal is kept.'),
   manual_send: t('Sent by you from the app after reviewing it.'),
 };
 const kindLabels = { self: t('Personal chat'), direct: t('Direct'), group: t('Group'), unsupported: t('Other') };
-const intentLabels = { question: t('question'), activity_review: t('activity review'), greeting: t('greeting'), shared_link: t('shared link'), link: t('link work to work items') };
+const intentLabels = { question: t('question'), activity_review: t('activity review'), greeting: t('greeting'), shared_link: t('shared link'), link: t('link work to work items'),
+  statement: t('informational'), personal: t('request for you') };
 const linkLabels = { sending: t('sending'), linked: t('linked'), already_linked: t('already linked'), failed: t('failed'), uncertain: t('uncertain (check the work item; never retried)') };
 let messageRows = [];
 let messageFilter = 'all';
@@ -1219,8 +1220,9 @@ function messageState(row) {
   return statusLabels[row.status] || [row.status, 'muted'];
 }
 
-function reasonText(reason) {
+function reasonText(reason, audit) {
   if (!reason) return '';
+  if (reason === 'refinement_failed' && !audit?.proposed?.trim()) return t('The answer could not be written; try again.');
   if (reason.startsWith('invalid_references')) return t('Withheld: references or links that could not be verified ({detail}).', { detail: reason.replace('invalid_references: ', '') });
   return reasonLabels[reason] || reason;
 }
@@ -1287,39 +1289,96 @@ function matchesFilter(row, filter) {
     || (filter === 'error' && tone === 'error') || (filter === 'active' && tone === 'active');
 }
 
-/** Context typed to improve an unsent answer, kept across the list's refreshes. */
+/** Context typed for an answer, kept across the list's refreshes. */
 const answerContext = new Map();
+/** Sources chosen for an answer (resource → ids), kept across refreshes; absent means its last choice. */
+const answerSources = new Map();
+/** Messages whose source chooser is open. */
+const openSourceChoices = new Set();
 let sendArmed = null;
-/** An answer that exists but was not sent (withheld, observed or improved) can be improved or sent. */
-const unsentDraft = row => ['ignored', 'dry_run'].includes(row.status) && !!row.audit.proposed?.trim()
-  && !row.audit.sent && !!row.audit.question && !row.resource.startsWith('simulation:');
+/** A message addressed to the assistant that was not sent an answer can get one written from here
+ *  (one with sensitive data never reaches a model). */
+const unsent = row => ['ignored', 'dry_run'].includes(row.status) && !row.audit.sent && !!row.audit.question
+  && row.audit.reason !== 'sensitive_question' && !row.resource.startsWith('simulation:');
+/** An unsent message whose answer exists (withheld, observed or written here) can be sent. */
+const unsentDraft = row => unsent(row) && !!row.audit.proposed?.trim();
 
-function draftActions(row) {
-  const context = el('textarea', { class: 'answer-context', rows: 3, maxLength: 4000,
+/** The sources the user may choose for an answer: enabled and allowed external processing, like the
+ *  test chat. None chosen means the ones authorized for the conversation. */
+function sourceChooser(row) {
+  const usable = live.map.resources.filter(r => r.enabled && r.external_processing);
+  const chosen = answerSources.get(row.resource) ?? new Set((row.audit.chosen_sources || []).filter(id => usable.some(r => r.id === id)));
+  const conversation = row.resource.replace(/\/messages\/.*$/, '');
+  const authorized = r => r.allowed_conversations.some(c => c === conversation || c === '*');
+  const summaryNote = el('small');
+  const describe = () => {
+    summaryNote.textContent = chosen.size ? tn(chosen.size, '1 chosen', '{n} chosen') : t('Automatic');
+  };
+  describe();
+  const fold = el('details', { class: 'fold answer-sources', open: openSourceChoices.has(row.resource) },
+    el('summary', {}, t('Sources'), summaryNote));
+  fold.ontoggle = () => { if (fold.open) openSourceChoices.add(row.resource); else openSourceChoices.delete(row.resource); };
+  if (!usable.length) {
+    fold.append(el('p', { class: 'hint', textContent: t('No sources are ready. In Knowledge, enable one, authorize its external processing and save.') }));
+    return fold;
+  }
+  fold.append(el('p', { class: 'hint', textContent: t('Choose what the assistant reads for this answer. With none chosen, it uses the sources authorized for this chat.') }));
+  const list = el('div', { class: 'choices' });
+  for (const resource of usable) {
+    const box = el('input', { type: 'checkbox', value: resource.id, checked: chosen.has(resource.id) });
+    box.onchange = () => {
+      if (box.checked) chosen.add(resource.id); else chosen.delete(resource.id);
+      answerSources.set(row.resource, chosen);
+      describe();
+    };
+    list.append(el('label', { class: 'check' }, box,
+      el('span', {}, el('strong', { textContent: resource.id }),
+        el('small', { textContent: `${kindName(resource)} · ${resource.description}${authorized(resource) ? ` · ${t('authorized for this chat')}` : ''}` }))));
+  }
+  fold.append(list);
+  return fold;
+}
+
+/** Generate the answer to an unanswered message, or once it exists: regenerate it with context, or send it. */
+function answerActions(row) {
+  const drafted = unsentDraft(row);
+  const sources = sourceChooser(row);
+  const context = drafted ? el('textarea', { class: 'answer-context', rows: 3, maxLength: 4000,
     placeholder: t('E.g. It is already in validation and Luis Felipe owns it; the production deployment is planned for 10/20 and the production variables are still missing.'),
-    value: answerContext.get(row.resource) || '' });
-  context.setAttribute('data-resource', row.resource);
-  context.oninput = () => answerContext.set(row.resource, context.value);
-  const improve = el('button', { class: 'secondary', type: 'button', textContent: t('Improve answer') });
-  improve.onclick = () => busy(improve, async () => {
-    await invoke('answer_refine', { resource: row.resource, context: context.value });
+    value: answerContext.get(row.resource) || '' }) : null;
+  if (context) {
+    context.setAttribute('data-resource', row.resource);
+    context.oninput = () => answerContext.set(row.resource, context.value);
+  }
+  const generate = el('button', { class: drafted ? 'secondary' : '', type: 'button', textContent: drafted ? t('Regenerate answer') : t('Generate answer') });
+  generate.onclick = () => busy(generate, async () => {
+    const chosen = [...sources.querySelectorAll('input:checked')].map(box => box.value);
+    await invoke('answer_refine', { resource: row.resource, context: context?.value ?? '', sources: chosen });
     answerContext.delete(row.resource);
-    notify(t('Improving the answer with your context…'), 'info');
+    answerSources.delete(row.resource);
+    notify(t('Writing the answer…'), 'info');
     await followRefinement(row.resource);
   });
-  const send = el('button', { type: 'button', textContent: t('Send to Teams') });
+  if (!drafted) {
+    return el('div', { class: 'field-block draft-actions' },
+      el('strong', { textContent: t('Answer this message') }),
+      el('p', { class: 'hint', textContent: t('The assistant reads the conversation and the sources and writes an answer for you to review. Nothing is sent until you send it.') }),
+      sources,
+      el('div', { class: 'actions' }, generate));
+  }
+  const send = el('button', { type: 'button', textContent: t('Send answer') });
   send.onclick = () => {
     // Sending is final: the first tap asks, the second one sends.
     if (sendArmed !== row.resource) {
       sendArmed = row.resource;
       send.textContent = t('Tap again to send');
       setTimeout(() => {
-        if (sendArmed === row.resource) { sendArmed = null; send.textContent = t('Send to Teams'); }
+        if (sendArmed === row.resource) { sendArmed = null; send.textContent = t('Send answer'); }
       }, 4000);
       return;
     }
     sendArmed = null;
-    send.textContent = t('Send to Teams');
+    send.textContent = t('Send answer');
     busy(send, async () => {
       const result = await invoke('answer_send', { resource: row.resource });
       if (result.status === 'sent') done(t('Answer sent to Teams.'));
@@ -1328,13 +1387,14 @@ function draftActions(row) {
     });
   };
   return el('div', { class: 'field-block draft-actions' },
-    el('strong', { textContent: t('Improve or send this answer') }),
+    el('strong', { textContent: t('Review and send') }),
     el('label', {}, t('Context for the assistant'), context),
-    el('div', { class: 'actions' }, improve, send),
-    el('p', { class: 'hint', textContent: t('Improving rewrites the answer with your context and the sources read again, without sending it. Sending posts the answer shown above once, as you.') }));
+    sources,
+    el('div', { class: 'actions' }, generate, send),
+    el('p', { class: 'hint', textContent: t('Regenerating writes the answer again with your context and the chosen sources, without sending it. Sending posts the answer shown above once, as you.') }));
 }
 
-/** Follows an answer being improved until it is ready, kept or failed. */
+/** Follows an answer being written until it is ready, kept or failed. */
 async function followRefinement(resource) {
   const deadline = Date.now() + 25 * 60_000;
   while (Date.now() < deadline) {
@@ -1342,9 +1402,9 @@ async function followRefinement(resource) {
     await loadMessages();
     const row = messageRows.find(r => r.resource === resource);
     if (row?.status === 'refining') continue;
-    if (row?.audit.reason === 'draft_ready') done(t('Improved answer ready: review it and send it from here.'));
-    else if (row?.audit.reason === 'refinement_failed') fail(t('The improved answer could not be written; the earlier proposal is kept.'));
-    else if (row) notify(reasonText(row.audit.reason), 'info');
+    if (row?.audit.reason === 'draft_ready') done(t('Answer ready: review it and send it from here.'));
+    else if (row?.audit.reason === 'refinement_failed') fail(reasonText(row.audit.reason, row.audit));
+    else if (row) notify(reasonText(row.audit.reason, row.audit), 'info');
     return;
   }
 }
@@ -1386,13 +1446,17 @@ function renderMessages() {
     const body = el('div', { class: 'message-body' });
     messageField(body, t('Message'), audit.question, true);
     if (audit.resolved_question) messageField(body, t('Interpreted with the context'), `${audit.resolved_question}${audit.topic ? ` · ${t('topic searched')}: ${audit.topic}` : ''}`);
-    messageField(body, t('Outcome'), reasonText(audit.reason));
+    messageField(body, t('Outcome'), reasonText(audit.reason, audit));
     if (row.status === 'sent') messageField(body, t('Answer sent'), audit.sent || audit.proposed, 'markdown');
-    else messageField(body, row.status === 'dry_run' ? t('Proposal (observation mode)') : audit.reason === 'draft_ready' ? t('Improved answer (not sent)') : t('Proposed answer (not sent)'), audit.proposed, 'markdown');
+    else messageField(body, row.status === 'dry_run' ? t('Proposal (observation mode)') : t('Proposed answer (not sent)'), audit.proposed, 'markdown');
     referencesField(body, audit);
     if (audit.refinement) messageField(body, t('Your context for the assistant'), audit.refinement, true);
-    if (row.status === 'refining') messageField(body, t('Improving'), t('The assistant is rewriting the answer with your context; it will not be sent until you send it.'));
-    if (unsentDraft(row)) body.append(draftActions(row));
+    if (row.status === 'refining') {
+      messageField(body, t('Generating'), audit.proposed?.trim()
+        ? t('The assistant is writing the answer again with your context; it is not sent until you send it.')
+        : t('The assistant is reading the conversation and writing an answer; it is not sent until you send it.'));
+    }
+    if (unsent(row)) body.append(answerActions(row));
     const details = [];
     if (audit.intent) details.push(`${t('Intent')}: ${intentLabels[audit.intent] || audit.intent}`);
     if (audit.history_messages) details.push(t('Context: {n} earlier messages', { n: audit.history_messages }));

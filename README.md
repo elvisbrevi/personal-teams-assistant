@@ -70,6 +70,13 @@ and a pull request named in a status question is read so it can be linked. The
 full list of cited references and Wiki pages read stays in the message history
 (Messages tab and `pta audit show`).
 
+Version 0.7.18 lets you answer what the assistant left unanswered: an informational
+message or a request for you shows **Generate answer** in Messages. The assistant
+writes your reply from the conversation (and the sources you choose, or those of
+the chat); then you can add context and **Regenerate answer**, or **Send answer**
+once. Any held answer can use chosen sources too (`pta answer refine RESOURCE
+--source ID`).
+
 Version 0.7.17 answers «¿qué hice ayer?», «del 5 al 9 de octubre» or "what did I
 do last week?" from the work you approved in Activities: a short day-by-day reply
 with each task, its HU and hours. Activities adds a History view of that record,

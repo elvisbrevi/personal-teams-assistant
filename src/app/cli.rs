@@ -58,8 +58,10 @@ Language models
 Messages and diagnostics
   audit list [--limit N] [--content]   Received messages, their outcome and the step log.
   audit show RESOURCE [--content]      One message; --content includes question and answer.
-  answer refine RESOURCE [--context-stdin]  Rewrites an unsent answer (withheld or observed) with your
-                           context from stdin (up to 4000 characters), in the background; it is not sent.
+  answer refine RESOURCE [--context-stdin] [--source ID]...  Writes the answer to a message that was not
+                           answered (informational, a request for you) or rewrites an unsent one (withheld,
+                           observed), with your context from stdin (up to 4000 characters) and only the
+                           chosen sources (default: those of the conversation), in the background; not sent.
   answer send RESOURCE     Sends an unsent answer once, after your review (never retried).
   logs [--limit N]         Host events.
   chat | test simulate     Real pipeline with a SimulationRequest JSON on stdin; never sends to Teams.
@@ -197,6 +199,14 @@ fn validate_args(args: &[String]) -> Result<()> {
                     "invalid redirect URL"
                 );
             }
+            "--source" => {
+                i += 1;
+                ensure!(
+                    args.get(i)
+                        .is_some_and(|v| !v.is_empty() && !v.starts_with("--")),
+                    "invalid source ID"
+                );
+            }
             _ => {
                 ensure!(!a.starts_with("--"), "unknown flag");
                 positional.push(a);
@@ -291,6 +301,7 @@ fn validate_args(args: &[String]) -> Result<()> {
             p.as_slice().starts_with(&["web", "users", "add"]),
         ),
         ("--limit", ["audit", "logs"].contains(&p[0])),
+        ("--source", p.as_slice().starts_with(&["answer", "refine"])),
     ] {
         ensure!(
             !args.iter().any(|a| a == flag) || allowed,
@@ -401,9 +412,14 @@ async fn execute(mut args: Vec<String>) -> Result<Reply> {
                 } else {
                     String::new()
                 };
+                let sources: Vec<&String> = args
+                    .windows(2)
+                    .filter(|pair| pair[0] == "--source")
+                    .map(|pair| &pair[1])
+                    .collect();
                 call(
                     "answer_refine",
-                    json!({"resource":resource,"context":context}),
+                    json!({"resource":resource,"context":context,"sources":sources}),
                     None,
                     true,
                 )
@@ -1089,6 +1105,15 @@ mod help_tests {
             vec!["activity", "run", "--context-stdin"],
             vec!["activity", "run", "2026-10-13", "--context-stdin"],
             vec!["answer", "refine", "chats/x/messages/y", "--context-stdin"],
+            vec![
+                "answer",
+                "refine",
+                "chats/x/messages/y",
+                "--source",
+                "manuals",
+                "--source",
+                "azure-devops-status",
+            ],
         ] {
             assert!(
                 validate_args(&command.into_iter().map(String::from).collect::<Vec<_>>()).is_ok()
@@ -1098,6 +1123,14 @@ mod help_tests {
             vec!["activity", "history", "--context-stdin"],
             vec!["activity", "run", "--context", "prompt"],
             vec!["answer", "send", "chats/x/messages/y", "--context-stdin"],
+            vec![
+                "answer",
+                "send",
+                "chats/x/messages/y",
+                "--source",
+                "manuals",
+            ],
+            vec!["answer", "refine", "chats/x/messages/y", "--source"],
         ] {
             assert!(
                 validate_args(&command.into_iter().map(String::from).collect::<Vec<_>>()).is_err()

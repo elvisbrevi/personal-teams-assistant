@@ -23,6 +23,10 @@ pub struct GenerationInput<'a> {
     /// The app adds where to register each piece of work and asks to confirm it.
     #[serde(skip)]
     pub proposing: bool,
+    /// The message asks for no answer (informational, or a request for the person) and the
+    /// user asked the app to write one anyway.
+    #[serde(skip)]
+    pub unprompted: bool,
     /// Context and corrections the user gave to improve an answer that was not sent.
     #[serde(rename = "owner_guidance", skip_serializing_if = "str::is_empty")]
     pub guidance: &'a str,
@@ -601,8 +605,17 @@ impl LlmProvider for Model {
             };
             system.push_str(&format!(" This request is an activity review, and these rules override the ones above where they differ. Answer only what was asked: the user's work that has NO linked work item. Be brief and precise, like a teammate's chat reply: no summary of registered work, no list of sources, no caveats about deployments or what is unverified, no closing summary. Start with one line giving the reviewed period exactly as the evidence states it and how many pieces of work have no linked work item. Then one bullet per piece of work, merging what belongs to the same change (a pull request with its commits, the pipeline run and release of that change): the date, what was done in a few words, and its identifiers as the evidence writes them (PR #12, commit 1a2b3c4d, run #345, Release-6, the Wiki page title) so the app links them.{suggestions} Leave out activity the evidence shows as registered. Use a Teams message only when it states concrete work the user did that no Azure DevOps activity or Wiki edit already covers; ignore greetings, questions and coordination. Verified authorship proves the user's own action: state it in the first person without asking for confirmation. If nothing lacks a work item, say so in one sentence. If coverage is partial, add one short line naming the source that was cut or unread.{closing} Do not ask which system or period to use, and do not invent activity.", suggestions = suggestions, closing = closing));
         }
+        if input.unprompted {
+            system.push_str(" The current request asks no question: it informs, instructs or asks the user for something, and the user chose to reply to it. Write the user's reply to the colleague: acknowledge it briefly and naturally, and answer only what it implies (a confirmation, the requested detail, a short answer to what it proposes). The evidence and owner_guidance may add a fact the reply needs; do not explain the message back, describe what you do not know or found, or commit the user to anything beyond what the message asks or owner_guidance states. These rules override the ones above about answering a question.");
+        }
         if !input.guidance.is_empty() || !input.previous_draft.is_empty() {
-            system.push_str(" The user you write as reviewed an answer that was not sent (previous_draft) and wants it improved. owner_guidance, when present, is the user's own context and corrections: treat its statements about their work as true, follow its instructions on content and tone, and let it override previous_draft and the evidence where they differ; identifiers and names it gives may be used, but never invent others or any URL. Keep what was right in previous_draft and fix what owner_guidance asks; write the complete new answer, never a note about the changes.");
+            if !input.previous_draft.is_empty() {
+                system.push_str(" The user you write as reviewed an answer that was not sent (previous_draft) and wants it improved.");
+            }
+            system.push_str(" owner_guidance, when present, is the user's own context and corrections: treat its statements about their work as true, follow its instructions on content and tone, and let it override previous_draft and the evidence where they differ; identifiers and names it gives may be used, but never invent others or any URL.");
+            if !input.previous_draft.is_empty() {
+                system.push_str(" Keep what was right in previous_draft and fix what owner_guidance asks; write the complete new answer, never a note about the changes.");
+            }
         }
         let system = format!(
             "{system} Return only a JSON object with answer (string) and detailed (boolean). The app links the verified references after you write: do not copy source IDs or return used_sources. Do not invent URLs. If a concrete pipeline, stage or work item name appears in the Wiki or in Teams but has no authorized reference, OMIT its name/ID and explain only the generic steps or concepts; mention the gap in plain words only if it affects the request. A Wiki ID alone does not authorize naming a concrete stage or pipeline. The app turns the names of verified entities and pages in your text into their links: write no links, citations or sources section yourself. A work item, pull request, pipeline run or release you do mention goes with its identifier (#123, PR !45, build #678) and a stage with the word stage («stage QA»); when the answer relies on a Wiki page, name the page by its title in the sentence (e.g. «según *Guía de despliegue*») so it can be linked. Distinguish pipeline_run/stage_run from pipeline_definition/stage_configuration. The Teams context keeps author/message/date/mine: name the relevant interlocutor and keep who said what; nearby messages prove an interaction only if their content shows it, chat membership is not enough. Without evidence, answer in one or two natural sentences (what you can say, or one concrete question), without inventing references or describing what was read or missing. Absence of evidence does not prove nonexistence; do not claim a source was searched unless the evidence says it was consulted. Decide whether the request needs a detailed explanation: detailed=true for a justified extensive explanation, detailed=false for a normal concise answer. JSON example: {{\"answer\":\"Short answer.\",\"detailed\":false}}"
@@ -769,6 +782,7 @@ impl LlmProvider for Chain {
                 history: input.history,
                 review: input.review,
                 proposing: input.proposing,
+                unprompted: input.unprompted,
                 guidance: input.guidance,
                 previous_draft: input.previous_draft,
             })
@@ -966,6 +980,7 @@ mod tests {
             history: "",
             review: false,
             proposing: false,
+            unprompted: false,
             guidance: "",
             previous_draft: "",
         }
@@ -1079,6 +1094,18 @@ mod tests {
         let prompt = system.lock().unwrap().clone();
         assert!(prompt.contains("owner_guidance, when present, is the user's own context"));
         assert!(prompt.contains("never invent others or any URL"));
+        assert!(!prompt.contains("The current request asks no question"));
+        // A message left unanswered is replied to, not answered as a question.
+        spanish
+            .generate_response(GenerationInput {
+                unprompted: true,
+                ..input()
+            })
+            .await
+            .unwrap();
+        let prompt = system.lock().unwrap().clone();
+        assert!(prompt.contains("The current request asks no question"));
+        assert!(!prompt.contains("previous_draft"));
 
         let english = Model::new(Capture(system.clone()), "Español natural").language(Language::En);
         english
