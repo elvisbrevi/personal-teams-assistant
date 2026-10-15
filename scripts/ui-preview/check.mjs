@@ -26,6 +26,8 @@ async function open(options = {}, scenario = 'full') {
 
 // ---------------------------------------------------------------- axe scans (both versions)
 const axeSummary = {};
+const scan = page => page.evaluate(async () => (await axe.run(document, { runOnly: { type: 'tag', values: ['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa', 'wcag22aa'] } })).violations
+  .map(v => ({ id: v.id, impact: v.impact, nodes: v.nodes.length, sample: v.nodes[0]?.target?.join(' ') })));
 for (const [label, ctx] of [['desktop-light', {}], ['desktop-dark', { colorScheme: 'dark' }], ['phone', { viewport: { width: 393, height: 852 }, isMobile: true, hasTouch: true }]]) {
   const { context, page } = await open({ axe: true, context: ctx });
   await page.evaluate(axeSource);
@@ -37,10 +39,17 @@ for (const [label, ctx] of [['desktop-light', {}], ['desktop-dark', { colorSchem
     const groups = list ? await page.$$eval(`${list} [role=tab]`, tabs => tabs.map(t => t.dataset.group)).catch(() => []) : [];
     for (const group of groups.length ? groups : [null]) {
       if (group) { await page.evaluate(([l, g]) => selectTab($(l), g), [list, group]); await page.waitForTimeout(250); }
-      const report = await page.evaluate(async () => (await axe.run(document, { runOnly: { type: 'tag', values: ['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa', 'wcag22aa'] } })).violations
-        .map(v => ({ id: v.id, impact: v.impact, nodes: v.nodes.length, sample: v.nodes[0]?.target?.join(' ') })));
       const key = `${label}/${tab}${group ? ':' + group : ''}`;
-      axeSummary[key] = report;
+      axeSummary[key] = await scan(page);
+    }
+    if (tab === 'messages') {
+      // The answer blocks of an unanswered message and of a draft, with their source choosers open.
+      await page.evaluate(() => {
+        for (const d of document.querySelectorAll('#messages-list details.message')) if (/\/(1004|1008)$/.test(d.dataset.resource)) d.open = true;
+        for (const f of document.querySelectorAll('#messages-list .answer-sources')) f.open = true;
+      });
+      await page.waitForTimeout(250);
+      axeSummary[`${label}/messages:answer`] = await scan(page);
     }
   }
   await context.close();
@@ -110,17 +119,47 @@ if (flag === '--axe-only') { await browser.close(); process.exit(0); }
   await page.click('nav [data-tab="overview"]');
   await page.click('#activity-list .activity-row:nth-child(4)');
   await page.waitForTimeout(500);
-  const openRes = await page.evaluate(() => [...document.querySelectorAll('#messages-list details[open]')].map(d => d.dataset.resource));
+  const openRes = await page.evaluate(() => [...document.querySelectorAll('#messages-list details.message[open]')].map(d => d.dataset.resource));
   check('recent activity row opens that message expanded', openRes.includes('chats/19:jkl@thread.v2/messages/1004'), openRes.join(','));
   await page.fill('#messages-search', 'refund');
   await page.waitForTimeout(200);
-  const shown = await page.$$eval('#messages-list details', d => d.length);
+  const shown = await page.$$eval('#messages-list details.message', d => d.length);
   check('search filters messages', shown === 1, `${shown} shown`);
   await page.fill('#messages-search', 'revisión inexistente');
   check('empty search offers to clear it', await page.isVisible('#messages-list .empty button'));
   await page.click('#messages-list .empty button');
   const counts = await page.$$eval('#messages-filters .count', c => c.map(x => x.textContent));
-  check('filters show counts', counts[0] === '6', counts.join('|'));
+  check('filters show counts', counts[0] === '7', counts.join('|'));
+  // An unanswered message: generate an answer from chosen sources, then regenerate or send it.
+  const informational = '#messages-list details[data-resource="chats/19:stu@thread.v2/messages/1008"]';
+  await page.click(`${informational} summary`);
+  check('unanswered message offers to generate an answer, without context or send yet',
+    await page.isVisible(`${informational} .draft-actions button:text("Generar respuesta")`)
+    && !(await page.isVisible(`${informational} .answer-context`)) && !(await page.isVisible(`${informational} button:text("Enviar respuesta")`)));
+  check('source chooser starts automatic and closed', (await page.textContent(`${informational} .answer-sources summary`)).includes('Automáticas')
+    && !(await page.$eval(`${informational} .answer-sources`, d => d.open)));
+  await page.click(`${informational} .answer-sources summary`);
+  check('this chat\'s authorized sources are marked', /autorizada para este chat/.test(await page.textContent(`${informational} .answer-sources`)));
+  await page.click(`${informational} .answer-sources input[value="wiki"]`);
+  check('choosing a source updates the summary', (await page.textContent(`${informational} .answer-sources summary`)).includes('1 elegida'));
+  await page.click(`${informational} .draft-actions button:text("Generar respuesta")`);
+  await page.waitForTimeout(300);
+  const refined = await page.evaluate(() => window.__ptaLastRefine);
+  check('generate sends the chosen sources and no context', JSON.stringify(refined?.sources) === '["wiki"]' && refined?.context === '', JSON.stringify(refined));
+  await page.waitForTimeout(3600);
+  check('once written: context, regenerate and send',
+    await page.isVisible(`${informational} .answer-context`)
+    && await page.isVisible(`${informational} button:text("Volver a generar respuesta")`)
+    && await page.isVisible(`${informational} button:text("Enviar respuesta")`));
+  check('the written answer is shown', /Development Bug/.test(await page.textContent(informational)));
+  check('the last chosen source stays chosen', await page.$eval(`${informational} .answer-sources input[value="wiki"]`, b => b.checked));
+  await page.screenshot({ path: `${out}/desktop-messages-answer.png`, fullPage: true });
+  const send = page.locator(`${informational} button:text("Enviar respuesta")`);
+  await send.click();
+  check('sending asks for a second tap', await page.isVisible(`${informational} button:text("Toca de nuevo para enviar")`));
+  await page.click(`${informational} button:text("Toca de nuevo para enviar")`);
+  await page.waitForTimeout(400);
+  check('a sent answer offers nothing more', !(await page.isVisible(`${informational} .draft-actions`)));
   // Knowledge fold survives a re-render
   await page.click('nav [data-tab="knowledge"]');
   await page.click('#resources .resource:nth-child(3) .resource-edit summary');
@@ -158,6 +197,17 @@ if (flag === '--axe-only') { await browser.close(); process.exit(0); }
   const days = await page.$$eval('#activity-log .log-day h3', h => h.map(x => x.textContent));
   check('phone: History lists the registered work by day, newest first', days.length === 4, days.join(' | '));
   check('phone: History counts the approved tasks', /5 tareas/.test(await page.textContent('#activity-log-total')), await page.textContent('#activity-log-total'));
+  await page.click('nav [data-tab="messages"]');
+  await page.waitForTimeout(400);
+  await page.tap('#messages-list details[data-resource$="/1008"] summary');
+  await page.tap('#messages-list details[data-resource$="/1008"] .answer-sources summary');
+  await page.waitForTimeout(200);
+  const generateBox = await page.locator('#messages-list details[data-resource$="/1008"] .draft-actions button').boundingBox();
+  const checkBox = await page.locator('#messages-list details[data-resource$="/1008"] .answer-sources label').first().boundingBox();
+  check('phone: generate answer and its source choices are 44px targets', generateBox?.height >= 44 && checkBox?.height >= 44, JSON.stringify([generateBox, checkBox]));
+  check('phone: an open answer block does not scroll sideways', !(await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth)));
+  await page.screenshot({ path: `${out}/phone-messages-answer.png`, fullPage: true });
+  await page.click('nav [data-tab="registration"]');
   await page.tap('#activity-tab-review');
   check('phone: Review comes back', await page.isVisible('#activity-day-panel') && !(await page.isVisible('#activity-view-log')));
   for (const g of ['general', 'teams', 'models', 'activity', 'credentials', 'advanced']) {

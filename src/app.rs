@@ -162,7 +162,8 @@ fn fail<E: Into<anyhow::Error>>(error: E) -> String {
     if let Some(refusal) = error.downcast_ref::<crate::pipeline::DraftRefusal>() {
         return match refusal {
             crate::pipeline::DraftRefusal::GuidanceTooLong
-            | crate::pipeline::DraftRefusal::SensitiveGuidance => {
+            | crate::pipeline::DraftRefusal::SensitiveGuidance
+            | crate::pipeline::DraftRefusal::UnknownSource => {
                 format!("[invalid_input] {refusal}")
             }
             _ => format!("[conflict] {refusal}"),
@@ -190,7 +191,7 @@ async fn running_pipeline(
         .as_ref()
         .filter(|r| !r.task.is_finished())
         .map(|r| r.pipeline.clone())
-        .ok_or_else(|| "[not_ready] Start the assistant to improve or send an answer.".to_owned())
+        .ok_or_else(|| "[not_ready] Start the assistant to write or send an answer.".to_owned())
 }
 
 /// A job key from the GUI or CLI: its canonical form is checked again when Teams is read.
@@ -208,8 +209,10 @@ fn answer_resource(args: &serde_json::Value) -> std::result::Result<String, Stri
     }
 }
 
-/// Improve an unsent answer with the user's context. Returns at once; the answer is written
-/// in the background and the job shows `refining` until it ends.
+/// Write the answer to a message that was not sent one (a new one for a message left
+/// unanswered, or the unsent one again) with the user's context and, optionally, the sources
+/// they chose. Returns at once; the answer is written in the background and the job shows
+/// `refining` until it ends.
 async fn refine_answer(
     state: &DesktopState,
     args: &serde_json::Value,
@@ -220,9 +223,18 @@ async fn refine_answer(
         Some(serde_json::Value::String(context)) => context.as_str(),
         _ => return Err("[invalid_input] Context must be text.".into()),
     };
+    let sources: Vec<String> = match args.get("sources") {
+        None | Some(serde_json::Value::Null) => Vec::new(),
+        Some(serde_json::Value::Array(ids)) if ids.len() <= 250 => ids
+            .iter()
+            .map(|id| id.as_str().map(str::to_owned))
+            .collect::<Option<_>>()
+            .ok_or("[invalid_input] Sources must be a list of source IDs.")?,
+        _ => return Err("[invalid_input] Sources must be a list of source IDs.".into()),
+    };
     let pipeline = running_pipeline(state).await?;
     pipeline
-        .begin_refinement(&resource, context)
+        .begin_refinement(&resource, context, &sources)
         .map_err(fail)?;
     tokio::spawn(async move {
         if pipeline.refine(&resource).await.is_err() {

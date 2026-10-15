@@ -3681,17 +3681,17 @@ async fn an_unsent_answer_is_improved_with_context_and_sent_once_by_hand() {
 
     // Context with personal data is refused before anything changes.
     let refusal = pipeline
-        .begin_refinement(resource, "escríbele a luis@example.com")
+        .begin_refinement(resource, "escríbele a luis@example.com", &[])
         .unwrap_err();
     assert!(matches!(
         refusal.downcast_ref::<DraftRefusal>(),
         Some(DraftRefusal::SensitiveGuidance)
     ));
     let context = "Ya está en validación con Luis Felipe; el paso a producción es el 20/10.";
-    pipeline.begin_refinement(resource, context).unwrap();
+    pipeline.begin_refinement(resource, context, &[]).unwrap();
     assert_eq!(store.status(resource).unwrap().as_deref(), Some("refining"));
     // A second request cannot start another improvement, nor send the old answer meanwhile.
-    assert!(pipeline.begin_refinement(resource, context).is_err());
+    assert!(pipeline.begin_refinement(resource, context, &[]).is_err());
     assert!(pipeline.send_draft(resource).await.is_err());
     pipeline.refine(resource).await.unwrap();
     let audit = store.audit(resource).unwrap().unwrap();
@@ -3724,7 +3724,11 @@ async fn an_unsent_answer_is_improved_with_context_and_sent_once_by_hand() {
             .downcast_ref::<DraftRefusal>(),
         Some(DraftRefusal::NotDraftable)
     ));
-    assert!(pipeline.begin_refinement(resource, "otra vez").is_err());
+    assert!(
+        pipeline
+            .begin_refinement(resource, "otra vez", &[])
+            .is_err()
+    );
     assert_eq!(
         teams.sent.lock().unwrap().as_slice(),
         ["Ya está en validación y la tiene Luis Felipe; el paso a producción es el 20/10."]
@@ -3755,7 +3759,7 @@ async fn a_failed_improvement_keeps_the_earlier_proposal_and_a_restart_never_req
     let resource = "chats/chat1/messages/123";
     store.enqueue(resource).unwrap();
     pipeline.process(resource).await.unwrap();
-    pipeline.begin_refinement(resource, "").unwrap();
+    pipeline.begin_refinement(resource, "", &[]).unwrap();
     assert!(pipeline.refine(resource).await.is_err());
     let audit = store.audit(resource).unwrap().unwrap();
     assert_eq!(audit.status, "ignored");
@@ -3767,7 +3771,9 @@ async fn a_failed_improvement_keeps_the_earlier_proposal_and_a_restart_never_req
     assert!(teams.sent.lock().unwrap().is_empty());
 
     // Interrupted while improving: reopening the database never queues it as a new message.
-    pipeline.begin_refinement(resource, "contexto").unwrap();
+    pipeline
+        .begin_refinement(resource, "contexto", &[])
+        .unwrap();
     drop(pipeline);
     drop(store);
     let reopened = support::store(&dir);
@@ -3782,4 +3788,255 @@ async fn a_failed_improvement_keeps_the_earlier_proposal_and_a_restart_never_req
         Some("No tengo a mano el avance de esa HU.")
     );
     assert!(reopened.next_job().unwrap().is_none());
+}
+
+/// Classifies every message as informational and records what it is asked to write.
+struct ReplyLlm {
+    seen: std::sync::Mutex<Vec<ReplySeen>>,
+}
+#[derive(Clone, Debug)]
+struct ReplySeen {
+    evidence: String,
+    unprompted: bool,
+    guidance: String,
+    previous_draft: String,
+}
+#[async_trait]
+impl LlmProvider for ReplyLlm {
+    fn name(&self) -> &str {
+        "reply"
+    }
+    async fn classify_intent(&self, _: &str, _: &str) -> Result<IntentDecision> {
+        Ok(IntentDecision {
+            intent: Intent::Statement,
+            confidence: 0.9,
+        })
+    }
+    async fn generate(&self, _: GenerationInput<'_>) -> Result<String> {
+        unreachable!()
+    }
+    async fn generate_response(
+        &self,
+        input: GenerationInput<'_>,
+    ) -> Result<personal_teams_assistant::llm::GeneratedAnswer> {
+        self.seen.lock().unwrap().push(ReplySeen {
+            evidence: input.evidence.into(),
+            unprompted: input.unprompted,
+            guidance: input.guidance.into(),
+            previous_draft: input.previous_draft.into(),
+        });
+        Ok(personal_teams_assistant::llm::GeneratedAnswer {
+            used_sources: Vec::new(),
+            answer: if input.guidance.is_empty() {
+                "Perfecto, lo dejo como Bug Desarrollo y lo vinculo al incidente."
+            } else {
+                "Listo, ya quedó como Bug Desarrollo vinculado al incidente."
+            }
+            .into(),
+            detailed: false,
+            provider: None,
+            fallbacks: Vec::new(),
+        })
+    }
+}
+/// The authorized `hours` source plus `manual`, enabled for external processing but
+/// authorized for no conversation, and `draft`, disabled.
+fn knowledge_with_unassigned(dir: &tempfile::TempDir) -> KnowledgeMap {
+    let mut map = knowledge(dir);
+    std::fs::write(
+        dir.path().join("manual.md"),
+        "Un hotfix de producción se registra como Bug Desarrollo.",
+    )
+    .unwrap();
+    for (id, enabled) in [("manual", true), ("draft", false)] {
+        map.resources.push(Resource {
+            id: id.into(),
+            description: "Manual de hotfix".into(),
+            topics: vec!["hotfix".into()],
+            enabled,
+            external_processing: true,
+            allowed_conversations: vec![],
+            allowed_senders: vec![],
+            access: Access::File {
+                repository: "private".into(),
+                path: "manual.md".into(),
+            },
+        });
+    }
+    map
+}
+#[tokio::test]
+async fn an_unanswered_message_gets_an_answer_from_chosen_sources_and_is_sent_once_by_hand() {
+    use personal_teams_assistant::pipeline::DraftRefusal;
+    let dir = tempfile::tempdir().unwrap();
+    let store = support::store(&dir);
+    let teams = Arc::new(HistoryTeams {
+        conversation: "chats/chat1".into(),
+        sender: "sender".into(),
+        text: "Para un hotfix de producción va como Bug Desarrollo: describe el síntoma, la causa y el cambio, y vincúlalo al incidente.",
+        sent: Default::default(),
+    });
+    let llm = Arc::new(ReplyLlm {
+        seen: Default::default(),
+    });
+    let pipeline = Pipeline {
+        config: Arc::new(support::config()),
+        store: store.clone(),
+        adapter: teams.clone(),
+        knowledge: knowledge_with_unassigned(&dir),
+        llm: llm.clone(),
+        tools: Arc::new(NoTools),
+        redactor: redactor(),
+    };
+    let resource = "chats/chat1/messages/123";
+    store.enqueue(resource).unwrap();
+    pipeline.process(resource).await.unwrap();
+    let audit = store.audit(resource).unwrap().unwrap();
+    assert_eq!(audit.reason, "informational_message");
+    assert_eq!(audit.intent.as_deref(), Some("statement"));
+    assert!(audit.proposed.is_none());
+    // Nothing to send yet, and only sources that may be processed externally can be chosen.
+    assert!(matches!(
+        pipeline
+            .send_draft(resource)
+            .await
+            .unwrap_err()
+            .downcast_ref::<DraftRefusal>(),
+        Some(DraftRefusal::NotDraftable)
+    ));
+    for chosen in ["missing", "draft"] {
+        assert!(matches!(
+            pipeline
+                .begin_refinement(resource, "", &[chosen.into()])
+                .unwrap_err()
+                .downcast_ref::<DraftRefusal>(),
+            Some(DraftRefusal::UnknownSource)
+        ));
+    }
+    assert_eq!(store.status(resource).unwrap().as_deref(), Some("ignored"));
+
+    // Generate: only the chosen source is read, outside the conversation's audiences.
+    pipeline
+        .begin_refinement(resource, "", &["manual".into(), "manual".into()])
+        .unwrap();
+    assert_eq!(store.status(resource).unwrap().as_deref(), Some("refining"));
+    pipeline.refine(resource).await.unwrap();
+    let audit = store.audit(resource).unwrap().unwrap();
+    assert_eq!(audit.status, "ignored");
+    assert_eq!(audit.reason, "draft_ready");
+    assert_eq!(audit.intent.as_deref(), Some("statement"));
+    assert_eq!(audit.chosen_sources, ["manual"]);
+    assert_eq!(audit.source.as_deref(), Some("manual"));
+    assert_eq!(
+        audit.proposed.as_deref(),
+        Some("Perfecto, lo dejo como Bug Desarrollo y lo vinculo al incidente.")
+    );
+    {
+        let seen = llm.seen.lock().unwrap();
+        assert_eq!(seen.len(), 1);
+        assert!(seen[0].unprompted);
+        assert!(seen[0].previous_draft.is_empty());
+        assert!(seen[0].evidence.contains("Bug Desarrollo"));
+        assert!(!seen[0].evidence.contains("soporte"));
+    }
+    assert!(teams.sent.lock().unwrap().is_empty());
+
+    // Regenerate with context and the conversation's own sources: still a reply, not a question.
+    let context = "Ya lo registré y quedó vinculado al incidente.";
+    pipeline.begin_refinement(resource, context, &[]).unwrap();
+    pipeline.refine(resource).await.unwrap();
+    let audit = store.audit(resource).unwrap().unwrap();
+    assert_eq!(audit.reason, "draft_ready");
+    assert!(audit.chosen_sources.is_empty());
+    assert_eq!(audit.source.as_deref(), Some("hours"));
+    {
+        let seen = llm.seen.lock().unwrap();
+        assert!(seen[1].unprompted);
+        assert_eq!(seen[1].guidance, context);
+        assert_eq!(
+            seen[1].previous_draft,
+            "Perfecto, lo dejo como Bug Desarrollo y lo vinculo al incidente."
+        );
+        assert!(seen[1].evidence.contains("soporte"));
+    }
+
+    assert_eq!(pipeline.send_draft(resource).await.unwrap(), "sent");
+    assert_eq!(
+        teams.sent.lock().unwrap().as_slice(),
+        ["Listo, ya quedó como Bug Desarrollo vinculado al incidente."]
+    );
+    assert!(pipeline.begin_refinement(resource, "", &[]).is_err());
+}
+#[tokio::test]
+async fn an_answer_that_cannot_be_written_says_why_and_a_sensitive_message_gets_none() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = support::store(&dir);
+    // A request for the person in a chat no source is authorized for.
+    let teams = Arc::new(HistoryTeams {
+        conversation: "chats/chat2".into(),
+        sender: "sender".into(),
+        text: "¿te puedo llamar en 5 minutos?",
+        sent: Default::default(),
+    });
+    let llm = Arc::new(ReplyLlm {
+        seen: Default::default(),
+    });
+    let pipeline = Pipeline {
+        config: Arc::new(support::config()),
+        store: store.clone(),
+        adapter: teams.clone(),
+        knowledge: knowledge_with_unassigned(&dir),
+        llm: llm.clone(),
+        tools: Arc::new(NoTools),
+        redactor: redactor(),
+    };
+    let resource = "chats/chat2/messages/1";
+    store.enqueue(resource).unwrap();
+    pipeline.process(resource).await.unwrap();
+    let audit = store.audit(resource).unwrap().unwrap();
+    assert_eq!(audit.reason, "personal_request");
+    assert_eq!(audit.intent.as_deref(), Some("personal"));
+
+    pipeline.begin_refinement(resource, "", &[]).unwrap();
+    pipeline.refine(resource).await.unwrap();
+    let audit = store.audit(resource).unwrap().unwrap();
+    assert_eq!(audit.status, "ignored");
+    assert_eq!(audit.reason, "no_authorized_resource");
+    assert!(audit.proposed.is_none());
+    assert!(llm.seen.lock().unwrap().is_empty());
+
+    // With a source the user chose, the reply is written.
+    pipeline
+        .begin_refinement(resource, "", &["manual".into()])
+        .unwrap();
+    pipeline.refine(resource).await.unwrap();
+    let audit = store.audit(resource).unwrap().unwrap();
+    assert_eq!(audit.reason, "draft_ready");
+    assert_eq!(audit.intent.as_deref(), Some("personal"));
+    assert!(llm.seen.lock().unwrap()[0].unprompted);
+    assert!(teams.sent.lock().unwrap().is_empty());
+
+    // A message with sensitive data never reaches a model, not even at the user's request.
+    let sensitive = Pipeline {
+        adapter: Arc::new(HistoryTeams {
+            conversation: "chats/chat1".into(),
+            sender: "sender".into(),
+            text: "mi clave es sk-abcdefghijklmnopqrstuvwxyz123456",
+            sent: Default::default(),
+        }),
+        config: pipeline.config.clone(),
+        store: store.clone(),
+        knowledge: knowledge_with_unassigned(&dir),
+        llm: llm.clone(),
+        tools: Arc::new(NoTools),
+        redactor: redactor(),
+    };
+    let resource = "chats/chat1/messages/2";
+    store.enqueue(resource).unwrap();
+    sensitive.process(resource).await.unwrap();
+    assert_eq!(
+        store.audit(resource).unwrap().unwrap().reason,
+        "sensitive_question"
+    );
+    assert!(sensitive.begin_refinement(resource, "", &[]).is_err());
 }

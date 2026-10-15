@@ -53,10 +53,19 @@ impl Pipeline {
         self.run(resource, local_sources, false).await
     }
 
-    /// Mark an answer that was not sent (withheld by the checks, or observed) as being
-    /// improved with the user's context, so a second request cannot start another. The
-    /// writing itself is [`Self::refine`]; the result is sent only by [`Self::send_draft`].
-    pub fn begin_refinement(&self, resource: &str, guidance: &str) -> Result<()> {
+    /// Mark a message that was not sent an answer as having one written at the user's request,
+    /// so a second request cannot start another: an answer that exists (withheld by the checks,
+    /// observed, or written earlier) is written again with the user's context, and a message
+    /// left unanswered (informational, a request for the person) gets its first one. `sources`
+    /// are the sources the user chose (enabled, with external processing); empty means the
+    /// ones authorized for the conversation. The writing itself is [`Self::refine`]; the
+    /// result is sent only by [`Self::send_draft`].
+    pub fn begin_refinement(
+        &self,
+        resource: &str,
+        guidance: &str,
+        sources: &[String],
+    ) -> Result<()> {
         let guidance = guidance.trim();
         if guidance.chars().count() > GUIDANCE_CHARS
             || guidance
@@ -68,26 +77,60 @@ impl Pipeline {
         if !self.redactor.clean(guidance) {
             return Err(DraftRefusal::SensitiveGuidance.into());
         }
+        let mut chosen: Vec<String> = Vec::new();
+        for id in sources {
+            if !self
+                .knowledge
+                .resources
+                .iter()
+                .any(|r| &r.id == id && r.enabled && r.external_processing)
+            {
+                return Err(DraftRefusal::UnknownSource.into());
+            }
+            if !chosen.contains(id) {
+                chosen.push(id.clone());
+            }
+        }
         let status = self.store.status(resource)?.unwrap_or_default();
         let mut audit = self
             .store
             .audit(resource)?
             .ok_or(DraftRefusal::NotDraftable)?;
-        if resource.starts_with("simulation:") || !unsent_draft(&status, &audit) {
+        if resource.starts_with("simulation:") || !unsent(&status, &audit) {
             return Err(DraftRefusal::NotDraftable.into());
+        }
+        let first = !unsent_draft(&status, &audit);
+        // A message left unanswered is answered as what it was; audits before 0.7.18 kept only
+        // the reason.
+        if first && audit.intent.is_none() {
+            audit.intent = match audit.reason.as_str() {
+                "informational_message" => Some(Intent::Statement.as_str().into()),
+                "personal_request" => Some(Intent::Personal.as_str().into()),
+                _ => None,
+            };
         }
         audit.status = "refining".into();
         audit.reason = "refining".into();
         audit.refinement = Some(guidance.to_owned());
         audit.step(
             "refine",
-            "the user asked to improve the unsent answer with more context",
+            match (first, chosen.len()) {
+                (true, 0) => "the user asked for an answer to the message".to_owned(),
+                (true, n) => {
+                    format!("the user asked for an answer to the message from {n} chosen sources")
+                }
+                (false, 0) => "the user asked to write the unsent answer again".to_owned(),
+                (false, n) => format!(
+                    "the user asked to write the unsent answer again from {n} chosen sources"
+                ),
+            },
         );
+        audit.chosen_sources = chosen;
         self.store.record(resource, &audit)
     }
 
-    /// Write the answer again with the user's context, the previous draft and fresh evidence,
-    /// without sending it. If writing fails the earlier proposal is kept.
+    /// Write the answer with the user's context, the previous draft (if any) and fresh
+    /// evidence, without sending it. If writing fails the earlier proposal is kept.
     pub async fn refine(&self, resource: &str) -> Result<()> {
         let earlier = self
             .store
@@ -100,13 +143,34 @@ impl Pipeline {
         }
         let result = self.run(resource, None, true).await;
         if result.is_err() || self.store.status(resource)?.as_deref() == Some("refining") {
+            // A run that stopped before writing (no authorized source, sensitive data, the
+            // message deleted) recorded why; any other failure keeps the generic reason.
+            let stopped = match (&result, self.store.audit(resource)?) {
+                (Ok(()), Some(ended)) if ended.reason == "ineligible_message" => {
+                    Some("message_changed".to_owned())
+                }
+                (Ok(()), Some(ended)) if ended.reason != "refining" => Some(ended.reason),
+                _ => None,
+            };
             let mut restored = earlier;
             restored.status = "ignored".into();
-            restored.reason = "refinement_failed".into();
             restored.step(
                 "refine",
-                "the improved answer could not be written; the earlier proposal is kept",
+                match (
+                    &stopped,
+                    restored
+                        .proposed
+                        .as_deref()
+                        .is_some_and(|p| !p.trim().is_empty()),
+                ) {
+                    (Some(_), _) => "the answer was not written; the outcome says why",
+                    (None, true) => {
+                        "the answer could not be written again; the earlier proposal is kept"
+                    }
+                    (None, false) => "the answer could not be written",
+                },
             );
+            restored.reason = stopped.unwrap_or_else(|| "refinement_failed".into());
             self.store.record(resource, &restored)?;
         }
         result
@@ -191,15 +255,19 @@ impl Pipeline {
             .as_ref()
             .map(|e| e.links.clone())
             .unwrap_or_default();
-        // Improving an unsent answer keeps its history, its proposal until a new one is
-        // written, and the intent it was answered with.
-        let draft = earlier.as_ref().filter(|_| drafting).map(|e| {
-            (
-                e.refinement.clone().unwrap_or_default(),
-                e.proposed.clone().unwrap_or_default(),
-                e.intent.clone(),
-                e.trace.clone(),
-            )
+        // An answer written at the user's request keeps the message's history, its proposal
+        // until a new one is written, the intent it was answered with and the chosen sources.
+        let draft = earlier.as_ref().filter(|_| drafting).map(|e| Draft {
+            guidance: e.refinement.clone().unwrap_or_default(),
+            previous: e.proposed.clone().unwrap_or_default(),
+            intent: e.intent.clone(),
+            trace: e.trace.clone(),
+            sources: e.chosen_sources.clone(),
+        });
+        // A message the assistant left unanswered, answered because the user asked for it.
+        let unprompted = draft.as_ref().is_some_and(|d| {
+            [Intent::Statement.as_str(), Intent::Personal.as_str()]
+                .contains(&d.intent.as_deref().unwrap_or_default())
         });
         let withheld_notice = earlier.and_then(|e| e.withheld_notice);
         let mut holding = Holding {
@@ -233,10 +301,11 @@ impl Pipeline {
             received_at: Some(message.created_at_millis),
             ..Default::default()
         };
-        if let Some((guidance, previous, _, trace)) = &draft {
-            audit.refinement = Some(guidance.clone());
-            audit.proposed = Some(previous.clone()).filter(|p| !p.is_empty());
-            audit.trace = trace.clone();
+        if let Some(draft) = &draft {
+            audit.refinement = Some(draft.guidance.clone());
+            audit.proposed = Some(draft.previous.clone()).filter(|p| !p.is_empty());
+            audit.trace = draft.trace.clone();
+            audit.chosen_sources = draft.sources.clone();
             audit.status = "refining".into();
             audit.reason = "refining".into();
         }
@@ -266,7 +335,14 @@ impl Pipeline {
             audit.step("blocked", "the question contains sensitive data");
             return self.store.record(resource, &audit);
         }
-        let available = if let Some(ids) = local_sources {
+        // The user may choose the sources of an answer they review and send themselves, like
+        // a simulation: enabled ones with external processing, beyond the conversation's
+        // audiences. Teams messages never widen what they read.
+        let chosen = draft
+            .as_ref()
+            .map(|d| d.sources.as_slice())
+            .filter(|ids| !ids.is_empty());
+        let available = if let Some(ids) = local_sources.or(chosen) {
             self.knowledge
                 .resources
                 .iter()
@@ -311,10 +387,17 @@ impl Pipeline {
             .collect();
         let mut review = false;
         let mut thanks = false;
-        let is_greeting = if let Some((_, _, intent, _)) = &draft {
+        let is_greeting = if let Some(draft) = &draft {
             // The user wants this message answered: no intent decision can drop it now.
-            review = intent.as_deref() == Some(Intent::ActivityReview.as_str());
-            audit.step("intent", "kept from the unsent answer");
+            review = draft.intent.as_deref() == Some(Intent::ActivityReview.as_str());
+            audit.step(
+                "intent",
+                if unprompted {
+                    "left unanswered; answered at the user's request"
+                } else {
+                    "kept from the unsent answer"
+                },
+            );
             false
         } else if link_reply.is_some() {
             false
@@ -390,6 +473,8 @@ impl Pipeline {
                 if decision.intent == Intent::Personal {
                     leave_to_person(&mut audit);
                 } else {
+                    // What the user may still answer from the app, as an informational message.
+                    audit.intent = Some(Intent::Statement.as_str().into());
                     audit.reason = "informational_message".into();
                     audit.step("no answer", "informational message: it asks for no answer");
                 }
@@ -400,20 +485,24 @@ impl Pipeline {
         };
         // Without a source that can read activity, a review is answered as a question.
         review &= !review_sources.is_empty();
-        audit.intent = Some(
-            if link_reply.is_some() {
-                "link"
-            } else if is_greeting {
-                Intent::Greeting.as_str()
-            } else if thanks {
-                "shared_link"
-            } else if review {
-                Intent::ActivityReview.as_str()
-            } else {
-                Intent::Question.as_str()
-            }
-            .into(),
-        );
+        audit.intent = if unprompted {
+            draft.as_ref().and_then(|d| d.intent.clone())
+        } else {
+            Some(
+                if link_reply.is_some() {
+                    "link"
+                } else if is_greeting {
+                    Intent::Greeting.as_str()
+                } else if thanks {
+                    "shared_link"
+                } else if review {
+                    Intent::ActivityReview.as_str()
+                } else {
+                    Intent::Question.as_str()
+                }
+                .into(),
+            )
+        };
         let mut context_question = None;
         let mut context_answer = None;
         let mut link_offer: Option<LinkOffer> = None;
@@ -607,7 +696,10 @@ impl Pipeline {
             // What the user did on a named day or period is answered from what the Activities
             // section recorded for those days, when it recorded anything there: the user
             // approved each task in it. Status rounds and named work items keep their tools.
+            // Sources the user chose are all read, as they are: no routing, recap or status extras.
+            let explicit = chosen.is_some();
             let recap = if review
+                || explicit
                 || wiki_requested
                 || status_words(&tool_question)
                 || !crate::ado::requested_work_items(&tool_question).is_empty()
@@ -633,12 +725,13 @@ impl Pipeline {
             };
             let status_route = recap.is_none()
                 && !review
+                && !explicit
                 && !wiki_requested
                 && status_question(&tool_question)
                 && tool_candidates.contains_key("azure-devops-status");
-            let selected_tool = if review || recap.is_some() {
+            let selected_tool = if review || recap.is_some() || explicit {
                 // An activity review reads every source that can review activity, below; a
-                // recap reads only the recorded days.
+                // recap reads only the recorded days; chosen tools are all read, below.
                 None
             } else if wiki_requested && wiki_ids.len() == 1 {
                 Some(wiki_ids[0].clone())
@@ -693,6 +786,13 @@ impl Pipeline {
             if review {
                 // The one case that combines tools: activity, Wiki edits and own messages.
                 sources = review_sources.clone();
+            } else if explicit {
+                sources.extend(
+                    available
+                        .iter()
+                        .copied()
+                        .filter(|r| matches!(r.access, Access::Tool { .. })),
+                );
             }
             let status_wikis: Vec<&crate::knowledge::Resource> = if status_route {
                 available
@@ -913,7 +1013,9 @@ impl Pipeline {
                     registry.references.len()
                 ),
             );
-            if evidence.trim().is_empty() {
+            if evidence.trim().is_empty() && unprompted {
+                evidence = "No facts were retrieved from the sources; reply from the message and the conversation.".into();
+            } else if evidence.trim().is_empty() {
                 evidence = "No verifiable facts were retrieved. Explain the limitation and ask to specify the source or the project; do not make up an answer.".chars().take(self.config.policy.max_context_chars).collect();
             }
             audit.status = "ignored".into();
@@ -947,8 +1049,9 @@ impl Pipeline {
                         history: &history,
                         review,
                         proposing,
-                        guidance: draft.as_ref().map_or("", |d| d.0.as_str()),
-                        previous_draft: draft.as_ref().map_or("", |d| d.1.as_str()),
+                        unprompted,
+                        guidance: draft.as_ref().map_or("", |d| d.guidance.as_str()),
+                        previous_draft: draft.as_ref().map_or("", |d| d.previous.as_str()),
                     }),
                 )
                 .await??;
@@ -2041,10 +2144,11 @@ impl Pipeline {
 /// Characters of context the user may give to improve an unsent answer.
 pub const GUIDANCE_CHARS: usize = 4000;
 
-/// Why an unsent answer cannot be improved or sent. Fixed texts, safe to show as they are.
+/// Why an answer cannot be written or sent from the app. Fixed texts, safe to show as they are.
 #[derive(Debug)]
 pub enum DraftRefusal {
-    /// It was sent, is being sent or improved, or has no proposal.
+    /// It was sent, is being sent or written, was not addressed to the assistant, or has no
+    /// answer to send.
     NotDraftable,
     /// It contains sensitive data or does not fit in a Teams message.
     Unsafe,
@@ -2052,18 +2156,20 @@ pub enum DraftRefusal {
     Changed,
     GuidanceTooLong,
     SensitiveGuidance,
+    /// A chosen source does not exist, is disabled or may not be processed externally.
+    UnknownSource,
 }
 impl std::fmt::Display for DraftRefusal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
             Self::NotDraftable => {
-                "This answer can no longer be improved or sent: it was already sent, is being sent or improved, or has no proposal."
+                "This message can no longer be answered from the app: it was already answered, its answer is being sent or written, it was not addressed to you, or it has no answer to send yet."
             }
             Self::Unsafe => {
-                "This answer contains sensitive data or does not fit in a Teams message; improve it first."
+                "This answer contains sensitive data or does not fit in a Teams message; regenerate it first."
             }
             Self::Changed => {
-                "The message changed after the answer was written; improve the answer again before sending it."
+                "The message changed after the answer was written; regenerate the answer before sending it."
             }
             Self::GuidanceTooLong => {
                 "The context must be plain text of at most 4000 characters."
@@ -2071,17 +2177,39 @@ impl std::fmt::Display for DraftRefusal {
             Self::SensitiveGuidance => {
                 "The context contains sensitive data (credentials, emails, phone numbers or IDs); remove it."
             }
+            Self::UnknownSource => {
+                "A chosen source no longer exists, is disabled or is not authorized for external processing; choose again."
+            }
         })
     }
 }
 impl std::error::Error for DraftRefusal {}
 
-/// An answer that exists but was not sent: withheld by the checks, observed in observation
-/// mode, or improved earlier. Only those can be improved or sent from the app.
-fn unsent_draft(status: &str, audit: &Audit) -> bool {
+/// What a user-requested answer keeps from the message's record.
+struct Draft {
+    /// The user's context for the assistant (may be empty).
+    guidance: String,
+    /// The answer it writes again; empty for a message left unanswered.
+    previous: String,
+    intent: Option<String>,
+    trace: Vec<crate::state::TraceStep>,
+    /// Sources the user chose; empty means the conversation's authorized ones.
+    sources: Vec<String>,
+}
+
+/// A message addressed to the assistant that was not sent an answer: one it left unanswered
+/// (informational, a request for the person…) or whose answer was withheld, observed or
+/// written earlier. Only those can get an answer written from the app. A message with
+/// sensitive data never reaches a model.
+fn unsent(status: &str, audit: &Audit) -> bool {
     matches!(status, "ignored" | "dry_run")
         && audit.sent.is_none()
         && audit.question.is_some()
+        && audit.reason != "sensitive_question"
+}
+/// An unsent message whose answer exists: only those can be sent from the app.
+fn unsent_draft(status: &str, audit: &Audit) -> bool {
+    unsent(status, audit)
         && audit
             .proposed
             .as_deref()
@@ -2645,6 +2773,8 @@ fn first_name(display_name: &str) -> Option<&str> {
     })
 }
 fn leave_to_person(audit: &mut Audit) {
+    // The user may still answer it from the app.
+    audit.intent = Some(Intent::Personal.as_str().into());
     audit.reason = "personal_request".into();
     audit.step(
         "no answer",
