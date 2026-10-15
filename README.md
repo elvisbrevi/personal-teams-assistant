@@ -70,6 +70,14 @@ and a pull request named in a status question is read so it can be linked. The
 full list of cited references and Wiki pages read stays in the message history
 (Messages tab and `pta audit show`).
 
+Version 0.7.16 reorganizes the GUI around daily work: Home, Messages and
+Activities first, then Knowledge and Test chat, with Settings at the bottom and
+split into categories (General, Microsoft Teams, Language models, Activity
+registration, Credentials, Advanced). Home's status rows open the setting each one
+depends on, Messages can be searched, fields that do not apply stay hidden, and
+the interface meets WCAG 2.2 AA contrast. Nothing changes in the assistant's
+behavior, configuration or CLI.
+
 Version 0.7.12 reviews explicitly mentioned activity even when its artifacts have
 a different date. Such work stays pending until you explain why it belongs to the
 selected day, through the GUI or `date_attribution` in the CLI. Existing task links
