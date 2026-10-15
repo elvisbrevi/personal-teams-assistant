@@ -75,6 +75,14 @@
     entry('33333333-3333-4333-8333-333333333333', 'done', { title: 'Fix settlement batch timeout', description: 'Raised the batch timeout and added a retry.', hours: 3, parent: 4410 }, { task_id: 4502, task_url: `${org}/Payments/_workitems/edit/4502` }),
     entry('44444444-4444-4444-8444-444444444444', 'dismissed', { title: 'Own message in Coffee chat: see you tomorrow', hours: null }),
   ];
+  // Work registered on earlier days, for the History view.
+  const earlier = scenario === 'fresh' ? [] : [
+    ['2026-10-13', 'Document the refund notification flow', 2, 4388, 4497],
+    ['2026-10-13', 'Pair review of the settlement retry', 1.5, 4410, 4498],
+    ['2026-10-12', 'Receipt PDF layout for card payments', 4, 4321, 4490],
+    ['2026-10-09', 'Deployment call for the payments release', 1, 4321, 4481],
+  ].map(([day, title, hours, parent, task], i) => entry(`5555555${i}-5555-4555-8555-555555555555`, i === 3 ? 'uncertain' : 'done', { title, hours, parent },
+    { day, task_id: task, task_url: `${org}/Payments/_workitems/edit/${task}` }));
   const runs = scenario === 'fresh' ? [] : [
     { id: 'run-1', day: DAY, status: 'completed', created_at: secs(ago(90)), summary: { recorded_hours: 4.5, remaining_hours: 4.5, pending: 2, created: 1, partial: true, warnings: ['Source wiki has incomplete coverage.'] }, diagnostics: { stage: 'Saving review results', finished_at: secs(ago(88)), provider: 'codex' } },
     { id: 'run-0', day: DAY, status: 'failed', created_at: secs(ago(200)), summary: null, diagnostics: { stage: 'Reading daily effort and open HUs', finished_at: secs(ago(199)), error: 'Azure DevOps returned HTTP 401' } },
@@ -88,7 +96,7 @@
     llm_providers: () => providers,
     audit: () => audit,
     self_chat_status: () => ({ diagnostics: { cursor: ['x', secs(ago(1))], unresolved_outputs: 0 } }),
-    activity_history: args => ({ day: args.day || DAY, running: false, entries: (args.day || DAY) === DAY ? history : [], runs: (args.day || DAY) === DAY ? runs : [], summary: (args.day || DAY) === DAY ? summary : null, settings: snapshot.config.activity_registration, llm: snapshot.config.llm, observation_mode: snapshot.config.policy.dry_run }),
+    activity_history: args => ({ day: args.day || DAY, running: false, entries: args.from ? [...history, ...earlier].filter(e => e.day >= args.from && e.day <= (args.day || DAY)) : (args.day || DAY) === DAY ? history : [], runs: (args.day || DAY) === DAY ? runs : [], summary: (args.day || DAY) === DAY ? summary : null, settings: snapshot.config.activity_registration, llm: snapshot.config.llm, observation_mode: snapshot.config.policy.dry_run }),
     activity_pending: () => ({ day: DAY, running: false, entries: pending, runs: [], summary: null, settings: snapshot.config.activity_registration, llm: snapshot.config.llm, observation_mode: snapshot.config.policy.dry_run }),
     activity_status: () => ({}),
     save_settings: args => { window.__ptaLastSave = structuredClone(args); snapshot.config = args.config; snapshot.map = args.map; snapshot.loaded_config = structuredClone(args.config); snapshot.tunnel_config = args.tunnelConfig; return {}; },

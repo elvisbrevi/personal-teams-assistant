@@ -618,6 +618,7 @@ async fn operate(
         "activity_status" | "activity_history" | "activity_pending" => activity::inspect(
             state,
             args.get("day").and_then(Value::as_str),
+            args.get("from").and_then(Value::as_str),
             method == "activity_pending",
         )
         .await

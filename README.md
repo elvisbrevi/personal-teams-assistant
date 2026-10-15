@@ -116,6 +116,7 @@ pta activity status              # scheduled/manual activity process
 pta activity run                 # review today's work with the saved settings
 pta activity pending             # activities needing context or an HU
 pta activity history 2026-10-08   # completed tasks and process outcomes by day
+pta activity history 2026-10-01..2026-10-15   # the activities of every day in a range
 ```
 
 `pta help` (or `pta`, `pta --help`) lists every command with its description; `--json` returns the full result as JSON. `pta skill show` gives the operating manual for agents.

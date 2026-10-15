@@ -109,3 +109,16 @@ test('run cards follow the interface language', () => {
   assert.match(card, /La fuente wiki tiene cobertura incompleta\./);
   assert.match(card, /"text":"Completada","tone":"ok"/);
 });
+
+test('history keeps the approved work, grouped by day with its hours', () => {
+  const context = localized('en', {});
+  vm.runInContext(renderSource, context);
+  const day = (id, day, state, hours) => ({ id, day, state, draft: { hours } });
+  context.entries = [
+    day('a', '2026-10-13', 'done', 2), day('b', '2026-10-14', 'pending', 3), day('c', '2026-10-13', 'uncertain', 1.5),
+    day('d', '2026-10-14', 'done', null), day('e', '2026-10-12', 'dismissed', 1), day('f', '2026-10-12', 'already_registered', 1),
+  ];
+  const days = vm.runInContext('registeredDays(entries)', context);
+  assert.deepEqual(JSON.parse(JSON.stringify(days.map(d => [d.day, d.entries.map(e => e.id), d.hours]))),
+    [['2026-10-14', ['d'], 0], ['2026-10-13', ['a', 'c'], 3.5]]);
+});

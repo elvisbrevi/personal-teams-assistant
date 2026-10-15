@@ -108,17 +108,28 @@ fn day(state: &DesktopState, value: Option<&str>) -> Result<NaiveDate> {
         .unwrap_or(today);
     Ok(day)
 }
+/// A day's activities, runs and totals; with `from`, the activities of every day from `from`
+/// to that day, newest first.
 pub(super) async fn inspect(
     state: &DesktopState,
     date: Option<&str>,
+    from: Option<&str>,
     pending: bool,
 ) -> Result<Value> {
     recover(state).await?;
     let config = read_config(&state.config_path)?;
-    let day = day(state, date)?.to_string();
+    let until = day(state, date)?;
+    let day = until.to_string();
     let db = database(state)?;
     let entries = if pending {
         db.pending()?
+    } else if let Some(from) = from {
+        let from = from.parse::<NaiveDate>()?;
+        ensure!(
+            from <= until,
+            Rejected::Input("The first day must not be after the last one.")
+        );
+        db.between(&from.to_string(), &day)?
     } else {
         db.entries(Some(&day))?
     };
