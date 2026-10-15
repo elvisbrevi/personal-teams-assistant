@@ -70,6 +70,14 @@ and a pull request named in a status question is read so it can be linked. The
 full list of cited references and Wiki pages read stays in the message history
 (Messages tab and `pta audit show`).
 
+Version 0.7.17 answers «¿qué hice ayer?», «del 5 al 9 de octubre» or "what did I
+do last week?" from the work you approved in Activities: a short day-by-day reply
+with each task, its HU and hours. Activities adds a History view of that record,
+grouped by day between two dates (`pta activity history FROM..TO`). On phones the
+page no longer scrolls sideways or bounces, Settings sections are a grid instead
+of a sideways strip, controls are at least 44 px and the colors were retuned for
+contrast in both themes.
+
 Version 0.7.16 reorganizes the GUI around daily work: Home, Messages and
 Activities first, then Knowledge and Test chat, with Settings at the bottom and
 split into categories (General, Microsoft Teams, Language models, Activity
