@@ -72,12 +72,14 @@ impl KnowledgeMap {
                 }
                 Access::Tool { tool } => {
                     tool.validate()?;
+                    // A catalog file must live in a declared repository; an inline one needs none.
                     if let crate::tools::ToolSpec::AzureDevopsWiki {
                         repository, path, ..
                     }
                     | crate::tools::ToolSpec::AzureDevopsStatus {
                         repository, path, ..
                     } = tool
+                        && tool.catalog_repository().is_some()
                     {
                         ensure!(
                             map.repositories.contains_key(repository)

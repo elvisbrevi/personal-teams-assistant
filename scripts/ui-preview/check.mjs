@@ -166,6 +166,12 @@ if (flag === '--axe-only') { await browser.close(); process.exit(0); }
   await page.click('#resources .resource:nth-child(3) .resource-toggles input');
   await page.waitForTimeout(200);
   check('source edit fold stays open after toggling', await page.evaluate(() => document.querySelectorAll('#resources .resource')[2].querySelector('.resource-edit').open));
+  check('the activity record is offered while the map has none', await page.isVisible('#record-offer'));
+  await page.click('#add-record');
+  await page.waitForTimeout(200);
+  check('adding the activity record lists it disabled and hides the offer', !(await page.isVisible('#record-offer'))
+    && await page.evaluate(() => [...document.querySelectorAll('#resources .resource')].some(r => r.textContent.includes('activity-record')
+      && r.textContent.includes('Registro de actividades') && r.textContent.includes('Desactivado'))));
   await page.click('#discard');
   check('no page errors', errors.length === 0, errors.join(' | '));
   await context.close();

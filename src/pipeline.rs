@@ -709,16 +709,9 @@ impl Pipeline {
             } else {
                 crate::activity::recorded::requested_days(&tool_question, self.today()).and_then(
                     |(since, until)| {
+                        let source = self.record_source(&available)?;
                         let data = self.recorded_between(&available, since, until, &mut audit)?;
                         audit.step("activity history", format!("{since} to {until}"));
-                        let source = available.iter().find(|r| {
-                            matches!(
-                                r.access,
-                                Access::Tool {
-                                    tool: crate::tools::ToolSpec::AzureDevopsStatus { .. }
-                                }
-                            )
-                        })?;
                         Some((source, data))
                     },
                 )
@@ -746,6 +739,7 @@ impl Pipeline {
                                 tool: crate::tools::ToolSpec::AzureDevopsWiki { .. }
                                     | crate::tools::ToolSpec::AzureDevopsStatus { .. }
                                     | crate::tools::ToolSpec::TeamsMessages {}
+                                    | crate::tools::ToolSpec::ActivityRecord {}
                             }
                         )
                 })
@@ -794,6 +788,13 @@ impl Pipeline {
                         .filter(|r| matches!(r.access, Access::Tool { .. })),
                 );
             }
+            // A status round also reads what the Activities section recorded, from its own
+            // source (or, in a map without one, as part of Azure DevOps activity).
+            let status_record = if status_route {
+                self.record_source(&available)
+            } else {
+                None
+            };
             let status_wikis: Vec<&crate::knowledge::Resource> = if status_route {
                 available
                     .iter()
@@ -808,7 +809,9 @@ impl Pipeline {
                 sources
                     .iter()
                     .chain(&status_wikis)
+                    .copied()
                     .chain(recap.as_ref().map(|(source, _)| *source))
+                    .chain(status_record.filter(|r| self.record_owned(r)))
                     .map(|r| r.id.as_str())
                     .collect::<Vec<_>>()
                     .join(",")
@@ -862,6 +865,29 @@ impl Pipeline {
                     .collect();
                 let mut reads = Vec::new();
                 for source in &sources {
+                    // The record of the days asked (or of the recent window), read locally.
+                    if let Access::Tool {
+                        tool: crate::tools::ToolSpec::ActivityRecord {},
+                    } = &source.access
+                    {
+                        let today = self.today();
+                        let (since, until) =
+                            crate::activity::recorded::requested_days(&tool_question, today)
+                                .unwrap_or_else(|| {
+                                    let days = crate::ado::recent_window(&tool_question);
+                                    (today - chrono::Duration::days(days - 1), today)
+                                });
+                        audit.step("activity history", format!("{since} to {until}"));
+                        let read = match self.recorded_between(&available, since, until, &mut audit)
+                        {
+                            Some(data) => Read::Typed(data),
+                            None => Read::Text(format!(
+                                "The Activities section recorded no work from {since} to {until}."
+                            )),
+                        };
+                        reads.push((*source, read));
+                        continue;
+                    }
                     let raw = match &source.access {
                         Access::Tool { tool } => {
                             audit.tools.push(tool.name().into());
@@ -919,7 +945,7 @@ impl Pipeline {
                         }
                         _ => Read::Text(self.redactor.redact(&raw)),
                     };
-                    reads.push((source, read));
+                    reads.push((*source, read));
                 }
                 for (source, read) in status_reads {
                     match read.await.ok().and_then(Result::ok).and_then(|raw| {
@@ -928,7 +954,7 @@ impl Pipeline {
                         Some(mut data) => {
                             data.sanitize(&self.redactor);
                             data.links = None;
-                            reads.push((source, Read::Typed(data)));
+                            reads.push((*source, Read::Typed(data)));
                         }
                         None => {
                             registry.partial = true;
@@ -944,12 +970,11 @@ impl Pipeline {
                     reads.push((source, Read::Typed(data)));
                 }
                 // What the Activities section recorded, by day: the user's work as registered.
-                if status_route
-                    && let Some(status) = sources.iter().find(|r| r.id == "azure-devops-status")
+                if let Some(record) = status_record
                     && let Some(data) =
                         self.recorded_activity(&available, crate::ado::MAX_WINDOW_DAYS, &mut audit)
                 {
-                    reads.push((status, Read::Typed(data)));
+                    reads.push((record, Read::Typed(data)));
                 }
                 // The text a source writes within `budget`, with its verified registry if typed.
                 // The Wiki keeps room for its coverage note; its need counts that room too.
@@ -1487,10 +1512,54 @@ impl Pipeline {
             .zoned(chrono::Utc::now())
             .date_naive()
     }
+    /// The source that lets this conversation read what the Activities section recorded: the
+    /// activity record source when the map has one, otherwise (maps written before it existed)
+    /// Azure DevOps activity, which used to carry it.
+    fn record_source<'a>(
+        &self,
+        available: &[&'a crate::knowledge::Resource],
+    ) -> Option<&'a crate::knowledge::Resource> {
+        available.iter().copied().find(|r| {
+            matches!(
+                (&r.access, self.record_has_source()),
+                (
+                    Access::Tool {
+                        tool: crate::tools::ToolSpec::ActivityRecord {}
+                    },
+                    true
+                ) | (
+                    Access::Tool {
+                        tool: crate::tools::ToolSpec::AzureDevopsStatus { .. }
+                    },
+                    false
+                )
+            )
+        })
+    }
+    /// Whether the map has an activity record source of its own (enabled or not).
+    fn record_has_source(&self) -> bool {
+        self.knowledge.resources.iter().any(|r| {
+            matches!(
+                r.access,
+                Access::Tool {
+                    tool: crate::tools::ToolSpec::ActivityRecord {}
+                }
+            )
+        })
+    }
+    /// Whether `source` is the activity record's own source (not Azure DevOps activity).
+    fn record_owned(&self, source: &crate::knowledge::Resource) -> bool {
+        matches!(
+            source.access,
+            Access::Tool {
+                tool: crate::tools::ToolSpec::ActivityRecord {}
+            }
+        )
+    }
     /// The work the Activities section recorded from `since` to `until`, by day, when this
-    /// conversation may see it: Azure DevOps activity must be authorized here, and an entry
-    /// shows only if every source its activities come from is. A missing or unreadable
-    /// database, or nothing to show, leaves it out.
+    /// conversation may see it: the record must be authorized here (`record_source`), and an
+    /// entry shows only if every source its Wiki pages or Teams messages come from is too. A
+    /// missing or unreadable database, or nothing to show, leaves it out.
     fn recorded_between(
         &self,
         available: &[&crate::knowledge::Resource],
@@ -1500,24 +1569,19 @@ impl Pipeline {
     ) -> Option<crate::evidence::Evidence> {
         use crate::activity::recorded::Origin;
         use crate::tools::ToolSpec;
-        let allowed: Vec<Origin> = available
-            .iter()
-            .filter_map(|r| match &r.access {
-                Access::Tool {
-                    tool: ToolSpec::AzureDevopsStatus { .. },
-                } => Some(Origin::Activity),
-                Access::Tool {
-                    tool: ToolSpec::AzureDevopsWiki { .. },
-                } => Some(Origin::Wiki),
-                Access::Tool {
-                    tool: ToolSpec::TeamsMessages {},
-                } => Some(Origin::Teams),
-                _ => None,
-            })
-            .collect();
-        if !allowed.contains(&Origin::Activity) {
-            return None;
-        }
+        self.record_source(available)?;
+        // Azure DevOps work is the record's own; Wiki pages and Teams messages keep needing
+        // their sources, so work drawn from other chats never reaches this one.
+        let mut allowed = vec![Origin::Activity];
+        allowed.extend(available.iter().filter_map(|r| match &r.access {
+            Access::Tool {
+                tool: ToolSpec::AzureDevopsWiki { .. },
+            } => Some(Origin::Wiki),
+            Access::Tool {
+                tool: ToolSpec::TeamsMessages {},
+            } => Some(Origin::Teams),
+            _ => None,
+        }));
         let (since, until) = (since.to_string(), until.to_string());
         let entries = crate::activity::store::Database::recorded(
             &self.config.server.data_dir.join("activity-registration.db"),
