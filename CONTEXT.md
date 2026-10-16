@@ -22,6 +22,14 @@ _Avoid_: category, topic, project (when meaning the subject)
 A fact the user confirmed, kept to answer with, optionally tied to contexts.
 _Avoid_: memory, knowledge entry
 
+**Approved example**:
+An answer the user rated good and chose to guide later answers to similar requests, by structure and tone only.
+_Avoid_: few-shot, template, training data
+
+**Person profile**:
+How the user addresses one person who writes to them, used only when answering that person.
+_Avoid_: contact, user (for the person who writes)
+
 **Knowledge index**:
 The searchable copy of repository sources and verified notes, split into sections.
 _Avoid_: vector database, RAG store

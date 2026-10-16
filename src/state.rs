@@ -82,6 +82,17 @@ pub struct Audit {
     /// The context (subject) the request named, whose sources and instructions shaped it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub context: Option<String>,
+    /// Who wrote the message: Graph user ID and display name (eligible messages only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sender_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sender_name: Option<String>,
+    /// The person profile the answer was written for (`[[people]]` in the map).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub person: Option<String>,
+    /// The user's judgment of the answer, given in the app or by an agent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub feedback: Option<Feedback>,
     /// Processing steps in order. Details name decisions and counts, never message content.
     pub trace: Vec<TraceStep>,
 }
@@ -92,6 +103,21 @@ pub struct TraceStep {
     pub at: i64,
     pub step: String,
     pub detail: String,
+}
+/// The user's judgment of an answer.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct Feedback {
+    /// `good` or `bad`.
+    pub rating: String,
+    /// What was right or wrong, in the user's words (redacted).
+    pub comment: String,
+    /// The request and answer guide later answers to similar requests (structure and tone).
+    pub example: bool,
+    /// The context the example belongs to; none = every context.
+    pub context: Option<String>,
+    /// When it was given (Unix seconds).
+    pub at: i64,
 }
 impl Audit {
     pub fn step(&mut self, step: &str, detail: impl Into<String>) {
@@ -124,6 +150,17 @@ impl Store {
             UPDATE jobs SET status='uncertain',audit='{"reason":"restart_during_send"}' WHERE status='sending';
             UPDATE jobs SET status='ignored',audit=json_set(coalesce(audit,'{}'),'$.status','ignored','$.reason','refinement_failed') WHERE status='refining';"#)?;
         Ok(Self { db: Mutex::new(db) })
+    }
+    /// Set (or clear) the user's judgment of an answer without touching anything else in the
+    /// job, so it never races with a job being processed. False when the job does not exist or
+    /// is being processed, written or sent.
+    pub fn set_feedback(path: &Path, resource: &str, feedback: Option<&Feedback>) -> Result<bool> {
+        let db = Self::attach(path)?;
+        let changed = db.db.lock().unwrap().execute(
+            "UPDATE jobs SET audit=CASE WHEN ?2 IS NULL THEN json_remove(audit,'$.feedback') ELSE json_set(audit,'$.feedback',json(?2)) END WHERE resource=?1 AND audit IS NOT NULL AND status NOT IN ('pending','processing','refining','sending')",
+            params![resource, feedback.map(serde_json::to_string).transpose()?],
+        )?;
+        Ok(changed > 0)
     }
     /// Diagnostic connections never recover or mutate jobs.
     pub fn self_chat_diagnostics(path: &Path) -> Result<serde_json::Value> {
@@ -496,6 +533,47 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn feedback_changes_only_itself_and_never_a_job_in_progress() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("assistant.db");
+        let store = Store::open(&path).unwrap();
+        for resource in ["done", "busy"] {
+            store.enqueue(resource).unwrap();
+        }
+        let done = Audit {
+            status: "sent".into(),
+            reason: "supported_answer".into(),
+            sent: Some("Respuesta".into()),
+            ..Default::default()
+        };
+        store.record("done", &done).unwrap();
+        store
+            .record(
+                "busy",
+                &Audit {
+                    status: "processing".into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let feedback = Feedback {
+            rating: "good".into(),
+            comment: "Clara".into(),
+            example: true,
+            context: None,
+            at: 1,
+        };
+        assert!(Store::set_feedback(&path, "done", Some(&feedback)).unwrap());
+        let saved = store.audit("done").unwrap().unwrap();
+        assert_eq!(saved.feedback, Some(feedback.clone()));
+        assert_eq!(saved.sent.as_deref(), Some("Respuesta"));
+        assert_eq!(store.status("done").unwrap().as_deref(), Some("sent"));
+        assert!(!Store::set_feedback(&path, "busy", Some(&feedback)).unwrap());
+        assert!(!Store::set_feedback(&path, "missing", Some(&feedback)).unwrap());
+        assert!(Store::set_feedback(&path, "done", None).unwrap());
+        assert_eq!(store.audit("done").unwrap().unwrap().feedback, None);
+    }
     #[test]
     fn a_job_in_progress_lists_an_empty_audit() {
         let dir = tempfile::tempdir().unwrap();

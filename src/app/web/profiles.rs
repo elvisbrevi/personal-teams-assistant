@@ -254,6 +254,7 @@ impl Portal {
             "audit",
             "answer_refine",
             "answer_send",
+            "answer_feedback",
             "notes_list",
             "notes_save",
             "notes_remove",

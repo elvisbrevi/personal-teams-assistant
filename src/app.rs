@@ -448,6 +448,7 @@ pub(crate) fn init_state(config_dir: &Path, data_dir: &Path) -> Result<DesktopSt
                 resources: Vec::new(),
                 contexts: Vec::new(),
                 cases: Vec::new(),
+                people: Vec::new(),
             })?,
         )?;
     }

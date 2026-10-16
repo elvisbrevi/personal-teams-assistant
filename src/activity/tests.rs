@@ -332,6 +332,7 @@ fn recorder(
         }],
         contexts: Vec::new(),
         cases: Vec::new(),
+        people: Vec::new(),
     };
     (
         Recorder {

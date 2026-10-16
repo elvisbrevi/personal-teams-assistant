@@ -162,8 +162,36 @@ if (flag === '--axe-only') { await browser.close(); process.exit(0); }
   await page.click(`${informational} button:text("Toca de nuevo para enviar")`);
   await page.waitForTimeout(400);
   check('a sent answer offers nothing more', !(await page.isVisible(`${informational} .draft-actions`)));
+  // Rating an answer: good, as an example, with a comment; then saving it as a note.
+  const rated = '#messages-list details.message[data-resource$="/1001"]';
+  await page.evaluate(sel => { document.querySelector(sel).open = true; }, rated);
+  await page.click(`${rated} .feedback button:text("Buena respuesta")`);
+  check('rating good offers to keep it as an example', await page.isVisible(`${rated} .example-fields`));
+  await page.click(`${rated} .example-fields input[type=checkbox]`);
+  await page.fill(`${rated} .feedback-comment`, 'Exactly the steps I use.');
+  await page.click(`${rated} .feedback button:text("Guardar evaluación")`);
+  await page.waitForTimeout(300);
+  check('the rating is saved with the example', await page.evaluate(() => {
+    const f = window.__ptaLastFeedback;
+    return f?.rating === 'good' && f.example === true && f.comment === 'Exactly the steps I use.';
+  }));
+  await page.evaluate(() => { document.querySelector('#messages-list details.message[data-resource$="/1002"]').open = true; });
+  check('a known sender links to their profile', await page.isVisible('#messages-list details.message[data-resource$="/1002"] .link-button:text("Cómo te diriges a Ana Pérez")'));
+  await page.evaluate(sel => { document.querySelector(sel).open = true; }, rated);
+  await page.click(`${rated} .link-button:text("Agregar a Luis Soto en Personas")`);
+  check('an unknown sender opens People with their name and Teams ID', await page.inputValue('#person-name') === 'Luis Soto'
+    && (await page.inputValue('#person-sender')).endsWith('b2'));
+  await page.click('#add-person');
+  check('the person is added', await page.isVisible('#people .resource:has-text("Luis Soto")'));
+  await page.click('#discard');
+  await page.click('nav [data-tab="messages"]');
+  await page.evaluate(sel => { document.querySelector(sel).open = true; }, rated);
+  await page.click(`${rated} .feedback button:text("Guardar como nota")`);
+  check('saving an answer as a note opens the note form with it', await page.isVisible('#note-form[open]')
+    && (await page.inputValue('#note-text')).includes('rollback runbook'));
   // Knowledge fold survives a re-render
   await page.click('nav [data-tab="knowledge"]');
+  await page.click('#knowledge-tab-sources');
   await page.click('#resources .resource:nth-child(3) .resource-edit summary');
   await page.click('#resources .resource:nth-child(3) .resource-toggles input');
   await page.waitForTimeout(200);
@@ -219,6 +247,7 @@ if (flag === '--axe-only') { await browser.close(); process.exit(0); }
   await page.waitForTimeout(500);
   check('searching notes narrows the list', await page.$$eval('#notes .resource', rows => rows.length) === 1);
   await page.fill('#notes-query', '');
+  await page.evaluate(() => { document.querySelector('#note-form').open = false; });
   await page.click('#note-form summary');
   await page.fill('#note-title', 'Refund cutoff');
   await page.fill('#note-text', 'Refunds requested after 18:00 are processed the next business day.');

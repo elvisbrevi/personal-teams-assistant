@@ -901,6 +901,7 @@ async fn operate(
             save_settings(state, config, map, tunnel).await?;
             json!({"enabled":false})
         }
+        "answer_feedback" => super::notes::feedback(state, args)?,
         "notes_list" => super::notes::list(state, args)?,
         "notes_save" => super::notes::save(state, args)?,
         "notes_remove" => super::notes::remove(state, args)?,

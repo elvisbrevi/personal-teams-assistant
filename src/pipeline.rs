@@ -329,6 +329,9 @@ impl Pipeline {
         }
         let current = self.redactor.redact(&message.text);
         audit.question = Some(current.clone());
+        audit.sender_id = Some(message.sender.clone()).filter(|s| !s.is_empty());
+        audit.sender_name = Some(message.sender_name.clone())
+            .filter(|n| !n.trim().is_empty() && self.redactor.clean(n));
         audit.step("eligibility", "message addressed to the assistant");
         if !self.redactor.clean(&current) {
             audit.reason = "sensitive_question".into();
@@ -1223,6 +1226,36 @@ impl Pipeline {
             // In the personal chat, with a source that can register work, the app proposes
             // where to register it instead of the model asking.
             // An improved draft is sent by hand, after which no plan could be confirmed.
+            // How the user addresses the person who wrote (not in the personal chat, where the
+            // user writes), and answers the user approved for similar requests.
+            let person = if own_chat {
+                None
+            } else {
+                self.knowledge
+                    .person_for(&message.sender, &message.sender_name)
+            };
+            let recipient = person.map_or_else(String::new, |p| {
+                let mut text = format!("Name: {}.", p.name);
+                if !p.address.trim().is_empty() {
+                    text.push_str(&format!(
+                        " How the user addresses them: {}",
+                        p.address.trim()
+                    ));
+                }
+                if !p.notes.trim().is_empty() {
+                    text.push_str(&format!(" About them: {}", p.notes.trim()));
+                }
+                self.redactor.redact(&text)
+            });
+            if let Some(person) = person {
+                audit.person = Some(person.id.clone());
+                audit.step("person", person.id.clone());
+            }
+            let examples = if review {
+                String::new()
+            } else {
+                self.approved_examples(&tool_question, context.map(|c| c.id.as_str()), &mut audit)
+            };
             let proposing = review
                 && !drafting
                 && own_chat
@@ -1251,6 +1284,8 @@ impl Pipeline {
                         previous_draft: draft.as_ref().map_or("", |d| d.previous.as_str()),
                         context_instructions: context.map_or("", |c| c.instructions.as_str()),
                         prompts: self.prompts(),
+                        recipient: &recipient,
+                        examples: &examples,
                     }),
                 )
                 .await??;
@@ -1685,6 +1720,29 @@ impl Pipeline {
             .activity_registration
             .zoned(chrono::Utc::now())
             .date_naive()
+    }
+    /// Up to two answers the user approved for requests like `query`, as text for the model;
+    /// empty when there are none or the index cannot be read.
+    fn approved_examples(&self, query: &str, context: Option<&str>, audit: &mut Audit) -> String {
+        let path = self.config.server.data_dir.join(crate::index::FILE);
+        if !path.exists() {
+            return String::new();
+        }
+        let found = crate::index::Index::open(&path)
+            .and_then(|index| index.examples(query, context, 2))
+            .unwrap_or_default();
+        if found.is_empty() {
+            return String::new();
+        }
+        audit.step("examples", format!("{} approved answers", found.len()));
+        self.redactor.redact(
+            &found
+                .iter()
+                .map(|(request, answer)| {
+                    format!("Request: {request}\nApproved answer: {answer}\n\n")
+                })
+                .collect::<String>(),
+        )
     }
     /// Whether a built-in case is on (a case the user did not change is).
     fn case_on(&self, id: &str) -> bool {

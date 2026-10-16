@@ -370,6 +370,7 @@
           <button role="tab" id="knowledge-tab-contexts" data-group="contexts" aria-controls="knowledge-contexts" aria-selected="false" tabindex="-1">Contexts</button>
           <button role="tab" id="knowledge-tab-cases" data-group="cases" aria-controls="knowledge-cases" aria-selected="false" tabindex="-1">Cases</button>
           <button role="tab" id="knowledge-tab-notes" data-group="notes" aria-controls="knowledge-notes" aria-selected="false" tabindex="-1">Notes</button>
+          <button role="tab" id="knowledge-tab-people" data-group="people" aria-controls="knowledge-people" aria-selected="false" tabindex="-1">People</button>
           <button role="tab" id="knowledge-tab-repositories" data-group="repositories" aria-controls="knowledge-repositories" aria-selected="false" tabindex="-1">Repositories</button>
         </div>
         <div id="knowledge-sources" role="tabpanel" aria-labelledby="knowledge-tab-sources">
@@ -439,6 +440,22 @@
               <label>Keywords, comma separated<input id="note-keywords" placeholder="hotfix, incident"></label>
               <fieldset id="note-contexts" class="choices"><legend>Contexts</legend></fieldset>
               <div class="actions"><button id="add-note">Save note</button></div>
+            </details>
+          </div>
+        </div>
+        <div id="knowledge-people" role="tabpanel" aria-labelledby="knowledge-tab-people" hidden>
+          <div class="panel">
+            <div class="panel-head"><h2>People</h2><span id="people-summary" class="hint"></span></div>
+            <p class="hint">How you address the people who write to you. When the assistant answers one of them, it follows your note for the form of address, tone and length; the note never reaches anyone else's answers.</p>
+            <div id="people" class="list"></div>
+            <details id="person-form" class="add-form">
+              <summary>Add a person</summary>
+              <div class="grid">
+                <label>Name<input id="person-name" placeholder="Ana Pérez"></label>
+                <label>Teams user ID <small>Filled in when you add them from a message.</small><input id="person-sender" translate="no" spellcheck="false" placeholder="00000000-0000-0000-0000-000000000000"></label>
+              </div>
+              <label>How you address them<textarea id="person-address" rows="2" placeholder="Informal, by first name, two or three sentences"></textarea></label>
+              <div class="actions"><button id="add-person" class="secondary">Add person</button></div>
             </details>
           </div>
         </div>

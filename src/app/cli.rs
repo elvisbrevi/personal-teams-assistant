@@ -63,6 +63,8 @@ Messages and diagnostics
                            observed), with your context from stdin (up to 4000 characters) and only the
                            chosen sources (default: those of the conversation), in the background; not sent.
   answer send RESOURCE     Sends an unsent answer once, after your review (never retried).
+  answer feedback RESOURCE JSON on stdin: rating good|bad (null clears), comment, example (a good answer
+                           guides later answers to similar requests, by structure and tone) and context.
   logs [--limit N]         Host events.
   chat | test simulate     Real pipeline with a SimulationRequest JSON on stdin; never sends to Teams.
   test connectivity        Reads the connected Microsoft account (without sending).
@@ -106,6 +108,9 @@ Knowledge
                            recap, activity_review, documentation, personal_request, statement).
   cases edit ID | cases reset ID         JSON on stdin: enabled, description (how the model recognizes it),
                            keywords, sources and instructions (how to answer); reset restores the defaults.
+  people list | people show ID | people add | people edit ID | people remove ID
+                           How you address each person: JSON with id, name, senders (Teams user IDs),
+                           aliases, address and notes; used only when answering that person.
   notes list [--context ID] [--limit N]  Verified notes, newest first.
   notes search TEXT [--context ID]       Notes by relevance.
   notes add | notes edit ID              JSON on stdin: title, text, contexts, keywords, origin, reference.
@@ -303,7 +308,9 @@ fn validate_args(args: &[String]) -> Result<()> {
             ]
             | ["audit", "list"]
             | ["audit", "show", _]
-            | ["answer", "refine" | "send", _]
+            | ["answer", "refine" | "send" | "feedback", _]
+            | ["people", "list" | "add"]
+            | ["people", "show" | "edit" | "remove", _]
             | ["cases", "list"]
             | ["cases", "show" | "edit" | "reset", _]
             | ["contexts", "list" | "add"]
@@ -462,6 +469,12 @@ async fn execute(mut args: Vec<String>) -> Result<Reply> {
                     true,
                 )
                 .await
+            }
+            "feedback" => {
+                let mut value = input()?;
+                ensure!(value.is_object(), "feedback is a JSON object");
+                value["resource"] = json!(resource);
+                call("answer_feedback", value, None, true).await
             }
             _ => call("answer_send", json!({"resource":resource}), None, true).await,
         };
@@ -762,6 +775,46 @@ async fn execute(mut args: Vec<String>) -> Result<Reply> {
                 .as_array_mut()
                 .unwrap()
                 .push(resource);
+        }
+        ("people", "list") => {
+            snap.data = data["map"]["people"].clone();
+            if snap.data.is_null() {
+                snap.data = json!([]);
+            }
+            return Ok(snap);
+        }
+        ("people", "add") => {
+            let person = input()?;
+            let map = data["map"].as_object_mut().context("invalid map")?;
+            map.entry("people")
+                .or_insert_with(|| json!([]))
+                .as_array_mut()
+                .context("invalid people")?
+                .push(person);
+        }
+        ("people", "show" | "edit" | "remove") => {
+            let id = positional(&args, 2)?;
+            let list = data["map"]["people"]
+                .as_array_mut()
+                .context("unknown person")?;
+            let i = list
+                .iter()
+                .position(|p| p["id"] == id)
+                .context("unknown person")?;
+            match action {
+                "show" => {
+                    snap.data = list[i].clone();
+                    return Ok(snap);
+                }
+                "edit" => {
+                    let person = input()?;
+                    ensure!(person["id"] == id, "person ID cannot change");
+                    list[i] = person;
+                }
+                _ => {
+                    list.remove(i);
+                }
+            }
         }
         ("cases", "list") => {
             snap.data = json!({"built_in": snap.data["cases"], "changes": data["map"]["cases"]});
@@ -1238,6 +1291,9 @@ mod help_tests {
             &["audit", "list"],
             &["answer", "refine", "resource"],
             &["answer", "send", "resource"],
+            &["answer", "feedback", "resource"],
+            &["people", "list"],
+            &["people", "edit", "ana"],
             &["cases", "list"],
             &["cases", "edit", "status_round"],
             &["cases", "reset", "recap"],
