@@ -53,10 +53,14 @@ path = "topics/assistant/operations.md"
 # kind = "tool"
 # [resources.tool]
 # type = "azure_devops_status"
-# repository = "personal"
-# path = "integrations/azure-devops.toml"
 # secret_ref = "secret://azure-devops/reader"
 # link_secret_ref = "secret://azure-devops/linker"
+# The catalog: organizations, projects ("*" = the projects of your teams) and your author email.
+# Older maps point to a TOML file in a repository instead (repository + path); never both.
+# [[resources.tool.catalog]]
+# organization = "https://dev.azure.com/example/"
+# projects = ["*"]
+# author_email = "me@example.com"
 
 # Wiki is independent from activity. Start disabled, without audiences/external processing.
 # [[resources]]
@@ -70,11 +74,13 @@ path = "topics/assistant/operations.md"
 # kind = "tool"
 # [resources.tool]
 # type = "azure_devops_wiki"
-# repository = "personal"
-# path = "integrations/azure-devops.toml"
 # secret_ref = "secret://azure-devops/reader"
 # wiki_ids = []
 # author_mode = "prefer_mine"
+# [[resources.tool.catalog]]
+# organization = "https://dev.azure.com/example/"
+# projects = ["*"]
+# author_email = "me@example.com"
 
 # The user's own messages in their Teams chats, read only for activity reviews ("what work did I
 # do that isn't registered?") with the Microsoft session already granted (Chat.Read). It starts
@@ -90,3 +96,19 @@ path = "topics/assistant/operations.md"
 # kind = "tool"
 # [resources.tool]
 # type = "teams_messages"
+
+# What the Activities section recorded by day (tasks you approved, with their HU and hours),
+# read on this device without a credential. Answers about what you did on a day or period come
+# from it; status rounds and activity reviews add it. Without this source, the record follows
+# the Azure DevOps activity source's authorization.
+# [[resources]]
+# id = "activity-record"
+# description = "Work I approved in Activities, by day: tasks, HU and hours"
+# topics = ["activity", "tasks"]
+# enabled = false
+# external_processing = false
+# allowed_conversations = []
+# allowed_senders = []
+# kind = "tool"
+# [resources.tool]
+# type = "activity_record"

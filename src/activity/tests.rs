@@ -324,6 +324,7 @@ fn recorder(
                 tool: ToolSpec::AzureDevopsStatus {
                     repository: "knowledge".into(),
                     path: "ado.toml".into(),
+                    catalog: vec![],
                     secret_ref: "secret://reader".into(),
                     link_secret_ref: Some("secret://writer".into()),
                 },

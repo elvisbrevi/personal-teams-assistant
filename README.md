@@ -70,6 +70,14 @@ and a pull request named in a status question is read so it can be linked. The
 full list of cited references and Wiki pages read stays in the message history
 (Messages tab and `pta audit show`).
 
+Version 0.7.19 makes the activity record a source of its own: in Knowledge,
+**Add activity record** lists what you approved in Activities as a source you
+enable, authorize for chosen chats and pick on its own when answering a message.
+Answers about what you did, status rounds and activity reviews read it from that
+source (maps without one keep reading it through Azure DevOps activity). The
+Azure DevOps catalog (organizations, projects and your author email) can now live
+in the map itself (`catalog`), so no knowledge repository is required.
+
 Version 0.7.18 lets you answer what the assistant left unanswered: an informational
 message or a request for you shows **Generate answer** in Messages. The assistant
 writes your reply from the conversation (and the sources you choose, or those of

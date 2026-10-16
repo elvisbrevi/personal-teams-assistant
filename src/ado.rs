@@ -107,6 +107,11 @@ impl Catalog {
     }
 }
 
+/// Check an Azure DevOps catalog (TOML) the way every reader parses it.
+pub fn validate_catalog(text: &str) -> Result<()> {
+    Catalog::parse(text).map(|_| ())
+}
+
 fn project_url(source: &Source, project: &str, host: &str, segments: &[&str]) -> Result<Url> {
     let mut url = Url::parse(&source.organization)?;
     url.set_host(Some(host))?;

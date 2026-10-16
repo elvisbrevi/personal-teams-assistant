@@ -1254,6 +1254,7 @@ fn wiki_resource() -> Resource {
             tool: ToolSpec::AzureDevopsWiki {
                 repository: "private".into(),
                 path: "catalog.toml".into(),
+                catalog: vec![],
                 secret_ref: "secret://ado/read".into(),
                 wiki_ids: vec![],
                 author_mode: personal_teams_assistant::ado::wiki::AuthorMode::PreferMine,
@@ -1310,6 +1311,7 @@ async fn wiki_priority_current_request_mixed_citations_and_complete_gate_without
                                 tool: ToolSpec::AzureDevopsStatus {
                                     repository: "private".into(),
                                     path: "catalog.toml".into(),
+                                    catalog: vec![],
                                     secret_ref: "secret://ado/read".into(),
                                     link_secret_ref: None,
                                 },
@@ -1827,6 +1829,7 @@ async fn teams_simulation_keeps_who_said_what_in_the_evidence_and_the_log() {
         tool: ToolSpec::AzureDevopsStatus {
             repository: "private".into(),
             path: "catalog.toml".into(),
+            catalog: vec![],
             secret_ref: "secret://ado/read".into(),
             link_secret_ref: None,
         },
@@ -2475,6 +2478,7 @@ async fn unregistered_work_is_reviewed_across_activity_wiki_and_teams_with_verif
             tool: ToolSpec::AzureDevopsStatus {
                 repository: "private".into(),
                 path: "catalog.toml".into(),
+                catalog: vec![],
                 secret_ref: "secret://ado/read".into(),
                 link_secret_ref: None,
             },
@@ -2962,6 +2966,7 @@ async fn unlinked_work_is_linked_only_after_the_user_confirms_the_exact_plan() {
             tool: ToolSpec::AzureDevopsStatus {
                 repository: "private".into(),
                 path: "catalog.toml".into(),
+                catalog: vec![],
                 secret_ref: "secret://ado/read".into(),
                 link_secret_ref: link_secret_ref.map(str::to_owned),
             },
@@ -3117,6 +3122,7 @@ async fn a_review_proposes_where_to_register_each_piece_and_applies_it_on_confir
         tool: ToolSpec::AzureDevopsStatus {
             repository: "private".into(),
             path: "catalog.toml".into(),
+            catalog: vec![],
             secret_ref: "secret://ado/read".into(),
             link_secret_ref: Some("secret://ado/link".into()),
         },
@@ -3333,6 +3339,7 @@ async fn what_the_user_did_on_a_day_comes_from_the_recorded_activities() {
         tool: ToolSpec::AzureDevopsStatus {
             repository: "private".into(),
             path: "catalog.toml".into(),
+            catalog: vec![],
             secret_ref: "secret://ado/read".into(),
             link_secret_ref: None,
         },
@@ -3381,6 +3388,198 @@ async fn what_the_user_did_on_a_day_comes_from_the_recorded_activities() {
     assert_eq!(audit.tools, vec!["read_recorded_activities"]);
     assert_eq!(audit.source.as_deref(), Some("azure-devops-status"));
     assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+/// Keeps the evidence each answer was written from; reads nothing but Azure DevOps activity,
+/// which finds nothing.
+struct EvidenceLlm(std::sync::Mutex<Vec<String>>);
+#[async_trait]
+impl LlmProvider for EvidenceLlm {
+    fn name(&self) -> &str {
+        "synthetic-evidence"
+    }
+    async fn classify_intent(&self, _: &str, _: &str) -> Result<IntentDecision> {
+        Ok(IntentDecision {
+            intent: Intent::Question,
+            confidence: 0.96,
+        })
+    }
+    async fn generate(&self, _: GenerationInput<'_>) -> Result<String> {
+        unreachable!()
+    }
+    async fn generate_response(
+        &self,
+        input: GenerationInput<'_>,
+    ) -> Result<personal_teams_assistant::llm::GeneratedAnswer> {
+        self.0.lock().unwrap().push(input.evidence.to_owned());
+        Ok(personal_teams_assistant::llm::GeneratedAnswer {
+            answer: "Trabajé en el flujo de pago QR.".into(),
+            detailed: false,
+            used_sources: Vec::new(),
+            provider: None,
+            fallbacks: Vec::new(),
+        })
+    }
+}
+struct QuietActivity;
+#[async_trait]
+impl ReadOnlyTool for QuietActivity {
+    async fn execute(&self, spec: &ToolSpec, _: &str, _: &str) -> Result<String> {
+        assert!(
+            matches!(spec, ToolSpec::AzureDevopsStatus { .. }),
+            "only activity is read"
+        );
+        Ok(serde_json::to_string(
+            &personal_teams_assistant::evidence::Evidence {
+                text: "Azure DevOps activity: nothing in the window.".into(),
+                ..Default::default()
+            },
+        )?)
+    }
+}
+fn record_resource() -> Resource {
+    Resource {
+        id: "activity-record".into(),
+        description: "Trabajo aprobado en Actividades".into(),
+        topics: vec![],
+        enabled: true,
+        external_processing: true,
+        allowed_conversations: vec![],
+        allowed_senders: vec![],
+        access: Access::Tool {
+            tool: ToolSpec::ActivityRecord {},
+        },
+    }
+}
+fn status_resource() -> Resource {
+    let mut status = wiki_resource();
+    status.id = "azure-devops-status".into();
+    status.access = Access::Tool {
+        tool: ToolSpec::AzureDevopsStatus {
+            repository: "private".into(),
+            path: "catalog.toml".into(),
+            catalog: vec![],
+            secret_ref: "secret://ado/read".into(),
+            link_secret_ref: None,
+        },
+    };
+    status
+}
+/// Answers `text` from `sources` with the record of yesterday and the day before, returning
+/// the evidence the model saw and the message's audit.
+async fn answer_with_record(
+    text: &str,
+    sources: &[&str],
+) -> (Vec<String>, personal_teams_assistant::state::Audit) {
+    let server = MockServer::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let store = support::store(&dir);
+    let graph = support::graph(&server, store.clone());
+    let mut cfg = (*graph.config).clone();
+    cfg.policy.dry_run = true;
+    cfg.server.data_dir = dir.path().into();
+    let today = cfg
+        .activity_registration
+        .zoned(chrono::Utc::now())
+        .date_naive();
+    let activities = personal_teams_assistant::activity::store::Database::open(
+        &dir.path().join("activity-registration.db"),
+    )
+    .unwrap();
+    let pr = "https://dev.azure.com/example/Payments/_git/api/pullrequest/";
+    for (key, back, task) in [("y1", 1, 26410), ("y2", 2, 26411)] {
+        let day = (today - chrono::Duration::days(back)).to_string();
+        record(
+            &activities,
+            key,
+            &day,
+            &format!("{pr}{task}"),
+            "done",
+            Some(task),
+        );
+    }
+    drop(activities);
+    let mut map = knowledge(&dir);
+    map.resources = vec![wiki_resource(), status_resource(), record_resource()];
+    let llm = Arc::new(EvidenceLlm(Default::default()));
+    let pipeline = Pipeline {
+        config: Arc::new(cfg),
+        store: store.clone(),
+        adapter: graph,
+        knowledge: map,
+        llm: llm.clone(),
+        tools: Arc::new(QuietActivity),
+        redactor: redactor(),
+    };
+    let sources: Vec<String> = sources.iter().map(|s| (*s).to_owned()).collect();
+    let result = simulation::run(
+        &pipeline,
+        SimulationRequest {
+            session: "record".into(),
+            text: text.into(),
+            group: false,
+            mentioned: false,
+            sources: sources.clone(),
+        },
+        Some(&sources),
+    )
+    .await
+    .unwrap();
+    assert_eq!(result.status, "dry_run", "{}", result.reason);
+    let rows = personal_teams_assistant::state::Store::inspect(
+        &dir.path().join("test.db"),
+        false,
+        1,
+        None,
+        true,
+    )
+    .unwrap();
+    assert!(server.received_requests().await.unwrap().is_empty());
+    let evidence = llm.0.lock().unwrap().clone();
+    (
+        evidence,
+        serde_json::from_value(rows[0]["audit"].clone()).unwrap(),
+    )
+}
+#[tokio::test]
+async fn the_activity_record_is_a_source_of_its_own() {
+    // Authorized on its own, without Azure DevOps activity: a recap reads only the record.
+    let (evidence, audit) = answer_with_record("¿Qué hice ayer?", &["activity-record"]).await;
+    assert!(
+        evidence[0].contains("«Registro y1» (2 h)"),
+        "{}",
+        evidence[0]
+    );
+    assert!(!evidence[0].contains("Registro y2"), "{}", evidence[0]);
+    assert_eq!(audit.tools, vec!["read_recorded_activities"]);
+    assert_eq!(audit.source.as_deref(), Some("activity-record"));
+    // Once the map has a record source, Azure DevOps activity no longer carries the record:
+    // the same question reads the activity tool and nothing the Activities section recorded.
+    let (evidence, audit) = answer_with_record("¿Qué hice ayer?", &["azure-devops-status"]).await;
+    assert!(!evidence[0].contains("Registro y1"), "{}", evidence[0]);
+    assert_eq!(audit.tools, vec!["get_azure_devops_status"]);
+    // Chosen with no day named, it reads the recent window: both days.
+    let (evidence, audit) =
+        answer_with_record("Resume mi trabajo registrado", &["activity-record"]).await;
+    assert!(evidence[0].contains("Registro y1"), "{}", evidence[0]);
+    assert!(evidence[0].contains("Registro y2"), "{}", evidence[0]);
+    assert_eq!(audit.tools, vec!["read_recorded_activities"]);
+    assert_eq!(audit.source.as_deref(), Some("activity-record"));
+    // A status round reads Azure DevOps activity and the record, each from its source.
+    let (evidence, audit) = answer_with_record(
+        "¿Cuál es el avance de mis HU?",
+        &["azure-devops-status", "activity-record"],
+    )
+    .await;
+    assert!(evidence[0].contains("Registro y1"), "{}", evidence[0]);
+    assert_eq!(
+        audit.tools,
+        vec!["get_azure_devops_status", "read_recorded_activities"]
+    );
+    assert_eq!(
+        audit.source.as_deref(),
+        Some("azure-devops-status,activity-record")
+    );
 }
 
 /// A status round: the named HU comes from the status tool (whoever holds it now) and the
@@ -3533,6 +3732,7 @@ async fn a_status_round_reads_the_named_hu_and_the_users_deployment_page() {
         tool: ToolSpec::AzureDevopsStatus {
             repository: "private".into(),
             path: "catalog.toml".into(),
+            catalog: vec![],
             secret_ref: "secret://ado/read".into(),
             link_secret_ref: None,
         },

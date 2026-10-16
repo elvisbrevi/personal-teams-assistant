@@ -1560,7 +1560,18 @@ function setFilter(filter) {
 const toolNames = {
   azure_devops_wiki: 'Azure DevOps Wiki', azure_devops_status: t('Azure DevOps activity'), azure_devops: t('Azure DevOps work items'),
   sql_server: 'SQL Server', rabbitmq: t('RabbitMQ queue'), http: 'HTTP GET', teams_messages: t('My Teams messages'),
+  activity_record: t('Activity record'),
 };
+
+/** The activity record as a new source: disabled, without audiences or external processing. */
+function recordSource() {
+  return { id: 'activity-record', description: t('Work you approved in Activities, by day: tasks, HU and hours.'),
+    topics: [], enabled: false, external_processing: false, allowed_conversations: [], allowed_senders: [],
+    kind: 'tool', tool: { type: 'activity_record' } };
+}
+
+/** An inline Azure DevOps catalog as its organizations' names. */
+const catalogText = catalog => catalog.map(c => c.organization.replace(/^https:\/\/dev\.azure\.com\//, '').replace(/\/$/, '')).join(', ');
 
 function kindName(resource) {
   if (resource.kind === 'file') return t('File');
@@ -1574,6 +1585,8 @@ function accessText(resource) {
   const tool = resource.tool ?? {};
   if (tool.organization) return `${tool.organization} / ${tool.project}`;
   if (tool.repository) return `${t('Catalog')}: ${tool.repository} / ${tool.path}`;
+  if (tool.catalog?.length) return `${t('Catalog')}: ${catalogText(tool.catalog)}`;
+  if (tool.type === 'activity_record') return t('Tasks you approved in Activities, read on this device');
   if (tool.url) return tool.url;
   if (tool.operation) return `${t('Fixed query')}: ${tool.operation}`;
   if (tool.type === 'teams_messages') return t('Your own messages, read with the connected Microsoft account');
@@ -1598,6 +1611,7 @@ function renderResources() {
   if (!resources.length) {
     container.append(el('div', { class: 'empty' }, el('p', { textContent: t('No sources yet. Add a file from a repository or register the Wiki with pta sources add.') })));
   }
+  $('#record-offer').hidden = resources.some(r => r.tool?.type === 'activity_record');
   for (const resource of resources) {
     let state = sourceState(resource);
     const facts = el('p', { class: 'resource-facts' });
@@ -2084,6 +2098,16 @@ $('#add-source').onclick = () => {
   markDirty();
   renderResources();
   notify(t('Source {id} added, disabled. Save the changes to keep it.', { id }));
+};
+$('#add-record').onclick = () => {
+  if (current.map.resources.some(r => r.tool?.type === 'activity_record')) return;
+  const source = recordSource();
+  if (current.map.resources.some(r => r.id === source.id)) return fail(t('That ID already exists.'));
+  current.map.resources.push(source);
+  openSources.add(source.id);
+  markDirty({ target: $('#add-record') });
+  renderResources();
+  notify(t('Source {id} added, disabled. Enable it, authorize it, choose its conversations and save.', { id: source.id }));
 };
 $('#chat-all').onclick = () => {
   const boxes = [...$('#chat-sources').querySelectorAll('input')];

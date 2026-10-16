@@ -19,8 +19,16 @@ pub enum ToolSpec {
         secret_ref: String,
     },
     AzureDevopsStatus {
+        /// The catalog as a TOML file in a knowledge repository (`repository` + `path`), or
+        /// inline in `catalog`; exactly one of them.
+        #[serde(default, skip_serializing_if = "String::is_empty")]
         repository: String,
+        #[serde(default, skip_serializing_if = "crate::tools::empty_path")]
         path: PathBuf,
+        /// Organizations, projects and author written in the map itself, so no knowledge
+        /// repository is needed.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        catalog: Vec<CatalogSource>,
         secret_ref: String,
         /// A separate credential with permission to edit work items. When set, the user may
         /// link work an activity review found to one of their work items, from the personal
@@ -29,8 +37,12 @@ pub enum ToolSpec {
         link_secret_ref: Option<String>,
     },
     AzureDevopsWiki {
+        #[serde(default, skip_serializing_if = "String::is_empty")]
         repository: String,
+        #[serde(default, skip_serializing_if = "crate::tools::empty_path")]
         path: PathBuf,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        catalog: Vec<CatalogSource>,
         secret_ref: String,
         #[serde(default)]
         wiki_ids: Vec<String>,
@@ -53,6 +65,30 @@ pub enum ToolSpec {
     /// The user's own messages in their Teams chats, read with the delegated Graph session
     /// (`Chat.Read`, already granted). Used to review the user's activity.
     TeamsMessages {},
+    /// What the Activities section recorded by day: the tasks the user approved, with their HU
+    /// and hours, and verified work not registered yet. Read locally from
+    /// `activity-registration.db`; no credential or network.
+    ActivityRecord {},
+}
+/// One Azure DevOps organization of a catalog: the projects to read (`*` = the projects of the
+/// teams the user belongs to) and the user's author email.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CatalogSource {
+    pub organization: String,
+    pub projects: Vec<String>,
+    pub author_email: String,
+}
+pub(crate) fn empty_path(path: &std::path::Path) -> bool {
+    path.as_os_str().is_empty()
+}
+/// An inline catalog as the TOML text the Azure DevOps readers parse.
+pub fn catalog_text(catalog: &[CatalogSource]) -> Result<String> {
+    #[derive(Serialize)]
+    struct Catalog<'a> {
+        sources: &'a [CatalogSource],
+    }
+    Ok(toml::to_string(&Catalog { sources: catalog })?)
 }
 #[derive(Clone, Copy, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -85,31 +121,26 @@ impl ToolSpec {
                 );
             }
             Self::AzureDevopsStatus {
-                repository,
-                path,
                 secret_ref,
                 link_secret_ref,
+                ..
             } => {
                 ensure!(
-                    !repository.is_empty()
+                    self.valid_catalog_reference()
                         && secret_ref.starts_with("secret://")
                         && link_secret_ref
                             .as_ref()
-                            .is_none_or(|s| s.starts_with("secret://") && s != secret_ref)
-                        && path.extension().is_some_and(|ext| ext == "toml"),
+                            .is_none_or(|s| s.starts_with("secret://") && s != secret_ref),
                     "invalid ADO status catalog reference"
                 );
             }
             Self::AzureDevopsWiki {
-                repository,
-                path,
                 secret_ref,
                 wiki_ids,
                 ..
             } => {
                 ensure!(
-                    !repository.is_empty()
-                        && path.extension().is_some_and(|e| e == "toml")
+                    self.valid_catalog_reference()
                         && secret_ref.starts_with("secret://")
                         && wiki_ids.len() <= 100,
                     "invalid Wiki catalog reference"
@@ -138,9 +169,77 @@ impl ToolSpec {
                     );
                 }
             }
-            Self::TeamsMessages {} => {}
+            Self::TeamsMessages {} | Self::ActivityRecord {} => {}
         }
         Ok(())
+    }
+    /// A catalog file in a knowledge repository or an inline catalog, never both; an inline
+    /// one must also be a valid catalog.
+    fn valid_catalog_reference(&self) -> bool {
+        let (Self::AzureDevopsStatus {
+            repository,
+            path,
+            catalog,
+            ..
+        }
+        | Self::AzureDevopsWiki {
+            repository,
+            path,
+            catalog,
+            ..
+        }) = self
+        else {
+            return false;
+        };
+        if catalog.is_empty() {
+            !repository.is_empty() && path.extension().is_some_and(|e| e == "toml")
+        } else {
+            repository.is_empty()
+                && empty_path(path)
+                && catalog_text(catalog)
+                    .is_ok_and(|text| crate::ado::validate_catalog(&text).is_ok())
+        }
+    }
+    /// The Azure DevOps catalog (TOML) of an activity or Wiki source: inline, or read from its
+    /// file in a declared knowledge repository.
+    pub fn catalog(&self, repositories: &BTreeMap<String, PathBuf>) -> Result<String> {
+        match self {
+            Self::AzureDevopsStatus {
+                repository,
+                path,
+                catalog,
+                ..
+            }
+            | Self::AzureDevopsWiki {
+                repository,
+                path,
+                catalog,
+                ..
+            } => {
+                if catalog.is_empty() {
+                    crate::knowledge::read_repository_file(repositories, repository, path)
+                } else {
+                    catalog_text(catalog)
+                }
+            }
+            _ => anyhow::bail!("this source has no Azure DevOps catalog"),
+        }
+    }
+    /// The knowledge repository whose file holds the catalog, if it is not inline.
+    pub fn catalog_repository(&self) -> Option<&str> {
+        match self {
+            Self::AzureDevopsStatus {
+                repository,
+                catalog,
+                ..
+            }
+            | Self::AzureDevopsWiki {
+                repository,
+                catalog,
+                ..
+            } if catalog.is_empty() => Some(repository),
+            _ => None,
+        }
     }
     pub fn name(&self) -> &'static str {
         match self {
@@ -155,6 +254,7 @@ impl ToolSpec {
             Self::Rabbitmq { .. } => "get_queue_status",
             Self::Http { .. } => "http_get",
             Self::TeamsMessages {} => "get_own_teams_messages",
+            Self::ActivityRecord {} => "read_recorded_activities",
         }
     }
     /// Sources an activity review reads: Azure DevOps activity, Wiki edits, own messages.
@@ -274,8 +374,6 @@ pub struct Tools {
 impl Tools {
     fn registration_catalog(&self, spec: &ToolSpec, write: bool) -> Result<(String, String)> {
         let ToolSpec::AzureDevopsStatus {
-            repository,
-            path,
             secret_ref,
             link_secret_ref,
             ..
@@ -291,7 +389,7 @@ impl Tools {
             secret_ref
         };
         Ok((
-            crate::knowledge::read_repository_file(&self.repositories, repository, path)?,
+            spec.catalog(&self.repositories)?,
             crate::security::resolve(reference, &self.bindings)?,
         ))
     }
@@ -316,16 +414,9 @@ impl ReadOnlyTool for Tools {
     ) -> Result<String> {
         spec.validate()?;
         let days = days.clamp(1, crate::ado::registration::LOOKBACK_DAYS);
-        if let ToolSpec::AzureDevopsStatus {
-            repository,
-            path,
-            secret_ref,
-            ..
-        } = spec
-        {
+        if let ToolSpec::AzureDevopsStatus { secret_ref, .. } = spec {
             let operation = async {
-                let catalog =
-                    crate::knowledge::read_repository_file(&self.repositories, repository, path)?;
+                let catalog = spec.catalog(&self.repositories)?;
                 let key = crate::security::resolve(secret_ref, &self.bindings)?;
                 let evidence = crate::ado::review::review(
                     &self.client,
@@ -340,16 +431,13 @@ impl ReadOnlyTool for Tools {
             };
             tokio::time::timeout(std::time::Duration::from_secs(180), operation).await?
         } else if let ToolSpec::AzureDevopsWiki {
-            repository,
-            path,
             secret_ref,
             wiki_ids,
             ..
         } = spec
         {
             let operation = async {
-                let catalog =
-                    crate::knowledge::read_repository_file(&self.repositories, repository, path)?;
+                let catalog = spec.catalog(&self.repositories)?;
                 let key = crate::security::resolve(secret_ref, &self.bindings)?;
                 let reader = crate::ado::wiki::Reader::new(&self.client, &key, &catalog, wiki_ids)?
                     .with_deadline(90)
@@ -562,17 +650,8 @@ impl ReadOnlyTool for Tools {
                         ..Default::default()
                     })?)
                 }
-                ToolSpec::AzureDevopsStatus {
-                    repository,
-                    path,
-                    secret_ref,
-                    ..
-                } => {
-                    let catalog = crate::knowledge::read_repository_file(
-                        &self.repositories,
-                        repository,
-                        path,
-                    )?;
+                ToolSpec::AzureDevopsStatus { secret_ref, .. } => {
+                    let catalog = spec.catalog(&self.repositories)?;
                     let key = crate::security::resolve(secret_ref, &self.bindings)?;
                     let mut evidence = crate::ado::status(
                         &self.client,
@@ -612,22 +691,17 @@ impl ReadOnlyTool for Tools {
                     Ok(serde_json::to_string(&evidence)?)
                 }
                 ToolSpec::AzureDevopsWiki {
-                    repository,
-                    path,
                     secret_ref,
                     wiki_ids,
                     author_mode,
                     repository_docs,
+                    ..
                 } => {
                     let query = match crate::ado::wiki::question_query(question) {
                         Ok(query)=>query,
                         Err(_)=>return Ok(serde_json::to_string(&crate::ado::wiki::WikiResult{partial:true,warnings:vec!["The Wiki search topic is missing; ask to specify the procedure or project.".into()],..Default::default()})?),
                     };
-                    let catalog = crate::knowledge::read_repository_file(
-                        &self.repositories,
-                        repository,
-                        path,
-                    )?;
+                    let catalog = spec.catalog(&self.repositories)?;
                     let key = crate::security::resolve(secret_ref, &self.bindings)?;
                     let reader =
                         crate::ado::wiki::Reader::new(&self.client, &key, &catalog, wiki_ids)?
@@ -678,6 +752,11 @@ impl ReadOnlyTool for Tools {
                         ),
                     )?)
                 }
+                // The pipeline reads the record itself: it knows the days asked and which
+                // sources the conversation may see.
+                ToolSpec::ActivityRecord {} => {
+                    anyhow::bail!("the activity record is read by the pipeline")
+                }
                 ToolSpec::Http { url, secret_ref } => {
                     let mut req = self.client.get(url);
                     if let Some(s) = secret_ref {
@@ -705,17 +784,8 @@ impl ReadOnlyTool for Tools {
         let since = chrono::Utc::now() - chrono::Duration::days(days);
         let operation = async {
             let evidence = match spec {
-                ToolSpec::AzureDevopsStatus {
-                    repository,
-                    path,
-                    secret_ref,
-                    ..
-                } => {
-                    let catalog = crate::knowledge::read_repository_file(
-                        &self.repositories,
-                        repository,
-                        path,
-                    )?;
+                ToolSpec::AzureDevopsStatus { secret_ref, .. } => {
+                    let catalog = spec.catalog(&self.repositories)?;
                     let key = crate::security::resolve(secret_ref, &self.bindings)?;
                     crate::ado::review::review(
                         &self.client,
@@ -728,17 +798,11 @@ impl ReadOnlyTool for Tools {
                     .await?
                 }
                 ToolSpec::AzureDevopsWiki {
-                    repository,
-                    path,
                     secret_ref,
                     wiki_ids,
                     ..
                 } => {
-                    let catalog = crate::knowledge::read_repository_file(
-                        &self.repositories,
-                        repository,
-                        path,
-                    )?;
+                    let catalog = spec.catalog(&self.repositories)?;
                     let key = crate::security::resolve(secret_ref, &self.bindings)?;
                     let reader =
                         crate::ado::wiki::Reader::new(&self.client, &key, &catalog, wiki_ids)?
@@ -761,8 +825,6 @@ impl ReadOnlyTool for Tools {
     async fn status_pages(&self, spec: &ToolSpec, question: &str) -> Result<String> {
         spec.validate()?;
         let ToolSpec::AzureDevopsWiki {
-            repository,
-            path,
             secret_ref,
             wiki_ids,
             ..
@@ -774,8 +836,7 @@ impl ReadOnlyTool for Tools {
         let days = crate::ado::MAX_WINDOW_DAYS;
         let since = chrono::Utc::now() - chrono::Duration::days(days);
         let operation = async {
-            let catalog =
-                crate::knowledge::read_repository_file(&self.repositories, repository, path)?;
+            let catalog = spec.catalog(&self.repositories)?;
             let key = crate::security::resolve(secret_ref, &self.bindings)?;
             let reader = crate::ado::wiki::Reader::new(&self.client, &key, &catalog, wiki_ids)?
                 .with_deadline(50)
@@ -798,16 +859,10 @@ impl ReadOnlyTool for Tools {
         spec: &ToolSpec,
         id: u64,
     ) -> Result<Option<crate::ado::link::Target>> {
-        let ToolSpec::AzureDevopsStatus {
-            repository,
-            path,
-            secret_ref,
-            ..
-        } = spec
-        else {
+        let ToolSpec::AzureDevopsStatus { secret_ref, .. } = spec else {
             anyhow::bail!("work item reads unsupported");
         };
-        let catalog = crate::knowledge::read_repository_file(&self.repositories, repository, path)?;
+        let catalog = spec.catalog(&self.repositories)?;
         let key = crate::security::resolve(secret_ref, &self.bindings)?;
         tokio::time::timeout(
             std::time::Duration::from_secs(20),
@@ -822,15 +877,13 @@ impl ReadOnlyTool for Tools {
         activity: &crate::ado::link::Linkable,
     ) -> Result<crate::ado::link::LinkStatus> {
         let ToolSpec::AzureDevopsStatus {
-            repository,
-            path,
             link_secret_ref: Some(link_secret_ref),
             ..
         } = spec
         else {
             anyhow::bail!("linking is not set up");
         };
-        let catalog = crate::knowledge::read_repository_file(&self.repositories, repository, path)?;
+        let catalog = spec.catalog(&self.repositories)?;
         let key = crate::security::resolve(link_secret_ref, &self.bindings)?;
         // A deadline reached mid-request may or may not have written the link.
         tokio::time::timeout(
@@ -848,15 +901,13 @@ impl ReadOnlyTool for Tools {
         activities: &[&crate::ado::link::Linkable],
     ) -> Result<(crate::ado::link::LinkStatus, Option<u64>)> {
         let ToolSpec::AzureDevopsStatus {
-            repository,
-            path,
             link_secret_ref: Some(link_secret_ref),
             ..
         } = spec
         else {
             anyhow::bail!("linking is not set up");
         };
-        let catalog = crate::knowledge::read_repository_file(&self.repositories, repository, path)?;
+        let catalog = spec.catalog(&self.repositories)?;
         let key = crate::security::resolve(link_secret_ref, &self.bindings)?;
         // A deadline reached mid-request may or may not have created the task.
         tokio::time::timeout(
@@ -927,6 +978,63 @@ mod tests {
             )
             .is_err()
         );
+    }
+    #[test]
+    fn the_activity_record_is_a_local_source_that_reviews_nothing() {
+        let map = crate::knowledge::KnowledgeMap::parse(
+            "[[resources]]\nid = \"activity-record\"\ndescription = \"Approved work\"\ntopics = []\nenabled = false\nexternal_processing = false\nallowed_conversations = []\nkind = \"tool\"\n[resources.tool]\ntype = \"activity_record\"\n",
+        )
+        .unwrap();
+        let crate::knowledge::Access::Tool { tool } = &map.resources[0].access else {
+            panic!("tool expected");
+        };
+        assert_eq!(tool.name(), "read_recorded_activities");
+        // Registration reviews read Azure DevOps, the Wiki and Teams; the record is their result.
+        assert!(!tool.reviews_activity());
+    }
+    #[test]
+    fn an_azure_devops_catalog_may_live_in_the_map() {
+        let source = |tool: &str| {
+            format!(
+                "[[resources]]\nid = \"azure-devops-status\"\ndescription = \"Activity\"\ntopics = []\nenabled = false\nexternal_processing = false\nallowed_conversations = []\nkind = \"tool\"\n[resources.tool]\ntype = \"azure_devops_status\"\nsecret_ref = \"secret://ado\"\n{tool}"
+            )
+        };
+        let inline = "[[resources.tool.catalog]]\norganization = \"https://dev.azure.com/example/\"\nprojects = [\"*\"]\nauthor_email = \"me@example.test\"\n";
+        // No repository is declared: an inline catalog needs none.
+        let map = crate::knowledge::KnowledgeMap::parse(&source(inline)).unwrap();
+        let crate::knowledge::Access::Tool { tool } = &map.resources[0].access else {
+            panic!("tool expected");
+        };
+        assert_eq!(tool.catalog_repository(), None);
+        let text = tool.catalog(&BTreeMap::new()).unwrap();
+        crate::ado::validate_catalog(&text).unwrap();
+        assert!(text.contains("me@example.test"), "{text}");
+        // Saved again, it keeps the catalog and writes no empty repository or path.
+        let saved = toml::to_string(&map).unwrap();
+        assert!(!saved.contains("repository"), "{saved}");
+        assert!(!saved.contains("path"), "{saved}");
+        crate::knowledge::KnowledgeMap::parse(&saved).unwrap();
+        // A file reference still needs its declared repository.
+        let file = "repository = \"knowledge\"\npath = \"azure-devops.toml\"\n";
+        assert!(crate::knowledge::KnowledgeMap::parse(&source(file)).is_err());
+        let declared = format!(
+            "[repositories]\nknowledge = \"/tmp/knowledge\"\n{}",
+            source(file)
+        );
+        let map = crate::knowledge::KnowledgeMap::parse(&declared).unwrap();
+        let crate::knowledge::Access::Tool { tool } = &map.resources[0].access else {
+            panic!("tool expected");
+        };
+        assert_eq!(tool.catalog_repository(), Some("knowledge"));
+        // Both at once, neither, or an invalid inline catalog are rejected.
+        let both = format!(
+            "[repositories]\nknowledge = \"/tmp/knowledge\"\n{}",
+            source(&format!("{file}{inline}"))
+        );
+        assert!(crate::knowledge::KnowledgeMap::parse(&both).is_err());
+        assert!(crate::knowledge::KnowledgeMap::parse(&source("")).is_err());
+        let foreign = inline.replace("dev.azure.com", "example.com");
+        assert!(crate::knowledge::KnowledgeMap::parse(&source(&foreign)).is_err());
     }
     #[test]
     fn tool_argument_is_closed() {

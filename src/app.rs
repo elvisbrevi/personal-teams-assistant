@@ -1436,20 +1436,18 @@ async fn azure_wiki(
     }
     let Access::Tool {
         tool:
-            ToolSpec::AzureDevopsWiki {
-                repository,
-                path,
+            tool @ ToolSpec::AzureDevopsWiki {
                 secret_ref,
                 wiki_ids,
                 author_mode,
                 repository_docs,
+                ..
             },
     } = &source.access
     else {
         return Err("[invalid_input] Source is not an Azure DevOps Wiki tool.".into());
     };
-    let catalog = crate::knowledge::read_repository_file(&map.repositories, repository, path)
-        .map_err(fail)?;
+    let catalog = tool.catalog(&map.repositories).map_err(fail)?;
     let key = security::resolve(secret_ref, &config.secrets).map_err(|_| {
         "[not_ready] Azure credential unavailable; inspect credentials list.".to_owned()
     })?;
