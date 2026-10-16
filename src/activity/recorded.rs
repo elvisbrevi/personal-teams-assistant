@@ -61,11 +61,16 @@ fn work_item(target: &Target, id: u64, label: String, url: &str) -> Option<Refer
     reference.validate().ok().map(|_| reference)
 }
 
+/// Whether an entry's work is in Azure DevOps: a task the app created (or may have created),
+/// or work already linked to one.
+fn registered(state: &str) -> bool {
+    matches!(state, "done" | "uncertain" | "already_registered")
+}
 /// One line for an entry and the references it names. Registered tasks and their HU are
 /// named by number only when their link verifies.
 fn line(entry: &Entry) -> Option<(String, Vec<Reference>)> {
     let registered = match entry.state.as_str() {
-        "done" | "uncertain" | "already_registered" => true,
+        state if registered(state) => true,
         "pending" | "refining" | "failed" => false,
         _ => return None,
     };
@@ -118,9 +123,10 @@ fn line(entry: &Entry) -> Option<(String, Vec<Reference>)> {
     Some((text, references))
 }
 
-/// The recorded work between `since` and `until` (yyyy-mm-dd, inclusive), newest day first,
-/// keeping only entries whose activities all come from `allowed` sources. `None` when
-/// nothing can be shown.
+/// The recorded work between `since` and `until` (yyyy-mm-dd, inclusive), newest day first.
+/// A registered task shows as the user approved it and wrote it to Azure DevOps; work not
+/// registered yet shows only when its activities all come from `allowed` sources, because its
+/// text is drawn from them. `None` when nothing can be shown.
 pub fn evidence(
     entries: &[Entry],
     allowed: &[Origin],
@@ -131,10 +137,11 @@ pub fn evidence(
         .iter()
         .filter(|e| e.day.as_str() >= since && e.day.as_str() <= until)
         .filter(|e| {
-            !e.activities.is_empty()
-                && e.activities
-                    .iter()
-                    .all(|a| origin(a).is_some_and(|o| allowed.contains(&o)))
+            registered(&e.state)
+                || (!e.activities.is_empty()
+                    && e.activities
+                        .iter()
+                        .all(|a| origin(a).is_some_and(|o| allowed.contains(&o))))
         })
         .collect();
     shown.sort_by(|a, b| b.day.cmp(&a.day).then(b.updated_at.cmp(&a.updated_at)));
@@ -434,11 +441,13 @@ mod tests {
             entry("2026-10-13", "done", commit, Some(26401)),
             entry("2026-10-14", "pending", commit, None),
             entry("2026-10-14", "done", chat, Some(26402)),
+            entry("2026-10-11", "pending", chat, None),
             entry("2026-10-12", "dismissed", commit, None),
             entry("2026-08-01", "done", commit, Some(1)),
         ];
         let evidence = evidence(&entries, &[Origin::Activity], "2026-09-09", "2026-10-14").unwrap();
-        // Newest day first; a chat-based entry, a dismissed one and an old one are left out.
+        // Newest day first; work not registered yet that came from a chat, a dismissed entry
+        // and an old one are left out. A registered task shows wherever it came from.
         let days: Vec<&str> = evidence
             .blocks
             .iter()
@@ -463,16 +472,19 @@ mod tests {
         assert!(evidence.text.contains(
             "- Registered as task #26401 under #23553 «Pagos QR»: «Trabajo del 2026-10-13» (2 h)"
         ));
-        assert!(!evidence.text.contains("26402") && !evidence.text.contains("2026-08-01"));
+        assert!(evidence.text.contains("#26402"), "{}", evidence.text);
+        assert!(!evidence.text.contains("2026-10-11") && !evidence.text.contains("2026-08-01"));
         let urls: Vec<&str> = evidence.references.iter().map(|r| r.url.as_str()).collect();
         assert_eq!(
             urls,
             [
                 "https://dev.azure.com/example/Payments/_workitems/edit/23553",
+                "https://dev.azure.com/example/Payments/_workitems/edit/26402",
                 "https://dev.azure.com/example/Payments/_workitems/edit/26401"
             ]
         );
-        // With the chat authorized too, its entry shows; with nothing to show, no section.
+        // With the chat authorized too, its unregistered work shows; with nothing to show, no
+        // section.
         let both = super::evidence(
             &entries,
             &[Origin::Activity, Origin::Teams],
@@ -480,8 +492,9 @@ mod tests {
             "2026-10-14",
         )
         .unwrap();
-        assert!(both.text.contains("#26402"));
-        assert!(super::evidence(&entries, &[Origin::Wiki], "2026-09-09", "2026-10-14").is_none());
+        assert!(both.text.contains("2026-10-11"));
+        let pending = [entry("2026-10-14", "pending", chat, None)];
+        assert!(super::evidence(&pending, &[Origin::Wiki], "2026-09-09", "2026-10-14").is_none());
     }
 
     #[test]
