@@ -70,6 +70,14 @@ and a pull request named in a status question is read so it can be linked. The
 full list of cited references and Wiki pages read stays in the message history
 (Messages tab and `pta audit show`).
 
+Version 0.7.21 makes the kinds of request configurable. In Knowledge › Cases (or
+`pta cases`), each built-in case — every answer, status round, what you did,
+activity review, documentation, request for you, informational message — shows how
+the model recognizes it and how it is answered; you can change those texts, add
+words that identify it, choose the sources it reads or turn it off. The rules on
+evidence, links and sensitive data stay. A context with a description is now also
+recognized by meaning.
+
 Version 0.7.20 adds a knowledge index. A whole repository can be a source of its
 own, with its description: each answer reads the sections that best match the
 request. Verified notes (Knowledge › Notes, `pta notes`) are searched the same way,

@@ -202,6 +202,8 @@ button.secondary.busy::after, button.danger.busy::after { border-color: var(--br
 .resource-edit label { margin: 0 0 .5rem; font-weight: 600; font-size: .82rem; color: var(--muted); }
 .resource-edit label input { color: var(--text); }
 .resource-edit .actions { margin: .2rem 0 0; justify-content: flex-end; }
+.resource-edit .resource-toggles { margin: .3rem 0 .9rem; }
+.resource-edit label > small { display: block; margin: .1rem 0 .2rem; }
 .add-form { margin-top: .8rem; border: 1px dashed var(--border-strong); border-radius: 11px; padding: .2rem .9rem; }
 .add-form[open] { padding-bottom: .9rem; }
 .add-form summary { cursor: pointer; font-weight: 600; color: var(--brand); padding: .6rem 0; }

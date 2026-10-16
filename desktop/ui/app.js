@@ -348,7 +348,7 @@ async function reload() {
   dirtyGroups.clear();
   renderSavebar();
   renderLive();
-  renderCredentials(); renderRepositories(); renderResources(); renderContexts(); renderNoteContexts(); renderChatSources();
+  renderCredentials(); renderRepositories(); renderResources(); renderContexts(); renderCases(); renderNoteContexts(); renderChatSources();
   await Promise.all([loadChain(), loadSelfChat()]);
 }
 
@@ -1815,6 +1815,99 @@ function renderContexts() {
       el('div', { class: 'resource-head' }, el('strong', { class: 'title', textContent: context.name || context.id }), badge(context.id, 'muted'), el('span', { class: 'grow' }),
         badge(tn(context.sources.length, '1 source', '{n} sources'), context.sources.length ? 'active' : 'warn')),
       facts, edit));
+  }
+}
+
+// ---------------------------------------------------------------- cases
+
+/** What each built-in case is, in the interface language (the host sends its defaults). */
+const caseTexts = {
+  general: { name: t('Every answer'), summary: t('How every answer sounds, and how the model recognizes a question.') },
+  status_round: { name: t('Status round'), summary: t('Progress, commitments, risks or blockers of your work («avance», «compromiso», «bloqueos», a named HU).'),
+    sources: t('As built it reads Azure DevOps activity, your own recent Wiki pages and the activity record.') },
+  recap: { name: t('What you did'), summary: t('What you did on a day or period («¿qué hice ayer?», «la semana pasada»), from the activity record alone.') },
+  activity_review: { name: t('Activity review'), summary: t('Your work that no task records yet, compared with your work items.'),
+    sources: t('As built it reads Azure DevOps activity, Wiki edits, your Teams messages and the activity record.') },
+  documentation: { name: t('Documentation'), summary: t('How something works or is used («según la wiki», endpoints, procedures), from the Wiki.'),
+    sources: t('As built it reads every authorized Wiki.') },
+  personal_request: { name: t('Request for you'), summary: t('A call, a meeting or your availability: left for you to answer, outside your personal chat.') },
+  statement: { name: t('Informational message'), summary: t('A message that asks for no answer: left unanswered, and replied to only when you ask for an answer in Messages.') },
+};
+/** Cases whose edit fold is open, kept across re-renders. */
+const openCases = new Set();
+
+/** Keeps only what differs from the built-in case; an unchanged case leaves the map. */
+function setCase(id, change) {
+  const clean = { id };
+  if (change.enabled === false) clean.enabled = false;
+  for (const key of ['description', 'instructions']) if (change[key]?.trim()) clean[key] = change[key].trim();
+  for (const key of ['keywords', 'sources']) if (change[key]?.length) clean[key] = change[key];
+  current.map.cases = (current.map.cases ?? []).filter(c => c.id !== id);
+  if (Object.keys(clean).length > 1) current.map.cases.push(clean);
+}
+
+function renderCases() {
+  const container = $('#cases');
+  container.replaceChildren();
+  const changed = (current.map.cases ?? []).length;
+  $('#cases-summary').textContent = changed ? tn(changed, '1 changed', '{n} changed') : t('As built');
+  for (const built of current.cases ?? []) {
+    const texts = caseTexts[built.id] ?? { name: built.name, summary: built.summary };
+    const change = structuredClone((current.map.cases ?? []).find(c => c.id === built.id) ?? { id: built.id });
+    const badges = el('span', { class: 'case-badges' });
+    const renderBadges = () => badges.replaceChildren(
+      ...(change.enabled === false ? [badge(t('Off'), 'warn')] : []),
+      ...((current.map.cases ?? []).some(c => c.id === built.id) ? [badge(t('Changed'), 'active')] : [badge(t('As built'), 'muted')]));
+    renderBadges();
+    const keep = () => { setCase(built.id, change); markDirty({ target: container }); renderBadges(); summary(); };
+    const summary = () => {
+      const count = (current.map.cases ?? []).length;
+      $('#cases-summary').textContent = count ? tn(count, '1 changed', '{n} changed') : t('As built');
+    };
+    const area = (label, value, fallback, onchange) => {
+      const element = el('textarea', { value: value || fallback, rows: 6 });
+      element.oninput = () => { onchange(element.value.trim() === fallback.trim() ? '' : element.value); keep(); };
+      return el('label', {}, label, element);
+    };
+    const parts = [];
+    if (built.optional) {
+      const box = el('input', { type: 'checkbox', checked: change.enabled !== false });
+      box.onchange = () => { change.enabled = box.checked; keep(); };
+      parts.push(el('div', { class: 'resource-toggles' }, el('label', { class: 'check' }, box, t('Use this case'))));
+    }
+    if (built.description) parts.push(area(t('How the model recognizes it'), change.description, built.description, value => { change.description = value; }));
+    if (built.keywords) {
+      const words = el('input', { value: (change.keywords ?? []).join(', '), placeholder: t('Comma separated'), spellcheck: false });
+      words.oninput = () => { change.keywords = names(words.value); keep(); };
+      parts.push(el('label', {}, t('Extra words that identify it'), el('small', { textContent: t('Besides the built-in ones; matched whole, ignoring case and accents.') }), words));
+    }
+    if (built.sources) {
+      const choices = el('fieldset', { class: 'choices' }, el('legend', { textContent: t('Sources it reads') }),
+        el('p', { class: 'hint', textContent: `${t('With none chosen, as built.')} ${texts.sources ?? ''}` }));
+      for (const resource of current.map.resources) {
+        const box = el('input', { type: 'checkbox', value: resource.id, checked: (change.sources ?? []).includes(resource.id) });
+        box.onchange = () => {
+          change.sources = box.checked ? [...(change.sources ?? []), resource.id] : (change.sources ?? []).filter(id => id !== resource.id);
+          keep();
+        };
+        choices.append(el('label', { class: 'check' }, box, el('span', {}, el('strong', { textContent: resource.id }), el('small', { textContent: kindName(resource) }))));
+      }
+      parts.push(choices);
+    }
+    if (built.instructions) parts.push(area(t('How to answer it'), change.instructions, built.instructions, value => { change.instructions = value; }));
+    const reset = el('button', { type: 'button', class: 'secondary small', textContent: t('Restore defaults') });
+    reset.onclick = () => {
+      current.map.cases = (current.map.cases ?? []).filter(c => c.id !== built.id);
+      markDirty({ target: container });
+      renderCases();
+    };
+    const edit = el('details', { class: 'fold resource-edit', open: openCases.has(built.id) },
+      el('summary', { textContent: t('Edit case') }), ...parts, el('div', { class: 'actions' }, reset));
+    edit.ontoggle = () => { if (edit.open) openCases.add(built.id); else openCases.delete(built.id); };
+    container.append(el('div', { class: 'resource' },
+      el('div', { class: 'resource-head' }, el('strong', { class: 'title', textContent: texts.name }), el('span', { class: 'grow' }), badges),
+      el('p', { class: 'resource-facts' }, el('span', { textContent: texts.summary })),
+      edit));
   }
 }
 

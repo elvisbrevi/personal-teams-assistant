@@ -16,6 +16,9 @@ pub struct KnowledgeMap {
     /// sources that know about them and how to answer about them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub contexts: Vec<Context>,
+    /// What the user changed in the built-in cases (kinds of request); see `crate::cases`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cases: Vec<crate::cases::Case>,
 }
 /// A subject the user works on. A request that names it (one of its keywords, its name or ID)
 /// is answered from its sources when the conversation may read them, with its instructions.
@@ -89,6 +92,7 @@ impl KnowledgeMap {
         ensure!(map.resources.len() <= 250, "too many resources");
         let mut ids = BTreeSet::new();
         let id_pattern = regex::Regex::new(r"^[a-z][a-z0-9_-]{0,63}$")?;
+        crate::cases::validate(&map.cases, |id| map.resources.iter().any(|r| r.id == id))?;
         ensure!(map.contexts.len() <= 50, "too many contexts");
         let mut context_ids = BTreeSet::new();
         let plain = |text: &str, max: usize| {
@@ -192,35 +196,25 @@ impl KnowledgeMap {
     /// The context a request names: the one with the most of its keywords, name or ID found
     /// as whole words (ignoring case and accents); the first in the map on a tie.
     pub fn context_for(&self, text: &str) -> Option<&Context> {
-        let words = |text: &str| -> Vec<String> {
-            crate::index::fold(text)
-                .split(|c: char| !c.is_alphanumeric())
-                .filter(|w| !w.is_empty())
-                .map(str::to_owned)
-                .collect()
-        };
-        let request = words(text);
-        let names = |phrase: &str| {
-            let phrase = words(phrase);
-            !phrase.is_empty()
-                && request
-                    .windows(phrase.len())
-                    .any(|w| w == phrase.as_slice())
-        };
         let mut best: Option<(usize, &Context)> = None;
         for context in &self.contexts {
-            let found = context
-                .keywords
-                .iter()
-                .map(String::as_str)
-                .chain([context.name.as_str(), context.id.as_str()])
-                .filter(|phrase| names(phrase))
-                .count();
+            let found = phrases_named(
+                text,
+                context
+                    .keywords
+                    .iter()
+                    .map(String::as_str)
+                    .chain([context.name.as_str(), context.id.as_str()]),
+            );
             if found > 0 && best.is_none_or(|(most, _)| found > most) {
                 best = Some((found, context));
             }
         }
         best.map(|(_, context)| context)
+    }
+    /// The user's changes to a built-in case, if any.
+    pub fn case(&self, id: &str) -> Option<&crate::cases::Case> {
+        self.cases.iter().find(|c| c.id == id)
     }
     pub fn available<'a>(&'a self, conversation: &str, sender: &str) -> Vec<&'a Resource> {
         self.resources
@@ -274,6 +268,27 @@ impl KnowledgeMap {
         };
         Ok(text)
     }
+}
+/// How many of `phrases` appear in `text` as whole words, ignoring case and accents.
+pub fn phrases_named<'a>(text: &str, phrases: impl IntoIterator<Item = &'a str>) -> usize {
+    let words = |text: &str| -> Vec<String> {
+        crate::index::fold(text)
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|w| !w.is_empty())
+            .map(str::to_owned)
+            .collect()
+    };
+    let request = words(text);
+    phrases
+        .into_iter()
+        .filter(|phrase| {
+            let phrase = words(phrase);
+            !phrase.is_empty()
+                && request
+                    .windows(phrase.len())
+                    .any(|w| w == phrase.as_slice())
+        })
+        .count()
 }
 pub fn read_repository_file(
     repositories: &BTreeMap<String, PathBuf>,

@@ -2,6 +2,7 @@ pub mod activity;
 pub mod adapters;
 pub mod ado;
 pub mod app;
+pub mod cases;
 pub mod config;
 pub mod diagnostics;
 pub mod evidence;

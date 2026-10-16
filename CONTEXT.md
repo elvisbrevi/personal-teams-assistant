@@ -26,6 +26,10 @@ _Avoid_: memory, knowledge entry
 The searchable copy of repository sources and verified notes, split into sections.
 _Avoid_: vector database, RAG store
 
+**Case**:
+A kind of request the assistant tells apart (a status round, a recap, an activity review, documentation, a request for the person, an informational message, any answer), with how it is recognized and answered.
+_Avoid_: intent (for the configurable kind), route, template
+
 **Recap**:
 An answer about what the user did on a named day or period, from the activity record alone.
 

@@ -191,6 +191,25 @@ if (flag === '--axe-only') { await browser.close(); process.exit(0); }
   await page.click('#save');
   await page.waitForTimeout(300);
   check('the context is saved with its new source', await page.evaluate(() => window.__ptaLastSave?.map?.contexts?.[0]?.sources?.includes('handbook')));
+  // Cases: the built-in kinds of request, edited and restored; only changes are saved.
+  await page.click('#knowledge-tab-cases');
+  check('the seven built-in cases are listed', await page.$$eval('#cases .resource', rows => rows.length) === 7);
+  const status = '#cases .resource:has-text("Ronda de avance")';
+  await page.click(`${status} .resource-edit summary`);
+  check('a case shows its default instructions to edit', await page.inputValue(`${status} textarea`) === 'Default instructions of status_round: how it is answered, part by part.');
+  await page.fill(`${status} input:not([type=checkbox])`, 'entrega, despliegue');
+  await page.click(`${status} input[value="ado-activity"]`);
+  check('a changed case is marked', await page.isVisible(`${status} .badge:has-text("Cambiado")`));
+  await page.click('#save');
+  await page.waitForTimeout(300);
+  check('only the change is saved', await page.evaluate(() => JSON.stringify(window.__ptaLastSave?.map?.cases)
+    === JSON.stringify([{ id: 'status_round', keywords: ['entrega', 'despliegue'], sources: ['ado-activity'] }])));
+  await page.click('#knowledge-tab-cases');
+  check('an open case stays open after saving', await page.isVisible(`${status} button:has-text("Restaurar")`));
+  await page.click(`${status} button:has-text("Restaurar")`);
+  await page.click('#save');
+  await page.waitForTimeout(300);
+  check('restoring defaults removes the change', await page.evaluate(() => (window.__ptaLastSave?.map?.cases ?? []).length === 0));
   // Notes: searched, added right away with their contexts.
   await page.click('#knowledge-tab-notes');
   await page.waitForTimeout(200);

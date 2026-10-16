@@ -384,6 +384,7 @@ impl Pipeline {
             .iter()
             .copied()
             .filter(|r| matches!(&r.access, Access::Tool { tool } if tool.reviews_activity()))
+            .filter(|r| self.case_reads("activity_review", &r.id))
             .collect();
         let mut review = false;
         let mut thanks = false;
@@ -404,11 +405,16 @@ impl Pipeline {
         } else if greeting(&current) {
             audit.step("intent", "greeting");
             true
-        } else if !own_chat && personal_request(&current) {
+        } else if !own_chat
+            && self.case_on("personal_request")
+            && (personal_request(&current) || self.case_named("personal_request", &current))
+        {
             audit.step("intent", "request for the person");
             leave_to_person(&mut audit);
             return self.store.record(resource, &audit);
-        } else if activity_review_request(&current) {
+        } else if self.case_on("activity_review")
+            && (activity_review_request(&current) || self.case_named("activity_review", &current))
+        {
             review = true;
             audit.step("intent", "activity review");
             false
@@ -416,13 +422,17 @@ impl Pipeline {
             // A question about the user's own work may ask to compare it with their tasks;
             // only then a model decides, and only if some source can review activity.
             if !review_sources.is_empty()
-                && work_mention(&current)
-                && !status_question(&current)
+                && self.case_on("activity_review")
+                && self.work_request(&current)
+                && !self.status_request(&current)
                 && !explicit_wiki(&current)
-                && !documentation_question(&current)
+                && !self.documentation_request(&current)
             {
                 let context = self.history(&message, &mut audit, &mut history).await;
-                if let Ok(decision) = self.llm.classify_intent(&current, &context).await
+                if let Ok(decision) = self
+                    .llm
+                    .classify_intent_as(&current, &context, self.categories())
+                    .await
                     && decision.intent == Intent::ActivityReview
                     && decision.confident()
                 {
@@ -451,7 +461,10 @@ impl Pipeline {
             }
             let context = self.history(&message, &mut audit, &mut history).await;
             // No holding notice yet: the message may not need an answer at all.
-            let decision = self.llm.classify_intent(&current, &context).await?;
+            let decision = self
+                .llm
+                .classify_intent_as(&current, &context, self.categories())
+                .await?;
             audit.confidences.push(decision.confidence);
             audit.step(
                 "intent",
@@ -463,8 +476,9 @@ impl Pipeline {
             );
             let answers = match decision.intent {
                 Intent::Question | Intent::ActivityReview | Intent::Greeting => true,
-                // In the personal chat the user is the one asking the assistant.
-                Intent::Personal => own_chat,
+                // In the personal chat the user is the one asking the assistant; with the case
+                // off, requests for the person are answered too.
+                Intent::Personal => own_chat || !self.case_on("personal_request"),
                 Intent::Statement => false,
             };
             // Sharing a link with a longer note informs too; the sender is thanked.
@@ -480,7 +494,7 @@ impl Pipeline {
                 }
                 return self.store.record(resource, &audit);
             }
-            review = decision.intent == Intent::ActivityReview;
+            review = decision.intent == Intent::ActivityReview && self.case_on("activity_review");
             decision.intent == Intent::Greeting
         };
         // Without a source that can read activity, a review is answered as a question.
@@ -612,7 +626,7 @@ impl Pipeline {
             });
             if (previous.is_some()
                 || !history.is_empty()
-                || (wiki_candidate && !status_question(&current)))
+                || (wiki_candidate && !self.status_request(&current)))
                 && !more_details
                 && !review
                 && !tool_candidates.is_empty()
@@ -668,8 +682,8 @@ impl Pipeline {
             } else {
                 question
             };
-            let wiki_requested =
-                explicit_wiki(&tool_question) || documentation_question(&tool_question);
+            let wiki_requested = explicit_wiki(&tool_question)
+                || (self.case_on("documentation") && self.documentation_request(&tool_question));
             let wiki_ids: Vec<_> = available
                 .iter()
                 .filter(|r| {
@@ -682,10 +696,20 @@ impl Pipeline {
                 })
                 .map(|r| r.id.clone())
                 .collect();
-            let tool_candidates = if wiki_requested {
+            let tool_candidates: BTreeMap<String, String> = if wiki_requested {
+                // The Wikis the documentation case reads, when it names any authorized one.
+                let wikis: Vec<&String> = wiki_ids
+                    .iter()
+                    .filter(|id| self.case_reads("documentation", id))
+                    .collect();
+                let wikis = if wikis.is_empty() {
+                    wiki_ids.iter().collect()
+                } else {
+                    wikis
+                };
                 tool_candidates
                     .into_iter()
-                    .filter(|(id, _)| wiki_ids.contains(id))
+                    .filter(|(id, _)| wikis.contains(&id))
                     .collect()
             } else {
                 tool_candidates
@@ -702,12 +726,115 @@ impl Pipeline {
             // answered from that context's sources among the authorized ones, with its
             // instructions. It narrows the general routing and the documents read; it never
             // authorizes a source, and sources the user chose are read as they are.
-            let context = self
+            let named_context = self
                 .knowledge
                 .context_for(&format!("{current}\n{tool_question}"));
+            let recap = if review
+                || explicit
+                || wiki_requested
+                || !self.case_on("recap")
+                || status_words(&tool_question)
+                || self.case_named("status_round", &tool_question)
+                || !crate::ado::requested_work_items(&tool_question).is_empty()
+                || !self.work_request(&tool_question)
+            {
+                None
+            } else {
+                crate::activity::recorded::requested_days(&tool_question, self.today()).and_then(
+                    |(since, until)| {
+                        let source = self.record_source(&available)?;
+                        let data = self.recorded_between(&available, since, until, &mut audit)?;
+                        audit.step("activity history", format!("{since} to {until}"));
+                        Some((source, data))
+                    },
+                )
+            };
+            // The Azure DevOps activity source a status round reads: the first one the status
+            // case lists, or the one with the usual ID.
+            let status_tool: Option<String> = match self.case_sources("status_round") {
+                Some(ids) => {
+                    ids.iter()
+                        .find(|id| {
+                            tool_candidates.contains_key(*id) && available.iter().any(|r| {
+                                &r.id == *id
+                                    && matches!(
+                                        r.access,
+                                        Access::Tool {
+                                            tool: crate::tools::ToolSpec::AzureDevopsStatus { .. }
+                                        }
+                                    )
+                            })
+                        })
+                        .cloned()
+                }
+                None => tool_candidates
+                    .contains_key("azure-devops-status")
+                    .then(|| "azure-devops-status".to_owned()),
+            };
+            let status_route = recap.is_none()
+                && !review
+                && !explicit
+                && !wiki_requested
+                && self.case_on("status_round")
+                && self.status_request(&tool_question)
+                && status_tool.is_some();
+            // Without a named context, a model may still recognize one by its description, for
+            // a request on the general route. It guides the routing, the notes and the
+            // instructions; it does not narrow the documents read.
+            let model_context = if named_context.is_none()
+                && !explicit
+                && !review
+                && recap.is_none()
+                && !status_route
+            {
+                let described: BTreeMap<String, String> = self
+                    .knowledge
+                    .contexts
+                    .iter()
+                    .filter(|c| !c.description.trim().is_empty())
+                    .map(|c| {
+                        (
+                            c.id.clone(),
+                            self.redactor
+                                .redact(&format!("{}: {}", c.name, c.description)),
+                        )
+                    })
+                    .collect();
+                if described.is_empty() {
+                    None
+                } else {
+                    match self
+                        .awaiting_model(
+                            &mut holding,
+                            resource,
+                            &message,
+                            &mut audit,
+                            self.llm.select_context(&tool_question, &described),
+                        )
+                        .await?
+                    {
+                        Ok(Some(id)) => self.knowledge.contexts.iter().find(|c| c.id == id),
+                        Ok(None) => None,
+                        Err(_) => {
+                            tracing::warn!(event = "context_selection_unavailable");
+                            None
+                        }
+                    }
+                }
+            } else {
+                None
+            };
+            let context = named_context.or(model_context);
             if let Some(context) = context {
                 audit.context = Some(context.id.clone());
-                audit.step("context", context.id.clone());
+                audit.step(
+                    "context",
+                    if model_context.is_some() {
+                        format!("{} (model)", context.id)
+                    } else {
+                        context.id.clone()
+                    },
+                );
             }
             let in_context = |id: &str| context.is_some_and(|c| c.sources.iter().any(|s| s == id));
             let routing: BTreeMap<String, String> = {
@@ -727,30 +854,6 @@ impl Pipeline {
                 .filter(|id| routing.contains_key(*id))
                 .cloned()
                 .collect();
-            let recap = if review
-                || explicit
-                || wiki_requested
-                || status_words(&tool_question)
-                || !crate::ado::requested_work_items(&tool_question).is_empty()
-                || !work_mention(&tool_question)
-            {
-                None
-            } else {
-                crate::activity::recorded::requested_days(&tool_question, self.today()).and_then(
-                    |(since, until)| {
-                        let source = self.record_source(&available)?;
-                        let data = self.recorded_between(&available, since, until, &mut audit)?;
-                        audit.step("activity history", format!("{since} to {until}"));
-                        Some((source, data))
-                    },
-                )
-            };
-            let status_route = recap.is_none()
-                && !review
-                && !explicit
-                && !wiki_requested
-                && status_question(&tool_question)
-                && tool_candidates.contains_key("azure-devops-status");
             let selected_tool = if review || recap.is_some() || explicit {
                 // An activity review reads every source that can review activity, below; a
                 // recap reads only the recorded days; chosen tools are all read, below.
@@ -758,7 +861,7 @@ impl Pipeline {
             } else if wiki_requested && routing_wikis.len() == 1 {
                 Some(routing_wikis[0].clone())
             } else if status_route {
-                Some("azure-devops-status".to_owned())
+                status_tool.clone()
             } else if routing_wikis.len() == 1
                 && routing.keys().all(|id| {
                     available.iter().any(|r| {
@@ -806,8 +909,8 @@ impl Pipeline {
             if review || recap.is_some() || status_route {
                 sources.retain(|r| !r.access.indexed());
             }
-            // Within a context, the documents it names among the authorized ones.
-            if !explicit && sources.iter().any(|r| in_context(&r.id)) {
+            // Within a context the request named, the documents it lists among the authorized ones.
+            if !explicit && named_context.is_some() && sources.iter().any(|r| in_context(&r.id)) {
                 sources.retain(|r| in_context(&r.id));
             }
             if let Some(id) = selected_tool
@@ -832,6 +935,7 @@ impl Pipeline {
             // source (or, in a map without one, as part of Azure DevOps activity).
             let status_record = if status_route {
                 self.record_source(&available)
+                    .filter(|r| self.case_reads("status_round", &r.id))
             } else {
                 None
             };
@@ -839,7 +943,7 @@ impl Pipeline {
                 available
                     .iter()
                     .copied()
-                    .filter(|r| wiki_ids.contains(&r.id))
+                    .filter(|r| wiki_ids.contains(&r.id) && self.case_reads("status_round", &r.id))
                     .take(2)
                     .collect()
             } else {
@@ -867,7 +971,14 @@ impl Pipeline {
                     "activity review",
                     format!("last {days} days in {} sources", sources.len()),
                 );
-                let recorded = self.recorded_activity(&available, days, &mut audit);
+                let recorded = if self
+                    .record_source(&available)
+                    .is_some_and(|r| self.case_reads("activity_review", &r.id))
+                {
+                    self.recorded_activity(&available, days, &mut audit)
+                } else {
+                    None
+                };
                 self.review_evidence(&sources, days, recorded, resource, &message, &mut audit)
                     .await?
             } else {
@@ -1139,6 +1250,7 @@ impl Pipeline {
                         guidance: draft.as_ref().map_or("", |d| d.guidance.as_str()),
                         previous_draft: draft.as_ref().map_or("", |d| d.previous.as_str()),
                         context_instructions: context.map_or("", |c| c.instructions.as_str()),
+                        prompts: self.prompts(),
                     }),
                 )
                 .await??;
@@ -1573,6 +1685,70 @@ impl Pipeline {
             .activity_registration
             .zoned(chrono::Utc::now())
             .date_naive()
+    }
+    /// Whether a built-in case is on (a case the user did not change is).
+    fn case_on(&self, id: &str) -> bool {
+        self.knowledge.case(id).is_none_or(|c| c.enabled)
+    }
+    /// Whether `text` names one of the keywords the user added to a case.
+    fn case_named(&self, id: &str, text: &str) -> bool {
+        self.knowledge.case(id).is_some_and(|c| {
+            crate::knowledge::phrases_named(text, c.keywords.iter().map(String::as_str)) > 0
+        })
+    }
+    /// The sources the user chose for a case, if any.
+    fn case_sources(&self, id: &str) -> Option<&[String]> {
+        self.knowledge
+            .case(id)
+            .map(|c| c.sources.as_slice())
+            .filter(|s| !s.is_empty())
+    }
+    /// Whether a case reads `source`: any of its kind when the user chose none.
+    fn case_reads(&self, id: &str, source: &str) -> bool {
+        self.case_sources(id)
+            .is_none_or(|ids| ids.iter().any(|s| s == source))
+    }
+    /// A status round: built-in words, or the user's.
+    fn status_request(&self, text: &str) -> bool {
+        status_question(text) || self.case_named("status_round", text)
+    }
+    /// A documentation question: built-in words, or the user's.
+    fn documentation_request(&self, text: &str) -> bool {
+        documentation_question(text) || self.case_named("documentation", text)
+    }
+    /// A mention of the user's own work: built-in words, or those the user added to recaps.
+    fn work_request(&self, text: &str) -> bool {
+        work_mention(text) || self.case_named("recap", text)
+    }
+    /// The user's descriptions of the intent categories.
+    fn categories(&self) -> crate::llm::Categories<'_> {
+        let text = |id: &str| {
+            self.knowledge
+                .case(id)
+                .map_or("", |c| c.description.as_str())
+        };
+        crate::llm::Categories {
+            question: text("general"),
+            activity_review: text("activity_review"),
+            personal: text("personal_request"),
+            statement: text("statement"),
+        }
+    }
+    /// The user's instructions for each case's part of the answer prompt.
+    fn prompts(&self) -> crate::llm::Prompts<'_> {
+        let text = |id: &str| {
+            self.knowledge
+                .case(id)
+                .map_or("", |c| c.instructions.as_str())
+        };
+        crate::llm::Prompts {
+            general: text("general"),
+            status_round: text("status_round"),
+            recap: text("recap"),
+            documentation: text("documentation"),
+            activity_review: text("activity_review"),
+            statement: text("statement"),
+        }
     }
     /// Search an indexed source (a whole repository or the verified notes) for `query`: a
     /// repository is first brought up to date with its checkout, and the notes keep those of

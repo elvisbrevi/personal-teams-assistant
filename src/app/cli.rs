@@ -102,6 +102,10 @@ Knowledge
   contexts list | contexts show ID | contexts add | contexts edit ID | contexts remove ID
                            Subjects such as «cobros»: JSON on stdin with id, name, description, keywords,
                            sources (IDs) and instructions. A request naming one reads its sources.
+  cases list | cases show ID             The kinds of request and their default texts (general, status_round,
+                           recap, activity_review, documentation, personal_request, statement).
+  cases edit ID | cases reset ID         JSON on stdin: enabled, description (how the model recognizes it),
+                           keywords, sources and instructions (how to answer); reset restores the defaults.
   notes list [--context ID] [--limit N]  Verified notes, newest first.
   notes search TEXT [--context ID]       Notes by relevance.
   notes add | notes edit ID              JSON on stdin: title, text, contexts, keywords, origin, reference.
@@ -300,6 +304,8 @@ fn validate_args(args: &[String]) -> Result<()> {
             | ["audit", "list"]
             | ["audit", "show", _]
             | ["answer", "refine" | "send", _]
+            | ["cases", "list"]
+            | ["cases", "show" | "edit" | "reset", _]
             | ["contexts", "list" | "add"]
             | ["contexts", "show" | "edit" | "remove", _]
             | ["notes", "list" | "add"]
@@ -757,6 +763,44 @@ async fn execute(mut args: Vec<String>) -> Result<Reply> {
                 .unwrap()
                 .push(resource);
         }
+        ("cases", "list") => {
+            snap.data = json!({"built_in": snap.data["cases"], "changes": data["map"]["cases"]});
+            return Ok(snap);
+        }
+        ("cases", "show") => {
+            let id = positional(&args, 2)?;
+            let built = snap.data["cases"]
+                .as_array()
+                .and_then(|cases| cases.iter().find(|c| c["id"] == id))
+                .cloned()
+                .context("unknown case")?;
+            let change = data["map"]["cases"]
+                .as_array()
+                .and_then(|cases| cases.iter().find(|c| c["id"] == id))
+                .cloned();
+            snap.data = json!({"built_in": built, "change": change});
+            return Ok(snap);
+        }
+        ("cases", "edit" | "reset") => {
+            let id = positional(&args, 2)?;
+            let map = data["map"].as_object_mut().context("invalid map")?;
+            let list = map
+                .entry("cases")
+                .or_insert_with(|| json!([]))
+                .as_array_mut()
+                .context("invalid cases")?;
+            list.retain(|c| c["id"] != id);
+            if action == "edit" {
+                let mut case = input()?;
+                ensure!(case.is_object(), "a case change is a JSON object");
+                ensure!(
+                    case.get("id").is_none_or(|v| v == id),
+                    "case ID cannot change"
+                );
+                case["id"] = json!(id);
+                list.push(case);
+            }
+        }
         ("contexts", "list") => {
             snap.data = data["map"]["contexts"].clone();
             if snap.data.is_null() {
@@ -1194,6 +1238,9 @@ mod help_tests {
             &["audit", "list"],
             &["answer", "refine", "resource"],
             &["answer", "send", "resource"],
+            &["cases", "list"],
+            &["cases", "edit", "status_round"],
+            &["cases", "reset", "recap"],
             &["contexts", "list"],
             &["contexts", "edit", "cobros"],
             &["notes", "list"],
