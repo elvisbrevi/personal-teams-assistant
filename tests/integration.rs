@@ -68,6 +68,7 @@ fn knowledge(dir: &tempfile::TempDir) -> KnowledgeMap {
         }],
         contexts: Vec::new(),
         cases: Vec::new(),
+        people: Vec::new(),
     }
 }
 fn used_ref(id: &str, mention: &str) -> personal_teams_assistant::evidence::Used {
@@ -1322,6 +1323,7 @@ async fn wiki_priority_current_request_mixed_citations_and_complete_gate_without
                     ],
                     contexts: Vec::new(),
                     cases: Vec::new(),
+                    people: Vec::new(),
                 },
                 llm: Arc::new(WikiLlm { used: ids.clone() }),
                 tools: Arc::new(WikiTools {
@@ -1454,6 +1456,7 @@ async fn follow_up_without_subject_searches_the_previous_topic_and_keeps_it_for_
                 resources: vec![wiki_resource()],
                 contexts: Vec::new(),
                 cases: Vec::new(),
+                people: Vec::new(),
             },
             llm: Arc::new(FollowUpLlm { resolve }),
             tools: Arc::new(WikiTools {
@@ -1557,6 +1560,7 @@ async fn a_first_wiki_question_searches_its_topic_not_the_whole_request() {
             resources: vec![wiki_resource()],
             contexts: Vec::new(),
             cases: Vec::new(),
+            people: Vec::new(),
         },
         llm: Arc::new(TopicLlm),
         // Generic words of the whole request («body», «endpoint») rank other API pages first.
@@ -1681,6 +1685,7 @@ async fn explicit_local_selection_still_requires_enabled_and_external_processing
                 resources: vec![source],
                 contexts: Vec::new(),
                 cases: Vec::new(),
+                people: Vec::new(),
             },
             llm: Arc::new(NoLlm),
             tools: Arc::new(NoTools),
@@ -1722,6 +1727,7 @@ async fn implicit_documentation_does_not_bypass_teams_source_audiences() {
             resources: vec![wiki],
             contexts: Vec::new(),
             cases: Vec::new(),
+            people: Vec::new(),
         },
         llm: Arc::new(NoLlm),
         tools: Arc::new(NoTools),
@@ -1855,6 +1861,7 @@ async fn teams_simulation_keeps_who_said_what_in_the_evidence_and_the_log() {
             resources: vec![resource],
             contexts: Vec::new(),
             cases: Vec::new(),
+            people: Vec::new(),
         },
         llm: Arc::new(TeamsAttributionLlm),
         tools: Arc::new(TeamsEvidenceTool),
@@ -4717,4 +4724,127 @@ async fn a_context_reads_its_sources_its_notes_and_its_instructions() {
     );
     assert!(seen[0].1.is_empty());
     assert_eq!(audit.context, None);
+}
+
+/// Keeps who the answer was written for and the approved examples it was given.
+struct GuidedLlm(std::sync::Mutex<Vec<(String, String)>>);
+#[async_trait]
+impl LlmProvider for GuidedLlm {
+    fn name(&self) -> &str {
+        "synthetic-guided"
+    }
+    async fn classify_intent(&self, _: &str, _: &str) -> Result<IntentDecision> {
+        Ok(IntentDecision {
+            intent: Intent::Question,
+            confidence: 0.96,
+        })
+    }
+    async fn generate(&self, _: GenerationInput<'_>) -> Result<String> {
+        unreachable!()
+    }
+    async fn generate_response(
+        &self,
+        input: GenerationInput<'_>,
+    ) -> Result<personal_teams_assistant::llm::GeneratedAnswer> {
+        self.0
+            .lock()
+            .unwrap()
+            .push((input.recipient.to_owned(), input.examples.to_owned()));
+        Ok(personal_teams_assistant::llm::GeneratedAnswer {
+            answer: "Atendemos de 9 a 18.".into(),
+            detailed: false,
+            used_sources: Vec::new(),
+            provider: None,
+            fallbacks: Vec::new(),
+        })
+    }
+}
+#[tokio::test]
+async fn a_person_profile_and_approved_examples_guide_the_answer() {
+    use personal_teams_assistant::index::{FILE, Index};
+    let dir = tempfile::tempdir().unwrap();
+    let server = MockServer::start().await;
+    let store = support::store(&dir);
+    let graph = support::graph(&server, store.clone());
+    let mut cfg = (*graph.config).clone();
+    cfg.policy.dry_run = true;
+    cfg.server.data_dir = dir.path().into();
+    let mut map = knowledge(&dir);
+    map.people = vec![personal_teams_assistant::knowledge::Person {
+        id: "ana".into(),
+        name: "Ana Pérez".into(),
+        senders: vec!["simulated-user".into()],
+        address: "Tutéala y responde en dos frases.".into(),
+        notes: "Coordina soporte.".into(),
+        ..Default::default()
+    }];
+    let index = Index::open(&dir.path().join(FILE)).unwrap();
+    index
+        .save_example(
+            "chats/19:x/messages/1",
+            "¿Cuál es el horario de soporte técnico?",
+            "El soporte atiende de lunes a viernes, de 9:00 a 18:00.",
+            None,
+        )
+        .unwrap();
+    drop(index);
+    let sources: Vec<String> = map.resources.iter().map(|r| r.id.clone()).collect();
+    let llm = Arc::new(GuidedLlm(Default::default()));
+    let pipeline = Pipeline {
+        config: Arc::new(cfg),
+        store: store.clone(),
+        adapter: graph,
+        knowledge: map,
+        llm: llm.clone(),
+        tools: Arc::new(NoTools),
+        redactor: redactor(),
+    };
+    for (session, text) in [
+        ("similar", "¿Qué horario tiene el soporte técnico?"),
+        ("other", "¿Dónde está el runbook de despliegue?"),
+    ] {
+        let result = simulation::run(
+            &pipeline,
+            SimulationRequest {
+                session: session.into(),
+                text: text.into(),
+                group: false,
+                mentioned: false,
+                sources: sources.clone(),
+            },
+            Some(&sources),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.status, "dry_run", "{}", result.reason);
+    }
+    let seen = llm.0.lock().unwrap().clone();
+    // The profile of whoever wrote, every time; the example only for a similar request.
+    assert!(
+        seen[0].0.contains("Tutéala y responde en dos frases."),
+        "{}",
+        seen[0].0
+    );
+    assert!(seen[0].0.contains("Coordina soporte."));
+    assert!(seen[0].1.contains("de 9:00 a 18:00"), "{}", seen[0].1);
+    assert!(seen[1].0.contains("Ana Pérez"));
+    assert!(seen[1].1.is_empty(), "{}", seen[1].1);
+    let rows = personal_teams_assistant::state::Store::inspect(
+        &dir.path().join("test.db"),
+        false,
+        2,
+        None,
+        true,
+    )
+    .unwrap();
+    let audits: Vec<personal_teams_assistant::state::Audit> = rows
+        .iter()
+        .map(|r| serde_json::from_value(r["audit"].clone()).unwrap())
+        .collect();
+    assert!(audits.iter().all(|a| a.person.as_deref() == Some("ana")));
+    assert!(
+        audits
+            .iter()
+            .any(|a| a.trace.iter().any(|s| s.step == "examples"))
+    );
 }

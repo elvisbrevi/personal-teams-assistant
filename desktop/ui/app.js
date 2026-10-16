@@ -348,7 +348,7 @@ async function reload() {
   dirtyGroups.clear();
   renderSavebar();
   renderLive();
-  renderCredentials(); renderRepositories(); renderResources(); renderContexts(); renderCases(); renderNoteContexts(); renderChatSources();
+  renderCredentials(); renderRepositories(); renderResources(); renderContexts(); renderCases(); renderPeople(); renderNoteContexts(); renderChatSources();
   await Promise.all([loadChain(), loadSelfChat()]);
 }
 
@@ -1424,6 +1424,88 @@ function answerActions(row) {
     el('p', { class: 'hint', textContent: t('Regenerating writes the answer again with your context and the chosen sources, without sending it. Sending posts the answer shown above once, as you.') }));
 }
 
+/** An answer exists (sent or proposed) and the message is not being processed. */
+const rateable = row => !!(row.audit.sent || row.audit.proposed)?.trim() && !row.resource.startsWith('simulation:')
+  && !['pending', 'processing', 'refining', 'sending'].includes(row.status);
+/** Ratings being edited, kept across refreshes: resource → { rating, comment, example, context }. */
+const feedbackDrafts = new Map();
+
+/** Rate an answer, keep it as an example for similar requests, or save it as a verified note. */
+function feedbackBlock(row) {
+  const saved = row.audit.feedback ?? {};
+  const draft = feedbackDrafts.get(row.resource) ?? { rating: saved.rating ?? null, comment: saved.comment ?? '', example: !!saved.example, context: saved.context ?? '' };
+  const remember = () => feedbackDrafts.set(row.resource, draft);
+  const ratings = el('div', { class: 'segmented', role: 'group', 'aria-label': t('Rate this answer') });
+  const example = el('input', { type: 'checkbox', checked: draft.example });
+  const exampleRow = el('label', { class: 'check' }, example, t('Use it as an example for similar requests'));
+  const contexts = current?.map?.contexts ?? [];
+  const context = el('select', { 'aria-label': t('Context of the example') },
+    el('option', { value: '', textContent: t('Every context') }),
+    ...contexts.map(c => el('option', { value: c.id, textContent: c.name || c.id, selected: draft.context === c.id })));
+  const exampleFields = el('div', { class: 'example-fields' }, exampleRow, ...(contexts.length ? [context] : []),
+    el('p', { class: 'hint', textContent: t('An example guides the structure and tone of later answers in any chat, never their facts. Do not choose answers with private details.') }));
+  const sync = () => {
+    for (const button of ratings.querySelectorAll('button')) button.setAttribute('aria-pressed', String(button.dataset.rating === draft.rating));
+    exampleFields.hidden = draft.rating !== 'good';
+  };
+  for (const [rating, label] of [['good', t('Good answer')], ['bad', t('Needs work')]]) {
+    const button = el('button', { type: 'button', textContent: label });
+    button.dataset.rating = rating;
+    button.onclick = () => { draft.rating = draft.rating === rating ? null : rating; if (draft.rating !== 'good') draft.example = false; example.checked = draft.example; remember(); sync(); };
+    ratings.append(button);
+  }
+  example.onchange = () => { draft.example = example.checked; remember(); };
+  context.onchange = () => { draft.context = context.value; remember(); };
+  const comment = el('textarea', { class: 'feedback-comment', rows: 2, maxLength: 2000, value: draft.comment,
+    placeholder: t('What was right or what should change') });
+  comment.setAttribute('data-resource', row.resource);
+  comment.oninput = () => { draft.comment = comment.value; remember(); };
+  const save = el('button', { type: 'button', class: 'secondary', textContent: t('Save rating') });
+  save.onclick = () => busy(save, async () => {
+    await invoke('answer_feedback', { resource: row.resource, rating: draft.rating, comment: draft.comment.trim(), example: draft.example, context: draft.context || null });
+    feedbackDrafts.delete(row.resource);
+    done(draft.rating ? t('Rating saved.') : t('Rating cleared.'));
+    await loadMessages();
+  });
+  const asNote = el('button', { type: 'button', class: 'secondary', textContent: t('Save as a note') });
+  asNote.onclick = () => noteFromAnswer(row);
+  sync();
+  return el('div', { class: 'field-block feedback' },
+    el('strong', { textContent: t('Your rating') }),
+    ratings, exampleFields,
+    el('label', {}, t('Comment'), comment),
+    el('div', { class: 'actions' }, asNote, save));
+}
+
+/** Opens Knowledge › Notes with the answer as a new verified note. */
+function noteFromAnswer(row) {
+  const answer = (row.audit.sent || row.audit.proposed || '').replace(/\[([^\]\n]+)\]\([^)\s]*\)/g, '$1');
+  showTab('knowledge');
+  selectTab($('#knowledge-tabs'), 'notes');
+  $('#note-form').open = true;
+  noteOrigin = { origin: 'answer', reference: row.resource };
+  field('#note-title', (row.audit.resolved_question || row.audit.question || '').slice(0, 200));
+  field('#note-text', answer);
+  $('#note-title').focus();
+}
+
+/** Opens the profile of the person who wrote, or a new one with their name and Teams ID. */
+function personLink(row) {
+  const known = (current?.map?.people ?? []).find(p => p.id === row.audit.person);
+  const button = el('button', { type: 'button', class: 'link-button', textContent: known
+    ? t('How you address {name}', { name: known.name }) : t('Add {name} to People', { name: row.audit.sender_name }) });
+  button.onclick = () => {
+    showTab('knowledge');
+    selectTab($('#knowledge-tabs'), 'people');
+    if (known) { openPeople.add(known.id); renderPeople(); return; }
+    $('#person-form').open = true;
+    field('#person-name', row.audit.sender_name);
+    field('#person-sender', row.audit.sender_id ?? '');
+    $('#person-address').focus();
+  };
+  return el('div', { class: 'field-block' }, button);
+}
+
 /** Follows an answer being written until it is ready, kept or failed. */
 async function followRefinement(resource) {
   const deadline = Date.now() + 25 * 60_000;
@@ -1442,7 +1524,7 @@ async function followRefinement(resource) {
 function renderMessages() {
   const list = $('#messages-list');
   // A refresh rebuilds the list: the context being typed keeps its focus and cursor.
-  const typing = document.activeElement?.classList?.contains('answer-context') ? document.activeElement : null;
+  const typing = ['answer-context', 'feedback-comment'].some(name => document.activeElement?.classList?.contains(name)) ? document.activeElement : null;
   const typingAt = typing ? [typing.dataset.resource, typing.selectionStart, typing.selectionEnd] : null;
   const hideIneligible = $('#messages-hide-ineligible').checked;
   const query = $('#messages-search').value;
@@ -1487,6 +1569,8 @@ function renderMessages() {
         : t('The assistant is reading the conversation and writing an answer; it is not sent until you send it.'));
     }
     if (unsent(row)) body.append(answerActions(row));
+    if (rateable(row)) body.append(feedbackBlock(row));
+    if (audit.sender_name && audit.conversation_kind !== 'self') body.append(personLink(row));
     const details = [];
     if (audit.intent) details.push(`${t('Intent')}: ${intentLabels[audit.intent] || audit.intent}`);
     if (audit.history_messages) details.push(t('Context: {n} earlier messages', { n: audit.history_messages }));
@@ -1519,7 +1603,7 @@ function renderMessages() {
     item.append(body);
     list.append(item);
   }
-  const restored = typingAt && [...list.querySelectorAll('.answer-context')].find(node => node.dataset.resource === typingAt[0]);
+  const restored = typingAt && [...list.querySelectorAll(`.${typing.classList.contains('feedback-comment') ? 'feedback-comment' : 'answer-context'}`)].find(node => node.dataset.resource === typingAt[0]);
   if (restored) { restored.focus(); restored.setSelectionRange(typingAt[1], typingAt[2]); }
   // A message opened from Home: show it once it is in the list.
   const focused = focusMessage && [...list.querySelectorAll('.message')].find(node => node.dataset.resource === focusMessage);
@@ -1911,9 +1995,56 @@ function renderCases() {
   }
 }
 
+// ---------------------------------------------------------------- people
+
+/** People whose edit fold is open, kept across re-renders. */
+const openPeople = new Set();
+
+function renderPeople() {
+  const container = $('#people');
+  container.replaceChildren();
+  const people = current.map.people ??= [];
+  $('#people-summary').textContent = people.length ? tn(people.length, '1 person', '{n} people') : '';
+  if (!people.length) container.append(el('div', { class: 'empty' }, el('p', { textContent: t('No people yet. Add someone here, or from one of their messages in Messages.') })));
+  for (const person of people) {
+    const facts = el('p', { class: 'resource-facts' });
+    const renderFacts = () => facts.replaceChildren(el('span', { textContent: person.address || t('No note on how to address them') }),
+      ...(person.notes ? [el('small', { textContent: person.notes })] : []));
+    renderFacts();
+    const input = (label, value, placeholder, onchange, options = {}) => {
+      const element = el('input', { value, placeholder, spellcheck: false, ...options });
+      element.oninput = () => { onchange(element.value); renderFacts(); markDirty(); };
+      return el('label', {}, label, element);
+    };
+    const area = (label, value, placeholder, onchange) => {
+      const element = el('textarea', { value, placeholder, rows: 2 });
+      element.oninput = () => { onchange(element.value); renderFacts(); markDirty(); };
+      return el('label', {}, label, element);
+    };
+    const remove = el('button', { type: 'button', class: 'danger small', textContent: t('Remove person') });
+    remove.onclick = () => { current.map.people = people.filter(p => p !== person); markDirty(); renderPeople(); };
+    const edit = el('details', { class: 'fold resource-edit', open: openPeople.has(person.id) },
+      el('summary', { textContent: t('Edit how you address them') }),
+      el('div', { class: 'grid' },
+        input(t('Name'), person.name, 'Ana Pérez', value => { person.name = value; }),
+        input(t('Other names'), (person.aliases ?? []).join(', '), t('Comma separated'), value => { person.aliases = names(value); })),
+      area(t('How you address them'), person.address, t('Informal, by first name, two or three sentences'), value => { person.address = value; }),
+      area(t('What to keep in mind'), person.notes, t('Their role, what they usually ask'), value => { person.notes = value; }),
+      input(t('Teams user IDs'), (person.senders ?? []).join(', '), t('Comma separated'), value => { person.senders = names(value); }, { translate: 'no' }),
+      el('div', { class: 'actions' }, remove));
+    edit.ontoggle = () => { if (edit.open) openPeople.add(person.id); else openPeople.delete(person.id); };
+    container.append(el('div', { class: 'resource' },
+      el('div', { class: 'resource-head' }, el('strong', { class: 'title', textContent: person.name }), el('span', { class: 'grow' }),
+        badge(person.senders?.length ? t('Teams ID known') : t('By name'), person.senders?.length ? 'ok' : 'muted')),
+      facts, edit));
+  }
+}
+
 // ---------------------------------------------------------------- notes
 
 let notesList = [];
+/** Where the note being added comes from, when it is an answer: { origin, reference }. */
+let noteOrigin = null;
 /** Notes whose edit fold is open, and the one whose removal waits for a second tap. */
 const openNotes = new Set();
 let removeArmed = null;
@@ -2441,6 +2572,22 @@ $('#add-record').onclick = () => {
   renderResources();
   notify(t('Source {id} added, disabled. Enable it, authorize it, choose its conversations and save.', { id: source.id }));
 };
+$('#add-person').onclick = () => {
+  const name = $('#person-name').value.trim();
+  const sender = $('#person-sender').value.trim();
+  if (!name) return fail(t('Write the person\'s name.'));
+  const people = current.map.people ??= [];
+  const base = folded(name).replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').replace(/^[^a-z]+/, '') || 'person';
+  let id = base.slice(0, 60);
+  for (let n = 2; people.some(p => p.id === id); n++) id = `${base.slice(0, 56)}-${n}`;
+  people.push({ id, name, senders: sender ? [sender] : [], aliases: [], address: $('#person-address').value.trim(), notes: '' });
+  openPeople.add(id);
+  for (const name of ['#person-name', '#person-sender', '#person-address']) field(name, '');
+  $('#person-form').open = false;
+  markDirty({ target: $('#add-person') });
+  renderPeople();
+  notify(t('{name} added. Save the changes to keep it.', { name }));
+};
 $('#add-context').onclick = () => {
   const id = $('#context-id').value.trim();
   const name = $('#context-name').value.trim();
@@ -2465,15 +2612,18 @@ $('#add-notes-source').onclick = () => {
   selectTab($('#knowledge-tabs'), 'sources');
   notify(t('Source {id} added, disabled. Enable it, authorize it, choose its conversations and save.', { id }));
 };
+// A note started from an answer stops being that answer's once the form closes.
+$('#note-form').ontoggle = () => { if (!$('#note-form').open) noteOrigin = null; };
 let notesSearch;
 $('#notes-query').oninput = () => { clearTimeout(notesSearch); notesSearch = setTimeout(() => loadNotes().catch(fail), 300); };
 $('#add-note').onclick = () => busy($('#add-note'), async () => {
   const note = { title: $('#note-title').value.trim(), text: $('#note-text').value.trim(),
-    keywords: names($('#note-keywords').value), contexts: newNoteContexts };
+    keywords: names($('#note-keywords').value), contexts: newNoteContexts, ...(noteOrigin ?? {}) };
   if (!note.title || !note.text) return fail(t('A note needs a title and a text.'));
   await invoke('notes_save', { note });
   for (const name of ['#note-title', '#note-text', '#note-keywords']) field(name, '');
   newNoteContexts = []; renderNoteContexts();
+  noteOrigin = null;
   $('#note-form').open = false;
   done(t('Note saved.'));
   await loadNotes();

@@ -207,3 +207,94 @@ pub(super) fn search(state: &DesktopState, args: &Value) -> Reply {
             .map_err(fail)?
     ))
 }
+
+/// The user's judgment of an answer: `rating` `good` or `bad` (null clears it), an optional
+/// `comment`, and `example` (a good answer guides later answers to similar requests, within
+/// `context` when given). Sensitive data in the comment is refused.
+pub(super) fn feedback(state: &DesktopState, args: &Value) -> Reply {
+    let resource = super::answer_resource(args)?;
+    let (config, map, index) = open(state)?;
+    let rating = match args.get("rating") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(r)) if r == "good" || r == "bad" => Some(r.clone()),
+        _ => {
+            return Err(
+                "[invalid_input] Rate an answer good or bad, or clear the rating with null.".into(),
+            );
+        }
+    };
+    let comment = args
+        .get("comment")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_owned();
+    let example = args
+        .get("example")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let context = args
+        .get("context")
+        .and_then(Value::as_str)
+        .filter(|c| !c.is_empty())
+        .map(str::to_owned);
+    if comment.chars().count() > 2000 || comment.chars().any(|c| c.is_control() && c != '\n') {
+        return Err("[invalid_input] A comment has at most 2000 characters.".into());
+    }
+    let redactor = crate::security::Redactor::new(&config.policy.sensitive_patterns, Vec::new())
+        .map_err(fail)?;
+    if !redactor.clean(&comment) {
+        return Err(
+            "[invalid_input] The comment contains sensitive data; remove it and save again.".into(),
+        );
+    }
+    if let Some(context) = &context
+        && !map.contexts.iter().any(|c| &c.id == context)
+    {
+        return Err("[invalid_input] Unknown context.".into());
+    }
+    if example && rating.as_deref() != Some("good") {
+        return Err("[invalid_input] Only an answer rated good can be an example.".into());
+    }
+    let db = config.server.data_dir.join("assistant.db");
+    let row = crate::state::Store::inspect(&db, false, 1, Some(&resource), true)
+        .map_err(fail)?
+        .into_iter()
+        .next()
+        .ok_or("[invalid_input] Unknown message.")?;
+    let audit: crate::state::Audit = serde_json::from_value(row["audit"].clone()).map_err(fail)?;
+    let answer = audit
+        .sent
+        .clone()
+        .or(audit.proposed.clone())
+        .filter(|a| !a.trim().is_empty());
+    if rating.is_some() && answer.is_none() {
+        return Err("[invalid_input] This message has no answer to rate.".into());
+    }
+    let feedback = rating.map(|rating| crate::state::Feedback {
+        rating,
+        comment,
+        example,
+        context: context.clone(),
+        at: chrono::Utc::now().timestamp(),
+    });
+    if !crate::state::Store::set_feedback(&db, &resource, feedback.as_ref()).map_err(fail)? {
+        return Err("[conflict] This message is being processed; rate it when it ends.".into());
+    }
+    let request = audit
+        .resolved_question
+        .or(audit.question)
+        .unwrap_or_default();
+    match (&feedback, answer) {
+        (Some(f), Some(answer)) if f.example && !request.is_empty() => index
+            .save_example(
+                &resource,
+                &request,
+                &crate::evidence::unlinked(&answer),
+                context.as_deref(),
+            )
+            .map_err(fail)?,
+        _ => index.remove_example(&resource).map_err(fail)?,
+    }
+    Ok(json!({"resource": resource, "feedback": feedback}))
+}

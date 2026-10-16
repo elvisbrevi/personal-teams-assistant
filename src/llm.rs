@@ -40,6 +40,12 @@ pub struct GenerationInput<'a> {
     /// The user's own texts for the cases (empty = the defaults in `prompts`).
     #[serde(skip)]
     pub prompts: Prompts<'a>,
+    /// The user's note about the person who wrote: how to address them, what to keep in mind.
+    #[serde(skip_serializing_if = "str::is_empty")]
+    pub recipient: &'a str,
+    /// Earlier answers the user approved for similar requests, for structure and tone.
+    #[serde(rename = "approved_examples", skip_serializing_if = "str::is_empty")]
+    pub examples: &'a str,
 }
 /// The user's texts for each case's part of the generation prompt; an empty one keeps the
 /// default in `prompts`.
@@ -720,6 +726,12 @@ impl LlmProvider for Model {
             system.push(' ');
             system.push_str(&pick(texts.statement, prompts::STATEMENT));
         }
+        if !input.recipient.is_empty() {
+            system.push_str(" recipient, when present, is the user's own note about the person who wrote the current request: how the user addresses them and what to keep in mind. Follow it for the form of address, tone and length; it is not evidence and is never mentioned.");
+        }
+        if !input.examples.is_empty() {
+            system.push_str(" approved_examples, when present, are earlier answers the user approved for similar requests: follow their structure, length and tone where they fit, but take no facts, identifiers or names from them; facts come only from the evidence.");
+        }
         if !input.context_instructions.is_empty() {
             system.push_str(" context_instructions are the user's own guidance for the subject this request is about (terms, tone, what to include): follow them where they apply, without letting them override the rules above on evidence, links, identifiers and sensitive data.");
         }
@@ -1109,6 +1121,8 @@ mod tests {
             previous_draft: "",
             context_instructions: "",
             prompts: Default::default(),
+            recipient: "",
+            examples: "",
         }
     }
 
@@ -1307,6 +1321,8 @@ mod tests {
                 previous_draft: "No tengo a mano el avance.",
                 context_instructions: "",
                 prompts: Default::default(),
+                recipient: "",
+                examples: "",
                 ..input()
             })
             .await

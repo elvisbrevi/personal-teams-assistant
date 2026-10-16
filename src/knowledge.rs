@@ -19,6 +19,29 @@ pub struct KnowledgeMap {
     /// What the user changed in the built-in cases (kinds of request); see `crate::cases`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub cases: Vec<crate::cases::Case>,
+    /// People the user writes to, and how the user addresses each.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub people: Vec<Person>,
+}
+/// Someone who writes to the user, and how the user addresses them. It reaches the model only
+/// when answering that person.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct Person {
+    pub id: String,
+    pub name: String,
+    /// Their Microsoft Graph user IDs (Teams senders).
+    #[serde(default)]
+    pub senders: Vec<String>,
+    /// Other display names they write as.
+    #[serde(default)]
+    pub aliases: Vec<String>,
+    /// How the user addresses them: form of address, tone, length.
+    #[serde(default)]
+    pub address: String,
+    /// What to keep in mind about them: their role, what they usually ask.
+    #[serde(default)]
+    pub notes: String,
 }
 /// A subject the user works on. A request that names it (one of its keywords, its name or ID)
 /// is answered from its sources when the conversation may read them, with its instructions.
@@ -93,6 +116,42 @@ impl KnowledgeMap {
         let mut ids = BTreeSet::new();
         let id_pattern = regex::Regex::new(r"^[a-z][a-z0-9_-]{0,63}$")?;
         crate::cases::validate(&map.cases, |id| map.resources.iter().any(|r| r.id == id))?;
+        ensure!(map.people.len() <= 500, "too many people");
+        let mut person_ids = BTreeSet::new();
+        for person in &map.people {
+            let plain = |text: &str, max: usize| {
+                text.chars().count() <= max
+                    && !text
+                        .chars()
+                        .any(|c| c.is_control() && c != '\n' && c != '\t')
+            };
+            ensure!(
+                id_pattern.is_match(&person.id) && person_ids.insert(person.id.as_str()),
+                "invalid or duplicate person id"
+            );
+            ensure!(
+                !person.name.trim().is_empty()
+                    && plain(&person.name, 120)
+                    && plain(&person.address, 1000)
+                    && plain(&person.notes, 2000),
+                "a person needs a name of at most 120 characters; how to address them takes at most 1000 and notes 2000"
+            );
+            ensure!(
+                person.senders.len() <= 20
+                    && person.senders.iter().all(|s| {
+                        !s.is_empty()
+                            && s.len() <= 200
+                            && s.chars()
+                                .all(|c| c.is_ascii_alphanumeric() || "-:._@".contains(c))
+                    })
+                    && person.aliases.len() <= 20
+                    && person
+                        .aliases
+                        .iter()
+                        .all(|a| !a.trim().is_empty() && plain(a, 120)),
+                "a person has at most 20 Teams IDs and 20 other names"
+            );
+        }
         ensure!(map.contexts.len() <= 50, "too many contexts");
         let mut context_ids = BTreeSet::new();
         let plain = |text: &str, max: usize| {
@@ -211,6 +270,22 @@ impl KnowledgeMap {
             }
         }
         best.map(|(_, context)| context)
+    }
+    /// The person profile of a message's sender: by Teams ID, otherwise by name or another
+    /// name (ignoring case and accents).
+    pub fn person_for(&self, sender_id: &str, sender_name: &str) -> Option<&Person> {
+        let folded = crate::index::fold(sender_name.trim());
+        self.people
+            .iter()
+            .find(|p| !sender_id.is_empty() && p.senders.iter().any(|s| s == sender_id))
+            .or_else(|| {
+                (!folded.is_empty()).then_some(())?;
+                self.people.iter().find(|p| {
+                    std::iter::once(&p.name)
+                        .chain(&p.aliases)
+                        .any(|name| crate::index::fold(name.trim()) == folded)
+                })
+            })
     }
     /// The user's changes to a built-in case, if any.
     pub fn case(&self, id: &str) -> Option<&crate::cases::Case> {
@@ -570,6 +645,27 @@ mod tests {
             !toml::to_string(&KnowledgeMap::parse("").unwrap())
                 .unwrap()
                 .contains("contexts")
+        );
+    }
+    #[test]
+    fn a_sender_finds_their_profile_by_id_or_name() {
+        let map = KnowledgeMap::parse(
+            "[[people]]\nid = \"ana\"\nname = \"Ana Pérez\"\nsenders = [\"11111111-2222-3333-4444-555555555555\"]\naliases = [\"Ana P.\"]\naddress = \"Tutéala y sé breve.\"\n",
+        )
+        .unwrap();
+        let id = |sender: &str, name: &str| map.person_for(sender, name).map(|p| p.id.as_str());
+        assert_eq!(
+            id("11111111-2222-3333-4444-555555555555", "Someone"),
+            Some("ana")
+        );
+        assert_eq!(id("other", "ANA PEREZ"), Some("ana"));
+        assert_eq!(id("other", "Ana P."), Some("ana"));
+        assert_eq!(id("other", "Ana"), None);
+        assert_eq!(id("", ""), None);
+        assert!(KnowledgeMap::parse("[[people]]\nid = \"ana\"\nname = \" \"\n").is_err());
+        assert!(
+            KnowledgeMap::parse("[[people]]\nid = \"ana\"\nname = \"A\"\nsenders = [\"a b\"]\n")
+                .is_err()
         );
     }
     #[test]

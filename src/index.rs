@@ -21,6 +21,8 @@ use std::{
 pub const FILE: &str = "knowledge-index.db";
 /// The documents of verified notes; never a resource ID, which starts with a letter.
 pub const NOTES: &str = "@notes";
+/// The requests of answers the user approved as examples.
+pub const EXAMPLES: &str = "@examples";
 /// Characters of one indexed section.
 const SECTION: usize = 1500;
 /// Files of one repository source, and the size of one file.
@@ -168,6 +170,7 @@ impl Index {
             PRAGMA foreign_keys=ON;
             CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY,value TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS notes(id TEXT PRIMARY KEY,payload TEXT NOT NULL,updated_at INTEGER NOT NULL);
+            CREATE TABLE IF NOT EXISTS examples(resource TEXT PRIMARY KEY,request TEXT NOT NULL,answer TEXT NOT NULL,context TEXT,updated_at INTEGER NOT NULL);
             CREATE TABLE IF NOT EXISTS documents(id INTEGER PRIMARY KEY,source TEXT NOT NULL,key TEXT NOT NULL,title TEXT NOT NULL,stamp TEXT NOT NULL,contexts TEXT NOT NULL DEFAULT '[]',UNIQUE(source,key));
             CREATE TABLE IF NOT EXISTS chunks(id INTEGER PRIMARY KEY,document INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE,heading TEXT NOT NULL,text TEXT NOT NULL,embedding BLOB);
             CREATE INDEX IF NOT EXISTS chunks_document ON chunks(document);
@@ -342,6 +345,88 @@ impl Index {
         Ok(notes)
     }
 
+    /// Keep an answer the user approved as an example for similar requests (its request is
+    /// searched; the whole answer is returned).
+    pub fn save_example(
+        &self,
+        resource: &str,
+        request: &str,
+        answer: &str,
+        context: Option<&str>,
+    ) -> Result<()> {
+        let now = chrono::Utc::now().timestamp();
+        let mut db = self.db.lock().unwrap();
+        let tx = db.transaction()?;
+        tx.execute(
+            "INSERT INTO examples(resource,request,answer,context,updated_at) VALUES (?1,?2,?3,?4,?5) ON CONFLICT(resource) DO UPDATE SET request=excluded.request,answer=excluded.answer,context=excluded.context,updated_at=excluded.updated_at",
+            params![resource, request, answer, context, now],
+        )?;
+        let contexts = serde_json::to_string(&context.map(|c| vec![c]).unwrap_or_default())?;
+        write_document(
+            &tx,
+            EXAMPLES,
+            resource,
+            "example",
+            &now.to_string(),
+            &contexts,
+            request,
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn remove_example(&self, resource: &str) -> Result<()> {
+        let db = self.db.lock().unwrap();
+        db.execute("DELETE FROM examples WHERE resource=?1", [resource])?;
+        db.execute(
+            "DELETE FROM documents WHERE source=?1 AND key=?2",
+            params![EXAMPLES, resource],
+        )?;
+        Ok(())
+    }
+
+    /// Approved examples for `query`, as (request, answer): only those whose request shares at
+    /// least half of the query's meaningful words (two at least, when it has two), so a single
+    /// common word does not bring in an unrelated answer. `context` keeps its examples and the
+    /// general ones.
+    pub fn examples(
+        &self,
+        query: &str,
+        context: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<(String, String)>> {
+        let wanted = terms(query);
+        if wanted.is_empty() {
+            return Ok(Vec::new());
+        }
+        let contexts = context.map(|c| vec![c.to_owned()]);
+        let hits = self.search(&[EXAMPLES], query, contexts.as_deref(), None, limit * 4)?;
+        let db = self.db.lock().unwrap();
+        let mut out = Vec::new();
+        for hit in hits {
+            let shared = terms(&hit.text).intersection(&wanted).count();
+            if shared * 2 < wanted.len() || shared < wanted.len().min(2) {
+                continue;
+            }
+            let found: Option<(String, String)> = db
+                .query_row(
+                    "SELECT request,answer FROM examples WHERE resource=?1",
+                    [&hit.key],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .optional()?;
+            if let Some(example) = found
+                && !out.contains(&example)
+            {
+                out.push(example);
+            }
+            if out.len() >= limit {
+                break;
+            }
+        }
+        Ok(out)
+    }
+
     /// What each source has in the index (`@notes` for the notes).
     pub fn status(&self) -> Result<BTreeMap<String, SourceStatus>> {
         let db = self.db.lock().unwrap();
@@ -379,8 +464,9 @@ impl Index {
     }
 
     /// The most relevant sections of `sources` (`@notes` included by name) for `query`, by
-    /// full-text rank, fused with vector similarity when `query_vector` is given. Notes are
-    /// kept only when they belong to every context or share one with `contexts` (when given).
+    /// full-text rank, fused with vector similarity when `query_vector` is given. Notes and
+    /// examples are kept only when they belong to every context or share one with `contexts`
+    /// (when given).
     pub fn search(
         &self,
         sources: &[&str],
@@ -395,7 +481,7 @@ impl Index {
         let db = self.db.lock().unwrap();
         let placeholders = vec!["?"; sources.len()].join(",");
         let keep = |source: &str, note_contexts: &str| {
-            source != NOTES
+            (source != NOTES && source != EXAMPLES)
                 || contexts.is_none_or(|wanted| {
                     let found: Vec<String> =
                         serde_json::from_str(note_contexts).unwrap_or_default();
@@ -708,6 +794,21 @@ pub fn fold(text: &str) -> String {
             'ú' | 'ù' | 'ü' | 'û' => 'u',
             'ñ' => 'n',
             c => c,
+        })
+        .collect()
+}
+
+/// The meaningful words of a text, accent-folded, a longer one by its stem.
+fn terms(text: &str) -> BTreeSet<String> {
+    fold(text)
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| w.chars().count() >= 3 && !STOPWORDS.contains(w))
+        .map(|w| {
+            if w.chars().count() >= 5 {
+                w.chars().take(w.chars().count() - 1).collect()
+            } else {
+                w.to_owned()
+            }
         })
         .collect()
 }
@@ -1069,6 +1170,73 @@ mod tests {
         // Another model's vectors are not comparable: they are dropped.
         index.use_embeddings("b").unwrap();
         assert_eq!(index.unembedded(&[NOTES], 10).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn approved_examples_guide_only_similar_requests() {
+        let data = tempfile::tempdir().unwrap();
+        let index = Index::open(&data.path().join(FILE)).unwrap();
+        index
+            .save_example(
+                "chats/a/messages/1",
+                "¿Cómo registro un hotfix de producción?",
+                "Se registra como Bug Desarrollo vinculado al incidente.",
+                Some("cobros"),
+            )
+            .unwrap();
+        index
+            .save_example(
+                "chats/a/messages/2",
+                "¿Hay reunión mañana?",
+                "Sí, a las 10.",
+                None,
+            )
+            .unwrap();
+        let found = index
+            .examples(
+                "¿cómo se registran los hotfix en producción?",
+                Some("cobros"),
+                2,
+            )
+            .unwrap();
+        assert_eq!(found.len(), 1);
+        assert!(found[0].1.contains("Bug Desarrollo"));
+        // One shared common word is not similar enough; another context's example stays out.
+        assert!(
+            index
+                .examples("¿Cómo está la producción del reporte?", None, 2)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            index
+                .examples("registro hotfix producción", Some("pagos"), 2)
+                .unwrap()
+                .is_empty()
+        );
+        // Saving again replaces it; removing forgets it.
+        index
+            .save_example(
+                "chats/a/messages/1",
+                "¿Cómo registro un hotfix de producción?",
+                "Como Bug.",
+                None,
+            )
+            .unwrap();
+        assert_eq!(
+            index
+                .examples("registro hotfix producción", None, 2)
+                .unwrap()[0]
+                .1,
+            "Como Bug."
+        );
+        index.remove_example("chats/a/messages/1").unwrap();
+        assert!(
+            index
+                .examples("registro hotfix producción", None, 2)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]

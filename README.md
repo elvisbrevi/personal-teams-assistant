@@ -70,6 +70,13 @@ and a pull request named in a status question is read so it can be linked. The
 full list of cited references and Wiki pages read stays in the message history
 (Messages tab and `pta audit show`).
 
+Version 0.7.22 lets the assistant improve from what you approve. In Messages,
+rate an answer (good or needs work, with a comment), keep a good one as an example
+for similar requests (it guides structure and tone, never facts), or save it as a
+verified note. Knowledge › People says how you address each person; the assistant
+follows it only when answering them. Agents can do the same with `pta answer
+feedback` and `pta people`.
+
 Version 0.7.21 makes the kinds of request configurable. In Knowledge › Cases (or
 `pta cases`), each built-in case — every answer, status round, what you did,
 activity review, documentation, request for you, informational message — shows how
