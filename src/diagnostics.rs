@@ -54,6 +54,7 @@ pub async fn providers(config: &Config) -> Result<Value> {
                         unprompted: false,
                         guidance: "",
                         previous_draft: "",
+                        context_instructions: "",
                     })
                     .await?;
                 let chars = generated.answer.trim().chars().count();

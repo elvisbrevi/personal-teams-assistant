@@ -97,6 +97,18 @@ Knowledge
   sources list | sources show ID | sources add | sources edit ID | sources remove ID
   sources enable|disable ID
   sources audience ID      JSON on stdin: allowed_conversations, allowed_senders, external_processing.
+                           A whole repository is a source too: {\"kind\":\"repository\",\"repository\":\"ALIAS\",...};
+                           the verified notes: {\"kind\":\"notes\",...} (optional \"contexts\" keeps only theirs).
+  contexts list | contexts show ID | contexts add | contexts edit ID | contexts remove ID
+                           Subjects such as «cobros»: JSON on stdin with id, name, description, keywords,
+                           sources (IDs) and instructions. A request naming one reads its sources.
+  notes list [--context ID] [--limit N]  Verified notes, newest first.
+  notes search TEXT [--context ID]       Notes by relevance.
+  notes add | notes edit ID              JSON on stdin: title, text, contexts, keywords, origin, reference.
+  notes remove ID
+  knowledge search TEXT [--source ID]... [--context ID]
+                           The sections the assistant would read from repositories and notes (no model).
+  index status | index refresh [SOURCE]  What each indexed source holds; compare repositories with their files.
   azure wiki list|search|read SOURCE_ID  (search/read: JSON on stdin; local read only)
 
 Agents
@@ -184,6 +196,14 @@ fn validate_args(args: &[String]) -> Result<()> {
         match a {
             "--json" | "--non-interactive" | "--offline" | "--no-browser" | "--wait"
             | "--content" | "--current-profile" | "--context-stdin" => {}
+            "--context" => {
+                i += 1;
+                ensure!(
+                    args.get(i)
+                        .is_some_and(|v| !v.is_empty() && !v.starts_with("--")),
+                    "invalid context ID"
+                );
+            }
             "--limit" => {
                 i += 1;
                 ensure!(
@@ -280,6 +300,13 @@ fn validate_args(args: &[String]) -> Result<()> {
             | ["audit", "list"]
             | ["audit", "show", _]
             | ["answer", "refine" | "send", _]
+            | ["contexts", "list" | "add"]
+            | ["contexts", "show" | "edit" | "remove", _]
+            | ["notes", "list" | "add"]
+            | ["notes", "search" | "edit" | "remove", _]
+            | ["knowledge", "search", _]
+            | ["index", "status" | "refresh"]
+            | ["index", "refresh", _]
     );
     ensure!(valid, "unknown command or invalid argument count");
     for (flag, allowed) in [
@@ -300,8 +327,13 @@ fn validate_args(args: &[String]) -> Result<()> {
             "--current-profile",
             p.as_slice().starts_with(&["web", "users", "add"]),
         ),
-        ("--limit", ["audit", "logs"].contains(&p[0])),
-        ("--source", p.as_slice().starts_with(&["answer", "refine"])),
+        ("--limit", ["audit", "logs", "notes"].contains(&p[0])),
+        (
+            "--source",
+            p.as_slice().starts_with(&["answer", "refine"])
+                || p.as_slice().starts_with(&["knowledge", "search"]),
+        ),
+        ("--context", ["notes", "knowledge"].contains(&p[0])),
     ] {
         ensure!(
             !args.iter().any(|a| a == flag) || allowed,
@@ -365,7 +397,7 @@ async fn execute(mut args: Vec<String>) -> Result<Reply> {
     match command {
         "capabilities" => {
             return Ok(Reply::success(
-                json!({"contract":control::CONTRACT,"commands":HELP,"skill_version":env!("CARGO_PKG_VERSION"),"activity_registration_support":true,"web_support":true,"web_access_support":true}),
+                json!({"contract":control::CONTRACT,"commands":HELP,"skill_version":env!("CARGO_PKG_VERSION"),"activity_registration_support":true,"web_support":true,"web_access_support":true,"knowledge_index_support":true}),
             ));
         }
         "skill" => return crate::app::skill::command(action, args.get(2).map(String::as_str)),
@@ -427,6 +459,47 @@ async fn execute(mut args: Vec<String>) -> Result<Reply> {
             }
             _ => call("answer_send", json!({"resource":resource}), None, true).await,
         };
+    }
+    if ["notes", "knowledge", "index"].contains(&command) {
+        let flag = |name: &str| {
+            args.iter()
+                .position(|a| a == name)
+                .and_then(|i| args.get(i + 1))
+                .cloned()
+        };
+        let (method, value) = match (command, action) {
+            ("notes", "list") => (
+                "notes_list",
+                json!({"context":flag("--context"),"limit":flag("--limit").map(|l| l.parse::<u64>()).transpose()?}),
+            ),
+            ("notes", "search") => (
+                "notes_list",
+                json!({"query":positional(&args,2)?,"context":flag("--context")}),
+            ),
+            ("notes", "add") => ("notes_save", json!({"note":input()?})),
+            ("notes", "edit") => {
+                let mut note = input()?;
+                note["id"] = json!(positional(&args, 2)?);
+                ("notes_save", json!({"note":note}))
+            }
+            ("notes", "remove") => ("notes_remove", json!({"id":positional(&args,2)?})),
+            ("knowledge", "search") => {
+                let sources: Vec<&String> = args
+                    .windows(2)
+                    .filter(|pair| pair[0] == "--source")
+                    .map(|pair| &pair[1])
+                    .collect();
+                (
+                    "knowledge_search",
+                    json!({"query":positional(&args,2)?,"context":flag("--context"),
+                        "sources":(!sources.is_empty()).then_some(sources)}),
+                )
+            }
+            ("index", "status") => ("index_status", json!({})),
+            ("index", "refresh") => ("index_refresh", json!({"source":args.get(2)})),
+            _ => anyhow::bail!("unknown command; consult --help"),
+        };
+        return call(method, value, None, true).await;
     }
     if command == "doctor" && args.iter().any(|a| a == "--offline") {
         let dir = control::profile_dir()?;
@@ -683,6 +756,45 @@ async fn execute(mut args: Vec<String>) -> Result<Reply> {
                 .as_array_mut()
                 .unwrap()
                 .push(resource);
+        }
+        ("contexts", "list") => {
+            snap.data = data["map"]["contexts"].clone();
+            if snap.data.is_null() {
+                snap.data = json!([]);
+            }
+            return Ok(snap);
+        }
+        ("contexts", "add") => {
+            let context = input()?;
+            let map = data["map"].as_object_mut().context("invalid map")?;
+            let list = map.entry("contexts").or_insert_with(|| json!([]));
+            list.as_array_mut()
+                .context("invalid contexts")?
+                .push(context);
+        }
+        ("contexts", "show" | "edit" | "remove") => {
+            let id = positional(&args, 2)?;
+            let list = data["map"]["contexts"]
+                .as_array_mut()
+                .context("unknown context")?;
+            let i = list
+                .iter()
+                .position(|c| c["id"] == id)
+                .context("unknown context")?;
+            match action {
+                "show" => {
+                    snap.data = list[i].clone();
+                    return Ok(snap);
+                }
+                "edit" => {
+                    let context = input()?;
+                    ensure!(context["id"] == id, "context ID cannot change");
+                    list[i] = context;
+                }
+                _ => {
+                    list.remove(i);
+                }
+            }
         }
         ("sources", "show" | "edit" | "remove" | "enable" | "disable" | "audience") => {
             let id = positional(&args, 2)?;
@@ -1082,6 +1194,15 @@ mod help_tests {
             &["audit", "list"],
             &["answer", "refine", "resource"],
             &["answer", "send", "resource"],
+            &["contexts", "list"],
+            &["contexts", "edit", "cobros"],
+            &["notes", "list"],
+            &["notes", "search", "hotfix"],
+            &["notes", "add"],
+            &["notes", "remove", "note-id"],
+            &["knowledge", "search", "conciliación"],
+            &["index", "status"],
+            &["index", "refresh", "handbook"],
         ];
         for command in commands {
             let args: Vec<String> = command.iter().map(|a| a.to_string()).collect();
@@ -1113,6 +1234,16 @@ mod help_tests {
                 "manuals",
                 "--source",
                 "azure-devops-status",
+            ],
+            vec!["notes", "list", "--context", "cobros", "--limit", "5"],
+            vec![
+                "knowledge",
+                "search",
+                "pagos",
+                "--source",
+                "handbook",
+                "--context",
+                "cobros",
             ],
         ] {
             assert!(

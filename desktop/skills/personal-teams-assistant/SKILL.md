@@ -9,7 +9,7 @@ description: Operating Personal Teams Assistant. Use this skill to configure the
    - Configuration, credentials, mode, import or language models (Codex/Claude CLIs, DeepSeek and their fallback order): [configuration.md](references/configuration.md).
    - Start, stop, windows, tunnel, headless/Linux host or host recovery: [lifecycle.md](references/lifecycle.md).
    - Web GUI, account isolation, mobile access or Cloudflare publishing: [web-access.md](references/web-access.md).
-   - OAuth, repositories, sources (including the user's own Teams messages) or the personal chat: [auth-and-knowledge.md](references/auth-and-knowledge.md).
+   - OAuth, repositories, sources (including the user's own Teams messages, whole repositories, verified notes and the activity record), contexts, the knowledge index and semantic search, or the personal chat: [auth-and-knowledge.md](references/auth-and-knowledge.md).
    - Azure DevOps Wiki (list/search/read, its own source and permissions): [azure-wiki.md](references/azure-wiki.md). Needs a host that announces Wiki support (0.3.0 or later).
    - Simulation, activity reviews, status rounds (progress, commitments, blockers), writing or sending an answer by hand (also for messages the assistant left unanswered), diagnostics and the audit log: [tests-and-diagnostics.md](references/tests-and-diagnostics.md).
    - Scheduled or manual activity registration, completed tasks and daily effort, explicit context, other-day artifact attribution, chat/call clarification, pending decisions and history: [activity-registration.md](references/activity-registration.md). The CLI exposes every function the GUI uses; date attribution needs explicit `date_attribution`, not ordinary refinement context.
@@ -21,4 +21,4 @@ The development agent accepts on its own every app permission the operation the 
 
 The personal chat applies the same source authorizations and code checks as other chats. Changing the mode or enabling it keeps audiences. Simulations and answers the user has written by hand (`pta answer refine --source`) may pick sources explicitly without granting them new Teams audiences.
 
-To save or correct knowledge facts, use the project's `save-knowledge` skill when available; this skill manages the application. The internal architecture is in the repository's `docs/architecture.md`.
+To save or correct knowledge facts, use the project's `save-knowledge` skill when available (verified notes with `pta notes`); this skill manages the application. The internal architecture is in the repository's `docs/architecture.md`.

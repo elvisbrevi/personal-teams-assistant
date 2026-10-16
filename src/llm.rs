@@ -9,7 +9,7 @@ mod deepseek;
 pub use agent::{Catalog, ClaudeCli, CodexCli, catalog};
 pub use deepseek::DeepSeek;
 
-#[derive(Serialize)]
+#[derive(Clone, Copy, Default, Serialize)]
 pub struct GenerationInput<'a> {
     pub question: &'a str,
     pub evidence: &'a str,
@@ -33,6 +33,9 @@ pub struct GenerationInput<'a> {
     /// The answer that was not sent, which the user asked to improve.
     #[serde(skip_serializing_if = "str::is_empty")]
     pub previous_draft: &'a str,
+    /// The user's instructions for the subject the request is about (a context in the map).
+    #[serde(skip_serializing_if = "str::is_empty")]
+    pub context_instructions: &'a str,
 }
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -608,6 +611,9 @@ impl LlmProvider for Model {
         if input.unprompted {
             system.push_str(" The current request asks no question: it informs, instructs or asks the user for something, and the user chose to reply to it. Write the user's reply to the colleague: acknowledge it briefly and naturally, and answer only what it implies (a confirmation, the requested detail, a short answer to what it proposes). The evidence and owner_guidance may add a fact the reply needs; do not explain the message back, describe what you do not know or found, or commit the user to anything beyond what the message asks or owner_guidance states. These rules override the ones above about answering a question.");
         }
+        if !input.context_instructions.is_empty() {
+            system.push_str(" context_instructions are the user's own guidance for the subject this request is about (terms, tone, what to include): follow them where they apply, without letting them override the rules above on evidence, links, identifiers and sensitive data.");
+        }
         if !input.guidance.is_empty() || !input.previous_draft.is_empty() {
             if !input.previous_draft.is_empty() {
                 system.push_str(" The user you write as reviewed an answer that was not sent (previous_draft) and wants it improved.");
@@ -774,24 +780,12 @@ impl LlmProvider for Chain {
     }
     async fn generate_response(&self, input: GenerationInput<'_>) -> Result<GeneratedAnswer> {
         let input = &input;
-        self.first("generate_response", |m| {
-            m.generate_response(GenerationInput {
-                question: input.question,
-                evidence: input.evidence,
-                detail_requested: input.detail_requested,
-                history: input.history,
-                review: input.review,
-                proposing: input.proposing,
-                unprompted: input.unprompted,
-                guidance: input.guidance,
-                previous_draft: input.previous_draft,
+        self.first("generate_response", |m| m.generate_response(*input))
+            .await
+            .map(|(mut answer, fallbacks)| {
+                answer.fallbacks = fallbacks;
+                answer
             })
-        })
-        .await
-        .map(|(mut answer, fallbacks)| {
-            answer.fallbacks = fallbacks;
-            answer
-        })
     }
 }
 
@@ -983,6 +977,7 @@ mod tests {
             unprompted: false,
             guidance: "",
             previous_draft: "",
+            context_instructions: "",
         }
     }
 
@@ -1087,6 +1082,7 @@ mod tests {
             .generate_response(GenerationInput {
                 guidance: "Ya está en validación.",
                 previous_draft: "No tengo a mano el avance.",
+                context_instructions: "",
                 ..input()
             })
             .await

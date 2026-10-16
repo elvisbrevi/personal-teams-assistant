@@ -79,6 +79,9 @@ pub struct Audit {
     /// the sources authorized for the conversation.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub chosen_sources: Vec<String>,
+    /// The context (subject) the request named, whose sources and instructions shaped it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context: Option<String>,
     /// Processing steps in order. Details name decisions and counts, never message content.
     pub trace: Vec<TraceStep>,
 }

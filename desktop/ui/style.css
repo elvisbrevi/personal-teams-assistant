@@ -189,6 +189,7 @@ button.secondary.busy::after, button.danger.busy::after { border-color: var(--br
 .list > .resource:first-child { border-top: 0; padding-top: .3rem; }
 .resource-head { display: flex; align-items: center; gap: .5rem; flex-wrap: wrap; }
 .resource-head strong { font-family: var(--mono); font-size: .92rem; }
+.resource-head strong.title { font-family: inherit; font-size: 1rem; }
 .resource-head .grow { flex: 1; }
 .resource { gap: .35rem; padding: .85rem 0; }
 .resource-facts { display: grid; gap: .1rem; margin: 0; }

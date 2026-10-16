@@ -1,6 +1,6 @@
 # Guide for agents
 
-Read [the architecture](docs/architecture.md) first: it explains components, pipeline, data, credentials, invariants and change recipes.
+Read [the architecture](docs/architecture.md) first: it explains components, pipeline, data, credentials, invariants and change recipes. [CONTEXT.md](CONTEXT.md) holds the domain's vocabulary (source, context, verified note, activity record…); use its terms.
 
 ## Which skill to use
 

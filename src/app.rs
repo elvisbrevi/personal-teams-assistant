@@ -31,6 +31,7 @@ mod github;
 #[cfg(feature = "gui")]
 mod gui;
 mod headless;
+mod notes;
 mod skill;
 mod web;
 
@@ -443,6 +444,7 @@ pub(crate) fn init_state(config_dir: &Path, data_dir: &Path) -> Result<DesktopSt
             &toml::to_string_pretty(&KnowledgeMap {
                 repositories: BTreeMap::new(),
                 resources: Vec::new(),
+                contexts: Vec::new(),
             })?,
         )?;
     }
@@ -762,6 +764,12 @@ async fn save_settings(
 ) -> std::result::Result<(), String> {
     let previous = read_config(&state.config_path).map_err(fail)?;
     config.knowledge_map = state.map_path.clone();
+    // The map's own rules say what to fix (a duplicate context, an unknown source); they never
+    // carry secrets.
+    toml::to_string(&map)
+        .map_err(anyhow::Error::from)
+        .and_then(|text| KnowledgeMap::parse(&text))
+        .map_err(|e| format!("[invalid_input] The knowledge map is invalid: {e}."))?;
     validate_local(&config, &map)
         .map_err(|_| "[invalid_input] Configuration or knowledge map is invalid.".to_string())?;
     protect_identity(&previous, &config)
@@ -778,11 +786,37 @@ async fn save_settings(
         stop(state).await.map_err(fail)?;
     }
     commit_settings(state, &config, &map, tunnel_config.trim()).map_err(fail)?;
+    forget_removed_sources(&config, &map);
     *state.activity_graph.lock().await = None;
     if was_running {
         start(state).await.map_err(fail)?;
     }
     Ok(())
+}
+
+/// The knowledge index keeps no documents of repository sources that left the map.
+fn forget_removed_sources(config: &Config, map: &KnowledgeMap) {
+    let path = config.server.data_dir.join(crate::index::FILE);
+    if !path.exists() {
+        return;
+    }
+    let kept: std::collections::BTreeSet<&str> = map
+        .resources
+        .iter()
+        .filter(|r| matches!(r.access, Access::Repository { .. }))
+        .map(|r| r.id.as_str())
+        .collect();
+    let forgotten = crate::index::Index::open(&path).and_then(|index| {
+        for source in index.status()?.into_keys() {
+            if source != crate::index::NOTES && !kept.contains(source.as_str()) {
+                index.forget(&source)?;
+            }
+        }
+        Ok(())
+    });
+    if forgotten.is_err() {
+        tracing::warn!(event = "knowledge_index_cleanup_failed");
+    }
 }
 
 async fn import_existing(state: &DesktopState, path: String) -> std::result::Result<(), String> {

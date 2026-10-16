@@ -32,6 +32,10 @@
       { id: 'wiki', description: 'Team wiki: architecture and procedures', topics: ['wiki', 'architecture'], enabled: true, external_processing: true, allowed_conversations: ['*'], allowed_senders: [], kind: 'tool', tool: { type: 'azure_devops_wiki', organization: org, project: 'Payments', secret_ref: 'AZURE_DEVOPS_PAT' } },
       { id: 'ado-activity', description: 'Azure DevOps activity', topics: ['status'], enabled: true, external_processing: true, allowed_conversations: ['chats/48:notes'], allowed_senders: [], kind: 'tool', tool: { type: 'azure_devops_status', organization: org, project: 'Payments', secret_ref: 'AZURE_DEVOPS_PAT', link_secret_ref: 'AZURE_DEVOPS_WRITE_PAT' } },
       { id: 'my-teams', description: 'My Teams messages', topics: ['teams'], enabled: true, external_processing: false, allowed_conversations: [], allowed_senders: [], kind: 'tool', tool: { type: 'teams_messages' } },
+      { id: 'handbook', description: 'Team handbook: runbooks, onboarding and conventions', topics: [], enabled: true, external_processing: true, allowed_conversations: ['*'], allowed_senders: [], kind: 'repository', repository: 'handbook' },
+    ];
+    snapshot.map.contexts = [
+      { id: 'billing', name: 'Billing', description: 'Invoices, payments and bank reconciliation', keywords: ['invoice', 'bank reconciliation', 'refund'], sources: ['payments', 'wiki'], instructions: 'Call collections «recaudación» and name the settlement batch when it applies.' },
     ];
     snapshot.credentials = Object.fromEntries(Object.keys(snapshot.credentials).map(k => [k, 'system']));
     if ('CLAUDE_CODE_OAUTH_TOKEN' in snapshot.credentials) snapshot.credentials.CLAUDE_CODE_OAUTH_TOKEN = 'unused';
@@ -90,6 +94,10 @@
   ];
   const summary = scenario === 'fresh' ? null : runs[0].summary;
 
+  const notes = scenario === 'fresh' ? [] : [
+    { id: 'note-1', title: 'How a production hotfix is registered', text: 'A production hotfix is logged as a Development Bug, not a user story: the symptom, the cause and the change, linked to the incident.', contexts: ['billing'], keywords: ['hotfix', 'incident'], origin: 'answer', created_at: secs(ago(3000)), updated_at: secs(ago(2000)) },
+    { id: 'note-2', title: 'Support hours', text: 'Support answers Monday to Friday, 9:00 to 18:00.', contexts: [], keywords: [], origin: 'user', created_at: secs(ago(9000)), updated_at: secs(ago(9000)) },
+  ];
   const delay = ms => new Promise(r => setTimeout(r, ms));
   const reply = (data, extra = {}) => ({ ok: true, code: 'ok', data, revision: 'rev-1', ...extra });
   const handlers = {
@@ -127,6 +135,21 @@
       Object.assign(row.audit, { reason: 'manual_send', sent: row.audit.proposed });
       return { status: 'sent' };
     },
+    index_status: () => ({ sources: snapshot.map.resources.filter(r => ['repository', 'notes'].includes(r.kind)).map(r => ({ id: r.id, kind: r.kind, enabled: r.enabled,
+      index: r.kind === 'repository' ? { documents: 42, sections: 318, embedded: 0, synced_at: secs(ago(12)) } : {} })), notes: { documents: notes.length, sections: notes.length, embedded: 0 }, embeddings: null }),
+    index_refresh: args => [{ id: args.source, sync: { added: 1, updated: 2, removed: 0, unchanged: 39, skipped: 0 } }],
+    notes_list: args => {
+      const words = (args.query || '').toLowerCase().split(/\W+/).filter(w => w.length > 2);
+      return structuredClone(notes.filter(n => !words.length || words.some(w => `${n.title} ${n.text} ${n.keywords.join(' ')}`.toLowerCase().includes(w))));
+    },
+    notes_save: args => {
+      window.__ptaLastNote = structuredClone(args.note);
+      const existing = notes.find(n => n.id === args.note.id);
+      const note = { origin: 'user', reference: null, contexts: [], keywords: [], ...args.note, id: args.note.id || `note-${notes.length + 1}`, created_at: existing?.created_at ?? secs(NOW), updated_at: secs(NOW) };
+      if (existing) Object.assign(existing, note); else notes.unshift(note);
+      return note;
+    },
+    notes_remove: args => { notes.splice(notes.findIndex(n => n.id === args.id), 1); return { removed: args.id }; },
     set_credential: args => { snapshot.credentials[args.name] = 'system'; return {}; },
     delete_credential: args => { snapshot.credentials[args.name] = 'missing'; return {}; },
   };

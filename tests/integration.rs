@@ -66,6 +66,7 @@ fn knowledge(dir: &tempfile::TempDir) -> KnowledgeMap {
                 path: "hours.md".into(),
             },
         }],
+        contexts: Vec::new(),
     }
 }
 fn used_ref(id: &str, mention: &str) -> personal_teams_assistant::evidence::Used {
@@ -1318,6 +1319,7 @@ async fn wiki_priority_current_request_mixed_citations_and_complete_gate_without
                             },
                         },
                     ],
+                    contexts: Vec::new(),
                 },
                 llm: Arc::new(WikiLlm { used: ids.clone() }),
                 tools: Arc::new(WikiTools {
@@ -1448,6 +1450,7 @@ async fn follow_up_without_subject_searches_the_previous_topic_and_keeps_it_for_
             knowledge: KnowledgeMap {
                 repositories: BTreeMap::new(),
                 resources: vec![wiki_resource()],
+                contexts: Vec::new(),
             },
             llm: Arc::new(FollowUpLlm { resolve }),
             tools: Arc::new(WikiTools {
@@ -1549,6 +1552,7 @@ async fn a_first_wiki_question_searches_its_topic_not_the_whole_request() {
         knowledge: KnowledgeMap {
             repositories: BTreeMap::new(),
             resources: vec![wiki_resource()],
+            contexts: Vec::new(),
         },
         llm: Arc::new(TopicLlm),
         // Generic words of the whole request («body», «endpoint») rank other API pages first.
@@ -1671,6 +1675,7 @@ async fn explicit_local_selection_still_requires_enabled_and_external_processing
             knowledge: KnowledgeMap {
                 repositories: BTreeMap::new(),
                 resources: vec![source],
+                contexts: Vec::new(),
             },
             llm: Arc::new(NoLlm),
             tools: Arc::new(NoTools),
@@ -1710,6 +1715,7 @@ async fn implicit_documentation_does_not_bypass_teams_source_audiences() {
         knowledge: KnowledgeMap {
             repositories: BTreeMap::new(),
             resources: vec![wiki],
+            contexts: Vec::new(),
         },
         llm: Arc::new(NoLlm),
         tools: Arc::new(NoTools),
@@ -1841,6 +1847,7 @@ async fn teams_simulation_keeps_who_said_what_in_the_evidence_and_the_log() {
         knowledge: KnowledgeMap {
             repositories: BTreeMap::new(),
             resources: vec![resource],
+            contexts: Vec::new(),
         },
         llm: Arc::new(TeamsAttributionLlm),
         tools: Arc::new(TeamsEvidenceTool),
@@ -4239,4 +4246,248 @@ async fn an_answer_that_cannot_be_written_says_why_and_a_sensitive_message_gets_
         "sensitive_question"
     );
     assert!(sensitive.begin_refinement(resource, "", &[]).is_err());
+}
+
+/// Keeps what each answer was written from: the evidence and the context's instructions.
+struct ContextLlm(std::sync::Mutex<Vec<(String, String)>>);
+#[async_trait]
+impl LlmProvider for ContextLlm {
+    fn name(&self) -> &str {
+        "synthetic-context"
+    }
+    async fn classify_intent(&self, _: &str, _: &str) -> Result<IntentDecision> {
+        Ok(IntentDecision {
+            intent: Intent::Question,
+            confidence: 0.96,
+        })
+    }
+    async fn generate(&self, _: GenerationInput<'_>) -> Result<String> {
+        unreachable!()
+    }
+    async fn generate_response(
+        &self,
+        input: GenerationInput<'_>,
+    ) -> Result<personal_teams_assistant::llm::GeneratedAnswer> {
+        self.0.lock().unwrap().push((
+            input.evidence.to_owned(),
+            input.context_instructions.to_owned(),
+        ));
+        Ok(personal_teams_assistant::llm::GeneratedAnswer {
+            answer: "La conciliación corre cada noche.".into(),
+            detailed: false,
+            used_sources: Vec::new(),
+            provider: None,
+            fallbacks: Vec::new(),
+        })
+    }
+}
+fn indexed_resource(id: &str, access: Access) -> Resource {
+    Resource {
+        id: id.into(),
+        description: format!("{id} knowledge"),
+        topics: vec![],
+        enabled: true,
+        external_processing: true,
+        allowed_conversations: vec![],
+        allowed_senders: vec![],
+        access,
+    }
+}
+/// Answers `text` in a simulation with `map` and the sources it lists, returning what the
+/// model saw and the message's audit.
+async fn answer_from(
+    dir: &tempfile::TempDir,
+    map: KnowledgeMap,
+    text: &str,
+) -> (
+    Vec<(String, String)>,
+    personal_teams_assistant::state::Audit,
+) {
+    let server = MockServer::start().await;
+    let store = support::store(dir);
+    let graph = support::graph(&server, store.clone());
+    let mut cfg = (*graph.config).clone();
+    cfg.policy.dry_run = true;
+    cfg.server.data_dir = dir.path().into();
+    let sources: Vec<String> = map.resources.iter().map(|r| r.id.clone()).collect();
+    let llm = Arc::new(ContextLlm(Default::default()));
+    let pipeline = Pipeline {
+        config: Arc::new(cfg),
+        store: store.clone(),
+        adapter: graph,
+        knowledge: map,
+        llm: llm.clone(),
+        tools: Arc::new(NoTools),
+        redactor: redactor(),
+    };
+    let result = simulation::run(
+        &pipeline,
+        SimulationRequest {
+            session: "index".into(),
+            text: text.into(),
+            group: false,
+            mentioned: false,
+            sources: sources.clone(),
+        },
+        Some(&sources),
+    )
+    .await
+    .unwrap();
+    assert_eq!(result.status, "dry_run", "{}", result.reason);
+    let rows = personal_teams_assistant::state::Store::inspect(
+        &dir.path().join("test.db"),
+        false,
+        1,
+        None,
+        true,
+    )
+    .unwrap();
+    let seen = llm.0.lock().unwrap().clone();
+    (
+        seen,
+        serde_json::from_value(rows[0]["audit"].clone()).unwrap(),
+    )
+}
+#[tokio::test]
+async fn a_repository_source_answers_from_its_most_relevant_sections() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut map = knowledge(&dir);
+    std::fs::create_dir_all(dir.path().join("docs")).unwrap();
+    std::fs::write(
+        dir.path().join("docs/cobros.md"),
+        format!(
+            "# Cobros\n\n## Conciliación bancaria\n\nLa conciliación de pagos corre cada noche con el archivo del banco.\n\n## Historia\n\n{}",
+            "Texto sin relación con la pregunta. ".repeat(200)
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("docs/otro.md"),
+        "# Vacaciones\n\nSe piden con dos semanas de anticipación.",
+    )
+    .unwrap();
+    map.resources = vec![indexed_resource(
+        "handbook",
+        Access::Repository {
+            repository: "private".into(),
+        },
+    )];
+    let (seen, audit) = answer_from(&dir, map, "¿Cuándo corre la conciliación de pagos?").await;
+    let evidence = &seen[0].0;
+    assert!(evidence.contains("cada noche"), "{evidence}");
+    assert!(evidence.contains("docs/cobros.md"), "{evidence}");
+    // The section that answers, not the whole file or the unrelated one.
+    assert!(!evidence.contains("Vacaciones"), "{evidence}");
+    assert!(
+        evidence.matches("Texto sin relación").count() < 50,
+        "{evidence}"
+    );
+    assert_eq!(audit.tools, vec!["search_repository"]);
+    assert_eq!(audit.source.as_deref(), Some("handbook"));
+}
+#[tokio::test]
+async fn a_context_reads_its_sources_its_notes_and_its_instructions() {
+    use personal_teams_assistant::index::{FILE, Index, Note};
+    let dir = tempfile::tempdir().unwrap();
+    let mut map = knowledge(&dir);
+    std::fs::write(
+        dir.path().join("cobros.md"),
+        "La conciliación bancaria corre cada noche.",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("otros.md"),
+        "La conciliación de inventario es mensual.",
+    )
+    .unwrap();
+    let file = |name: &str| Access::File {
+        repository: "private".into(),
+        path: name.into(),
+    };
+    map.resources = vec![
+        indexed_resource("cobros-doc", file("cobros.md")),
+        indexed_resource("otros-doc", file("otros.md")),
+        indexed_resource("notes", Access::Notes { contexts: vec![] }),
+    ];
+    map.contexts = vec![
+        personal_teams_assistant::knowledge::Context {
+            id: "cobros".into(),
+            name: "Cobros".into(),
+            keywords: vec!["conciliación bancaria".into()],
+            sources: vec!["cobros-doc".into(), "notes".into()],
+            instructions: "Llama «recaudación» a los cobros.".into(),
+            ..Default::default()
+        },
+        personal_teams_assistant::knowledge::Context {
+            id: "inventario".into(),
+            name: "Inventario".into(),
+            ..Default::default()
+        },
+    ];
+    let index = Index::open(&dir.path().join(FILE)).unwrap();
+    for (title, text, contexts) in [
+        (
+            "Corte",
+            "La conciliación bancaria cierra a las 23:00.",
+            vec!["cobros".to_owned()],
+        ),
+        (
+            "Inventario",
+            "La conciliación de inventario la revisa bodega.",
+            vec!["inventario".to_owned()],
+        ),
+        (
+            "General",
+            "Las dudas de conciliación van al canal de soporte.",
+            vec![],
+        ),
+    ] {
+        index
+            .save_note(Note {
+                title: title.into(),
+                text: text.into(),
+                contexts,
+                ..Default::default()
+            })
+            .unwrap();
+    }
+    drop(index);
+    let (seen, audit) = answer_from(
+        &dir,
+        map.clone(),
+        "¿A qué hora cierra la conciliación bancaria?",
+    )
+    .await;
+    let (evidence, instructions) = &seen[0];
+    assert!(evidence.contains("corre cada noche"), "{evidence}");
+    assert!(evidence.contains("cierra a las 23:00"), "{evidence}");
+    assert!(evidence.contains("canal de soporte"), "{evidence}");
+    // Another context's document and notes stay out.
+    assert!(!evidence.contains("inventario"), "{evidence}");
+    assert_eq!(instructions, "Llama «recaudación» a los cobros.");
+    assert_eq!(audit.context.as_deref(), Some("cobros"));
+    assert_eq!(audit.source.as_deref(), Some("cobros-doc,notes"));
+    // Without a context, every authorized document is read and no instructions apply.
+    let dir = tempfile::tempdir().unwrap();
+    let mut plain = knowledge(&dir);
+    std::fs::write(
+        dir.path().join("cobros.md"),
+        "La conciliación bancaria corre cada noche.",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("otros.md"),
+        "La conciliación de inventario es mensual.",
+    )
+    .unwrap();
+    plain.resources = map.resources.clone();
+    plain.contexts = map.contexts.clone();
+    let (seen, audit) = answer_from(&dir, plain, "¿Cuándo es la conciliación?").await;
+    assert!(
+        seen[0].0.contains("es mensual") && seen[0].0.contains("cada noche"),
+        "{}",
+        seen[0].0
+    );
+    assert!(seen[0].1.is_empty());
+    assert_eq!(audit.context, None);
 }
