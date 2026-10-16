@@ -122,6 +122,9 @@ Knowledge
 
 Agents
   capabilities             Contract and commands as JSON.
+  mcp                      Model Context Protocol server over stdio for agents (Codex, Claude Code): every
+                           operation of the app as a tool; sending, Azure DevOps writes, access and mode changes
+                           need the user's confirmation. mcp config prints how to add it to each agent.
   skill show|path|install DIRECTORY     Operating manual for agents.
 
 Options
@@ -152,7 +155,12 @@ fn positional(args: &[String], index: usize) -> Result<&str> {
         .map(String::as_str)
         .context("missing argument; consult --help")
 }
-async fn call(method: &str, args: Value, revision: Option<String>, launch: bool) -> Result<Reply> {
+pub(super) async fn call(
+    method: &str,
+    args: Value,
+    revision: Option<String>,
+    launch: bool,
+) -> Result<Reply> {
     control::client(
         Request {
             contract: control::CONTRACT,
@@ -164,7 +172,7 @@ async fn call(method: &str, args: Value, revision: Option<String>, launch: bool)
     )
     .await
 }
-async fn snapshot() -> Result<Reply> {
+pub(super) async fn snapshot() -> Result<Reply> {
     call("snapshot", json!({}), None, true).await
 }
 fn lookup<'a>(value: &'a Value, key: &str) -> Result<&'a Value> {
@@ -256,6 +264,8 @@ fn validate_args(args: &[String]) -> Result<()> {
             | "chat"
             | "help"]
             | ["app", "open" | "hide" | "quit"]
+            | ["mcp"]
+            | ["mcp", "config"]
             | ["web", "status" | "configure" | "callbacks"]
             | ["web", "users", "list"]
             | [
@@ -410,7 +420,7 @@ async fn execute(mut args: Vec<String>) -> Result<Reply> {
     match command {
         "capabilities" => {
             return Ok(Reply::success(
-                json!({"contract":control::CONTRACT,"commands":HELP,"skill_version":env!("CARGO_PKG_VERSION"),"activity_registration_support":true,"web_support":true,"web_access_support":true,"knowledge_index_support":true}),
+                json!({"contract":control::CONTRACT,"commands":HELP,"skill_version":env!("CARGO_PKG_VERSION"),"activity_registration_support":true,"web_support":true,"web_access_support":true,"knowledge_index_support":true,"mcp_support":true}),
             ));
         }
         "skill" => return crate::app::skill::command(action, args.get(2).map(String::as_str)),
@@ -1101,6 +1111,33 @@ pub async fn run() -> i32 {
         }
         return 0;
     }
+    // The MCP server owns stdout for its protocol: it never prints a reply.
+    let positional: Vec<&str> = args
+        .iter()
+        .filter(|a| !a.starts_with("--"))
+        .map(String::as_str)
+        .collect();
+    if positional.first() == Some(&"mcp") {
+        match positional.get(1) {
+            None => {
+                // Like any command: a host left from an update is replaced, keeping the
+                // assistant's state (its notes go to stderr, never to the protocol).
+                let _ = retire_outdated_host("mcp", "", false).await;
+                return super::mcp::Server::new().serve().await;
+            }
+            Some(&"config") => {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&super::mcp::config()).unwrap()
+                );
+                return 0;
+            }
+            _ => {
+                eprintln!("Usage: pta mcp | pta mcp config");
+                return 2;
+            }
+        }
+    }
     let json_output = args.iter().any(|a| a == "--json");
     let command: Vec<String> = args
         .iter()
@@ -1252,6 +1289,8 @@ mod help_tests {
         let commands: &[&[&str]] = &[
             &["help"],
             &["capabilities"],
+            &["mcp"],
+            &["mcp", "config"],
             &["status"],
             &["doctor"],
             &["start"],
