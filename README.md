@@ -70,6 +70,13 @@ and a pull request named in a status question is read so it can be linked. The
 full list of cited references and Wiki pages read stays in the message history
 (Messages tab and `pta audit show`).
 
+Version 0.7.23 adds an MCP server for agents: `pta mcp` exposes every operation of
+the app — messages, answers, sources, contexts, cases, notes, people, ratings and
+activity registration — to Claude Code, Codex or any MCP client (`pta mcp config`
+prints how to add it). Sending to Teams, writing to Azure DevOps, authorizing sources
+and changing the mode need your confirmation, asked by the client itself when it
+supports it.
+
 Version 0.7.22 lets the assistant improve from what you approve. In Messages,
 rate an answer (good or needs work, with a comment), keep a good one as an example
 for similar requests (it guides structure and tone, never facts), or save it as a

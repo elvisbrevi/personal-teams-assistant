@@ -38,6 +38,10 @@ const FILES: &[(&str, &str)] = &[
         ),
     ),
     (
+        "references/mcp.md",
+        include_str!("../../desktop/skills/personal-teams-assistant/references/mcp.md"),
+    ),
+    (
         "references/azure-wiki.md",
         include_str!("../../desktop/skills/personal-teams-assistant/references/azure-wiki.md"),
     ),

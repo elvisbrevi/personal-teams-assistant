@@ -5,7 +5,7 @@ Read [the architecture](docs/architecture.md) first: it explains components, pip
 ## Which skill to use
 
 - Save, correct or organize facts in the knowledge base: [save-knowledge](.agents/skills/save-knowledge/SKILL.md).
-- Configure, operate or diagnose the installed application: [personal-teams-assistant](desktop/skills/personal-teams-assistant/SKILL.md) (also `pta skill show`).
+- Configure, operate or diagnose the installed application: [personal-teams-assistant](desktop/skills/personal-teams-assistant/SKILL.md) (also `pta skill show`); from an agent with MCP, `pta mcp` exposes the same operations ([mcp.md](desktop/skills/personal-teams-assistant/references/mcp.md)).
 - Change the GUI (`desktop/ui/`): follow [the GUI design conventions](docs/ui-design-conventions.md).
 
 ## Priorities

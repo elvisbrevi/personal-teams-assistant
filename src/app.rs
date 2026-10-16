@@ -31,6 +31,7 @@ mod github;
 #[cfg(feature = "gui")]
 mod gui;
 mod headless;
+mod mcp;
 mod notes;
 mod skill;
 mod web;
