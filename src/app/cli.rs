@@ -105,7 +105,7 @@ Knowledge
                            Subjects such as «cobros»: JSON on stdin with id, name, description, keywords,
                            sources (IDs) and instructions. A request naming one reads its sources.
   cases list | cases show ID             The kinds of request and their default texts (general, status_round,
-                           recap, activity_review, documentation, personal_request, statement).
+                           recap, report_tasks, activity_review, documentation, personal_request, statement).
   cases edit ID | cases reset ID         JSON on stdin: enabled, description (how the model recognizes it),
                            keywords, sources and instructions (how to answer); reset restores the defaults.
   people list | people show ID | people add | people edit ID | people remove ID

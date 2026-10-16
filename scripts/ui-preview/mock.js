@@ -51,6 +51,7 @@
     ['general', 'Every answer', true, true, false, null, false],
     ['status_round', 'Status round', false, true, true, 'Azure DevOps activity, Wiki and the activity record', true],
     ['recap', 'What you did', false, true, true, null, true],
+    ['report_tasks', 'Report tasks', false, true, true, null, true],
     ['activity_review', 'Activity review', true, true, true, 'Azure DevOps activity, Wiki edits, Teams messages and the activity record', true],
     ['documentation', 'Documentation', false, true, true, 'Wiki', true],
     ['personal_request', 'Request for you', true, false, true, null, true],

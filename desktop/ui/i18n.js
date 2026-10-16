@@ -635,6 +635,8 @@ const UI_CATALOG = { es: {
   'As built it reads Azure DevOps activity, your own recent Wiki pages and the activity record.': 'Por defecto lee la actividad de Azure DevOps, tus páginas recientes de la Wiki y el registro de actividades.',
   'What you did': 'Lo que hiciste',
   'What you did on a day or period («¿qué hice ayer?», «la semana pasada»), from the activity record alone.': 'Lo que hiciste un día o en un período («¿qué hice ayer?», «la semana pasada»), solo desde el registro de actividades.',
+  'Report tasks': 'Reportar tareas',
+  'Report registered tasks or answer a reminder to log hours, from the activity record alone.': 'Reportar tareas registradas o responder a un recordatorio de horas, solo desde el registro de actividades.',
   'Activity review': 'Revisión de actividad',
   'Your work that no task records yet, compared with your work items.': 'Tu trabajo que ninguna tarea registra todavía, comparado con tus work items.',
   'As built it reads Azure DevOps activity, Wiki edits, your Teams messages and the activity record.': 'Por defecto lee la actividad de Azure DevOps, tus ediciones de la Wiki, tus mensajes de Teams y el registro de actividades.',

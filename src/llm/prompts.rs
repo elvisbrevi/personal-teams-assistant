@@ -23,3 +23,6 @@ pub const CLASSIFY_PERSONAL: &str = "asks the person for their own time or actio
 /// How the model recognizes a message that asks for no answer (intent `statement`).
 pub const CLASSIFY_STATEMENT: &str =
     "information or an instruction that does not ask for an answer";
+
+/// A registration reminder is answered from confirmed task registrations, never a review.
+pub const REPORT_TASKS: &str = "For a task report or reminder to log tasks or hours, answer only from the Activities section for the requested dates (today by default). Start naturally in the user's language with 'Ya registré mis tareas de hoy:' when today's registered tasks are present, then list each task with its ID, work performed and recorded hours. Include the total hours when available. Never search for unregistered work or propose new tasks. Never claim tasks were registered when the record contains none: say there are no confirmed registered tasks for the period. Do not promise future registration. These instructions override status rounds, activity reviews and the limit on IDs. Output only the opening, task list and total. Omit caveats about Remaining Work, status synchronization or any other fields absent from the activity record.";
