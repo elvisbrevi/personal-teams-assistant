@@ -368,6 +368,7 @@
         <div id="knowledge-tabs" class="subnav" role="tablist" aria-label="Knowledge views">
           <button role="tab" id="knowledge-tab-sources" data-group="sources" aria-controls="knowledge-sources" aria-selected="true">Sources</button>
           <button role="tab" id="knowledge-tab-contexts" data-group="contexts" aria-controls="knowledge-contexts" aria-selected="false" tabindex="-1">Contexts</button>
+          <button role="tab" id="knowledge-tab-cases" data-group="cases" aria-controls="knowledge-cases" aria-selected="false" tabindex="-1">Cases</button>
           <button role="tab" id="knowledge-tab-notes" data-group="notes" aria-controls="knowledge-notes" aria-selected="false" tabindex="-1">Notes</button>
           <button role="tab" id="knowledge-tab-repositories" data-group="repositories" aria-controls="knowledge-repositories" aria-selected="false" tabindex="-1">Repositories</button>
         </div>
@@ -410,6 +411,13 @@
               <label>Keywords, comma separated<input id="context-keywords" placeholder="invoice, bank reconciliation, payment"></label>
               <div class="actions"><button id="add-context" class="secondary">Add context</button></div>
             </details>
+          </div>
+        </div>
+        <div id="knowledge-cases" role="tabpanel" aria-labelledby="knowledge-tab-cases" hidden>
+          <div class="panel">
+            <div class="panel-head"><h2>Cases</h2><span id="cases-summary" class="hint"></span></div>
+            <p class="hint">The kinds of request the assistant tells apart. For each one you can change how the model recognizes it, the extra words that identify it, the sources it reads and how it is answered. The rules on evidence, links and sensitive data always apply. The default texts are in English, the language of the prompts; you can write yours in Spanish. To answer about a subject of your own, add a context.</p>
+            <div id="cases" class="list"></div>
           </div>
         </div>
         <div id="knowledge-notes" role="tabpanel" aria-labelledby="knowledge-tab-notes" hidden>

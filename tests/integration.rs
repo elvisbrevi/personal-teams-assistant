@@ -67,6 +67,7 @@ fn knowledge(dir: &tempfile::TempDir) -> KnowledgeMap {
             },
         }],
         contexts: Vec::new(),
+        cases: Vec::new(),
     }
 }
 fn used_ref(id: &str, mention: &str) -> personal_teams_assistant::evidence::Used {
@@ -1320,6 +1321,7 @@ async fn wiki_priority_current_request_mixed_citations_and_complete_gate_without
                         },
                     ],
                     contexts: Vec::new(),
+                    cases: Vec::new(),
                 },
                 llm: Arc::new(WikiLlm { used: ids.clone() }),
                 tools: Arc::new(WikiTools {
@@ -1451,6 +1453,7 @@ async fn follow_up_without_subject_searches_the_previous_topic_and_keeps_it_for_
                 repositories: BTreeMap::new(),
                 resources: vec![wiki_resource()],
                 contexts: Vec::new(),
+                cases: Vec::new(),
             },
             llm: Arc::new(FollowUpLlm { resolve }),
             tools: Arc::new(WikiTools {
@@ -1553,6 +1556,7 @@ async fn a_first_wiki_question_searches_its_topic_not_the_whole_request() {
             repositories: BTreeMap::new(),
             resources: vec![wiki_resource()],
             contexts: Vec::new(),
+            cases: Vec::new(),
         },
         llm: Arc::new(TopicLlm),
         // Generic words of the whole request («body», «endpoint») rank other API pages first.
@@ -1676,6 +1680,7 @@ async fn explicit_local_selection_still_requires_enabled_and_external_processing
                 repositories: BTreeMap::new(),
                 resources: vec![source],
                 contexts: Vec::new(),
+                cases: Vec::new(),
             },
             llm: Arc::new(NoLlm),
             tools: Arc::new(NoTools),
@@ -1716,6 +1721,7 @@ async fn implicit_documentation_does_not_bypass_teams_source_audiences() {
             repositories: BTreeMap::new(),
             resources: vec![wiki],
             contexts: Vec::new(),
+            cases: Vec::new(),
         },
         llm: Arc::new(NoLlm),
         tools: Arc::new(NoTools),
@@ -1848,6 +1854,7 @@ async fn teams_simulation_keeps_who_said_what_in_the_evidence_and_the_log() {
             repositories: BTreeMap::new(),
             resources: vec![resource],
             contexts: Vec::new(),
+            cases: Vec::new(),
         },
         llm: Arc::new(TeamsAttributionLlm),
         tools: Arc::new(TeamsEvidenceTool),
@@ -3478,6 +3485,14 @@ async fn answer_with_record(
     text: &str,
     sources: &[&str],
 ) -> (Vec<String>, personal_teams_assistant::state::Audit) {
+    answer_with_cases(text, sources, Vec::new()).await
+}
+/// `answer_with_record` with the user's changes to the built-in cases.
+async fn answer_with_cases(
+    text: &str,
+    sources: &[&str],
+    cases: Vec<personal_teams_assistant::cases::Case>,
+) -> (Vec<String>, personal_teams_assistant::state::Audit) {
     let server = MockServer::start().await;
     let dir = tempfile::tempdir().unwrap();
     let store = support::store(&dir);
@@ -3508,6 +3523,7 @@ async fn answer_with_record(
     drop(activities);
     let mut map = knowledge(&dir);
     map.resources = vec![wiki_resource(), status_resource(), record_resource()];
+    map.cases = cases;
     let llm = Arc::new(EvidenceLlm(Default::default()));
     let pipeline = Pipeline {
         config: Arc::new(cfg),
@@ -3586,6 +3602,217 @@ async fn the_activity_record_is_a_source_of_its_own() {
     assert_eq!(
         audit.source.as_deref(),
         Some("azure-devops-status,activity-record")
+    );
+}
+
+#[tokio::test]
+async fn the_users_cases_add_words_turn_routes_off_and_choose_sources() {
+    use personal_teams_assistant::cases::Case;
+    let case = |id: &str| Case {
+        id: id.into(),
+        ..Default::default()
+    };
+    // «entrega» is not a built-in status word; added to the status case, it is a status round
+    // and reads Azure DevOps activity with the record.
+    let (_, plain) = answer_with_cases(
+        "¿Cómo va la entrega?",
+        &["azure-devops-status", "activity-record"],
+        vec![],
+    )
+    .await;
+    assert!(
+        !plain.tools.contains(&"read_recorded_activities".to_owned()),
+        "{:?}",
+        plain.tools
+    );
+    let (evidence, audit) = answer_with_cases(
+        "¿Cómo va la entrega?",
+        &["azure-devops-status", "activity-record"],
+        vec![Case {
+            keywords: vec!["entrega".into()],
+            ..case("status_round")
+        }],
+    )
+    .await;
+    assert_eq!(
+        audit.tools,
+        vec!["get_azure_devops_status", "read_recorded_activities"]
+    );
+    assert!(evidence[0].contains("Registro y1"), "{}", evidence[0]);
+    // Its sources can leave the record out.
+    let (_, audit) = answer_with_cases(
+        "¿Cuál es el avance de mis HU?",
+        &["azure-devops-status", "activity-record"],
+        vec![Case {
+            sources: vec!["azure-devops-status".into()],
+            ..case("status_round")
+        }],
+    )
+    .await;
+    assert_eq!(audit.tools, vec!["get_azure_devops_status"]);
+    // With recaps off, «¿qué hice ayer?» is not answered from the record of that day: it
+    // takes the general route (here no model picks a tool, so nothing is read).
+    let (_, audit) = answer_with_cases(
+        "¿Qué hice ayer?",
+        &["azure-devops-status", "activity-record"],
+        vec![Case {
+            enabled: false,
+            ..case("recap")
+        }],
+    )
+    .await;
+    assert!(audit.tools.is_empty(), "{:?}", audit.tools);
+    assert!(!audit.trace.iter().any(|s| s.step == "activity history"));
+    let (_, audit) = answer_with_cases(
+        "¿Qué hice ayer?",
+        &["azure-devops-status", "activity-record"],
+        vec![],
+    )
+    .await;
+    assert_eq!(audit.tools, vec!["read_recorded_activities"]);
+    // A status case turned off is never chosen.
+    let (_, audit) = answer_with_cases(
+        "¿Cuál es el avance de mis HU?",
+        &["azure-devops-status", "activity-record"],
+        vec![Case {
+            enabled: false,
+            ..case("status_round")
+        }],
+    )
+    .await;
+    assert!(!audit.trace.iter().any(|s| s.step == "activity history"));
+    assert!(!audit.tools.contains(&"read_own_wiki_pages".to_owned()));
+}
+
+/// Chooses the «cobros» context by its description and keeps what the answer was written from.
+struct ContextChoosingLlm(std::sync::Mutex<Vec<(String, String)>>);
+#[async_trait]
+impl LlmProvider for ContextChoosingLlm {
+    fn name(&self) -> &str {
+        "synthetic-context-choice"
+    }
+    async fn classify_intent(&self, _: &str, _: &str) -> Result<IntentDecision> {
+        Ok(IntentDecision {
+            intent: Intent::Question,
+            confidence: 0.96,
+        })
+    }
+    async fn select_context(
+        &self,
+        question: &str,
+        contexts: &BTreeMap<String, String>,
+    ) -> Result<Option<String>> {
+        assert!(question.contains("recaudación"), "{question}");
+        assert_eq!(contexts.keys().collect::<Vec<_>>(), ["cobros"]);
+        assert!(contexts["cobros"].starts_with("Cobros: Facturación"));
+        Ok(Some("cobros".into()))
+    }
+    async fn generate(&self, _: GenerationInput<'_>) -> Result<String> {
+        unreachable!()
+    }
+    async fn generate_response(
+        &self,
+        input: GenerationInput<'_>,
+    ) -> Result<personal_teams_assistant::llm::GeneratedAnswer> {
+        self.0.lock().unwrap().push((
+            input.evidence.to_owned(),
+            input.context_instructions.to_owned(),
+        ));
+        Ok(personal_teams_assistant::llm::GeneratedAnswer {
+            answer: "La recaudación cierra a las 23:00.".into(),
+            detailed: false,
+            used_sources: Vec::new(),
+            provider: None,
+            fallbacks: Vec::new(),
+        })
+    }
+}
+#[tokio::test]
+async fn a_model_recognizes_a_context_by_its_description_without_narrowing_documents() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = MockServer::start().await;
+    let store = support::store(&dir);
+    let graph = support::graph(&server, store.clone());
+    let mut cfg = (*graph.config).clone();
+    cfg.policy.dry_run = true;
+    cfg.server.data_dir = dir.path().into();
+    let mut map = knowledge(&dir);
+    std::fs::write(
+        dir.path().join("otros.md"),
+        "La recaudación de inventario es mensual.",
+    )
+    .unwrap();
+    map.resources.push(indexed_resource(
+        "otros-doc",
+        Access::File {
+            repository: "private".into(),
+            path: "otros.md".into(),
+        },
+    ));
+    map.contexts = vec![
+        personal_teams_assistant::knowledge::Context {
+            id: "cobros".into(),
+            name: "Cobros".into(),
+            description: "Facturación, pagos y conciliación".into(),
+            sources: vec!["hours".into()],
+            instructions: "Habla de recaudación.".into(),
+            ..Default::default()
+        },
+        // Without a description, a context is only named by its words.
+        personal_teams_assistant::knowledge::Context {
+            id: "rrhh".into(),
+            name: "RRHH".into(),
+            ..Default::default()
+        },
+    ];
+    let sources: Vec<String> = map.resources.iter().map(|r| r.id.clone()).collect();
+    let llm = Arc::new(ContextChoosingLlm(Default::default()));
+    let pipeline = Pipeline {
+        config: Arc::new(cfg),
+        store: store.clone(),
+        adapter: graph,
+        knowledge: map,
+        llm: llm.clone(),
+        tools: Arc::new(NoTools),
+        redactor: redactor(),
+    };
+    let result = simulation::run(
+        &pipeline,
+        SimulationRequest {
+            session: "model-context".into(),
+            text: "¿A qué hora cierra la recaudación?".into(),
+            group: false,
+            mentioned: false,
+            sources: sources.clone(),
+        },
+        Some(&sources),
+    )
+    .await
+    .unwrap();
+    assert_eq!(result.status, "dry_run", "{}", result.reason);
+    let (evidence, instructions) = llm.0.lock().unwrap()[0].clone();
+    assert_eq!(instructions, "Habla de recaudación.");
+    // A model's choice guides; every authorized document is still read.
+    assert!(
+        evidence.contains("es mensual") && evidence.contains("09:00"),
+        "{evidence}"
+    );
+    let rows = personal_teams_assistant::state::Store::inspect(
+        &dir.path().join("test.db"),
+        false,
+        1,
+        None,
+        true,
+    )
+    .unwrap();
+    let audit: personal_teams_assistant::state::Audit =
+        serde_json::from_value(rows[0]["audit"].clone()).unwrap();
+    assert_eq!(audit.context.as_deref(), Some("cobros"));
+    assert!(
+        audit
+            .trace
+            .iter()
+            .any(|s| s.step == "context" && s.detail == "cobros (model)")
     );
 }
 

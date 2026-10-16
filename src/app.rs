@@ -121,6 +121,8 @@ struct Snapshot {
     github_connected: bool,
     tunnel_config: String,
     restart_offer: bool,
+    /// The built-in cases with their default texts, for editors (additive).
+    cases: &'static [crate::cases::BuiltIn],
 }
 
 #[derive(Debug)]
@@ -445,6 +447,7 @@ pub(crate) fn init_state(config_dir: &Path, data_dir: &Path) -> Result<DesktopSt
                 repositories: BTreeMap::new(),
                 resources: Vec::new(),
                 contexts: Vec::new(),
+                cases: Vec::new(),
             })?,
         )?;
     }
@@ -582,6 +585,7 @@ async fn snapshot(host: &Host) -> std::result::Result<Snapshot, String> {
         restart_offer: state
             .restart_offer
             .load(std::sync::atomic::Ordering::Relaxed),
+        cases: &crate::cases::BUILT_IN,
     })
 }
 

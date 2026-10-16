@@ -43,6 +43,18 @@
     snapshot.credentials.OLD_REVIEWER_KEY = 'retired';
     Object.assign(snapshot, { running: true, active_subscriptions: 1, microsoft_connected: true, github_connected: true, tunnel_running: true });
   }
+  // The built-in cases the host sends, with short synthetic default texts.
+  snapshot.cases = [
+    ['general', 'Every answer', true, true, false, null, false],
+    ['status_round', 'Status round', false, true, true, 'Azure DevOps activity, Wiki and the activity record', true],
+    ['recap', 'What you did', false, true, true, null, true],
+    ['activity_review', 'Activity review', true, true, true, 'Azure DevOps activity, Wiki edits, Teams messages and the activity record', true],
+    ['documentation', 'Documentation', false, true, true, 'Wiki', true],
+    ['personal_request', 'Request for you', true, false, true, null, true],
+    ['statement', 'Informational message', true, true, false, null, false],
+  ].map(([id, name, description, instructions, keywords, sources, optional]) => ({ id, name, summary: `${name} (default summary).`,
+    description: description ? `Default description of ${id}: how the model recognizes it.` : null,
+    instructions: instructions ? `Default instructions of ${id}: how it is answered, part by part.` : null, keywords, sources, optional }));
   snapshot.loaded_config = structuredClone(snapshot.config);
 
   const providers = structuredClone(window.__PTA_FIXTURE__.providers);
