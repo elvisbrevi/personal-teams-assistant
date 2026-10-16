@@ -330,6 +330,7 @@ fn recorder(
                 },
             },
         }],
+        contexts: Vec::new(),
     };
     (
         Recorder {

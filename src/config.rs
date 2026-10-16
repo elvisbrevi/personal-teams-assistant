@@ -18,6 +18,9 @@ pub struct Config {
     pub secrets: BTreeMap<String, String>,
     #[serde(default)]
     pub activity_registration: crate::activity::Settings,
+    /// The knowledge index: optional embeddings for semantic search.
+    #[serde(default, skip_serializing_if = "crate::index::Settings::is_default")]
+    pub knowledge_index: crate::index::Settings,
 }
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -205,6 +208,18 @@ impl Config {
         ensure!(!self.policy.greeting.trim().is_empty(), "invalid greeting");
         crate::llm::validate(&self.llm)?;
         self.activity_registration.validate()?;
+        self.knowledge_index.validate()?;
+        if let Some(reference) = self
+            .knowledge_index
+            .embeddings
+            .as_ref()
+            .and_then(|e| e.secret_ref.as_ref())
+        {
+            ensure!(
+                self.secrets.contains_key(reference),
+                "map the embeddings credential reference in [secrets]"
+            );
+        }
         Ok(())
     }
     /// The delegated Graph scopes already consented for this Entra registration. Never widen.

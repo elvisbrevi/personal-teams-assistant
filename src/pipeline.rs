@@ -698,6 +698,35 @@ impl Pipeline {
             // approved each task in it. Status rounds and named work items keep their tools.
             // Sources the user chose are all read, as they are: no routing, recap or status extras.
             let explicit = chosen.is_some();
+            // A request that names a context (a subject in the map, such as «cobros») is
+            // answered from that context's sources among the authorized ones, with its
+            // instructions. It narrows the general routing and the documents read; it never
+            // authorizes a source, and sources the user chose are read as they are.
+            let context = self
+                .knowledge
+                .context_for(&format!("{current}\n{tool_question}"));
+            if let Some(context) = context {
+                audit.context = Some(context.id.clone());
+                audit.step("context", context.id.clone());
+            }
+            let in_context = |id: &str| context.is_some_and(|c| c.sources.iter().any(|s| s == id));
+            let routing: BTreeMap<String, String> = {
+                let narrowed: BTreeMap<String, String> = tool_candidates
+                    .iter()
+                    .filter(|(id, _)| !explicit && in_context(id))
+                    .map(|(id, d)| (id.clone(), d.clone()))
+                    .collect();
+                if narrowed.is_empty() {
+                    tool_candidates.clone()
+                } else {
+                    narrowed
+                }
+            };
+            let routing_wikis: Vec<String> = wiki_ids
+                .iter()
+                .filter(|id| routing.contains_key(*id))
+                .cloned()
+                .collect();
             let recap = if review
                 || explicit
                 || wiki_requested
@@ -726,31 +755,33 @@ impl Pipeline {
                 // An activity review reads every source that can review activity, below; a
                 // recap reads only the recorded days; chosen tools are all read, below.
                 None
-            } else if wiki_requested && wiki_ids.len() == 1 {
-                Some(wiki_ids[0].clone())
+            } else if wiki_requested && routing_wikis.len() == 1 {
+                Some(routing_wikis[0].clone())
             } else if status_route {
                 Some("azure-devops-status".to_owned())
-            } else if wiki_ids.len() == 1
-                && available.iter().all(|r| {
-                    !matches!(r.access, Access::Tool { .. })
-                        || matches!(
-                            r.access,
-                            Access::Tool {
-                                tool: crate::tools::ToolSpec::AzureDevopsWiki { .. }
-                                    | crate::tools::ToolSpec::AzureDevopsStatus { .. }
-                                    | crate::tools::ToolSpec::TeamsMessages {}
-                                    | crate::tools::ToolSpec::ActivityRecord {}
-                            }
-                        )
+            } else if routing_wikis.len() == 1
+                && routing.keys().all(|id| {
+                    available.iter().any(|r| {
+                        &r.id == id
+                            && matches!(
+                                r.access,
+                                Access::Tool {
+                                    tool: crate::tools::ToolSpec::AzureDevopsWiki { .. }
+                                        | crate::tools::ToolSpec::AzureDevopsStatus { .. }
+                                        | crate::tools::ToolSpec::TeamsMessages {}
+                                        | crate::tools::ToolSpec::ActivityRecord {}
+                                }
+                            )
+                    })
                 })
             {
                 // A bounded Wiki read retrieves facts; it does not need a model to assert
                 // that an unseen page already answers the question. Final checks still apply.
-                Some(wiki_ids[0].clone())
-            } else if tool_candidates.is_empty() {
+                Some(routing_wikis[0].clone())
+            } else if routing.is_empty() {
                 None
-            } else if tool_candidates.len() == 1 {
-                tool_candidates.keys().next().cloned()
+            } else if routing.len() == 1 {
+                routing.keys().next().cloned()
             } else {
                 match self
                     .awaiting_model(
@@ -758,11 +789,11 @@ impl Pipeline {
                         resource,
                         &message,
                         &mut audit,
-                        self.llm.select_tool(&tool_question, &tool_candidates),
+                        self.llm.select_tool(&tool_question, &routing),
                     )
                     .await?
                 {
-                    Ok(Some(id)) if tool_candidates.contains_key(&id) => Some(id),
+                    Ok(Some(id)) if routing.contains_key(&id) => Some(id),
                     Ok(_) => None,
                     Err(_) => {
                         tracing::warn!(event = "tool_routing_unavailable");
@@ -770,6 +801,15 @@ impl Pipeline {
                     }
                 }
             };
+            // Recaps, status rounds and reviews are about the user's own work: documents
+            // searched by relevance (repositories, notes) would only add noise there.
+            if review || recap.is_some() || status_route {
+                sources.retain(|r| !r.access.indexed());
+            }
+            // Within a context, the documents it names among the authorized ones.
+            if !explicit && sources.iter().any(|r| in_context(&r.id)) {
+                sources.retain(|r| in_context(&r.id));
+            }
             if let Some(id) = selected_tool
                 && let Some(source) = available
                     .iter()
@@ -910,6 +950,27 @@ impl Pipeline {
                                 },
                             })
                             .await?
+                        }
+                        access if access.indexed() => {
+                            let query = match &wiki_topic {
+                                Some(topic) => format!("{tool_question} {topic}"),
+                                None => tool_question.clone(),
+                            };
+                            match self.indexed(source, &query, context, &mut audit).await {
+                                Ok(text) => text,
+                                Err(_) => {
+                                    registry.partial = true;
+                                    registry.warnings.push(format!(
+                                        "The source {} could not be searched.",
+                                        source.id
+                                    ));
+                                    audit.step(
+                                        "index",
+                                        format!("{} could not be searched", source.id),
+                                    );
+                                    String::new()
+                                }
+                            }
                         }
                         _ => self.knowledge.retrieve(source, &question, total).await?,
                     };
@@ -1077,6 +1138,7 @@ impl Pipeline {
                         unprompted,
                         guidance: draft.as_ref().map_or("", |d| d.guidance.as_str()),
                         previous_draft: draft.as_ref().map_or("", |d| d.previous.as_str()),
+                        context_instructions: context.map_or("", |c| c.instructions.as_str()),
                     }),
                 )
                 .await??;
@@ -1511,6 +1573,118 @@ impl Pipeline {
             .activity_registration
             .zoned(chrono::Utc::now())
             .date_naive()
+    }
+    /// Search an indexed source (a whole repository or the verified notes) for `query`: a
+    /// repository is first brought up to date with its checkout, and the notes keep those of
+    /// the source's contexts (or of the request's context) and the general ones. With
+    /// embeddings configured, the request's vector joins the full-text ranking.
+    async fn indexed(
+        &self,
+        source: &crate::knowledge::Resource,
+        query: &str,
+        context: Option<&crate::knowledge::Context>,
+        audit: &mut Audit,
+    ) -> Result<String> {
+        use anyhow::Context as _;
+        let path = self.config.server.data_dir.join(crate::index::FILE);
+        let (name, contexts, tool) = match &source.access {
+            Access::Repository { repository } => {
+                let root = self
+                    .knowledge
+                    .repositories
+                    .get(repository)
+                    .context("unknown repository")?
+                    .clone();
+                let (path, id) = (path.clone(), source.id.clone());
+                tokio::task::spawn_blocking(move || {
+                    crate::index::Index::open(&path)?.sync_repository(&id, &root)
+                })
+                .await??;
+                (source.id.as_str(), None, "search_repository")
+            }
+            Access::Notes { contexts } => (
+                crate::index::NOTES,
+                if contexts.is_empty() {
+                    context.map(|c| vec![c.id.clone()])
+                } else {
+                    Some(contexts.clone())
+                },
+                "search_notes",
+            ),
+            _ => anyhow::bail!("not an indexed source"),
+        };
+        let index = crate::index::Index::open(&path)?;
+        let vector = self.query_vector(&index, name, query).await;
+        let hits = index.search(&[name], query, contexts.as_deref(), vector.as_deref(), 8)?;
+        audit.tools.push(tool.into());
+        audit.step(
+            "index",
+            format!(
+                "{}: {} sections{}",
+                source.id,
+                hits.len(),
+                if vector.is_some() {
+                    " (text and vectors)"
+                } else {
+                    ""
+                }
+            ),
+        );
+        Ok(hits
+            .iter()
+            .map(|h| {
+                if h.source == crate::index::NOTES {
+                    format!("### {}\n{}\n\n", h.heading, h.text)
+                } else {
+                    format!("### {} ({})\n{}\n\n", h.heading, h.key, h.text)
+                }
+            })
+            .collect())
+    }
+    /// The request as a vector, when embeddings are configured; sections of `name` still
+    /// without one get theirs first (a bounded number per search). Any failure leaves the
+    /// full-text ranking alone.
+    async fn query_vector(
+        &self,
+        index: &crate::index::Index,
+        name: &str,
+        query: &str,
+    ) -> Option<Vec<f32>> {
+        let settings = self.config.knowledge_index.embeddings.as_ref()?;
+        let work = async {
+            let key = settings
+                .secret_ref
+                .as_ref()
+                .map(|r| crate::security::resolve(r, &self.config.secrets))
+                .transpose()?;
+            let client = reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .build()?;
+            index.use_embeddings(&settings.identity())?;
+            let pending = index.unembedded(&[name], crate::index::EMBED_PER_SEARCH)?;
+            if !pending.is_empty() {
+                let texts: Vec<String> = pending
+                    .iter()
+                    .map(|(_, text)| self.redactor.redact(text))
+                    .collect();
+                let vectors = settings.embed(&client, key.as_deref(), &texts).await?;
+                let ids = pending.iter().map(|(id, _)| *id);
+                index.save_embeddings(&ids.zip(vectors).collect::<Vec<_>>())?;
+            }
+            let mut found = settings
+                .embed(&client, key.as_deref(), &[self.redactor.redact(query)])
+                .await?;
+            found
+                .pop()
+                .ok_or_else(|| anyhow::anyhow!("no vector for the request"))
+        };
+        match work.await {
+            Ok(vector) => Some(vector),
+            Err(_) => {
+                tracing::warn!(event = "embeddings_unavailable");
+                None
+            }
+        }
     }
     /// The source that lets this conversation read what the Activities section recorded: the
     /// activity record source when the map has one, otherwise (maps written before it existed)

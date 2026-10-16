@@ -106,6 +106,7 @@ function showTab(name, anchor) {
   if (name === 'messages') loadMessages().catch(fail);
   if (name === 'overview') loadActivity();
   if (name === 'registration') loadRegistration().catch(fail);
+  if (name === 'knowledge') loadKnowledge().catch(fail);
   const target = anchor && document.getElementById(anchor);
   // A panel inside a tab (a Settings section, an Activities view) opens that tab first.
   const owner = target && document.querySelector(`[aria-controls="${target.closest('[role=tabpanel]')?.id}"]`);
@@ -342,11 +343,12 @@ async function reload() {
   $('#discover-chats').checked = config.graph.discover_all_chats;
   renderChatList();
   renderRegistrationSettings();
+  renderEmbeddings();
   dirty = false;
   dirtyGroups.clear();
   renderSavebar();
   renderLive();
-  renderCredentials(); renderRepositories(); renderResources(); renderChatSources();
+  renderCredentials(); renderRepositories(); renderResources(); renderContexts(); renderNoteContexts(); renderChatSources();
   await Promise.all([loadChain(), loadSelfChat()]);
 }
 
@@ -521,6 +523,34 @@ function collectSettings() {
   config.server.cloudflare_tunnel = $('#cloudflare-tunnel').checked;
   config.policy.dry_run = $('#dry-run').checked;
   collectRegistrationSettings();
+  collectEmbeddings();
+}
+
+/** The reference the embeddings credential is mapped from in `[secrets]`. */
+const EMBEDDINGS_SECRET = 'secret://knowledge/embeddings';
+
+function collectEmbeddings() {
+  const config = current.config;
+  const url = $('#embeddings-url').value.trim();
+  const model = $('#embeddings-model').value.trim();
+  const credential = $('#embeddings-credential').value.trim();
+  if (!url && !model && !credential) {
+    delete config.knowledge_index;
+    delete config.secrets[EMBEDDINGS_SECRET];
+    return;
+  }
+  if (!url || !model) throw t('Semantic search needs both the endpoint URL and the model, or neither.');
+  if (credential && !/^[A-Z][A-Z0-9_]{0,63}$/.test(credential)) throw t('The credential name uses capital letters, digits and _, like OPENAI_API_KEY.');
+  if (credential) config.secrets[EMBEDDINGS_SECRET] = credential;
+  else delete config.secrets[EMBEDDINGS_SECRET];
+  config.knowledge_index = { embeddings: { url, model, ...(credential ? { secret_ref: EMBEDDINGS_SECRET } : {}) } };
+}
+
+function renderEmbeddings() {
+  const embeddings = current.config.knowledge_index?.embeddings;
+  field('#embeddings-url', embeddings?.url);
+  field('#embeddings-model', embeddings?.model);
+  field('#embeddings-credential', embeddings?.secret_ref ? current.config.secrets[embeddings.secret_ref] : '');
 }
 
 async function save() {
@@ -1576,12 +1606,29 @@ const catalogText = catalog => catalog.map(c => c.organization.replace(/^https:\
 function kindName(resource) {
   if (resource.kind === 'file') return t('File');
   if (resource.kind === 'url') return 'URL';
+  if (resource.kind === 'repository') return t('Repository');
+  if (resource.kind === 'notes') return t('Notes');
   return toolNames[resource.tool?.type] || resource.tool?.type || t('Tool');
+}
+
+/** What the knowledge index holds per source (`index_status`), loaded with the Knowledge section. */
+let indexStatus = { sources: [] };
+const indexOf = resource => indexStatus.sources.find(s => s.id === resource.id)?.index;
+
+function indexText(resource) {
+  const held = indexOf(resource);
+  if (resource.kind === 'notes') return tn(indexStatus.notes?.documents ?? 0, '1 note', '{n} notes');
+  if (!held?.synced_at) return t('Not indexed yet: it is indexed the first time an answer reads it');
+  return t('{files} files, {sections} sections indexed {when}', { files: held.documents, sections: held.sections, when: ago(held.synced_at * 1000) });
 }
 
 function accessText(resource) {
   if (resource.kind === 'file') return `${resource.repository} / ${resource.path}`;
   if (resource.kind === 'url') return resource.url;
+  if (resource.kind === 'repository') return `${t('Repository')}: ${resource.repository} · ${indexText(resource)}`;
+  if (resource.kind === 'notes') return resource.contexts?.length
+    ? t('Your verified notes of {contexts} and the general ones', { contexts: resource.contexts.join(', ') })
+    : `${t('Your verified notes')} · ${indexText(resource)}`;
   const tool = resource.tool ?? {};
   if (tool.organization) return `${tool.organization} / ${tool.project}`;
   if (tool.repository) return `${t('Catalog')}: ${tool.repository} / ${tool.path}`;
@@ -1609,7 +1656,7 @@ function renderResources() {
   const resources = current.map.resources;
   $('#sources-summary').textContent = resources.length ? t('{ready} of {total} ready for Teams', { ready: readySources(current.map).length, total: resources.length }) : '';
   if (!resources.length) {
-    container.append(el('div', { class: 'empty' }, el('p', { textContent: t('No sources yet. Add a file from a repository or register the Wiki with pta sources add.') })));
+    container.append(el('div', { class: 'empty' }, el('p', { textContent: t('No sources yet. Add a repository or a file from one, or register the Wiki with pta sources add.') })));
   }
   $('#record-offer').hidden = resources.some(r => r.tool?.type === 'activity_record');
   for (const resource of resources) {
@@ -1634,7 +1681,22 @@ function renderResources() {
       toggles.append(el('label', { class: 'check' }, box, text));
     }
     const remove = el('button', { type: 'button', class: 'danger small', textContent: t('Remove source') });
-    remove.onclick = () => { current.map.resources = current.map.resources.filter(r => r !== resource); markDirty(); renderResources(); };
+    remove.onclick = () => {
+      current.map.resources = current.map.resources.filter(r => r !== resource);
+      for (const context of current.map.contexts ?? []) context.sources = context.sources.filter(id => id !== resource.id);
+      markDirty(); renderResources(); renderContexts();
+    };
+    const actions = [remove];
+    if (resource.kind === 'repository') {
+      const refresh = el('button', { type: 'button', class: 'secondary small', textContent: t('Refresh index') });
+      refresh.onclick = () => busy(refresh, async () => {
+        const [result] = await invoke('index_refresh', { source: resource.id });
+        await loadIndexStatus();
+        const sync = result?.sync ?? {};
+        done(t('{id} indexed: {added} new, {updated} changed, {removed} removed files.', { id: resource.id, added: sync.added ?? 0, updated: sync.updated ?? 0, removed: sync.removed ?? 0 }));
+      });
+      actions.unshift(refresh);
+    }
     const edit = el('details', { class: 'fold resource-edit', open: openSources.has(resource.id) },
       el('summary', { textContent: t('Edit description, topics and audience') }),
       el('div', { class: 'grid' },
@@ -1646,7 +1708,7 @@ function renderResources() {
           state.replaceWith(next);
           state = next;
         })),
-      el('div', { class: 'actions' }, remove));
+      el('div', { class: 'actions' }, ...actions));
     edit.ontoggle = () => { if (edit.open) openSources.add(resource.id); else openSources.delete(resource.id); };
     container.append(el('div', { class: 'resource' },
       el('div', { class: 'resource-head' }, el('strong', { textContent: resource.id }), badge(kindName(resource), 'active'), el('span', { class: 'grow' }), state),
@@ -1678,8 +1740,178 @@ function renderRepositories() {
       renderRepositories(); renderResources();
       if (files.length) notify(t('Its sources were removed too: {ids}.', { ids: files.map(r => r.id).join(', ') }));
     };
-    container.append(el('div', { class: 'row' }, rowText(alias, t('Git checkout')), input, update, remove));
+    const source = current.map.resources.find(r => r.kind === 'repository' && r.repository === alias);
+    const asSource = el('button', { class: 'secondary', textContent: t('Use as a source') });
+    asSource.onclick = () => { addRepositorySource(alias, t('Knowledge in the {alias} repository', { alias })); };
+    container.append(el('div', { class: 'row' },
+      rowText(alias, source ? t('Git checkout · source {id}', { id: source.id }) : t('Git checkout')), input,
+      ...(source ? [] : [asSource]), update, remove));
   }
+}
+
+/** A repository as a source of its own, disabled until the user authorizes it. */
+function addRepositorySource(alias, description) {
+  let id = alias.replace(/_/g, '-');
+  for (let n = 2; current.map.resources.some(r => r.id === id); n++) id = `${alias.replace(/_/g, '-').slice(0, 60)}-${n}`;
+  current.map.resources.push({ id, description, topics: [], enabled: false, external_processing: false,
+    allowed_conversations: [], allowed_senders: [], kind: 'repository', repository: alias });
+  openSources.add(id);
+  markDirty({ target: $('#repositories') });
+  renderRepositories(); renderResources();
+  notify(t('Source {id} added, disabled. Enable it, authorize it, choose its conversations and save.', { id }));
+}
+
+// ---------------------------------------------------------------- contexts
+
+/** Contexts whose edit fold is open, kept across re-renders. */
+const openContexts = new Set();
+
+function renderContexts() {
+  const container = $('#contexts');
+  container.replaceChildren();
+  const contexts = current.map.contexts ??= [];
+  $('#contexts-summary').textContent = contexts.length ? tn(contexts.length, '1 context', '{n} contexts') : '';
+  if (!contexts.length) container.append(el('div', { class: 'empty' }, el('p', { textContent: t('No contexts yet. Add one for each subject you answer about, with the words that name it.') })));
+  for (const context of contexts) {
+    const facts = el('p', { class: 'resource-facts' });
+    const renderFacts = () => facts.replaceChildren(
+      el('span', { textContent: context.description || t('No description') }),
+      el('small', { textContent: [`${t('Keywords')}: ${context.keywords.join(', ') || '—'}`,
+        `${t('Sources')}: ${context.sources.join(', ') || t('none')}`].join(' · ') }));
+    renderFacts();
+    const input = (label, value, placeholder, onchange) => {
+      const element = el('input', { value, placeholder, spellcheck: false });
+      element.oninput = () => { onchange(element.value); renderFacts(); markDirty(); };
+      return el('label', {}, label, element);
+    };
+    const area = (label, value, placeholder, onchange) => {
+      const element = el('textarea', { value, placeholder, rows: 3 });
+      element.oninput = () => { onchange(element.value); renderFacts(); markDirty(); };
+      return el('label', {}, label, element);
+    };
+    const sources = el('fieldset', { class: 'choices' }, el('legend', { textContent: t('Sources it reads') }));
+    for (const resource of current.map.resources) {
+      const box = el('input', { type: 'checkbox', value: resource.id, checked: context.sources.includes(resource.id) });
+      box.onchange = () => {
+        context.sources = box.checked ? [...context.sources, resource.id] : context.sources.filter(id => id !== resource.id);
+        renderFacts(); markDirty();
+      };
+      sources.append(el('label', { class: 'check' }, box, el('span', {}, el('strong', { textContent: resource.id }), el('small', { textContent: kindName(resource) }))));
+    }
+    if (!current.map.resources.length) sources.append(el('p', { class: 'hint', textContent: t('Add sources first.') }));
+    const remove = el('button', { type: 'button', class: 'danger small', textContent: t('Remove context') });
+    remove.onclick = () => { current.map.contexts = contexts.filter(c => c !== context); markDirty(); renderContexts(); renderNoteContexts(); };
+    const edit = el('details', { class: 'fold resource-edit', open: openContexts.has(context.id) },
+      el('summary', { textContent: t('Edit keywords, sources and instructions') }),
+      el('div', { class: 'grid' },
+        input(t('Name'), context.name, t('Billing'), value => { context.name = value; }),
+        input(t('Keywords'), context.keywords.join(', '), t('Comma separated'), value => { context.keywords = names(value); })),
+      input(t('Description'), context.description, t('What the subject covers'), value => { context.description = value; }),
+      sources,
+      area(t('Instructions for answers'), context.instructions, t('Terms to use, tone, what to always include'), value => { context.instructions = value; }),
+      el('div', { class: 'actions' }, remove));
+    edit.ontoggle = () => { if (edit.open) openContexts.add(context.id); else openContexts.delete(context.id); };
+    container.append(el('div', { class: 'resource' },
+      el('div', { class: 'resource-head' }, el('strong', { class: 'title', textContent: context.name || context.id }), badge(context.id, 'muted'), el('span', { class: 'grow' }),
+        badge(tn(context.sources.length, '1 source', '{n} sources'), context.sources.length ? 'active' : 'warn')),
+      facts, edit));
+  }
+}
+
+// ---------------------------------------------------------------- notes
+
+let notesList = [];
+/** Notes whose edit fold is open, and the one whose removal waits for a second tap. */
+const openNotes = new Set();
+let removeArmed = null;
+
+async function loadIndexStatus() {
+  indexStatus = await invoke('index_status');
+  renderResources();
+}
+
+async function loadNotes() {
+  const query = $('#notes-query').value.trim();
+  notesList = await invoke('notes_list', query ? { query, limit: 100 } : { limit: 200 });
+  renderNotes();
+}
+
+/** The contexts a note can belong to, as checkboxes. */
+function contextChoices(container, chosen, onchange) {
+  container.querySelectorAll('label, p').forEach(node => node.remove());
+  const contexts = current.map.contexts ?? [];
+  if (!contexts.length) container.append(el('p', { class: 'hint', textContent: t('Without contexts, a note belongs to every subject.') }));
+  for (const context of contexts) {
+    const box = el('input', { type: 'checkbox', value: context.id, checked: chosen.includes(context.id) });
+    box.onchange = () => onchange(box.checked ? [...chosen.filter(id => id !== context.id), context.id] : chosen.filter(id => id !== context.id));
+    container.append(el('label', { class: 'check' }, box, el('span', { textContent: context.name || context.id })));
+  }
+}
+let newNoteContexts = [];
+function renderNoteContexts() {
+  contextChoices($('#note-contexts'), newNoteContexts, value => { newNoteContexts = value; renderNoteContexts(); });
+}
+
+const originNames = { agent: t('From an agent'), answer: t('From an answer'), import: t('Imported') };
+
+function renderNotes() {
+  const container = $('#notes');
+  container.replaceChildren();
+  $('#notes-summary').textContent = tn(notesList.length, '1 note', '{n} notes');
+  $('#notes-offer').hidden = current.map.resources.some(r => r.kind === 'notes');
+  if (!notesList.length) {
+    container.append(el('div', { class: 'empty' }, el('p', { textContent: $('#notes-query').value.trim()
+      ? t('No note matches the search.') : t('No notes yet. Add what you verified, or ask an agent to add it with pta notes add.') })));
+  }
+  for (const note of notesList) {
+    const draft = structuredClone(note);
+    const title = el('input', { value: note.title });
+    title.oninput = () => { draft.title = title.value; };
+    const text = el('textarea', { value: note.text, rows: 5 });
+    text.oninput = () => { draft.text = text.value; };
+    const keywords = el('input', { value: note.keywords.join(', ') });
+    keywords.oninput = () => { draft.keywords = names(keywords.value); };
+    const contexts = el('fieldset', { class: 'choices' }, el('legend', { textContent: t('Contexts') }));
+    const renderChoices = () => contextChoices(contexts, draft.contexts, value => { draft.contexts = value; renderChoices(); });
+    renderChoices();
+    const save = el('button', { type: 'button', class: 'secondary small', textContent: t('Save note') });
+    save.onclick = () => busy(save, async () => {
+      await invoke('notes_save', { note: draft });
+      done(t('Note saved.'));
+      await loadNotes();
+    });
+    const remove = el('button', { type: 'button', class: 'danger small', textContent: t('Remove note') });
+    remove.onclick = () => {
+      if (removeArmed !== note.id) {
+        removeArmed = note.id;
+        remove.textContent = t('Tap again to remove');
+        setTimeout(() => { if (removeArmed === note.id) { removeArmed = null; remove.textContent = t('Remove note'); } }, 4000);
+        return;
+      }
+      removeArmed = null;
+      busy(remove, async () => { await invoke('notes_remove', { id: note.id }); openNotes.delete(note.id); done(t('Note removed.')); await loadNotes(); });
+    };
+    const edit = el('details', { class: 'fold resource-edit', open: openNotes.has(note.id) },
+      el('summary', { textContent: t('Edit note') }),
+      el('label', {}, t('Title'), title), el('label', {}, t('Text'), text),
+      el('label', {}, t('Keywords'), keywords), contexts,
+      el('div', { class: 'actions' }, save, remove));
+    edit.ontoggle = () => { if (edit.open) openNotes.add(note.id); else openNotes.delete(note.id); };
+    const contextNames = note.contexts.map(id => (current.map.contexts ?? []).find(c => c.id === id)?.name || id);
+    container.append(el('div', { class: 'resource' },
+      el('div', { class: 'resource-head' }, el('strong', { class: 'title', textContent: note.title }), el('span', { class: 'grow' }),
+        ...(originNames[note.origin] ? [badge(originNames[note.origin], 'info')] : []),
+        ...(contextNames.length ? contextNames.map(name => badge(name, 'active')) : [badge(t('Every context'), 'muted')])),
+      el('p', { class: 'resource-facts' },
+        el('span', { textContent: note.text.length > 280 ? `${note.text.slice(0, 280)}…` : note.text }),
+        el('small', { textContent: [note.keywords.length ? `${t('Keywords')}: ${note.keywords.join(', ')}` : '',
+          t('Updated {when}', { when: ago(note.updated_at * 1000) })].filter(Boolean).join(' · ') })),
+      edit));
+  }
+}
+
+async function loadKnowledge() {
+  await Promise.all([loadIndexStatus(), loadNotes()]);
 }
 
 async function listGithub() {
@@ -2054,12 +2286,14 @@ $('#self-chat-test').onclick = () => busy($('#self-chat-test'), async () => {
 $('#add-repo').onclick = () => {
   const alias = $('#repo-alias').value.trim();
   const path = $('#repo-path').value.trim();
+  const description = $('#repo-description').value.trim();
   if (!/^[a-z][a-z0-9_-]{0,63}$/.test(alias) || !path) return fail(t('Give a valid alias (lowercase letters, digits, - or _) and the checkout path.'));
   if (current.map.repositories[alias]) return fail(t('That alias already exists.'));
   current.map.repositories[alias] = path;
-  field('#repo-alias', ''); field('#repo-path', '');
-  markDirty();
-  renderRepositories();
+  field('#repo-alias', ''); field('#repo-path', ''); field('#repo-description', '');
+  markDirty({ target: $('#add-repo') });
+  if (description) addRepositorySource(alias, description);
+  else renderRepositories();
 };
 $('#github-connect').onclick = () => busy($('#github-connect'), async () => {
   const prompt = await invoke('begin_github_login', { clientId: $('#github-client-id').value.trim() });
@@ -2085,15 +2319,20 @@ $('#github-disconnect').onclick = () => busy($('#github-disconnect'), async () =
   await refreshLive();
   done(t('GitHub disconnected. Local checkouts stay.'));
 });
+$('#source-kind').onchange = () => { $('#source-path-label').hidden = $('#source-kind').value !== 'file'; };
 $('#add-source').onclick = () => {
   const id = $('#source-id').value.trim();
   const repository = $('#source-repo').value;
+  const whole = $('#source-kind').value === 'repository';
   const path = $('#source-path').value.trim();
   const description = $('#source-description').value.trim();
-  if (!/^[a-z][a-z0-9_-]{0,63}$/.test(id) || !repository || !path || !description) return fail(t('Fill in the ID (lowercase letters, digits, - or _), repository, file and description.'));
+  if (!/^[a-z][a-z0-9_-]{0,63}$/.test(id) || !repository || (!whole && !path) || !description) return fail(whole
+    ? t('Fill in the ID (lowercase letters, digits, - or _), repository and description.')
+    : t('Fill in the ID (lowercase letters, digits, - or _), repository, file and description.'));
   if (current.map.resources.some(r => r.id === id)) return fail(t('That ID already exists.'));
   current.map.resources.push({ id, description, topics: names($('#source-topics').value), enabled: false,
-    external_processing: false, allowed_conversations: [], allowed_senders: [], kind: 'file', repository, path });
+    external_processing: false, allowed_conversations: [], allowed_senders: [],
+    ...(whole ? { kind: 'repository', repository } : { kind: 'file', repository, path }) });
   for (const name of ['#source-id', '#source-path', '#source-topics', '#source-description']) field(name, '');
   markDirty();
   renderResources();
@@ -2109,6 +2348,43 @@ $('#add-record').onclick = () => {
   renderResources();
   notify(t('Source {id} added, disabled. Enable it, authorize it, choose its conversations and save.', { id: source.id }));
 };
+$('#add-context').onclick = () => {
+  const id = $('#context-id').value.trim();
+  const name = $('#context-name').value.trim();
+  if (!/^[a-z][a-z0-9_-]{0,63}$/.test(id) || !name) return fail(t('Give the context an ID (lowercase letters, digits, - or _) and a name.'));
+  const contexts = current.map.contexts ??= [];
+  if (contexts.some(c => c.id === id)) return fail(t('That ID already exists.'));
+  contexts.push({ id, name, description: '', keywords: names($('#context-keywords').value), sources: [], instructions: '' });
+  openContexts.add(id);
+  for (const name of ['#context-id', '#context-name', '#context-keywords']) field(name, '');
+  markDirty({ target: $('#add-context') });
+  renderContexts(); renderNoteContexts();
+  notify(t('Context {id} added. Choose its sources and save the changes.', { id }));
+};
+$('#add-notes-source').onclick = () => {
+  if (current.map.resources.some(r => r.kind === 'notes')) return;
+  const id = current.map.resources.some(r => r.id === 'notes') ? 'verified-notes' : 'notes';
+  current.map.resources.push({ id, description: t('Facts I verified: procedures, decisions and how things are done here.'),
+    topics: [], enabled: false, external_processing: false, allowed_conversations: [], allowed_senders: [], kind: 'notes' });
+  openSources.add(id);
+  markDirty({ target: $('#add-notes-source') });
+  renderResources(); renderNotes();
+  selectTab($('#knowledge-tabs'), 'sources');
+  notify(t('Source {id} added, disabled. Enable it, authorize it, choose its conversations and save.', { id }));
+};
+let notesSearch;
+$('#notes-query').oninput = () => { clearTimeout(notesSearch); notesSearch = setTimeout(() => loadNotes().catch(fail), 300); };
+$('#add-note').onclick = () => busy($('#add-note'), async () => {
+  const note = { title: $('#note-title').value.trim(), text: $('#note-text').value.trim(),
+    keywords: names($('#note-keywords').value), contexts: newNoteContexts };
+  if (!note.title || !note.text) return fail(t('A note needs a title and a text.'));
+  await invoke('notes_save', { note });
+  for (const name of ['#note-title', '#note-text', '#note-keywords']) field(name, '');
+  newNoteContexts = []; renderNoteContexts();
+  $('#note-form').open = false;
+  done(t('Note saved.'));
+  await loadNotes();
+});
 $('#chat-all').onclick = () => {
   const boxes = [...$('#chat-sources').querySelectorAll('input')];
   const all = boxes.every(box => box.checked);

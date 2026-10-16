@@ -227,6 +227,15 @@
         </div>
 
         <div id="settings-advanced" class="settings-group" role="tabpanel" aria-labelledby="settings-tab-advanced" data-settings-group="advanced" hidden>
+          <div class="panel" id="panel-embeddings">
+            <h2>Semantic search</h2>
+            <p class="hint">Repositories and notes are always searched by their words. With an embeddings endpoint (OpenAI, or a compatible server such as Ollama on this computer) they are also searched by meaning, so a request finds a passage that says the same thing in other words. The sections searched are sent to that endpoint.</p>
+            <div class="grid">
+              <label>Endpoint URL<input id="embeddings-url" class="cfg" translate="no" placeholder="https://api.openai.com/v1" spellcheck="false"></label>
+              <label>Model<input id="embeddings-model" class="cfg" translate="no" placeholder="text-embedding-3-small" spellcheck="false"></label>
+              <label>Credential name <small>Store its value in Credentials; leave it empty for a server on this computer.</small><input id="embeddings-credential" class="cfg" translate="no" placeholder="OPENAI_API_KEY" spellcheck="false"></label>
+            </div>
+          </div>
           <div class="panel" id="panel-import">
             <h2>Migrate this installation</h2>
             <p class="hint">Imports your current <code>config.toml</code>, keeping its client ID, map and SQLite directory. Import the existing credentials to this computer too, especially <code>STATE_ENCRYPTION_KEY</code>.</p>
@@ -356,55 +365,106 @@
           <h1>Knowledge</h1>
           <p>The assistant answers only with sources that are enabled, authorized for external processing and open to the conversation that asks.</p>
         </header>
-        <div class="panel">
-          <div class="panel-head"><h2>Sources</h2><span id="sources-summary" class="hint"></span></div>
-          <div id="resources" class="list"></div>
-          <div id="record-offer" class="callout info" hidden>
-            <div class="grow">
-              <p>Answers about what you did can read the tasks you approved in Activities, with their HU and hours. Add the activity record as a source to authorize it and choose it on its own.</p>
-              <div class="actions"><button id="add-record" type="button" class="secondary">Add activity record</button></div>
-            </div>
-          </div>
-          <details class="add-form">
-            <summary>Add a file from a repository</summary>
-            <div class="grid">
-              <label>Source ID<input id="source-id" translate="no" placeholder="operations" spellcheck="false"></label>
-              <label>Repository<select id="source-repo"></select></label>
-              <label>Relative file path<input id="source-path" translate="no" placeholder="topics/operations.md" spellcheck="false"></label>
-              <label>Topics, comma separated<input id="source-topics" placeholder="operations, support"></label>
-            </div>
-            <label>Description<input id="source-description" placeholder="Which questions it answers"></label>
-            <div class="actions"><button id="add-source" class="secondary">Add source</button></div>
-            <p class="hint">A new source starts disabled, without audiences and without external processing. The Wiki, Azure DevOps activity, your Teams messages and other tools are added with <code>pta sources add</code>; here you can enable and authorize them.</p>
-          </details>
+        <div id="knowledge-tabs" class="subnav" role="tablist" aria-label="Knowledge views">
+          <button role="tab" id="knowledge-tab-sources" data-group="sources" aria-controls="knowledge-sources" aria-selected="true">Sources</button>
+          <button role="tab" id="knowledge-tab-contexts" data-group="contexts" aria-controls="knowledge-contexts" aria-selected="false" tabindex="-1">Contexts</button>
+          <button role="tab" id="knowledge-tab-notes" data-group="notes" aria-controls="knowledge-notes" aria-selected="false" tabindex="-1">Notes</button>
+          <button role="tab" id="knowledge-tab-repositories" data-group="repositories" aria-controls="knowledge-repositories" aria-selected="false" tabindex="-1">Repositories</button>
         </div>
-        <div class="panel">
-          <h2>Repositories</h2>
-          <p class="hint">Local Git checkouts the files come from. Removing one from this list does not delete its files.</p>
-          <div id="repositories" class="list"></div>
-          <details class="add-form">
-            <summary>Add a local checkout</summary>
-            <div class="grid">
-              <label>Alias<input id="repo-alias" translate="no" placeholder="my_knowledge" spellcheck="false"></label>
-              <label>Checkout path<input id="repo-path" translate="no" placeholder="/path/to/repository" spellcheck="false"></label>
+        <div id="knowledge-sources" role="tabpanel" aria-labelledby="knowledge-tab-sources">
+          <div class="panel">
+            <div class="panel-head"><h2>Sources</h2><span id="sources-summary" class="hint"></span></div>
+            <div id="resources" class="list"></div>
+            <div id="record-offer" class="callout info" hidden>
+              <div class="grow">
+                <p>Answers about what you did can read the tasks you approved in Activities, with their HU and hours. Add the activity record as a source to authorize it and choose it on its own.</p>
+                <div class="actions"><button id="add-record" type="button" class="secondary">Add activity record</button></div>
+              </div>
             </div>
-            <div class="actions"><button id="add-repo" class="secondary">Add repository</button></div>
-          </details>
-        </div>
-        <div class="panel">
-          <div class="panel-head"><h2>Private GitHub repositories</h2><span id="github-state" class="badge muted"></span></div>
-          <p class="hint">Connect a GitHub App with the Contents: read permission, installed only on the repositories you choose. The organization may require approval. The token stays in the system store.</p>
-          <details class="fold">
-            <summary>Use another GitHub App <small>Advanced</small></summary>
-            <label>GitHub App client ID<input id="github-client-id" value="Iv23liswvVle1ENUJYBT" placeholder="Public client ID" spellcheck="false"></label>
-          </details>
-          <div class="actions"><button id="github-connect" class="secondary">Connect GitHub</button><button id="github-list" class="secondary">See authorized repositories</button><button id="github-disconnect" class="secondary">Disconnect GitHub</button></div>
-          <div id="github-device" class="device" hidden>
-            <p>Copy this code and authorize the app on GitHub:</p>
-            <strong id="github-code" class="code"></strong>
-            <div class="actions"><button id="github-open" class="secondary">Open GitHub</button><button id="github-finish">I authorized it</button></div>
+            <details class="add-form">
+              <summary>Add a source from a repository</summary>
+              <div class="grid">
+                <label>Source ID<input id="source-id" translate="no" placeholder="operations" spellcheck="false"></label>
+                <label>Repository<select id="source-repo"></select></label>
+                <label>What it reads<select id="source-kind"><option value="repository">The whole repository</option><option value="file">One file</option></select></label>
+                <label id="source-path-label" hidden>Relative file path<input id="source-path" translate="no" placeholder="topics/operations.md" spellcheck="false"></label>
+                <label>Topics, comma separated<input id="source-topics" placeholder="operations, support"></label>
+              </div>
+              <label>Description<input id="source-description" placeholder="Which questions it answers"></label>
+              <div class="actions"><button id="add-source" class="secondary">Add source</button></div>
+              <p class="hint">A whole repository is searched by relevance: each answer reads the sections that best match the request, from its Markdown and text files. A new source starts disabled, without audiences and without external processing. The Wiki, Azure DevOps activity, your Teams messages and other tools are added with <code>pta sources add</code>; here you can enable and authorize them.</p>
+            </details>
           </div>
-          <div id="github-repositories" class="list"></div>
+        </div>
+        <div id="knowledge-contexts" role="tabpanel" aria-labelledby="knowledge-tab-contexts" hidden>
+          <div class="panel">
+            <div class="panel-head"><h2>Contexts</h2><span id="contexts-summary" class="hint"></span></div>
+            <p class="hint">A context groups what the assistant knows about one subject, such as billing or a project. When a request names it, by one of its keywords or its name, the answer reads that context's sources among the authorized ones and follows its instructions. A context never authorizes a source.</p>
+            <div id="contexts" class="list"></div>
+            <details class="add-form">
+              <summary>Add a context</summary>
+              <div class="grid">
+                <label>Context ID<input id="context-id" translate="no" placeholder="billing" spellcheck="false"></label>
+                <label>Name<input id="context-name" placeholder="Billing"></label>
+              </div>
+              <label>Keywords, comma separated<input id="context-keywords" placeholder="invoice, bank reconciliation, payment"></label>
+              <div class="actions"><button id="add-context" class="secondary">Add context</button></div>
+            </details>
+          </div>
+        </div>
+        <div id="knowledge-notes" role="tabpanel" aria-labelledby="knowledge-tab-notes" hidden>
+          <div class="panel">
+            <div class="panel-head"><h2>Verified notes</h2><span id="notes-summary" class="hint"></span></div>
+            <p class="hint">Facts you verified, kept for the assistant to answer with. Notes are saved right away; they reach answers through the notes source, authorized like any other.</p>
+            <div id="notes-offer" class="callout info" hidden>
+              <div class="grow">
+                <p>No source reads these notes yet. Add the notes source, then enable and authorize it in Sources.</p>
+                <div class="actions"><button id="add-notes-source" type="button" class="secondary">Add notes source</button></div>
+              </div>
+            </div>
+            <label>Search notes<input id="notes-query" type="search" placeholder="Words from the title or the text"></label>
+            <div id="notes" class="list" aria-live="polite"></div>
+            <details id="note-form" class="add-form">
+              <summary>Add a note</summary>
+              <label>Title<input id="note-title" placeholder="How a production hotfix is registered"></label>
+              <label>Text<textarea id="note-text" rows="5" placeholder="What is true and verified, in your own words"></textarea></label>
+              <label>Keywords, comma separated<input id="note-keywords" placeholder="hotfix, incident"></label>
+              <fieldset id="note-contexts" class="choices"><legend>Contexts</legend></fieldset>
+              <div class="actions"><button id="add-note">Save note</button></div>
+            </details>
+          </div>
+        </div>
+        <div id="knowledge-repositories" role="tabpanel" aria-labelledby="knowledge-tab-repositories" hidden>
+          <div class="panel">
+            <h2>Repositories</h2>
+            <p class="hint">Local Git checkouts the sources read. Each one can be a source of its own, searched by relevance. Removing one from this list does not delete its files.</p>
+            <div id="repositories" class="list"></div>
+            <details class="add-form">
+              <summary>Add a local checkout</summary>
+              <div class="grid">
+                <label>Alias<input id="repo-alias" translate="no" placeholder="my_knowledge" spellcheck="false"></label>
+                <label>Checkout path<input id="repo-path" translate="no" placeholder="/path/to/repository" spellcheck="false"></label>
+              </div>
+              <label>What it knows<input id="repo-description" placeholder="Runbooks and procedures of the payments team"></label>
+              <div class="actions"><button id="add-repo" class="secondary">Add repository</button></div>
+              <p class="hint">With a description, the repository is also added as a source, disabled until you authorize it.</p>
+            </details>
+          </div>
+          <div class="panel">
+            <div class="panel-head"><h2>Private GitHub repositories</h2><span id="github-state" class="badge muted"></span></div>
+            <p class="hint">Connect a GitHub App with the Contents: read permission, installed only on the repositories you choose. The organization may require approval. The token stays in the system store.</p>
+            <details class="fold">
+              <summary>Use another GitHub App <small>Advanced</small></summary>
+              <label>GitHub App client ID<input id="github-client-id" value="Iv23liswvVle1ENUJYBT" placeholder="Public client ID" spellcheck="false"></label>
+            </details>
+            <div class="actions"><button id="github-connect" class="secondary">Connect GitHub</button><button id="github-list" class="secondary">See authorized repositories</button><button id="github-disconnect" class="secondary">Disconnect GitHub</button></div>
+            <div id="github-device" class="device" hidden>
+              <p>Copy this code and authorize the app on GitHub:</p>
+              <strong id="github-code" class="code"></strong>
+              <div class="actions"><button id="github-open" class="secondary">Open GitHub</button><button id="github-finish">I authorized it</button></div>
+            </div>
+            <div id="github-repositories" class="list"></div>
+          </div>
         </div>
       </section>
 

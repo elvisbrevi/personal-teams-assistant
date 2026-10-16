@@ -5,6 +5,7 @@ pub mod app;
 pub mod config;
 pub mod diagnostics;
 pub mod evidence;
+pub mod index;
 pub mod knowledge;
 pub mod llm;
 pub mod local_chat;

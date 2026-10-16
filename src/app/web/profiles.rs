@@ -254,6 +254,12 @@ impl Portal {
             "audit",
             "answer_refine",
             "answer_send",
+            "notes_list",
+            "notes_save",
+            "notes_remove",
+            "knowledge_search",
+            "index_status",
+            "index_refresh",
             "activity_status",
             "activity_history",
             "activity_pending",
@@ -349,6 +355,15 @@ impl Portal {
                 && config.server.webhook_prefix == saved.server.webhook_prefix
                 && config.server.cloudflare_tunnel == saved.server.cloudflare_tunnel,
             "The portal operator manages the public URL, listener and tunnel."
+        );
+        // A loopback embeddings server would be the portal's own computer.
+        ensure!(
+            config
+                .knowledge_index
+                .embeddings
+                .as_ref()
+                .is_none_or(|e| e.url.starts_with("https://")),
+            "The web interface accepts only HTTPS embeddings endpoints."
         );
         let old_map = KnowledgeMap::load(&saved.knowledge_map)?;
         for (alias, path) in &map.repositories {

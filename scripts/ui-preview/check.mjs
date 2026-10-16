@@ -34,11 +34,13 @@ for (const [label, ctx] of [['desktop-light', {}], ['desktop-dark', { colorSchem
   for (const tab of ['overview', 'messages', 'registration', 'knowledge', 'chat', 'settings']) {
     await page.evaluate(t => showTab(t), tab);
     await page.waitForTimeout(300);
-    // Every tab of the section's tab list (Settings sections, Activities views) is scanned.
-    const list = { settings: '#settings-tabs', registration: '#activity-tabs' }[tab];
+    // Every tab of the section's tab list (Settings sections, Activities and Knowledge views) is scanned.
+    const list = { settings: '#settings-tabs', registration: '#activity-tabs', knowledge: '#knowledge-tabs' }[tab];
     const groups = list ? await page.$$eval(`${list} [role=tab]`, tabs => tabs.map(t => t.dataset.group)).catch(() => []) : [];
     for (const group of groups.length ? groups : [null]) {
       if (group) { await page.evaluate(([l, g]) => selectTab($(l), g), [list, group]); await page.waitForTimeout(250); }
+      // Knowledge editors are scanned open.
+      if (tab === 'knowledge') await page.evaluate(() => { for (const d of document.querySelectorAll('#knowledge details')) d.open = true; });
       const key = `${label}/${tab}${group ? ':' + group : ''}`;
       axeSummary[key] = await scan(page);
     }
@@ -172,7 +174,55 @@ if (flag === '--axe-only') { await browser.close(); process.exit(0); }
   check('adding the activity record lists it disabled and hides the offer', !(await page.isVisible('#record-offer'))
     && await page.evaluate(() => [...document.querySelectorAll('#resources .resource')].some(r => r.textContent.includes('activity-record')
       && r.textContent.includes('Registro de actividades') && r.textContent.includes('Desactivado'))));
+  check('a repository source shows what its index holds', await page.evaluate(() => [...document.querySelectorAll('#resources .resource')]
+    .some(r => r.textContent.includes('handbook') && r.textContent.includes('42 archivos'))));
+  await page.click('#knowledge-sources details.add-form summary');
+  await page.selectOption('#source-kind', 'repository');
+  check('a whole repository needs no file path', !(await page.isVisible('#source-path-label')));
+  await page.selectOption('#source-kind', 'file');
+  check('one file asks for its path', await page.isVisible('#source-path-label'));
   await page.click('#discard');
+  // Contexts: a subject with its keywords, sources and instructions, saved with the map.
+  await page.click('#knowledge-tab-contexts');
+  check('contexts list shows the billing context', await page.isVisible('#contexts .resource:has-text("Billing")'));
+  await page.click('#contexts .resource-edit summary');
+  await page.click('#contexts .resource-edit input[value="handbook"]');
+  check('choosing a context source asks to save', await page.isVisible('#savebar'));
+  await page.click('#save');
+  await page.waitForTimeout(300);
+  check('the context is saved with its new source', await page.evaluate(() => window.__ptaLastSave?.map?.contexts?.[0]?.sources?.includes('handbook')));
+  // Notes: searched, added right away with their contexts.
+  await page.click('#knowledge-tab-notes');
+  await page.waitForTimeout(200);
+  check('notes are listed', await page.$$eval('#notes .resource', rows => rows.length) === 2);
+  check('the notes source is offered while none reads them', await page.isVisible('#notes-offer'));
+  await page.fill('#notes-query', 'hotfix');
+  await page.waitForTimeout(500);
+  check('searching notes narrows the list', await page.$$eval('#notes .resource', rows => rows.length) === 1);
+  await page.fill('#notes-query', '');
+  await page.click('#note-form summary');
+  await page.fill('#note-title', 'Refund cutoff');
+  await page.fill('#note-text', 'Refunds requested after 18:00 are processed the next business day.');
+  await page.click('#note-contexts input[value="billing"]');
+  await page.click('#add-note');
+  await page.waitForTimeout(400);
+  check('a new note is saved with its context', await page.evaluate(() => window.__ptaLastNote?.title === 'Refund cutoff' && window.__ptaLastNote?.contexts?.[0] === 'billing'));
+  check('the new note is listed', await page.isVisible('#notes .resource:has-text("Refund cutoff")'));
+  await page.click('#knowledge-tab-sources');
+  // Semantic search: endpoint and model together; the credential is mapped in [secrets].
+  await page.evaluate(() => showTab('settings', 'panel-embeddings'));
+  await page.fill('#embeddings-url', 'https://api.openai.com/v1');
+  await page.click('#save');
+  await page.waitForTimeout(300);
+  check('an endpoint without a model is refused before saving', await page.isVisible('#notice.error'));
+  await page.fill('#embeddings-model', 'text-embedding-3-small');
+  await page.fill('#embeddings-credential', 'OPENAI_API_KEY');
+  await page.click('#save');
+  await page.waitForTimeout(300);
+  check('embeddings are saved with their credential reference', await page.evaluate(() => {
+    const config = window.__ptaLastSave?.config;
+    return config?.knowledge_index?.embeddings?.secret_ref === 'secret://knowledge/embeddings' && config.secrets['secret://knowledge/embeddings'] === 'OPENAI_API_KEY';
+  }));
   check('no page errors', errors.length === 0, errors.join(' | '));
   await context.close();
 }

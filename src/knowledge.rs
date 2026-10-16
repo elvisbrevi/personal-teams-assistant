@@ -1,4 +1,4 @@
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context as _, Result, ensure};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -12,6 +12,30 @@ pub struct KnowledgeMap {
     pub repositories: BTreeMap<String, PathBuf>,
     #[serde(default)]
     pub resources: Vec<Resource>,
+    /// Subjects the user works on («cobros», a project): the words that name them, the
+    /// sources that know about them and how to answer about them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub contexts: Vec<Context>,
+}
+/// A subject the user works on. A request that names it (one of its keywords, its name or ID)
+/// is answered from its sources when the conversation may read them, with its instructions.
+/// It narrows and guides; it never authorizes a source.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct Context {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    /// Words or phrases that name the subject, matched whole, ignoring case and accents.
+    #[serde(default)]
+    pub keywords: Vec<String>,
+    /// The sources that know about it, by ID.
+    #[serde(default)]
+    pub sources: Vec<String>,
+    /// How to answer about it: terms, tone, what to include.
+    #[serde(default)]
+    pub instructions: String,
 }
 #[derive(Clone, Deserialize, Serialize)]
 pub struct Resource {
@@ -29,9 +53,32 @@ pub struct Resource {
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Access {
-    File { repository: String, path: PathBuf },
-    Url { url: String },
-    Tool { tool: crate::tools::ToolSpec },
+    File {
+        repository: String,
+        path: PathBuf,
+    },
+    Url {
+        url: String,
+    },
+    Tool {
+        tool: crate::tools::ToolSpec,
+    },
+    /// A whole repository: its Markdown and text files, searched through the knowledge index.
+    Repository {
+        repository: String,
+    },
+    /// The verified notes (written in the app, with `pta notes` or by agents); `contexts`
+    /// keeps only the notes of those contexts and the general ones.
+    Notes {
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        contexts: Vec<String>,
+    },
+}
+impl Access {
+    /// Read through the knowledge index rather than whole.
+    pub fn indexed(&self) -> bool {
+        matches!(self, Self::Repository { .. } | Self::Notes { .. })
+    }
 }
 impl KnowledgeMap {
     pub fn load(path: &Path) -> Result<Self> {
@@ -42,6 +89,41 @@ impl KnowledgeMap {
         ensure!(map.resources.len() <= 250, "too many resources");
         let mut ids = BTreeSet::new();
         let id_pattern = regex::Regex::new(r"^[a-z][a-z0-9_-]{0,63}$")?;
+        ensure!(map.contexts.len() <= 50, "too many contexts");
+        let mut context_ids = BTreeSet::new();
+        let plain = |text: &str, max: usize| {
+            text.chars().count() <= max
+                && !text
+                    .chars()
+                    .any(|c| c.is_control() && c != '\n' && c != '\t')
+        };
+        for c in &map.contexts {
+            ensure!(
+                id_pattern.is_match(&c.id) && context_ids.insert(c.id.as_str()),
+                "invalid or duplicate context id"
+            );
+            ensure!(
+                !c.name.trim().is_empty()
+                    && plain(&c.name, 80)
+                    && plain(&c.description, 2000)
+                    && plain(&c.instructions, 4000),
+                "a context needs a name of at most 80 characters, a description of at most 2000 and instructions of at most 4000"
+            );
+            ensure!(
+                c.keywords.len() <= 50
+                    && c.keywords
+                        .iter()
+                        .all(|k| !k.trim().is_empty() && plain(k, 80)),
+                "a context has at most 50 keywords of at most 80 characters"
+            );
+            ensure!(
+                c.sources.len() <= 50
+                    && c.sources
+                        .iter()
+                        .all(|id| map.resources.iter().any(|r| &r.id == id)),
+                "a context's sources must exist in the knowledge map"
+            );
+        }
         for r in &map.resources {
             ensure!(
                 id_pattern.is_match(&r.id)
@@ -70,6 +152,18 @@ impl KnowledgeMap {
                 Access::Url { url } => {
                     validate_url(url)?;
                 }
+                Access::Repository { repository } => {
+                    ensure!(
+                        map.repositories.contains_key(repository),
+                        "unknown repository"
+                    );
+                }
+                Access::Notes { contexts } => {
+                    ensure!(
+                        contexts.iter().all(|c| context_ids.contains(c.as_str())),
+                        "a notes source's contexts must exist in the knowledge map"
+                    );
+                }
                 Access::Tool { tool } => {
                     tool.validate()?;
                     // A catalog file must live in a declared repository; an inline one needs none.
@@ -94,6 +188,39 @@ impl KnowledgeMap {
             }
         }
         Ok(map)
+    }
+    /// The context a request names: the one with the most of its keywords, name or ID found
+    /// as whole words (ignoring case and accents); the first in the map on a tie.
+    pub fn context_for(&self, text: &str) -> Option<&Context> {
+        let words = |text: &str| -> Vec<String> {
+            crate::index::fold(text)
+                .split(|c: char| !c.is_alphanumeric())
+                .filter(|w| !w.is_empty())
+                .map(str::to_owned)
+                .collect()
+        };
+        let request = words(text);
+        let names = |phrase: &str| {
+            let phrase = words(phrase);
+            !phrase.is_empty()
+                && request
+                    .windows(phrase.len())
+                    .any(|w| w == phrase.as_slice())
+        };
+        let mut best: Option<(usize, &Context)> = None;
+        for context in &self.contexts {
+            let found = context
+                .keywords
+                .iter()
+                .map(String::as_str)
+                .chain([context.name.as_str(), context.id.as_str()])
+                .filter(|phrase| names(phrase))
+                .count();
+            if found > 0 && best.is_none_or(|(most, _)| found > most) {
+                best = Some((found, context));
+            }
+        }
+        best.map(|(_, context)| context)
     }
     pub fn available<'a>(&'a self, conversation: &str, sender: &str) -> Vec<&'a Resource> {
         self.resources
@@ -141,6 +268,9 @@ impl KnowledgeMap {
                 }
             }
             Access::Tool { .. } => anyhow::bail!("tool resources require the tool registry"),
+            Access::Repository { .. } | Access::Notes { .. } => {
+                anyhow::bail!("indexed resources are read through the knowledge index")
+            }
         };
         Ok(text)
     }
@@ -257,7 +387,7 @@ pub fn excerpt(text: &str, question: &str, limit: usize) -> String {
 }
 /// `text` split at Markdown headings outside fenced code, each part with its lowercase heading
 /// path; a section longer than `limit` splits again at blank lines outside fences.
-fn parts(text: &str, limit: usize) -> Vec<(String, String)> {
+pub(crate) fn parts(text: &str, limit: usize) -> Vec<(String, String)> {
     let fence = |line: &str| {
         let line = line.trim_start();
         line.starts_with("```") || line.starts_with("~~~")
@@ -370,6 +500,62 @@ mod tests {
     fn invalid_map_rejected() {
         assert!(KnowledgeMap::parse("resources=[]\nrepositories={}").is_ok());
         assert!(KnowledgeMap::parse("resources='oops'").is_err());
+    }
+    #[test]
+    fn a_request_names_its_context_by_keywords_name_or_id() {
+        let map = KnowledgeMap::parse(
+            "[[resources]]\nid = \"wiki-cobros\"\ndescription = \"x\"\ntopics = []\nenabled = false\nexternal_processing = false\nallowed_conversations = []\nkind = \"url\"\nurl = \"https://docs.example.com/\"\n\n[[contexts]]\nid = \"cobros\"\nname = \"Cobros\"\nkeywords = [\"conciliación bancaria\", \"factura\"]\nsources = [\"wiki-cobros\"]\n\n[[contexts]]\nid = \"portal-pagos\"\nname = \"Portal de pagos\"\nkeywords = [\"pago QR\", \"factura\"]\n",
+        )
+        .unwrap();
+        let named = |text: &str| map.context_for(text).map(|c| c.id.as_str());
+        assert_eq!(named("¿Cómo va la CONCILIACION bancaria?"), Some("cobros"));
+        // A phrase matches whole: «bancaria» alone or «conciliaciones» is not the phrase.
+        assert_eq!(named("una cuenta bancaria"), None);
+        // More matches win; a tie keeps the first context.
+        assert_eq!(named("la factura del pago qr"), Some("portal-pagos"));
+        assert_eq!(named("una factura"), Some("cobros"));
+        assert_eq!(named("el portal de pagos"), Some("portal-pagos"));
+        assert_eq!(named("portal-pagos"), Some("portal-pagos"));
+        // Contexts name existing sources only, with unique IDs.
+        let invalid = |extra: &str| {
+            KnowledgeMap::parse(&format!("[[contexts]]\nid = \"a\"\nname = \"A\"\n{extra}"))
+                .is_err()
+        };
+        assert!(invalid("sources = [\"missing\"]\n"));
+        assert!(invalid("\n[[contexts]]\nid = \"a\"\nname = \"B\"\n"));
+        assert!(invalid("keywords = [\" \"]\n"));
+        assert!(!invalid(""));
+    }
+    #[test]
+    fn repositories_and_notes_are_sources_that_round_trip() {
+        let text = "[repositories]\nhandbook = \"/tmp/handbook\"\n\n[[resources]]\nid = \"handbook\"\ndescription = \"Runbooks\"\ntopics = []\nenabled = false\nexternal_processing = false\nallowed_conversations = []\nkind = \"repository\"\nrepository = \"handbook\"\n\n[[resources]]\nid = \"notes\"\ndescription = \"Notes\"\ntopics = []\nenabled = false\nexternal_processing = false\nallowed_conversations = []\nkind = \"notes\"\ncontexts = [\"cobros\"]\n\n[[contexts]]\nid = \"cobros\"\nname = \"Cobros\"\nsources = [\"handbook\"]\n";
+        let map = KnowledgeMap::parse(text).unwrap();
+        assert!(map.resources.iter().all(|r| r.access.indexed()));
+        let saved = toml::to_string(&map).unwrap();
+        assert_eq!(KnowledgeMap::parse(&saved).unwrap().resources.len(), 2);
+        // An undeclared repository, an unknown context or an extra field are refused.
+        assert!(
+            KnowledgeMap::parse(
+                &text.replace("repository = \"handbook\"", "repository = \"other\"")
+            )
+            .is_err()
+        );
+        assert!(
+            KnowledgeMap::parse(&text.replace("contexts = [\"cobros\"]", "contexts = [\"pagos\"]"))
+                .is_err()
+        );
+        assert!(
+            KnowledgeMap::parse(
+                &text.replace("kind = \"notes\"", "kind = \"notes\"\npath = \"x\"")
+            )
+            .is_err()
+        );
+        // A map without contexts writes none.
+        assert!(
+            !toml::to_string(&KnowledgeMap::parse("").unwrap())
+                .unwrap()
+                .contains("contexts")
+        );
     }
     #[test]
     fn blocks_ssrf_urls() {

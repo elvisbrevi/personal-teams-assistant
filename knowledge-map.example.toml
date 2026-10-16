@@ -15,6 +15,31 @@ kind = "file"
 repository = "personal"
 path = "topics/assistant/operations.md"
 
+# A whole repository as one source: its Markdown and text files, searched by relevance through
+# the knowledge index. Each answer reads the sections that best match the request.
+# [[resources]]
+# id = "handbook"
+# description = "Runbooks and procedures of the payments team"
+# topics = []
+# enabled = false
+# external_processing = false
+# allowed_conversations = []
+# allowed_senders = []
+# kind = "repository"
+# repository = "personal"
+
+# Verified notes (pta notes, the Knowledge section or agents), searched like a repository.
+# Optional contexts = ["billing"] keeps only those contexts' notes and the general ones.
+# [[resources]]
+# id = "notes"
+# description = "Facts I verified: procedures, decisions and how things are done here"
+# topics = []
+# enabled = false
+# external_processing = false
+# allowed_conversations = []
+# allowed_senders = []
+# kind = "notes"
+
 # A website must be an exact HTTPS URL. Redirects, private IPs and credentials are blocked.
 # [[resources]]
 # id = "public-docs"
@@ -112,3 +137,14 @@ path = "topics/assistant/operations.md"
 # kind = "tool"
 # [resources.tool]
 # type = "activity_record"
+
+# Contexts: subjects you answer about. A request that names one (a keyword, its name or ID)
+# reads its sources among the authorized ones and follows its instructions; it never
+# authorizes a source.
+# [[contexts]]
+# id = "billing"
+# name = "Billing"
+# description = "Invoices, payments and bank reconciliation"
+# keywords = ["invoice", "bank reconciliation", "refund"]
+# sources = ["handbook", "notes"]
+# instructions = "Call collections «recaudación» and name the settlement batch when it applies."

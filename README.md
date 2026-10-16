@@ -70,6 +70,14 @@ and a pull request named in a status question is read so it can be linked. The
 full list of cited references and Wiki pages read stays in the message history
 (Messages tab and `pta audit show`).
 
+Version 0.7.20 adds a knowledge index. A whole repository can be a source of its
+own, with its description: each answer reads the sections that best match the
+request. Verified notes (Knowledge › Notes, `pta notes`) are searched the same way,
+and contexts such as «billing» group the sources, keywords and instructions of one
+subject: a request that names it reads that context's sources. Search is full-text
+(SQLite FTS5), and also by meaning with an optional embeddings endpoint (Settings ›
+Advanced › Semantic search).
+
 Version 0.7.19 makes the activity record a source of its own: in Knowledge,
 **Add activity record** lists what you approved in Activities as a source you
 enable, authorize for chosen chats and pick on its own when answering a message.

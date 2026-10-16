@@ -536,6 +536,9 @@ pub(crate) async fn dispatch(host: &Arc<Host>, request: Request) -> Reply {
             "self_chat_status",
             "audit",
             "logs",
+            "notes_list",
+            "knowledge_search",
+            "index_status",
             "finish_github_login",
             "cancel_github",
             "disconnect_github",
@@ -898,6 +901,12 @@ async fn operate(
             save_settings(state, config, map, tunnel).await?;
             json!({"enabled":false})
         }
+        "notes_list" => super::notes::list(state, args)?,
+        "notes_save" => super::notes::save(state, args)?,
+        "notes_remove" => super::notes::remove(state, args)?,
+        "knowledge_search" => super::notes::search(state, args)?,
+        "index_status" => super::notes::status(state)?,
+        "index_refresh" => super::notes::refresh(state, args).await?,
         "answer_refine" => refine_answer(state, args).await?,
         "answer_send" => send_answer(state, args).await?,
         "audit" | "logs" => {
