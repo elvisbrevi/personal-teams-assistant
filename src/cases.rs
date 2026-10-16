@@ -69,7 +69,7 @@ pub struct BuiltIn {
     pub optional: bool,
 }
 
-pub const BUILT_IN: [BuiltIn; 7] = [
+pub const BUILT_IN: [BuiltIn; 8] = [
     BuiltIn {
         id: "general",
         name: "Every answer",
@@ -98,6 +98,16 @@ pub const BUILT_IN: [BuiltIn; 7] = [
         summary: "What you did on a day or period («¿qué hice ayer?», «la semana pasada»), from the activity record alone.",
         description: None,
         instructions: Some(prompts::RECAP),
+        keywords: true,
+        sources: None,
+        optional: true,
+    },
+    BuiltIn {
+        id: "report_tasks",
+        name: "Report tasks",
+        summary: "Report registered tasks or answer a reminder to log hours, from the activity record alone.",
+        description: None,
+        instructions: Some(prompts::REPORT_TASKS),
         keywords: true,
         sources: None,
         optional: true,

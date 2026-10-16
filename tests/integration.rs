@@ -4848,3 +4848,185 @@ async fn a_person_profile_and_approved_examples_guide_the_answer() {
             .any(|a| a.trace.iter().any(|s| s.step == "examples"))
     );
 }
+
+struct TaskReportLlm;
+#[async_trait]
+impl LlmProvider for TaskReportLlm {
+    fn name(&self) -> &str {
+        "synthetic-task-report"
+    }
+    async fn classify_intent(&self, _: &str, _: &str) -> Result<IntentDecision> {
+        panic!("task reminders must be recognized before activity reviews");
+    }
+    async fn generate(&self, _: GenerationInput<'_>) -> Result<String> {
+        unreachable!()
+    }
+    async fn generate_response(
+        &self,
+        input: GenerationInput<'_>,
+    ) -> Result<personal_teams_assistant::llm::GeneratedAnswer> {
+        assert!(!input.review);
+        assert!(input.history.is_empty());
+        assert_eq!(
+            input.prompts.recap,
+            personal_teams_assistant::llm::prompts::REPORT_TASKS
+        );
+        if input.evidence.contains("No confirmed registered tasks") {
+            return Ok(personal_teams_assistant::llm::GeneratedAnswer {
+                answer: "No tengo tareas registradas para ese día.".into(),
+                detailed: false,
+                used_sources: Vec::new(),
+                provider: None,
+                fallbacks: Vec::new(),
+            });
+        }
+        assert!(
+            input.evidence.contains("Registered as task #26410"),
+            "{}",
+            input.evidence
+        );
+        for absent in [
+            "Registro yesterday",
+            "Registro pending",
+            "Registro uncertain",
+        ] {
+            assert!(!input.evidence.contains(absent), "{}", input.evidence);
+        }
+        Ok(personal_teams_assistant::llm::GeneratedAnswer {
+            answer: "Ya registré mis tareas de hoy: tarea #26410 en la HU #23553, ajuste del flujo de pago QR (2 h).".into(),
+            detailed: false, used_sources: Vec::new(), provider: None, fallbacks: Vec::new(),
+        })
+    }
+}
+#[tokio::test]
+async fn task_report_prioritizes_the_reminder_and_reads_only_confirmed_tasks() {
+    let server = MockServer::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let store = support::store(&dir);
+    let graph = support::graph(&server, store.clone());
+    let mut cfg = (*graph.config).clone();
+    cfg.policy.dry_run = true;
+    cfg.server.data_dir = dir.path().into();
+    let today = cfg
+        .activity_registration
+        .zoned(chrono::Utc::now())
+        .date_naive();
+    let activities = personal_teams_assistant::activity::store::Database::open(
+        &dir.path().join("activity-registration.db"),
+    )
+    .unwrap();
+    let pr = "https://dev.azure.com/example/Payments/_git/api/pullrequest/";
+    for (key, back, task) in [
+        ("today", 0, 26410),
+        ("yesterday", 1, 26411),
+        ("pending", 0, 26412),
+        ("uncertain", 0, 26413),
+    ] {
+        let day = (today - chrono::Duration::days(back)).to_string();
+        record(
+            &activities,
+            key,
+            &day,
+            &format!("{pr}{task}"),
+            match key {
+                "pending" => "pending",
+                "uncertain" => "uncertain",
+                _ => "done",
+            },
+            Some(task),
+        );
+    }
+    drop(activities);
+    let mut status = wiki_resource();
+    status.id = "azure-devops-status".into();
+    status.access = Access::Tool {
+        tool: ToolSpec::AzureDevopsStatus {
+            repository: "private".into(),
+            path: "catalog.toml".into(),
+            catalog: vec![],
+            secret_ref: "secret://ado/read".into(),
+            link_secret_ref: None,
+        },
+    };
+    let mut map = knowledge(&dir);
+    map.resources = vec![wiki_resource(), status];
+    let pipeline = Pipeline {
+        config: Arc::new(cfg),
+        store: store.clone(),
+        adapter: graph,
+        knowledge: map,
+        llm: Arc::new(TaskReportLlm),
+        tools: Arc::new(NoReads),
+        redactor: redactor(),
+    };
+    let sources: Vec<String> = vec!["manuals".into(), "azure-devops-status".into()];
+    let result = simulation::run(
+        &pipeline,
+        SimulationRequest {
+            session: "recap".into(),
+            text: "URGENTE Elvis: antes de cerrar el día registra tus horas en Azure DevOps (Completed Work / Remaining Work en tus Tasks y estado al día). Lo que no está registrado no existe.".into(),
+            group: false,
+            mentioned: false,
+            sources: sources.clone(),
+        },
+        Some(&sources),
+    )
+    .await
+    .unwrap();
+    assert_eq!(result.status, "dry_run", "{}", result.reason);
+    let answer = result.answer.unwrap();
+    assert!(
+        answer.contains("](https://dev.azure.com/example/Payments/_workitems/edit/26410)"),
+        "{answer}"
+    );
+    let rows = personal_teams_assistant::state::Store::inspect(
+        &dir.path().join("test.db"),
+        false,
+        1,
+        None,
+        true,
+    )
+    .unwrap();
+    let audit: personal_teams_assistant::state::Audit =
+        serde_json::from_value(rows[0]["audit"].clone()).unwrap();
+    assert_eq!(audit.intent.as_deref(), Some("report_tasks"));
+    assert_eq!(audit.tools, vec!["read_recorded_activities"]);
+    assert_eq!(audit.source.as_deref(), Some("azure-devops-status"));
+    assert!(server.received_requests().await.unwrap().is_empty());
+    let empty_day = today - chrono::Duration::days(3);
+    let result = simulation::run(
+        &pipeline,
+        SimulationRequest {
+            session: "report-empty".into(),
+            text: format!("Mis tareas registradas el {empty_day}"),
+            group: false,
+            mentioned: false,
+            sources: sources.clone(),
+        },
+        Some(&sources),
+    )
+    .await
+    .unwrap();
+    assert_eq!(result.status, "dry_run", "{}", result.reason);
+    assert_eq!(
+        result.answer.as_deref(),
+        Some("No tengo tareas registradas para ese día.")
+    );
+    assert!(server.received_requests().await.unwrap().is_empty());
+    let denied = vec!["manuals".to_owned()];
+    let result = simulation::run(
+        &pipeline,
+        SimulationRequest {
+            session: "report-unauthorized".into(),
+            text: "Reportar tareas".into(),
+            group: false,
+            mentioned: false,
+            sources: denied.clone(),
+        },
+        Some(&denied),
+    )
+    .await
+    .unwrap();
+    assert_eq!(result.reason, "no_authorized_resource");
+    assert!(server.received_requests().await.unwrap().is_empty());
+}

@@ -44,6 +44,9 @@ An answer about what the user did on a named day or period, from the activity re
 **Status round**:
 A request for the user's progress, commitments, risks or blockers, answered part by part.
 
+**Task report**:
+A reply listing confirmed registered tasks for a day or period, from the activity record alone; also answers reminders to log hours.
+
 **Activity review**:
 A comparison of the user's own activity with the work registered as tasks, listing what is not registered.
 

@@ -221,7 +221,7 @@ if (flag === '--axe-only') { await browser.close(); process.exit(0); }
   check('the context is saved with its new source', await page.evaluate(() => window.__ptaLastSave?.map?.contexts?.[0]?.sources?.includes('handbook')));
   // Cases: the built-in kinds of request, edited and restored; only changes are saved.
   await page.click('#knowledge-tab-cases');
-  check('the seven built-in cases are listed', await page.$$eval('#cases .resource', rows => rows.length) === 7);
+  check('the eight built-in cases are listed', await page.$$eval('#cases .resource', rows => rows.length) === 8);
   const status = '#cases .resource:has-text("Ronda de avance")';
   await page.click(`${status} .resource-edit summary`);
   check('a case shows its default instructions to edit', await page.inputValue(`${status} textarea`) === 'Default instructions of status_round: how it is answered, part by part.');

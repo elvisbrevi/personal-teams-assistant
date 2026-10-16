@@ -1230,7 +1230,7 @@ const reasonLabels = {
   manual_send: t('Sent by you from the app after reviewing it.'),
 };
 const kindLabels = { self: t('Personal chat'), direct: t('Direct'), group: t('Group'), unsupported: t('Other') };
-const intentLabels = { question: t('question'), activity_review: t('activity review'), greeting: t('greeting'), shared_link: t('shared link'), link: t('link work to work items'),
+const intentLabels = { report_tasks: t('Report tasks'), question: t('question'), activity_review: t('activity review'), greeting: t('greeting'), shared_link: t('shared link'), link: t('link work to work items'),
   statement: t('informational'), personal: t('request for you') };
 const linkLabels = { sending: t('sending'), linked: t('linked'), already_linked: t('already linked'), failed: t('failed'), uncertain: t('uncertain (check the work item; never retried)') };
 let messageRows = [];
@@ -1910,6 +1910,7 @@ const caseTexts = {
   status_round: { name: t('Status round'), summary: t('Progress, commitments, risks or blockers of your work («avance», «compromiso», «bloqueos», a named HU).'),
     sources: t('As built it reads Azure DevOps activity, your own recent Wiki pages and the activity record.') },
   recap: { name: t('What you did'), summary: t('What you did on a day or period («¿qué hice ayer?», «la semana pasada»), from the activity record alone.') },
+  report_tasks: { name: t('Report tasks'), summary: t('Report registered tasks or answer a reminder to log hours, from the activity record alone.') },
   activity_review: { name: t('Activity review'), summary: t('Your work that no task records yet, compared with your work items.'),
     sources: t('As built it reads Azure DevOps activity, Wiki edits, your Teams messages and the activity record.') },
   documentation: { name: t('Documentation'), summary: t('How something works or is used («según la wiki», endpoints, procedures), from the Wiki.'),

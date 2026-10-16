@@ -359,8 +359,12 @@ impl Pipeline {
         // Read once, when an intent decision or an answer first needs them.
         // A reply to an activity review in the personal chat may ask to link the work it found
         // to work items; that conversation is handled before any intent decision.
+        let report_tasks = self.case_on("report_tasks")
+            && !personal_request(&current)
+            && (report_tasks_request(&current) || self.case_named("report_tasks", &current));
         let mut link_plan = None;
         let link_reply = if own_chat
+            && !report_tasks
             && !resource.starts_with("simulation:")
             && !self.config.policy.dry_run
             && !drafting
@@ -381,7 +385,7 @@ impl Pipeline {
         } else {
             None
         };
-        let mut history: Option<String> = None;
+        let mut history: Option<String> = report_tasks.then(String::new);
         // Sources an activity review may read, already authorized for this conversation.
         let review_sources: Vec<_> = available
             .iter()
@@ -391,7 +395,10 @@ impl Pipeline {
             .collect();
         let mut review = false;
         let mut thanks = false;
-        let is_greeting = if let Some(draft) = &draft {
+        let is_greeting = if report_tasks {
+            audit.step("intent", "report tasks");
+            false
+        } else if let Some(draft) = &draft {
             // The user wants this message answered: no intent decision can drop it now.
             review = draft.intent.as_deref() == Some(Intent::ActivityReview.as_str());
             audit.step(
@@ -512,6 +519,8 @@ impl Pipeline {
                     Intent::Greeting.as_str()
                 } else if thanks {
                     "shared_link"
+                } else if report_tasks {
+                    "report_tasks"
                 } else if review {
                     Intent::ActivityReview.as_str()
                 } else {
@@ -532,7 +541,11 @@ impl Pipeline {
             audit.reason = "deterministic_thanks".into();
             thanks_reply(self.config.llm.language, &message.sender_name)
         } else {
-            let previous = self.store.context(&message.conversation)?;
+            let previous = if report_tasks {
+                None
+            } else {
+                self.store.context(&message.conversation)?
+            };
             let history = self.history(&message, &mut audit, &mut history).await;
             audit.step(
                 "context",
@@ -631,6 +644,7 @@ impl Pipeline {
                 || !history.is_empty()
                 || (wiki_candidate && !self.status_request(&current)))
                 && !more_details
+                && !report_tasks
                 && !review
                 && !tool_candidates.is_empty()
             {
@@ -732,7 +746,35 @@ impl Pipeline {
             let named_context = self
                 .knowledge
                 .context_for(&format!("{current}\n{tool_question}"));
-            let recap = if review
+            let recap = if report_tasks {
+                let Some(source) = self.record_source(&available) else {
+                    audit.reason = "no_authorized_resource".into();
+                    audit.step("sources", "the activity record is not authorized");
+                    return self.store.record(resource, &audit);
+                };
+                let (since, until) =
+                    crate::activity::recorded::requested_days(&current, self.today())
+                        .unwrap_or((self.today(), self.today()));
+                let entries = crate::activity::store::Database::recorded(
+                    &self.config.server.data_dir.join("activity-registration.db"),
+                    &since.to_string(),
+                    &until.to_string(),
+                )?;
+                let entries: Vec<_> = entries
+                    .into_iter()
+                    .filter(|e| matches!(e.state.as_str(), "done" | "already_registered"))
+                    .collect();
+                let mut data = crate::activity::recorded::evidence(
+                    &entries, &[], &since.to_string(), &until.to_string(),
+                ).unwrap_or_else(|| crate::evidence::Evidence {
+                    text: format!("No confirmed registered tasks in the Activities section from {since} to {until}."),
+                    ..Default::default()
+                });
+                data.sanitize(&self.redactor);
+                audit.tools.push("read_recorded_activities".into());
+                audit.step("activity history", format!("{since} to {until}"));
+                Some((source, data))
+            } else if review
                 || explicit
                 || wiki_requested
                 || !self.case_on("recap")
@@ -923,7 +965,9 @@ impl Pipeline {
             {
                 sources.push(*source);
             }
-            if review {
+            if report_tasks {
+                sources.clear();
+            } else if review {
                 // The one case that combines tools: activity, Wiki edits and own messages.
                 sources = review_sources.clone();
             } else if explicit {
@@ -1283,7 +1327,20 @@ impl Pipeline {
                         guidance: draft.as_ref().map_or("", |d| d.guidance.as_str()),
                         previous_draft: draft.as_ref().map_or("", |d| d.previous.as_str()),
                         context_instructions: context.map_or("", |c| c.instructions.as_str()),
-                        prompts: self.prompts(),
+                        prompts: if report_tasks {
+                            let instructions = self
+                                .knowledge
+                                .case("report_tasks")
+                                .map(|c| c.instructions.as_str())
+                                .filter(|s| !s.is_empty())
+                                .unwrap_or(crate::llm::prompts::REPORT_TASKS);
+                            crate::llm::Prompts {
+                                recap: instructions,
+                                ..self.prompts()
+                            }
+                        } else {
+                            self.prompts()
+                        },
                         recipient: &recipient,
                         examples: &examples,
                     }),
@@ -3029,6 +3086,29 @@ fn normalized_phrase(text: &str) -> String {
         .collect();
     format!(" {} ", words.join(" "))
 }
+/// Registration reminders take priority over phrases like "not registered" in their footer.
+fn report_tasks_request(text: &str) -> bool {
+    let phrase = normalized_phrase(text);
+    [
+        " reportar tareas ",
+        " reporta tus tareas ",
+        " reporta mis tareas ",
+        " registra tus horas ",
+        " registra tus tareas ",
+        " registra las horas ",
+        " recuerda registrar tus horas ",
+        " recuerda registrar tus tareas ",
+        " tareas registradas ",
+        " horas registradas ",
+        " log your hours ",
+        " log your tasks ",
+        " report tasks ",
+        " registered tasks ",
+        " registered hours ",
+    ]
+    .iter()
+    .any(|p| phrase.contains(p))
+}
 /// Asks to find the user's work that no task records («¿qué hice que no está registrado?»).
 fn activity_review_request(text: &str) -> bool {
     let phrase = normalized_phrase(text);
@@ -3533,6 +3613,24 @@ mod tests {
             "gracias",
         ] {
             assert!(!link_request(other, &offer), "{other}");
+        }
+    }
+
+    #[test]
+    fn task_reminders_are_reports_even_with_an_unregistered_work_footer() {
+        for text in [
+            "URGENTE: registra tus horas; lo que no está registrado no existe",
+            "Reportar tareas",
+            "¿Cuáles son mis tareas registradas hoy?",
+            "Please log your hours",
+        ] {
+            assert!(super::report_tasks_request(text), "{text}");
+        }
+        for text in [
+            "¿Qué trabajo hice que no está registrado?",
+            "¿Qué hice ayer?",
+        ] {
+            assert!(!super::report_tasks_request(text), "{text}");
         }
     }
 
