@@ -248,7 +248,8 @@ impl CodexCli {
             label: format!("codex:{model}:{effort}"),
         }
     }
-    #[cfg(test)]
+    // Only the Unix tests drive a fake CLI script.
+    #[cfg(all(test, unix))]
     fn at(program: &Path, model: &str, effort: &str) -> Self {
         Self {
             program: Some(program.into()),
@@ -360,7 +361,8 @@ impl ClaudeCli {
             label: format!("claude:{model}:{effort}"),
         }
     }
-    #[cfg(test)]
+    // Only the Unix tests drive a fake CLI script.
+    #[cfg(all(test, unix))]
     fn at(program: &Path, model: &str, effort: &str) -> Self {
         Self {
             program: Some(program.into()),
