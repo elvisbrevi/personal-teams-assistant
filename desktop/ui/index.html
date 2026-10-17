@@ -4,7 +4,14 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="color-scheme" content="light dark">
+  <meta name="theme-color" content="#fff6e5" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#17151f" media="(prefers-color-scheme: dark)">
+  <meta name="apple-mobile-web-app-title" content="Assistant">
   <title>Personal Teams Assistant</title>
+  <!-- The tab icon, the iOS home-screen icon and the PWA manifest (rendered from desktop/icons/app.png). -->
+  <link rel="icon" href="favicon.png" type="image/png" sizes="64x64">
+  <link rel="apple-touch-icon" href="apple-touch-icon.png">
+  <link rel="manifest" href="manifest.webmanifest" crossorigin="use-credentials">
   <link rel="stylesheet" href="style.css">
   <script src="transport.js" defer></script>
   <script src="i18n.js" defer></script>
@@ -37,7 +44,7 @@
   <div class="app">
     <aside class="sidebar">
       <div class="brand">
-        <svg class="logo" viewBox="0 0 64 64" aria-hidden="true"><rect class="logo-tile" x="2.5" y="2.5" width="59" height="59" rx="18"/><circle class="logo-eye" cx="22" cy="28" r="10"/><circle class="logo-eye" cx="42" cy="28" r="10"/><circle class="logo-pupil" cx="23.5" cy="29.5" r="4.6"/><circle class="logo-pupil" cx="43.5" cy="29.5" r="4.6"/><path class="logo-mouth" d="M26 45q6 5 12 0"/></svg>
+        <svg class="logo" viewBox="0 0 64 64" aria-hidden="true"><rect class="logo-tile" x="2" y="2" width="60" height="60" rx="16"/><circle class="logo-eye" cx="21" cy="27" r="9"/><circle class="logo-eye" cx="43" cy="27" r="9"/><circle class="logo-pupil" cx="22" cy="28" r="4"/><circle class="logo-pupil" cx="44" cy="28" r="4"/><path class="logo-mouth" d="M24 43q8 8 16 0"/></svg>
         <div translate="no"><strong>Teams Assistant</strong><small id="version">Personal</small></div>
       </div>
       <!-- Daily work first, then what feeds the answers; Settings stays apart at the end. -->

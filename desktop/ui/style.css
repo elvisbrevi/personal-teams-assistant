@@ -63,10 +63,10 @@ h1:focus:not(:focus-visible), main:focus:not(:focus-visible) { outline: none; }
 .brand .logo { width: 42px; height: 42px; flex: none; }
 .brand strong { display: block; font-family: var(--display); font-size: 1.08rem; font-weight: 800; letter-spacing: -.01em; }
 .brand small { color: var(--muted); font-size: .8rem; }
-.logo-tile { fill: var(--primary); stroke: var(--line); stroke-width: 3; }
+.logo-tile { fill: var(--primary); stroke: var(--line); stroke-width: 4; }
 .logo-eye { fill: var(--eye-white); stroke: var(--eye-ink); stroke-width: 3; }
 .logo-pupil { fill: var(--eye-ink); }
-.logo-mouth { fill: none; stroke: var(--eye-ink); stroke-width: 3.2; stroke-linecap: round; }
+.logo-mouth { fill: none; stroke: var(--eye-ink); stroke-width: 3; stroke-linecap: round; }
 /* Daily work, a gap, what feeds the answers, and Settings pinned to the bottom. */
 nav { flex: 1; display: flex; flex-direction: column; gap: .3rem; min-height: 0; }
 nav button { display: flex; align-items: center; justify-content: flex-start; gap: .7rem; width: 100%; min-height: 2.95rem; padding: .3rem .8rem .3rem .35rem; border-color: transparent; background: transparent; color: var(--text); font-size: .95rem; text-align: left; }

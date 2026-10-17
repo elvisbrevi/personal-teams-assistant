@@ -186,6 +186,9 @@ async fn access_bootstraps_the_existing_profile_without_a_password_form() {
         "/i18n.js",
         "/transport.js",
         "/style.css",
+        "/favicon.png",
+        "/manifest.webmanifest",
+        "/apple-touch-icon.png",
     ] {
         assert_eq!(
             send(&portal, "GET", uri, None, None, None, Value::Null)
@@ -287,6 +290,46 @@ async fn access_bootstraps_the_existing_profile_without_a_password_form() {
         .status(),
         StatusCode::UNAUTHORIZED
     );
+}
+
+#[tokio::test]
+async fn the_pwa_manifest_and_its_icons_are_served_behind_access() {
+    let (_dir, portal, entries, _server) = configured_fixture().await;
+    let auth = TestSession {
+        cookie: String::new(),
+        assertion: assertion(&entries[0]),
+    };
+    for (uri, kind) in [
+        ("/favicon.png", "image/png"),
+        ("/manifest.webmanifest", "application/manifest+json"),
+        ("/apple-touch-icon.png", "image/png"),
+        ("/icon-192.png", "image/png"),
+        ("/icon-512.png", "image/png"),
+    ] {
+        let response = send(&portal, "GET", uri, Some(&auth), None, None, Value::Null).await;
+        assert_eq!(response.status(), StatusCode::OK, "{uri}");
+        assert_eq!(response.headers()[header::CONTENT_TYPE], kind, "{uri}");
+    }
+    let manifest = json_body(
+        send(
+            &portal,
+            "GET",
+            "/manifest.webmanifest",
+            Some(&auth),
+            None,
+            None,
+            Value::Null,
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(manifest["start_url"], "/");
+    // Every icon the manifest names is served.
+    for icon in manifest["icons"].as_array().unwrap() {
+        let uri = format!("/{}", icon["src"].as_str().unwrap());
+        let response = send(&portal, "GET", &uri, Some(&auth), None, None, Value::Null).await;
+        assert_eq!(response.status(), StatusCode::OK, "{uri}");
+    }
 }
 
 #[tokio::test]

@@ -80,6 +80,12 @@ function applyTheme(choice) {
   for (const button of document.querySelectorAll('#theme-choice button')) {
     button.setAttribute('aria-pressed', String(button.dataset.themeChoice === (theme ?? 'system')));
   }
+  // The browser's bar takes the page's color: the chosen theme's, or each one's under the system.
+  const page = getComputedStyle(document.documentElement).backgroundColor;
+  for (const meta of document.querySelectorAll('meta[name="theme-color"]')) {
+    meta.dataset.color ??= meta.content;
+    meta.content = theme ? page : meta.dataset.color;
+  }
 }
 try { applyTheme(localStorage.getItem(THEME_KEY)); } catch { applyTheme(null); }
 

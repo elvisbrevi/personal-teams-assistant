@@ -329,6 +329,32 @@ fn router(portal: Arc<Portal>) -> Router {
                 )
             }),
         )
+        // The tab icon, the iOS home-screen icon and the PWA manifest, behind Access like the stylesheet.
+        .route(
+            "/favicon.png",
+            get(|| async { png(include_bytes!("../../desktop/ui/favicon.png")) }),
+        )
+        .route(
+            "/manifest.webmanifest",
+            get(|| async {
+                asset(
+                    "application/manifest+json",
+                    include_str!("../../desktop/ui/manifest.webmanifest"),
+                )
+            }),
+        )
+        .route(
+            "/apple-touch-icon.png",
+            get(|| async { png(include_bytes!("../../desktop/ui/apple-touch-icon.png")) }),
+        )
+        .route(
+            "/icon-192.png",
+            get(|| async { png(include_bytes!("../../desktop/ui/icon-192.png")) }),
+        )
+        .route(
+            "/icon-512.png",
+            get(|| async { png(include_bytes!("../../desktop/ui/icon-512.png")) }),
+        )
         .route("/app.js", get(app_js))
         .route("/i18n.js", get(i18n_js))
         .route("/transport.js", get(transport_js))
@@ -348,6 +374,9 @@ fn router(portal: Arc<Portal>) -> Router {
 }
 fn asset(content_type: &'static str, content: &'static str) -> Response {
     ([(header::CONTENT_TYPE, content_type)], content).into_response()
+}
+fn png(content: &'static [u8]) -> Response {
+    ([(header::CONTENT_TYPE, "image/png")], content).into_response()
 }
 async fn secure_headers(
     State(portal): State<Arc<Portal>>,

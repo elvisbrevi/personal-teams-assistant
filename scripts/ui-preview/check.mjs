@@ -287,9 +287,20 @@ if (flag === '--axe-only') { await browser.close(); process.exit(0); }
   await page.reload();
   await page.waitForTimeout(600);
   check('the chosen theme survives a reload', (await theme())[0] === 'dark' && await page.getAttribute('#theme-choice [data-theme-choice="dark"]', 'aria-pressed') === 'true');
+  const bars = await page.$$eval('meta[name="theme-color"]', metas => metas.map(m => m.content));
+  check('the browser bar takes the chosen theme', bars.length === 2 && bars.every(color => color === 'rgb(23, 21, 31)'), bars.join(' | '));
   await page.evaluate(() => showTab('settings'));
   await page.click('#theme-choice [data-theme-choice="system"]');
   check('matching the system again forgets the choice', JSON.stringify(await theme()) === JSON.stringify([null, 'rgb(255, 246, 229)', null]), JSON.stringify(await theme()));
+  // The tab icon, the iOS home-screen icon and the manifest with every icon it names load under the portal's CSP.
+  const icons = await page.evaluate(async () => {
+    const manifest = await (await fetch(document.querySelector('link[rel=manifest]').href)).json();
+    const urls = [document.querySelector('link[rel=icon]').href, document.querySelector('link[rel=apple-touch-icon]').href,
+      ...manifest.icons.map(icon => new URL(icon.src, location.href).href)];
+    const loaded = await Promise.all(urls.map(async url => (await fetch(url)).ok));
+    return { display: manifest.display, loaded };
+  });
+  check('the tab icon, the home-screen icon and the manifest\'s icons load', icons.display === 'standalone' && icons.loaded.length === 4 && icons.loaded.every(Boolean), JSON.stringify(icons));
   await context.close();
 }
 {

@@ -405,6 +405,11 @@ mod tests {
             "i18n.js",
             "transport.js",
             "style.css",
+            "favicon.png",
+            "manifest.webmanifest",
+            "apple-touch-icon.png",
+            "icon-192.png",
+            "icon-512.png",
         ] {
             assert!(
                 context.assets().get(&asset.into()).is_some(),

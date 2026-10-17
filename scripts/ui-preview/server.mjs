@@ -11,7 +11,7 @@ const ui = path.resolve(process.argv[2] || path.join(here, '../../desktop/ui'));
 const port = Number(process.argv[3] || 4173);
 // The same policy the web portal sends (src/app/web.rs): a violation shows up in the console.
 const csp = "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'";
-const types = { '.js': 'text/javascript', '.css': 'text/css', '.html': 'text/html' };
+const types = { '.js': 'text/javascript', '.css': 'text/css', '.html': 'text/html', '.svg': 'image/svg+xml', '.png': 'image/png', '.webmanifest': 'application/manifest+json' };
 
 http.createServer((req, res) => {
   const { pathname } = new URL(req.url, 'http://localhost');
