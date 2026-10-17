@@ -1,0 +1,14 @@
+{
+  "name": "Personal Teams Assistant",
+  "short_name": "Assistant",
+  "description": "Answers your Microsoft Teams messages as you, only with the sources you authorize.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#fff6e5",
+  "theme_color": "#fff6e5",
+  "icons": [
+    { "src": "icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" }
+  ]
+}
