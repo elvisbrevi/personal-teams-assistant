@@ -15,7 +15,10 @@ const results = [];
 const check = (name, ok, detail = '') => { results.push({ name, ok, detail }); console.log(`${ok ? 'PASS' : 'FAIL'} ${name}${detail ? ` — ${detail}` : ''}`); };
 
 async function open(options = {}, scenario = 'full') {
-  const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, locale: 'es-CL', bypassCSP: !!options.axe, ...options.context });
+  // Scans see the settled page: with reduced motion the GUI has no transitions, so a tab is never
+  // measured halfway between its colors (on a slow machine that read as a contrast failure).
+  const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, locale: 'es-CL', bypassCSP: !!options.axe,
+    ...(options.axe ? { reducedMotion: 'reduce' } : {}), ...options.context });
   const page = await context.newPage();
   const errors = [];
   page.on('pageerror', e => errors.push(e.message));
