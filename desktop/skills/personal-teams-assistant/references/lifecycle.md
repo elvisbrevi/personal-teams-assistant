@@ -25,4 +25,6 @@ RestartSec=10
 WantedBy=default.target
 ```
 
+**Automatic server updates.** New versions reach crates.io when a version change is merged (the repository's release workflow publishes it after CI passes). A server running the web portal can install each one by itself with the repository's updater (`scripts/vps-update.py` and its systemd user timer, see [delivery](https://github.com/elvisbrevi/personal-teams-assistant/blob/main/docs/delivery.md)): every five minutes it compares `pta --version` with crates.io, waits while an activity review, a task write or a Teams answer is in flight, installs headless, restarts the portal service, verifies `pta status` and restores the previous version if the new one is not healthy. `~/.local/state/personal-teams-assistant-update/history.log` records each update, deferral and rollback; `personal-teams-assistant-update --check` tells what it would do. Do not update that server by hand as well.
+
 Never keep two instances of the same account active at once (another computer, the local GUI or a server): they would duplicate answers and cause loops in the personal chat. Leave the other one stopped or in `pta mode observe`.

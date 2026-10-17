@@ -1,0 +1,21 @@
+# Installs new crates.io releases on the server that runs the web portal (docs/delivery.md).
+# Install: copy scripts/vps-update.py to ~/.local/bin/personal-teams-assistant-update (0755) and
+# this unit and its timer to ~/.config/systemd/user/, then
+# `systemctl --user daemon-reload && systemctl --user enable --now personal-teams-assistant-update.timer`.
+[Unit]
+Description=Personal Teams Assistant: install a new crates.io release on this server
+Documentation=https://github.com/elvisbrevi/personal-teams-assistant/blob/main/docs/delivery.md
+
+[Service]
+Type=oneshot
+Environment=PATH=%h/.cargo/bin:/usr/local/bin:/usr/bin:/bin
+WorkingDirectory=%h
+ExecStart=/usr/bin/python3 -I %h/.local/bin/personal-teams-assistant-update
+# A release build next to the production portal: keep it in the background.
+Nice=10
+CPUWeight=20
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+TimeoutStartSec=75min
+UMask=0077
+NoNewPrivileges=true
