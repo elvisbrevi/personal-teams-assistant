@@ -1,5 +1,5 @@
-// Renders the app icon (desktop/icons/app.png: the lime face tile on a white background) to the
-// images the portal and the landing serve. iOS gets a full-bleed square cut just inside the tile, so its own
+// Renders the app icon (desktop/icons/source/app.png: the lime face tile on a white background, kept
+// outside the crate) to the images the portal, the landing and the desktop app use. iOS gets a full-bleed square cut just inside the tile, so its own
 // rounded mask meets the tile's glossy rim; browsers and the PWA manifest get the tile with
 // transparent corners. Usage: node scripts/render-icons.mjs   (Playwright from scripts/ui-preview/deps.mjs)
 import fs from 'node:fs';
@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { launch } from './ui-preview/deps.mjs';
 
 const root = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
-const source = `data:image/png;base64,${fs.readFileSync(path.join(root, 'desktop/icons/app.png')).toString('base64')}`;
+const source = `data:image/png;base64,${fs.readFileSync(path.join(root, 'desktop/icons/source/app.png')).toString('base64')}`;
 // The tile in the source: its box, its corner radius and the lime of its rim. `edge` cuts its
 // antialiased outline, which carries the white background, off the transparent corners.
 const tile = { left: 121, top: 124, right: 1128, bottom: 1120, radius: 249, rim: '#a4db0a', edge: 3 };
@@ -20,10 +20,28 @@ const outputs = [
   // The landing's brand mark, tab icon and home-screen icon.
   { name: 'site/public/assets/icon.png', size: 256, inset: 0 },
   { name: 'site/public/assets/apple-touch-icon.png', size: 180, inset: 16, opaque: true },
+  // The desktop app: window and tray icon (bundle.icon in tauri.conf.json), and Windows' icon.
+  { name: 'desktop/icons/32x32.png', size: 32, inset: 0 },
+  { name: 'desktop/icons/128x128.png', size: 128, inset: 0 },
+  { name: 'desktop/icons/icon.ico', sizes: [16, 24, 32, 48, 64, 256], inset: 0 },
 ];
+/** An ICO file whose entries are PNG images (Windows Vista and later read them). */
+function ico(pngs) {
+  const header = Buffer.alloc(6 + 16 * pngs.length);
+  header.writeUInt16LE(0, 0); header.writeUInt16LE(1, 2); header.writeUInt16LE(pngs.length, 4);
+  let offset = header.length;
+  pngs.forEach(({ size, data }, index) => {
+    const entry = 6 + 16 * index;
+    header.writeUInt8(size >= 256 ? 0 : size, entry); header.writeUInt8(size >= 256 ? 0 : size, entry + 1);
+    header.writeUInt16LE(1, entry + 4); header.writeUInt16LE(32, entry + 6);
+    header.writeUInt32LE(data.length, entry + 8); header.writeUInt32LE(offset, entry + 12);
+    offset += data.length;
+  });
+  return Buffer.concat([header, ...pngs.map(png => png.data)]);
+}
 const browser = await launch();
 const page = await browser.newPage();
-for (const output of outputs) {
+async function render(output) {
   const data = await page.evaluate(async ({ source, tile, output }) => {
     const image = new Image();
     image.src = source;
@@ -46,7 +64,13 @@ for (const output of outputs) {
     g.drawImage(image, 0, 0);
     return canvas.toDataURL('image/png');
   }, { source, tile, output });
-  fs.writeFileSync(path.join(root, output.name), Buffer.from(data.split(',')[1], 'base64'));
-  console.log(`${output.name} (${output.size} × ${output.size})`);
+  return Buffer.from(data.split(',')[1], 'base64');
+}
+for (const output of outputs) {
+  const data = output.sizes
+    ? ico(await Promise.all(output.sizes.map(async size => ({ size, data: await render({ ...output, size }) }))))
+    : await render(output);
+  fs.writeFileSync(path.join(root, output.name), data);
+  console.log(`${output.name} (${output.sizes ? output.sizes.join(', ') : `${output.size} × ${output.size}`})`);
 }
 await browser.close();
