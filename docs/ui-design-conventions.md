@@ -1,12 +1,14 @@
 # GUI design conventions
 
-The standard every change to `desktop/ui/` follows, so the native window, the web portal and the phone layout stay one consistent work tool. The architecture (§11) says what each section does; this document says how it looks and behaves. The reasoning behind the current structure is in the [UX redesign report](ux-redesign-report.md).
+The standard every change to `desktop/ui/` follows, so the native window, the web portal and the phone layout stay one consistent work tool. The architecture (§11) says what each section does; this document says how it looks and behaves. The reasoning behind the current structure is in the [UX redesign report](ux-redesign-report.md); the visual language (0.7.25) is a sticker sheet: playful neobrutalism kept at the density of a work tool.
 
 ## 1. Character
 
-- A professional tool used every day: clarity, density and speed over decoration. No hero sections, marketing copy, illustrations, gradients or entrance animations.
-- One visual identity: the dark green brand (`--brand`, the logo), system fonts, flat panels separated by borders. Elevation (`--shadow-float`) is only for what floats: the toast, the save bar and dialogs.
-- Motion only answers an action or shows a live state (the running dot's pulse, a spinner). `prefers-reduced-motion` disables it.
+- A professional tool used every day, with a playful look: clarity, density and speed come first, and the play lives in color, outline and type, never in extra content. No marketing copy, decorative illustrations, gradients or entrance animations.
+- One visual identity: warm paper (`--bg`), an ink outline (`--line`, 2px) around every surface and control, rounded display type (`--display`: SF Pro Rounded on Apple devices, a system face elsewhere) for headings, buttons, tabs and numbers, and system text to read. Each section has its sticker color (`--c-overview`, `--c-messages`, `--c-registration`, `--c-knowledge`, `--c-chat`, `--c-settings`) for its navigation tile, its page tile and its active tab on a phone; states have their own fills (§7).
+- A hard offset shadow means «you can press this» or «this is lifted above the page»: buttons, pressable cards and outcome tiles (they sink into the shadow when pressed), an open message, the activity editor, the selected sidebar item, and what floats (toast, save bar, phone tab bar, dialogs). Panels, rows, tabs and filters are flat; never a blurred shadow.
+- The only illustration is the assistant's face: the brand mark, Home's state (awake while it runs and answers, reading aside while it observes, looking up while something is missing, glancing around while it starts or stops, asleep when stopped) and the eyes of an empty list. It repeats what the text says and is hidden from assistive technology.
+- Motion only answers an action or shows a live state (the face's blink and glance, the status dot's pulse, a spinner, a button sinking, a notice popping in). `prefers-reduced-motion` disables it.
 
 ## 2. Platform constraints
 
@@ -27,7 +29,7 @@ The standard every change to `desktop/ui/` follows, so the native window, the we
 
 | Navigation | Contents |
 | --- | --- |
-| Daily work | Home (state, attention, setup, status, recent activity), Messages, Activities |
+| Daily work | Home (state, attention, setup, recent activity with its outcome tiles, status), Messages, Activities |
 | What feeds the answers | Knowledge (sources, repositories, GitHub), Test chat |
 | Footer | Settings, then the status pill and the web account |
 
@@ -52,26 +54,29 @@ The standard every change to `desktop/ui/` follows, so the native window, the we
 | Explanation under a title or field | `.hint`; `label > small` for a field's constraint |
 | Fields side by side | `.grid` (stretches); `.grid.fill` when a short field may stand alone |
 | Boolean with a consequence | `.switch-row` for the few mode switches; `.check` for ordinary options |
-| Exclusive filter of a list | `.segmented` buttons with `aria-pressed` and a `.count` |
-| Category tabs inside a section | `.subnav` with `role=tablist`/`tab`/`tabpanel`, roving `tabindex`, arrow/Home/End keys (`selectTab(list, name)`), `.flag.edited` and `.flag.warn` dots with screen-reader text; it wraps, and below 860px it is a grid of large choices |
-| Status of a part, linking to its setting | `.status-row` button (label, dot and value, detail, arrow) |
+| Exclusive filter of a list | `.segmented` chips with `aria-pressed` and a `.count`; the pressed one is inverse (ink, cream in dark) |
+| Category tabs inside a section | `.subnav` with `role=tablist`/`tab`/`tabpanel`, roving `tabindex`, arrow/Home/End keys (`selectTab(list, name)`), `.flag.edited` and `.flag.warn` dots with screen-reader text; pill tabs, the selected one inverse; it wraps, and below 860px it is a grid of large choices (Settings: icon over the name) |
+| Status of a part, linking to its setting | `.status-row` button (icon tile in the tone's fill, label, value, detail, arrow) |
+| Counts that open a filtered list | `.stat` tiles in a `.stat-grid` (number and label; the tone's soft fill only when the count is not zero) |
 | State of an item | `badge(text, tone)`: `ok`, `warn`, `error`, `info`, `active`, `muted`; the text always carries the meaning, the color only reinforces it |
 | Result or problem where it happened | `.callout` with a tone; global confirmations go to `notify()` (status) and failures to `fail()` (alert) |
 | Selectable item in a list | `button.card` / `.card` |
 | Unsaved form state | the save bar plus the edited section's flag; `markDirty(event)` records the section |
 
-- Buttons: one primary action per panel or form (the next step); everything else `.secondary`; destructive actions `.danger` and visually apart; navigation-like actions `.link-button`. An irreversible action (dismiss, send to Teams) asks for a second tap instead of a modal.
+- Buttons: outlined pills with a shadow. One primary action per panel or form (the next step, `--primary` lime); everything else `.secondary` (paper); destructive actions `.danger` and visually apart; navigation-like actions `.link-button`. An irreversible action (dismiss, send to Teams) asks for a second tap instead of a modal.
 - Asynchronous actions run through `busy(button, task)`: the button shows progress and is disabled; errors become a notice.
 - Links to Azure DevOps, Wiki and Teams artifacts use `link()` (opens in the portal, copies in the native window).
 
 ## 7. Tokens
 
-- Colors are semantic custom properties in `:root` with a dark variant under `prefers-color-scheme: dark`; components never use raw hex values except the save bar's on-brand white.
-- Text contrast is at least 4.5:1 on every surface in both themes, `--faint` included (it carries small text). `--border-strong` outlines controls (inputs, secondary and danger buttons, tabs, toggles) at 3:1 against their surfaces (WCAG 1.4.11); `--border` only separates. Check new pairs before adding them.
-- Secondary buttons sit on `--surface-2` with a `--border-strong` outline so they read as buttons on a phone; disabled ones fade to 45%.
-- Radius `--radius` (10px) for panels; 8px for controls; 99px only for badges and pills.
-- Spacing in rem steps (.25, .5, .75, 1, 1.25); panels pad 1.05rem 1.2rem and separate by .9rem.
-- Type: body 15px (16px on phones), `h1` 1.55rem, `h2` 1.05rem, hints .92rem, metadata .82–.86rem; tabular figures for counts and times.
+- Colors are semantic custom properties in `:root` with a dark variant under `prefers-color-scheme: dark`; components never use raw hex values. Dark mode keeps the same stickers on a deep violet-black, with cream ink.
+- Every state has three tokens: a text color (`--ok`, `--warn`, `--error`, `--info`, `--active`), a sticker fill (`--*-fill`) and a soft fill (`--*-soft`). Text on a section color or a sticker fill is `--on-color` (ink) in both themes; text on a soft fill is `--text`. The inverse pair (`--inverse`, `--inverse-text`) marks what is selected.
+- Text contrast is at least 4.5:1 on every surface and fill in both themes, `--muted` and `--faint` included (they carry small text). `--line` outlines every surface and control (WCAG 1.4.11, far above 3:1); `--rule` only separates rows inside a panel. Check new pairs before adding them.
+- Disabled controls fade to 45% and lose their shadow.
+- Border `--bw` (2px; badges 1.5px). Radius `--radius` (22px) for panels, `--radius-card` (16px) for cards, messages, callouts and the toast, `--radius-control` (14px) for inputs, 99px for buttons, chips, tabs, badges and pills.
+- Shadows: `--shadow` (3px 3px 0) for what can be pressed, `--shadow-float` (5px 5px 0) for what floats or is open.
+- Spacing in rem steps (.25, .5, .75, 1, 1.25); panels pad 1.15rem 1.3rem and separate by 1rem.
+- Type: body 15px (16px on phones), `h1` 1.85rem weight 800 (1.6rem on phones), `h2` 1.12rem, hints .92rem, metadata .82–.86rem; tabular figures for counts and times.
 
 ## 8. Accessibility (WCAG 2.2 AA)
 
@@ -84,7 +89,7 @@ The standard every change to `desktop/ui/` follows, so the native window, the we
 
 ## 9. Responsive
 
-- Above 860px: sidebar. 681–860px: a top bar with short labels and an icon-only Settings. 680px and below (iPhone 15: 393px): a title bar with the state and Settings, a bottom tab bar of five sections, safe-area insets, 16px inputs and 44px controls.
+- Above 860px: sidebar. 681–860px: a top bar with short labels and an icon-only Settings. 680px and below (iPhone 15: 393px): a title bar with the state and Settings, a floating tab bar of five sections (the active one shows its short name on its sticker color, the others their icon, named for assistive technology), safe-area insets, 16px inputs and 44px controls.
 - No horizontal page scroll at any width, and the page does not bounce past its edges (`overflow-x: clip`, `overscroll-behavior: none` on the root): a phone user can never drag the whole screen. Tab lists wrap instead of scrolling sideways; only content that needs it (code blocks, wide tables) scrolls inside its own box.
 - Lists switch from aligned columns to wrapping lines of facts (Messages summaries, status rows).
 
