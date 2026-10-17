@@ -1,5 +1,5 @@
 // Renders the app icon (desktop/icons/app.png: the lime face tile on a white background) to the
-// images the portal serves. iOS gets a full-bleed square cut just inside the tile, so its own
+// images the portal and the landing serve. iOS gets a full-bleed square cut just inside the tile, so its own
 // rounded mask meets the tile's glossy rim; browsers and the PWA manifest get the tile with
 // transparent corners. Usage: node scripts/render-icons.mjs   (Playwright from scripts/ui-preview/deps.mjs)
 import fs from 'node:fs';
@@ -13,10 +13,13 @@ const source = `data:image/png;base64,${fs.readFileSync(path.join(root, 'desktop
 // antialiased outline, which carries the white background, off the transparent corners.
 const tile = { left: 121, top: 124, right: 1128, bottom: 1120, radius: 249, rim: '#a4db0a', edge: 3 };
 const outputs = [
-  { name: 'apple-touch-icon.png', size: 180, inset: 16, opaque: true },
-  { name: 'icon-192.png', size: 192, inset: 0 },
-  { name: 'icon-512.png', size: 512, inset: 0 },
-  { name: 'favicon.png', size: 64, inset: 0 },
+  { name: 'desktop/ui/apple-touch-icon.png', size: 180, inset: 16, opaque: true },
+  { name: 'desktop/ui/icon-192.png', size: 192, inset: 0 },
+  { name: 'desktop/ui/icon-512.png', size: 512, inset: 0 },
+  { name: 'desktop/ui/favicon.png', size: 64, inset: 0 },
+  // The landing's brand mark, tab icon and home-screen icon.
+  { name: 'site/public/assets/icon.png', size: 256, inset: 0 },
+  { name: 'site/public/assets/apple-touch-icon.png', size: 180, inset: 16, opaque: true },
 ];
 const browser = await launch();
 const page = await browser.newPage();
@@ -43,7 +46,7 @@ for (const output of outputs) {
     g.drawImage(image, 0, 0);
     return canvas.toDataURL('image/png');
   }, { source, tile, output });
-  fs.writeFileSync(path.join(root, 'desktop/ui', output.name), Buffer.from(data.split(',')[1], 'base64'));
-  console.log(`desktop/ui/${output.name} (${output.size} × ${output.size})`);
+  fs.writeFileSync(path.join(root, output.name), Buffer.from(data.split(',')[1], 'base64'));
+  console.log(`${output.name} (${output.size} × ${output.size})`);
 }
 await browser.close();

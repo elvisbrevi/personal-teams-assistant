@@ -1,10 +1,37 @@
-# Personal Teams Assistant
+<p align="center"><img src="https://raw.githubusercontent.com/elvisbrevi/personal-teams-assistant/main/site/public/assets/icon.png" width="120" height="120" alt=""></p>
+
+<h1 align="center">Personal Teams Assistant</h1>
+
+<p align="center"><strong>Answers in Teams as you, and only with what you authorize.</strong><br>
+<a href="https://teams-assistant.elvisbrevi.cl/">Website</a> · <a href="https://crates.io/crates/personal-teams-assistant">crates.io</a> · <a href="docs/architecture.md">Architecture</a> · <a href="desktop/skills/personal-teams-assistant/SKILL.md">Agent skill</a></p>
+
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/elvisbrevi/personal-teams-assistant/main/site/public/assets/app-overview-dark.jpg">
+    <img src="https://raw.githubusercontent.com/elvisbrevi/personal-teams-assistant/main/site/public/assets/app-overview-light.jpg" width="640" alt="Home: the assistant's face shows it is running in observation mode, with recent outcomes, setup and the status of each part.">
+  </picture>
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/elvisbrevi/personal-teams-assistant/main/site/public/assets/app-phone-home-dark.jpg">
+    <img src="https://raw.githubusercontent.com/elvisbrevi/personal-teams-assistant/main/site/public/assets/app-phone-home-light.jpg" width="190" alt="The same Home on a phone, with the floating tab bar.">
+  </picture>
+</p>
 
 A personal Microsoft Teams assistant written in Rust. It reads and answers **as you** (delegated Microsoft Graph OAuth, no bot) when someone writes to you directly, mentions you in a group or asks it in your personal chat. It answers only with evidence from sources you authorized for that conversation — files from Git repositories, URLs, Azure DevOps (activity and Wiki), your own Teams messages and other read-only tools — and writes with the language model you choose: Codex or Claude Code through their installed CLIs, or the DeepSeek API, in a configurable fallback order. Code checks references, links and sensitive data; if an answer cites something that cannot be verified or contains sensitive data, it is not sent (in your personal chat you get a notice) and it stays visible in the Messages tab.
 
 Ask it, for example, which work you did in the last two weeks that no task records: it compares your commits, pull requests, pipeline runs, releases, Wiki edits and (if you authorize them) your Teams messages with your Azure DevOps work items, and answers briefly with each unregistered piece of work, its verified link and the work items where it could go. In your personal chat it also proposes where to register each one — an existing work item or a new task in the right HU, with the reason — and does it only after you reply «confirmo», with a separate Azure DevOps credential you choose to give it.
 
-The app and its answers to Teams follow the configured language, Spanish or English (`llm.language`); the CLI and audit log are in English. The GUI also works on phones (a web portal with a bottom tab bar).
+The app and its answers to Teams follow the configured language, Spanish or English (`llm.language`); the CLI and audit log are in English. The GUI also works on phones: the web portal has a floating tab bar, follows the system's light or dark mode (or the one you choose in Settings › General) and installs on the home screen with its own icon.
+
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/elvisbrevi/personal-teams-assistant/main/site/public/assets/app-chat-dark.jpg">
+    <img src="https://raw.githubusercontent.com/elvisbrevi/personal-teams-assistant/main/site/public/assets/app-chat-light.jpg" width="640" alt="Test chat: a review of the work done in the last two weeks that no task records, with the user story each piece could go under.">
+  </picture>
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/elvisbrevi/personal-teams-assistant/main/site/public/assets/app-phone-activities-dark.jpg">
+    <img src="https://raw.githubusercontent.com/elvisbrevi/personal-teams-assistant/main/site/public/assets/app-phone-activities-light.jpg" width="190" alt="Activities on a phone: review a day, the hours registered against the daily target and the activities that need your input.">
+  </picture>
+</p>
 
 You can also register work on a schedule: once a day or every interval in a time window. Select your Azure DevOps activity (commits, pull requests, pipeline runs, releases and stage approvals), Wiki creation/edits and Teams messages/call sources, and a separate work-item write credential. The app proposes or creates **Task** items under the matching HU or bug that is not closed (in development counts), assigned to you, with a description, effort in hours, evidence links and the fields required for **Done**. It deducts hours already registered from the daily target (9 by default), groups related artifacts and never invents work to fill the remaining hours. Unclear descriptions, effort, HUs or calls produce a system notification that opens a separate review window with suggestions and an **Other / more context** field. The **Activities** tab shows pending decisions and history by day. Everything is also available through `pta`; see the [activity registration guide](desktop/skills/personal-teams-assistant/references/activity-registration.md).
 
@@ -51,6 +78,16 @@ without copying its history or reconnecting Teams. See the
 [web and Cloudflare setup guide](desktop/skills/personal-teams-assistant/references/web-access.md).
 
 ### Update
+
+Versions 0.7.25 to 0.7.27 give the app a new look: a «sticker sheet» with ink
+outlines, one color per section and the assistant's face, which shows its state on
+Home (awake while it runs, reading aside while it observes, asleep when stopped).
+Home leads with outcome tiles that open Messages filtered; on phones the sections
+sit in a floating tab bar. Settings › General › Appearance chooses Light, Dark or
+the system's mode on each device. The web portal now has an icon and a web app
+manifest: on an iPhone, remove the home-screen shortcut and add it again from
+Safari to get the new icon. Nothing changes in the assistant's behavior,
+configuration or CLI.
 
 Version 0.7.13 answers status rounds from the work item itself: an HU named in
 the question is read even after it was handed over (its state, since when and
