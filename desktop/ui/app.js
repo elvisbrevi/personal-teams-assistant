@@ -208,11 +208,12 @@ const transitions = {
   stopping: { tone: 'busy', pill: t('Stopping…'), title: t('Stopping the assistant…'), detail: t('It stops receiving Teams messages.') },
 };
 
-/** One status row; selecting it opens where that part is changed (`go` = showTab arguments). */
-function tile(label, value, tone, detail, go) {
-  const row = el('button', { type: 'button', class: 'status-row' },
-    el('span', { class: 'status-label', textContent: label }),
-    el('span', { class: 'status-value' }, el('strong', {}, el('span', { class: `dot ${tone}`, 'aria-hidden': 'true' }), value),
+/** One status row; selecting it opens where that part is changed (`go` = showTab arguments).
+ *  Its icon tile takes the tone's color; the value says the same in words. */
+function tile(label, value, tone, detail, go, symbol) {
+  const row = el('button', { type: 'button', class: `status-row ${tone}` },
+    el('span', { class: 'status-icon', 'aria-hidden': 'true' }, icon(symbol)),
+    el('span', { class: 'status-value' }, el('span', { class: 'status-label', textContent: label }), el('strong', { textContent: value }),
       el('small', { textContent: detail })),
     icon('arrow'));
   row.onclick = () => showTab(...go);
@@ -229,18 +230,18 @@ function renderTiles(s) {
   try { if (urlReady(config)) host = new URL(config.server.public_url).host; } catch { /* shown as missing */ }
   $('#tiles').replaceChildren(
     tile(t('Microsoft account'), s.microsoft_connected ? t('Connected') : t('Not connected'), s.microsoft_connected ? 'ok' : 'warn',
-      s.microsoft_connected ? t('Reads and answers as you') : t('Connect it in Settings'), ['settings', 'panel-teams']),
+      s.microsoft_connected ? t('Reads and answers as you') : t('Connect it in Settings'), ['settings', 'panel-teams'], 'user'),
     tile(t('Mode'), config.policy.dry_run ? t('Observation') : t('Sending on'), config.policy.dry_run ? 'info' : 'ok',
-      config.policy.dry_run ? t('Sends nothing to Teams') : t('Answers in Teams'), ['settings', 'panel-behavior']),
+      config.policy.dry_run ? t('Sends nothing to Teams') : t('Answers in Teams'), ['settings', 'panel-behavior'], 'eye'),
     tile(t('Reception'), config.graph.discover_all_chats ? t('All my chats') : t('{n} chat(s)', { n: config.graph.allowed_chats.length }),
       s.running && s.active_subscriptions ? 'ok' : 'muted',
-      s.running ? t('{n} active subscription(s)', { n: s.active_subscriptions }) : t('Inactive while stopped'), ['settings', 'panel-teams']),
-    tile(t('Tunnel'), tunnelManaged ? (s.tunnel_running ? t('Running') : t('Stopped')) : t('External'), tunnelManaged && s.tunnel_running ? 'ok' : 'muted', host, ['settings', 'panel-server']),
+      s.running ? t('{n} active subscription(s)', { n: s.active_subscriptions }) : t('Inactive while stopped'), ['settings', 'panel-teams'], 'antenna'),
+    tile(t('Tunnel'), tunnelManaged ? (s.tunnel_running ? t('Running') : t('Stopped')) : t('External'), tunnelManaged && s.tunnel_running ? 'ok' : 'muted', host, ['settings', 'panel-server'], 'globe'),
     tile(t('Models'), first ? `${providerNames[first.provider] || first.provider}` : t('None active'), first ? 'ok' : 'warn',
-      first ? `${first.model}${rest.length ? ` · ${t('fallback')}: ${rest.map(c => providerNames[c.provider] || c.provider).join(' → ')}` : ` · ${t('no fallback')}`}` : t('Turn one on in Settings'), ['settings', 'panel-llm']),
-    tile(t('Sources'), t('{ready} of {total} ready', { ready, total: s.map.resources.length }), ready ? 'ok' : 'warn', t('Enabled, authorized and with an audience'), ['knowledge']),
+      first ? `${first.model}${rest.length ? ` · ${t('fallback')}: ${rest.map(c => providerNames[c.provider] || c.provider).join(' → ')}` : ` · ${t('no fallback')}`}` : t('Turn one on in Settings'), ['settings', 'panel-llm'], 'chip'),
+    tile(t('Sources'), t('{ready} of {total} ready', { ready, total: s.map.resources.length }), ready ? 'ok' : 'warn', t('Enabled, authorized and with an audience'), ['knowledge'], 'book'),
     tile(t('Personal chat'), config.graph.self_chat ? t('Enabled') : t('Disabled'), config.graph.self_chat ? 'ok' : 'muted',
-      config.graph.self_chat ? t('Ask it from your Teams notes') : t('Optional'), ['settings', 'panel-self-chat']),
+      config.graph.self_chat ? t('Ask it from your Teams notes') : t('Optional'), ['settings', 'panel-self-chat'], 'chat'),
   );
 }
 
@@ -289,7 +290,8 @@ function renderLive() {
   $('#status').className = `pill ${state.tone}${motion}`;
   $('#status').title = state.detail;
   $('#status span').textContent = state.pill;
-  $('#hero-dot').className = `dot ${state.tone}${motion}`;
+  // The hero takes the state's color and the face its expression (style.css).
+  $('#hero').className = `panel hero ${state.tone}${motion}`;
   $('#hero-title').textContent = state.title;
   $('#hero-detail').textContent = state.detail;
   $('#version').textContent = `v${s.host_version}${s.headless ? ` · ${t('headless')}` : ''}`;
@@ -1646,10 +1648,12 @@ async function loadActivity() {
   const tally = (filter) => relevant.filter(row => matchesFilter(row, filter)).length;
   const stats = [[t('Answered'), tally('sent'), 'ok', 'sent'], [t('Withheld or unanswered'), tally('withheld'), 'warn', 'withheld'],
     [t('Errors'), tally('error'), 'error', 'error'], [t('In progress'), tally('active'), 'active', 'active']];
-  $('#activity-stats').replaceChildren(...stats.filter(([, n]) => n).map(([label, n, tone, filter]) => {
-    const chip = el('button', { class: `badge ${tone}`, textContent: `${label}: ${n}`, title: t('See in Messages') });
-    chip.onclick = () => { setFilter(filter); showTab('messages'); };
-    return chip;
+  // Every outcome keeps its tile; only those with messages take their color.
+  $('#activity-stats').replaceChildren(...stats.map(([label, n, tone, filter]) => {
+    const stat = el('button', { type: 'button', class: `stat ${n ? tone : 'muted'}`, title: t('See in Messages') },
+      el('strong', { textContent: String(n) }), el('span', { textContent: label }));
+    stat.onclick = () => { setFilter(filter); showTab('messages'); };
+    return stat;
   }));
   const recent = relevant.slice(0, 6);
   $('#activity-list').replaceChildren(...(recent.length ? recent.map(row => {

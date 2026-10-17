@@ -1,6 +1,6 @@
 [package]
 name = "personal-teams-assistant"
-version = "0.7.24"
+version = "0.7.25"
 edition = "2024"
 rust-version = "1.95"
 build = "build.rs"
