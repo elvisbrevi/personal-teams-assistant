@@ -14,7 +14,7 @@ flowchart LR
 
 The repository is public, so GitHub-hosted **standard** runners (`ubuntu-latest`, `macos-latest`, `windows-latest`) are free with no minute cap. Nothing here uses larger runners, self-hosted runners or anything paid, and nothing may: if a check does not fit on a standard runner, narrow it.
 
-**If the repository ever turns private, GitHub Actions stops being free:** a free account gets 2,000 minutes a month, macOS minutes count ten times and Windows twice. One full CI run (about 9 Linux, 9 macOS and 8 Windows minutes in parallel, see below) would then cost roughly 115 minutes; less than twenty a month would fit. Turn the macOS and Windows jobs off, or pay, before making it private.
+**If the repository ever turns private, GitHub Actions stops being free:** a free account gets 2,000 minutes a month, macOS minutes count ten times and Windows twice. One full CI run (see the times below, each job rounded up to the minute) would then cost roughly 75 minutes, 50 of them for macOS; only about 25 runs a month would fit. Turn the macOS and Windows jobs off, or pay, before making it private.
 
 The landing (`site/`) stays on Cloudflare Workers Builds (free plan), which publishes it on its own when `site/` changes on `main`. The server is never a runner: on a public repository a pull request from anyone could run code there. It pulls releases from crates.io instead.
 
@@ -45,18 +45,22 @@ Rust jobs cache dependencies with `Swatinem/rust-cache`, saved only from `main` 
 
 ### Measured times
 
-<!-- Filled in from real runs; see the pull request that added CI. -->
+Wall-clock times on standard runners, from the pull request that added CI (no cache yet: pull requests only restore the cache `main` saves). The jobs run in parallel, so a full run takes as long as its slowest job.
 
-| Job | Cold cache | Warm cache |
+| Job | No cache | Warm cache |
 | --- | --- | --- |
-| Changes | | |
-| Linux | | |
-| UI and scripts | | |
-| macOS | | |
-| Windows (informative) | | |
+| Changes | 6 s | 6 s |
+| Linux | 4 min 46 s – 6 min 55 s | |
+| UI and scripts | 1 min 36 s (Playwright's Chromium 18 s, preview checks 60 s) | same, no Rust |
+| macOS | 3 min 33 s – 4 min 44 s | |
+| Windows (informative) | 6 min 11 s | |
+| CI result | 4 s | 4 s |
+| Whole run | 7 – 7.5 min | |
 | Release, version already published | | |
 | Release, publishing | | |
 | Server update (build, restart, healthy) | | |
+
+In the Linux job the slowest steps are clippy with `gui` (about 2 min without cache), `cargo test` with `gui` (about 2 min) and `cargo package` (about 70 s).
 
 ## Release (`.github/workflows/release.yml`)
 
