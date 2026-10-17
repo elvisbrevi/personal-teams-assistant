@@ -116,10 +116,10 @@ The updater is not part of the crate, so a release does not update it: repeat th
 systemctl --user list-timers personal-teams-assistant-update.timer   # next check
 ~/.local/bin/personal-teams-assistant-update --check                   # what a run would do, changing nothing
 tail ~/.local/state/personal-teams-assistant-update/history.log        # updates, deferrals, rollbacks
-~/.local/bin/personal-teams-assistant-update --rollback-drill          # update, then roll back on purpose
+~/.local/bin/personal-teams-assistant-update --rollback-drill          # install, then roll back on purpose
 ```
 
-`--rollback-drill` installs the newest release, verifies it, rolls back to the previous version as if it had failed and verifies that one; it does not block the version, so the next timer run installs it for good. To retry a blocked version, delete its entry from `blocked` in `~/.local/state/personal-teams-assistant-update/state.json`. To pause updates: `systemctl --user stop personal-teams-assistant-update.timer`.
+`--rollback-drill` installs the newest release (or reinstalls the installed version when there is none newer), verifies it, rolls back to the backed-up binaries as if it had failed, restarts and verifies them; it blocks nothing, so the next timer run installs a newer release for good. It restarts the portal twice: run it when a short interruption is acceptable. To retry a blocked version, delete its entry from `blocked` in `~/.local/state/personal-teams-assistant-update/state.json`. To pause updates: `systemctl --user stop personal-teams-assistant-update.timer`.
 
 ## Repository settings
 

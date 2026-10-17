@@ -14,8 +14,9 @@ holds no token. The standard library is enough; the server runs it with `python3
 
 Usage: vps-update.py [--check | --rollback-drill]
   --check           report what a run would do and change nothing
-  --rollback-drill  update, then roll back as if the new version had failed (an acceptance test);
-                    the version is not blocked, so the next run installs it for good
+  --rollback-drill  install the newest release (or reinstall the installed one when there is none
+                    newer), verify it, then roll back as if it had failed and verify the previous
+                    binaries; nothing is blocked, so the next run installs a newer release for good
 Exit status: 0 nothing to do, deferred, updated or drill passed; 1 the update failed and the
 previous version is back; 2 the rollback failed too and the portal needs a person.
 """
@@ -309,8 +310,10 @@ def update(check=False, drill=False):
         log(f"crates.io index unavailable ({error}); will try again")
         return 0
     if latest is None or latest <= installed:
-        log(f"{show(installed)} is installed; crates.io has {show(latest)}: nothing to do")
-        return 0
+        if not drill:
+            log(f"{show(installed)} is installed; crates.io has {show(latest)}: nothing to do")
+            return 0
+        latest = installed
     target = show(latest)
     state = load_state()
     if target in state["blocked"] and not drill:
@@ -336,6 +339,9 @@ def update(check=False, drill=False):
     started = time.monotonic()
     if not install(target) or installed_version() != latest:
         restore()
+        if drill:
+            record(f"rollback drill: install of {target} failed; {show(installed)} kept, the portal was not restarted")
+            return 1
         attempts = state["attempts"].get(target, 0) + 1
         state["attempts"][target] = attempts
         if attempts >= MAX_INSTALL_ATTEMPTS:
@@ -375,7 +381,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--check", action="store_true", help="report what a run would do and change nothing")
-    mode.add_argument("--rollback-drill", action="store_true", help="update, then roll back as if the update had failed")
+    mode.add_argument("--rollback-drill", action="store_true", help="install, verify, then roll back as if the install had failed")
     args = parser.parse_args()
     STATE.mkdir(parents=True, exist_ok=True, mode=0o700)
     with open(STATE / "lock", "w") as lock:

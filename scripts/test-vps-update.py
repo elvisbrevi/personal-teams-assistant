@@ -262,6 +262,17 @@ class Updater(unittest.TestCase):
         self.assertIn("would update 0.7.28 -> 0.7.29", output)
         self.assertEqual([c for c in self.calls() if not c.startswith("systemctl --user is-active")], [])
 
+    def test_rollback_drill_without_a_newer_release_reinstalls_and_restores_the_installed_files(self):
+        code, output = self.run_update("--rollback-drill")
+        self.assertEqual(code, 0, output)
+        calls = self.calls()
+        self.assertIn("cargo install personal-teams-assistant --version 0.7.28 --locked --no-default-features --force", calls)
+        self.assertEqual(sum(c.startswith("systemctl --user restart") for c in calls), 2)
+        self.assertEqual((self.installed(), self.running()), ("0.7.28", "0.7.28"))
+        self.assertIn("(path)", (self.cargo / ".crates.toml").read_text())
+        self.assertIn("rollback drill: 0.7.28 was healthy, rolled back to 0.7.28", self.history())
+        self.assertFalse((self.state / "state.json").exists())
+
     def test_rollback_drill_returns_to_the_previous_version_without_blocking(self):
         self.publish("0.7.28", "0.7.29")
         code, output = self.run_update("--rollback-drill")
