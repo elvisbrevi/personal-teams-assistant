@@ -70,6 +70,19 @@ function lines(text) { return text.split('\n').map(s => s.trim()).filter(Boolean
 function names(text) { return text.split(',').map(s => s.trim()).filter(Boolean); }
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
+/** This device's theme (Settings › General): `light` or `dark`, or none to follow the system.
+ *  It lives in `localStorage`, not in the profile, and applies before the first paint. */
+const THEME_KEY = 'pta-theme';
+function applyTheme(choice) {
+  const theme = ['light', 'dark'].includes(choice) ? choice : null;
+  if (theme) document.documentElement.dataset.theme = theme;
+  else delete document.documentElement.dataset.theme;
+  for (const button of document.querySelectorAll('#theme-choice button')) {
+    button.setAttribute('aria-pressed', String(button.dataset.themeChoice === (theme ?? 'system')));
+  }
+}
+try { applyTheme(localStorage.getItem(THEME_KEY)); } catch { applyTheme(null); }
+
 let noticeTimer;
 function notify(text, tone = 'info') {
   const box = $('#notice');
@@ -2397,6 +2410,14 @@ document.querySelectorAll('.cfg').forEach(input => {
   input.addEventListener('change', markDirty);
 });
 $('#discover-chats').addEventListener('change', renderChatList);
+document.querySelectorAll('#theme-choice button').forEach(button => {
+  button.onclick = () => {
+    const choice = button.dataset.themeChoice;
+    try { if (choice === 'system') localStorage.removeItem(THEME_KEY); else localStorage.setItem(THEME_KEY, choice); }
+    catch { /* applies to this page only */ }
+    applyTheme(choice);
+  };
+});
 $('#registration-schedule').addEventListener('change', renderScheduleFields);
 $('#notice-close').onclick = () => { $('#notice').hidden = true; };
 $('#save').onclick = () => busy($('#save'), async () => { await save(); done(t('Settings saved.')); });

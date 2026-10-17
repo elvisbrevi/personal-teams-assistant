@@ -14,7 +14,7 @@ The standard every change to `desktop/ui/` follows, so the native window, the we
 
 - Five assets only: `index.html`, `style.css`, `app.js`, `i18n.js`, `transport.js` (embedded by `gui.rs` and served by `web.rs`). A new file needs both and their tests.
 - The CSP forbids inline styles and scripts and `innerHTML`: build nodes with `el()`, set dynamic geometry through CSSOM properties (`node.style.width = …`), no `style=` attributes. No external fonts, images or scripts.
-- The same code runs in WKWebView (macOS), WebView2/WebKitGTK and the portal's browsers: no engine-specific APIs. A clicked button is not focused in WebKit, so do not rely on `document.activeElement` after a click (pass the context explicitly, as `markDirty({ target })` does).
+- The same code runs in WKWebView (macOS), WebView2/WebKitGTK and the portal's browsers: no engine-specific APIs. The tokens need `light-dark()` (Safari 17.5, Chromium 123, Firefox 120 or later). A clicked button is not focused in WebKit, so do not rely on `document.activeElement` after a click (pass the context explicitly, as `markDirty({ target })` does).
 - Every operation goes through `invoke()` and the IPC contract; there are no GUI-only methods.
 
 ## 3. Language and copy
@@ -34,7 +34,7 @@ The standard every change to `desktop/ui/` follows, so the native window, the we
 | Footer | Settings, then the status pill and the web account |
 
 - A new feature joins the section of the task it serves; it does not get a navigation item of its own unless it is a separate daily task. The sidebar holds at most eight items; the phone tab bar exactly the five non-Settings sections.
-- Settings is one category at a time: **General** (how the assistant answers), **Microsoft Teams** (identity, reception, personal chat, public URL), **Language models**, **Activity registration**, **Credentials**, **Advanced** (rare or migration operations). A new field goes in the category of the user's goal; a category reaches seven panels before it is split, and a seventh category needs an IA review.
+- Settings is one category at a time: **General** (how the assistant answers, and this device's theme), **Microsoft Teams** (identity, reception, personal chat, public URL), **Language models**, **Activity registration**, **Credentials**, **Advanced** (rare or migration operations). A new field goes in the category of the user's goal; a category reaches seven panels before it is split, and a seventh category needs an IA review.
 - Deep links use `showTab(section, panelId)`: when the panel is in Settings it opens its category first. Home's status rows and setup steps always link to where the thing is changed.
 - Attention is shown once where it can be acted on (the activities notice is on Home; elsewhere the navigation counter carries it).
 
@@ -69,7 +69,7 @@ The standard every change to `desktop/ui/` follows, so the native window, the we
 
 ## 7. Tokens
 
-- Colors are semantic custom properties in `:root` with a dark variant under `prefers-color-scheme: dark`; components never use raw hex values. Dark mode keeps the same stickers on a deep violet-black, with cream ink.
+- Colors are semantic custom properties in `:root`, each holding its light and dark value with `light-dark()`; components never use raw hex values. `color-scheme` picks the theme: the system's, unless Settings › General › Appearance chose Light or Dark on this device (`data-theme` on the root, `pta-theme` in `localStorage`, applied before the first paint; not part of the profile). Dark mode keeps the same stickers on a deep violet-black, with cream ink.
 - Every state has three tokens: a text color (`--ok`, `--warn`, `--error`, `--info`, `--active`), a sticker fill (`--*-fill`) and a soft fill (`--*-soft`). Text on a section color or a sticker fill is `--on-color` (ink) in both themes; text on a soft fill is `--text`. The inverse pair (`--inverse`, `--inverse-text`) marks what is selected.
 - Text contrast is at least 4.5:1 on every surface and fill in both themes, `--muted` and `--faint` included (they carry small text). `--line` outlines every surface and control (WCAG 1.4.11, far above 3:1); `--rule` only separates rows inside a panel. Check new pairs before adding them.
 - Disabled controls fade to 45% and lose their shadow.

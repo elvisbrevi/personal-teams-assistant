@@ -1,26 +1,29 @@
 /* A sticker sheet on warm paper: ink outlines every surface, each section has its sticker color, and a hard
    shadow marks only what can be pressed or is lifted above the page (open, selected, floating). */
+/* Each color token holds its light and dark value; `color-scheme` picks one. It follows the system
+   unless this device chose a theme in Settings › General (`data-theme` on the root). */
 :root {
   color-scheme: light dark;
-  --bg: #fff6e5; --surface: #ffffff; --surface-2: #f7eedc; --sunken: #f1e6d0;
+  --bg: light-dark(#fff6e5, #17151f); --surface: light-dark(#ffffff, #221f2d); --surface-2: light-dark(#f7eedc, #2b2739); --sunken: light-dark(#f1e6d0, #1c1a26);
   /* Ink: the text, the outline of every surface and the shadow of what can be pressed. */
-  --text: #1e1b2e; --muted: #5c5670; --faint: #5c5670;
-  --line: #1e1b2e; --rule: #e6d9c2; --shadow-ink: #1e1b2e;
+  --text: light-dark(#1e1b2e, #f5efe4); --muted: light-dark(#5c5670, #bdb5cc); --faint: var(--muted);
+  --line: light-dark(#1e1b2e, #e9e1d0); --rule: light-dark(#e6d9c2, #3a3549); --shadow-ink: light-dark(#1e1b2e, #000000);
   /* Text on a sticker color, in both themes; the inverse marks what is selected. */
-  --on-color: #1e1b2e; --inverse: #1e1b2e; --inverse-text: #fff6e5;
-  --bar: #1e1b2e; --bar-text: #fff6e5;
-  --link: #2049b5; --focus: #2b5cff;
+  --on-color: #1e1b2e; --inverse: light-dark(#1e1b2e, #f5efe4); --inverse-text: light-dark(#fff6e5, #1e1b2e);
+  --bar: light-dark(#1e1b2e, #2b2739); --bar-text: light-dark(#fff6e5, #f5efe4);
+  --link: light-dark(#2049b5, #9ec2ff); --focus: light-dark(#2b5cff, #9ec2ff);
   --eye-white: #ffffff; --eye-ink: #1e1b2e;
   /* Section stickers: the navigation tile, the page tile and the phone's active tab. */
-  --c-overview: #c5f25a; --c-messages: #8ec5ff; --c-registration: #ffae6b; --c-knowledge: #bba4ff; --c-chat: #ffa6d5; --c-settings: #ffd95c;
-  --primary: #c5f25a;
+  --c-overview: light-dark(#c5f25a, #bde85a); --c-messages: light-dark(#8ec5ff, #8cc0fb); --c-registration: light-dark(#ffae6b, #fba86a);
+  --c-knowledge: light-dark(#bba4ff, #b39cff); --c-chat: light-dark(#ffa6d5, #fb9fcf); --c-settings: light-dark(#ffd95c, #f8d058);
+  --primary: var(--c-overview);
   /* States: a text color, a sticker fill and a soft fill for badges, tiles and callouts. Ink text sits on every fill. */
-  --ok: #136b42; --ok-fill: #86e0aa; --ok-soft: #d9f5e2;
-  --warn: #7a5200; --warn-fill: #ffd95c; --warn-soft: #fff0b8;
-  --error: #b3261e; --error-fill: #ff7a70; --error-soft: #ffddd8;
-  --info: #5b3fc4; --info-fill: #bba4ff; --info-soft: #ece4ff;
-  --active: #1f5fb8; --active-fill: #8ec5ff; --active-soft: #dcecff;
-  --muted-fill: #d9cfbb; --muted-soft: #efe6d4;
+  --ok: light-dark(#136b42, #8fd9a8); --ok-fill: light-dark(#86e0aa, #7fd9a1); --ok-soft: light-dark(#d9f5e2, #1e3a2c);
+  --warn: light-dark(#7a5200, #f3c969); --warn-fill: light-dark(#ffd95c, #f5cf55); --warn-soft: light-dark(#fff0b8, #3b3216);
+  --error: light-dark(#b3261e, #ff9c94); --error-fill: light-dark(#ff7a70, #ff8178); --error-soft: light-dark(#ffddd8, #45211f);
+  --info: light-dark(#5b3fc4, #c7b6ff); --info-fill: light-dark(#bba4ff, #b39cff); --info-soft: light-dark(#ece4ff, #2e2650);
+  --active: light-dark(#1f5fb8, #9ec2ff); --active-fill: light-dark(#8ec5ff, #86bdfb); --active-soft: light-dark(#dcecff, #1b2c49);
+  --muted-fill: light-dark(#d9cfbb, #5b546c); --muted-soft: light-dark(#efe6d4, #2b2739);
   --bw: 2px;
   --radius: 22px; --radius-card: 16px; --radius-control: 14px;
   --shadow: 3px 3px 0 var(--shadow-ink);
@@ -31,24 +34,8 @@
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
   font-size: 15px; color: var(--text); background: var(--bg);
 }
-@media (prefers-color-scheme: dark) {
-  :root {
-    --bg: #17151f; --surface: #221f2d; --surface-2: #2b2739; --sunken: #1c1a26;
-    --text: #f5efe4; --muted: #bdb5cc; --faint: #bdb5cc;
-    --line: #e9e1d0; --rule: #3a3549; --shadow-ink: #000000;
-    --inverse: #f5efe4; --inverse-text: #1e1b2e;
-    --bar: #2b2739; --bar-text: #f5efe4;
-    --link: #9ec2ff; --focus: #9ec2ff;
-    --c-overview: #bde85a; --c-messages: #8cc0fb; --c-registration: #fba86a; --c-knowledge: #b39cff; --c-chat: #fb9fcf; --c-settings: #f8d058;
-    --primary: #bde85a;
-    --ok: #8fd9a8; --ok-fill: #7fd9a1; --ok-soft: #1e3a2c;
-    --warn: #f3c969; --warn-fill: #f5cf55; --warn-soft: #3b3216;
-    --error: #ff9c94; --error-fill: #ff8178; --error-soft: #45211f;
-    --info: #c7b6ff; --info-fill: #b39cff; --info-soft: #2e2650;
-    --active: #9ec2ff; --active-fill: #86bdfb; --active-soft: #1b2c49;
-    --muted-fill: #5b546c; --muted-soft: #2b2739;
-  }
-}
+:root[data-theme="light"] { color-scheme: light; }
+:root[data-theme="dark"] { color-scheme: dark; }
 * { box-sizing: border-box; }
 [hidden] { display: none !important; }
 /* The page never scrolls sideways or bounces past its edges; only lists that need it scroll inside. */
@@ -324,6 +311,9 @@ nav button, .status-row, .activity-row, .segmented button, .subnav [role=tab], .
 .segmented { display: flex; flex-wrap: wrap; gap: .45rem; }
 .segmented button { min-height: 2.35rem; padding: .35rem .85rem; background: var(--surface); color: var(--text); font-size: .87rem; }
 .segmented button[aria-pressed="true"] { background: var(--inverse); color: var(--inverse-text); }
+/* The theme is one choice of three: equal parts of one row, never wrapping one alone. */
+#theme-choice { display: grid; grid-template-columns: 1.5fr 1fr 1fr; max-width: 28rem; margin-top: .6rem; }
+#theme-choice button { padding-inline: .5rem; }
 .segmented .count { display: inline-grid; place-items: center; min-width: 1.45rem; padding: 0 .35rem; border-radius: 99px; background: var(--surface-2); color: var(--text); font-size: .76rem; font-variant-numeric: tabular-nums; }
 .segmented .count:empty { display: none; }
 .segmented button[aria-pressed="true"] .count { background: var(--primary); color: var(--on-color); }

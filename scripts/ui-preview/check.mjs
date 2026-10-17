@@ -275,6 +275,24 @@ if (flag === '--axe-only') { await browser.close(); process.exit(0); }
   await context.close();
 }
 {
+  // Theme: this device's choice applies at once, asks for no save and survives a reload.
+  const { context, page } = await open();
+  const theme = () => page.evaluate(() => [document.documentElement.dataset.theme ?? null, getComputedStyle(document.body).backgroundColor, localStorage.getItem('pta-theme')]);
+  await page.click('nav [data-tab="settings"]');
+  check('theme starts matching the system', JSON.stringify(await theme()) === JSON.stringify([null, 'rgb(255, 246, 229)', null])
+    && await page.getAttribute('#theme-choice [data-theme-choice="system"]', 'aria-pressed') === 'true', JSON.stringify(await theme()));
+  await page.click('#theme-choice [data-theme-choice="dark"]');
+  check('dark theme applies right away without asking to save', JSON.stringify(await theme()) === JSON.stringify(['dark', 'rgb(23, 21, 31)', 'dark'])
+    && !(await page.isVisible('#savebar')), JSON.stringify(await theme()));
+  await page.reload();
+  await page.waitForTimeout(600);
+  check('the chosen theme survives a reload', (await theme())[0] === 'dark' && await page.getAttribute('#theme-choice [data-theme-choice="dark"]', 'aria-pressed') === 'true');
+  await page.evaluate(() => showTab('settings'));
+  await page.click('#theme-choice [data-theme-choice="system"]');
+  check('matching the system again forgets the choice', JSON.stringify(await theme()) === JSON.stringify([null, 'rgb(255, 246, 229)', null]), JSON.stringify(await theme()));
+  await context.close();
+}
+{
   const { context, page } = await open({}, 'fresh');
   check('fresh: setup checklist visible', await page.isVisible('#setup-panel'));
   await page.click('#setup-steps li:first-child button');
