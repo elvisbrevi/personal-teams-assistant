@@ -1,7 +1,8 @@
 // axe-core WCAG 2.2 AA scans of every section (and Settings category) plus interaction checks
 // of navigation, Settings, conditional fields, Messages search and Knowledge folds.
 // Usage: node scripts/ui-preview/check.mjs <port> <out-dir> [--axe-only]   (server.mjs must be serving)
-// --axe-only also works against an older copy of the GUI, for a before/after comparison.
+// It exits 1 when an interaction check fails or any scan finds a violation (CI runs it).
+// --axe-only only reports, and also works against an older copy of the GUI, for a before/after comparison.
 import fs from 'node:fs';
 import { axePath, launch } from './deps.mjs';
 
@@ -61,6 +62,7 @@ const totals = {};
 for (const [key, list] of Object.entries(axeSummary)) for (const v of list) totals[v.id] = (totals[v.id] || 0) + v.nodes;
 console.log('axe violations (rule: nodes across all scans):', JSON.stringify(totals));
 if (flag === '--axe-only') { await browser.close(); process.exit(0); }
+check('axe: no WCAG 2.2 AA violations in any scan', !Object.keys(totals).length, `${Object.keys(axeSummary).length} scans`);
 
 // ---------------------------------------------------------------- interaction checks
 {

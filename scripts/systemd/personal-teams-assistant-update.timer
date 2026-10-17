@@ -1,0 +1,12 @@
+# Checks crates.io five minutes after each check ends (never two at once). See the service unit.
+[Unit]
+Description=Check crates.io for a new Personal Teams Assistant release every five minutes
+
+[Timer]
+OnActiveSec=1min
+OnUnitInactiveSec=5min
+RandomizedDelaySec=20s
+AccuracySec=10s
+
+[Install]
+WantedBy=timers.target

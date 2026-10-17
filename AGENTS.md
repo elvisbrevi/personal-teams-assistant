@@ -33,9 +33,15 @@ Read [the architecture](docs/architecture.md) first: it explains components, pip
 - With information from Teams conversations, name the people involved when relevant and supported, keeping who said or did what. Do not invent names or attribute an interaction to every chat member.
 - In an activity review, verified authorship (an own commit, pull request, run, release, approval, Wiki edit or message) proves the user's own action; never invent activity.
 
-## Before delivering
+## Delivering
 
-There is no CI (GitHub Actions is disabled to avoid costs): these local checks are the only gate. Do not add GitHub Actions workflows.
+GitHub Actions is the gate and the delivery ([delivery](docs/delivery.md)). Develop, open a pull request, wait for its **CI result** check to pass and merge it: `gh pr merge --auto --merge --delete-branch` waits for CI. Never bypass the check (`--admin`) or merge with CI failing.
+
+Merging delivers: a version bump (`Cargo.toml`, `Cargo.lock`, `desktop/tauri.conf.json`) is published to crates.io by `release.yml` once CI passed on `main`, with its tag and GitHub release; the server's updater installs it within minutes; a change under `site/` is published by Cloudflare. Do not publish, tag or install on the server by hand; do it only as the fallback in [delivery](docs/delivery.md#when-the-automatic-path-fails), when the automatic path itself failed.
+
+Workflows use only GitHub-hosted standard runners (free while the repository is public): no larger, paid or self-hosted runners, and never a runner on the server. `ci.yml` has no secrets because pull requests from forks run it; grant other permissions per job, only where needed.
+
+Run the checks locally before pushing, as fast feedback (CI runs the same on Linux, plus macOS and an informative Windows build):
 
 ```sh
 cargo fmt --all --check
