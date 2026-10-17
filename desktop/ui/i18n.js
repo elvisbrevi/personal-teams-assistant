@@ -125,6 +125,12 @@ const UI_CATALOG = { es: {
   // Settings
   'Changes are saved together with the bar at the bottom. If the assistant is running, it restarts to apply them.': 'Los cambios se guardan juntos con la barra inferior. Si el asistente está en ejecución, se reinicia para aplicarlos.',
   'Your web account': 'Tu cuenta web',
+  'Appearance': 'Apariencia',
+  'Saved on this device and applied right away. Match the system follows its light or dark mode; other devices keep their own choice.': 'Se guarda en este dispositivo y se aplica al instante. «Como el sistema» sigue su modo claro u oscuro; los demás dispositivos conservan su propia elección.',
+  'Theme': 'Tema',
+  'Match the system': 'Como el sistema',
+  'Light': 'Claro',
+  'Dark': 'Oscuro',
   'You signed in with GitHub. Your configuration, Teams account, credentials and history belong to your profile. Contact the portal operator to recover access.': 'Iniciaste sesión con GitHub. Tu configuración, cuenta de Teams, credenciales e historial pertenecen a tu perfil. Contacta al operador del portal para recuperar el acceso.',
   'Their values are never shown. Type in a field only to store or replace a credential; it applies right away. Environment variables and secret files take priority.': 'Sus valores nunca se muestran. Escribe en un campo solo para guardar o reemplazar una credencial; se aplica de inmediato. Las variables de entorno y los archivos de secretos tienen prioridad.',
   'System store': 'Almacén del sistema',
