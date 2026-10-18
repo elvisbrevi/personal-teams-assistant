@@ -315,6 +315,17 @@ impl Portal {
     }
 }
 
+/// Static files served without Access: WebKit fetches a page's icons without cookies, so behind
+/// Access an iPhone gets the login page instead of the home-screen icon. Each path has its own
+/// Access Bypass app (`scripts/configure-web-access.py`).
+const PUBLIC_ASSETS: [&str; 5] = [
+    "/favicon.png",
+    "/manifest.webmanifest",
+    "/apple-touch-icon.png",
+    "/icon-192.png",
+    "/icon-512.png",
+];
+
 fn router(portal: Arc<Portal>) -> Router {
     Router::new()
         .route("/", get(index))
@@ -329,7 +340,7 @@ fn router(portal: Arc<Portal>) -> Router {
                 )
             }),
         )
-        // The tab icon, the iOS home-screen icon and the PWA manifest, behind Access like the stylesheet.
+        // The tab icon, the iOS home-screen icon and the PWA manifest, public (`PUBLIC_ASSETS`).
         .route(
             "/favicon.png",
             get(|| async { png(include_bytes!("../../desktop/ui/favicon.png")) }),
@@ -391,8 +402,10 @@ async fn secure_headers(
     let expected = &origin[url::Position::BeforeHost..url::Position::AfterPort];
     let mut response = if host != Some(expected) {
         StatusCode::MISDIRECTED_REQUEST.into_response()
-    } else if request.method() == axum::http::Method::POST
-        && store::callback_path(request.uri().path())
+    } else if (request.method() == axum::http::Method::POST
+        && store::callback_path(request.uri().path()))
+        || (request.method() == axum::http::Method::GET
+            && PUBLIC_ASSETS.contains(&request.uri().path()))
     {
         next.run(request).await
     } else if let Some(verifier) = &portal.access {
