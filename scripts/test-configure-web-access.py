@@ -75,8 +75,12 @@ class SetupTests(unittest.TestCase):
     def test_exact_exceptions_precede_panel_protection_and_resources_are_reused(self):
         self.run_setup()
         writes = [(method, data) for method, _, data in self.calls if method == "POST"]
-        self.assertEqual([data["type"] for _, data in writes], ["github","self_hosted","self_hosted","self_hosted"])
-        self.assertEqual([data["policies"][0]["decision"] for _, data in writes[1:]], ["bypass","bypass","allow"])
+        self.assertEqual([data["type"] for _, data in writes], ["github"] + ["self_hosted"] * 8)
+        self.assertEqual([data["policies"][0]["decision"] for _, data in writes[1:]], ["bypass"] * 7 + ["allow"])
+        # Phones fetch home-screen icons without cookies: each static icon gets its own exact bypass.
+        assets = [data for _, data in writes[3:8]]
+        self.assertEqual([data["domain"] for data in assets], [self.args.hostname + path for path in setup.PUBLIC_ASSETS])
+        self.assertEqual({data["policies"][0]["name"] for data in assets}, {setup.ASSET_POLICY})
         main = writes[-1][1]
         self.assertEqual(main["allowed_idps"], [PROVIDER])
         self.assertTrue(main["auto_redirect_to_identity"])
@@ -93,7 +97,7 @@ class SetupTests(unittest.TestCase):
         self.calls.clear()
         self.run_setup()
         self.assertFalse(any(method == "POST" for method, _, _ in self.calls))
-        self.assertEqual(len(self.apps), 3)
+        self.assertEqual(len(self.apps), 8)
 
     def test_cookie_readback_is_required_before_writing_settings(self):
         def missing_cookie(token, method, path, data=None):
@@ -126,7 +130,7 @@ class SetupTests(unittest.TestCase):
             setup.callback_paths(self.callbacks,self.args.hostname)
 
     def test_overlapping_foreign_apps_and_unmanaged_policies_are_preserved(self):
-        for domain in [self.args.hostname,"*.elvisbrevi.cl",self.args.hostname + "/webhooks/*"]:
+        for domain in [self.args.hostname,"*.elvisbrevi.cl",self.args.hostname + "/webhooks/*",self.args.hostname + "/favicon.png"]:
             self.apps = {"foreign":{"id":"foreign","domain":domain,"name":"other application","type":"self_hosted"}}
             self.calls.clear()
             with self.assertRaises(setup.SetupError):

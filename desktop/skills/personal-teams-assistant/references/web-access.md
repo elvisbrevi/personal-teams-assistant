@@ -100,7 +100,7 @@ required. Never use an everyone or whole-domain Allow policy.
 
 Required **account** permissions:
 
-- `Access: Apps and Policies Write`: panel app, Allow policy and exact Graph bypass
+- `Access: Apps and Policies Write`: panel app, Allow policy and exact Graph and icon bypass
   applications. Read permission alone cannot configure them.
 - `Access: Identity Providers Write`, or `Access: Organizations, Identity Providers,
   and Groups Write`: dedicated GitHub IdP. Existing read access to the organization
@@ -134,7 +134,12 @@ effect when the portal restarts. Plain HTTP previews cannot authenticate Access.
 and `/webhooks/<profile-id>/graph/lifecycle` paths. Re-run setup when adding an
 isolated account. Only these callback POST handlers are exempt in the backend;
 the exact matching paths have separate Access Bypass apps at the edge. No broad
-`/webhooks/*` bypass is accepted. Disabled/unknown profiles and additional paths
+`/webhooks/*` bypass is accepted. The static icons and PWA manifest (`/favicon.png`,
+`/manifest.webmanifest`, `/apple-touch-icon.png`, `/icon-192.png`, `/icon-512.png`)
+are the only other exception: WebKit fetches a page's icons without cookies, so an
+iPhone would otherwise get the login page as its home-screen icon. The helper
+creates an exact Bypass app for each and the backend serves only their GETs
+without Access. Disabled/unknown profiles and additional paths
 cannot start hosts or administer the panel. Graph subscription, clientState,
 tenant/resource and validation-token handling stay unchanged. The current
 profile retains its separate existing Teams callback hostname/tunnel.

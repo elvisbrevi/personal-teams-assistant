@@ -19,6 +19,12 @@ APP_NAME = "personal-teams-assistant-web"
 IDP_NAME = "personal-teams-assistant-login"
 APP_WRITE = "Access: Apps and Policies Write"
 IDP_WRITE = "Access: Identity Providers Write (or Access: Organizations, Identity Providers, and Groups Write)"
+# The portal serves these static files without Access (`PUBLIC_ASSETS` in src/app/web.rs): WebKit
+# fetches a page's icons without cookies, so an iPhone would get the login page as its icon.
+PUBLIC_ASSETS = ["/favicon.png", "/manifest.webmanifest", "/apple-touch-icon.png", "/icon-192.png", "/icon-512.png"]
+PANEL_POLICY = "Authorized GitHub identities"
+CALLBACK_POLICY = "Graph callback only"
+ASSET_POLICY = "Public icon only"
 
 
 class SetupError(Exception):
@@ -168,7 +174,11 @@ def configure(args):
     definitions = [{"name": APP_NAME, "domain": args.hostname}]
     for path in callbacks:
         definitions.append({"name": APP_NAME + " Graph " + path.split('/')[2] + " " + path.rsplit('/', 1)[1], "domain": args.hostname + path})
+    for path in PUBLIC_ASSETS:
+        definitions.append({"name": APP_NAME + " asset " + path[1:], "domain": args.hostname + path})
     wanted = {item["domain"]: item["name"] for item in definitions}
+    policy_names = {item["domain"]: CALLBACK_POLICY if "/webhooks/" in item["domain"] else ASSET_POLICY for item in definitions[1:]}
+    policy_names[args.hostname] = PANEL_POLICY
     by_domain = {}
     for app in existing:
         for domain in domains(app):
@@ -181,8 +191,7 @@ def configure(args):
     # Inspect every existing managed policy before performing any writes.
     for domain, app in by_domain.items():
         policies = result(token, "GET", f"{base}/apps/{app['id']}/policies")
-        expected_name = "Authorized GitHub identities" if domain == args.hostname else "Graph callback only"
-        if any(policy.get("name") != expected_name for policy in policies):
+        if any(policy.get("name") != policy_names[domain] for policy in policies):
             raise SetupError("Existing portal application has unmanaged policies; inspect it before changing Access.")
     if args.dry_run:
         print(json.dumps({"writes":False,"team_domain":auth_domain,"dedicated_github_provider_exists":bool(provider),
@@ -201,11 +210,11 @@ def configure(args):
     # Prepare exact exceptions first, before protecting the enclosing hostname.
     for item in definitions[1:]:
         upsert_app(token, base, by_domain.get(item["domain"]), {**item,"type":"self_hosted","app_launcher_visible":False,
-            "policies":[{"name":"Graph callback only","decision":"bypass","include":[{"everyone":{}}]}]})
+            "policies":[{"name":policy_names[item["domain"]],"decision":"bypass","include":[{"everyone":{}}]}]})
     main = upsert_app(token, base, by_domain.get(args.hostname), {**definitions[0],"type":"self_hosted",
         "session_duration":"12h","app_launcher_visible":False,"allowed_idps":[provider["id"]],
         "auto_redirect_to_identity":True,"http_only_cookie_attribute":True,
-        "policies":[{"name":"Authorized GitHub identities","decision":"allow", "include":[{"email":{"email":email}} for email in emails],
+        "policies":[{"name":PANEL_POLICY,"decision":"allow", "include":[{"email":{"email":email}} for email in emails],
             "require":[{"login_method":{"id":provider["id"]}}]}]})
     if not re.fullmatch(r"[0-9a-f]{64}", main.get("aud", "")):
         raise SetupError("Cloudflare returned an invalid application audience.")
