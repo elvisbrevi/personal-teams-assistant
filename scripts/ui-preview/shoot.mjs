@@ -6,7 +6,7 @@ import { launch } from './deps.mjs';
 const [port, out, ...only] = process.argv.slice(2);
 fs.mkdirSync(out, { recursive: true });
 const browser = await launch();
-const tabs = only.length ? only : ['overview', 'messages', 'registration', 'knowledge', 'chat', 'settings'];
+const tabs = only.length ? only : ['overview', 'todo', 'messages', 'registration', 'knowledge', 'chat', 'settings'];
 const problems = [];
 const runs = [
   { name: 'desktop', viewport: { width: 1440, height: 900 }, scheme: 'light', scenario: 'full' },
@@ -23,9 +23,9 @@ for (const run of runs) {
   await page.goto(`http://127.0.0.1:${port}/?scenario=${run.scenario}`);
   await page.waitForTimeout(700);
   for (const tab of tabs) {
-    if (run.name !== 'desktop' && run.name !== 'phone' && !['overview', 'settings', 'registration'].includes(tab)) continue;
+    if (run.name !== 'desktop' && run.name !== 'phone' && !['overview', 'todo', 'settings', 'registration'].includes(tab)) continue;
     const button = page.locator(`nav [data-tab="${tab}"]`).first();
-    if (await button.count()) await button.click(); else await page.evaluate(t => showTab(t), tab);
+    if (await button.isVisible()) await button.click(); else await page.evaluate(t => showTab(t), tab);
     await page.waitForTimeout(450);
     await page.screenshot({ path: `${out}/${run.name}-${tab}.png`, fullPage: true });
   }

@@ -117,6 +117,29 @@
   const delay = ms => new Promise(r => setTimeout(r, ms));
   const reply = (data, extra = {}) => ({ ok: true, code: 'ok', data, revision: 'rev-1', ...extra });
   const handlers = {
+    list_azure_hus: async args => {
+      window.__ptaLastTodo = { provider: 'azure', ...structuredClone(args) };
+      await delay(window.__ptaTodoDelay || 0);
+      if (window.__ptaTodoError) throw new Error('Azure HU read timed out.');
+      const items = Array.from({ length: 15 }, (_, index) => ({ id: 5000 - index, title: ['Implement receipt downloads', 'Review payment validation', 'Improve settlement reporting'][index % 3],
+        url: `${org}/Payments/_workitems/edit/${5000 - index}`, project: 'Payments', state: index % 2 ? 'Finished' : 'Developing',
+        created_at: `2026-10-${String(19 - index).padStart(2, '0')}T12:00:00Z`,
+        dates: [
+          { field: 'Microsoft.VSTS.Scheduling.StartDate', name: 'Start date', value: '2026-10-01T12:00:00Z' },
+          { field: 'Microsoft.VSTS.Scheduling.TargetDate', name: 'Completion date', value: '2026-11-30T12:00:00Z' },
+          { field: 'Custom.DevStart', name: 'Development start', value: index % 2 ? null : '2026-10-12T12:00:00Z' },
+          { field: 'Custom.DevFinish', name: 'Development finish', value: '2026-10-30T12:00:00Z' },
+        ] }));
+      const filtered = items.filter(item => !args.state || item.state === args.state);
+      return { items: filtered.slice(0, args.limit), states: ['Developing', 'Finished', 'Awaiting validation'], projects: ['Payments'], assignment_fields: ['Developer 1', 'Developer 2'], partial: !!window.__ptaTodoPartial, warnings: [], has_more: filtered.length > args.limit };
+    },
+    list_github_epics: args => {
+      window.__ptaLastTodo = { provider: 'github', ...structuredClone(args) };
+      const items = [{ id: 42, title: 'Billing platform improvements', url: 'https://github.com/contoso/billing/issues/42', project: 'contoso/billing', state: 'open', created_at: '2026-10-18T12:00:00Z',
+        dates: [{ field: 'start_date', name: 'Start date', value: null }, { field: 'closed_at', name: 'Completion date', value: null }] }];
+      return { items: items.filter(item => !args.state || item.state === args.state), states: ['open', 'closed'], projects: ['contoso/billing'], assignment_fields: ['Assignees'], partial: false, warnings: [], has_more: false };
+    },
+    open_work_item: args => { window.__ptaOpenedWorkItem = args.url; return { url: args.url }; },
     snapshot: () => structuredClone(snapshot),
     llm_providers: () => providers,
     audit: () => audit,

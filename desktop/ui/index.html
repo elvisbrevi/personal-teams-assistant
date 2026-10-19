@@ -39,6 +39,9 @@
     <symbol id="i-key" viewBox="0 0 24 24"><circle cx="8" cy="15" r="4.5"/><path d="m11.2 11.8 8.8-8.8M16.5 6.5l3 3M13.8 9.2l2 2"/></symbol>
     <symbol id="i-wrench" viewBox="0 0 24 24"><path d="M15.5 4.5a4.5 4.5 0 0 0-5.9 5.6L4 15.7V20h4.3l5.6-5.6a4.5 4.5 0 0 0 5.6-5.9l-2.8 2.8-2.9-.7-.7-2.9z"/></symbol>
     <symbol id="i-antenna" viewBox="0 0 24 24"><path d="M12 12v9"/><circle cx="12" cy="10" r="2"/><path d="M7.8 6.2a6 6 0 0 0 0 7.6M16.2 6.2a6 6 0 0 1 0 7.6M4.9 3.4a10 10 0 0 0 0 13.2M19.1 3.4a10 10 0 0 1 0 13.2"/></symbol>
+    <symbol id="i-todo" viewBox="0 0 24 24"><path d="m3 6 2 2 3-4M11 6h10M3 13h5M11 13h10M3 20h5M11 20h10"/></symbol>
+    <symbol id="i-link" viewBox="0 0 24 24"><path d="M14 3h7v7M21 3 10 14M10 5H4v16h16v-6"/></symbol>
+    <symbol id="i-more" viewBox="0 0 24 24"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></symbol>
   </svg>
   <a class="skip-link" href="#main">Skip to content</a>
   <div class="app">
@@ -50,11 +53,15 @@
       <!-- Daily work first, then what feeds the answers; Settings stays apart at the end. -->
       <nav aria-label="Sections">
         <button data-tab="overview" title="Home" aria-current="page"><span class="tile" aria-hidden="true"><svg class="icon"><use href="#i-home"/></svg></span><span>Home</span></button>
+        <button data-tab="todo" title="To-Do"><span class="tile" aria-hidden="true"><svg class="icon"><use href="#i-todo"/></svg></span><span>To-Do</span></button>
         <button data-tab="messages" title="Messages"><span class="tile" aria-hidden="true"><svg class="icon"><use href="#i-inbox"/></svg></span><span>Messages</span><b id="nav-attention" class="nav-count" hidden></b></button>
         <button data-tab="registration" title="Activities"><span class="tile" aria-hidden="true"><svg class="icon"><use href="#i-check"/></svg></span><span class="long">Activities</span><span class="short">Activity</span><b id="nav-activities" class="nav-count" hidden></b></button>
         <span class="nav-gap" aria-hidden="true"></span>
-        <button data-tab="knowledge" title="Knowledge"><span class="tile" aria-hidden="true"><svg class="icon"><use href="#i-book"/></svg></span><span class="long">Knowledge</span><span class="short">Sources</span></button>
-        <button data-tab="chat" title="Test chat"><span class="tile" aria-hidden="true"><svg class="icon"><use href="#i-chat"/></svg></span><span class="long">Test chat</span><span class="short">Test</span></button>
+        <button id="nav-more" class="nav-more" aria-expanded="false" aria-controls="nav-secondary" title="More sections"><span class="tile" aria-hidden="true"><svg class="icon"><use href="#i-more"/></svg></span><span>More</span></button>
+        <div id="nav-secondary" class="nav-secondary">
+          <button data-tab="knowledge" title="Knowledge"><span class="tile" aria-hidden="true"><svg class="icon"><use href="#i-book"/></svg></span><span class="long">Knowledge</span><span class="short">Sources</span></button>
+          <button data-tab="chat" title="Test chat"><span class="tile" aria-hidden="true"><svg class="icon"><use href="#i-chat"/></svg></span><span class="long">Test chat</span><span class="short">Test</span></button>
+        </div>
         <button data-tab="settings" title="Settings" class="nav-settings"><span class="tile" aria-hidden="true"><svg class="icon"><use href="#i-settings"/></svg></span><span>Settings</span></button>
       </nav>
       <div class="sidebar-foot">
@@ -111,6 +118,27 @@
             <div class="panel-head"><h2>Status</h2><span class="hint">Select a row to change it.</span></div>
             <div id="tiles" class="status-list"></div>
           </div>
+        </div>
+      </section>
+
+      <section id="todo" hidden>
+        <header class="page-head"><span class="page-tile" aria-hidden="true"><svg class="icon"><use href="#i-todo"/></svg></span><div class="page-title">
+          <h1>To-Do</h1>
+          <p>Your Azure DevOps HUs or GitHub epics, newest first.</p>
+        </div></header>
+        <div class="panel">
+          <div class="grid todo-filters">
+            <label>Provider<select id="todo-provider"><option value="azure">Azure DevOps</option><option value="github">GitHub</option></select></label>
+            <label id="todo-source-field" hidden>Source<select id="todo-source"></select></label>
+            <label>State<select id="todo-state"><option value="">All states</option></select></label>
+            <label>Items to show<select id="todo-limit"><option value="10">10</option><option value="25">25</option><option value="50">50</option><option value="100">100</option></select></label>
+          </div>
+          <div class="panel-head"><h2 id="todo-title">My HUs</h2><button id="todo-refresh" class="secondary small"><svg class="icon"><use href="#i-refresh"/></svg>Refresh</button></div>
+          <p id="todo-assignment" class="hint"></p>
+          <p id="todo-progress" class="hint" role="status" aria-live="polite"></p>
+          <div id="todo-problem" class="callout error" role="alert" hidden></div>
+          <div id="todo-warnings" class="callout warn" hidden></div>
+          <div id="todo-list" class="todo-list" aria-busy="false"></div>
         </div>
       </section>
 

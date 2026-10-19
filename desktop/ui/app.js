@@ -1,7 +1,7 @@
 const rawInvoke = window.ptaTransport.invoke;
 // Also the answer operations: they do not depend on the profile files, so they neither check
 // nor advance the form's revision.
-const READS = ['snapshot', 'chat', 'github_repositories', 'self_chat_status', 'llm_providers', 'audit', 'activity_status', 'activity_history', 'activity_pending', 'answer_refine', 'answer_send'];
+const READS = ['snapshot', 'chat', 'github_repositories', 'self_chat_status', 'llm_providers', 'audit', 'activity_status', 'activity_history', 'activity_pending', 'answer_refine', 'answer_send', 'list_azure_hus', 'list_github_epics', 'open_work_item'];
 // Revision of the profile files the last reply saw. The form's own revision (`current.revision`)
 // changes only when it reloads or writes, so saving a stale form fails instead of overwriting
 // changes made elsewhere (e.g. with `pta`).
@@ -118,14 +118,17 @@ async function busy(button, task) {
 
 function showTab(name, anchor) {
   tab = name;
-  for (const section of ['overview', 'settings', 'messages', 'knowledge', 'chat', 'registration']) $('#' + section).hidden = section !== name;
-  for (const button of document.querySelectorAll('nav button')) {
+  setNavOverflow(false);
+  for (const section of ['overview', 'todo', 'settings', 'messages', 'knowledge', 'chat', 'registration']) $('#' + section).hidden = section !== name;
+  for (const button of document.querySelectorAll('nav button[data-tab]')) {
     button.setAttribute('aria-current', button.dataset.tab === name ? 'page' : 'false');
   }
+  $('#nav-more').setAttribute('aria-current', ['knowledge', 'chat'].includes(name) ? 'page' : 'false');
   if (name === 'messages') loadMessages().catch(fail);
   if (name === 'overview') loadActivity();
   if (name === 'registration') loadRegistration().catch(fail);
   if (name === 'knowledge') loadKnowledge().catch(fail);
+  if (name === 'todo') loadTodo();
   const target = anchor && document.getElementById(anchor);
   // A panel inside a tab (a Settings section, an Activities view) opens that tab first.
   const owner = target && document.querySelector(`[aria-controls="${target.closest('[role=tabpanel]')?.id}"]`);
@@ -134,6 +137,86 @@ function showTab(name, anchor) {
   renderActivityNotice();
   if (target) target.scrollIntoView({ behavior: 'smooth', block: 'start' });
   else window.scrollTo(0, 0);
+}
+
+function setNavOverflow(open) {
+  $('nav').classList.toggle('overflow-open', open);
+  $('#nav-more').setAttribute('aria-expanded', String(open));
+}
+
+// ---------------------------------------------------------------- To-Do
+
+let todoRequest = 0;
+function todoSources() {
+  const sources = (live?.map.resources ?? []).filter(r => r.kind === 'tool' && r.tool.type === 'azure_devops_status' && r.enabled);
+  const selected = $('#todo-source').value;
+  $('#todo-source').replaceChildren(...sources.map(source => el('option', { value: source.id, textContent: source.description || source.id })));
+  if (sources.some(source => source.id === selected)) $('#todo-source').value = selected;
+  $('#todo-source-field').hidden = $('#todo-provider').value !== 'azure' || sources.length < 2;
+  return sources;
+}
+function todoDate(name, raw) {
+  const parsed = raw && new Date(raw);
+  return el('div', {}, el('dt', { textContent: name }), el('dd', {}, parsed && !Number.isNaN(parsed.valueOf())
+    ? el('time', { dateTime: raw, textContent: parsed.toLocaleDateString(uiLocale(), { dateStyle: 'medium' }) })
+    : t('Not recorded')));
+}
+function todoItem(item) {
+  const label = t('Open #{id} in a new tab', { id: item.id });
+  const open = window.ptaTransport.browser
+    ? el('a', { class: 'icon-button secondary', href: item.url, target: '_blank', rel: 'noopener noreferrer', title: label, 'aria-label': label }, icon('link'))
+    : el('button', { type: 'button', class: 'icon-button secondary', title: label, 'aria-label': label }, icon('link'));
+  if (!window.ptaTransport.browser) open.onclick = () => busy(open, () => invoke('open_work_item', { url: item.url }));
+  return el('article', { class: 'todo-item' },
+    el('div', { class: 'todo-heading' }, el('h3', { textContent: `#${item.id} · ${item.title}` }), open),
+    el('div', { class: 'todo-context' }, badge(tx(item.state), 'info'), el('span', { textContent: item.project })),
+    el('dl', { class: 'todo-dates' }, todoDate(t('Created'), item.created_at), ...item.dates.map(date => todoDate(tx(date.name), date.value))));
+}
+async function loadTodo() {
+  const request = ++todoRequest;
+  const azure = $('#todo-provider').value === 'azure';
+  const sources = todoSources();
+  $('#todo-title').textContent = azure ? t('My HUs') : t('My epics');
+  $('#todo-list').replaceChildren();
+  $('#todo-list').setAttribute('aria-busy', 'true');
+  $('#todo-progress').textContent = t('Loading…');
+  $('#todo-assignment').textContent = '';
+  $('#todo-problem').hidden = true;
+  $('#todo-warnings').hidden = true;
+  $('#todo-refresh').disabled = true;
+  try {
+    if (azure && !sources.length) throw t('Configure an Azure DevOps activity source in Knowledge to see your HUs.');
+    const args = { limit: Number($('#todo-limit').value) };
+    if (azure) args.source = $('#todo-source').value;
+    if ($('#todo-state').value) args.state = $('#todo-state').value;
+    const result = await invoke(azure ? 'list_azure_hus' : 'list_github_epics', args);
+    if (request !== todoRequest) return;
+    const selected = $('#todo-state').value;
+    $('#todo-state').replaceChildren(el('option', { value: '', textContent: t('All states') }), ...result.states.map(state => el('option', { value: state, textContent: tx(state) })));
+    $('#todo-state').value = selected;
+    $('#todo-assignment').textContent = azure
+      ? t('Your developer assignment: {fields}', { fields: result.assignment_fields.join(', ') })
+      : t('Issues of type Epic assigned to your connected GitHub account. GitHub provides open and closed states; unavailable dates stay empty.');
+    $('#todo-list').replaceChildren(...result.items.map(todoItem));
+    if (!result.items.length) $('#todo-list').append(el('p', { class: 'empty', textContent: t('No items match these filters. Try another state.') }));
+    $('#todo-progress').textContent = result.has_more
+      ? t('Showing the {n} newest items. Increase the limit to see more.', { n: result.items.length })
+      : tn('{n} item', '{n} items', result.items.length);
+    if (result.partial) {
+      $('#todo-warnings').hidden = false;
+      $('#todo-warnings').textContent = t('Some projects could not be read. The list and available states may be incomplete.');
+    }
+  } catch (error) {
+    if (request !== todoRequest) return;
+    $('#todo-progress').textContent = '';
+    $('#todo-problem').hidden = false;
+    $('#todo-problem').textContent = tx(String(error?.message ?? error));
+  } finally {
+    if (request === todoRequest) {
+      $('#todo-list').setAttribute('aria-busy', 'false');
+      $('#todo-refresh').disabled = false;
+    }
+  }
 }
 
 // ---------------------------------------------------------------- settings sections
@@ -2392,10 +2475,30 @@ function resizeComposer() {
 
 // ---------------------------------------------------------------- wiring
 
+$('#todo-provider').onchange = () => {
+  $('#todo-state').replaceChildren(el('option', { value: '', textContent: t('All states') }));
+  loadTodo();
+};
+$('#todo-source').onchange = () => {
+  $('#todo-state').replaceChildren(el('option', { value: '', textContent: t('All states') }));
+  loadTodo();
+};
+$('#todo-state').onchange = () => loadTodo();
+$('#todo-limit').onchange = () => loadTodo();
+$('#todo-refresh').onclick = () => busy($('#todo-refresh'), loadTodo);
+
 // After a section change, focus its heading so a screen reader starts there (no visible ring after a click).
 document.querySelectorAll('section > .page-head h1').forEach(heading => { heading.tabIndex = -1; });
-document.querySelectorAll('nav button').forEach(button => {
+document.querySelectorAll('nav button[data-tab]').forEach(button => {
   button.onclick = () => { showTab(button.dataset.tab); $(`#${button.dataset.tab} h1`)?.focus({ preventScroll: true }); };
+});
+$('#nav-more').onclick = () => setNavOverflow($('#nav-more').getAttribute('aria-expanded') !== 'true');
+document.addEventListener('click', event => { if (!event.target.closest('nav')) setNavOverflow(false); });
+document.addEventListener('keydown', event => {
+  if (event.key === 'Escape' && $('#nav-more').getAttribute('aria-expanded') === 'true') {
+    setNavOverflow(false);
+    $('#nav-more').focus();
+  }
 });
 for (const list of document.querySelectorAll('[role=tablist]')) {
   const tabs = [...list.querySelectorAll('[role=tab]')];

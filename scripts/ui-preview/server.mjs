@@ -25,7 +25,9 @@ http.createServer((req, res) => {
   } else if (pathname === '/__mock.js') {
     body = fs.readFileSync(path.join(here, 'mock.js'));
   } else if (pathname === '/__fixture.js') {
-    body = `window.__PTA_FIXTURE__ = ${fs.readFileSync(path.join(here, 'fixture.json'), 'utf8')};`;
+    const fixture = JSON.parse(fs.readFileSync(path.join(here, 'fixture.json'), 'utf8'));
+    fixture.snapshot.host_version = fs.readFileSync(path.join(here, '../../Cargo.toml'), 'utf8').match(/^version = "([^"]+)"/m)[1];
+    body = `window.__PTA_FIXTURE__ = ${JSON.stringify(fixture)};`;
     file = 'fixture.js';
   } else {
     const target = path.join(ui, path.normalize(pathname));

@@ -460,6 +460,9 @@ pub(crate) async fn dispatch(host: &Arc<Host>, request: Request) -> Reply {
     if activity::active(state).await
         && ![
             "snapshot",
+            "list_azure_hus",
+            "list_github_epics",
+            "open_work_item",
             "llm_providers",
             "audit",
             "logs",
@@ -497,6 +500,9 @@ pub(crate) async fn dispatch(host: &Arc<Host>, request: Request) -> Reply {
     if microsoft_pending
         && ![
             "snapshot",
+            "list_azure_hus",
+            "list_github_epics",
+            "open_work_item",
             "llm_providers",
             "activity_status",
             "activity_history",
@@ -528,6 +534,9 @@ pub(crate) async fn dispatch(host: &Arc<Host>, request: Request) -> Reply {
     if github_pending
         && ![
             "snapshot",
+            "list_azure_hus",
+            "list_github_epics",
+            "open_work_item",
             "llm_providers",
             "activity_status",
             "activity_history",
@@ -618,6 +627,14 @@ async fn operate(
     let state = &host.state;
     let value = match method {
         "snapshot" => serde_json::to_value(snapshot(host).await?).map_err(fail)?,
+        "list_azure_hus" | "list_github_epics" => tools::todo::list(state, method, args).await?,
+        "open_work_item" => {
+            let raw: String = arg(args, "url")?;
+            let url = crate::tools::todo::validate_link(&raw)
+                .map_err(|_| "[invalid_input] Invalid work item link.".to_owned())?;
+            host.shell.open_url(url.as_str()).map_err(fail)?;
+            json!({"url":url.as_str()})
+        }
         "activity_status" | "activity_history" | "activity_pending" => activity::inspect(
             state,
             args.get("day").and_then(Value::as_str),
