@@ -462,6 +462,8 @@ pub(crate) async fn dispatch(host: &Arc<Host>, request: Request) -> Reply {
             "snapshot",
             "list_azure_hus",
             "list_github_epics",
+            "get_azure_hu",
+            "get_github_epic",
             "open_work_item",
             "llm_providers",
             "audit",
@@ -502,6 +504,8 @@ pub(crate) async fn dispatch(host: &Arc<Host>, request: Request) -> Reply {
             "snapshot",
             "list_azure_hus",
             "list_github_epics",
+            "get_azure_hu",
+            "get_github_epic",
             "open_work_item",
             "llm_providers",
             "activity_status",
@@ -536,6 +540,8 @@ pub(crate) async fn dispatch(host: &Arc<Host>, request: Request) -> Reply {
             "snapshot",
             "list_azure_hus",
             "list_github_epics",
+            "get_azure_hu",
+            "get_github_epic",
             "open_work_item",
             "llm_providers",
             "activity_status",
@@ -627,7 +633,9 @@ async fn operate(
     let state = &host.state;
     let value = match method {
         "snapshot" => serde_json::to_value(snapshot(host).await?).map_err(fail)?,
-        "list_azure_hus" | "list_github_epics" => tools::todo::list(state, method, args).await?,
+        "list_azure_hus" | "list_github_epics" | "get_azure_hu" | "get_github_epic" => {
+            tools::todo::read(state, method, args).await?
+        }
         "open_work_item" => {
             let raw: String = arg(args, "url")?;
             let url = crate::tools::todo::validate_link(&raw)

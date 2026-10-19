@@ -10,7 +10,7 @@ operations as their GUI sections and dedicated CLI commands.
 Tools with effects outside the app or that grant access require `confirmed: true`, only after
 the user has approved the exact action. MCP retains its client-mediated confirmation flow.
 
-## List the user's Azure DevOps HUs
+## List the user's Azure DevOps HUs and bugs
 
 ```sh
 printf '%s\n' '{}' | pta --json tools call list_azure_hus
@@ -20,19 +20,21 @@ printf '%s\n' '{"source":"azure-devops-status","state":"Developing","limit":25}'
 - `source`: an enabled Azure DevOps activity source ID. Optional when exactly one is enabled.
 - `project`: optionally narrow to a project in that source's catalog.
 - `state`: an exact state returned by the tool. Omit it for all states.
+- `kind`: `hu` or `bug`; omit for both requirement-category HUs and bug-category items.
 - `limit`: 1–100, default 10, newest creation date first across the selected projects.
 
 The tool reuses the catalog's organization, projects, author identity and read credential.
 `*` retains its meaning: projects of teams the connected user belongs to. It discovers the
-process's requirement category (including custom HU types), all defined states, developer
+process's requirement and bug categories (including custom types), all defined states, developer
 identity fields and start/finish/target/closure date fields. It matches the catalog user in
-any developer role, rather than the current responsible owner. Only processes without
-developer identity fields fall back to `System.AssignedTo`. Returned assignments are checked
+any developer role, rather than the current responsible owner. Assignment is discovered separately
+for each type: a bug without developer identity fields falls back to `System.AssignedTo` even
+when the HU type has developer roles. Returned assignments are checked
 again after reading the items. Completed items are included; there is no activity time window.
 
 Results include `items`, `states` (including states without matching items), `projects`,
 `assignment_fields`, `has_more`, `partial` and `warnings`. Each item has `id`, `title`, a verified
-provider `url`, `project`, `state`, `created_at` and `dates` with the original field reference,
+provider `url`, `project`, `kind` (the original type), `state`, `created_at` and `dates` with the original field reference,
 display name and nullable value. Separate HU and development dates retain their own labels.
 Metadata is cached for five minutes; items are read fresh, with only the requested fields.
 Unavailable projects produce partial coverage and a visible warning, never an apparently
@@ -57,10 +59,43 @@ Project-board custom workflow states and dates are not issue states or dates and
 by this tool. Search truncation or incomplete results are reported. No dates are inferred
 from body text, milestones, changes or labels.
 
+## Read one HU, bug or epic
+
+```sh
+printf '%s\n' '{"id":4321}' | pta --json tools call get_azure_hu
+printf '%s\n' '{"id":4410,"source":"azure-devops-status","project":"Payments"}' | pta --json tools call get_azure_hu
+printf '%s\n' '{"id":42,"project":"example/work"}' | pta --json tools call get_github_epic
+```
+
+`get_azure_hu` requires a positive integer `id` and accepts optional `source` and `project`.
+It reads only enabled activity sources and projects in their configured catalog (including
+team discovery for `*`), verifies the returned ID, project and requirement/bug category,
+and rejects ambiguous IDs across organizations. Detail reads are not restricted to current
+assignment or open states. Select a source with one organization if an ID is ambiguous.
+
+`get_github_epic` requires `id` (the issue number) and `project` (`OWNER/REPO`), because issue
+numbers are local to their repository. It verifies the canonical URL, number and Epic type,
+rejects pull requests and uses the existing GitHub connection and Issues read access.
+
+Both return `item`, `fields` (reference, original display name, data type, original value and safe rich-text `content` tree for HTML),
+`comments` (author, dates, text and format), `relations` (label, detail and safe URL),
+`history`, `partial` and `warnings`. Azure retains all returned standard and custom fields:
+Assigned To, developer roles, description, acceptance criteria, bug reproduction steps,
+severity, evidence and process-specific data. Relations retain attachments, linked work
+items and development artifacts; Git branches, PRs, commits and builds get verified links.
+GitHub returns the description, assignees, author, labels, milestone, state details and dates,
+comments, sub-issues and events. No fields or links are inferred from a model.
+
+Reads are fresh and bounded: Azure up to 500 latest comments and the first 200 revisions;
+GitHub up to 500 comments, 500 sub-issues and 200 events. Azure resolves at most 200 linked
+work item titles in configured projects. Unavailable sections and bounds produce explicit
+warnings; a failed read is never presented as a complete empty discussion. Original links
+remain available. No response-provided pagination URL receives a credential.
+
 ## GUI
 
 To-Do is a daily-work section. It calls `list_azure_hus` and `list_github_epics` directly through
-the host contract, with provider, state and item-count selectors (10 by default). Multiple
+the host contract, with provider, type (HUs and bugs / HUs / Bugs), state and item-count selectors (10 by default). Multiple
 enabled Azure sources add a source selector. It keeps state names from the provider and
 shows missing dates explicitly. The existing sticker design and device theme are preserved.
 On phones, four daily destinations plus More keep the floating bar at five targets; More
@@ -71,3 +106,11 @@ The link icon opens a new browser tab in the portal and the default browser in t
 app (`open_work_item`, also a CLI/MCP tool taking `{"url":"…"}`). The host accepts only canonical HTTPS Azure
 work-item and GitHub issue links. These local reads work with Teams stopped, use no model,
 and do not change any source audience or authorize external processing.
+
+Pressing an item opens its mobile detail inside To-Do through `get_azure_hu` or
+`get_github_epic`. Back restores the list, filters, scroll and keyboard focus. Type-specific
+rich fields, comments and evidence stay readable; all original fields and change history
+are folded. Rich HTML is parsed in the core into bounded safe trees and rebuilt from allowed elements,
+without browser HTML parsing, scripts, original attributes or remote image loads; images and attachments open through their original links rather than
+inline previews. The same device theme, touch targets and translation rules apply. Refresh,
+inline errors, partial warnings and stale-response guards also apply to detail reads.

@@ -65,6 +65,10 @@ The standard every change to `desktop/ui/` follows, so the native window, the we
 
 - Buttons: outlined pills with a shadow. One primary action per panel or form (the next step, `--primary` lime); everything else `.secondary` (paper); destructive actions `.danger` and visually apart; navigation-like actions `.link-button`. An irreversible action (dismiss, send to Teams) asks for a second tap instead of a modal.
 - Asynchronous actions run through `busy(button, task)`: the button shows progress and is disabled; errors become a notice.
+- To-Do cards open an in-section detail; the external-link icon remains a separate action. Back
+  restores filters, list position and focus. Keep assignment, type-specific content and discussion
+  visible; fold all fields and history. Parse provider HTML in the core into safe rich-text trees, rebuild from allowed elements and turn
+  images into original links; never mount provider scripts, styles or image URLs.
 - Links to Azure DevOps, Wiki and Teams artifacts use `link()` (opens in the portal, copies in the native window). To-Do link icons explicitly open the item: a new tab in the portal, the default browser through the validated `open_work_item` host operation in the native window.
 
 ## 7. Tokens

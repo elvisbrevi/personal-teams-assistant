@@ -1,4 +1,5 @@
 //! Bounded, read-only evidence from Azure DevOps. The catalog lives in the private knowledge repo.
+pub mod detail;
 pub mod link;
 mod progress;
 pub mod registration;

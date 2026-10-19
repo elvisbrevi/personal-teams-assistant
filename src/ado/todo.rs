@@ -1,4 +1,4 @@
-//! The user's HUs by developer assignment, independent of activity windows or current owner.
+//! The user's HUs and bugs by process-specific assignment, independent of activity windows.
 use super::*;
 use crate::tools::todo::{Date, Filters, Item, List};
 use sha2::{Digest, Sha256};
@@ -17,7 +17,7 @@ fn developer(field: &Value) -> bool {
     let name = field["name"].as_str().unwrap_or_default().to_lowercase();
     field["isIdentity"] == true && (name.contains("desarrollador") || name.contains("developer"))
 }
-fn date_field(field: &Value) -> bool {
+pub(super) fn date_field(field: &Value) -> bool {
     if field["type"] != "dateTime" {
         return false;
     }
@@ -36,7 +36,7 @@ fn date_field(field: &Value) -> bool {
         .iter()
         .any(|word| name.contains(word))
 }
-fn timestamp(value: &Value) -> Option<String> {
+pub(super) fn timestamp(value: &Value) -> Option<String> {
     chrono::DateTime::parse_from_rfc3339(value.as_str()?)
         .ok()
         .map(|date| {
@@ -45,7 +45,7 @@ fn timestamp(value: &Value) -> Option<String> {
         })
 }
 
-async fn metadata(client: &Client, key: &str, cache: &Store, url: Url) -> Result<Value> {
+pub(super) async fn metadata(client: &Client, key: &str, cache: &Store, url: Url) -> Result<Value> {
     // Metadata only, five minutes; the credential fingerprint prevents reuse after an account change.
     let cache_key = format!("todo-schema:{:x}:{url}", Sha256::digest(key.as_bytes()));
     cached_read(
@@ -57,8 +57,12 @@ async fn metadata(client: &Client, key: &str, cache: &Store, url: Url) -> Result
     .await
 }
 
+struct Kind {
+    name: String,
+    assignments: Vec<Value>,
+}
 struct Schema {
-    kinds: Vec<String>,
+    kinds: Vec<Kind>,
     states: BTreeSet<String>,
     assignments: Vec<Value>,
     dates: Vec<Value>,
@@ -69,9 +73,27 @@ async fn schema(
     cache: &Store,
     source: &Source,
     project: &str,
+    filter: Option<&str>,
 ) -> Result<Schema> {
-    let (category, fields) = tokio::try_join!(
-        metadata(
+    let fields = metadata(
+        client,
+        key,
+        cache,
+        organization_url(source, &["_apis", "wit", "fields"])?,
+    )
+    .await?;
+    let fields = fields["value"]
+        .as_array()
+        .context("invalid organization fields")?;
+    let mut names = BTreeSet::new();
+    for (category, group) in [
+        ("Microsoft.RequirementCategory", "hu"),
+        ("Microsoft.BugCategory", "bug"),
+    ] {
+        if filter.is_some_and(|filter| filter != group) {
+            continue;
+        }
+        let reply = metadata(
             client,
             key,
             cache,
@@ -79,31 +101,29 @@ async fn schema(
                 source,
                 project,
                 "dev.azure.com",
-                &[
-                    "_apis",
-                    "wit",
-                    "workitemtypecategories",
-                    "Microsoft.RequirementCategory"
-                ]
-            )?
-        ),
-        metadata(
-            client,
-            key,
-            cache,
-            organization_url(source, &["_apis", "wit", "fields"])?
-        ),
-    )?;
-    let kinds: Vec<String> = category["workItemTypes"]
-        .as_array()
-        .context("invalid HU category")?
-        .iter()
-        .filter_map(|kind| kind["name"].as_str().map(str::to_owned))
-        .collect();
-    ensure!(!kinds.is_empty() && kinds.len() <= 20, "invalid HU types");
+                &["_apis", "wit", "workitemtypecategories", category],
+            )?,
+        )
+        .await;
+        let reply = match reply {
+            Ok(reply) => reply,
+            Err(error) if error.to_string().ends_with("HTTP 404") => continue,
+            Err(error) => return Err(error),
+        };
+        for kind in reply["workItemTypes"]
+            .as_array()
+            .context("invalid work item category")?
+        {
+            if let Some(name) = kind["name"].as_str() {
+                names.insert(name.to_owned());
+            }
+        }
+    }
+    ensure!(names.len() <= 40, "invalid work item types");
+    let mut kinds = Vec::new();
     let mut states = BTreeSet::new();
     let mut used = BTreeSet::new();
-    for kind in &kinds {
+    for kind in names {
         let definition = metadata(
             client,
             key,
@@ -112,7 +132,7 @@ async fn schema(
                 source,
                 project,
                 "dev.azure.com",
-                &["_apis", "wit", "workitemtypes", kind],
+                &["_apis", "wit", "workitemtypes", &kind],
             )?,
         )
         .await?;
@@ -124,41 +144,44 @@ async fn schema(
                 states.insert(state.to_owned());
             }
         }
-        for field in definition["fields"]
+        let type_fields: BTreeSet<_> = definition["fields"]
             .as_array()
-            .context("invalid HU fields")?
-        {
-            if let Some(name) = field["referenceName"]
-                .as_str()
-                .filter(|name| reference(name))
-            {
-                used.insert(name.to_owned());
-            }
+            .context("invalid work item fields")?
+            .iter()
+            .filter_map(|f| f["referenceName"].as_str().filter(|name| reference(name)))
+            .collect();
+        let mut assignments: Vec<Value> = fields
+            .iter()
+            .filter(|f| {
+                developer(f)
+                    && f["referenceName"]
+                        .as_str()
+                        .is_some_and(|r| type_fields.contains(r))
+            })
+            .cloned()
+            .collect();
+        // Assignment is process-specific per type: bugs may lack the HU's developer roles.
+        if assignments.is_empty() {
+            assignments.push(json!({"name":"Assigned To","referenceName":"System.AssignedTo"}));
         }
+        used.extend(type_fields.into_iter().map(str::to_owned));
+        kinds.push(Kind {
+            name: kind,
+            assignments,
+        });
     }
-    let fields = fields["value"]
-        .as_array()
-        .context("invalid organization fields")?;
-    let fields: Vec<_> = fields
+    let assignments = kinds
         .iter()
-        .filter(|field| {
-            field["referenceName"]
+        .flat_map(|k| k.assignments.iter().cloned())
+        .collect();
+    let dates = fields
+        .iter()
+        .filter(|f| {
+            f["referenceName"]
                 .as_str()
                 .is_some_and(|r| used.contains(r))
+                && date_field(f)
         })
-        .collect();
-    let mut assignments: Vec<Value> = fields
-        .iter()
-        .filter(|f| developer(f))
-        .map(|f| (*f).clone())
-        .collect();
-    // A process without developer roles uses its standard assignment field. Never OR it with developer roles.
-    if assignments.is_empty() {
-        assignments.push(json!({"name":"Assigned To","referenceName":"System.AssignedTo"}));
-    }
-    let dates = fields
-        .into_iter()
-        .filter(|f| date_field(f))
         .cloned()
         .collect();
     Ok(Schema {
@@ -178,7 +201,7 @@ async fn in_project(
     filters: &Filters,
     result: &mut List,
 ) -> Result<()> {
-    let schema = schema(client, key, cache, source, project).await?;
+    let schema = schema(client, key, cache, source, project, filters.kind.as_deref()).await?;
     result.states.extend(schema.states.iter().cloned());
     result.assignment_fields.extend(
         schema
@@ -193,31 +216,39 @@ async fn in_project(
     {
         return Ok(());
     }
+    if schema.kinds.is_empty() {
+        return Ok(());
+    }
     let assigned = schema
-        .assignments
+        .kinds
         .iter()
-        .map(|f| {
+        .map(|kind| {
+            let roles = kind
+                .assignments
+                .iter()
+                .map(|f| {
+                    format!(
+                        "[{}] = {}",
+                        f["referenceName"].as_str().unwrap_or_default(),
+                        literal(&source.author_email)
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(" OR ");
             format!(
-                "[{}] = {}",
-                f["referenceName"].as_str().unwrap_or_default(),
-                literal(&source.author_email)
+                "([System.WorkItemType] = {} AND ({roles}))",
+                literal(&kind.name)
             )
         })
         .collect::<Vec<_>>()
         .join(" OR ");
-    let kinds = schema
-        .kinds
-        .iter()
-        .map(|k| literal(k))
-        .collect::<Vec<_>>()
-        .join(", ");
     let state = filters
         .state
         .as_ref()
         .map(|s| format!(" AND [System.State] = {}", literal(s)))
         .unwrap_or_default();
     let query = format!(
-        "SELECT [System.Id] FROM WorkItems WHERE [System.TeamProject] = {} AND [System.WorkItemType] IN ({kinds}) AND ({assigned}){state} ORDER BY [System.CreatedDate] DESC, [System.Id] DESC",
+        "SELECT [System.Id] FROM WorkItems WHERE [System.TeamProject] = {} AND ({assigned}){state} ORDER BY [System.CreatedDate] DESC, [System.Id] DESC",
         literal(project)
     );
     let mut url = project_url(source, project, "dev.azure.com", &["_apis", "wit", "wiql"])?;
@@ -249,6 +280,8 @@ async fn in_project(
             .chain(&schema.dates)
             .filter_map(|field| field["referenceName"].as_str()),
     );
+    fields.sort_unstable();
+    fields.dedup();
     let mut url = project_url(
         source,
         project,
@@ -276,13 +309,18 @@ async fn in_project(
             || !schema
                 .kinds
                 .iter()
-                .any(|k| k == field(item, "System.WorkItemType"))
-            || !schema.assignments.iter().any(|f| {
-                same_user(
-                    &item["fields"][f["referenceName"].as_str().unwrap_or_default()],
-                    &source.author_email,
-                )
-            })
+                .any(|k| k.name == field(item, "System.WorkItemType"))
+            || !schema
+                .kinds
+                .iter()
+                .filter(|k| k.name == field(item, "System.WorkItemType"))
+                .flat_map(|k| &k.assignments)
+                .any(|f| {
+                    same_user(
+                        &item["fields"][f["referenceName"].as_str().unwrap_or_default()],
+                        &source.author_email,
+                    )
+                })
             || filters
                 .state
                 .as_ref()
@@ -297,6 +335,7 @@ async fn in_project(
             url: link.url,
             project: project.into(),
             state: field(item, "System.State").into(),
+            kind: field(item, "System.WorkItemType").into(),
             created_at: timestamp(&item["fields"]["System.CreatedDate"]),
             dates: schema
                 .dates
@@ -375,6 +414,7 @@ mod tests {
         let server = MockServer::start().await;
         TEST_SERVER.with(|s| *s.borrow_mut() = Some(Url::parse(&server.uri()).unwrap()));
         let fields = json!([
+            {"referenceName":"System.AssignedTo","name":"Assigned To","isIdentity":true,"type":"string"},
             {"referenceName":"Custom.Developer1","name":"Developer 1","isIdentity":true,"type":"string"},
             {"referenceName":"Custom.Developer2","name":"Developer 2","isIdentity":true,"type":"string"},
             {"referenceName":"Microsoft.VSTS.Scheduling.StartDate","name":"Start Date","type":"dateTime"},
@@ -389,8 +429,16 @@ mod tests {
                 json!({"workItemTypes":[{"name":"Custom HU"}]}),
             ),
             (
+                "/example/Payments/_apis/wit/workitemtypecategories/Microsoft.BugCategory",
+                json!({"workItemTypes":[{"name":"Bug"}]}),
+            ),
+            (
+                "/example/Payments/_apis/wit/workitemtypes/Bug",
+                json!({"fields":[{"referenceName":"System.AssignedTo"}],"states":[{"name":"Resolved"}]}),
+            ),
+            (
                 "/example/Payments/_apis/wit/workitemtypes/Custom%20HU",
-                json!({"fields":fields,"states":[{"name":"Developing"},{"name":"Finished"},{"name":"Unused state"}]}),
+                json!({"fields":fields.as_array().unwrap().iter().filter(|f| f["referenceName"] != "System.AssignedTo").collect::<Vec<_>>(),"states":[{"name":"Developing"},{"name":"Finished"},{"name":"Unused state"}]}),
             ),
         ] {
             Mock::given(method("GET"))
@@ -401,16 +449,16 @@ mod tests {
         }
         Mock::given(method("POST")).and(path("/example/Payments/_apis/wit/wiql")).respond_with(|r: &wiremock::Request| {
             let query = r.body_json::<Value>().unwrap()["query"].as_str().unwrap().to_owned();
-            assert!(query.contains("[Custom.Developer1] = 'me@example.test' OR [Custom.Developer2] = 'me@example.test'"), "{query}");
-            assert!(!query.contains("AssignedTo"));
+            if query.contains("Custom HU") { assert!(query.contains("[Custom.Developer1] = 'me@example.test' OR [Custom.Developer2] = 'me@example.test'"), "{query}"); }
+            if query.contains("Bug") { assert!(query.contains("[System.WorkItemType] = 'Bug' AND ([System.AssignedTo] = 'me@example.test')")); }
             assert!(query.contains("[System.CreatedDate] DESC"));
             assert!(r.url.query_pairs().any(|(k,v)| k == "$top" && v == "3"));
             ResponseTemplate::new(200).set_body_json(json!({"workItems":[{"id":1},{"id":2},{"id":3}]}))
         }).mount(&server).await;
         let item = |id, assigned: &str| {
             json!({"id":id,"fields":{
-                "System.TeamProject":"Payments","System.WorkItemType":"Custom HU","System.Title":format!("HU {id}"),"System.State":"Developing",
-                "System.CreatedDate":format!("2026-10-0{id}T12:00:00Z"),"System.AssignedTo":{"uniqueName":"owner@example.test"},
+                "System.TeamProject":"Payments","System.WorkItemType":if id == 2 { "Bug" } else { "Custom HU" },"System.Title":format!("HU {id}"),"System.State":"Developing",
+                "System.CreatedDate":format!("2026-10-0{id}T12:00:00Z"),"System.AssignedTo":{"uniqueName":if id == 2 { "me@example.test" } else { "owner@example.test" }},
                 "Custom.Developer2":{"uniqueName":assigned},"Custom.DevStart":"2026-10-04T12:00:00Z","Custom.DevFinish":"2026-10-05T12:00:00Z"
             }})
         };
@@ -418,11 +466,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cache = Store::open(&dir.path().join("cache.db")).unwrap();
         let result = list(&Client::new(), "test-key", "[[sources]]\norganization='https://dev.azure.com/example/'\nprojects=['Payments']\nauthor_email='me@example.test'", &cache, &Filters { limit:2, ..Default::default() }).await.unwrap();
-        TEST_SERVER.with(|s| *s.borrow_mut() = None);
         assert!(!result.partial, "{:?}", result.warnings);
         assert_eq!(
             result.items.iter().map(|i| i.id).collect::<Vec<_>>(),
-            [3, 1]
+            [3, 2]
         );
         assert!(result.states.contains(&"Unused state".into()));
         assert_eq!(result.items[0].dates.len(), 4);
@@ -439,5 +486,18 @@ mod tests {
                 .url
                 .starts_with("https://dev.azure.com/example/Payments/_workitems/edit/")
         );
+        assert!(result.states.contains(&"Resolved".into()));
+        for (kind, expected) in [("hu", vec![3, 1]), ("bug", vec![2])] {
+            let filtered = list(&Client::new(), "test-key", "[[sources]]\norganization='https://dev.azure.com/example/'\nprojects=['Payments']\nauthor_email='me@example.test'", &cache, &Filters { limit: 2, kind: Some(kind.into()), ..Default::default() }).await.unwrap();
+            assert!(!filtered.partial, "{:?}", filtered.warnings);
+            assert_eq!(
+                filtered.items.iter().map(|i| i.id).collect::<Vec<_>>(),
+                expected
+            );
+            if kind == "bug" {
+                assert_eq!(filtered.states, ["Resolved"]);
+            }
+        }
+        TEST_SERVER.with(|s| *s.borrow_mut() = None);
     }
 }

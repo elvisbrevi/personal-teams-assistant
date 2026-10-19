@@ -1,7 +1,7 @@
 const rawInvoke = window.ptaTransport.invoke;
 // Also the answer operations: they do not depend on the profile files, so they neither check
 // nor advance the form's revision.
-const READS = ['snapshot', 'chat', 'github_repositories', 'self_chat_status', 'llm_providers', 'audit', 'activity_status', 'activity_history', 'activity_pending', 'answer_refine', 'answer_send', 'list_azure_hus', 'list_github_epics', 'open_work_item'];
+const READS = ['snapshot', 'chat', 'github_repositories', 'self_chat_status', 'llm_providers', 'audit', 'activity_status', 'activity_history', 'activity_pending', 'answer_refine', 'answer_send', 'list_azure_hus', 'list_github_epics', 'get_azure_hu', 'get_github_epic', 'open_work_item'];
 // Revision of the profile files the last reply saw. The form's own revision (`current.revision`)
 // changes only when it reloads or writes, so saving a stale form fails instead of overwriting
 // changes made elsewhere (e.g. with `pta`).
@@ -161,22 +161,166 @@ function todoDate(name, raw) {
     ? el('time', { dateTime: raw, textContent: parsed.toLocaleDateString(uiLocale(), { dateStyle: 'medium' }) })
     : t('Not recorded')));
 }
-function todoItem(item) {
+function todoOriginal(item) {
   const label = t('Open #{id} in a new tab', { id: item.id });
   const open = window.ptaTransport.browser
     ? el('a', { class: 'icon-button secondary', href: item.url, target: '_blank', rel: 'noopener noreferrer', title: label, 'aria-label': label }, icon('link'))
     : el('button', { type: 'button', class: 'icon-button secondary', title: label, 'aria-label': label }, icon('link'));
   if (!window.ptaTransport.browser) open.onclick = () => busy(open, () => invoke('open_work_item', { url: item.url }));
+  return open;
+}
+let todoDetailRequest = 0;
+let todoSelection = null;
+let todoListScroll = 0;
+let todoReturnFocus = null;
+function todoItem(item) {
+  const select = el('button', { type: 'button', class: 'todo-select', textContent: `#${item.id} · ${item.title}` });
+  select.onclick = () => {
+    todoListScroll = window.scrollY;
+    todoReturnFocus = select;
+    todoSelection = { provider: $('#todo-provider').value, source: $('#todo-source').value, item };
+    loadTodoDetail();
+  };
   return el('article', { class: 'todo-item' },
-    el('div', { class: 'todo-heading' }, el('h3', { textContent: `#${item.id} · ${item.title}` }), open),
-    el('div', { class: 'todo-context' }, badge(tx(item.state), 'info'), el('span', { textContent: item.project })),
+    el('div', { class: 'todo-heading' }, el('h3', {}, select), todoOriginal(item)),
+    el('div', { class: 'todo-context' }, badge(tx(item.state), 'info'), badge(tx(item.kind || 'HU'), 'muted'), el('span', { textContent: item.project })),
     el('dl', { class: 'todo-dates' }, todoDate(t('Created'), item.created_at), ...item.dates.map(date => todoDate(tx(date.name), date.value))));
 }
+function closeTodoDetail(restore = true) {
+  ++todoDetailRequest;
+  todoSelection = null;
+  $('#todo-detail').hidden = true;
+  $('#todo-master').hidden = false;
+  if (restore) {
+    todoReturnFocus?.focus({ preventScroll: true });
+    window.scrollTo(0, todoListScroll);
+  }
+}
+function todoSafeUrl(raw, base) {
+  try {
+    const url = new URL(raw, base);
+    return url.protocol === 'https:' && !url.username && !url.password ? url.href : null;
+  } catch { return null; }
+}
+/** Render the core's safe rich-text tree; provider HTML never enters the browser's parser. */
+function todoRich(text, format, base, content) {
+  if (format !== 'html') return format === 'markdown' ? markdown(text) : el('div', { class: 'todo-text', textContent: text });
+  if (!Array.isArray(content)) return el('div', { class: 'todo-text', textContent: text });
+  const root = el('div', { class: 'md' });
+  const allowed = new Set(['p', 'div', 'span', 'strong', 'b', 'em', 'i', 'u', 's', 'del', 'br', 'ul', 'ol', 'li', 'pre', 'code', 'blockquote', 'hr', 'table', 'thead', 'tbody', 'tr', 'th', 'td']);
+  let remaining = 12000;
+  let clipped = false;
+  function rebuild(node, parent, depth = 0) {
+    if (--remaining < 0 || depth > 40) { clipped = true; return; }
+    if (node.tag === 'notice') { clipped = true; return; }
+    if (node.tag === 'text') { parent.append(node.text || ''); return; }
+    if (node.tag === 'a' || node.tag === 'img') {
+      const url = node.url && todoSafeUrl(node.url, base);
+      const label = node.tag === 'img' ? node.text || t('View image') : richLabel(node) || url || '';
+      parent.append(url ? link(label, url) : label);
+      return;
+    }
+    const tag = /^h[1-6]$/.test(node.tag) ? 'h3' : allowed.has(node.tag) ? node.tag : null;
+    if (!tag) return;
+    const safe = el(tag);
+    for (const child of node.children || []) rebuild(child, safe, depth + 1);
+    parent.append(tag === 'table' ? el('div', { class: 'table' }, safe) : safe);
+  }
+  const richLabel = node => (node.text || '') + (node.children || []).map(richLabel).join('');
+  for (const node of content) rebuild(node, root);
+  if (clipped) root.append(el('p', { class: 'hint', textContent: t('This text is too long to display completely. Open the original item for the full content.') }));
+  return root;
+}
+function todoValue(field, base) {
+  const value = field.value;
+  if (value === null || value === undefined || value === '') return el('span', { class: 'hint', textContent: t('Not recorded') });
+  if (field.kind === 'dateTime') return todoDate(tx(field.name), value).lastChild.firstChild;
+  const text = typeof value === 'object' ? value.displayName || value.uniqueName || JSON.stringify(value, null, 2) : String(value);
+  if (field.kind === 'boolean') return el('span', { textContent: value ? t('Yes') : t('No') });
+  if (todoSafeUrl(text, base) && /^https:\/\//.test(text)) return link(text, text);
+  return todoRich(text, field.kind, base, field.content);
+}
+function todoFields(fields, base) {
+  return el('dl', { class: 'todo-fields' }, ...fields.map(field => el('div', {}, el('dt', { textContent: tx(field.name) }), el('dd', {}, todoValue(field, base)))));
+}
+function todoFold(label, children, count) {
+  return el('details', { class: 'panel fold-panel' }, el('summary', {}, label, count === undefined ? null : el('span', { class: 'count', textContent: count })), ...children);
+}
+function renderTodoDetail(detail) {
+  const item = detail.item;
+  const base = item.url;
+  const prominent = new Set(['System.AssignedTo', 'assignees', 'System.AreaPath', 'System.IterationPath', 'System.Tags', 'Microsoft.VSTS.Common.Priority', 'Microsoft.VSTS.Common.Severity', 'labels', 'milestone', 'milestone_due', 'user']);
+  const shown = detail.fields.filter(field => prominent.has(field.reference));
+  if (!shown.some(field => ['System.AssignedTo', 'assignees'].includes(field.reference))) shown.unshift({ reference: 'System.AssignedTo', name: 'Assigned To', kind: 'string', value: null });
+  const content = detail.fields.filter(field => field.reference !== 'System.History' && ((field.value && ['html', 'markdown', 'plainText'].includes(field.kind)) || /description|acceptancecriteria|reprosteps/i.test(field.reference) || (/evidence/i.test(field.reference) && typeof field.value === 'string')));
+  const contentOrder = ['System.Description', 'body', 'Microsoft.VSTS.Common.AcceptanceCriteria', 'Microsoft.VSTS.TCM.ReproSteps', 'Microsoft.VSTS.TCM.SystemInfo'];
+  const contentRank = field => contentOrder.includes(field.reference) ? contentOrder.indexOf(field.reference) : contentOrder.length;
+  content.sort((a, b) => contentRank(a) - contentRank(b) || a.name.localeCompare(b.name));
+  const header = el('div', { class: 'panel todo-detail-header' },
+    el('div', { class: 'todo-context' }, badge(tx(item.kind), 'muted'), badge(tx(item.state), 'info'), el('span', { textContent: item.project })),
+    el('div', { class: 'todo-heading' }, el('h2', { id: 'todo-detail-title', tabIndex: -1, textContent: `#${item.id} · ${item.title}` }), todoOriginal(item)),
+    todoFields(shown, base),
+    el('dl', { class: 'todo-dates' }, todoDate(t('Created'), item.created_at), ...item.dates.map(date => todoDate(tx(date.name), date.value))));
+  const panels = content.map(field => el('section', { class: 'panel' }, el('h2', { textContent: tx(field.name) }), todoValue(field, base)));
+  const relations = detail.relations.map(relation => el('div', { class: 'todo-relation' }, badge(tx(relation.name), 'muted'), relation.url && todoSafeUrl(relation.url, base) ? link(relation.detail || relation.url, relation.url) : el('span', { textContent: relation.detail })));
+  const comments = detail.comments.map(comment => el('article', { class: 'todo-comment' },
+    el('div', { class: 'todo-context' }, el('strong', { textContent: comment.author || t('Unknown author') }), comment.created_at ? el('time', { dateTime: comment.created_at, textContent: new Date(comment.created_at).toLocaleString(uiLocale(), { dateStyle: 'medium', timeStyle: 'short' }) }) : null,
+      comment.modified_at && comment.modified_at !== comment.created_at ? el('span', { textContent: t('Edited') }) : null), todoRich(comment.text, comment.format, base, comment.content)));
+  const history = detail.history.map(change => el('article', { class: 'todo-comment' }, el('div', { class: 'todo-context' }, el('strong', { textContent: change.author || t('Unknown author') }), change.at ? el('time', { dateTime: change.at, textContent: new Date(change.at).toLocaleString(uiLocale(), { dateStyle: 'medium', timeStyle: 'short' }) }) : null),
+    todoFields(change.fields.map(field => ({ ...field, kind: 'string', value: typeof field.value === 'object' && field.value !== null && ('newValue' in field.value || 'oldValue' in field.value) ? `${todoHistoryValue(field.value.oldValue)} → ${todoHistoryValue(field.value.newValue)}` : field.value })), base)));
+  $('#todo-detail-content').replaceChildren(header,
+    ...(detail.partial ? [ el('div', { class: 'callout warn', role: 'status' }, ...detail.warnings.map(warning => el('p', { textContent: tx(warning) })))] : []),
+    ...panels,
+    el('section', { class: 'panel' }, el('div', { class: 'panel-head' }, el('h2', { textContent: t('Comments') }), el('span', { class: 'count', textContent: comments.length })), ...(comments.length ? comments : [el('p', { class: 'hint', textContent: t('No comments to show.') })])),
+    el('section', { class: 'panel' }, el('div', { class: 'panel-head' }, el('h2', { textContent: t('Links and evidence') }), el('span', { class: 'count', textContent: relations.length })), ...(relations.length ? relations : [el('p', { class: 'hint', textContent: t('No linked items to show.') })])),
+    todoFold(t('All fields'), [todoFields(detail.fields, base)], detail.fields.length),
+    todoFold(t('Change history'), history.length ? history : [el('p', { class: 'hint', textContent: t('No history to show.') })], history.length));
+}
+function todoHistoryValue(value) {
+  if (value === undefined || value === null) return t('Not recorded');
+  return typeof value === 'object' ? value.displayName || value.uniqueName || JSON.stringify(value) : String(value);
+}
+async function loadTodoDetail() {
+  if (!todoSelection) return;
+  const selected = todoSelection;
+  const request = ++todoDetailRequest;
+  $('#todo-master').hidden = true;
+  $('#todo-detail').hidden = false;
+  $('#todo-detail-content').replaceChildren();
+  $('#todo-detail-content').setAttribute('aria-busy', 'true');
+  $('#todo-detail-problem').hidden = true;
+  $('#todo-detail-progress').textContent = t('Loading detail…');
+  $('#todo-detail-refresh').disabled = true;
+  $('#todo-back').focus({ preventScroll: true });
+  $('#todo-detail').scrollIntoView({ block: 'start' });
+  try {
+    const args = { id: selected.item.id, project: selected.item.project };
+    if (selected.provider === 'azure') args.source = selected.source;
+    const detail = await invoke(selected.provider === 'azure' ? 'get_azure_hu' : 'get_github_epic', args);
+    if (request !== todoDetailRequest) return;
+    renderTodoDetail(detail);
+    $('#todo-detail-title').focus({ preventScroll: true });
+    $('#todo-detail-progress').textContent = '';
+  } catch (error) {
+    if (request !== todoDetailRequest) return;
+    $('#todo-detail-progress').textContent = '';
+    $('#todo-detail-problem').hidden = false;
+    $('#todo-detail-problem').textContent = tx(String(error?.message ?? error));
+    $('#todo-detail-content').replaceChildren(el('p', { class: 'hint', textContent: t('Open the original item or refresh to try again.') }), todoOriginal(selected.item));
+  } finally {
+    if (request === todoDetailRequest) {
+      $('#todo-detail-content').setAttribute('aria-busy', 'false');
+      $('#todo-detail-refresh').disabled = false;
+    }
+  }
+}
 async function loadTodo() {
+  closeTodoDetail(false);
   const request = ++todoRequest;
   const azure = $('#todo-provider').value === 'azure';
   const sources = todoSources();
-  $('#todo-title').textContent = azure ? t('My HUs') : t('My epics');
+  $('#todo-title').textContent = azure ? t('My HUs and bugs') : t('My epics');
+  $('#todo-kind-field').hidden = !azure;
   $('#todo-list').replaceChildren();
   $('#todo-list').setAttribute('aria-busy', 'true');
   $('#todo-progress').textContent = t('Loading…');
@@ -187,7 +331,10 @@ async function loadTodo() {
   try {
     if (azure && !sources.length) throw t('Configure an Azure DevOps activity source in Knowledge to see your HUs.');
     const args = { limit: Number($('#todo-limit').value) };
-    if (azure) args.source = $('#todo-source').value;
+    if (azure) {
+      args.source = $('#todo-source').value;
+      if ($('#todo-kind').value) args.kind = $('#todo-kind').value;
+    }
     if ($('#todo-state').value) args.state = $('#todo-state').value;
     const result = await invoke(azure ? 'list_azure_hus' : 'list_github_epics', args);
     if (request !== todoRequest) return;
@@ -195,7 +342,7 @@ async function loadTodo() {
     $('#todo-state').replaceChildren(el('option', { value: '', textContent: t('All states') }), ...result.states.map(state => el('option', { value: state, textContent: tx(state) })));
     $('#todo-state').value = selected;
     $('#todo-assignment').textContent = azure
-      ? t('Your developer assignment: {fields}', { fields: result.assignment_fields.join(', ') })
+      ? t('Your assignment fields: {fields}', { fields: result.assignment_fields.join(', ') })
       : t('Issues of type Epic assigned to your connected GitHub account. GitHub provides open and closed states; unavailable dates stay empty.');
     $('#todo-list').replaceChildren(...result.items.map(todoItem));
     if (!result.items.length) $('#todo-list').append(el('p', { class: 'empty', textContent: t('No items match these filters. Try another state.') }));
@@ -2483,6 +2630,12 @@ $('#todo-source').onchange = () => {
   $('#todo-state').replaceChildren(el('option', { value: '', textContent: t('All states') }));
   loadTodo();
 };
+$('#todo-kind').onchange = () => {
+  $('#todo-state').replaceChildren(el('option', { value: '', textContent: t('All states') }));
+  loadTodo();
+};
+$('#todo-back').onclick = () => closeTodoDetail();
+$('#todo-detail-refresh').onclick = () => loadTodoDetail();
 $('#todo-state').onchange = () => loadTodo();
 $('#todo-limit').onchange = () => loadTodo();
 $('#todo-refresh').onclick = () => busy($('#todo-refresh'), loadTodo);

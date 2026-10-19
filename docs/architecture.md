@@ -29,7 +29,8 @@ src/                          core: pipeline, Graph adapters, LLM, knowledge, to
   llm/deepseek.rs             DeepSeek API (`/chat/completions`)
   llm/agent.rs                Codex (`codex exec`) and Claude Code (`claude -p`) as tool-less CLIs; catalog
   ado.rs                      Azure DevOps activity for status questions (work items, commits, pipelines)
-  ado/todo.rs                 personal HUs by process-defined developer roles, states and dates
+  ado/todo.rs                 personal HUs and bugs by process-defined assignment, states and dates
+  ado/detail.rs               full HU/bug fields, comments, relations and history within that catalog
   tools/todo.rs               typed To-Do filters/results and canonical provider link validation
   ado/progress.rs             a work item a status request names, read directly whoever holds it now
   ado/review.rs               activity review: own work compared with work items, verified links
@@ -444,12 +445,14 @@ not another GUI section. CLI capabilities advertise `tools_support` and `todo_su
 
 `list_azure_hus` and `list_github_epics` are read-only host methods shared by To-Do, CLI tools
 and MCP. They need no running Teams service or model and never change source audiences.
-`tools/todo.rs` defines `Filters` (optional source/project/state, limit 1–100, default 10),
+`tools/todo.rs` defines `Filters` (optional source/project/state/kind (hu or bug), limit 1–100, default 10),
 `List` (items, all states, projects, assignment fields, partial coverage/warnings and has_more),
 and item dates retaining their field reference, display name and nullable value.
 `ado/todo.rs` reads an enabled Azure activity source's catalog, resolves `*` to the user's team
-projects and discovers requirement-category HU types, workflow states and developer identity
-fields. All developer roles are ORed; Assigned To is used only if no developer role exists.
+projects and discovers requirement-category HU and bug-category types, workflow states and developer identity
+fields. Assignment is checked separately per type: all its developer roles are ORed, with
+Assigned To used only when that type has no developer role. The default includes both categories;
+`kind` narrows the category before querying and limiting.
 WIQL filters assignment/type/project/state and orders creation descending; the item read requests
 only displayed/verification fields, and verifies assignment and scope again. Every start/finish,
 target and closure date field stays distinct, including development dates. There is no recent
@@ -462,6 +465,19 @@ to its authenticated user and verifies type, assignee and canonical issue URLs. 
 open/closed and optionally OWNER/REPO. GitHub supplies creation/closure; an unavailable start is
 null. `open_work_item` validates canonical HTTPS Azure/GitHub item links before calling the
 host's shell. The portal opens its returned item links with target=_blank.
+
+`get_azure_hu` and `get_github_epic` are read-only detail operations in the same catalog,
+CLI/MCP adapters, dispatcher read lists and portal allowlist. `DetailRequest` requires a positive
+ID; GitHub also requires OWNER/REPO. Azure verifies the response ID, configured project and
+process requirement/bug category without restricting current assignment; duplicate IDs across
+catalog organizations fail as ambiguous. It reads every returned standard/custom field with
+organization field metadata, comments (7.1-preview.4, at most 500 latest), updates (first 200)
+and original relations. It resolves at most 200 related work item titles in scope and turns
+supported vstfs Git branch/PR/commit/build artifacts into pinned Azure web links. GitHub verifies
+issue type, number and canonical repository URL, then reads fields, comments/sub-issues (500 each)
+and events (200) through constructed API URLs, never response URLs with the credential. Missing
+sections and bounds set `partial` with explicit warnings. All clients have timeouts, bounded
+responses and no redirects; these tools make no external writes and change no audiences.
 
 `pta [--json] [--non-interactive] COMMAND`. `pta`, `pta help`, `--help` or `-h` show the help in English with every command described (a test requires it to document every accepted command). `--json` prints `{contract, version, ok, code, exit_code, message, data, revision}`; without `--json`, `status`, `start`, `stop`, `restart` and `app quit` print a readable summary and the rest print the data as JSON. Progress goes to stderr, no streaming. Credentials only on non-interactive stdin (≤16 KiB). `pta --help` is the command reference.
 
@@ -481,7 +497,13 @@ To add an operation: a method in `control::operate` (window or browser only thro
 
 ## 11. GUI
 
-- **To-Do**: daily work next to Home, with the existing section tile, panel, controls and date metadata.
+- **To-Do**: daily work next to Home, with provider/type/state/count filters and pressable cards.
+  Detail reads keep process-specific rich fields (HU criteria, bug reproduction/severity, GitHub
+  epic description/milestone), assignment, discussion and evidence prominent; all fields and
+  history fold below. Back preserves list/filter/scroll/focus; refresh, partial warnings, inline
+  errors and stale-response guards apply to both views. Provider HTML is parsed by the core with `scraper` into bounded `RichNode` trees,
+  then built by the UI from allowed tags and text without browser HTML parsing or original attributes; external images become links, with no content execution or remote
+  image loads. The external-link icon remains separate from opening detail.
   Provider, state and count selectors call the shared list tools (10 items by default), with an
   Azure source selector when needed. Rows retain each HU and development date separately,
   and show unavailable dates explicitly. Errors and partial coverage appear inline; request
@@ -582,7 +604,9 @@ node --test scripts/test-activity-ui.cjs scripts/test-ui-i18n.cjs    # GUI logic
 
 - To-Do GitHub epics are issues of type Epic, with native open/closed states. Project-board custom
   workflow states and dates are not read; unavailable issue start dates remain null. The GitHub
-  App must already have Issues read access. Azure To-Do stays within the configured catalog and
+  App must already have Issues read access. Detail images/attachments remain original links,
+  without inline image previews; process form extensions and GitHub Project-board layouts are
+  not reproduced. Large discussions/histories report their documented bounds. Azure To-Do stays within the configured catalog and
   team projects; it does not widen the source to unrelated organization projects.
 
 - One Teams identity per profile. Team channels are not supported.

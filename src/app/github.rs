@@ -1,5 +1,7 @@
+mod detail;
 use crate::security;
 use anyhow::{Context, Result, ensure};
+pub(super) use detail::epic;
 use regex::Regex;
 use reqwest::{Client, Response};
 use serde::{Deserialize, Serialize};
@@ -236,7 +238,10 @@ async fn epics_with(
 ) -> Result<crate::tools::todo::List> {
     use crate::tools::todo::{Date, Item, List, validate_link};
     use serde_json::Value;
-    ensure!(filters.source.is_none(), "invalid GitHub source filter");
+    ensure!(
+        filters.source.is_none() && filters.kind.is_none(),
+        "invalid GitHub source or kind filter"
+    );
     ensure!(
         filters
             .state
@@ -245,14 +250,7 @@ async fn epics_with(
         "invalid GitHub state: use open or closed"
     );
     if let Some(repo) = &filters.project {
-        let parts: Vec<_> = repo.split('/').collect();
-        ensure!(
-            parts.len() == 2
-                && parts.iter().all(|s| !s.is_empty()
-                    && s.chars()
-                        .all(|c| c.is_ascii_alphanumeric() || "._-".contains(c))),
-            "invalid GitHub repository"
-        );
+        crate::tools::todo::validate_repository(repo)?;
     }
     let user: Value = get(client, token, &format!("{base}user")).await?;
     let login = user["login"]
@@ -352,6 +350,7 @@ async fn epics_with(
             url: raw.into(),
             project: repo,
             state: state.into(),
+            kind: "Epic".into(),
             created_at: issue["created_at"].as_str().map(str::to_owned),
             dates: vec![
                 Date {

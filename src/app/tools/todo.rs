@@ -4,21 +4,41 @@ use crate::{
     knowledge::{Access, KnowledgeMap},
     security,
     state::Store,
-    tools::{ToolSpec, todo::Filters},
+    tools::{
+        ToolSpec,
+        todo::{DetailRequest, Filters},
+    },
 };
 use serde_json::Value;
 
-pub(in crate::app) async fn list(
+pub(in crate::app) async fn read(
     state: &DesktopState,
     method: &str,
     args: &Value,
 ) -> Result<Value, String> {
-    let filters: Filters = serde_json::from_value(args.clone())
-        .map_err(|_| "[invalid_input] Invalid To-Do filters.".to_owned())?;
+    let github_read = matches!(method, "list_github_epics" | "get_github_epic");
+    let detail: Option<DetailRequest> = if method.starts_with("get_") {
+        let args: DetailRequest = serde_json::from_value(args.clone())
+            .map_err(|_| "[invalid_input] Invalid work item arguments.".to_owned())?;
+        args.validate(github_read)
+            .map_err(|e| format!("[invalid_input] {e}"))?;
+        Some(args)
+    } else {
+        None
+    };
+    let filters: Filters = match &detail {
+        Some(args) => Filters {
+            source: args.source.clone(),
+            project: args.project.clone(),
+            ..Default::default()
+        },
+        None => serde_json::from_value(args.clone())
+            .map_err(|_| "[invalid_input] Invalid To-Do filters.".to_owned())?,
+    };
     filters
         .validate()
         .map_err(|e| format!("[invalid_input] {e}"))?;
-    let result = if method == "list_github_epics" {
+    let result = if github_read {
         if security::secret_source("GITHUB_OAUTH_TOKENS")
             .map_err(fail)?
             .is_none()
@@ -26,9 +46,13 @@ pub(in crate::app) async fn list(
             return Err("[not_ready] Connect GitHub in Knowledge before listing epics.".into());
         }
         let _guard = state.github_api.lock().await;
-        tokio::time::timeout(std::time::Duration::from_secs(90), github::epics(&filters)).await
-            .map_err(|_| "[network] GitHub Epic read timed out.".to_owned())?
-            .map_err(|_| "[network] GitHub epics could not be read; check the connection and Issues read access.".to_owned())?
+        tokio::time::timeout(std::time::Duration::from_secs(90), async {
+            match &detail {
+                Some(args) => serde_json::to_value(github::epic(args).await?),
+                None => serde_json::to_value(github::epics(&filters).await?),
+            }.map_err(anyhow::Error::from)
+        }).await.map_err(|_| "[network] GitHub Epic read timed out.".to_owned())?
+            .map_err(|error| if error.to_string().starts_with("invalid") { format!("[invalid_input] {error}") } else { "[network] GitHub epics could not be read; check the connection and Issues read access.".into() })?
     } else {
         let config = read_config(&state.config_path).map_err(fail)?;
         let map = KnowledgeMap::load(&state.map_path).map_err(fail)?;
@@ -76,9 +100,13 @@ pub(in crate::app) async fn list(
             .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(fail)?;
-        tokio::time::timeout(std::time::Duration::from_secs(90), crate::ado::todo::list(&client, &key, &catalog, &cache, &filters)).await
-            .map_err(|_| "[network] Azure HU read timed out.".to_owned())?
+        tokio::time::timeout(std::time::Duration::from_secs(90), async {
+            match &detail {
+                Some(args) => serde_json::to_value(crate::ado::detail::get(&client, &key, &catalog, &cache, args).await?),
+                None => serde_json::to_value(crate::ado::todo::list(&client, &key, &catalog, &cache, &filters).await?),
+            }.map_err(anyhow::Error::from)
+        }).await.map_err(|_| "[network] Azure HU read timed out.".to_owned())?
             .map_err(|error| if error.to_string().starts_with("invalid") { format!("[invalid_input] {error}") } else { "[network] Azure HUs could not be read; check the catalog, team membership and read credential.".into() })?
     };
-    serde_json::to_value(result).map_err(fail)
+    Ok(result)
 }
