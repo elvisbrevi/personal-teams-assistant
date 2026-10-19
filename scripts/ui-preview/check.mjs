@@ -35,7 +35,7 @@ const scan = page => page.evaluate(async () => (await axe.run(document, { runOnl
 for (const [label, ctx] of [['desktop-light', {}], ['desktop-dark', { colorScheme: 'dark' }], ['phone', { viewport: { width: 393, height: 852 }, isMobile: true, hasTouch: true }]]) {
   const { context, page } = await open({ axe: true, context: ctx });
   await page.evaluate(axeSource);
-  for (const tab of ['overview', 'messages', 'registration', 'knowledge', 'chat', 'settings']) {
+  for (const tab of ['overview', 'todo', 'messages', 'registration', 'knowledge', 'chat', 'settings']) {
     await page.evaluate(t => showTab(t), tab);
     await page.waitForTimeout(300);
     // Every tab of the section's tab list (Settings sections, Activities and Knowledge views) is scanned.
@@ -72,7 +72,43 @@ check('axe: no WCAG 2.2 AA violations in any scan', !Object.keys(totals).length,
   const { context, page, errors } = await open();
   // Navigation order and Settings in the footer
   const order = await page.$$eval('nav [data-tab]', b => b.map(x => x.dataset.tab));
-  check('nav order: daily work first, Settings last', JSON.stringify(order) === JSON.stringify(['overview', 'messages', 'registration', 'knowledge', 'chat', 'settings']), order.join(','));
+  check('nav order: daily work first, Settings last', JSON.stringify(order) === JSON.stringify(['overview', 'todo', 'messages', 'registration', 'knowledge', 'chat', 'settings']), order.join(','));
+  await page.click('nav [data-tab="todo"]');
+  await page.waitForTimeout(200);
+  check('To-Do initially requests ten Azure HUs', await page.evaluate(() => window.__ptaLastTodo?.provider === 'azure' && window.__ptaLastTodo?.limit === 10) && await page.locator('.todo-item').count() === 10);
+  check('To-Do includes states without assigned items', await page.locator('#todo-state option[value="Awaiting validation"]').count() === 1);
+  check('To-Do keeps both HU and development date pairs', await page.locator('.todo-item:first-child .todo-dates dt').count() === 5);
+  await page.click('.todo-item:first-child .icon-button');
+  await page.waitForFunction(() => window.__ptaOpenedWorkItem);
+  check('native To-Do link uses the host browser operation', await page.evaluate(() => window.__ptaOpenedWorkItem?.endsWith('/5000')));
+  await page.selectOption('#todo-state', 'Finished');
+  await page.waitForTimeout(200);
+  check('To-Do state filter reaches the backend tool', await page.evaluate(() => window.__ptaLastTodo?.state === 'Finished') && await page.locator('.todo-item').count() === 7);
+  await page.selectOption('#todo-state', 'Awaiting validation');
+  await page.waitForTimeout(200);
+  check('To-Do has a filtered empty state', await page.isVisible('#todo-list .empty'));
+  await page.selectOption('#todo-state', '');
+  await page.selectOption('#todo-limit', '25');
+  await page.waitForTimeout(200);
+  check('To-Do limit reaches the backend tool', await page.evaluate(() => window.__ptaLastTodo?.limit === 25) && await page.locator('.todo-item').count() === 15);
+  await page.evaluate(() => { window.__ptaTodoError = true; });
+  await page.click('#todo-refresh');
+  await page.waitForTimeout(200);
+  check('To-Do reports read errors inline and clears old items', await page.isVisible('#todo-problem') && await page.locator('.todo-item').count() === 0);
+  await page.evaluate(() => { window.__ptaTodoError = false; window.__ptaTodoDelay = 250; });
+  await page.click('#todo-refresh');
+  await page.selectOption('#todo-provider', 'github');
+  await page.waitForTimeout(400);
+  check('To-Do ignores an older Azure response after switching provider', await page.locator('.todo-item').count() === 1 && (await page.textContent('#todo-list')).includes('Billing platform'));
+  check('GitHub offers its native issue states and unavailable dates', await page.locator('#todo-state option[value="closed"]').count() === 1 && (await page.textContent('#todo-list')).includes('Sin registrar'));
+  await page.evaluate(() => { window.ptaTransport.browser = true; });
+  await page.click('#todo-refresh');
+  await page.waitForTimeout(200);
+  check('portal To-Do links open a new tab with opener protection', await page.locator('#todo-list a[target="_blank"][rel="noopener noreferrer"]').count() === 1);
+  await page.evaluate(() => { window.ptaTransport.browser = false; });
+  await page.evaluate(() => { window.__ptaTodoDelay = 0; });
+  await page.screenshot({ path: `${out}/desktop-todo.png`, fullPage: true });
+  await page.click('nav [data-tab="overview"]');
   // Banner only on Home
   const bannerHome = await page.isVisible('#activity-notice');
   await page.click('nav [data-tab="knowledge"]');
@@ -320,7 +356,19 @@ check('axe: no WCAG 2.2 AA violations in any scan', !Object.keys(totals).length,
 {
   const { context, page } = await open({ context: { viewport: { width: 393, height: 852 }, isMobile: true, hasTouch: true } });
   const columns = await page.$eval('nav', n => getComputedStyle(n).gridTemplateColumns.split(' ').length);
-  check('phone: five sections in the tab bar', columns === 5, `${columns} columns`);
+  check('phone: five destinations in the tab bar', columns === 5, `${columns} columns`);
+  await page.click('nav [data-tab="todo"]');
+  await page.waitForTimeout(200);
+  check('phone: To-Do has a direct tab and 44px link targets', await page.isVisible('#todo') && await page.$eval('.todo-item .icon-button', button => button.getBoundingClientRect().height >= 44));
+  await page.click('#nav-more');
+  check('phone: More reveals Knowledge and Test chat', await page.isVisible('nav [data-tab="knowledge"]') && await page.isVisible('nav [data-tab="chat"]'));
+  await page.keyboard.press('Tab');
+  check('phone: Tab enters the More disclosure in reading order', await page.evaluate(() => document.activeElement?.dataset.tab === 'knowledge'));
+  await page.keyboard.press('Escape');
+  check('phone: Escape closes More and restores focus', await page.getAttribute('#nav-more', 'aria-expanded') === 'false' && await page.evaluate(() => document.activeElement.id === 'nav-more'));
+  await page.click('#nav-more');
+  await page.click('nav [data-tab="knowledge"]');
+  check('phone: secondary navigation closes after selecting a section', await page.isVisible('#knowledge') && await page.getAttribute('#nav-more', 'aria-expanded') === 'false');
   const box = await page.locator('nav .nav-settings').boundingBox();
   check('phone: Settings sits in the title bar', box && box.y < 60 && box.width >= 44, JSON.stringify(box));
   await page.click('nav .nav-settings');

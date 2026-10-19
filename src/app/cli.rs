@@ -121,6 +121,10 @@ Knowledge
   azure wiki list|search|read SOURCE_ID  (search/read: JSON on stdin; local read only)
 
 Agents
+  tools list               Shared application tools, their filters and effects (no host required).
+  tools call NAME          Calls a shared tool with JSON on stdin; external actions require confirmed:true.
+                           list_azure_hus: source, project, state, limit (default 10, maximum 100).
+                           list_github_epics: project (OWNER/REPO), state (open|closed), limit.
   capabilities             Contract and commands as JSON.
   mcp                      Model Context Protocol server over stdio for agents (Codex, Claude Code): every
                            operation of the app as a tool; sending, Azure DevOps writes, access and mode changes
@@ -266,6 +270,8 @@ fn validate_args(args: &[String]) -> Result<()> {
             | ["app", "open" | "hide" | "quit"]
             | ["mcp"]
             | ["mcp", "config"]
+            | ["tools", "list"]
+            | ["tools", "call", _]
             | ["web", "status" | "configure" | "callbacks"]
             | ["web", "users", "list"]
             | [
@@ -414,13 +420,43 @@ async fn execute(mut args: Vec<String>) -> Result<Reply> {
     if command == "web" {
         return super::web::admin(&args);
     }
-    if !matches!(command, "capabilities" | "skill") && !offline {
+    if !matches!(command, "capabilities" | "skill" | "tools") && !offline {
         retire_outdated_host(command, action, !non_interactive && !json_output).await?;
     }
     match command {
+        "tools" => {
+            if action == "list" {
+                return Ok(Reply::success(super::tools::catalog()));
+            }
+            let name = positional(&args, 2)?;
+            let value = input()?;
+            if super::tools::validate(name, &value).is_err() {
+                return Ok(Reply::error(
+                    "invalid_input",
+                    2,
+                    "Invalid tool arguments. Consult pta tools list for the input schema.",
+                ));
+            }
+            if let Some(question) = super::tools::confirmation(name, &value)
+                && value["confirmed"] != true
+            {
+                return Ok(Reply::error(
+                    "invalid_input",
+                    2,
+                    &format!(
+                        "Confirm this exact action before calling with confirmed:true: {question}"
+                    ),
+                ));
+            }
+            retire_outdated_host(command, action, !non_interactive && !json_output).await?;
+            return match super::tools::run(name, &value).await {
+                Ok(data) => Ok(Reply::success(data)),
+                Err(message) => Ok(Reply::error("operation_failed", 1, &message)),
+            };
+        }
         "capabilities" => {
             return Ok(Reply::success(
-                json!({"contract":control::CONTRACT,"commands":HELP,"skill_version":env!("CARGO_PKG_VERSION"),"activity_registration_support":true,"web_support":true,"web_access_support":true,"knowledge_index_support":true,"mcp_support":true}),
+                json!({"contract":control::CONTRACT,"commands":HELP,"skill_version":env!("CARGO_PKG_VERSION"),"activity_registration_support":true,"web_support":true,"web_access_support":true,"knowledge_index_support":true,"mcp_support":true,"tools_support":true,"todo_support":true}),
             ));
         }
         "skill" => return crate::app::skill::command(action, args.get(2).map(String::as_str)),
@@ -1291,6 +1327,8 @@ mod help_tests {
             &["capabilities"],
             &["mcp"],
             &["mcp", "config"],
+            &["tools", "list"],
+            &["tools", "call", "list_azure_hus"],
             &["status"],
             &["doctor"],
             &["start"],

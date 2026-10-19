@@ -34,6 +34,7 @@ mod headless;
 mod mcp;
 mod notes;
 mod skill;
+mod tools;
 mod web;
 
 /// What the process owning the host can do beyond operations: a Tauri window, or nothing.

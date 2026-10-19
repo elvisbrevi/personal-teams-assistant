@@ -214,6 +214,163 @@ async fn get<T: for<'a> Deserialize<'a>>(client: &Client, token: &str, url: &str
     checked_json(response).await
 }
 
+/// Issues of type Epic assigned to the connected GitHub user, newest first.
+pub(super) async fn epics(
+    filters: &crate::tools::todo::Filters,
+) -> Result<crate::tools::todo::List> {
+    filters.validate()?;
+    epics_with(
+        &client()?,
+        &access_token().await?,
+        "https://api.github.com/",
+        filters,
+    )
+    .await
+}
+
+async fn epics_with(
+    client: &Client,
+    token: &str,
+    base: &str,
+    filters: &crate::tools::todo::Filters,
+) -> Result<crate::tools::todo::List> {
+    use crate::tools::todo::{Date, Item, List, validate_link};
+    use serde_json::Value;
+    ensure!(filters.source.is_none(), "invalid GitHub source filter");
+    ensure!(
+        filters
+            .state
+            .as_deref()
+            .is_none_or(|state| ["open", "closed"].contains(&state)),
+        "invalid GitHub state: use open or closed"
+    );
+    if let Some(repo) = &filters.project {
+        let parts: Vec<_> = repo.split('/').collect();
+        ensure!(
+            parts.len() == 2
+                && parts.iter().all(|s| !s.is_empty()
+                    && s.chars()
+                        .all(|c| c.is_ascii_alphanumeric() || "._-".contains(c))),
+            "invalid GitHub repository"
+        );
+    }
+    let user: Value = get(client, token, &format!("{base}user")).await?;
+    let login = user["login"]
+        .as_str()
+        .context("GitHub account unavailable")?;
+    ensure!(
+        !login.is_empty() && login.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'),
+        "invalid GitHub login"
+    );
+    let mut query = format!("is:issue assignee:{login} type:\"Epic\"");
+    if let Some(state) = &filters.state {
+        query.push_str(&format!(" state:{state}"));
+    }
+    if let Some(repo) = &filters.project {
+        query.push_str(&format!(" repo:{repo}"));
+    }
+    let mut url = url::Url::parse(&format!("{base}search/issues"))?;
+    url.query_pairs_mut()
+        .append_pair("q", &query)
+        .append_pair("sort", "created")
+        .append_pair("order", "desc")
+        .append_pair("per_page", &filters.limit.to_string());
+    let found: Value = get(client, token, url.as_str()).await?;
+    let mut result = List {
+        states: vec!["open".into(), "closed".into()],
+        assignment_fields: vec!["Assignees".into()],
+        ..Default::default()
+    };
+    if found["incomplete_results"] == true {
+        result.warn(
+            "GitHub returned incomplete search results; refresh or narrow the repository filter."
+                .into(),
+        );
+    }
+    let items = found["items"]
+        .as_array()
+        .context("invalid GitHub Epic search")?;
+    result.has_more = found["total_count"]
+        .as_u64()
+        .is_some_and(|total| total > items.len() as u64);
+    for issue in items {
+        if issue.get("pull_request").is_some() {
+            continue;
+        }
+        if !issue["assignees"].as_array().is_some_and(|a| {
+            a.iter().any(|u| {
+                u["login"]
+                    .as_str()
+                    .is_some_and(|u| u.eq_ignore_ascii_case(login))
+            })
+        }) {
+            continue;
+        }
+        let id = issue["number"].as_u64().context("invalid Epic number")?;
+        let raw = issue["html_url"].as_str().context("invalid Epic link")?;
+        let link = validate_link(raw)?;
+        ensure!(link.host_str() == Some("github.com"), "invalid Epic link");
+        let parts: Vec<_> = link
+            .path_segments()
+            .context("invalid Epic repository")?
+            .collect();
+        ensure!(parts[3] == id.to_string(), "invalid Epic link number");
+        let repo = format!("{}/{}", parts[0], parts[1]);
+        if filters
+            .project
+            .as_ref()
+            .is_some_and(|p| !p.eq_ignore_ascii_case(&repo))
+        {
+            continue;
+        }
+        // Some search versions omit the issue type; verify it through the issue endpoint then.
+        let detail;
+        let issue = if issue["type"]["name"].is_string() {
+            issue
+        } else {
+            detail =
+                get::<Value>(client, token, &format!("{base}repos/{repo}/issues/{id}")).await?;
+            &detail
+        };
+        if !issue["type"]["name"]
+            .as_str()
+            .is_some_and(|kind| kind.eq_ignore_ascii_case("Epic"))
+        {
+            continue;
+        }
+        let state = issue["state"].as_str().context("invalid Epic state")?;
+        if filters.state.as_ref().is_some_and(|s| s != state) {
+            continue;
+        }
+        result.projects.push(repo.clone());
+        result.items.push(Item {
+            id,
+            title: issue["title"]
+                .as_str()
+                .context("invalid Epic title")?
+                .into(),
+            url: raw.into(),
+            project: repo,
+            state: state.into(),
+            created_at: issue["created_at"].as_str().map(str::to_owned),
+            dates: vec![
+                Date {
+                    field: "start_date".into(),
+                    name: "Start date".into(),
+                    value: None,
+                },
+                Date {
+                    field: "closed_at".into(),
+                    name: "Completion date".into(),
+                    value: issue["closed_at"].as_str().map(str::to_owned),
+                },
+            ],
+        });
+    }
+    result.finish(filters.limit);
+    Ok(result)
+}
+
 pub async fn repositories() -> Result<Vec<Repository>> {
     let token = access_token().await?;
     let client = client()?;
@@ -436,5 +593,64 @@ fn git_status(command: &mut Command) -> Result<std::process::ExitStatus> {
             anyhow::bail!("Git operation timed out");
         }
         std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+#[cfg(test)]
+mod todo_tests {
+    use super::*;
+    use serde_json::json;
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{method, path},
+    };
+
+    #[tokio::test]
+    async fn epics_use_issue_type_own_assignment_and_server_side_filters() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/user"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"login":"example-user"})))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET")).and(path("/search/issues")).respond_with(|request: &wiremock::Request| {
+            let params: std::collections::BTreeMap<_,_> = request.url.query_pairs().collect();
+            assert_eq!(params["q"], "is:issue assignee:example-user type:\"Epic\" state:closed repo:example/work");
+            assert_eq!(params["sort"], "created");
+            assert_eq!(params["order"], "desc");
+            assert_eq!(params["per_page"], "10");
+            let issue = |number, kind, user| json!({"number":number,"title":"Plan the release","type":{"name":kind},"state":"closed","created_at":"2026-10-01T12:00:00Z","closed_at":"2026-10-04T12:00:00Z","html_url":format!("https://github.com/example/work/issues/{number}"),"assignees":[{"login":user}]});
+            ResponseTemplate::new(200).set_body_json(json!({"total_count":12,"incomplete_results":false,"items":[issue(1,"Epic","example-user"),issue(2,"Task","example-user"),issue(3,"Epic","someone-else")]}))
+        }).mount(&server).await;
+        let filters: crate::tools::todo::Filters =
+            serde_json::from_value(json!({"state":"closed","project":"example/work"})).unwrap();
+        let result = epics_with(
+            &client().unwrap(),
+            "test-token",
+            &format!("{}/", server.uri()),
+            &filters,
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.items.len(), 1);
+        assert!(result.has_more);
+        assert_eq!(result.states, ["closed", "open"]);
+        assert_eq!(result.items[0].dates[0].value, None);
+        assert_eq!(
+            result.items[0].dates[1].value.as_deref(),
+            Some("2026-10-04T12:00:00Z")
+        );
+        let invalid: crate::tools::todo::Filters =
+            serde_json::from_value(json!({"state":"closed OR assignee:someone-else"})).unwrap();
+        assert!(
+            epics_with(
+                &client().unwrap(),
+                "test-token",
+                &format!("{}/", server.uri()),
+                &invalid
+            )
+            .await
+            .is_err()
+        );
     }
 }

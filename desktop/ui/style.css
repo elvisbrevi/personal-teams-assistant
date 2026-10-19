@@ -16,6 +16,7 @@
   /* Section stickers: the navigation tile, the page tile and the phone's active tab. */
   --c-overview: light-dark(#c5f25a, #bde85a); --c-messages: light-dark(#8ec5ff, #8cc0fb); --c-registration: light-dark(#ffae6b, #fba86a);
   --c-knowledge: light-dark(#bba4ff, #b39cff); --c-chat: light-dark(#ffa6d5, #fb9fcf); --c-settings: light-dark(#ffd95c, #f8d058);
+  --c-todo: var(--ok-fill);
   --primary: var(--c-overview);
   /* States: a text color, a sticker fill and a soft fill for badges, tiles and callouts. Ink text sits on every fill. */
   --ok: light-dark(#136b42, #8fd9a8); --ok-fill: light-dark(#86e0aa, #7fd9a1); --ok-soft: light-dark(#d9f5e2, #1e3a2c);
@@ -69,6 +70,7 @@ nav button { display: flex; align-items: center; justify-content: flex-start; ga
 nav .tile { display: grid; place-items: center; width: 2.15rem; height: 2.15rem; flex: none; border: var(--bw) solid var(--line); border-radius: 11px; background: var(--tile, var(--surface)); color: var(--on-color); }
 nav button[aria-current="page"] { background: var(--inverse); color: var(--inverse-text); border-color: var(--line); box-shadow: var(--shadow); }
 [data-tab="overview"], #overview { --tile: var(--c-overview); }
+[data-tab="todo"], #todo { --tile: var(--c-todo); }
 [data-tab="messages"], #messages { --tile: var(--c-messages); }
 [data-tab="registration"], #registration { --tile: var(--c-registration); }
 [data-tab="knowledge"], #knowledge { --tile: var(--c-knowledge); }
@@ -76,6 +78,8 @@ nav button[aria-current="page"] { background: var(--inverse); color: var(--inver
 [data-tab="settings"], #settings { --tile: var(--c-settings); }
 .nav-gap { display: block; height: 0; margin: .5rem .7rem; border-top: var(--bw) solid var(--rule); }
 .nav-settings { margin-top: auto; }
+.nav-secondary { display: contents; }
+nav .nav-more { display: none; --tile: var(--c-knowledge); }
 .nav-count { margin-left: auto; min-width: 1.5rem; padding: .05rem .42rem; border: var(--bw) solid var(--line); border-radius: 99px; background: var(--error-fill); color: var(--on-color); font-family: var(--display); font-size: .75rem; font-weight: 800; text-align: center; font-variant-numeric: tabular-nums; }
 main { min-width: 0; padding: 1.6rem 2.2rem 6rem; max-width: 1200px; width: 100%; }
 .page-head { display: flex; align-items: flex-start; gap: 1rem; margin-bottom: 1.25rem; }
@@ -161,6 +165,20 @@ nav button, .status-row, .activity-row, .segmented button, .subnav [role=tab], .
 .badge.ok { background: var(--ok-soft); } .badge.warn { background: var(--warn-soft); }
 .badge.error { background: var(--error-soft); } .badge.active { background: var(--active-soft); }
 .badge.info { background: var(--info-soft); } .badge.muted { background: var(--muted-soft); }
+
+/* To-Do */
+.todo-filters { margin-bottom: 1rem; }
+.todo-filters label { min-width: 0; }
+.todo-list { display: grid; }
+.todo-item { padding: 1rem 0; border-top: 1px solid var(--rule); min-width: 0; }
+.todo-heading { display: flex; align-items: flex-start; gap: .75rem; justify-content: space-between; }
+.todo-heading h3 { font-size: 1rem; margin: .25rem 0; overflow-wrap: anywhere; }
+.todo-heading .icon-button { display: inline-flex; align-items: center; justify-content: center; flex: none; min-width: 32px; min-height: 32px; text-decoration: none; }
+.todo-context { display: flex; align-items: center; flex-wrap: wrap; gap: .5rem; font-size: .86rem; color: var(--muted); margin: .35rem 0 .7rem; }
+.todo-context .badge { white-space: normal; }
+.todo-dates { display: flex; flex-wrap: wrap; gap: .65rem 1.5rem; font-size: .82rem; color: var(--muted); margin: 0; }
+.todo-dates dt { font-weight: 600; }
+.todo-dates dd { margin: .15rem 0 0; font-variant-numeric: tabular-nums; }
 
 /* Home: the assistant's face carries its state */
 .hero { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 1rem 1.4rem; padding: 1.2rem 1.4rem; background: var(--surface-2); }
@@ -546,15 +564,22 @@ dialog p { overflow-wrap: anywhere; }
 
 /* Tablets: a top bar with the sections inline */
 @media (max-width: 860px) {
+  nav .nav-more { display: flex; }
+  .nav-secondary { display: none; position: absolute; right: .3rem; top: calc(100% + .75rem); min-width: 12rem; padding: .5rem; border: var(--bw) solid var(--line); border-radius: var(--radius-card); background: var(--surface); box-shadow: var(--shadow-float); }
+  nav.overflow-open .nav-secondary { display: grid; gap: .5rem; }
+  nav .nav-secondary button { justify-content: flex-start; color: var(--text); }
+  nav .nav-secondary button[aria-current="page"] { background: var(--inverse); color: var(--inverse-text); }
+  nav .nav-secondary button span.short { position: static; width: auto; height: auto; overflow: visible; clip: auto; }
+
   .app { grid-template-columns: 1fr; }
-  .sidebar { position: sticky; z-index: 6; height: auto; flex-direction: row; align-items: center; gap: .6rem; padding: .55rem .8rem; border-right: 0; border-bottom: var(--bw) solid var(--line); overflow-x: auto; }
+  .sidebar { position: sticky; z-index: 6; height: auto; flex-direction: row; align-items: center; gap: .6rem; padding: .55rem .8rem; border-right: 0; border-bottom: var(--bw) solid var(--line); overflow: visible; }
   .brand div { display: none; }
   /* Visually hidden, still announced: the dot alone shows the state. */
   .sidebar-foot .pill span { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
   .sidebar-foot .pill { padding: .55rem; }
   .brand { padding: 0; }
   .brand .logo { width: 36px; height: 36px; }
-  nav { flex: 0 1 auto; flex-direction: row; gap: .2rem; }
+  nav { position: relative; flex: 0 1 auto; flex-direction: row; gap: .2rem; }
   nav button { width: auto; min-height: 2.75rem; padding: .25rem .7rem .25rem .25rem; gap: .45rem; white-space: nowrap; font-size: .88rem; }
   nav .tile { width: 1.95rem; height: 1.95rem; border-radius: 10px; }
   .nav-gap { width: 0; height: 1.6rem; margin: auto .25rem; border-top: 0; border-left: var(--bw) solid var(--rule); }
@@ -588,6 +613,8 @@ dialog p { overflow-wrap: anywhere; }
 
 /* Phones (iPhone 15: 393 × 852): a title bar on top, the sections in a floating tab bar at the bottom */
 @media (max-width: 680px) {
+  .todo-heading .icon-button { min-width: 44px; min-height: 44px; }
+  .nav-secondary { top: auto; bottom: calc(100% + .75rem); }
   :root { font-size: 16px; --tabbar: calc(4.5rem + env(safe-area-inset-bottom)); }
   h1 { font-size: 1.6rem; }
   .sidebar { top: 0; gap: .6rem; min-height: calc(3.5rem + env(safe-area-inset-top)); padding: calc(.5rem + env(safe-area-inset-top)) calc(max(.75rem, env(safe-area-inset-right)) + 3.1rem) .5rem max(1rem, env(safe-area-inset-left)); overflow: visible; }

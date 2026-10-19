@@ -29,11 +29,11 @@ The standard every change to `desktop/ui/` follows, so the native window, the we
 
 | Navigation | Contents |
 | --- | --- |
-| Daily work | Home (state, attention, setup, recent activity with its outcome tiles, status), Messages, Activities |
+| Daily work | Home (state, attention, setup, recent activity with its outcome tiles, status), To-Do, Messages, Activities |
 | What feeds the answers | Knowledge (sources, repositories, GitHub), Test chat |
 | Footer | Settings, then the status pill and the web account |
 
-- A new feature joins the section of the task it serves; it does not get a navigation item of its own unless it is a separate daily task. The sidebar holds at most eight items; the phone tab bar exactly the five non-Settings sections.
+- A new feature joins the section of the task it serves; it does not get a navigation item of its own unless it is a separate daily task. The sidebar holds at most eight items. The phone keeps five destinations: Home, To-Do, Messages, Activities and More (Knowledge and Test chat). More is a keyboard-accessible disclosure, closes after selection or Escape, and preserves the floating bar's shape and touch targets.
 - Settings is one category at a time: **General** (how the assistant answers, and this device's theme), **Microsoft Teams** (identity, reception, personal chat, public URL), **Language models**, **Activity registration**, **Credentials**, **Advanced** (rare or migration operations). A new field goes in the category of the user's goal; a category reaches seven panels before it is split, and a seventh category needs an IA review.
 - Deep links use `showTab(section, panelId)`: when the panel is in Settings it opens its category first. Home's status rows and setup steps always link to where the thing is changed.
 - Attention is shown once where it can be acted on (the activities notice is on Home; elsewhere the navigation counter carries it).
@@ -65,7 +65,7 @@ The standard every change to `desktop/ui/` follows, so the native window, the we
 
 - Buttons: outlined pills with a shadow. One primary action per panel or form (the next step, `--primary` lime); everything else `.secondary` (paper); destructive actions `.danger` and visually apart; navigation-like actions `.link-button`. An irreversible action (dismiss, send to Teams) asks for a second tap instead of a modal.
 - Asynchronous actions run through `busy(button, task)`: the button shows progress and is disabled; errors become a notice.
-- Links to Azure DevOps, Wiki and Teams artifacts use `link()` (opens in the portal, copies in the native window).
+- Links to Azure DevOps, Wiki and Teams artifacts use `link()` (opens in the portal, copies in the native window). To-Do link icons explicitly open the item: a new tab in the portal, the default browser through the validated `open_work_item` host operation in the native window.
 
 ## 7. Tokens
 
