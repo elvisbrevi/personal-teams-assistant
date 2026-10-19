@@ -70,7 +70,7 @@ Runs on every push to `main` (and by hand, `workflow_dispatch`, on the head of `
 2. **Publish to crates.io**, in the `release` environment: a short-lived token from crates.io **Trusted Publishing** (OIDC, `rust-lang/crates-io-auth-action`), then `cargo publish --locked --no-verify` (CI already built, tested and packaged that commit).
 3. **Tag and GitHub release** `vX.Y.Z` on that commit, with generated notes (`contents: write` only in this job).
 
-Releasing is therefore: merge a pull request that bumps the version in `Cargo.toml`, `Cargo.lock` and `desktop/tauri.conf.json`. A merge without a bump runs CI and publishes nothing. If CI failed on a bump, fix `main` (the next commit releases) or re-run CI and then this workflow.
+Releasing is therefore: merge a pull request that bumps the version in `Cargo.toml`, `Cargo.lock` and `desktop/tauri.conf.json`. A merge without a bump runs CI and publishes nothing. When delivering product changes, choose a version that crates.io does not have before opening the pull request, then verify the package was published and the server runs that version with its previous health. A green release workflow that skipped publishing an existing version is not a new delivery. If CI failed on a bump, fix `main` (the next commit releases) or re-run CI and then this workflow.
 
 crates.io rejects Trusted Publishing from `workflow_run` and `pull_request_target` triggers; that is why the release runs on `push` and waits for CI itself. Its configuration on crates.io (crate settings → Trusted Publishing → GitHub):
 

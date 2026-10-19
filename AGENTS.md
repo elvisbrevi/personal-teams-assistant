@@ -39,6 +39,8 @@ GitHub Actions is the gate and the delivery ([delivery](docs/delivery.md)). Deve
 
 Merging delivers: a version bump (`Cargo.toml`, `Cargo.lock`, `desktop/tauri.conf.json`) is published to crates.io by `release.yml` once CI passed on `main`, with its tag and GitHub release; the server's updater installs it within minutes; a change under `site/` is published by Cloudflare. Do not publish, tag or install on the server by hand; do it only as the fallback in [delivery](docs/delivery.md#when-the-automatic-path-fails), when the automatic path itself failed.
 
+When delivering product changes, include a new, unpublished version in all three version files before opening the pull request. A merge and push alone do not publish an existing version. Verify the new crates.io version and the server's running version and health before reporting delivery complete; distinguish merged, published and installed.
+
 Workflows use only GitHub-hosted standard runners (free while the repository is public): no larger, paid or self-hosted runners, and never a runner on the server. `ci.yml` has no secrets because pull requests from forks run it; grant other permissions per job, only where needed.
 
 Run the checks locally before pushing, as fast feedback (CI runs the same on Linux, plus macOS and an informative Windows build):
