@@ -123,8 +123,10 @@ Knowledge
 Agents
   tools list               Shared application tools, their filters and effects (no host required).
   tools call NAME          Calls a shared tool with JSON on stdin; external actions require confirmed:true.
-                           list_azure_hus: source, project, state, limit (default 10, maximum 100).
+                           list_azure_hus: source, project, state, kind (hu|bug), limit (default 10, maximum 100).
                            list_github_epics: project (OWNER/REPO), state (open|closed), limit.
+                           get_azure_hu: id, optional source and project (HU or bug detail).
+                           get_github_epic: id and project (OWNER/REPO).
   capabilities             Contract and commands as JSON.
   mcp                      Model Context Protocol server over stdio for agents (Codex, Claude Code): every
                            operation of the app as a tool; sending, Azure DevOps writes, access and mode changes

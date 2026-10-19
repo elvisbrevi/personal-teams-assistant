@@ -56,7 +56,7 @@ pub(super) const TOOLS: &[Tool] = &[
     Tool {
         name: "list_azure_hus",
         title: "My Azure DevOps HUs",
-        description: "HUs assigned to the catalog user as developer, newest first. Discovers the process's developer roles, all HU states and start/finish fields, including separate development dates. Falls back to Assigned To only in processes without developer roles. Local read; no model or Teams audience changes.",
+        description: "HUs and bugs assigned to the catalog user, newest first. Assignment roles are discovered separately for each type; kind optionally filters hu or bug. Discovers the process's developer roles, all HU states and start/finish fields, including separate development dates. Falls back to Assigned To only in processes without developer roles. Local read; no model or Teams audience changes.",
         effect: Effect::Read,
         schema: todo_schema,
     },
@@ -71,9 +71,24 @@ pub(super) const TOOLS: &[Tool] = &[
                 .as_object_mut()
                 .unwrap()
                 .remove("source");
+            schema["properties"].as_object_mut().unwrap().remove("kind");
             schema["properties"]["state"] = json!({"type":"string","enum":["open","closed"]});
             schema
         },
+    },
+    Tool {
+        name: "get_azure_hu",
+        title: "Azure DevOps HU or bug detail",
+        description: "Reads an HU or bug by ID within an enabled Azure activity source's configured projects. Includes all original/custom fields, Assigned To, acceptance criteria or reproduction steps, comments with authors, evidence, attachments, development links and history. Read-only; does not require Teams or a model. Select source/project when ambiguous.",
+        effect: Effect::Read,
+        schema: || detail_schema(false),
+    },
+    Tool {
+        name: "get_github_epic",
+        title: "GitHub epic detail",
+        description: "Reads an Epic issue by its repository-local number (id) and required project OWNER/REPO, through the existing GitHub connection. Returns description, assignees, labels, milestone, dates, comments, sub-issues and history. Read-only; reports incomplete sections.",
+        effect: Effect::Read,
+        schema: || detail_schema(true),
     },
     Tool {
         name: "status",
@@ -408,10 +423,23 @@ fn todo_schema() -> Value {
         json!({
             "source": string("Azure DevOps activity source ID; optional when exactly one is enabled."),
             "project": string("One configured Azure project, or GitHub OWNER/REPO."),
+            "kind": {"type":"string", "enum":["hu","bug"], "description":"Azure only: omit for HUs and bugs."},
             "state": string("Exact state returned by the tool; omit to include all states."),
             "limit": {"type":"integer","minimum":1,"maximum":100,"default":10}
         }),
         &[],
+    )
+}
+
+fn detail_schema(github: bool) -> Value {
+    let mut properties = json!({"id":{"type":"integer","minimum":1,"maximum":2147483647}, "project":string("Azure project, or required GitHub OWNER/REPO; issue numbers are local to their repository.")});
+    if !github {
+        properties["source"] =
+            string("Enabled Azure activity source ID; optional when exactly one is enabled.");
+    }
+    object(
+        properties,
+        if github { &["id", "project"] } else { &["id"] },
     )
 }
 
@@ -458,6 +486,13 @@ pub(super) fn validate(name: &str, args: &Value) -> Result<(), String> {
         let filters: crate::tools::todo::Filters =
             serde_json::from_value(json!(args)).map_err(|_| "Invalid To-Do filters.")?;
         filters.validate().map_err(|e| e.to_string())?;
+    }
+    if matches!(name, "get_azure_hu" | "get_github_epic") {
+        let detail: crate::tools::todo::DetailRequest =
+            serde_json::from_value(json!(args)).map_err(|_| "Invalid work item arguments.")?;
+        detail
+            .validate(name == "get_github_epic")
+            .map_err(|e| e.to_string())?;
     }
     Ok(())
 }
@@ -529,7 +564,7 @@ fn text<'a>(args: &'a Value, name: &str) -> Result<&'a str, String> {
 pub(super) async fn run(name: &str, args: &Value) -> Result<Value, String> {
     validate(name, args)?;
     match name {
-        "list_azure_hus" | "list_github_epics" | "open_work_item" => ipc(name, args.clone()).await,
+        "list_azure_hus" | "list_github_epics" | "get_azure_hu" | "get_github_epic" | "open_work_item" => ipc(name, args.clone()).await,
         "status" => {
             let s = ipc("snapshot", json!({})).await?;
             Ok(json!({
@@ -722,6 +757,27 @@ mod tests {
 
     #[test]
     fn tool_calls_are_closed_before_contacting_a_host() {
+        assert!(validate("get_azure_hu", &json!({"id": 7})).is_ok());
+        assert!(validate("get_azure_hu", &json!({"id": 0})).is_err());
+        assert!(validate("get_azure_hu", &json!({"id": "7"})).is_err());
+        assert!(validate("get_github_epic", &json!({"id": 42})).is_err());
+        assert!(
+            validate(
+                "get_github_epic",
+                &json!({"id": 42, "project":"example/work"})
+            )
+            .is_ok()
+        );
+        assert!(
+            validate(
+                "get_github_epic",
+                &json!({"id": 42, "project":"example/.."})
+            )
+            .is_err()
+        );
+        assert!(validate("list_azure_hus", &json!({"kind":"bug"})).is_ok());
+        assert!(validate("list_azure_hus", &json!({"kind":"Task"})).is_err());
+        assert!(validate("list_github_epics", &json!({"kind":"bug"})).is_err());
         assert!(validate("list_azure_hus", &json!({})).is_ok());
         assert!(validate("list_azure_hus", &json!({"limit":101})).is_err());
         assert!(validate("list_azure_hus", &json!({"limit":"10"})).is_err());

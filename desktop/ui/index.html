@@ -124,21 +124,28 @@
       <section id="todo" hidden>
         <header class="page-head"><span class="page-tile" aria-hidden="true"><svg class="icon"><use href="#i-todo"/></svg></span><div class="page-title">
           <h1>To-Do</h1>
-          <p>Your Azure DevOps HUs or GitHub epics, newest first.</p>
+          <p>Your Azure DevOps HUs and bugs or GitHub epics, newest first.</p>
         </div></header>
-        <div class="panel">
+        <div id="todo-master" class="panel">
           <div class="grid todo-filters">
             <label>Provider<select id="todo-provider"><option value="azure">Azure DevOps</option><option value="github">GitHub</option></select></label>
             <label id="todo-source-field" hidden>Source<select id="todo-source"></select></label>
+            <label id="todo-kind-field">Type<select id="todo-kind"><option value="">HUs and bugs</option><option value="hu">HUs</option><option value="bug">Bugs</option></select></label>
             <label>State<select id="todo-state"><option value="">All states</option></select></label>
             <label>Items to show<select id="todo-limit"><option value="10">10</option><option value="25">25</option><option value="50">50</option><option value="100">100</option></select></label>
           </div>
-          <div class="panel-head"><h2 id="todo-title">My HUs</h2><button id="todo-refresh" class="secondary small"><svg class="icon"><use href="#i-refresh"/></svg>Refresh</button></div>
+          <div class="panel-head"><h2 id="todo-title">My HUs and bugs</h2><button id="todo-refresh" class="secondary small"><svg class="icon"><use href="#i-refresh"/></svg>Refresh</button></div>
           <p id="todo-assignment" class="hint"></p>
           <p id="todo-progress" class="hint" role="status" aria-live="polite"></p>
           <div id="todo-problem" class="callout error" role="alert" hidden></div>
           <div id="todo-warnings" class="callout warn" hidden></div>
           <div id="todo-list" class="todo-list" aria-busy="false"></div>
+        </div>
+        <div id="todo-detail" hidden>
+          <div class="todo-detail-toolbar"><button id="todo-back" class="secondary" type="button">Back to To-Do</button><button id="todo-detail-refresh" class="secondary" type="button">Refresh detail</button></div>
+          <p id="todo-detail-progress" class="hint" role="status" aria-live="polite"></p>
+          <div id="todo-detail-problem" class="callout error" role="alert" hidden></div>
+          <div id="todo-detail-content" aria-busy="false"></div>
         </div>
       </section>
 

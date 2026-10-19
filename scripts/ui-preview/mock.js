@@ -116,13 +116,47 @@
   ];
   const delay = ms => new Promise(r => setTimeout(r, ms));
   const reply = (data, extra = {}) => ({ ok: true, code: 'ok', data, revision: 'rev-1', ...extra });
+  // Only trusted synthetic HTML is parsed here; real provider HTML is parsed by the Rust core.
+  function richFixture(text) {
+    const node = element => element.nodeType === 3 ? { tag: 'text', text: element.textContent, children: [] } : {
+      tag: element.tagName.toLowerCase(), text: '', url: element.getAttribute('href'), children: [...element.childNodes].map(node),
+    };
+    return [...new DOMParser().parseFromString(text, 'text/html').body.childNodes].map(node);
+  }
+  async function todoDetail(args, github) {
+    window.__ptaLastDetail = { provider: github ? 'github' : 'azure', ...structuredClone(args) };
+    await delay(window.__ptaDetailDelay || 0);
+    if (window.__ptaDetailError) throw new Error('Azure HU read timed out.');
+    const bug = !github && args.id === 4999;
+    const field = (reference, name, kind, value) => ({ reference, name, kind, value, content: kind === 'html' ? richFixture(value) : null });
+    return {
+      item: { id: args.id, title: github ? 'Billing platform improvements' : bug ? 'Receipt download times out' : 'Implement receipt downloads', project: args.project,
+        kind: github ? 'Epic' : bug ? 'Bug' : 'User Story', state: 'Developing', created_at: '2026-10-01T12:00:00Z', dates: [{ name: 'Development start', value: '2026-10-12T12:00:00Z' }],
+        url: github ? `https://github.com/${args.project}/issues/${args.id}` : `${org}/${args.project}/_workitems/edit/${args.id}` },
+      fields: [field(github ? 'assignees' : 'System.AssignedTo', 'Assigned To', 'string', 'Ana Pérez'),
+        field(github ? 'body' : 'System.Description', 'Description', github ? 'markdown' : 'html', github ? '## Goal\nMake billing easier on a phone.' : '<p>Customers can download their <strong>payment receipt</strong> from the portal.</p><ul><li>Available after payment confirmation.</li><li>Keep the original receipt number.</li></ul>'),
+        field(bug ? 'Microsoft.VSTS.TCM.ReproSteps' : 'Microsoft.VSTS.Common.AcceptanceCriteria', bug ? 'Repro Steps' : 'Acceptance Criteria', 'html', '<ol><li>Open a confirmed payment.</li><li>Download a readable PDF receipt.</li></ol>'),
+        field('Custom.Evidence', 'Evidence', 'html', '<p>Validated in the test environment.</p><a href="https://dev.azure.com/contoso/Payments/_build/results?buildId=42">Validation run</a>'),
+        field('Custom.Branch', 'Branch', 'string', 'feature/receipt-downloads'),
+        field('Microsoft.VSTS.Common.Priority', 'Priority', 'integer', 2),
+        ...(bug ? [field('Microsoft.VSTS.Common.Severity', 'Severity', 'string', '2 - High')] : []),
+        ...(github ? [field('labels', 'Labels', 'string', 'payments, mobile'), field('milestone', 'Milestone', 'string', 'October')] : [field('System.IterationPath', 'Iteration Path', 'string', 'Payments / Sprint 12')])],
+      comments: [{ author: 'Luis Soto', created_at: '2026-10-14T12:00:00Z', modified_at: null, text: '<p>Validated on a phone. The PDF is <strong>readable</strong>.</p>', content: richFixture('<p>Validated on a phone. The PDF is <strong>readable</strong>.</p>'), format: 'html' }],
+      relations: [{ name: github ? 'Sub-issue' : 'Branch', url: github ? 'https://github.com/contoso/billing/issues/43' : `${org}/Payments/_git/portal?version=GBfeature%2Freceipt-downloads`, detail: github ? '#43 · Receipt downloads · open' : 'feature/receipt-downloads' },
+        { name: 'Attachment', url: `${org}/_apis/wit/attachments/receipt`, detail: 'receipt-validation.png' }],
+      history: [{ author: 'Ana Pérez', at: '2026-10-14T12:00:00Z', fields: [field('System.State', 'State', 'string', { oldValue: 'New', newValue: 'Developing' })] }],
+      partial: !!window.__ptaDetailPartial, warnings: window.__ptaDetailPartial ? ['Comments could not be read. Open the original item or try again.'] : [],
+    };
+  }
   const handlers = {
+    get_azure_hu: args => todoDetail(args, false),
+    get_github_epic: args => todoDetail(args, true),
     list_azure_hus: async args => {
       window.__ptaLastTodo = { provider: 'azure', ...structuredClone(args) };
       await delay(window.__ptaTodoDelay || 0);
       if (window.__ptaTodoError) throw new Error('Azure HU read timed out.');
       const items = Array.from({ length: 15 }, (_, index) => ({ id: 5000 - index, title: ['Implement receipt downloads', 'Review payment validation', 'Improve settlement reporting'][index % 3],
-        url: `${org}/Payments/_workitems/edit/${5000 - index}`, project: 'Payments', state: index % 2 ? 'Finished' : 'Developing',
+        url: `${org}/Payments/_workitems/edit/${5000 - index}`, project: 'Payments', kind: index % 3 === 1 ? 'Bug' : 'User Story', state: index % 2 ? 'Finished' : 'Developing',
         created_at: `2026-10-${String(19 - index).padStart(2, '0')}T12:00:00Z`,
         dates: [
           { field: 'Microsoft.VSTS.Scheduling.StartDate', name: 'Start date', value: '2026-10-01T12:00:00Z' },
@@ -130,12 +164,12 @@
           { field: 'Custom.DevStart', name: 'Development start', value: index % 2 ? null : '2026-10-12T12:00:00Z' },
           { field: 'Custom.DevFinish', name: 'Development finish', value: '2026-10-30T12:00:00Z' },
         ] }));
-      const filtered = items.filter(item => !args.state || item.state === args.state);
+      const filtered = items.filter(item => (!args.state || item.state === args.state) && (!args.kind || (args.kind === 'bug') === (item.kind === 'Bug')));
       return { items: filtered.slice(0, args.limit), states: ['Developing', 'Finished', 'Awaiting validation'], projects: ['Payments'], assignment_fields: ['Developer 1', 'Developer 2'], partial: !!window.__ptaTodoPartial, warnings: [], has_more: filtered.length > args.limit };
     },
     list_github_epics: args => {
       window.__ptaLastTodo = { provider: 'github', ...structuredClone(args) };
-      const items = [{ id: 42, title: 'Billing platform improvements', url: 'https://github.com/contoso/billing/issues/42', project: 'contoso/billing', state: 'open', created_at: '2026-10-18T12:00:00Z',
+      const items = [{ id: 42, title: 'Billing platform improvements', url: 'https://github.com/contoso/billing/issues/42', project: 'contoso/billing', kind: 'Epic', state: 'open', created_at: '2026-10-18T12:00:00Z',
         dates: [{ field: 'start_date', name: 'Start date', value: null }, { field: 'closed_at', name: 'Completion date', value: null }] }];
       return { items: items.filter(item => !args.state || item.state === args.state), states: ['open', 'closed'], projects: ['contoso/billing'], assignment_fields: ['Assignees'], partial: false, warnings: [], has_more: false };
     },

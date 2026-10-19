@@ -249,6 +249,8 @@ impl Portal {
             "snapshot",
             "list_azure_hus",
             "list_github_epics",
+            "get_azure_hu",
+            "get_github_epic",
             "open_work_item",
             "chat",
             "github_repositories",

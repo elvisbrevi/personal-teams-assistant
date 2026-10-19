@@ -169,16 +169,38 @@ nav button, .status-row, .activity-row, .segmented button, .subnav [role=tab], .
 /* To-Do */
 .todo-filters { margin-bottom: 1rem; }
 .todo-filters label { min-width: 0; }
-.todo-list { display: grid; }
-.todo-item { padding: 1rem 0; border-top: 1px solid var(--rule); min-width: 0; }
+.todo-list { display: grid; gap: .75rem; }
+.todo-item { position: relative; padding: 1rem; border: var(--bw) solid var(--line); border-radius: var(--radius-card); box-shadow: var(--shadow); background: var(--surface); min-width: 0; }
 .todo-heading { display: flex; align-items: flex-start; gap: .75rem; justify-content: space-between; }
 .todo-heading h3 { font-size: 1rem; margin: .25rem 0; overflow-wrap: anywhere; }
-.todo-heading .icon-button { display: inline-flex; align-items: center; justify-content: center; flex: none; min-width: 32px; min-height: 32px; text-decoration: none; }
+.todo-select { display: block; padding: 0; border: 0; border-radius: 0; box-shadow: none; background: none; color: var(--text); text-align: left; font-size: inherit; min-height: 0; }
+.todo-select::after { content: ""; position: absolute; inset: 0; border-radius: var(--radius-card); }
+.todo-select:focus-visible { outline: 0; }
+.todo-select:focus-visible::after { outline: 3px solid var(--link); outline-offset: 4px; }
+.todo-heading .icon-button, #todo-detail-content > .icon-button { display: inline-flex; align-items: center; justify-content: center; flex: none; min-width: 32px; min-height: 32px; text-decoration: none; position: relative; z-index: 1; }
 .todo-context { display: flex; align-items: center; flex-wrap: wrap; gap: .5rem; font-size: .86rem; color: var(--muted); margin: .35rem 0 .7rem; }
 .todo-context .badge { white-space: normal; }
 .todo-dates { display: flex; flex-wrap: wrap; gap: .65rem 1.5rem; font-size: .82rem; color: var(--muted); margin: 0; }
 .todo-dates dt { font-weight: 600; }
 .todo-dates dd { margin: .15rem 0 0; font-variant-numeric: tabular-nums; }
+.todo-detail-toolbar { display: flex; justify-content: space-between; gap: .75rem; flex-wrap: wrap; }
+.todo-detail-header .todo-heading h2 { font-size: 1.4rem; overflow-wrap: anywhere; }
+.todo-detail-header .todo-heading { margin-bottom: 1rem; }
+.todo-detail-header .todo-dates { border-top: 1px solid var(--rule); padding-top: 1rem; }
+.todo-fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 14rem), 1fr)); gap: .75rem 1rem; margin: .75rem 0 1rem; }
+.todo-fields > div { min-width: 0; }
+.todo-fields dt { font-size: .86rem; font-weight: 650; color: var(--muted); margin-bottom: .25rem; overflow-wrap: anywhere; }
+.todo-fields dd { margin: 0; overflow-wrap: anywhere; }
+.todo-text { white-space: pre-wrap; overflow-wrap: anywhere; }
+.todo-comment { border-top: 1px solid var(--rule); padding: .75rem 0; min-width: 0; overflow-wrap: anywhere; }
+.todo-comment:first-of-type { border-top: 0; }
+.todo-comment .todo-context strong { color: var(--text); }
+.todo-relation { display: flex; align-items: baseline; gap: .5rem; flex-wrap: wrap; border-top: 1px solid var(--rule); padding: .7rem 0; overflow-wrap: anywhere; }
+#todo-detail-content { min-width: 0; }
+#todo-detail-content .panel { min-width: 0; }
+#todo-detail-content .callout { margin-bottom: 1rem; }
+#todo-detail-content .md { overflow-wrap: anywhere; }
+
 
 /* Home: the assistant's face carries its state */
 .hero { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 1rem 1.4rem; padding: 1.2rem 1.4rem; background: var(--surface-2); }
@@ -613,7 +635,7 @@ dialog p { overflow-wrap: anywhere; }
 
 /* Phones (iPhone 15: 393 × 852): a title bar on top, the sections in a floating tab bar at the bottom */
 @media (max-width: 680px) {
-  .todo-heading .icon-button { min-width: 44px; min-height: 44px; }
+  .todo-heading .icon-button, #todo-detail-content > .icon-button { min-width: 44px; min-height: 44px; }
   .nav-secondary { top: auto; bottom: calc(100% + .75rem); }
   :root { font-size: 16px; --tabbar: calc(4.5rem + env(safe-area-inset-bottom)); }
   h1 { font-size: 1.6rem; }
