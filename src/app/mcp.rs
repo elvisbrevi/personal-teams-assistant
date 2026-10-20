@@ -3,7 +3,7 @@
 //! host's IPC contract, so audiences, checks and records are the host's own.
 //!
 //! Tools that act outside the app or grant access — sending to Teams, writing to Azure DevOps,
-//! authorizing a source, changing the mode, the assistant's state or activity registration —
+//! authorizing a source, changing the mode, the assistant's state or the assistant's state —
 //! need the user's confirmation: through MCP elicitation when the client offers it (the user
 //! answers the client, not the agent), otherwise with `confirmed: true`, which the agent may
 //! set only after the user approved that exact action.
@@ -17,7 +17,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines, Stdin, Stdout}
 
 const PROTOCOLS: [&str; 3] = ["2025-06-18", "2025-03-26", "2024-11-05"];
 
-const INSTRUCTIONS: &str = "Personal Teams Assistant answers Microsoft Teams messages as the user, only from the sources the user authorized for each conversation, and registers the user's work in Azure DevOps. Read before you write: status, messages_list, sources_list, contexts_list, cases_list, notes_search, knowledge_search. Local changes (notes, contexts, cases, people, ratings, answer drafts) are reversible. Tools marked as needing confirmation act outside the app or grant access; the server asks the user, or requires confirmed: true, which you may set only after the user approved that exact action in this conversation. Ask the user whenever a fact is ambiguous, could be someone else's opinion, would replace what they said before, or when the HU, effort or day of an activity is unclear. Never put secrets, emails, phone numbers or IDs in notes or comments; the server refuses them. Answers are never sent to Teams unless answer_send is confirmed.";
+const INSTRUCTIONS: &str = "Personal Teams Assistant answers Microsoft Teams messages as the user, only from the sources the user authorized for each conversation, and keeps daily records of existing Azure tasks. It never creates or changes tasks. Read before you write: status, messages_list, sources_list, contexts_list, cases_list, notes_search, knowledge_search. Local changes (notes, contexts, cases, people, ratings, answer drafts, daily task snapshots and their schedule) are reversible. Tools marked as needing confirmation act outside the app or grant access; the server asks the user, or requires confirmed: true, which you may set only after the user approved that exact action in this conversation. Ask the user whenever a fact is ambiguous, could be someone else's opinion, would replace what they said before, or when the requested task user or day is unclear. Query existing tasks with list_azure_tasks (day and optional user), get_azure_task (id), or activity_history (saved daily record). Never put secrets, emails, phone numbers or IDs in notes or comments; the server refuses them. Answers are never sent to Teams unless answer_send is confirmed.";
 
 use super::tools::{Effect, TOOLS, confirmation, run};
 

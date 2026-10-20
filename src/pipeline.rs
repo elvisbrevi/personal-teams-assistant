@@ -762,7 +762,12 @@ impl Pipeline {
                 )?;
                 let entries: Vec<_> = entries
                     .into_iter()
-                    .filter(|e| matches!(e.state.as_str(), "done" | "already_registered"))
+                    .filter(|e| {
+                        matches!(
+                            e.state.as_str(),
+                            "recorded" | "recorded_empty" | "done" | "already_registered"
+                        )
+                    })
                     .collect();
                 let mut data = crate::activity::recorded::evidence(
                     &entries, &[], &since.to_string(), &until.to_string(),
@@ -2299,8 +2304,8 @@ impl Pipeline {
             audit.reason = "links_not_configured".into();
             audit.step("links", "no authorized source has a write credential");
             return Ok(Some(LinkTurn::reply(match language {
-                Language::Es => "Para vincular trabajo a una HU necesito una credencial de Azure DevOps con permiso de escritura en Work Items, configurada en la fuente de actividad (`link_secret_ref`). Cuando esté, vuelve a pedírmelo.".into(),
-                Language::En => "To link work to a work item I need an Azure DevOps credential with write access to Work Items, set on the activity source (`link_secret_ref`). Ask me again once it is configured.".into(),
+                Language::Es => "La app ya no crea ni vincula tareas en Azure DevOps. Puedes consultar las tareas existentes en Actividades.".into(),
+                Language::En => "The app no longer creates or links tasks in Azure DevOps. You can read existing tasks in Activities.".into(),
             })));
         }
         audit.provider = Some(self.llm.name().into());

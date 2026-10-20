@@ -1,19 +1,15 @@
 const rawInvoke = window.ptaTransport.invoke;
 // Also the answer operations: they do not depend on the profile files, so they neither check
 // nor advance the form's revision.
-const READS = ['snapshot', 'chat', 'github_repositories', 'self_chat_status', 'llm_providers', 'audit', 'activity_status', 'activity_history', 'activity_pending', 'answer_refine', 'answer_send', 'list_azure_hus', 'list_github_epics', 'get_azure_hu', 'get_github_epic', 'open_work_item'];
+const READS = ['snapshot', 'chat', 'github_repositories', 'self_chat_status', 'llm_providers', 'audit', 'activity_status', 'activity_history', 'activity_pending', 'answer_refine', 'answer_send', 'list_azure_hus', 'list_github_epics', 'get_azure_hu', 'get_azure_task', 'list_azure_tasks', 'get_github_epic', 'open_work_item'];
 // Revision of the profile files the last reply saw. The form's own revision (`current.revision`)
 // changes only when it reloads or writes, so saving a stale form fails instead of overwriting
 // changes made elsewhere (e.g. with `pta`).
 let lastRevision = null;
 async function invoke(method, args = {}) {
   if (window.ptaTransport.browser && method === 'activity_open') {
-    selectedActivity = args.id || pendingActivities[0]?.id || null;
-    activityEditing = false; activityPayload = '';
-    const entry = pendingActivities.find(e => e.id === selectedActivity);
-    if (entry) renderActivityEditor(entry);
-    showTab('registration', entry ? 'activity-editor' : null);
-    return { visible: true, id: selectedActivity };
+    showTab('registration');
+    return { visible: true };
   }
   let result = await rawInvoke('command', { request: {
     method, args, revision: READS.includes(method) ? null : current?.revision ?? null, contract: 1
@@ -111,7 +107,6 @@ async function busy(button, task) {
   finally {
     if (button) { button.disabled = false; button.classList.remove('busy'); }
     renderLive();
-    if (viewedActivity) renderActivityEditor(viewedActivity);
     if (button?.id === 'activity-run') button.disabled = activityRunning;
   }
 }
@@ -173,9 +168,10 @@ let todoDetailRequest = 0;
 let todoSelection = null;
 let todoListScroll = 0;
 let todoReturnFocus = null;
-function todoItem(item) {
+function todoItem(item, onSelect = null) {
   const select = el('button', { type: 'button', class: 'todo-select', textContent: `#${item.id} · ${item.title}` });
   select.onclick = () => {
+    if (onSelect) return onSelect(select);
     todoListScroll = window.scrollY;
     todoReturnFocus = select;
     todoSelection = { provider: $('#todo-provider').value, source: $('#todo-source').value, item };
@@ -246,7 +242,7 @@ function todoFields(fields, base) {
 function todoFold(label, children, count) {
   return el('details', { class: 'panel fold-panel' }, el('summary', {}, label, count === undefined ? null : el('span', { class: 'count', textContent: count })), ...children);
 }
-function renderTodoDetail(detail) {
+function renderTodoDetail(detail, prefix = 'todo') {
   const item = detail.item;
   const base = item.url;
   const prominent = new Set(['System.AssignedTo', 'assignees', 'System.AreaPath', 'System.IterationPath', 'System.Tags', 'Microsoft.VSTS.Common.Priority', 'Microsoft.VSTS.Common.Severity', 'labels', 'milestone', 'milestone_due', 'user']);
@@ -258,7 +254,7 @@ function renderTodoDetail(detail) {
   content.sort((a, b) => contentRank(a) - contentRank(b) || a.name.localeCompare(b.name));
   const header = el('div', { class: 'panel todo-detail-header' },
     el('div', { class: 'todo-context' }, badge(tx(item.kind), 'muted'), badge(tx(item.state), 'info'), el('span', { textContent: item.project })),
-    el('div', { class: 'todo-heading' }, el('h2', { id: 'todo-detail-title', tabIndex: -1, textContent: `#${item.id} · ${item.title}` }), todoOriginal(item)),
+    el('div', { class: 'todo-heading' }, el('h2', { id: `${prefix}-detail-title`, tabIndex: -1, textContent: `#${item.id} · ${item.title}` }), todoOriginal(item)),
     todoFields(shown, base),
     el('dl', { class: 'todo-dates' }, todoDate(t('Created'), item.created_at), ...item.dates.map(date => todoDate(tx(date.name), date.value))));
   const panels = content.map(field => el('section', { class: 'panel' }, el('h2', { textContent: tx(field.name) }), todoValue(field, base)));
@@ -268,7 +264,7 @@ function renderTodoDetail(detail) {
       comment.modified_at && comment.modified_at !== comment.created_at ? el('span', { textContent: t('Edited') }) : null), todoRich(comment.text, comment.format, base, comment.content)));
   const history = detail.history.map(change => el('article', { class: 'todo-comment' }, el('div', { class: 'todo-context' }, el('strong', { textContent: change.author || t('Unknown author') }), change.at ? el('time', { dateTime: change.at, textContent: new Date(change.at).toLocaleString(uiLocale(), { dateStyle: 'medium', timeStyle: 'short' }) }) : null),
     todoFields(change.fields.map(field => ({ ...field, kind: 'string', value: typeof field.value === 'object' && field.value !== null && ('newValue' in field.value || 'oldValue' in field.value) ? `${todoHistoryValue(field.value.oldValue)} → ${todoHistoryValue(field.value.newValue)}` : field.value })), base)));
-  $('#todo-detail-content').replaceChildren(header,
+  $(`#${prefix}-detail-content`).replaceChildren(header,
     ...(detail.partial ? [ el('div', { class: 'callout warn', role: 'status' }, ...detail.warnings.map(warning => el('p', { textContent: tx(warning) })))] : []),
     ...panels,
     el('section', { class: 'panel' }, el('div', { class: 'panel-head' }, el('h2', { textContent: t('Comments') }), el('span', { class: 'count', textContent: comments.length })), ...(comments.length ? comments : [el('p', { class: 'hint', textContent: t('No comments to show.') })])),
@@ -380,7 +376,6 @@ function selectTab(list, name, focus = false) {
     document.getElementById(button.getAttribute('aria-controls')).hidden = !selected;
     if (selected && focus) button.focus();
   }
-  if (list.id === 'activity-tabs' && name === 'log') loadLog().catch(fail);
 }
 
 /** Marks which sections hold unsaved edits and which need something before the assistant works. */
@@ -828,121 +823,45 @@ function startAssistant(button) {
   });
 }
 
-// ---------------------------------------------------------------- activity registration
+// ---------------------------------------------------------------- daily task record
 
 const activityWindow = new URLSearchParams(window.location.search).get('activity');
-let selectedActivity = activityWindow && activityWindow !== 'pending' ? activityWindow : null;
-let activityPayload = '';
-let activityEditing = false;
 let activityRunning = false;
-let pendingActivities = [];
-let viewedActivity = null;
-/** The create/refine/dismiss the host is running for one entry: `{ id, action, day, parentBefore, choice }`. */
-let activityOperation = null;
-/** The last outcome shown next to the form: `{ id, tone, text }`. */
-let activityResult = null;
-/** The entry whose day the selector already moved to, so the user can still change the day. */
-let activityJumped = null;
-let activitySettings = null;
-let activitySummary = null;
-const activityReviewContexts = new Map();
-
-const activityStates = { pending: [t('Needs input'), 'warn'], refining: [t('Asking assistant'), 'info'], sending: [t('Creating'), 'info'],
-  done: [t('Created'), 'ok'], dismissed: [t('Dismissed'), 'muted'], uncertain: [t('Inspect Azure DevOps'), 'error'],
-  failed: [t('Rejected'), 'error'], already_registered: [t('Already registered'), 'muted'] };
-const runStates = { running: [t('Running'), 'info'], completed: [t('Completed'), 'ok'], failed: [t('Failed'), 'error'], interrupted: [t('Interrupted'), 'error'] };
+let activityDay = null;
+let activityTask = null;
+let activityDayRequest = 0;
+let activityDetailRequest = 0;
+let activityListRequest = 0;
+let activityDaysPayload = '';
+let activityDayFocus = null;
+let activityTaskFocus = null;
+let activityDaysScroll = 0;
+let activityTasksScroll = 0;
 const hoursText = hours => t('{hours} h', { hours: num(hours) });
-const dayText = day => new Date(`${day}T12:00:00`).toLocaleDateString(uiLocale(), { weekday: 'long', day: 'numeric', month: 'long' });
-/** The work the user approved (created tasks, and uncertain creations to check), by day, newest first. */
-function registeredDays(entries) {
-  const days = new Map();
-  for (const entry of entries.filter(e => e.state === 'done' || e.state === 'uncertain')) {
-    if (!days.has(entry.day)) days.set(entry.day, { day: entry.day, entries: [], hours: 0 });
-    const day = days.get(entry.day);
-    day.entries.push(entry);
-    day.hours += entry.draft.hours || 0;
-  }
-  return [...days.values()].sort((a, b) => b.day.localeCompare(a.day));
-}
-
-function activityFailureHelp(error) {
-  if (/Azure DevOps.*HTTP 401/is.test(error)) return t('Azure DevOps rejected the saved read credential. Check its validity for the selected organization and update it in Settings → Credentials.');
-  if (/Azure DevOps.*HTTP 403/is.test(error)) return t('Azure DevOps denied access. Check the credential permissions and access to the selected project.');
-  return '';
-}
-function renderActivityRun(run) {
-  const d = run.diagnostics || {};
-  const failed = ['failed', 'interrupted'].includes(run.status);
-  const error = d.error || (failed ? t('This older run did not save its failure details. The original error cannot be recovered.') : '');
-  const prompt = el('button', { class: 'secondary small', textContent: t('Copy diagnostic prompt') });
-  prompt.onclick = () => busy(prompt, async () => {
-    // Written for a coding agent, so it stays in English like the CLI and the diagnostics.
-    const text = [
-      `Investigate the activity registration ${run.status} in Personal Teams Assistant ${live?.host_version || ''}.`,
-      `Day: ${run.day}. Run ID: ${run.id}. Started: ${new Date(run.created_at * 1000).toISOString()}.`,
-      d.finished_at ? `Finished: ${new Date(d.finished_at * 1000).toISOString()}.` : '',
-      `Last step: ${d.stage || 'Not recorded'}.`, `Error: ${d.error || (failed ? 'Not recorded by this older run' : 'None recorded')}`,
-      `Run configuration: ${JSON.stringify(d.settings || {})}. Agents: ${d.provider || 'Not recorded'}.`,
-      `Observation mode: ${d.observation_mode ?? 'Not recorded'}. Summary: ${JSON.stringify(run.summary)}.`,
-      d.context ? `Context supplied to this run: ${d.context}` : '',
-      $('#activity-review-context').value.trim() ? `Additional context: ${$('#activity-review-context').value.trim()}` : '',
-      'Trace the failing step, explain the cause, and propose the smallest fix. Inspect credentials by presence and metadata only; never print secret values. Verify with read-only checks first. Inspect task history before any new registration; never retry an uncertain write.'
-    ].filter(Boolean).join('\n\n');
-    if (!await copy(text)) throw t('Could not copy the diagnostic prompt.');
-    done(t('Diagnostic prompt copied. Paste it into Codex, Claude, or another agent.'));
-  });
-  const duration = d.finished_at ? t('{n} s', { n: Math.max(0, d.finished_at - run.created_at) }) : t('In progress');
-  const help = activityFailureHelp(error);
-  const [label, tone] = runStates[run.status] || [run.status, 'info'];
-  return el('div', { class: 'activity-card' },
-    el('div', { class: 'card-row' }, badge(label, tone),
-      el('span', { class: 'grow', textContent: new Date(run.created_at * 1000).toLocaleString(uiLocale()) }), prompt),
-    el('p', { class: 'hint', textContent: `${d.finished_at ? duration : failed || run.status === 'completed' ? t('Duration not recorded') : duration} · ${d.stage ? tx(d.stage) : t('Step not recorded')}` }),
-    error ? el('p', { class: 'activity-issue', textContent: tx(error) }) : null,
-    help ? el('p', { textContent: help }) : null,
-    run.summary ? el('p', { textContent: t('{created} tasks created · {pending} need input · {recorded} hours accounted for · {remaining} hours remaining', {
-      created: run.summary.created, pending: run.summary.pending,
-      recorded: num(run.summary.recorded_hours, 2, 2), remaining: num(run.summary.remaining_hours, 2, 2) }) }) : null,
-    ...(run.summary?.warnings || []).map(w => el('p', { class: 'activity-issue', textContent: tx(w) })),
-    d.context ? el('details', {}, el('summary', { textContent: t('Context supplied to the agents') }), el('p', { class: 'activity-run-context', textContent: d.context })) : null,
-    el('small', { class: 'resource-id', textContent: run.id }));
-}
+const dayText = day => new Date(`${day}T12:00:00`).toLocaleDateString(uiLocale(), { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
 
 function renderRegistrationSettings() {
   const s = current.config.activity_registration;
   $('#registration-enabled').checked = s.enabled;
-  $('#registration-auto').checked = s.auto_register;
   for (const [id, value] of Object.entries({ hours: s.daily_hours, schedule: s.schedule, at: s.at,
     interval: s.interval_minutes, start: s.window_start, end: s.window_end, zone: s.time_zone,
-    kind: s.task_kind, state: s.done_state, effort: s.effort_field,
-    fields: JSON.stringify(s.extra_fields, null, 2) })) field('#registration-' + id, value);
+    effort: s.effort_field })) field('#registration-' + id, value);
   for (const day of document.querySelectorAll('#registration-weekdays input')) day.checked = s.weekdays.includes(Number(day.dataset.day));
   renderScheduleFields();
-  const sources = current.map.resources.filter(r => ['azure_devops_status', 'azure_devops_wiki', 'teams_messages'].includes(r.tool?.type));
-  const writers = sources.filter(r => r.tool.type === 'azure_devops_status' && r.tool.link_secret_ref);
-  $('#registration-writer').replaceChildren(el('option', { value: '', textContent: t('Select a source with a write credential') }),
-    ...writers.map(r => el('option', { value: r.id, textContent: r.description || r.id, disabled: !r.enabled || !r.external_processing })));
-  field('#registration-writer', s.write_source);
+  const sources = current.map.resources.filter(r => r.tool?.type === 'azure_devops_status');
   $('#registration-sources').replaceChildren(...sources.map(r => {
-    const check = el('input', { type: 'checkbox', checked: s.sources.includes(r.id), disabled: !r.enabled || !r.external_processing });
+    const check = el('input', { type: 'checkbox', checked: s.sources.includes(r.id), disabled: !r.enabled });
     check.dataset.source = r.id;
     check.onchange = markDirty;
     return el('label', { class: 'check' }, check, el('span', {}, r.description || r.id,
-      !r.enabled || !r.external_processing ? el('small', { textContent: ` ${t('Enable and authorize this source in Knowledge first.')}` }) : null));
+      !r.enabled ? el('small', { textContent: t('Enable this source in Knowledge first.') }) : null));
   }));
-  if (!sources.length) $('#registration-sources').append(el('p', { class: 'hint', textContent: t('Add Azure DevOps activity, Wiki or Teams messages sources in Knowledge to review your work.') }));
+  if (!sources.length) $('#registration-sources').append(el('p', { class: 'hint', textContent: t('Add an Azure DevOps source in Knowledge to read existing tasks.') }));
 }
-/** A daily schedule asks for its time; an interval schedule for its interval and window. Hidden values are kept. */
 function renderScheduleFields() {
   const daily = $('#registration-schedule').value !== 'interval';
   $('#registration-at-field').hidden = !daily;
   for (const id of ['#registration-interval-field', '#registration-start-field', '#registration-end-field']) $(id).hidden = daily;
-}
-function jsonFields(text) {
-  let value;
-  try { value = JSON.parse(text.trim() || '{}'); } catch { throw t('Additional fields must be a JSON object.'); }
-  if (!value || Array.isArray(value) || typeof value !== 'object') throw t('Additional fields must be a JSON object.');
-  return value;
 }
 function collectRegistrationSettings() {
   const s = current.config.activity_registration;
@@ -950,497 +869,122 @@ function collectRegistrationSettings() {
     showTab('settings', 'panel-registration-schedule');
     throw t('Choose at least one workday.');
   }
-  Object.assign(s, { enabled: $('#registration-enabled').checked, auto_register: $('#registration-auto').checked,
+  Object.assign(s, { enabled: $('#registration-enabled').checked,
     daily_hours: Number($('#registration-hours').value), schedule: $('#registration-schedule').value,
     at: $('#registration-at').value, interval_minutes: Number($('#registration-interval').value),
     window_start: $('#registration-start').value, window_end: $('#registration-end').value,
     time_zone: $('#registration-zone').value.trim(),
     weekdays: [...document.querySelectorAll('#registration-weekdays input:checked')].map(day => Number(day.dataset.day)),
-    write_source: $('#registration-writer').value, task_kind: $('#registration-kind').value,
-    done_state: $('#registration-state').value.trim(), effort_field: $('#registration-effort').value.trim(),
-    extra_fields: jsonFields($('#registration-fields').value),
+    effort_field: $('#registration-effort').value.trim(),
     sources: [...document.querySelectorAll('#registration-sources input:checked')].map(c => c.dataset.source) });
-  if (s.write_source && !s.sources.includes(s.write_source)) s.sources.push(s.write_source);
 }
-
 function renderActivityNotice() {
-  const count = pendingActivities.length;
-  // Shown on Home only; elsewhere the Activities count in the navigation says the same.
-  $('#activity-notice').hidden = !count && !activityRunning;
-  $('#activity-notice-text').textContent = activityRunning ? t('Reviewing your work…')
-    : tn(count, '1 activity needs your context or an HU.', '{n} activities need your context or an HU.');
+  $('#activity-notice').hidden = !activityRunning;
+  $('#activity-notice-text').textContent = t('Saving the day’s tasks…');
 }
-
-/** Effort of the day against the daily target, from the last saved totals. */
-function renderActivityMeter(summary, settings) {
-  const target = settings.daily_hours;
-  const recorded = summary?.recorded_hours ?? 0;
-  $('#activity-hours-text').textContent = summary
-    ? t('{recorded} of {target} h registered', { recorded: num(recorded), target: num(target) })
-    : t('Daily target: {target} h', { target: num(target) });
-  $('#activity-hours-note').textContent = !summary ? t('Review this day to calculate the registered effort.')
-    : summary.remaining_hours > 0 ? t('{hours} h left', { hours: num(summary.remaining_hours) }) : t('Daily target reached');
-  $('#activity-hours-bar').style.width = `${Math.min(100, Math.round(recorded / target * 100))}%`;
-}
-
-function activitySetupText(settings, llm, observing) {
-  const agents = llm.chain?.filter(p => p.enabled).map(p => `${providerNames[p.provider] || p.provider} (${p.model})`).join(' → ') || `${llm.provider} (${llm.model})`;
-  const mode = observing ? t('Observation mode: nothing is created') : settings.auto_register ? t('Automatic creation when verified') : t('Manual approval');
-  const schedule = !settings.enabled ? t('Schedule disabled')
-    : settings.schedule === 'daily' ? t('Scheduled at {time}', { time: settings.at })
-    : t('Every {n} min ({start}–{end})', { n: settings.interval_minutes, start: settings.window_start, end: settings.window_end });
-  return [
-    t('Sources: {names}', { names: settings.sources.join(', ') || t('None selected') }),
-    t('Agents: {names}', { names: agents }), mode, schedule,
-    t('Time zone: {zone}', { zone: settings.time_zone === 'local' ? t('host local time') : settings.time_zone }),
-  ].join(' · ');
-}
-
-/** An entry's title as the user reads it: activity names come from the host in English. */
-const entryTitle = (entry, fallback) => tx(entry.draft.title) || fallback;
-
-function pendingCard(entry) {
-  const open = el('button', { type: 'button', class: `card card-button${entry.id === selectedActivity ? ' selected' : ''}` },
-    el('span', { class: 'card-main' },
-      el('strong', { textContent: entryTitle(entry, t('Activity without a task')) }),
-      el('span', { class: entry.issue ? 'card-text warn-text' : 'card-text', textContent: tx(entry.issue || entry.draft.question) || t('Review the HU, description and effort before creating the task.') }),
-      el('span', { class: 'card-meta' }, badge(dayText(entry.day), 'muted'), entry.draft.hours ? badge(hoursText(entry.draft.hours), 'info') : null,
-        entry.state === 'refining' ? badge(t('Asking assistant'), 'info') : null)),
-    icon('arrow'));
-  open.dataset.id = entry.id;
-  open.title = activityWindow || window.ptaTransport.browser ? t('Review') : t('Review in new window');
-  open.onclick = () => openActivity(entry, open);
+function activityDayCard(day) {
+  const open = el('button', { type: 'button', class: 'card card-button' },
+    el('span', { class: 'card-main' }, el('strong', { textContent: dayText(day.day) }),
+      el('span', { class: 'card-meta' }, badge(tn(day.tasks, '1 task', '{n} tasks'), 'muted'),
+        el('span', { textContent: hoursText(day.hours) }),
+        day.target_hours > day.hours ? badge(t('Below daily target'), 'warn') : null)), icon('arrow'));
+  open.onclick = () => { activityDaysScroll = window.scrollY; activityDayFocus = open; openActivityDay(day.day).catch(fail); };
   return open;
 }
-
-function historyCard(entry) {
-  const [label, tone] = activityStates[entry.state] || [entry.state, 'muted'];
-  const parent = entry.parents.find(p => p.id === entry.draft.parent);
-  const title = entry.task_url ? link(`#${entry.task_id} ${entryTitle(entry, '')}`, entry.task_url) : el('strong', { textContent: entryTitle(entry, t('Activity')) });
-  const facts = el('p', { class: 'card-text' }, parent ? [`${t('HU')} `, link(`#${parent.id} ${parent.title}`, parent.url)] : t('No HU selected'),
-    ` · ${entry.draft.hours ? hoursText(entry.draft.hours) : t('No effort yet')}`);
-  let action = null;
-  if (entry.state === 'pending') {
-    action = el('button', { type: 'button', class: 'secondary small', textContent: t('Open') });
-    action.onclick = () => openActivity(entry, action);
+function showActivityView(view) {
+  for (const name of ['master', 'day-view', 'detail']) $(`#activity-${name}`).hidden = name !== view;
+}
+async function openActivityDay(day, focus = true) {
+  const request = ++activityDayRequest;
+  ++activityDetailRequest;
+  activityDay = day; activityTask = null;
+  showActivityView('day-view');
+  $('#activity-day-title').textContent = dayText(day);
+  $('#activity-day-tasks').replaceChildren();
+  $('#activity-day-warning').hidden = true;
+  $('#activity-day-progress').textContent = t('Loading…');
+  $('#activity-day-tasks').setAttribute('aria-busy', 'true');
+  if (focus) { $('#activity-day-title').focus({ preventScroll: true }); $('#activity-day-view').scrollIntoView({ block: 'start' }); }
+  try {
+    const history = await invoke('activity_history', { day });
+    if (request !== activityDayRequest) return;
+    const record = history.record;
+    $('#activity-day-progress').textContent = record ? `${tn(record.tasks.length, '1 task', '{n} tasks')} · ${hoursText(record.hours)}` : t('This day has not been saved yet.');
+    const below = record && record.target_hours > record.hours;
+    $('#activity-day-warning').hidden = !below;
+    $('#activity-day-warning').textContent = below ? t('{recorded} of {target} h. The daily target is advisory; all tasks were saved.', { recorded: num(record.hours), target: num(record.target_hours) }) : '';
+    $('#activity-day-tasks').replaceChildren(...(record?.tasks || []).map(task => {
+      const card = todoItem(task.item, button => {
+        activityTasksScroll = window.scrollY; activityTaskFocus = button;
+        activityTask = task; loadActivityTask();
+      });
+      card.append(el('div', { class: 'todo-context' }, el('span', { textContent: hoursText(task.hours) }),
+        task.parent ? link(`#${task.parent.id} ${task.parent.title}`, task.parent.url) : null));
+      return card;
+    }));
+    if (record && !record.tasks.length) $('#activity-day-tasks').append(el('p', { class: 'empty', textContent: t('No tasks were recorded for this day.') }));
+  } catch (error) {
+    if (request === activityDayRequest) $('#activity-day-progress').textContent = tx(String(error?.message ?? error));
+  } finally {
+    if (request === activityDayRequest) $('#activity-day-tasks').setAttribute('aria-busy', 'false');
   }
-  return el('div', { class: 'card' }, el('div', { class: 'card-row' }, badge(label, tone), action), title,
-    facts, entry.issue ? el('p', { class: 'card-text warn-text', textContent: tx(entry.issue) }) : null);
 }
-
-/** One day of registered work: its tasks with their HU and hours. */
-function logDay(day) {
-  return el('section', { class: 'log-day' },
-    el('div', { class: 'log-day-head' }, el('h3', { textContent: dayText(day.day) }),
-      el('span', { class: 'log-day-sum', textContent: `${tn(day.entries.length, '1 task', '{n} tasks')} · ${hoursText(day.hours)}` })),
-    el('ul', { class: 'log-tasks' }, ...day.entries.map(entry => {
-      const parent = entry.parents.find(p => p.id === entry.draft.parent);
-      const title = entryTitle(entry, t('Activity'));
-      return el('li', {},
-        entry.task_url ? link(`#${entry.task_id} ${title}`, entry.task_url) : el('strong', { textContent: title }),
-        el('small', {}, parent ? [`${t('HU')} `, link(`#${parent.id} ${parent.title}`, parent.url), ' · '] : null,
-          el('span', { textContent: entry.draft.hours ? hoursText(entry.draft.hours) : t('No effort yet') })),
-        entry.state === 'uncertain' ? badge(activityStates.uncertain[0], 'error') : null);
-    })));
-}
-
-async function loadLog() {
-  const to = $('#activity-log-to'), from = $('#activity-log-from');
-  if (!to.value) {
-    // The last two weeks, ending on the host's today.
-    const today = (await invoke('activity_history')).day;
-    const [y, m, d] = today.split('-').map(Number);
-    field('#activity-log-to', today);
-    field('#activity-log-from', new Date(Date.UTC(y, m - 1, d - 13)).toISOString().slice(0, 10));
+async function loadActivityTask() {
+  if (!activityTask) return;
+  const request = ++activityDetailRequest;
+  const task = activityTask;
+  showActivityView('detail');
+  $('#activity-detail-content').replaceChildren();
+  $('#activity-detail-content').setAttribute('aria-busy', 'true');
+  $('#activity-detail-progress').textContent = t('Loading detail…');
+  $('#activity-detail-refresh').disabled = true;
+  $('#activity-task-back').focus({ preventScroll: true });
+  $('#activity-detail').scrollIntoView({ block: 'start' });
+  try {
+    const args = { id: task.item.id, project: task.item.project };
+    if (task.source) args.source = task.source;
+    const detail = await invoke('get_azure_task', args);
+    if (request !== activityDetailRequest) return;
+    renderTodoDetail(detail, 'activity');
+    $('#activity-detail-title').focus({ preventScroll: true });
+    $('#activity-detail-progress').textContent = '';
+  } catch (error) {
+    if (request !== activityDetailRequest) return;
+    $('#activity-detail-progress').textContent = tx(String(error?.message ?? error));
+    $('#activity-detail-content').replaceChildren(el('p', { class: 'hint', textContent: t('Open the original item or refresh to try again.') }), todoOriginal(task.item));
+  } finally {
+    if (request === activityDetailRequest) {
+      $('#activity-detail-content').setAttribute('aria-busy', 'false');
+      $('#activity-detail-refresh').disabled = false;
+    }
   }
-  if (!from.value || from.value > to.value) field('#activity-log-from', to.value);
-  from.max = to.value; to.min = from.value;
-  const days = registeredDays((await invoke('activity_history', { from: from.value, day: to.value })).entries);
-  const tasks = days.reduce((n, d) => n + d.entries.length, 0);
-  $('#activity-log-total').textContent = tasks ? t('{tasks} · {hours} in {days}', {
-    tasks: tn(tasks, '1 task', '{n} tasks'), hours: hoursText(days.reduce((n, d) => n + d.hours, 0)), days: tn(days.length, '1 day', '{n} days') }) : '';
-  $('#activity-log').replaceChildren(...days.map(logDay));
-  if (!tasks) $('#activity-log').append(el('p', { class: 'empty-note', textContent: t('No tasks were registered in these days. The tasks you create in Review appear here.') }));
 }
-
-/** Opens an entry inline (browser and the activity window) or in the native activity window. */
-async function openActivity(entry, button) {
-  if (!activityWindow && !window.ptaTransport.browser) return busy(button, () => invoke('activity_open', { id: entry.id }));
-  selectTab($('#activity-tabs'), 'review');
-  selectedActivity = entry.id; activityEditing = false; activityPayload = '';
-  if (activityResult?.id !== entry.id) activityResult = null;
-  renderActivityEditor(entry);
-  $('#activity-editor').scrollIntoView({ behavior: 'smooth', block: 'start' });
-  await loadRegistration().catch(fail);
-}
-
-function closeActivity() {
-  selectedActivity = null; viewedActivity = null; activityEditing = false; activityPayload = '';
-  $('#activity-editor').hidden = true;
-  $('#registration').classList.remove('editing');
-  for (const card of document.querySelectorAll('#activity-pending .card-button.selected')) card.classList.remove('selected');
-}
-
-/** A result that outlives the editor: a created task, a dismissal. */
-function flashActivity(tone, ...content) {
-  const box = $('#activity-flash');
-  box.className = `callout ${tone}`;
-  box.replaceChildren(...content);
-  box.hidden = false;
-}
-
 async function loadRegistration() {
-  let [history, pending] = await Promise.all([
-    invoke('activity_history', $('#activity-day').value ? { day: $('#activity-day').value } : {}), invoke('activity_pending')
-  ]);
-  const selected = pending.entries.find(e => e.id === selectedActivity);
-  // Opening an entry shows its day once; afterwards the user can pick any other day.
-  if (selected && activityJumped !== selected.id) {
-    activityJumped = selected.id;
-    if (history.day !== selected.day) {
-      field('#activity-day', selected.day);
-      field('#activity-review-context', activityReviewContexts.get(selected.day) || '');
-      history = await invoke('activity_history', { day: selected.day });
-    }
-  }
+  const request = ++activityListRequest;
+  const args = {};
+  if ($('#activity-log-from').value) args.from = $('#activity-log-from').value;
+  if ($('#activity-log-to').value) args.day = $('#activity-log-to').value;
+  const history = await invoke('activity_history', args);
+  if (request !== activityListRequest) return;
   if (!$('#activity-day').value) field('#activity-day', history.day);
+  const finished = activityRunning && !history.running;
   activityRunning = history.running;
-  const latest = history.runs[0];
-  const settings = activitySettings = history.settings || live.config.activity_registration;
-  const llm = history.llm || live.config.llm;
-  const activeRun = history.runs.find(r => r.status === 'running');
-  pendingActivities = pending.entries;
-  const count = pending.entries.length;
-  $('#nav-activities').hidden = !count;
-  $('#nav-activities').textContent = count;
-  renderActivityNotice();
-  $('#activity-progress').hidden = !activityRunning;
-  $('#activity-running').textContent = activityOperation ? operationText(activityOperation.action)
-    : activeRun?.diagnostics?.stage ? `${tx(activeRun.diagnostics.stage)}…` : t('An activity operation is running.');
-  $('#activity-setup').textContent = activitySetupText(settings, llm, history.observation_mode);
-  const latestFailed = latest && ['failed', 'interrupted'].includes(latest.status);
-  $('#activity-result').hidden = !latestFailed;
-  $('#activity-result').textContent = latestFailed ? t('The last review of this day did not finish ({step}). See Process runs and diagnostics below.', {
-    step: latest.diagnostics?.stage ? tx(latest.diagnostics.stage) : runStates[latest.status][0] }) : '';
   $('#activity-run').disabled = activityRunning;
-  const summary = activitySummary = history.summary || history.runs.find(r => r.status === 'completed' && r.summary)?.summary || null;
-  renderActivityMeter(summary, settings);
-  const created = history.entries.filter(e => e.state === 'done').length;
-  const dayPending = history.entries.filter(e => e.state === 'pending').length;
-  $('#activity-summary').replaceChildren(...[
-    created ? badge(tn(created, '1 task created', '{n} tasks created'), 'ok') : null,
-    dayPending ? badge(tn(dayPending, '1 needs input', '{n} need input'), 'warn') : null,
-    history.observation_mode ? badge(t('Observation mode: nothing is created'), 'info') : null,
-    summary?.partial ? el('details', { class: 'fold warnings' }, el('summary', { textContent: tn(summary.warnings.length, '1 coverage warning', '{n} coverage warnings') }),
-      ...summary.warnings.map(w => el('p', { class: 'activity-issue', textContent: tx(w) }))) : null,
-  ].filter(Boolean));
-  $('#activity-pending-count').textContent = count || '';
-  $('#activity-pending').replaceChildren(...pending.entries.map(pendingCard));
-  if (!count) $('#activity-pending').append(el('p', { class: 'empty-note', textContent: t('Nothing needs your input. Review a day to look for unregistered work.') }));
-  $('#activity-history').replaceChildren(...history.entries.map(historyCard));
-  if (!history.entries.length) $('#activity-history').append(el('p', { class: 'empty-note', textContent: history.runs.length ? t('The review found no activities to register on this day.') : t('This day has not been reviewed yet.') }));
-  $('#activity-runs').replaceChildren(...history.runs.map(renderActivityRun));
-  $('#activity-runs-count').textContent = history.runs.length || '';
-  if (!history.runs.length) $('#activity-runs').append(el('p', { class: 'hint', textContent: t('No reviews have run for this day.') }));
-  let entry = [...pending.entries, ...history.entries].find(e => e.id === selectedActivity);
-  if (activityWindow && !selectedActivity && count) { entry = pending.entries[0]; selectedActivity = entry.id; }
-  if (entry) renderActivityEditor(entry);
-  else if (selectedActivity && !activityOperation) closeActivity();
-}
-
-function operationText(action) {
-  return action === 'refine' ? t('The assistant is updating the draft…')
-    : action === 'dismiss' ? t('Dismissing the activity…') : t('Creating the task in Azure DevOps…');
-}
-
-/** The call/work-item confirmation an entry still needs, when the agents asked nothing. */
-function confirmationNote(entry) {
-  if (!entry.activities.some(a => a.context_required)) return '';
-  return entry.activities.some(a => a.context_required && a.organization === 'https://teams.microsoft.com')
-    ? t('Confirm that you attended this call, its purpose and its HU before registering it.')
-    : t('Confirm the referenced work items and corresponding HU before registering this work.');
-}
-
-function renderParents(entry, value) {
-  const suggested = entry.draft.suggested_parents;
-  const parents = [...entry.parents].sort((a, b) => Number(suggested.includes(b.id)) - Number(suggested.includes(a.id)));
-  // A bug says so; HUs are the usual parent and keep their name short.
-  const kind = p => /bug|defect|incident/i.test(p.kind) ? ` · ${p.kind}` : '';
-  $('#activity-parent').replaceChildren(el('option', { value: '', textContent: t('Select an HU or bug') }),
-    ...parents.map(p => el('option', { value: p.id, textContent: `${suggested.includes(p.id) ? '★ ' : ''}#${p.id} ${p.title}${kind(p)}${p.state ? ` · ${p.state}` : ''}` })),
-    el('option', { value: 'other', textContent: t('Other HU or bug…') }));
-  field('#activity-parent', value ?? entry.draft.parent ?? '');
-  $('#activity-other-parent-label').hidden = $('#activity-parent').value !== 'other';
-}
-
-function renderActivityOutcome(entry) {
-  const box = $('#activity-outcome');
-  let tone = '', content = [];
-  if (activityOperation?.id === entry.id) {
-    tone = 'info';
-    content = [el('span', { class: 'spinner', 'aria-hidden': 'true' }), el('span', { textContent: operationText(activityOperation.action) })];
-  } else if (activityResult?.id === entry.id) {
-    tone = activityResult.tone;
-    content = [activityResult.text];
-  } else if (entry.issue) {
-    tone = ['failed', 'uncertain'].includes(entry.state) ? 'error' : 'warn';
-    content = [tx(entry.issue)];
+  $('#activity-progress').hidden = !activityRunning;
+  $('#nav-activities').hidden = true;
+  renderActivityNotice();
+  const payload = JSON.stringify(history.days);
+  if (payload !== activityDaysPayload) {
+    activityDaysPayload = payload;
+    $('#activity-log').replaceChildren(...history.days.map(activityDayCard));
+    if (!history.days.length) $('#activity-log').append(el('p', { class: 'empty', textContent: t('No recorded days yet. Save a day’s tasks or enable the schedule in Settings.') }));
+    $('#activity-log-total').textContent = tn(history.days.length, '1 day', '{n} days');
   }
-  box.hidden = !tone;
-  box.className = `callout ${tone}`;
-  box.replaceChildren(...content);
-}
-
-/** The inputs of the fields the task type requires: `{ field, input, read }`. */
-let requiredInputs = [];
-/** The evidence field the assistant is asked to write in the next refinement. */
-let draftEvidence = null;
-const evidenceField = field => /evidenc/i.test(`${field.name} ${field.reference}`);
-function rememberedField(reference) {
-  try { return JSON.parse(localStorage.getItem(`pta-field:${reference}`) ?? 'null') ?? undefined; } catch { return undefined; }
-}
-
-const toHtml = text => text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\n/g, '<br>');
-const fromHtml = html => String(html).replace(/<br\s*\/?>/gi, '\n').replace(/<\/(p|div|li)>/gi, '\n').replace(/<[^>]+>/g, '')
-  .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').trim();
-/** A starting value from the activity for a field that asks for a link or evidence; the user edits it. */
-function suggestedValue(field, entry) {
-  const label = `${field.name} ${field.reference}`;
-  const azure = entry.activities.filter(a => a.url.startsWith('https://dev.azure.com/'));
-  if (/url|link|enlace/i.test(label)) {
-    return (azure.find(a => /\/commit\/|pullrequest/i.test(a.url)) || azure[0])?.url;
-  }
-  // Evidence is what the agent wrote about the result, plus the Azure DevOps artifacts' links;
-  // never chat text or Teams links, which may expose unrelated conversations.
-  if (/evidenc/i.test(label)) {
-    const links = azure.map(a => `- ${tx(a.short || a.label)}: ${a.url}`);
-    return [entry.draft.evidence || entry.draft.description, ...links].filter(Boolean).join('\n') || undefined;
-  }
-  return undefined;
-}
-
-/** One input per field Azure DevOps requires, typed from its metadata: a list of its allowed values,
- * a number, a date or text. With `keep`, what the user already typed stays. */
-function renderRequired(entry, keep) {
-  const typed = keep ? new Map(requiredInputs.map(r => [r.field.reference, r.read()])) : new Map();
-  requiredInputs = (entry.required || []).map((field, index) => {
-    const id = `activity-required-${index}`;
-    const kind = (field.kind || '').toLowerCase();
-    const allowed = field.allowed?.length ? field.allowed : kind === 'boolean' ? [true, false] : [];
-    // A list remembers the last choice (an activity type, a month); free values start empty.
-    const stored = entry.fields[field.reference] === '' ? undefined : entry.fields[field.reference];
-    const current = typed.get(field.reference) ?? stored
-      ?? (allowed.length ? rememberedField(field.reference) : suggestedValue(field, entry)) ?? (field.default || undefined);
-    let input, read;
-    if (allowed.length) {
-      input = el('select', { id }, el('option', { value: '', textContent: t('Choose…') }),
-        ...allowed.map((value, at) => el('option', { value: String(at), textContent: value === true ? t('Yes') : value === false ? t('No') : String(value) })));
-      const at = allowed.findIndex(value => JSON.stringify(value) === JSON.stringify(current));
-      input.value = at >= 0 ? String(at) : '';
-      read = () => input.value === '' ? undefined : allowed[Number(input.value)];
-    } else if (kind === 'datetime') {
-      input = el('input', { id, type: 'date', value: typeof current === 'string' ? current.slice(0, 10) : '' });
-      read = () => input.value || undefined;
-    } else if (kind === 'html') {
-      // Azure DevOps keeps HTML: lines stay lines and the text is escaped.
-      input = el('textarea', { id, rows: 4, value: current === undefined ? '' : fromHtml(current) });
-      read = () => input.value.trim() ? toHtml(input.value.trim()) : undefined;
-    } else if (kind === 'plaintext') {
-      input = el('textarea', { id, rows: 3, value: current ?? '' });
-      read = () => input.value.trim() || undefined;
-    } else {
-      const numeric = kind === 'integer' || kind === 'double';
-      input = el('input', { id, type: numeric ? 'number' : 'text', step: numeric ? 'any' : undefined,
-        inputMode: numeric ? (kind === 'integer' ? 'numeric' : 'decimal') : undefined, value: current ?? '' });
-      read = () => { const text = input.value.trim(); return !text ? undefined : numeric ? Number(text) : text; };
-    }
-    let label = el('label', {}, field.name || field.reference, field.help ? el('small', { textContent: ` ${field.help}` }) : null, input);
-    if (evidenceField(field)) {
-      // The agent writes the evidence from the verified work; the user reviews it.
-      const write = el('button', { type: 'button', class: 'secondary small' }, icon('spark'), t('Write it with the assistant'));
-      write.onclick = () => { draftEvidence = field.reference; busy(write, () => resolveActivity('refine')); };
-      label = el('div', { class: 'with-action' }, label, write);
-    }
-    return { field, input, read, label };
-  });
-  $('#activity-required').hidden = !requiredInputs.length;
-  $('#activity-required').replaceChildren(...(requiredInputs.length ? [el('h4', { textContent: t('Required by Azure DevOps') }),
-    el('p', { class: 'hint', textContent: t('Your Azure DevOps process asks for these fields to create the task.') }), ...requiredInputs.map(r => r.label)] : []));
-}
-const requiredName = r => r.field.name || r.field.reference;
-
-function renderActivityEditor(entry) {
-  viewedActivity = entry;
-  $('#activity-editor').hidden = false;
-  $('#registration').classList.add('editing');
-  for (const card of document.querySelectorAll('#activity-pending .card-button')) card.classList.toggle('selected', card.dataset.id === entry.id);
-  const needsInput = ['pending', 'refining'].includes(entry.state);
-  const payload = JSON.stringify(entry);
-  if (payload !== activityPayload && !activityEditing) {
-    activityPayload = payload;
-    $('#activity-editor-day').textContent = dayText(entry.day);
-    $('#activity-editor-title').textContent = entryTitle(entry, t('Review activity'));
-    $('#activity-evidence').replaceChildren(...entry.activities.map(a => el('li', {}, link(tx(a.label), a.url),
-      a.date && a.date !== entry.day ? el('small', { textContent: ` · ${t('Artifact date: {date}', { date: dayText(a.date) })}` }) : null,
-      a.context_required ? badge(t('Needs your confirmation'), 'warn') : null)));
-    const question = entry.draft.question || confirmationNote(entry);
-    $('#activity-ask').hidden = !needsInput;
-    $('#activity-question').textContent = question ? tx(question) : t('The draft looks complete. Check it below, or tell the assistant what to change.');
-    $('#activity-refine-box').open = false;
-    renderParents(entry);
-    field('#activity-title', entryTitle(entry, '')); field('#activity-description', entry.draft.description);
-    field('#activity-hours', entry.draft.hours); field('#activity-context', '');
-    $('#activity-date-attribution-label').hidden = !entry.activities.some(a => a.date && a.date !== entry.day);
-    field('#activity-date-attribution', entry.date_attribution || '');
-    // Required fields have their own inputs; the JSON keeps only the rest.
-    const requiredRefs = new Set((entry.required || []).map(f => f.reference));
-    field('#activity-fields', JSON.stringify(Object.fromEntries(Object.entries(entry.fields).filter(([key]) => !requiredRefs.has(key))), null, 2));
-    renderRequired(entry, false);
-  }
-  const [label, tone] = activityStates[entry.state] || [entry.state, 'muted'];
-  $('#activity-editor-state').className = `badge ${tone}`;
-  $('#activity-editor-state').textContent = label;
-  const left = activitySummary && entry.day === $('#activity-day').value ? activitySummary.remaining_hours : null;
-  $('#activity-hours-left').textContent = left === null ? '' : t('{hours} h left of the daily target', { hours: num(left) });
-  renderActivityOutcome(entry);
-  const disabled = activityRunning || Boolean(activityOperation) || entry.state !== 'pending';
-  for (const input of document.querySelectorAll('#activity-editor input, #activity-editor textarea, #activity-editor select, #activity-editor form button, #activity-refine')) input.disabled = disabled;
-  $('#activity-create').classList.toggle('busy', activityOperation?.id === entry.id && activityOperation.action === 'create');
-}
-
-/** What the form still lacks before asking the host to create the task. */
-function activityFormProblem() {
-  if (viewedActivity.activities.some(a => a.date && a.date !== viewedActivity.day) && !$('#activity-date-attribution').value.trim()) {
-    return [t('Explain why this work belongs to the selected day.'), '#activity-date-attribution'];
-  }
-  const parent = $('#activity-parent').value === 'other' ? $('#activity-other-parent').value : $('#activity-parent').value;
-  const hours = Number($('#activity-hours').value);
-  if (!parent || !(Number(parent) > 0)) return [t('Choose the HU or bug the task goes under before creating it.'), $('#activity-parent').value === 'other' ? '#activity-other-parent' : '#activity-parent'];
-  if (!$('#activity-title').value.trim()) return [t('Write the task title.'), '#activity-title'];
-  if (!$('#activity-hours').value || !(hours >= 0.01 && hours <= 24)) return [t('Enter the effort in hours (between 0.01 and 24).'), '#activity-hours'];
-  if (!$('#activity-description').value.trim()) return [t('Describe the work done before creating the task.'), '#activity-description'];
-  if ($('#activity-description').value.includes('://')) return [t("Remove the links from the description: the activity's links are added to the task automatically."), '#activity-description'];
-  const empty = requiredInputs.filter(r => { const value = r.read(); return value === undefined || (typeof value === 'number' && !Number.isFinite(value)); });
-  if (empty.length) return [t('Complete the fields Azure DevOps requires: {names}.', { names: empty.map(requiredName).join(', ') }), `#${empty[0].input.id}`];
-  // Azure DevOps keeps at most 255 characters in a text field; the app accepts 8000 in others.
-  const long = requiredInputs.find(r => { const value = r.read(); return typeof value === 'string' && value.length > (r.field.kind?.toLowerCase() === 'string' ? 255 : 8000); });
-  if (long) return [t('{name} admits at most {n} characters.', { name: requiredName(long), n: long.field.kind?.toLowerCase() === 'string' ? 255 : 8000 }), `#${long.input.id}`];
-  const fraction = requiredInputs.find(r => r.field.kind?.toLowerCase() === 'integer' && !Number.isInteger(r.read()));
-  if (fraction) return [t('{name} must be a whole number.', { name: requiredName(fraction) }), `#${fraction.input.id}`];
-  return null;
-}
-
-/** Shows what is missing next to the buttons and marks the field, without opening the phone keyboard. */
-function showActivityProblem(text, selector) {
-  activityResult = { id: selectedActivity, tone: 'warn', text, local: true };
-  if (viewedActivity) renderActivityOutcome(viewedActivity);
-  for (const marked of document.querySelectorAll('#activity-editor .invalid')) { marked.classList.remove('invalid'); marked.removeAttribute('aria-invalid'); }
-  const target = selector && $(selector);
-  if (target) {
-    target.closest('details')?.setAttribute('open', '');
-    target.classList.add('invalid');
-    target.setAttribute('aria-invalid', 'true');
-  }
-  $('#activity-outcome').scrollIntoView({ behavior: 'smooth', block: 'center' });
-}
-
-async function resolveActivity(action) {
-  if (!selectedActivity || !viewedActivity) throw t('Select an activity.');
-  if (action === 'create') {
-    const problem = activityFormProblem();
-    if (problem) return showActivityProblem(...problem);
-  }
-  const evidence = action === 'refine' ? draftEvidence : null;
-  draftEvidence = null;
-  if (action === 'refine' && !evidence && !$('#activity-context').value.trim() && !$('#activity-date-attribution').value.trim()) return showActivityProblem(t('Write your answer for the assistant first.'), '#activity-context');
-  let fields = {};
-  if (action !== 'dismiss') {
-    try { fields = jsonFields($('#activity-fields').value); } catch (error) { return showActivityProblem(String(error), '#activity-fields'); }
-    // Asking for new evidence drops the current text, so the agent's version fills the field.
-    for (const r of requiredInputs) {
-      if (r.field.reference === evidence) fields[r.field.reference] = '';
-      else if (r.read() !== undefined) fields[r.field.reference] = r.read();
-    }
-  }
-  const choice = $('#activity-parent').value;
-  const parentValue = choice === 'other' ? $('#activity-other-parent').value : choice;
-  const resolution = action === 'dismiss' ? { action } : {
-    action, parent: parentValue ? Number(parentValue) : null, title: $('#activity-title').value.trim(),
-    description: $('#activity-description').value.trim(), hours: $('#activity-hours').value ? Number($('#activity-hours').value) : null,
-    context: [$('#activity-context').value.trim(), evidence ? t('Write the completion evidence: the result and the artifacts by name, without chat content.') : ''].filter(Boolean).join('\n'),
-    date_attribution: $('#activity-date-attribution').value.trim(), fields
-  };
-  // A refusal (too long, sensitive, invalid) is shown next to the buttons, not as a toast.
-  try { await invoke('activity_resolve', { id: selectedActivity, resolution }); }
-  catch (error) { return showActivityProblem(tx(String(error?.message ?? error))); }
-  if (action === 'create') {
-    for (const r of requiredInputs) {
-      if (r.field.allowed?.length && r.read() !== undefined) try { localStorage.setItem(`pta-field:${r.field.reference}`, JSON.stringify(r.read())); } catch { /* not remembered */ }
-    }
-  }
-  activityOperation = { id: selectedActivity, action, day: viewedActivity.day, parentBefore: viewedActivity.draft.parent ?? null, choice };
-  activityResult = null;
-  activityRunning = true;
-  renderActivityEditor(viewedActivity);
-  $('#activity-outcome').scrollIntoView({ behavior: 'smooth', block: 'center' });
-  watchActivityOperation(activityOperation);
-}
-
-/** Polls until the host finishes the operation, then shows its result next to the form. */
-async function watchActivityOperation(operation) {
-  const deadline = Date.now() + 30 * 60_000;
-  while (activityOperation === operation && Date.now() < deadline) {
-    await sleep(1500);
-    let history;
-    try { history = await invoke('activity_history', { day: operation.day }); } catch { continue; }
-    if (history.running) continue;
-    activityOperation = null;
-    finishActivityOperation(operation, history.entries.find(e => e.id === operation.id));
-    await loadRegistration().catch(fail);
-    return;
-  }
-}
-
-function finishActivityOperation(operation, entry) {
-  const result = (tone, text) => { activityResult = { id: operation.id, tone, text }; };
-  if (!entry) {
-    result('error', t('The activity could not be read again. Refresh the list.'));
-  } else if (entry.state === 'done') {
-    const parent = entry.parents.find(p => p.id === entry.draft.parent);
-    const task = entry.task_url ? link(`#${entry.task_id} ${entryTitle(entry, '')}`, entry.task_url) : `«${entryTitle(entry, '')}»`;
-    flashActivity('ok', icon('check'), el('span', {}, t('Task created in Done:'), ' ', task,
-      parent ? [` · ${t('HU')} `, link(`#${parent.id} ${parent.title}`, parent.url)] : null, ` · ${hoursText(entry.draft.hours)}`));
-    done(t('Task #{id} created in Done.', { id: entry.task_id }));
-    if (selectedActivity === operation.id) closeActivity();
-    $('#activity-flash').scrollIntoView({ behavior: 'smooth', block: 'center' });
-    return;
-  } else if (['dismissed', 'already_registered'].includes(entry.state)) {
-    flashActivity('info', entry.state === 'dismissed' ? t('Activity dismissed: «{title}». It will not be proposed again.', { title: entryTitle(entry, t('Activity')) }) : tx(entry.issue));
-    if (selectedActivity === operation.id) closeActivity();
-    return;
-  } else if (['failed', 'uncertain'].includes(entry.state)) {
-    result('error', tx(entry.issue));
-  } else if (operation.action === 'refine') {
-    result(entry.issue ? 'warn' : 'ok', tx(entry.issue) || t('The assistant updated the draft. Review it and create the task.'));
-    activityEditing = false; activityPayload = '';
-  } else {
-    result('warn', tx(entry.issue) || t('The task was not created. Review the details and try again.'));
-    // The text the user typed stays; the HU follows the host when it chose or reset one.
-    if (selectedActivity === entry.id) {
-      const parent = (entry.draft.parent ?? null) !== operation.parentBefore || operation.choice === 'other' ? entry.draft.parent ?? '' : operation.choice;
-      renderParents(entry, parent);
-      // Fields Azure DevOps just asked for appear, with what was typed in the others.
-      renderRequired(entry, true);
-      const empty = requiredInputs.find(r => r.read() === undefined);
-      if (empty) { empty.input.classList.add('invalid'); empty.input.setAttribute('aria-invalid', 'true'); }
-      activityEditing = true;
-    }
-  }
-  if (selectedActivity === operation.id) {
-    renderActivityEditor(entry || viewedActivity);
-    const ask = requiredInputs.some(r => r.input.classList.contains('invalid'));
-    $(ask ? '#activity-required' : '#activity-outcome').scrollIntoView({ behavior: 'smooth', block: ask ? 'start' : 'center' });
-  }
+  const latest = history.last_run || history.runs[0];
+  $('#activity-result').hidden = !latest || !['failed', 'interrupted'].includes(latest.status);
+  $('#activity-result').textContent = latest?.diagnostics?.error ? tx(latest.diagnostics.error) : t('The last task snapshot did not finish. Try saving the day again.');
+  if (finished && latest?.status === 'completed') done(t('Daily tasks saved.'));
+  if (finished && activityDay && !activityTask) await openActivityDay(activityDay, false);
 }
 
 // ---------------------------------------------------------------- messages
@@ -1932,7 +1476,7 @@ const toolNames = {
 
 /** The activity record as a new source: disabled, without audiences or external processing. */
 function recordSource() {
-  return { id: 'activity-record', description: t('Work you approved in Activities, by day: tasks, HU and hours.'),
+  return { id: 'activity-record', description: t('Existing Azure tasks saved by day, with their HU and hours.'),
     topics: [], enabled: false, external_processing: false, allowed_conversations: [], allowed_senders: [],
     kind: 'tool', tool: { type: 'activity_record' } };
 }
@@ -1970,7 +1514,7 @@ function accessText(resource) {
   if (tool.organization) return `${tool.organization} / ${tool.project}`;
   if (tool.repository) return `${t('Catalog')}: ${tool.repository} / ${tool.path}`;
   if (tool.catalog?.length) return `${t('Catalog')}: ${catalogText(tool.catalog)}`;
-  if (tool.type === 'activity_record') return t('Tasks you approved in Activities, read on this device');
+  if (tool.type === 'activity_record') return t('Daily task record, read on this device');
   if (tool.url) return tool.url;
   if (tool.operation) return `${t('Fixed query')}: ${tool.operation}`;
   if (tool.type === 'teams_messages') return t('Your own messages, read with the connected Microsoft account');
@@ -2702,55 +2246,27 @@ $('#activity-all').onclick = () => showTab('messages');
 $('#activity-notice-open').onclick = () => busy($('#activity-notice-open'), () => invoke('activity_open'));
 $('#activity-settings').onclick = () => showTab('settings', 'panel-registration');
 $('#activity-refresh').onclick = () => busy($('#activity-refresh'), loadRegistration);
-$('#activity-log-from').onchange = $('#activity-log-to').onchange = () => loadLog().catch(fail);
-$('#activity-day').onchange = () => {
-  field('#activity-review-context', activityReviewContexts.get($('#activity-day').value) || '');
-  $('#activity-flash').hidden = true;
-  loadRegistration().catch(fail);
-};
-$('#activity-review-context').oninput = () => activityReviewContexts.set($('#activity-day').value, $('#activity-review-context').value);
+$('#activity-log-from').onchange = $('#activity-log-to').onchange = () => loadRegistration().catch(fail);
 $('#activity-run').onclick = () => busy($('#activity-run'), async () => {
   if (dirty) await save();
-  $('#activity-flash').hidden = true;
-  await invoke('activity_run', { day: $('#activity-day').value || null, context: $('#activity-review-context').value.trim() });
-  notify(t('Reviewing your work. This can take a few minutes; the page updates by itself.'));
+  await invoke('activity_run', { day: $('#activity-day').value || null });
+  activityRunning = true;
   await loadRegistration();
 });
-$('#activity-parent').onchange = () => {
-  activityEditing = true;
-  $('#activity-other-parent-label').hidden = $('#activity-parent').value !== 'other';
-  if ($('#activity-parent').value === 'other') $('#activity-other-parent').focus();
+$('#activity-days-back').onclick = () => {
+  ++activityDayRequest; ++activityDetailRequest;
+  activityDay = null; activityTask = null;
+  showActivityView('master');
+  activityDayFocus?.focus({ preventScroll: true }); window.scrollTo(0, activityDaysScroll);
 };
-$('#activity-form').oninput = event => {
-  activityEditing = true;
-  event.target.classList?.remove('invalid');
-  event.target.removeAttribute?.('aria-invalid');
-  // A problem found in the form goes away once the user edits it; the host's ones stay.
-  if (activityResult?.local && viewedActivity) { activityResult = null; renderActivityOutcome(viewedActivity); }
+$('#activity-task-back').onclick = () => {
+  ++activityDetailRequest; activityTask = null;
+  showActivityView('day-view');
+  activityTaskFocus?.focus({ preventScroll: true }); window.scrollTo(0, activityTasksScroll);
 };
-$('#activity-context').oninput = () => { activityEditing = true; };
-$('#activity-form').onsubmit = event => { event.preventDefault(); busy($('#activity-create'), () => resolveActivity('create')); };
-$('#activity-refine').onclick = () => busy($('#activity-refine'), () => resolveActivity('refine'));
-let dismissArmed = null;
-$('#activity-dismiss').onclick = () => {
-  // Dismissing is permanent: the first tap asks, the second one dismisses.
-  const button = $('#activity-dismiss');
-  if (dismissArmed !== selectedActivity) {
-    dismissArmed = selectedActivity;
-    button.textContent = t('Tap again to dismiss');
-    button.classList.add('danger');
-    setTimeout(() => { dismissArmed = null; button.textContent = t('Dismiss'); button.classList.remove('danger'); }, 4000);
-    return;
-  }
-  dismissArmed = null;
-  button.textContent = t('Dismiss'); button.classList.remove('danger');
-  busy(button, () => resolveActivity('dismiss'));
-};
-$('#activity-back').onclick = () => {
-  closeActivity();
-  $('#activity-pending-panel').scrollIntoView({ behavior: 'smooth', block: 'start' });
-};
-setInterval(() => { if (current && !activityOperation) loadRegistration().catch(() => {}); }, 5_000);
+$('#activity-detail-refresh').onclick = () => loadActivityTask();
+setInterval(() => { if (current && (tab === 'registration' || activityRunning)) loadRegistration().catch(() => {}); }, 5_000);
+
 if (window.__TAURI__?.event?.listen) {
   // Pushed on every start/stop, including from the tray and `pta`.
   window.__TAURI__.event.listen('assistant-phase', event => {
@@ -2760,9 +2276,8 @@ if (window.__TAURI__?.event?.listen) {
     else refreshLive().catch(() => renderLive());
   });
   window.__TAURI__.event.listen('assistant-error', event => fail(event.payload));
-  window.__TAURI__.event.listen('activity-registration', () => { if (!activityOperation) loadRegistration().catch(fail); });
+  window.__TAURI__.event.listen('activity-registration', () => loadRegistration().catch(fail));
   window.__TAURI__.event.listen('activity-open', event => {
-    selectedActivity = event.payload.id; activityEditing = false; activityPayload = '';
     showTab('registration');
   });
 }

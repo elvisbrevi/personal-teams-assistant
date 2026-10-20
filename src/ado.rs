@@ -4,6 +4,7 @@ pub mod link;
 mod progress;
 pub mod registration;
 pub mod review;
+pub mod tasks;
 pub mod todo;
 pub mod wiki;
 use crate::evidence::{Block, Evidence, Reference};

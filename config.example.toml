@@ -68,9 +68,9 @@ sensitive_patterns = []
 # "secret://internal/status" = "INTERNAL_API_TOKEN"
 
 [activity_registration]
-# Explicitly selected enabled sources may be reviewed locally without new Teams audiences.
+# Save existing Azure tasks locally by day; no models or Azure writes.
 enabled = false
-auto_register = true
+auto_register = false # legacy, ignored
 daily_hours = 9.0
 schedule = "daily" # daily or interval
 at = "18:00"
@@ -79,9 +79,9 @@ window_start = "09:00"
 window_end = "18:00"
 weekdays = [1, 2, 3, 4, 5] # Monday to Sunday = 1 to 7
 time_zone = "local" # or an IANA zone, e.g. America/Santiago
-sources = [] # Resource IDs: ADO commits/PRs/pipelines/releases/approvals, Wiki edits, Teams work/calls
-write_source = "" # activity source with a separate link_secret_ref
-task_kind = "Task"
-done_state = "Done" # checked against the project's Completed states
+sources = [] # Azure source IDs; empty uses all enabled Azure sources
+write_source = "" # legacy, ignored
+task_kind = "Task" # legacy, task types are discovered from the process
+done_state = "Done" # legacy, completed states are discovered from the process
 effort_field = "Microsoft.VSTS.Scheduling.CompletedWork" # hours
-extra_fields = {} # e.g. { "Custom.ActivityType" = "Documentation" }
+extra_fields = {} # legacy, ignored

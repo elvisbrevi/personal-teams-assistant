@@ -712,8 +712,8 @@ impl LlmProvider for Model {
                 )
             } else {
                 (
-                    " Under each bullet, one indented line with the work items where it could be registered, taken only from the evidence's «Possible work items» for that line or, for Wiki edits and Teams messages, from the user's work items in the evidence whose title clearly matches: their ID and title (e.g. #78 Fix the receipt), at most three; if none fits, a short proposed title for a new task.",
-                    "End with exactly one short question asking in which work item each activity should be registered.",
+                    "",
+                    "Do not propose creating tasks or offer to register work. This app only reads existing Azure tasks.",
                 )
             };
             system.push_str(" This request is an activity review, and these rules override the ones above where they differ. ");
@@ -1237,7 +1237,7 @@ mod tests {
         assert!(prompt.contains(prompts::RECAP.trim()));
         assert!(prompt.contains("UNTRUSTED DATA"));
         assert!(prompt.contains("Do not invent URLs."));
-        // A review's base text is replaced; the app's closing question stays.
+        // A review's base text is replaced; it still cannot offer retired task writes.
         model
             .generate_response(GenerationInput {
                 review: true,
@@ -1252,7 +1252,7 @@ mod tests {
         let prompt = system.lock().unwrap().clone();
         assert!(prompt.contains("This request is an activity review"));
         assert!(prompt.contains("Lista solo lo no registrado."));
-        assert!(prompt.contains("End with exactly one short question"));
+        assert!(prompt.contains("Do not propose creating tasks"));
         assert!(!prompt.contains(prompts::ACTIVITY_REVIEW.trim()));
     }
 

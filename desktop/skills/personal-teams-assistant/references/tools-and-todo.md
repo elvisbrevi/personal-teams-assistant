@@ -114,3 +114,19 @@ are folded. Rich HTML is parsed in the core into bounded safe trees and rebuilt 
 without browser HTML parsing, scripts, original attributes or remote image loads; images and attachments open through their original links rather than
 inline previews. The same device theme, touch targets and translation rules apply. Refresh,
 inline errors, partial warnings and stale-response guards also apply to detail reads.
+
+## Existing Azure tasks by user and day
+
+```sh
+printf '%s\n' '{"day":"2026-10-14"}' | pta --json tools call list_azure_tasks
+printf '%s\n' '{"day":"2026-10-14","user":"person@example.test","source":"azure-devops-status","project":"Payments"}' | pta --json tools call list_azure_tasks
+printf '%s\n' '{"id":4502,"source":"azure-devops-status","project":"Payments"}' | pta --json tools call get_azure_task
+```
+
+`list_azure_tasks` requires an exact day and optionally selects an Azure email/uniqueName (`user`),
+source and project. The configured catalog user is the default. It reads historical daily
+hours and completions within the configured time zone, process task category and project
+scope. `get_azure_task` reads one task with the same detail schema and safeguards as HU detail.
+Neither writes to Azure. The Activities screen uses daily saved copies and reuses To-Do's
+cards, detail rendering and original-link icon. See [daily task record](activity-registration.md)
+for date attribution, limits, scheduling and saved history.

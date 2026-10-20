@@ -1,21 +1,12 @@
-//! Host-owned scheduler: independent of Teams reception, sharing its Graph token owner.
+//! Host-owned read-only daily task snapshots, independent of Teams and language models.
 use super::*;
 use crate::{
-    activity::{Recorder, Resolution, store::Database},
-    adapters::{graph::Graph, oauth::AccessToken},
-    security::Redactor,
-    tools::Tools,
+    activity::{Summary, store::Database},
+    tools::{ToolSpec, tasks::Day},
 };
 use chrono::{NaiveDate, Utc};
 use serde_json::{Value, json};
 
-struct NoToken;
-#[async_trait::async_trait]
-impl AccessToken for NoToken {
-    async fn access_token(&self) -> Result<String> {
-        anyhow::bail!("connect Microsoft before reading chats and meetings")
-    }
-}
 fn database(state: &DesktopState) -> Result<Arc<Database>> {
     let config = read_config(&state.config_path)?;
     security::private_dir(&config.server.data_dir)?;
@@ -41,75 +32,15 @@ async fn recover(state: &DesktopState) -> Result<()> {
     }
     Ok(())
 }
-async fn recorder(state: &DesktopState) -> Result<Recorder> {
-    let config = read_config(&state.config_path)?;
-    let map = KnowledgeMap::load(&state.map_path)?;
-    config.validate()?;
-    crate::activity::validate_sources(&config.activity_registration, &map)?;
-    let (llm, mut secrets) = crate::llm::from_config(&config.llm)?;
-    for name in config.secrets.values() {
-        secrets.push(security::secret(name)?);
-    }
-    let redactor = Arc::new(Redactor::new(&config.policy.sensitive_patterns, secrets)?);
-    let db = database(state)?;
-    let cache = Arc::new(Store::open(
-        &config.server.data_dir.join("activity-cache.db"),
-    )?);
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(20))
-        .redirect(reqwest::redirect::Policy::none())
-        .build()?;
-    let config_arc = Arc::new(config.clone());
-    let mut graph = state.activity_graph.lock().await;
-    if graph.is_none() {
-        let path = config.server.data_dir.join("assistant.db");
-        let token: Arc<dyn AccessToken> = if Store::has_token(&path)? {
-            Arc::new(OAuth::new(
-                config_arc.clone(),
-                client.clone(),
-                Arc::new(Store::attach(&path)?),
-                Vault::new(&security::secret("STATE_ENCRYPTION_KEY")?)?,
-            )?)
-        } else {
-            Arc::new(NoToken)
-        };
-        *graph = Some(Arc::new(Graph {
-            client: client.clone(),
-            token,
-            config: config_arc,
-            store: cache.clone(),
-            base_url: "https://graph.microsoft.com/v1.0".into(),
-            client_state: String::new(),
-        }));
-    }
-    let tools = Arc::new(Tools {
-        client,
-        bindings: config.secrets.clone(),
-        repositories: map.repositories.clone(),
-        store: cache,
-        graph: graph.as_ref().unwrap().clone(),
-    });
-    Ok(Recorder {
-        config,
-        map,
-        db,
-        tools,
-        llm: Arc::new(llm),
-        redactor,
-    })
-}
 fn day(state: &DesktopState, value: Option<&str>) -> Result<NaiveDate> {
     let settings = read_config(&state.config_path)?.activity_registration;
     settings.validate()?;
     let today = settings.zoned(Utc::now()).date_naive();
-    let day = value
+    Ok(value
         .map(str::parse::<NaiveDate>)
         .transpose()?
-        .unwrap_or(today);
-    Ok(day)
+        .unwrap_or(today))
 }
-/// A day's activities, runs and totals; with `from`, the activities of every day from `from`
-/// to that day, newest first.
 pub(super) async fn inspect(
     state: &DesktopState,
     date: Option<&str>,
@@ -118,31 +49,25 @@ pub(super) async fn inspect(
 ) -> Result<Value> {
     recover(state).await?;
     let config = read_config(&state.config_path)?;
-    let until = day(state, date)?;
-    let day = until.to_string();
+    let until = day(state, date)?.to_string();
+    let since = from
+        .unwrap_or("0001-01-01")
+        .parse::<NaiveDate>()?
+        .to_string();
+    ensure!(
+        since.as_str() <= until.as_str(),
+        Rejected::Input("The first day must not be after the last one.")
+    );
     let db = database(state)?;
-    let entries = if pending {
-        db.pending()?
-    } else if let Some(from) = from {
-        let from = from.parse::<NaiveDate>()?;
-        ensure!(
-            from <= until,
-            Rejected::Input("The first day must not be after the last one.")
-        );
-        db.between(&from.to_string(), &day)?
+    let days = if pending {
+        vec![]
     } else {
-        db.entries(Some(&day))?
+        db.days(&since, &until)?
     };
-    let entries: Vec<_> = entries
-        .into_iter()
-        .filter(|e| !pending || e.state == "pending" || e.state == "refining")
-        .map(|mut e| {
-            e.evidence.clear();
-            e
-        })
-        .collect();
+    let record = days.iter().find(|d| d.day == until);
+    let summaries: Vec<_> = days.iter().map(|d| json!({"day":d.day,"tasks":d.tasks.len(),"hours":d.hours,"target_hours":d.target_hours,"saved_at":d.saved_at,"partial":d.partial})).collect();
     Ok(
-        json!({"day":day,"running":active(state).await,"entries":entries,"runs":db.runs(Some(&day))?,"summary":db.summary(&day)?,"settings":config.activity_registration,"llm":config.llm,"observation_mode":config.policy.dry_run}),
+        json!({"day":until,"running":active(state).await,"days":summaries,"record":record,"entries":[],"runs":db.runs(Some(&until))?,"last_run":db.runs(None)?.first(),"summary":db.summary(&until)?,"settings":config.activity_registration}),
     )
 }
 pub(super) async fn run(
@@ -152,153 +77,109 @@ pub(super) async fn run(
     context: &str,
 ) -> Result<Value> {
     recover(&host.state).await?;
+    ensure!(
+        context.trim().is_empty(),
+        Rejected::Input("Activity context is retired. This operation only saves existing tasks.")
+    );
     let mut task = host.state.activity_task.lock().await;
     ensure!(
         task.as_ref().is_none_or(|t| t.is_finished()),
         Rejected::Conflict("An activity operation is already running. Wait for it to finish.")
     );
-    let recorder = recorder(&host.state).await?;
-    crate::activity::validate_context(context, &recorder.redactor).map_err(|_| {
-        Rejected::Input("The context must be at most 6000 bytes and contain no sensitive data.")
-    })?;
-    let day = day(&host.state, date)?;
-    let today = recorder
-        .config
-        .activity_registration
-        .zoned(Utc::now())
-        .date_naive();
+    let config = read_config(&host.state.config_path)?;
+    let map = KnowledgeMap::load(&host.state.map_path)?;
+    let selected: Vec<_> = map
+        .resources
+        .iter()
+        .filter(|r| {
+            r.enabled
+                && (config.activity_registration.sources.is_empty()
+                    || config.activity_registration.sources.contains(&r.id))
+                && matches!(
+                    r.access,
+                    Access::Tool {
+                        tool: ToolSpec::AzureDevopsStatus { .. }
+                    }
+                )
+        })
+        .map(|r| r.id.clone())
+        .collect();
     ensure!(
-        day <= today && (today - day).num_days() < crate::ado::registration::LOOKBACK_DAYS,
-        Rejected::Input("Choose a day within the last 14 days.")
+        !selected.is_empty(),
+        Rejected::Input("Select an enabled Azure DevOps source for daily tasks.")
     );
-    let Some(id) = recorder.db.claim_run(slot, &day.to_string())? else {
+    let date = day(&host.state, date)?;
+    ensure!(
+        date <= config.activity_registration.zoned(Utc::now()).date_naive(),
+        Rejected::Input("Choose today or an earlier day.")
+    );
+    let db = database(&host.state)?;
+    let Some(id) = db.claim_run(slot, &date.to_string())? else {
         return Ok(json!({"already_run":true}));
     };
-    // Failure to display an OS notification never prevents an already authorized run.
-    let language = recorder.config.llm.language;
-    let _ = host.shell.notify_activity(
-        &language.say("Registering work", "Registrando trabajo"),
-        &language.say(
-            format!("Reviewing your activity for {day}."),
-            format!("Revisando tu actividad del {day}."),
-        ),
-        None,
-    );
+    db.describe_run(
+        &id,
+        &json!({"stage":"Reading existing tasks","settings":config.activity_registration}),
+    )?;
     let h = host.clone();
     let run_id = id.clone();
-    let context = context.trim().to_owned();
     *task = Some(tokio::spawn(async move {
-        let result = recorder.run(&run_id, day, &context).await;
-        let (title, body) = match result {
-            Ok(summary) if summary.pending > 0 => (
-                language.say("Activity details needed", "Faltan detalles de actividades"),
-                language.say(
-                    format!(
-                        "{} activities need context or an HU. Open Activities to review them.",
-                        summary.pending
-                    ),
-                    format!(
-                        "{} actividades necesitan contexto o una HU. Abre Actividades para revisarlas.",
-                        summary.pending
-                    ),
-                ),
-            ),
-            Ok(summary) => (
-                language.say("Activity registration finished", "Registro de actividades terminado"),
-                language.say(
-                    format!(
-                        "{} tasks created; {:.2} hours remain for {day}.",
-                        summary.created, summary.remaining_hours
-                    ),
-                    format!(
-                        "{} tareas creadas; quedan {:.2} horas para el {day}.",
-                        summary.created, summary.remaining_hours
-                    ),
-                ),
-            ),
-            Err(error) => (
-                language.say("Activity registration failed", "El registro de actividades falló"),
-                recorder.error_detail(&error),
-            ),
-        };
-        let _ = h.shell.notify_activity(&title, &body, None);
-    }));
-    Ok(json!({"id":id,"day":day.to_string(),"running":true}))
-}
-pub(super) async fn resolve(host: &Arc<Host>, id: String, resolution: Resolution) -> Result<Value> {
-    recover(&host.state).await?;
-    let mut task = host.state.activity_task.lock().await;
-    ensure!(
-        task.as_ref().is_none_or(|t| t.is_finished()),
-        Rejected::Conflict("An activity operation is already running. Wait for it to finish.")
-    );
-    let recorder = recorder(&host.state).await?;
-    let entry = recorder.db.entry(&id)?.ok_or(Rejected::Input(
-        "The activity was not found. Refresh the list.",
-    ))?;
-    resolution
-        .validate(&recorder.redactor)
-        .map_err(|error| rejection(&error))?;
-    ensure!(
-        entry.state == "pending",
-        Rejected::Conflict("This activity is no longer pending. Refresh the list.")
-    );
-    let h = host.clone();
-    let entry_id = id.clone();
-    let language = recorder.config.llm.language;
-    *task = Some(tokio::spawn(async move {
-        let result = recorder.resolve(&entry_id, resolution).await;
-        let body = match result {
-            Ok(e) if e.state == "done" => language.say(
-                format!("Task #{} created in Done.", e.task_id.unwrap_or_default()),
-                format!("Tarea #{} creada en Done.", e.task_id.unwrap_or_default()),
-            ),
-            Ok(e) if e.state == "dismissed" => {
-                language.say("Activity dismissed.", "Actividad descartada.")
-            }
-            Ok(e) if !e.issue.is_empty() => e.issue,
-            Ok(_) => language.say(
-                "Review the updated suggestion and any required fields.",
-                "Revisa la sugerencia actualizada y los campos obligatorios.",
-            ),
-            Err(error) => {
-                let detail = recorder.error_detail(&error);
-                if let Ok(Some(mut entry)) = recorder.db.entry(&entry_id)
-                    && ["pending", "refining"].contains(&entry.state.as_str())
-                {
-                    let previous = entry.state.clone();
-                    entry.state = "pending".into();
-                    entry.issue = detail.clone();
-                    let _ = recorder.db.update(&entry, &previous);
+        let result: Result<Day> = async {
+            let mut day = Day {day:date.to_string(),time_zone:config.activity_registration.time_zone.clone(),target_hours:config.activity_registration.daily_hours,..Default::default()};
+            let mut seen = std::collections::BTreeSet::new();
+            for source in selected {
+                let value = tools::todo::read(&h.state, "list_azure_tasks", &json!({"day":date.to_string(),"source":source})).await.map_err(|_| anyhow::anyhow!("Existing Azure tasks could not be read. Check the selected sources and read credentials; the previous record was retained."))?;
+                let read: Day = serde_json::from_value(value)?;
+                for task in read.tasks {
+                    if seen.insert(task.item.url.clone()) { day.hours += task.hours; day.tasks.push(task); }
                 }
-                detail
+            }
+            day.saved_at = Utc::now().timestamp();
+            db.save_day(&day)?;
+            Ok(day)
+        }.await;
+        let language = config.llm.language;
+        let (summary, error, body) = match result {
+            Ok(day) => {
+                let remaining = (day.target_hours - day.hours).max(0.);
+                let warnings = if remaining > 0. {
+                    vec![format!(
+                        "Daily target not reached: {:.2} of {:.2} hours. The day's tasks were saved.",
+                        day.hours, day.target_hours
+                    )]
+                } else {
+                    vec![]
+                };
+                let summary = Summary {
+                    recorded_hours: day.hours,
+                    remaining_hours: remaining,
+                    warnings,
+                    ..Default::default()
+                };
+                let _ = db.save_summary(&day.day, &summary);
+                let body = language.say(
+                    format!("Saved {} tasks for {}.", day.tasks.len(), day.day),
+                    format!("Se guardaron {} tareas del {}.", day.tasks.len(), day.day),
+                );
+                (Some(summary), String::new(), body)
+            }
+            Err(_) => {
+                let error = "Existing Azure tasks could not be saved. Check the selected sources and read credentials; the previous record was retained.".to_owned();
+                let body = language.say(error.clone(),"No se pudieron guardar las tareas de Azure. Revisa las fuentes y credenciales de lectura; se conservó el registro anterior.");
+                (None, error, body)
             }
         };
-        let _ = h.shell.notify_activity(
-            &language.say("Activities", "Actividades"),
-            &body,
-            Some(&entry_id),
-        );
+        let _ = db.finish_run(&run_id, summary.as_ref(), &error);
+        let _ =
+            h.shell
+                .notify_activity(&language.say("Daily tasks", "Tareas del día"), &body, None);
     }));
-    Ok(json!({"id":id,"running":true}))
+    Ok(json!({"id":id,"day":date.to_string(),"running":true}))
 }
-/// The exact reason an activity resolution was refused, as a fixed text the GUI translates.
-fn rejection(error: &anyhow::Error) -> Rejected {
-    Rejected::Input(match error.to_string().as_str() {
-        "task field too large" => {
-            "A field value is too long (at most 8000 characters) or has control characters."
-        }
-        "task fields must be scalar values" => "Field values must be text, numbers or true/false.",
-        "too many task fields" => "There are too many additional fields (at most 30).",
-        "invalid additional task field" => {
-            "An additional field name is invalid or reserved: the app sets the System fields."
-        }
-        "task fields contain sensitive data" => {
-            "A field contains data that looks sensitive (an email address, phone number, ID number, token or password). Remove it and try again."
-        }
-        "invalid resolution action" => "The requested action is invalid.",
-        _ => "The context must be at most 6000 bytes and contain no sensitive data.",
-    })
+pub(super) async fn resolve(_host: &Arc<Host>, _id: String, _resolution: Value) -> Result<Value> {
+    anyhow::bail!(Rejected::Input(
+        "Task creation is retired. Activities only saves existing tasks."
+    ))
 }
 pub(super) async fn shutdown(state: &DesktopState) {
     if let Some(task) = state.activity_task.lock().await.take() {
@@ -338,41 +219,5 @@ pub(super) async fn schedule(host: Arc<Host>) {
             }
         }
         tokio::time::sleep(std::time::Duration::from_secs(30)).await;
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::activity::Resolution;
-
-    #[test]
-    fn a_refused_resolution_names_its_exact_reason() {
-        let redactor = Redactor::new(&[], vec![]).unwrap();
-        let resolution = |fields: serde_json::Value, context: &str| -> Resolution {
-            serde_json::from_value(json!({"action":"create","context":context,"fields":fields}))
-                .unwrap()
-        };
-        let reason = |r: Resolution| rejection(&r.validate(&redactor).unwrap_err()).to_string();
-        assert!(
-            reason(resolution(json!({"Custom.Evidence":"x".repeat(8001)}), ""))
-                .contains("too long")
-        );
-        assert!(reason(resolution(json!({"Custom.Evidence":["a"]}), "")).contains("text, numbers"));
-        assert!(reason(resolution(json!({"System.State":"Done"}), "")).contains("reserved"));
-        assert!(
-            reason(resolution(json!({"Custom.Contact":"ana@example.com"}), ""))
-                .contains("sensitive")
-        );
-        assert!(reason(resolution(json!({}), &"x".repeat(6001))).contains("6000 bytes"));
-        assert!(
-            resolution(json!({"Custom.Evidence":"x".repeat(8000)}), "")
-                .validate(&redactor)
-                .is_ok()
-        );
-        // Custom fields of inherited processes may be named with a GUID.
-        let guid = json!({"Custom.b505c83e-3745-4d8b-b76b-b3086a0c4c71":"<p>Done</p>"});
-        assert!(resolution(guid, "").validate(&redactor).is_ok());
-        assert!(reason(resolution(json!({"-Custom.X":"x"}), "")).contains("reserved"));
     }
 }

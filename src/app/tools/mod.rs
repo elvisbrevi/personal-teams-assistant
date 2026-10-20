@@ -84,6 +84,25 @@ pub(super) const TOOLS: &[Tool] = &[
         schema: || detail_schema(false),
     },
     Tool {
+        name: "list_azure_tasks",
+        title: "Azure DevOps tasks by user and day",
+        description: "Read-only tasks for a user on YYYY-MM-DD in the configured time zone. Uses daily effort changes or completion, historical assignments and process-defined task types. user defaults to the catalog user. Includes verified task/parent links, title, description and daily hours. Never creates tasks; needs no model or Teams session.",
+        effect: Effect::Read,
+        schema: || {
+            object(
+                json!({"day":string("YYYY-MM-DD."),"user":string("Azure user email (uniqueName); defaults to the catalog user."),"source":string("Enabled Azure source; optional when unambiguous."),"project":string("Configured project, optional.")}),
+                &["day"],
+            )
+        },
+    },
+    Tool {
+        name: "get_azure_task",
+        title: "Azure DevOps task detail",
+        description: "Reads an existing task by ID within an enabled Azure source's configured projects. Full description, assignment, fields, comments, links and history, using the same safe detail view as To-Do. Read-only.",
+        effect: Effect::Read,
+        schema: || detail_schema(false),
+    },
+    Tool {
         name: "get_github_epic",
         title: "GitHub epic detail",
         description: "Reads an Epic issue by its repository-local number (id) and required project OWNER/REPO, through the existing GitHub connection. Returns description, assignees, labels, milestone, dates, comments, sub-issues and history. Read-only; reports incomplete sections.",
@@ -188,16 +207,9 @@ pub(super) const TOOLS: &[Tool] = &[
         schema: none,
     },
     Tool {
-        name: "activity_pending",
-        title: "Activities needing input",
-        description: "Detected work waiting for the user's decision (HU, effort, description, required fields), across days.",
-        effect: Effect::Read,
-        schema: none,
-    },
-    Tool {
         name: "activity_history",
         title: "Activity history",
-        description: "Entries and runs of one day, or the approved tasks of every day from `from` to `day`.",
+        description: "Recorded days, with counts and hours; the selected day includes its saved task list. Supports an inclusive from/day range.",
         effect: Effect::Read,
         schema: || {
             object(
@@ -209,7 +221,7 @@ pub(super) const TOOLS: &[Tool] = &[
     Tool {
         name: "activity_settings",
         title: "Activity registration settings",
-        description: "Scheduled and automatic registration settings: enabled, schedule, workdays, time zone, sources, daily hours, task fields.",
+        description: "Daily task snapshot settings: enabled, schedule, workdays, time zone, Azure sources, advisory daily hours and effort field. Legacy write settings are ignored.",
         effect: Effect::Read,
         schema: none,
     },
@@ -346,36 +358,24 @@ pub(super) const TOOLS: &[Tool] = &[
     },
     Tool {
         name: "activity_run",
-        title: "Review a day's activity",
-        description: "Reviews and, when automatic registration is on, registers a day's work as completed tasks in Azure DevOps. Needs the user's confirmation.",
-        effect: Effect::External,
+        title: "Save a day's tasks",
+        description: "Reads existing Azure tasks for the catalog user and saves the daily task record locally. No model, proposals or Azure writes. The hours target is only a warning.",
+        effect: Effect::Local,
         schema: || {
             object(
-                json!({"day": string("YYYY-MM-DD (default today, within the last 14 days)."), "context": string("Context for the agents (at most 6000 bytes)."), "confirmed": confirmed()}),
+                json!({"day": string("YYYY-MM-DD (default today; any past day).")}),
                 &[],
-            )
-        },
-    },
-    Tool {
-        name: "activity_resolve",
-        title: "Decide on a pending activity",
-        description: "create writes the completed task in Azure DevOps; refine rewrites the draft with context; dismiss discards it for good. create and dismiss need the user's confirmation.",
-        effect: Effect::External,
-        schema: || {
-            object(
-                json!({"id": string("The entry ID."), "resolution": {"type": "object", "description": "action (create|refine|dismiss), parent, title, description, hours, context, fields, date_attribution."}, "confirmed": confirmed()}),
-                &["id", "resolution"],
             )
         },
     },
     Tool {
         name: "activity_settings_update",
         title: "Change activity registration",
-        description: "Changes activity registration settings (schedule, workdays, time zone, sources, automatic registration, task fields). Needs the user's confirmation.",
-        effect: Effect::External,
+        description: "Changes the read-only daily task schedule, time zone, sources, advisory daily hours and effort field.",
+        effect: Effect::Local,
         schema: || {
             object(
-                json!({"changes": {"type": "object", "description": "Fields of activity_registration to set, as activity_settings shows them."}, "confirmed": confirmed()}),
+                json!({"changes": {"type": "object", "description": "Fields of activity_registration to set, as activity_settings shows them."}}),
                 &["changes"],
             )
         },
@@ -487,7 +487,12 @@ pub(super) fn validate(name: &str, args: &Value) -> Result<(), String> {
             serde_json::from_value(json!(args)).map_err(|_| "Invalid To-Do filters.")?;
         filters.validate().map_err(|e| e.to_string())?;
     }
-    if matches!(name, "get_azure_hu" | "get_github_epic") {
+    if name == "list_azure_tasks" {
+        let query: crate::tools::tasks::Query =
+            serde_json::from_value(json!(args)).map_err(|_| "Invalid daily task arguments.")?;
+        query.validate().map_err(|e| e.to_string())?;
+    }
+    if matches!(name, "get_azure_hu" | "get_azure_task" | "get_github_epic") {
         let detail: crate::tools::todo::DetailRequest =
             serde_json::from_value(json!(args)).map_err(|_| "Invalid work item arguments.")?;
         detail
@@ -564,7 +569,7 @@ fn text<'a>(args: &'a Value, name: &str) -> Result<&'a str, String> {
 pub(super) async fn run(name: &str, args: &Value) -> Result<Value, String> {
     validate(name, args)?;
     match name {
-        "list_azure_hus" | "list_github_epics" | "get_azure_hu" | "get_github_epic" | "open_work_item" => ipc(name, args.clone()).await,
+        "list_azure_hus" | "list_azure_tasks" | "list_github_epics" | "get_azure_hu" | "get_azure_task" | "get_github_epic" | "open_work_item" => ipc(name, args.clone()).await,
         "status" => {
             let s = ipc("snapshot", json!({})).await?;
             Ok(json!({
@@ -602,7 +607,6 @@ pub(super) async fn run(name: &str, args: &Value) -> Result<Value, String> {
         "knowledge_search" => ipc("knowledge_search", json!({"query": text(args, "query")?, "sources": args.get("sources"), "context": args.get("context"), "limit": args.get("limit")})).await,
         "index_status" => ipc("index_status", json!({})).await,
         "activity_status" => ipc("activity_status", json!({})).await,
-        "activity_pending" => ipc("activity_pending", json!({})).await,
         "activity_history" => ipc("activity_history", json!({"day": args.get("day"), "from": args.get("from")})).await,
         "activity_settings" => Ok(ipc("snapshot", json!({})).await?["config"]["activity_registration"].clone()),
         "chat_simulate" => {
@@ -656,8 +660,7 @@ pub(super) async fn run(name: &str, args: &Value) -> Result<Value, String> {
             "sources": args.get("sources").cloned().unwrap_or(json!([]))})).await,
         "index_refresh" => ipc("index_refresh", json!({"source": args.get("source")})).await,
         "answer_send" => ipc("answer_send", json!({"resource": text(args, "resource")?})).await,
-        "activity_run" => ipc("activity_run", json!({"day": args.get("day"), "context": args.get("context").and_then(Value::as_str).unwrap_or("")})).await,
-        "activity_resolve" => ipc("activity_resolve", json!({"id": text(args, "id")?, "resolution": args.get("resolution")})).await,
+        "activity_run" => ipc("activity_run", json!({"day": args.get("day")})).await,
         "activity_settings_update" => {
             let changes = args.get("changes").and_then(Value::as_object).ok_or("changes must be an object.")?.clone();
             edit(|p| {
@@ -714,25 +717,11 @@ pub(super) async fn run(name: &str, args: &Value) -> Result<Value, String> {
 
 /// The user's confirmation for an action with effects outside the app, in words they read.
 pub(super) fn confirmation(name: &str, args: &Value) -> Option<String> {
-    let resolution = args["resolution"]["action"].as_str().unwrap_or("");
     Some(match name {
         "answer_send" => format!(
             "Send the written answer of {} to Teams, as you?",
             args["resource"].as_str().unwrap_or("this message")
         ),
-        "activity_run" => format!(
-            "Review your activity of {} (with automatic registration on, completed tasks may be created in Azure DevOps)?",
-            args["day"].as_str().unwrap_or("today")
-        ),
-        "activity_resolve" if resolution == "refine" => return None,
-        "activity_resolve" if resolution == "dismiss" => {
-            "Dismiss this pending activity for good?".to_owned()
-        }
-        "activity_resolve" => format!(
-            "Create the completed task «{}» in Azure DevOps?",
-            args["resolution"]["title"].as_str().unwrap_or("")
-        ),
-        "activity_settings_update" => format!("Change activity registration: {}?", args["changes"]),
         "source_authorize" => format!(
             "Change who may read the source {}: {}?",
             args["id"].as_str().unwrap_or(""),
@@ -757,6 +746,24 @@ mod tests {
 
     #[test]
     fn tool_calls_are_closed_before_contacting_a_host() {
+        assert!(
+            validate(
+                "list_azure_tasks",
+                &json!({"day":"2026-10-14","user":"person@example.test"})
+            )
+            .is_ok()
+        );
+        assert!(validate("list_azure_tasks", &json!({"day":"yesterday"})).is_err());
+        assert!(
+            validate(
+                "list_azure_tasks",
+                &json!({"day":"2026-10-14","organization":"evil"})
+            )
+            .is_err()
+        );
+        assert!(validate("get_azure_task", &json!({"id":7})).is_ok());
+        assert!(validate("get_azure_task", &json!({"id":0})).is_err());
+
         assert!(validate("get_azure_hu", &json!({"id": 7})).is_ok());
         assert!(validate("get_azure_hu", &json!({"id": 0})).is_err());
         assert!(validate("get_azure_hu", &json!({"id": "7"})).is_err());
@@ -823,21 +830,8 @@ mod tests {
                 tool.name
             );
         }
-        // Refining a pending activity is local; creating or dismissing it is not.
-        assert!(
-            confirmation(
-                "activity_resolve",
-                &json!({"resolution": {"action": "refine"}})
-            )
-            .is_none()
-        );
-        assert!(
-            confirmation(
-                "activity_resolve",
-                &json!({"resolution": {"action": "dismiss"}})
-            )
-            .is_some()
-        );
+        assert!(confirmation("activity_run", &json!({})).is_none());
+        assert!(validate("activity_resolve", &json!({})).is_err());
     }
 
     #[test]
