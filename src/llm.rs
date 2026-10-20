@@ -7,7 +7,7 @@ use serde_json::{Value, json};
 mod agent;
 mod deepseek;
 pub mod prompts;
-pub use agent::{Catalog, ClaudeCli, CodexCli, catalog};
+pub use agent::{Catalog, ClaudeCli, CodexCli, OpenCodeCli, catalog};
 pub use deepseek::DeepSeek;
 
 #[derive(Clone, Copy, Default, Serialize)]
@@ -226,7 +226,8 @@ pub trait LlmProvider: Send + Sync {
 }
 
 /// Providers in the order the GUI offers them. CLIs use their own login; DeepSeek an API key.
-pub const PROVIDERS: [&str; 3] = ["codex", "claude", "deepseek"];
+pub const PROVIDERS: [&str; 4] = ["codex", "claude", "opencode", "deepseek"];
+pub const MAX_CHAIN_LENGTH: usize = 16;
 
 /// Reasoning efforts each provider accepts. Codex `ultra` delegates to sub-agents, so it is
 /// never offered: the answer must come from one tool-less model call.
@@ -235,6 +236,7 @@ pub fn efforts(provider: &str) -> &'static [&'static str] {
         "codex" => &["minimal", "low", "medium", "high", "xhigh", "max"],
         "claude" => &["low", "medium", "high", "xhigh", "max"],
         "deepseek" => &["none", "low", "high", "max"],
+        "opencode" => &["default", "low", "medium", "high", "xhigh", "max"],
         _ => &[],
     }
 }
@@ -263,16 +265,19 @@ fn valid_model(model: &str) -> bool {
 pub fn validate(llm: &Llm) -> Result<()> {
     validate_provider(&llm.provider)?;
     ensure!(valid_model(&llm.model), "invalid LLM model");
-    ensure!(llm.chain.len() <= PROVIDERS.len(), "too many LLM providers");
-    for (index, choice) in llm.chain.iter().enumerate() {
+    ensure!(llm.chain.len() <= MAX_CHAIN_LENGTH, "too many LLM models");
+    for choice in &llm.chain {
         validate_provider(&choice.provider)?;
-        ensure!(
-            llm.chain[..index]
-                .iter()
-                .all(|c| c.provider != choice.provider),
-            "each LLM provider may appear once"
-        );
         ensure!(valid_model(&choice.model), "invalid LLM model");
+        if choice.provider == "opencode" {
+            ensure!(
+                choice
+                    .model
+                    .split_once('/')
+                    .is_some_and(|(p, m)| !p.is_empty() && !m.is_empty()),
+                "OpenCode model must use provider/model"
+            );
+        }
         ensure!(
             efforts(&choice.provider).contains(&choice.effort.as_str()),
             "unsupported reasoning effort for this LLM provider"
@@ -960,6 +965,7 @@ pub fn model_for(choice: &LlmChoice, llm: &Llm, secrets: &mut Vec<String>) -> Re
         }
         "codex" => Model::new(CodexCli::new(&choice.model, &choice.effort), style),
         "claude" => Model::new(ClaudeCli::new(&choice.model, &choice.effort), style),
+        "opencode" => Model::new(OpenCodeCli::new(&choice.model, &choice.effort), style),
         _ => bail!("unsupported LLM provider"),
     };
     Ok(model.language(llm.language))
@@ -1037,10 +1043,10 @@ mod tests {
             vec![choice("codex", "gpt-6.1-sol", "ultra")],
             vec![choice("claude", "claude-opus-5-5", "none")],
             vec![choice("deepseek", "deepseek-flash", "medium")],
-            vec![
-                choice("codex", "gpt-6.1-sol", "low"),
-                choice("codex", "gpt-6-luna", "low"),
-            ],
+            vec![choice("opencode", "model-without-provider", "default")],
+            vec![choice("opencode", "provider/", "default")],
+            vec![choice("opencode", "provider/model", "ultra")],
+            vec![choice("codex", "gpt-6.1-sol", "low"); MAX_CHAIN_LENGTH + 1],
         ] {
             assert!(validate(&llm(chain)).is_err());
         }
@@ -1049,6 +1055,18 @@ mod tests {
             entry.enabled = false;
         }
         assert!(validate(&none_enabled).is_err());
+    }
+
+    #[test]
+    fn chain_keeps_repeated_providers_models_and_efforts_in_order() {
+        let config = llm(vec![
+            choice("codex", "gpt-6.1-sol", "medium"),
+            choice("codex", "gpt-6-luna", "low"),
+            choice("codex", "gpt-6.1-sol", "high"),
+            choice("opencode", "deepseek/deepseek-chat", "default"),
+        ]);
+        validate(&config).unwrap();
+        assert_eq!(config.active(), config.chain);
     }
 
     #[test]

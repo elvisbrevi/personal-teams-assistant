@@ -404,7 +404,7 @@ function renderSavebar() {
 // ---------------------------------------------------------------- status and overview
 
 const GENERATED = ['GRAPH_WEBHOOK_SECRET', 'STATE_ENCRYPTION_KEY'];
-const providerNames = { codex: 'Codex', claude: 'Claude Code', deepseek: 'DeepSeek' };
+const providerNames = { codex: 'Codex', claude: 'Claude Code', deepseek: 'DeepSeek', opencode: 'OpenCode' };
 
 function expectedSubscriptions(config) {
   return config.graph.discover_all_chats ? 1 : config.graph.allowed_chats.length + config.graph.channels.length;
@@ -494,7 +494,7 @@ function renderSteps(s) {
   const missing = missingCredentials(s.credentials);
   const steps = [
     { done: !missing.length, title: t('Credentials'), text: missing.length ? t('Missing: {names}.', { names: missing.join(', ') }) : t('The required credentials are stored.'), go: ['settings', 'panel-credentials'] },
-    { done: enabledChain(config).length > 0, title: t('Language model'), text: t('Turn on and order Codex, Claude Code or DeepSeek.'), go: ['settings', 'panel-llm'] },
+    { done: enabledChain(config).length > 0, title: t('Language model'), text: t('Turn on and order Codex, Claude Code, OpenCode or DeepSeek.'), go: ['settings', 'panel-llm'] },
     { done: entraReady(config), title: t('Entra registration'), text: t('Tenant and client ID of your existing registration.'), go: ['settings', 'panel-teams'] },
     { done: s.microsoft_connected, title: t('Microsoft account'), text: t('Sign in to read and answer as you.'), go: ['settings', 'panel-teams'] },
     { done: urlReady(config), title: t('Public URL and tunnel'), text: t('A stable HTTPS URL that reaches the local port.'), go: ['settings', 'panel-server'] },
@@ -654,21 +654,15 @@ function renderCredentials() {
   }
 }
 
-const effortNames = { none: t('No reasoning'), minimal: t('Minimal'), low: t('Low'), medium: t('Medium'), high: t('High'), xhigh: t('Very high'), max: t('Maximum') };
+const effortNames = { default: t('Model default'), none: t('No reasoning'), minimal: t('Minimal'), low: t('Low'), medium: t('Medium'), high: t('High'), xhigh: t('Very high'), max: t('Maximum') };
 let llmCatalog = { providers: [] };
 let llmRows = [];
 
-/** Configured order first (legacy profiles: their single DeepSeek model), then the rest inactive. */
+/** Keep each configured model in priority order, including repeated providers. */
 function chainRows(config) {
-  const rows = config.llm.chain.length
+  return config.llm.chain.length
     ? config.llm.chain.map(choice => ({ ...choice }))
     : [{ provider: config.llm.provider, model: config.llm.model, effort: 'max', enabled: true }];
-  for (const info of llmCatalog.providers) {
-    if (rows.some(row => row.provider === info.id)) continue;
-    const model = info.models[0];
-    rows.push({ provider: info.id, model: model?.id ?? '', effort: model?.default_effort ?? info.efforts[0], enabled: false });
-  }
-  return rows;
 }
 
 function providerStatus(info) {
@@ -688,6 +682,11 @@ function select(caption, label, options, value) {
 function renderChain() {
   const list = $('#llm-chain');
   list.replaceChildren();
+  const providerSelect = $('#add-llm-provider');
+  const selected = providerSelect.value;
+  providerSelect.replaceChildren(...llmCatalog.providers.map(info => new Option(providerNames[info.id] || info.id, info.id)));
+  if (selected) providerSelect.value = selected;
+  $('#add-llm').disabled = llmRows.length >= 16 || !providerSelect.value;
   let active = 0;
   llmRows.forEach((row, index) => {
     const info = llmCatalog.providers.find(provider => provider.id === row.provider);
@@ -700,6 +699,13 @@ function renderChain() {
     const models = (info?.models ?? []).map(model => [model.id, model.name]);
     if (row.model && !models.some(([id]) => id === row.model)) models.unshift([row.model, `${row.model} (${t('current')})`]);
     const [modelField, model] = select(t('Model'), t('{name} model', { name }), models, row.model);
+    if (row.provider === 'opencode') {
+      const input = el('input', { type: 'text', value: row.model, list: `llm-models-${index}`, 'aria-label': t('{name} model', { name }), placeholder: 'provider/model' });
+      const suggestions = el('datalist', { id: `llm-models-${index}` }, ...models.map(([id]) => new Option(id, id)));
+      input.oninput = () => { row.model = input.value.trim(); markDirty({ target: list }); };
+      modelField.replaceChild(input, model);
+      modelField.append(suggestions);
+    }
     model.title = row.model;
     const efforts = () => info?.models.find(m => m.id === row.model)?.efforts ?? info?.efforts ?? [row.effort];
     const effortOptions = () => {
@@ -725,6 +731,9 @@ function renderChain() {
       };
       order.append(button);
     }
+    const remove = el('button', { class: 'secondary small', textContent: t('Remove'), 'aria-label': t('Remove {name} model', { name }) });
+    remove.onclick = () => { llmRows.splice(index, 1); markDirty({ target: list }); renderChain(); };
+    order.append(remove);
     list.append(el('li', { class: 'chain-row' + (row.enabled ? '' : ' off') }, rank, label, modelField, effortField, order));
   });
 }
@@ -2289,6 +2298,15 @@ setInterval(() => {
   // Not while context is typed for an answer: a rebuilt list would move it under the user.
   if (tab === 'messages' && $('#messages-auto').checked && !document.activeElement?.classList?.contains('answer-context')) loadMessages().catch(() => {});
 }, 10_000);
+$('#add-llm').onclick = () => {
+  const info = llmCatalog.providers.find(provider => provider.id === $('#add-llm-provider').value);
+  if (!info || llmRows.length >= 16) return;
+  const model = info.models[0];
+  llmRows.push({ provider: info.id, model: model?.id ?? '', effort: model?.default_effort ?? info.efforts[0], enabled: info.available });
+  markDirty({ target: $('#llm-chain') });
+  renderChain();
+  $('#llm-chain li:last-child .field input, #llm-chain li:last-child .field select')?.focus();
+};
 $('#detect-llm').onclick = () => busy($('#detect-llm'), async () => {
   llmCatalog = await invoke('llm_providers'); renderChain(); done(t('CLIs detected again.'));
 });

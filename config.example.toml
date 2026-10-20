@@ -25,9 +25,11 @@ style = "Natural and clear. Summarize by project and explain what the technical 
 # The CLI, audit log and diagnostics stay in English.
 language = "es"
 
-# Priority order. Every model call starts from the first enabled provider and falls back to the
-# next only when it fails (for example, out of usage credits). Codex and Claude run their
-# installed CLIs with their own login; DeepSeek calls its API with DEEPSEEK_API_KEY.
+# Every model call starts with the first enabled entry and tries the next only on failure.
+# A provider may repeat with a different model or effort (at most 16 entries).
+# OpenCode 2 uses provider = "opencode", model = "provider/model", effort = "default".
+# Codex, Claude and OpenCode use their installed CLIs and own login;
+# DeepSeek calls its API with DEEPSEEK_API_KEY.
 [[llm.chain]]
 provider = "codex"
 model = "gpt-6.1-sol"
