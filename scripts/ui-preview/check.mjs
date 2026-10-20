@@ -225,14 +225,43 @@ check('axe: no WCAG 2.2 AA violations in any scan', !Object.keys(totals).length,
   await page.locator('#llm-chain > li:nth-child(3) .order button').last().click();
   await page.selectOption('#add-llm-provider', 'opencode');
   await page.click('#add-llm');
-  await page.locator('#llm-chain > li:last-child .field input').fill('example/model-b');
+  const openCodeRow = page.locator('#llm-chain > li:last-child');
+  check('OpenCode model is a dropdown without free text', await openCodeRow.locator('.field input, datalist').count() === 0 && await openCodeRow.locator('.field select').count() === 2);
+  check('OpenCode lists only catalog favorites', JSON.stringify(await openCodeRow.locator('.field select').first().locator('option').evaluateAll(xs => xs.map(x => x.value))) === JSON.stringify(['example/model-a', 'example/model-b']));
+  check('OpenCode efforts match model A variants', JSON.stringify(await openCodeRow.locator('.field select').last().locator('option').evaluateAll(xs => xs.map(x => x.value))) === JSON.stringify(['default', 'none', 'high']));
+  await openCodeRow.locator('.field select').last().selectOption('high');
+  await openCodeRow.locator('.field select').first().selectOption('example/model-b');
+  check('switching OpenCode models resets an unsupported effort to default', await openCodeRow.locator('.field select').last().inputValue() === 'default');
+  check('OpenCode efforts match model B including named variants', JSON.stringify(await openCodeRow.locator('.field select').last().locator('option').evaluateAll(xs => xs.map(x => x.value))) === JSON.stringify(['default', 'minimal', 'deep']));
+  await openCodeRow.locator('.field select').last().selectOption('deep');
   await page.click('#save');
   await page.waitForTimeout(400);
-  check('OpenCode accepts a custom provider/model and saves its default effort', await page.evaluate(() => window.__ptaLastSave.config.llm.chain.at(-1).provider === 'opencode' && window.__ptaLastSave.config.llm.chain.at(-1).model === 'example/model-b' && window.__ptaLastSave.config.llm.chain.at(-1).effort === 'default'));
+  check('OpenCode saves its selected favorite and native variant', await page.evaluate(() => window.__ptaLastSave.config.llm.chain.at(-1).provider === 'opencode' && window.__ptaLastSave.config.llm.chain.at(-1).model === 'example/model-b' && window.__ptaLastSave.config.llm.chain.at(-1).effort === 'deep'));
   await page.locator('#llm-chain > li:last-child .order button').last().click();
   await page.click('#save');
   await page.waitForTimeout(400);
   check('removing a model persists without dropping other entries', await page.evaluate(() => window.__ptaLastSave.config.llm.chain.length) === modelCount);
+  await page.evaluate(() => {
+    llmRows.push({ provider: 'opencode', model: 'example/no-longer-favorite', effort: 'high', enabled: false });
+    markDirty({ target: document.querySelector('#llm-chain') });
+    renderChain();
+  });
+  check('a saved non-favorite is preserved without becoming a model option', await openCodeRow.locator('.field select').first().inputValue() === '' && await openCodeRow.locator('option[value="example/no-longer-favorite"]').count() === 0 && (await openCodeRow.textContent()).includes('example/no-longer-favorite'));
+  await page.click('#save');
+  await page.waitForTimeout(400);
+  check('unrelated settings saves preserve the old non-favorite model', await page.evaluate(() => window.__ptaLastSave.config.llm.chain.at(-1).model === 'example/no-longer-favorite'));
+  await page.evaluate(() => {
+    llmRows.at(-1).model = 'example/model-a';
+    llmRows.at(-1).effort = 'deep';
+    renderChain();
+  });
+  check('a saved unsupported effort is not offered as a variant', await openCodeRow.locator('.field select').last().inputValue() === '' && await openCodeRow.locator('.field select').last().locator('option[value="deep"]').count() === 0);
+  await page.evaluate(() => {
+    llmCatalog.providers.find(p => p.id === 'opencode').models = [];
+    renderChain();
+  });
+  check('no OpenCode favorites disables Add and model selection', await page.isDisabled('#add-llm') && await openCodeRow.locator('.field select').first().isDisabled() && await openCodeRow.locator('.field select').last().isDisabled());
+  await page.locator('#llm-chain > li:last-child .order button').last().click();
   // Schedule-dependent fields and weekdays
   await page.click('#settings-tab-activity');
   check('daily schedule shows only its time', await page.isVisible('#registration-at-field') && !(await page.isVisible('#registration-interval-field')));

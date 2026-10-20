@@ -227,6 +227,7 @@
             <p class="hint">They classify messages, write the answers and pick the references they use. The first active one answers; if it fails (for example, out of credits or with its usage limit reached) the next one answers, and the next call starts again with the first. Codex, Claude and OpenCode use their installed CLI with their own login; DeepSeek uses its API with <code>DEEPSEEK_API_KEY</code>.</p>
             <div class="actions"><label for="add-llm-provider">Provider<select id="add-llm-provider"></select></label><button id="add-llm" class="secondary">Add model</button></div>
             <p class="hint">You can add the same provider several times with different models or efforts (up to 16 models).</p>
+            <p class="hint">OpenCode only lists available favorites. Mark models as favorites in OpenCode, then detect CLIs again. Effort shows the selected model’s variants.</p>
             <ol id="llm-chain" class="chain" aria-label="Model priority order"></ol>
           </div>
         </div>

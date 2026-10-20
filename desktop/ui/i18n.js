@@ -5,6 +5,11 @@ const UI_LANGUAGES = ['es', 'en'];
 
 const UI_CATALOG = { es: {
   'Model default': 'Predeterminado del modelo',
+  'Select an OpenCode favorite': 'Selecciona un favorito de OpenCode',
+  'Saved model: {model}. It is not in the available favorites.': 'Modelo guardado: {model}. No está entre los favoritos disponibles.',
+  'Select a supported variant': 'Selecciona una variante disponible',
+  'Saved effort: {effort}.': 'Esfuerzo guardado: {effort}.',
+  'OpenCode only lists available favorites. Mark models as favorites in OpenCode, then detect CLIs again. Effort shows the selected model’s variants.': 'OpenCode solo muestra los favoritos disponibles. Marca los modelos como favoritos en OpenCode y vuelve a detectar los CLI. El esfuerzo muestra las variantes del modelo elegido.',
   'Add model': 'Agregar modelo',
   'Remove {name} model': 'Eliminar modelo de {name}',
   'You can add the same provider several times with different models or efforts (up to 16 models).': 'Puedes agregar el mismo proveedor varias veces con distintos modelos o niveles de esfuerzo (hasta 16 modelos).',
