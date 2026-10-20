@@ -23,7 +23,7 @@
     ];
     c.llm.style = 'Brief, cordial and direct. Use bullet lists for steps.';
     c.policy.dry_run = true;
-    Object.assign(c.activity_registration, { enabled: true, sources: ['ado-activity', 'wiki', 'my-teams'], write_source: 'ado-activity', effort_field: 'Microsoft.VSTS.Scheduling.CompletedWork' });
+    Object.assign(c.activity_registration, { enabled: true, sources: ['ado-activity'], write_source: '', effort_field: 'Microsoft.VSTS.Scheduling.CompletedWork' });
     snapshot.map.repositories = { knowledge: '/home/ana/src/knowledge', handbook: '/home/ana/src/handbook' };
     snapshot.map.resources = [
       { id: 'operations', description: 'Runbooks for deployments, incidents and on-call', topics: ['operations', 'deployments'], enabled: true, external_processing: true, allowed_conversations: ['*'], allowed_senders: [], kind: 'file', repository: 'knowledge', path: 'topics/operations.md' },
@@ -81,34 +81,16 @@
     { id: 4388, title: 'Refund notifications', url: `${org}/Payments/_workitems/edit/4388`, organization: org, project: 'Payments', kind: 'User Story', state: 'New' },
     { id: 4410, title: 'Timeout on settlement batch', url: `${org}/Payments/_workitems/edit/4410`, organization: org, project: 'Payments', kind: 'Bug', state: 'Active' },
   ];
-  const activity = (label, url, date = DAY, extra = {}) => ({ key: 'a1', label, short: label.split(' ').slice(0, 2).join(' '), url, organization: org, date, occurred_at: `${date}T14:00:00Z`, ...extra });
-  const entry = (id, state, draft, extra = {}) => ({ id, run: 'run-1', day: DAY, state, draft: { activities: [], parent: null, title: '', description: '', evidence: '', hours: null, confidence: .6, question: '', suggested_parents: [4321], ignore: false, ...draft },
-    activities: [], parents, evidence: '', context: '', fields: {}, issue: '', task_id: null, task_url: null, updated_at: secs(NOW), required: [], date_attribution: '', ...extra });
-  const pending = scenario === 'fresh' ? [] : [
-    entry('11111111-1111-4111-8111-111111111111', 'pending', { title: 'Review the receipt PDF pull request', description: 'Reviewed and approved the PR that renders card receipts as PDF.', hours: 1.5, parent: 4321, question: 'Is 1.5 hours right for this review?' },
-      { activities: [activity('PR #212 Receipt PDF renderer (portal)', `${org}/Payments/_git/portal/pullrequest/212`)],
-        required: [{ name: 'Activity type', reference: 'Custom.ActivityType', required: true, allowed: ['Development', 'Review', 'Documentation', 'Meeting'], kind: 'picklistString', help: '', default: null }] }),
-    entry('22222222-2222-4222-8222-222222222222', 'pending', { title: 'Call in Daily Payments', description: '', hours: null, question: 'Which HU does this activity belong to, what did you do, and how long did it take?' },
-      { activities: [activity('Call in Daily Payments', 'https://teams.microsoft.com/l/meeting/1', DAY, { organization: 'https://teams.microsoft.com', context_required: true })] }),
-  ];
-  const history = scenario === 'fresh' ? [] : [
-    ...pending,
-    entry('33333333-3333-4333-8333-333333333333', 'done', { title: 'Fix settlement batch timeout', description: 'Raised the batch timeout and added a retry.', hours: 3, parent: 4410 }, { task_id: 4502, task_url: `${org}/Payments/_workitems/edit/4502` }),
-    entry('44444444-4444-4444-8444-444444444444', 'dismissed', { title: 'Own message in Coffee chat: see you tomorrow', hours: null }),
-  ];
-  // Work registered on earlier days, for the History view.
-  const earlier = scenario === 'fresh' ? [] : [
-    ['2026-10-13', 'Document the refund notification flow', 2, 4388, 4497],
-    ['2026-10-13', 'Pair review of the settlement retry', 1.5, 4410, 4498],
-    ['2026-10-12', 'Receipt PDF layout for card payments', 4, 4321, 4490],
-    ['2026-10-09', 'Deployment call for the payments release', 1, 4321, 4481],
-  ].map(([day, title, hours, parent, task], i) => entry(`5555555${i}-5555-4555-8555-555555555555`, i === 3 ? 'uncertain' : 'done', { title, hours, parent },
-    { day, task_id: task, task_url: `${org}/Payments/_workitems/edit/${task}` }));
-  const runs = scenario === 'fresh' ? [] : [
-    { id: 'run-1', day: DAY, status: 'completed', created_at: secs(ago(90)), summary: { recorded_hours: 4.5, remaining_hours: 4.5, pending: 2, created: 1, partial: true, warnings: ['Source wiki has incomplete coverage.'] }, diagnostics: { stage: 'Saving review results', finished_at: secs(ago(88)), provider: 'codex' } },
-    { id: 'run-0', day: DAY, status: 'failed', created_at: secs(ago(200)), summary: null, diagnostics: { stage: 'Reading daily effort and open HUs', finished_at: secs(ago(199)), error: 'Azure DevOps returned HTTP 401' } },
-  ];
-  const summary = scenario === 'fresh' ? null : runs[0].summary;
+  const taskDays = scenario === 'fresh' ? [] : [
+    [DAY, [[4502, 'Fix settlement batch timeout', 3, 4410]]],
+    ['2026-10-13', [[4497, 'Document the refund notification flow', 2, 4388], [4498, 'Pair review of the settlement retry', 1.5, 4410]]],
+    ['2026-10-12', [[4490, 'Receipt PDF layout for card payments', 4, 4321]]],
+    ['2026-10-09', [[4481, 'Deployment call for the payments release', 1, 4321]]],
+    ['2026-10-08', []],
+  ].map(([day, tasks]) => ({ day, time_zone: 'America/Santiago', target_hours: 9, saved_at: secs(NOW), partial: false, warnings: [],
+    tasks: tasks.map(([id, title, hours, parent]) => ({ item: { id, title, url: `${org}/Payments/_workitems/edit/${id}`, project: 'Payments', kind: 'Task', state: 'Done', created_at: `${day}T12:00:00Z`, dates: [] },
+      source: 'ado-activity', organization: org, user: 'ana@example.test', description: title, hours, parent: { ...parents.find(p => p.id === parent), created_at: null, dates: [] } })),
+    hours: tasks.reduce((sum, t) => sum + t[2], 0) }));
 
   const notes = scenario === 'fresh' ? [] : [
     { id: 'note-1', title: 'How a production hotfix is registered', text: 'A production hotfix is logged as a Development Bug, not a user story: the symptom, the cause and the change, linked to the incident.', contexts: ['billing'], keywords: ['hotfix', 'incident'], origin: 'answer', created_at: secs(ago(3000)), updated_at: secs(ago(2000)) },
@@ -149,6 +131,8 @@
     };
   }
   const handlers = {
+    get_azure_task: async args => { const detail = await todoDetail(args, false); detail.item.kind = 'Task'; return detail; },
+    activity_run: args => { window.__ptaLastActivityRun = args; return { running: true }; },
     get_azure_hu: args => todoDetail(args, false),
     get_github_epic: args => todoDetail(args, true),
     list_azure_hus: async args => {
@@ -178,8 +162,9 @@
     llm_providers: () => providers,
     audit: () => audit,
     self_chat_status: () => ({ diagnostics: { cursor: ['x', secs(ago(1))], unresolved_outputs: 0 } }),
-    activity_history: args => ({ day: args.day || DAY, running: false, entries: args.from ? [...history, ...earlier].filter(e => e.day >= args.from && e.day <= (args.day || DAY)) : (args.day || DAY) === DAY ? history : [], runs: (args.day || DAY) === DAY ? runs : [], summary: (args.day || DAY) === DAY ? summary : null, settings: snapshot.config.activity_registration, llm: snapshot.config.llm, observation_mode: snapshot.config.policy.dry_run }),
-    activity_pending: () => ({ day: DAY, running: false, entries: pending, runs: [], summary: null, settings: snapshot.config.activity_registration, llm: snapshot.config.llm, observation_mode: snapshot.config.policy.dry_run }),
+    activity_history: args => ({ day: args.day || DAY, running: !!window.__ptaActivityRunning,
+      days: taskDays.filter(d => (!args.from || d.day >= args.from) && d.day <= (args.day || DAY)).map(d => ({ ...d, tasks: d.tasks.length })),
+      record: taskDays.find(d => d.day === (args.day || DAY)) || null, entries: [], runs: [], summary: null, settings: snapshot.config.activity_registration }),
     activity_status: () => ({}),
     save_settings: args => { window.__ptaLastSave = structuredClone(args); snapshot.config = args.config; snapshot.map = args.map; snapshot.loaded_config = structuredClone(args.config); snapshot.tunnel_config = args.tunnelConfig; return {}; },
     start_assistant: () => { snapshot.running = true; return {}; },

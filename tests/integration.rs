@@ -3113,7 +3113,7 @@ async fn unlinked_work_is_linked_only_after_the_user_confirms_the_exact_plan() {
     };
     let (_, audit) = say(&read_only, "vincula el commit en la #100").await;
     assert_eq!(audit.reason, "links_not_configured");
-    assert!(last_sent().contains("link_secret_ref"));
+    assert!(last_sent().contains("ya no crea"));
     assert_eq!(tools.writes.lock().unwrap().len(), 1);
 }
 
@@ -3303,7 +3303,7 @@ impl LlmProvider for RecapLlm {
         assert!(
             input
                 .evidence
-                .contains("Registered as task #26410 under #23553 «Pagos QR»: «Registro y1» (2 h)"),
+                .contains("Recorded task #26410 under #23553 «Pagos QR»: «Registro y1» (2 h)"),
             "{}",
             input.evidence
         );
@@ -3353,6 +3353,37 @@ async fn what_the_user_did_on_a_day_comes_from_the_recorded_activities() {
             Some(task),
         );
     }
+    use personal_teams_assistant::tools::{
+        tasks::{Day, Task},
+        todo::Item,
+    };
+    let item = |id, title: &str| Item {
+        id,
+        title: title.into(),
+        url: format!("https://dev.azure.com/example/Payments/_workitems/edit/{id}"),
+        project: "Payments".into(),
+        kind: "Task".into(),
+        state: "Done".into(),
+        created_at: None,
+        dates: vec![],
+    };
+    activities
+        .save_day(&Day {
+            day: (today - chrono::Duration::days(1)).to_string(),
+            saved_at: 1,
+            hours: 2.,
+            tasks: vec![Task {
+                item: item(26410, "Registro y1"),
+                source: "azure-devops-status".into(),
+                organization: "https://dev.azure.com/example".into(),
+                user: "me@example.test".into(),
+                description: "Ajuste del flujo de pago QR.".into(),
+                hours: 2.,
+                parent: Some(item(23553, "Pagos QR")),
+            }],
+            ..Default::default()
+        })
+        .unwrap();
     drop(activities);
     let mut status = wiki_resource();
     status.id = "azure-devops-status".into();

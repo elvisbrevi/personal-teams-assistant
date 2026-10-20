@@ -1,7 +1,7 @@
 //! The work the Activities section recorded, by day, as context for status answers and
-//! activity reviews: tasks the app registered and the user's verified work it detected that
-//! is not registered yet. An entry is shown only where every source its activities come from
-//! is authorized, so a Teams conversation never sees work drawn from chats it may not read.
+//! activity reviews: existing Azure tasks saved in daily snapshots, plus legacy records.
+//! Legacy unregistered work still requires every originating source to be authorized;
+//! recorded tasks require the activity record audience.
 use super::Entry;
 use crate::ado::link::{Linkable, Target};
 use crate::evidence::{Block, Evidence, Reference};
@@ -64,11 +64,17 @@ fn work_item(target: &Target, id: u64, label: String, url: &str) -> Option<Refer
 /// Whether an entry's work is in Azure DevOps: a task the app created (or may have created),
 /// or work already linked to one.
 fn registered(state: &str) -> bool {
-    matches!(state, "done" | "uncertain" | "already_registered")
+    matches!(
+        state,
+        "recorded" | "recorded_empty" | "done" | "uncertain" | "already_registered"
+    )
 }
 /// One line for an entry and the references it names. Registered tasks and their HU are
 /// named by number only when their link verifies.
 fn line(entry: &Entry) -> Option<(String, Vec<Reference>)> {
+    if entry.state == "recorded_empty" {
+        return Some(("- No tasks were recorded for this day.\n".into(), vec![]));
+    }
     let registered = match entry.state.as_str() {
         state if registered(state) => true,
         "pending" | "refining" | "failed" => false,
@@ -85,7 +91,12 @@ fn line(entry: &Entry) -> Option<(String, Vec<Reference>)> {
         references.push(reference);
         Some(format!(" under #{} «{}»", p.id, p.title))
     });
-    let task = match (entry.task_id, entry.task_url.as_deref(), parent) {
+    let scope = if entry.state == "recorded" {
+        entry.parents.iter().find(|p| Some(p.id) == entry.task_id)
+    } else {
+        parent
+    };
+    let task = match (entry.task_id, entry.task_url.as_deref(), scope) {
         (Some(id), Some(url), Some(parent)) => {
             work_item(parent, id, format!("#{id} {}", entry.draft.title), url).map(|r| {
                 references.push(r);
@@ -95,6 +106,7 @@ fn line(entry: &Entry) -> Option<(String, Vec<Reference>)> {
         _ => None,
     };
     let what = match (registered, entry.state.as_str()) {
+        (true, "recorded") => format!("Recorded task{}", task.as_deref().unwrap_or("")),
         (true, "uncertain") => format!(
             "Registration as task{} uncertain",
             task.as_deref().unwrap_or("")
@@ -146,7 +158,7 @@ pub fn evidence(
         .collect();
     shown.sort_by(|a, b| b.day.cmp(&a.day).then(b.updated_at.cmp(&a.updated_at)));
     let header = format!(
-        "Work recorded in the app's Activities section, by day, from {since} to {until} (the user's own verified activity; registered tasks were created in Azure DevOps by the app; days without lines have no recorded work):"
+        "Work recorded in the app's Activities section, by day, from {since} to {until} (the user's own verified activity; recorded tasks are read from Azure DevOps; the app does not create tasks; days without lines have no recorded work):"
     );
     let mut evidence = Evidence {
         text: format!("{header}\n"),

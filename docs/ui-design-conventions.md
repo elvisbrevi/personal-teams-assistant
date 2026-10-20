@@ -6,7 +6,7 @@ The standard every change to `desktop/ui/` follows, so the native window, the we
 
 - A professional tool used every day, with a playful look: clarity, density and speed come first, and the play lives in color, outline and type, never in extra content. No marketing copy, decorative illustrations, gradients or entrance animations.
 - One visual identity: warm paper (`--bg`), an ink outline (`--line`, 2px) around every surface and control, rounded display type (`--display`: SF Pro Rounded on Apple devices, a system face elsewhere) for headings, buttons, tabs and numbers, and system text to read. Each section has its sticker color (`--c-overview`, `--c-messages`, `--c-registration`, `--c-knowledge`, `--c-chat`, `--c-settings`) for its navigation tile, its page tile and its active tab on a phone; states have their own fills (§7).
-- A hard offset shadow means «you can press this» or «this is lifted above the page»: buttons, pressable cards and outcome tiles (they sink into the shadow when pressed), an open message, the activity editor, the selected sidebar item, and what floats (toast, save bar, phone tab bar, dialogs). Panels, rows, tabs and filters are flat; never a blurred shadow.
+- A hard offset shadow means «you can press this» or «this is lifted above the page»: buttons, pressable cards and outcome tiles (they sink into the shadow when pressed), an open message, the open task detail, the selected sidebar item, and what floats (toast, save bar, phone tab bar, dialogs). Panels, rows, tabs and filters are flat; never a blurred shadow.
 - The only illustration is the assistant's face: the brand mark, Home's state (awake while it runs and answers, reading aside while it observes, looking up while something is missing, glancing around while it starts or stops, asleep when stopped) and the eyes of an empty list. It repeats what the text says and is hidden from assistive technology.
 - Motion only answers an action or shows a live state (the face's blink and glance, the status dot's pulse, a spinner, a button sinking, a notice popping in). `prefers-reduced-motion` disables it.
 
@@ -34,9 +34,9 @@ The standard every change to `desktop/ui/` follows, so the native window, the we
 | Footer | Settings, then the status pill and the web account |
 
 - A new feature joins the section of the task it serves; it does not get a navigation item of its own unless it is a separate daily task. The sidebar holds at most eight items. The phone keeps five destinations: Home, To-Do, Messages, Activities and More (Knowledge and Test chat). More is a keyboard-accessible disclosure, closes after selection or Escape, and preserves the floating bar's shape and touch targets.
-- Settings is one category at a time: **General** (how the assistant answers, and this device's theme), **Microsoft Teams** (identity, reception, personal chat, public URL), **Language models**, **Activity registration**, **Credentials**, **Advanced** (rare or migration operations). A new field goes in the category of the user's goal; a category reaches seven panels before it is split, and a seventh category needs an IA review.
+- Settings is one category at a time: **General** (how the assistant answers, and this device's theme), **Microsoft Teams** (identity, reception, personal chat, public URL), **Language models**, **Activity registration** (daily record and schedule), **Credentials**, **Advanced** (rare or migration operations). A new field goes in the category of the user's goal; a category reaches seven panels before it is split, and a seventh category needs an IA review.
 - Deep links use `showTab(section, panelId)`: when the panel is in Settings it opens its category first. Home's status rows and setup steps always link to where the thing is changed.
-- Attention is shown once where it can be acted on (the activities notice is on Home; elsewhere the navigation counter carries it).
+- Attention is shown once where it can be acted on (a running daily snapshot is shown on Home and at its save control).
 
 ## 5. Progressive disclosure
 
@@ -65,7 +65,7 @@ The standard every change to `desktop/ui/` follows, so the native window, the we
 
 - Buttons: outlined pills with a shadow. One primary action per panel or form (the next step, `--primary` lime); everything else `.secondary` (paper); destructive actions `.danger` and visually apart; navigation-like actions `.link-button`. An irreversible action (dismiss, send to Teams) asks for a second tap instead of a modal.
 - Asynchronous actions run through `busy(button, task)`: the button shows progress and is disabled; errors become a notice.
-- To-Do cards open an in-section detail; the external-link icon remains a separate action. Back
+- To-Do cards open an in-section detail; Activities reuses these cards and detail after selecting a recorded day; the external-link icon remains a separate action. Back
   restores filters, list position and focus. Keep assignment, type-specific content and discussion
   visible; fold all fields and history. Parse provider HTML in the core into safe rich-text trees, rebuild from allowed elements and turn
   images into original links; never mount provider scripts, styles or image URLs.

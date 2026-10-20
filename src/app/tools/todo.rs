@@ -16,6 +16,16 @@ pub(in crate::app) async fn read(
     method: &str,
     args: &Value,
 ) -> Result<Value, String> {
+    let task_query: Option<crate::tools::tasks::Query> = if method == "list_azure_tasks" {
+        let query: crate::tools::tasks::Query = serde_json::from_value(args.clone())
+            .map_err(|_| "[invalid_input] Invalid daily task arguments.".to_owned())?;
+        query
+            .validate()
+            .map_err(|e| format!("[invalid_input] {e}"))?;
+        Some(query)
+    } else {
+        None
+    };
     let github_read = matches!(method, "list_github_epics" | "get_github_epic");
     let detail: Option<DetailRequest> = if method.starts_with("get_") {
         let args: DetailRequest = serde_json::from_value(args.clone())
@@ -30,6 +40,11 @@ pub(in crate::app) async fn read(
         Some(args) => Filters {
             source: args.source.clone(),
             project: args.project.clone(),
+            ..Default::default()
+        },
+        None if task_query.is_some() => Filters {
+            source: task_query.as_ref().unwrap().source.clone(),
+            project: task_query.as_ref().unwrap().project.clone(),
             ..Default::default()
         },
         None => serde_json::from_value(args.clone())
@@ -72,7 +87,7 @@ pub(in crate::app) async fn read(
         let source = match sources.as_slice() {
             [] => {
                 return Err(
-                    "[not_ready] Configure an Azure DevOps activity source before listing HUs."
+                    "[not_ready] Configure an Azure DevOps activity source before reading work items."
                         .into(),
                 );
             }
@@ -81,7 +96,8 @@ pub(in crate::app) async fn read(
         };
         if !source.enabled {
             return Err(
-                "[not_ready] Enable the selected Azure DevOps source before listing HUs.".into(),
+                "[not_ready] Enable the selected Azure DevOps source before reading work items."
+                    .into(),
             );
         }
         let Access::Tool {
@@ -100,13 +116,21 @@ pub(in crate::app) async fn read(
             .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(fail)?;
-        tokio::time::timeout(std::time::Duration::from_secs(90), async {
+        tokio::time::timeout(std::time::Duration::from_secs(110), async {
+            if let Some(query) = &task_query {
+                let mut query = query.clone();
+                query.source = Some(source.id.clone());
+                serde_json::to_value(crate::ado::tasks::list(&client, &key, &catalog, &cache, &query, &config.activity_registration).await?).map_err(anyhow::Error::from)
+            } else if method == "get_azure_task" {
+                serde_json::to_value(crate::ado::detail::get_task(&client, &key, &catalog, &cache, detail.as_ref().unwrap()).await?).map_err(anyhow::Error::from)
+            } else {
             match &detail {
                 Some(args) => serde_json::to_value(crate::ado::detail::get(&client, &key, &catalog, &cache, args).await?),
                 None => serde_json::to_value(crate::ado::todo::list(&client, &key, &catalog, &cache, &filters).await?),
             }.map_err(anyhow::Error::from)
-        }).await.map_err(|_| "[network] Azure HU read timed out.".to_owned())?
-            .map_err(|error| if error.to_string().starts_with("invalid") { format!("[invalid_input] {error}") } else { "[network] Azure HUs could not be read; check the catalog, team membership and read credential.".into() })?
+            }
+        }).await.map_err(|_| "[network] Azure work item read timed out.".to_owned())?
+            .map_err(|error| if error.to_string().starts_with("invalid") { format!("[invalid_input] {error}") } else { "[network] Azure work items could not be read; check the catalog, team membership and read credential.".into() })?
     };
     Ok(result)
 }

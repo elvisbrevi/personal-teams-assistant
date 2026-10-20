@@ -1,6 +1,6 @@
 # Personal Teams Assistant
 
-An assistant that answers Microsoft Teams messages as the user, only from what the user authorized, and registers the user's work in Azure DevOps.
+An assistant that answers Microsoft Teams messages as the user, only from what the user authorized, and keeps daily records of the user's existing Azure DevOps tasks.
 
 ## Language
 
@@ -50,10 +50,10 @@ A reply listing confirmed registered tasks for a day or period, from the activit
 **Activity review**:
 A comparison of the user's own activity with the work registered as tasks, listing what is not registered.
 
-### Registering work
+### Daily work
 
 **Activity record**:
-What the Activities section recorded by day: the tasks the user approved, with their HU and hours, and verified work not registered yet.
+What Activities saved by day: existing Azure tasks with verified links, descriptions, optional HU and daily hours. An empty saved day differs from an unsaved day; the app never creates or changes tasks.
 _Avoid_: activity history (for the data), log
 
 **HU**:

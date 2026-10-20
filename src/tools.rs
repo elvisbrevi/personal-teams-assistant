@@ -6,6 +6,7 @@ use serde_json::{Value, json};
 use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
 use tokio_util::compat::TokioAsyncWriteCompatExt;
 
+pub mod tasks;
 pub mod todo;
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -408,6 +409,11 @@ fn lookup_id(question: &str) -> Result<String> {
 }
 #[async_trait]
 impl ReadOnlyTool for Tools {
+    // Azure writes are retired, including plans persisted by an older host.
+    fn links_work(&self, _spec: &ToolSpec) -> bool {
+        false
+    }
+
     async fn registration_review(
         &self,
         spec: &ToolSpec,
@@ -501,55 +507,7 @@ impl ReadOnlyTool for Tools {
         )
         .await?
     }
-    async fn validate_task(
-        &self,
-        spec: &ToolSpec,
-        parent: &crate::ado::link::Target,
-        task: &crate::ado::registration::TaskFields,
-        activities: &[crate::ado::link::Linkable],
-    ) -> Result<crate::ado::registration::Check> {
-        let (catalog, key) = self.registration_catalog(spec, true)?;
-        tokio::time::timeout(
-            std::time::Duration::from_secs(45),
-            crate::ado::registration::check_task(
-                &self.client,
-                &key,
-                &catalog,
-                parent,
-                task,
-                activities,
-            ),
-        )
-        .await?
-    }
-    async fn register_task(
-        &self,
-        spec: &ToolSpec,
-        parent: &crate::ado::link::Target,
-        task: &crate::ado::registration::TaskFields,
-        activities: &[crate::ado::link::Linkable],
-        check: &crate::ado::registration::Check,
-    ) -> Result<crate::ado::registration::Written> {
-        let (catalog, key) = self.registration_catalog(spec, true)?;
-        tokio::time::timeout(
-            std::time::Duration::from_secs(45),
-            crate::ado::registration::write_task(
-                &self.client,
-                &key,
-                &catalog,
-                parent,
-                task,
-                activities,
-                check,
-            ),
-        )
-        .await
-        .unwrap_or(Ok(crate::ado::registration::Written {
-            status: crate::ado::link::LinkStatus::Uncertain,
-            id: None,
-            detail: String::new(),
-        }))
-    }
+
     async fn execute(&self, spec: &ToolSpec, question: &str, conversation: &str) -> Result<String> {
         spec.validate()?;
         let operation = async {
@@ -872,53 +830,6 @@ impl ReadOnlyTool for Tools {
         )
         .await?
     }
-    async fn add_link(
-        &self,
-        spec: &ToolSpec,
-        target: &crate::ado::link::Target,
-        activity: &crate::ado::link::Linkable,
-    ) -> Result<crate::ado::link::LinkStatus> {
-        let ToolSpec::AzureDevopsStatus {
-            link_secret_ref: Some(link_secret_ref),
-            ..
-        } = spec
-        else {
-            anyhow::bail!("linking is not set up");
-        };
-        let catalog = spec.catalog(&self.repositories)?;
-        let key = crate::security::resolve(link_secret_ref, &self.bindings)?;
-        // A deadline reached mid-request may or may not have written the link.
-        tokio::time::timeout(
-            std::time::Duration::from_secs(20),
-            crate::ado::link::add_link(&self.client, &key, &catalog, target, activity),
-        )
-        .await
-        .unwrap_or(Ok(crate::ado::link::LinkStatus::Uncertain))
-    }
-    async fn create_task(
-        &self,
-        spec: &ToolSpec,
-        parent: &crate::ado::link::Target,
-        task: &crate::ado::link::NewTask,
-        activities: &[&crate::ado::link::Linkable],
-    ) -> Result<(crate::ado::link::LinkStatus, Option<u64>)> {
-        let ToolSpec::AzureDevopsStatus {
-            link_secret_ref: Some(link_secret_ref),
-            ..
-        } = spec
-        else {
-            anyhow::bail!("linking is not set up");
-        };
-        let catalog = spec.catalog(&self.repositories)?;
-        let key = crate::security::resolve(link_secret_ref, &self.bindings)?;
-        // A deadline reached mid-request may or may not have created the task.
-        tokio::time::timeout(
-            std::time::Duration::from_secs(20),
-            crate::ado::link::create_task(&self.client, &key, &catalog, parent, task, activities),
-        )
-        .await
-        .unwrap_or(Ok((crate::ado::link::LinkStatus::Uncertain, None)))
-    }
 }
 
 /// Tool facade scoped to the resource already authorized by the pipeline.
@@ -963,6 +874,63 @@ impl ScopedTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn installed_tools_cannot_write_even_with_a_legacy_write_credential() {
+        struct NoToken;
+        #[async_trait]
+        impl crate::adapters::oauth::AccessToken for NoToken {
+            async fn access_token(&self) -> Result<String> {
+                anyhow::bail!("no Graph session")
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::open(&dir.path().join("cache.db")).unwrap());
+        let client = reqwest::Client::new();
+        let tools = Tools {
+            bindings: BTreeMap::new(),
+            repositories: BTreeMap::new(),
+            client: client.clone(),
+            store: store.clone(),
+            graph: Arc::new(Graph {
+                client,
+                token: Arc::new(NoToken),
+                config: Arc::new(crate::config::Config::desktop_template().unwrap()),
+                store,
+                base_url: "https://graph.microsoft.com/v1.0".into(),
+                client_state: String::new(),
+            }),
+        };
+        let spec = ToolSpec::AzureDevopsStatus {
+            repository: String::new(),
+            path: PathBuf::new(),
+            catalog: vec![],
+            secret_ref: "secret://reader".into(),
+            link_secret_ref: Some("secret://writer".into()),
+        };
+        assert!(!tools.links_work(&spec));
+        let target = crate::ado::link::Target::default();
+        assert!(
+            tools
+                .add_link(&spec, &target, &crate::ado::link::Linkable::default())
+                .await
+                .is_err()
+        );
+        assert!(
+            tools
+                .create_task(
+                    &spec,
+                    &target,
+                    &crate::ado::link::NewTask {
+                        title: "Retired".into(),
+                        kind: "Task".into()
+                    },
+                    &[]
+                )
+                .await
+                .is_err()
+        );
+    }
+
     #[test]
     fn own_teams_messages_source_parses_and_reviews_activity() {
         let map = crate::knowledge::KnowledgeMap::parse(

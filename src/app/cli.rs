@@ -82,15 +82,13 @@ Personal chat
   self-chat reconcile NONCE MESSAGE_ID  Resolves a pending output.
   test self-chat           Checks the personal chat membership (does not send).
 
-Activity registration
-  activity status|pending  Current run, or activities needing context or an HU.
-  activity run [DAY] [--context-stdin]  Reviews and registers work (today by default).
-                           --context-stdin reads up to 6000 bytes of context for the agents.
-  activity history [DAY|FROM..TO]  Tasks and runs of a day, or the tasks of every day
-                           from FROM to TO (YYYY-MM-DD).
-  activity resolve ID       JSON on stdin: action=create|refine|dismiss, parent, title, description,
-                           hours, context (Other), fields (additional required field values).
-  activity open [ID]        Opens the activity review in a separate app window.
+Daily task record
+  activity status          Current snapshot run and recorded days.
+  activity run [DAY]        Saves existing Azure tasks locally (today by default); never creates tasks.
+  activity history [DAY|FROM..TO]  Recorded days and the selected day's tasks (YYYY-MM-DD).
+  activity pending         Retired; always empty.
+  activity resolve ID      Retired; refuses task creation.
+  activity open [ID]        Opens Activities in the app.
                            Configure with config set activity_registration.FIELD JSON.
 
 Knowledge
@@ -126,10 +124,12 @@ Agents
                            list_azure_hus: source, project, state, kind (hu|bug), limit (default 10, maximum 100).
                            list_github_epics: project (OWNER/REPO), state (open|closed), limit.
                            get_azure_hu: id, optional source and project (HU or bug detail).
+                           list_azure_tasks: day (YYYY-MM-DD), optional user, source and project.
+                           get_azure_task: id, optional source and project (read-only task detail).
                            get_github_epic: id and project (OWNER/REPO).
   capabilities             Contract and commands as JSON.
   mcp                      Model Context Protocol server over stdio for agents (Codex, Claude Code): every
-                           operation of the app as a tool; sending, Azure DevOps writes, access and mode changes
+                           operation of the app as a tool; sending, access and mode changes
                            need the user's confirmation. mcp config prints how to add it to each agent.
   skill show|path|install DIRECTORY     Operating manual for agents.
 

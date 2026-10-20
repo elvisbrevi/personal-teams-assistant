@@ -310,6 +310,27 @@ pub async fn get(
     cache: &Store,
     args: &DetailRequest,
 ) -> Result<Detail> {
+    get_kind(client, key, catalog, cache, args, false).await
+}
+
+pub async fn get_task(
+    client: &Client,
+    key: &str,
+    catalog: &str,
+    cache: &Store,
+    args: &DetailRequest,
+) -> Result<Detail> {
+    get_kind(client, key, catalog, cache, args, true).await
+}
+
+async fn get_kind(
+    client: &Client,
+    key: &str,
+    catalog: &str,
+    cache: &Store,
+    args: &DetailRequest,
+    task: bool,
+) -> Result<Detail> {
     args.validate(false)?;
     let catalog = Catalog::parse(catalog)?.own(client, key).await?;
     let mut found = None;
@@ -341,7 +362,11 @@ pub async fn get(
             }
             // Verify the type against this project's process, including closed HUs and bugs.
             let mut kinds = BTreeSet::new();
-            for category in ["Microsoft.RequirementCategory", "Microsoft.BugCategory"] {
+            for category in if task {
+                &["Microsoft.TaskCategory"][..]
+            } else {
+                &["Microsoft.RequirementCategory", "Microsoft.BugCategory"][..]
+            } {
                 match todo::metadata(
                     client,
                     key,
@@ -370,7 +395,11 @@ pub async fn get(
             }
             ensure!(
                 kinds.contains(field(&item, "System.WorkItemType")),
-                "invalid work item type: select an HU or bug"
+                if task {
+                    "invalid work item type: select a task"
+                } else {
+                    "invalid work item type: select an HU or bug"
+                }
             );
             ensure!(
                 found.is_none(),

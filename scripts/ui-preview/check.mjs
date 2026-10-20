@@ -39,7 +39,7 @@ for (const [label, ctx] of [['desktop-light', {}], ['desktop-dark', { colorSchem
     await page.evaluate(t => showTab(t), tab);
     await page.waitForTimeout(300);
     // Every tab of the section's tab list (Settings sections, Activities and Knowledge views) is scanned.
-    const list = { settings: '#settings-tabs', registration: '#activity-tabs', knowledge: '#knowledge-tabs' }[tab];
+    const list = { settings: '#settings-tabs', knowledge: '#knowledge-tabs' }[tab];
     const groups = list ? await page.$$eval(`${list} [role=tab]`, tabs => tabs.map(t => t.dataset.group)).catch(() => []) : [];
     for (const group of groups.length ? groups : [null]) {
       if (group) { await page.evaluate(([l, g]) => selectTab($(l), g), [list, group]); await page.waitForTimeout(250); }
@@ -168,11 +168,11 @@ check('axe: no WCAG 2.2 AA violations in any scan', !Object.keys(totals).length,
   await page.evaluate(() => { window.__ptaTodoDelay = 0; });
   await page.screenshot({ path: `${out}/desktop-todo.png`, fullPage: true });
   await page.click('nav [data-tab="overview"]');
-  // Banner only on Home
+  // The daily record no longer leaves obsolete input warnings on Home.
   const bannerHome = await page.isVisible('#activity-notice');
   await page.click('nav [data-tab="knowledge"]');
   const bannerElsewhere = await page.isVisible('#activity-notice');
-  check('activity banner on Home only', bannerHome && !bannerElsewhere);
+  check('no obsolete activity input banner', !bannerHome && !bannerElsewhere);
   check('nav click focuses the section heading', await page.evaluate(() => document.activeElement?.matches('#knowledge h1')));
   // Status row deep link to Settings › Microsoft Teams
   await page.click('nav [data-tab="overview"]');
@@ -442,11 +442,28 @@ check('axe: no WCAG 2.2 AA violations in any scan', !Object.keys(totals).length,
   const tabsScroll = await page.$eval('#settings-tabs', n => n.scrollWidth > n.clientWidth);
   check('phone: Settings sections all in sight, none scrolls sideways', !tabsScroll);
   await page.click('nav [data-tab="registration"]');
-  await page.tap('#activity-tab-log');
   await page.waitForTimeout(400);
-  const days = await page.$$eval('#activity-log .log-day h3', h => h.map(x => x.textContent));
-  check('phone: History lists the registered work by day, newest first', days.length === 4, days.join(' | '));
-  check('phone: History counts the approved tasks', /5 tareas/.test(await page.textContent('#activity-log-total')), await page.textContent('#activity-log-total'));
+  const days = await page.$$eval('#activity-log .card strong', h => h.map(x => x.textContent));
+  check('phone: History lists recorded days including an empty day, newest first', days.length === 5, days.join(' | '));
+  check('phone: History counts recorded days', /5 días/.test(await page.textContent('#activity-log-total')), await page.textContent('#activity-log-total'));
+  await page.tap('#activity-log .card:first-child');
+  await page.waitForSelector('#activity-day-tasks .todo-select');
+  check('phone: day shows its existing task and advisory hours warning', /4502/.test(await page.textContent('#activity-day-tasks')) && await page.isVisible('#activity-day-warning'));
+  check('phone: task has a separate original-link action', await page.locator('#activity-day-tasks .icon-button').count() === 1);
+  await page.tap('#activity-day-tasks .todo-select');
+  await page.waitForSelector('#activity-detail-title');
+  check('phone: task opens the shared detail through the task tool', await page.evaluate(() => window.__ptaLastDetail?.id === 4502 && window.__ptaCalls.includes('get_azure_task')));
+  await page.evaluate(axeSource);
+  const taskViolations = await scan(page);
+  check('phone: task detail passes axe WCAG 2.2 AA', taskViolations.length === 0, JSON.stringify(taskViolations));
+  await page.tap('#activity-task-back');
+  check('phone: back restores task focus', await page.evaluate(() => document.activeElement?.matches('#activity-day-tasks .todo-select')));
+  await page.tap('#activity-days-back');
+  check('phone: back restores day focus', await page.evaluate(() => document.activeElement?.matches('#activity-log .card')));
+  await page.tap('#activity-log .card:last-child');
+  await page.waitForTimeout(200);
+  check('phone: saved empty day is visible', /No se registraron tareas/.test(await page.textContent('#activity-day-tasks')));
+  await page.tap('#activity-days-back');
   await page.click('nav [data-tab="messages"]');
   await page.waitForTimeout(400);
   await page.tap('#messages-list details[data-resource$="/1008"] summary');
@@ -458,8 +475,7 @@ check('axe: no WCAG 2.2 AA violations in any scan', !Object.keys(totals).length,
   check('phone: an open answer block does not scroll sideways', !(await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth)));
   await page.screenshot({ path: `${out}/phone-messages-answer.png`, fullPage: true });
   await page.click('nav [data-tab="registration"]');
-  await page.tap('#activity-tab-review');
-  check('phone: Review comes back', await page.isVisible('#activity-day-panel') && !(await page.isVisible('#activity-view-log')));
+  check('phone: recorded day list remains available', await page.isVisible('#activity-master'));
   for (const g of ['general', 'teams', 'models', 'activity', 'credentials', 'advanced']) {
     await page.evaluate(x => selectTab($('#settings-tabs'), x), g);
     await page.waitForTimeout(150);

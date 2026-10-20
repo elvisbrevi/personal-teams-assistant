@@ -248,8 +248,10 @@ impl Portal {
         const METHODS: &[&str] = &[
             "snapshot",
             "list_azure_hus",
+            "list_azure_tasks",
             "list_github_epics",
             "get_azure_hu",
+            "get_azure_task",
             "get_github_epic",
             "open_work_item",
             "chat",

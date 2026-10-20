@@ -19,7 +19,8 @@ impl Database {
             CREATE INDEX IF NOT EXISTS entries_day ON entries(day);
             CREATE TABLE IF NOT EXISTS claims(activity TEXT PRIMARY KEY,entry TEXT NOT NULL);")?;
         db.execute_batch(
-            "CREATE TABLE IF NOT EXISTS totals(day TEXT PRIMARY KEY,summary TEXT NOT NULL);",
+            "CREATE TABLE IF NOT EXISTS totals(day TEXT PRIMARY KEY,summary TEXT NOT NULL);
+             CREATE TABLE IF NOT EXISTS task_days(day TEXT PRIMARY KEY,payload TEXT NOT NULL);",
         )?;
         let has_diagnostics = db
             .prepare("PRAGMA table_info(runs)")?
@@ -52,7 +53,7 @@ impl Database {
         }
         self.db.lock().unwrap().execute(
             "UPDATE runs SET status='interrupted', diagnostics=json_set(diagnostics,'$.error',?1,'$.finished_at',?2) WHERE status='running'",
-            params!["The host stopped during this review. Inspect task history before running another review; uncertain writes are never retried.", Utc::now().timestamp()],
+            params!["The host stopped before this run finished. Previously saved daily task records were retained.", Utc::now().timestamp()],
         )?;
         Ok(())
     }
@@ -213,7 +214,84 @@ impl Database {
         }
         let db = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
         db.busy_timeout(std::time::Duration::from_secs(2))?;
-        between(&db, since, until)
+        let mut entries = between(&db, since, until)?;
+        if db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='task_days')",
+            [],
+            |r| r.get::<_, bool>(0),
+        )? {
+            for day in task_days(&db, since, until)? {
+                entries.retain(|e| e.day != day.day);
+                entries.extend(day.entries());
+            }
+        }
+        Ok(entries)
+    }
+
+    pub fn save_day(&self, day: &crate::tools::tasks::Day) -> Result<()> {
+        self.db.lock().unwrap().execute("INSERT INTO task_days(day,payload) VALUES(?1,?2) ON CONFLICT(day) DO UPDATE SET payload=excluded.payload", params![day.day, serde_json::to_string(day)?])?;
+        Ok(())
+    }
+
+    pub fn days(&self, since: &str, until: &str) -> Result<Vec<crate::tools::tasks::Day>> {
+        let db = self.db.lock().unwrap();
+        let mut days = task_days(&db, since, until)?;
+        let snapshot_days: std::collections::BTreeSet<_> =
+            days.iter().map(|d| d.day.clone()).collect();
+        // Retain the confirmed tasks saved by older versions; new snapshots supersede them.
+        for e in between(&db, since, until)?
+            .into_iter()
+            .filter(|e| e.state == "done")
+        {
+            if snapshot_days.contains(&e.day) {
+                continue;
+            }
+            let Some(parent) = e.parents.iter().find(|p| Some(p.id) == e.draft.parent) else {
+                continue;
+            };
+            let (Some(id), Some(url)) = (e.task_id, e.task_url) else {
+                continue;
+            };
+            let index = match days.iter().position(|d| d.day == e.day) {
+                Some(index) => index,
+                None => {
+                    days.push(crate::tools::tasks::Day {
+                        day: e.day.clone(),
+                        ..Default::default()
+                    });
+                    days.len() - 1
+                }
+            };
+            let day = &mut days[index];
+            let item = |id, title, url, state, kind| crate::tools::todo::Item {
+                id,
+                title,
+                url,
+                state,
+                kind,
+                project: parent.project.clone(),
+                created_at: None,
+                dates: vec![],
+            };
+            day.hours += e.draft.hours.unwrap_or_default();
+            day.tasks.push(crate::tools::tasks::Task {
+                item: item(id, e.draft.title, url, "".into(), "Task".into()),
+                source: String::new(),
+                organization: parent.organization.clone(),
+                user: String::new(),
+                description: e.draft.description,
+                hours: e.draft.hours.unwrap_or_default(),
+                parent: Some(item(
+                    parent.id,
+                    parent.title.clone(),
+                    parent.url.clone(),
+                    parent.state.clone(),
+                    parent.kind.clone(),
+                )),
+            });
+        }
+        days.sort_by(|a, b| b.day.cmp(&a.day));
+        Ok(days)
     }
     pub fn save_summary(&self, day: &str, summary: &Summary) -> Result<()> {
         self.db.lock().unwrap().execute("INSERT INTO totals(day,summary) VALUES(?1,?2) ON CONFLICT(day) DO UPDATE SET summary=excluded.summary",params![day,serde_json::to_string(summary)?])?;
@@ -230,6 +308,13 @@ impl Database {
             .optional()?;
         text.map(|s| Ok(serde_json::from_str(&s)?)).transpose()
     }
+}
+fn task_days(db: &Connection, since: &str, until: &str) -> Result<Vec<crate::tools::tasks::Day>> {
+    let mut stmt =
+        db.prepare("SELECT payload FROM task_days WHERE day>=?1 AND day<=?2 ORDER BY day DESC")?;
+    stmt.query_map([since, until], |r| r.get::<_, String>(0))?
+        .map(|r| Ok(serde_json::from_str(&r?)?))
+        .collect()
 }
 fn between(db: &Connection, since: &str, until: &str) -> Result<Vec<Entry>> {
     let mut stmt = db.prepare(

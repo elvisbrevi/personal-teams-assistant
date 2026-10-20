@@ -2,7 +2,7 @@ Read `pta config show` or `pta config get policy.dry_run`. `pta config set polic
 
 `knowledge_index` holds the optional embeddings endpoint for semantic search of repositories and notes (`embeddings`: `url`, `model`, `secret_ref`); see [auth-and-knowledge.md](auth-and-knowledge.md). Without it, they are searched by their words.
 
-`activity_registration` configures scheduled/manual registration of performed work as completed tasks, the 9-hour target, source selection and required fields. Every setting and review action is available through `pta`: see [activity-registration.md](activity-registration.md). It defaults to disabled; observation mode also prevents task creation.
+`activity_registration` configures daily snapshots of existing Azure tasks, their schedule, Azure sources and advisory hours target. It defaults to disabled; snapshots never write to Azure and need no model. Legacy task-write fields are ignored. See [activity-registration.md](activity-registration.md).
 
 `pta config apply` and `pta config validate` read JSON or TOML on stdin with `config`, `map` and, optionally, `tunnel_config`. Start from a recent read. Writes based on a read detect revision changes; after a conflict, read again and redo the change. The GUI takes part in the same control: it collects Settings and Knowledge changes in the «You have unsaved changes» bar and writes nothing until «Save changes» (credentials are stored right away). Validation and import keep the map and identity restrictions.
 
