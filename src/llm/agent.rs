@@ -644,18 +644,75 @@ fn opencode_v2(version: &str) -> bool {
         .starts_with("2.")
 }
 
-fn opencode_models(text: &str) -> Vec<ModelInfo> {
-    text.lines()
-        .map(str::trim)
-        .filter(|id| {
-            super::valid_model(id)
-                && id
-                    .split_once('/')
-                    .is_some_and(|(p, m)| !p.is_empty() && !m.is_empty())
-        })
-        .take(500)
-        .map(|id| model(id, id, "opencode", "default"))
-        .collect()
+fn opencode_models(text: &str, preferences: &str) -> Vec<ModelInfo> {
+    let (Ok(catalog), Ok(preferences)) = (
+        serde_json::from_str::<Value>(text),
+        serde_json::from_str::<Value>(preferences),
+    ) else {
+        return Vec::new();
+    };
+    let mut models = Vec::new();
+    for favorite in preferences["favorite"].as_array().into_iter().flatten() {
+        let (Some(provider), Some(id)) = (
+            favorite["providerID"].as_str().filter(|id| !id.is_empty()),
+            favorite["modelID"].as_str().filter(|id| !id.is_empty()),
+        ) else {
+            continue;
+        };
+        let full_id = format!("{provider}/{id}");
+        if !super::valid_model(&full_id) || models.iter().any(|m: &ModelInfo| m.id == full_id) {
+            continue;
+        }
+        let Some(entry) = catalog["data"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|m| m["providerID"] == provider && m["id"] == id)
+        else {
+            continue;
+        };
+        let mut efforts = vec!["default".to_owned()];
+        for variant in entry["variants"].as_array().into_iter().flatten() {
+            if let Some(id) = variant["id"].as_str().filter(|id| super::valid_variant(id))
+                && !efforts.iter().any(|effort| effort == id)
+            {
+                efforts.push(id.to_owned());
+            }
+        }
+        models.push(ModelInfo {
+            id: full_id.clone(),
+            name: entry["name"]
+                .as_str()
+                .unwrap_or(&full_id)
+                .chars()
+                .filter(|c| !c.is_control())
+                .take(100)
+                .collect(),
+            efforts,
+            default_effort: "default".into(),
+        });
+        if models.len() == 500 {
+            break;
+        }
+    }
+    models
+}
+
+async fn opencode_preferences(binary: &Path) -> Option<String> {
+    use std::io::Read;
+    // Ask OpenCode for its path so XDG overrides and platform defaults match its TUI.
+    let state = probe(binary, &["debug", "paths", "state"]).await?;
+    let state = Path::new(state.trim());
+    if !state.is_absolute() {
+        return None;
+    }
+    let mut text = String::new();
+    std::fs::File::open(state.join("model.json"))
+        .ok()?
+        .take(1_048_577)
+        .read_to_string(&mut text)
+        .ok()?;
+    (text.len() <= 1_048_576).then_some(text)
 }
 
 async fn opencode_catalog(binary: Option<&Path>) -> (Option<String>, Vec<ModelInfo>) {
@@ -672,20 +729,17 @@ async fn opencode_catalog(binary: Option<&Path>) -> (Option<String>, Vec<ModelIn
     let Ok(dir) = workspace() else {
         return (version, Vec::new());
     };
-    let args = ["models", "--standalone"].map(OsString::from);
-    let models = run_configured(
-        binary,
-        &args,
-        "",
-        dir.path(),
-        PROBE_DEADLINE,
-        &opencode_env(dir.path(), ""),
-    )
-    .await
-    .ok()
-    .filter(|o| o.success)
-    .map(|o| opencode_models(&o.stdout))
-    .unwrap_or_default();
+    let args = ["api", "--standalone", "model.list"].map(OsString::from);
+    let env = opencode_env(dir.path(), "");
+    let (output, preferences) = tokio::join!(
+        run_configured(binary, &args, "", dir.path(), PROBE_DEADLINE, &env,),
+        opencode_preferences(binary)
+    );
+    let models = output
+        .ok()
+        .filter(|o| o.success)
+        .map(|o| opencode_models(&o.stdout, preferences.as_deref().unwrap_or("{}")))
+        .unwrap_or_default();
     (version, models)
 }
 
@@ -1063,11 +1117,78 @@ mod tests {
         );
         assert!(opencode_v2("opencode v2.0.32"));
         assert!(!opencode_v2("opencode v1.2.0"));
-        let models = opencode_models("deepseek/deepseek-chat\n--unsafe/model\nnot-a-model\n");
-        assert_eq!(models.len(), 1);
-        assert_eq!(models[0].default_effort, "default");
         let args = OpenCodeCli::new("deepseek/deepseek-chat", "high").args("ses_test");
         assert!(args.contains(&OsString::from("--model=deepseek/deepseek-chat#high")));
+    }
+
+    #[test]
+    fn opencode_catalog_only_offers_available_favorites_with_their_own_variants() {
+        let catalog = json!({"data":[
+            {"providerID":"example","id":"a","name":"Model A","variants":[{"id":"none"},{"id":"high"},{"id":"high"},{"id":"bad#variant"}]},
+            {"providerID":"example","id":"b","variants":[{"id":"minimal"},{"id":"deep"}]},
+            {"providerID":"example","id":"plain"},
+            {"providerID":"example","id":"not-favorite"},
+            {"providerID":"--unsafe","id":"a"}
+        ]}).to_string();
+        let preferences = json!({"favorite":[
+            {"providerID":"example","modelID":"b"},
+            {"providerID":"example","modelID":"missing"},
+            {"providerID":"example","modelID":"a"},
+            {"providerID":"example","modelID":"a"},
+            {"providerID":"example","modelID":"plain"},
+            {"providerID":"--unsafe","modelID":"a"},
+            {"providerID":"example"}
+        ],"recent":[{"providerID":"example","modelID":"not-favorite"}]})
+        .to_string();
+        let models = opencode_models(&catalog, &preferences);
+        assert_eq!(
+            models.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
+            ["example/b", "example/a", "example/plain"]
+        );
+        assert_eq!(models[0].efforts, ["default", "minimal", "deep"]);
+        assert_eq!(models[1].efforts, ["default", "none", "high"]);
+        assert_eq!(models[2].efforts, ["default"]);
+        assert_eq!(models[1].name, "Model A");
+        assert!(models.iter().all(|m| m.default_effort == "default"));
+        for preferences in ["{}", "{\"favorite\":[]}", "invalid"] {
+            assert!(opencode_models(&catalog, preferences).is_empty());
+        }
+        assert!(opencode_models("invalid", &preferences).is_empty());
+        let args = OpenCodeCli::new(&models[0].id, "deep").args("ses_test");
+        assert!(args.contains(&OsString::from("--model=example/b#deep")));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn opencode_catalog_reads_cli_state_and_private_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let catalog =
+            json!({"data":[{"providerID":"example","id":"a","variants":[{"id":"none"}]}]})
+                .to_string();
+        let program = fake_cli(dir.path(), &catalog, 0);
+        let script = std::fs::read_to_string(&program).unwrap().replace(
+            "cat >",
+            &format!(
+                "if [ \"$1\" = debug ]; then echo '{}'; exit 0; fi\ncat >",
+                dir.path().display()
+            ),
+        );
+        std::fs::write(&program, script).unwrap();
+        std::fs::write(
+            dir.path().join("model.json"),
+            r#"{"favorite":[{"providerID":"example","modelID":"a"}]}"#,
+        )
+        .unwrap();
+        let (_, models) = opencode_catalog(Some(&program)).await;
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].efforts, ["default", "none"]);
+        let args = std::fs::read_to_string(dir.path().join("log.args")).unwrap();
+        assert_eq!(args, "api\n--standalone\nmodel.list\n");
+        let env = std::fs::read_to_string(dir.path().join("log.env")).unwrap();
+        assert!(env.contains("OPENCODE_DISABLE_PROJECT_CONFIG=true"));
+        assert!(!env.contains("DEEPSEEK_API_KEY="));
+        std::fs::remove_file(dir.path().join("model.json")).unwrap();
+        assert!(opencode_catalog(Some(&program)).await.1.is_empty());
     }
 
     #[cfg(unix)]

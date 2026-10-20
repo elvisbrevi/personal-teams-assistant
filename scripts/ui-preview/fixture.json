@@ -221,12 +221,7 @@
     "version": "2.0.32",
     "credential": null,
     "efforts": [
-     "default",
-     "low",
-     "medium",
-     "high",
-     "xhigh",
-     "max"
+     "default"
     ],
     "models": [
      {
@@ -234,9 +229,18 @@
       "name": "Example model A",
       "efforts": [
        "default",
-       "low",
-       "medium",
+       "none",
        "high"
+      ],
+      "default_effort": "default"
+     },
+     {
+      "id": "example/model-b",
+      "name": "Example model B",
+      "efforts": [
+       "default",
+       "minimal",
+       "deep"
       ],
       "default_effort": "default"
      }
@@ -310,7 +314,7 @@
    "policy": {
     "allowed_senders": [],
     "dry_run": true,
-    "greeting": "\u00a1Hola!",
+    "greeting": "¡Hola!",
     "max_answer_chars": 3000,
     "max_context_chars": 16000,
     "max_detailed_answer_chars": 8000,

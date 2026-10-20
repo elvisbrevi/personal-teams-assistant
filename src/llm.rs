@@ -236,7 +236,8 @@ pub fn efforts(provider: &str) -> &'static [&'static str] {
         "codex" => &["minimal", "low", "medium", "high", "xhigh", "max"],
         "claude" => &["low", "medium", "high", "xhigh", "max"],
         "deepseek" => &["none", "low", "high", "max"],
-        "opencode" => &["default", "low", "medium", "high", "xhigh", "max"],
+        // Named variants come from each OpenCode model's catalog.
+        "opencode" => &["default"],
         _ => &[],
     }
 }
@@ -262,6 +263,16 @@ fn valid_model(model: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || "._:/[]-".contains(c))
 }
 
+/// A variant is appended after `#` inside one model argument; never allow another reference.
+fn valid_variant(variant: &str) -> bool {
+    !variant.is_empty()
+        && variant.len() <= 100
+        && variant.starts_with(|c: char| c.is_ascii_alphanumeric())
+        && variant
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "._-".contains(c))
+}
+
 pub fn validate(llm: &Llm) -> Result<()> {
     validate_provider(&llm.provider)?;
     ensure!(valid_model(&llm.model), "invalid LLM model");
@@ -277,11 +288,13 @@ pub fn validate(llm: &Llm) -> Result<()> {
                     .is_some_and(|(p, m)| !p.is_empty() && !m.is_empty()),
                 "OpenCode model must use provider/model"
             );
+            ensure!(valid_variant(&choice.effort), "invalid OpenCode variant");
+        } else {
+            ensure!(
+                efforts(&choice.provider).contains(&choice.effort.as_str()),
+                "unsupported reasoning effort for this LLM provider"
+            );
         }
-        ensure!(
-            efforts(&choice.provider).contains(&choice.effort.as_str()),
-            "unsupported reasoning effort for this LLM provider"
-        );
     }
     ensure!(!llm.active().is_empty(), "enable at least one LLM provider");
     Ok(())
@@ -1028,13 +1041,16 @@ mod tests {
             choice("codex", "gpt-6.1-sol", "medium"),
             choice("claude", "claude-opus-5-5", "medium"),
             choice("deepseek", "deepseek-flash", "max"),
+            choice("opencode", "example/a", "none"),
+            choice("opencode", "example/b", "minimal"),
+            choice("opencode", "example/b", "deep"),
         ]);
         assert!(validate(&valid).is_ok());
         let mut disabled = valid.clone();
         disabled.chain[2].enabled = false;
         assert!(validate(&disabled).is_ok());
         assert!(!uses_deepseek(&disabled));
-        assert_eq!(disabled.active().len(), 2);
+        assert_eq!(disabled.active().len(), 5);
         for chain in [
             vec![choice("openai", "gpt", "high")],
             vec![choice("codex", "--dangerously-bypass", "medium")],
@@ -1045,7 +1061,10 @@ mod tests {
             vec![choice("deepseek", "deepseek-flash", "medium")],
             vec![choice("opencode", "model-without-provider", "default")],
             vec![choice("opencode", "provider/", "default")],
-            vec![choice("opencode", "provider/model", "ultra")],
+            vec![choice("opencode", "provider/model", "bad#variant")],
+            vec![choice("opencode", "provider/model", "--variant")],
+            vec![choice("opencode", "provider/model", "")],
+            vec![choice("opencode", "provider/model", "two words")],
             vec![choice("codex", "gpt-6.1-sol", "low"); MAX_CHAIN_LENGTH + 1],
         ] {
             assert!(validate(&llm(chain)).is_err());

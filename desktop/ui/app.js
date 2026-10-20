@@ -686,7 +686,9 @@ function renderChain() {
   const selected = providerSelect.value;
   providerSelect.replaceChildren(...llmCatalog.providers.map(info => new Option(providerNames[info.id] || info.id, info.id)));
   if (selected) providerSelect.value = selected;
-  $('#add-llm').disabled = llmRows.length >= 16 || !providerSelect.value;
+  const addedProvider = llmCatalog.providers.find(info => info.id === providerSelect.value);
+  $('#add-llm').disabled = llmRows.length >= 16 || !addedProvider || (addedProvider.id === 'opencode' && !addedProvider.models.length);
+  providerSelect.onchange = renderChain;
   let active = 0;
   llmRows.forEach((row, index) => {
     const info = llmCatalog.providers.find(provider => provider.id === row.provider);
@@ -697,22 +699,27 @@ function renderChain() {
     const label = el('label', { class: 'check' }, toggle,
       el('div', {}, el('strong', { textContent: name }), el('small', { textContent: providerStatus(info) })));
     const models = (info?.models ?? []).map(model => [model.id, model.name]);
-    if (row.model && !models.some(([id]) => id === row.model)) models.unshift([row.model, `${row.model} (${t('current')})`]);
+    const openCode = row.provider === 'opencode';
+    const knownModel = models.some(([id]) => id === row.model);
+    if (row.model && !knownModel && !openCode) models.unshift([row.model, `${row.model} (${t('current')})`]);
     const [modelField, model] = select(t('Model'), t('{name} model', { name }), models, row.model);
-    if (row.provider === 'opencode') {
-      const input = el('input', { type: 'text', value: row.model, list: `llm-models-${index}`, 'aria-label': t('{name} model', { name }), placeholder: 'provider/model' });
-      const suggestions = el('datalist', { id: `llm-models-${index}` }, ...models.map(([id]) => new Option(id, id)));
-      input.oninput = () => { row.model = input.value.trim(); markDirty({ target: list }); };
-      modelField.replaceChild(input, model);
-      modelField.append(suggestions);
+    if (openCode && !knownModel) {
+      model.prepend(el('option', { value: '', textContent: t('Select an OpenCode favorite'), disabled: true, selected: true }));
+      modelField.append(el('small', { textContent: t('Saved model: {model}. It is not in the available favorites.', { model: row.model }) }));
     }
+    model.disabled = openCode && !models.length;
     model.title = row.model;
-    const efforts = () => info?.models.find(m => m.id === row.model)?.efforts ?? info?.efforts ?? [row.effort];
+    const efforts = () => info?.models.find(m => m.id === row.model)?.efforts ?? (openCode ? [] : info?.efforts ?? [row.effort]);
     const effortOptions = () => {
       const values = efforts();
-      return (values.includes(row.effort) ? values : [row.effort, ...values]).map(value => [value, effortNames[value] || value]);
+      return (openCode || values.includes(row.effort) ? values : [row.effort, ...values]).map(value => [value, openCode && value !== 'default' ? value : effortNames[value] || value]);
     };
     const [effortField, effort] = select(t('Effort'), t('{name} effort', { name }), effortOptions(), row.effort);
+    if (openCode && !efforts().includes(row.effort)) {
+      effort.prepend(el('option', { value: '', textContent: t('Select a supported variant'), disabled: true, selected: true }));
+      effortField.append(el('small', { textContent: t('Saved effort: {effort}.', { effort: row.effort }) }));
+    }
+    effort.disabled = openCode && !efforts().length;
     model.onchange = () => {
       row.model = model.value;
       const supported = efforts();
@@ -2302,6 +2309,7 @@ $('#add-llm').onclick = () => {
   const info = llmCatalog.providers.find(provider => provider.id === $('#add-llm-provider').value);
   if (!info || llmRows.length >= 16) return;
   const model = info.models[0];
+  if (info.id === 'opencode' && !model) return;
   llmRows.push({ provider: info.id, model: model?.id ?? '', effort: model?.default_effort ?? info.efforts[0], enabled: info.available });
   markDirty({ target: $('#llm-chain') });
   renderChain();
