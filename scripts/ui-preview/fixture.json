@@ -213,6 +213,34 @@
     ],
     "transport": "api",
     "version": null
+   },
+   {
+    "id": "opencode",
+    "transport": "cli",
+    "available": true,
+    "version": "2.0.32",
+    "credential": null,
+    "efforts": [
+     "default",
+     "low",
+     "medium",
+     "high",
+     "xhigh",
+     "max"
+    ],
+    "models": [
+     {
+      "id": "example/model-a",
+      "name": "Example model A",
+      "efforts": [
+       "default",
+       "low",
+       "medium",
+       "high"
+      ],
+      "default_effort": "default"
+     }
+    ]
    }
   ]
  },

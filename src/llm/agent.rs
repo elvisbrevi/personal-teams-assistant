@@ -1,7 +1,7 @@
-//! Codex and Claude Code as non-interactive model calls through their installed CLIs.
+//! Codex, Claude Code and OpenCode as non-interactive model calls through their installed CLIs.
 //!
 //! Each call runs the CLI with its own login, in a fresh empty private directory, with a
-//! minimal environment (no host credentials), every tool disabled, no session persistence and
+//! minimal environment (no host credentials), every tool disabled, a fresh session and
 //! the untrusted request on stdin. Only the final JSON message is used.
 use super::{Backend, Failure, Unavailable, efforts, usage_limited};
 use anyhow::{Context, Result};
@@ -131,6 +131,7 @@ pub(crate) fn locate(program: &str) -> Option<PathBuf> {
             ".bun/bin",
             ".volta/bin",
             ".claude/local",
+            ".opencode/bin",
             ".cargo/bin",
             "bin",
         ] {
@@ -177,12 +178,24 @@ async fn run(
     dir: &Path,
     deadline: Duration,
 ) -> Result<Output> {
+    run_configured(binary, args, input, dir, deadline, &[]).await
+}
+
+async fn run_configured(
+    binary: &Path,
+    args: &[OsString],
+    input: &str,
+    dir: &Path,
+    deadline: Duration,
+    overrides: &[(OsString, OsString)],
+) -> Result<Output> {
     use tokio::io::AsyncWriteExt;
     let mut child = tokio::process::Command::new(binary)
         .args(args)
         .current_dir(dir)
         .env_clear()
         .envs(child_env(binary))
+        .envs(overrides.iter().cloned())
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -442,6 +455,240 @@ impl Backend for ClaudeCli {
     }
 }
 
+/// OpenCode 2 uses its own provider login and a private server, never the user's running server.
+pub struct OpenCodeCli {
+    program: Option<PathBuf>,
+    model: String,
+    effort: String,
+    label: String,
+}
+impl OpenCodeCli {
+    pub fn new(model: &str, effort: &str) -> Self {
+        Self {
+            program: None,
+            model: model.into(),
+            effort: effort.into(),
+            label: format!("opencode:{model}:{effort}"),
+        }
+    }
+    fn args(&self, session: &str) -> Vec<OsString> {
+        let model = if self.effort == "default" {
+            self.model.clone()
+        } else {
+            format!("{}#{}", self.model, self.effort)
+        };
+        [
+            "run",
+            "--standalone",
+            "--format=json",
+            "--agent=pta",
+            "--title=PTA model call",
+        ]
+        .map(OsString::from)
+        .into_iter()
+        .chain([
+            format!("--model={model}").into(),
+            format!("--session={session}").into(),
+        ])
+        .collect()
+    }
+}
+
+fn opencode_env(dir: &Path, system: &str) -> Vec<(OsString, OsString)> {
+    let deny = serde_json::json!([{"action":"*","resource":"*","effect":"deny"}]);
+    let config = serde_json::json!({
+        "agents": {"pta": {"mode":"primary", "system":system, "steps":1, "permissions":deny}},
+        "permissions": deny,
+        "policies": [
+            {"action":"tool.use","resource":"*","effect":"deny"},
+            {"action":"plugin.use","resource":"*","effect":"deny"},
+            {"action":"mcp.use","resource":"*","effect":"deny"},
+            {"action":"skill.use","resource":"*","effect":"deny"}
+        ],
+        "instructions": [], "plugins": [], "snapshots": false,
+        "compaction": {"auto":false}, "warming": false, "update":"disable"
+    });
+    vec![
+        ("XDG_CONFIG_HOME".into(), dir.join("config").into()),
+        (
+            "OPENCODE_CONFIG_DIR".into(),
+            dir.join("config/opencode").into(),
+        ),
+        ("OPENCODE_CONFIG_CONTENT".into(), config.to_string().into()),
+        ("OPENCODE_DISABLE_PROJECT_CONFIG".into(), "true".into()),
+        ("OPENCODE_DISABLE_CLAUDE_CODE".into(), "true".into()),
+        ("OPENCODE_DISABLE_FILEWATCHER".into(), "true".into()),
+        ("OPENCODE_DISABLE_FFF".into(), "true".into()),
+        ("OPENCODE_DISABLE_AUTOUPDATE".into(), "true".into()),
+    ]
+}
+
+/// A fresh ID lets cancellation clean up only this call's session, even without any output.
+/// OpenCode keeps provider logins in its database, so retain it and delete the session instead.
+struct OpenCodeSession {
+    binary: PathBuf,
+    id: String,
+    dir: Option<tempfile::TempDir>,
+    env: Vec<(OsString, OsString)>,
+}
+impl OpenCodeSession {
+    async fn clean(&self) -> Result<()> {
+        let args = ["session", "delete", "--standalone", &self.id].map(OsString::from);
+        let output = run_configured(
+            &self.binary,
+            &args,
+            "",
+            self.dir.as_ref().unwrap().path(),
+            PROBE_DEADLINE,
+            &self.env,
+        )
+        .await?;
+        if output.success {
+            Ok(())
+        } else {
+            Err(Unavailable(Failure::Failed).into())
+        }
+    }
+}
+impl Drop for OpenCodeSession {
+    fn drop(&mut self) {
+        let Some(dir) = self.dir.take() else { return };
+        let binary = self.binary.clone();
+        let id = self.id.clone();
+        let env = self.env.clone();
+        // The host runtime remains alive after a cancelled model call or service stop.
+        tokio::spawn(async move {
+            let args = ["session", "delete", "--standalone", &id].map(OsString::from);
+            let _ = run_configured(&binary, &args, "", dir.path(), PROBE_DEADLINE, &env).await;
+        });
+    }
+}
+
+fn opencode_answer(output: &Output) -> Result<String> {
+    let mut answer = String::new();
+    let mut stopped = None;
+    let mut completed_text = false;
+    let mut errors = String::new();
+    for line in output.stdout.lines() {
+        let Ok(event) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        match event["type"].as_str() {
+            Some("text") => {
+                answer.push_str(event["part"]["text"].as_str().unwrap_or_default());
+                // OpenCode 2.0 ends the text part but emits no step_finish event.
+                completed_text = event["part"]["time"]["end"].as_u64().is_some();
+            }
+            Some("step_finish") => stopped = Some(event["part"]["reason"] == "stop"),
+            Some("error") => errors.push_str(&event["error"].to_string()),
+            Some("tool_use") => return Err(Unavailable(Failure::Failed).into()),
+            _ => {}
+        }
+    }
+    if output.success
+        && stopped.unwrap_or(completed_text)
+        && errors.is_empty()
+        && !answer.trim().is_empty()
+    {
+        Ok(answer)
+    } else {
+        Err(failure(&format!("{errors}\n{}", output.stderr)))
+    }
+}
+
+#[async_trait]
+impl Backend for OpenCodeCli {
+    fn label(&self) -> &str {
+        &self.label
+    }
+    async fn complete_json(&self, system: &str, user: &str, schema: &Value) -> Result<String> {
+        let binary = self
+            .program
+            .clone()
+            .or_else(|| locate("opencode"))
+            .ok_or(Unavailable(Failure::NotInstalled))?;
+        let detected = probe(&binary, &["--version"]).await;
+        if !detected.as_deref().is_some_and(opencode_v2) {
+            return Err(Unavailable(Failure::Failed).into());
+        }
+        let dir = workspace()?;
+        let instructions =
+            format!("{system}\nReturn only a JSON object matching this schema: {schema}");
+        let mut session = OpenCodeSession {
+            binary,
+            id: format!("ses_{}", uuid::Uuid::new_v4().simple()),
+            env: opencode_env(dir.path(), &instructions),
+            dir: Some(dir),
+        };
+        let result = run_configured(
+            &session.binary,
+            &self.args(&session.id),
+            user,
+            session.dir.as_ref().unwrap().path(),
+            CLI_DEADLINE,
+            &session.env,
+        )
+        .await
+        .and_then(|output| opencode_answer(&output));
+        session.clean().await?;
+        session.dir.take();
+        result
+    }
+}
+
+fn opencode_v2(version: &str) -> bool {
+    version
+        .trim()
+        .trim_start_matches("opencode ")
+        .trim_start_matches('v')
+        .starts_with("2.")
+}
+
+fn opencode_models(text: &str) -> Vec<ModelInfo> {
+    text.lines()
+        .map(str::trim)
+        .filter(|id| {
+            super::valid_model(id)
+                && id
+                    .split_once('/')
+                    .is_some_and(|(p, m)| !p.is_empty() && !m.is_empty())
+        })
+        .take(500)
+        .map(|id| model(id, id, "opencode", "default"))
+        .collect()
+}
+
+async fn opencode_catalog(binary: Option<&Path>) -> (Option<String>, Vec<ModelInfo>) {
+    let Some(binary) = binary else {
+        return (None, Vec::new());
+    };
+    let version = probe(binary, &["--version"])
+        .await
+        .as_deref()
+        .and_then(version);
+    if !version.as_deref().is_some_and(opencode_v2) {
+        return (version, Vec::new());
+    }
+    let Ok(dir) = workspace() else {
+        return (version, Vec::new());
+    };
+    let args = ["models", "--standalone"].map(OsString::from);
+    let models = run_configured(
+        binary,
+        &args,
+        "",
+        dir.path(),
+        PROBE_DEADLINE,
+        &opencode_env(dir.path(), ""),
+    )
+    .await
+    .ok()
+    .filter(|o| o.success)
+    .map(|o| opencode_models(&o.stdout))
+    .unwrap_or_default();
+    (version, models)
+}
+
 /// What the settings screen can offer: installed CLIs, their models and reasoning efforts.
 #[derive(Serialize)]
 pub struct Catalog {
@@ -537,7 +784,8 @@ fn codex_models(catalog: &str) -> Vec<ModelInfo> {
 pub async fn catalog() -> Catalog {
     let codex = locate("codex");
     let claude = locate("claude");
-    let (codex_version, codex_catalog, claude_version) = tokio::join!(
+    let opencode = locate("opencode");
+    let (codex_version, codex_catalog, claude_version, (opencode_version, opencode_models)) = tokio::join!(
         async {
             match &codex {
                 Some(binary) => probe(binary, &["--version"]).await,
@@ -556,6 +804,7 @@ pub async fn catalog() -> Catalog {
                 None => None,
             }
         },
+        opencode_catalog(opencode.as_deref()),
     );
     let mut codex_models = codex_catalog
         .as_deref()
@@ -588,6 +837,16 @@ pub async fn catalog() -> Catalog {
                     model("claude-fable-5-1", "Claude Fable 5.1", "claude", "medium"),
                     model("claude-haiku-4-5", "Claude Haiku 4.5", "claude", "medium"),
                 ],
+            },
+            ProviderInfo {
+                id: "opencode",
+                transport: "cli",
+                available: opencode.is_some()
+                    && opencode_version.as_deref().is_some_and(opencode_v2),
+                version: opencode_version,
+                credential: None,
+                efforts: efforts("opencode").iter().map(|e| e.to_string()).collect(),
+                models: opencode_models,
             },
             ProviderInfo {
                 id: "deepseek",
@@ -761,6 +1020,104 @@ mod tests {
         );
     }
 
+    #[test]
+    fn opencode_contract_rejects_partial_tool_and_credit_errors() {
+        let reply = concat!(
+            "{\"type\":\"text\",\"part\":{\"text\":\"{\\\"answer\\\":\\\"OK\\\"}\"}}\n",
+            "{\"type\":\"step_finish\",\"part\":{\"reason\":\"stop\"}}\n"
+        );
+        assert_eq!(
+            opencode_answer(&output(true, reply)).unwrap(),
+            r#"{"answer":"OK"}"#
+        );
+        assert!(opencode_answer(&output(true, reply.lines().next().unwrap())).is_err());
+        let older =
+            json!({"type":"text","part":{"text":"{\"answer\":\"OK\"}","time":{"start":1,"end":2}}})
+                .to_string();
+        assert_eq!(
+            opencode_answer(&output(true, &older)).unwrap(),
+            r#"{"answer":"OK"}"#
+        );
+        assert!(opencode_answer(&output(false, &older)).is_err());
+        assert!(
+            opencode_answer(&output(
+                true,
+                &format!(
+                    "{older}\n{{\"type\":\"step_finish\",\"part\":{{\"reason\":\"length\"}}}}"
+                )
+            ))
+            .is_err()
+        );
+        assert!(
+            opencode_answer(&output(true, &format!("{reply}{{\"type\":\"tool_use\"}}"))).is_err()
+        );
+        assert_eq!(
+            failure_of(
+                &opencode_answer(&output(
+                    false,
+                    r#"{"type":"error","error":{"message":"usage limit reached"}}"#
+                ))
+                .unwrap_err()
+            ),
+            Failure::UsageLimit
+        );
+        assert!(opencode_v2("opencode v2.0.32"));
+        assert!(!opencode_v2("opencode v1.2.0"));
+        let models = opencode_models("deepseek/deepseek-chat\n--unsafe/model\nnot-a-model\n");
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].default_effort, "default");
+        let args = OpenCodeCli::new("deepseek/deepseek-chat", "high").args("ses_test");
+        assert!(args.contains(&OsString::from("--model=deepseek/deepseek-chat#high")));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn opencode_denies_tools_keeps_prompt_off_argv_and_deletes_only_its_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let reply = concat!(
+            "{\"type\":\"text\",\"part\":{\"text\":\"{\\\"answer\\\":\\\"OK\\\"}\"}}\n",
+            "{\"type\":\"step_finish\",\"part\":{\"reason\":\"stop\"}}\n"
+        );
+        let program = fake_cli(dir.path(), reply, 0);
+        let cli = OpenCodeCli {
+            program: Some(program),
+            ..OpenCodeCli::new("deepseek/deepseek-chat", "default")
+        };
+        let result = cli
+            .complete_json(
+                "Synthetic system",
+                "private request",
+                &json!({"type":"object"}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result, r#"{"answer":"OK"}"#);
+        // The final invocation deletes exactly this call's generated session.
+        let args = std::fs::read_to_string(dir.path().join("log.args")).unwrap();
+        assert!(args.starts_with("session\ndelete\n--standalone\nses_"));
+        let env = std::fs::read_to_string(dir.path().join("log.env")).unwrap();
+        assert!(env.contains("OPENCODE_DISABLE_PROJECT_CONFIG=true"));
+        assert!(!env.contains("DEEPSEEK_API_KEY="));
+        let config = opencode_env(dir.path(), "Synthetic system")
+            .into_iter()
+            .find(|(k, _)| k == "OPENCODE_CONFIG_CONTENT")
+            .unwrap()
+            .1;
+        let config: Value = serde_json::from_str(config.to_str().unwrap()).unwrap();
+        assert_eq!(config["agents"]["pta"]["permissions"][0]["effect"], "deny");
+        assert_eq!(
+            config["policies"][0],
+            json!({"action":"tool.use","resource":"*","effect":"deny"})
+        );
+        assert_eq!(config["plugins"], json!([]));
+        let args = cli.args("ses_test");
+        assert!(
+            !args
+                .iter()
+                .any(|a| a.to_string_lossy().contains("private request"))
+        );
+    }
+
     /// A fake CLI that records its stdin, arguments and environment, then prints `reply`.
     #[cfg(unix)]
     fn fake_cli(dir: &Path, reply: &str, status: i32) -> PathBuf {
@@ -772,7 +1129,7 @@ mod tests {
         std::fs::write(
             &path,
             format!(
-                "#!/bin/sh\ncat > '{log}.stdin'\nprintf '%s\\n' \"$@\" > '{log}.args'\nenv > '{log}.env'\npwd > '{log}.pwd'\ncat '{reply}'\nexit {status}\n",
+                "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 'opencode v2.0.32'; exit 0; fi\ncat > '{log}.stdin'\nprintf '%s\\n' \"$@\" > '{log}.args'\nenv > '{log}.env'\npwd > '{log}.pwd'\ncat '{reply}'\nexit {status}\n",
                 log = log.display(),
                 reply = reply_path.display(),
             ),

@@ -43,6 +43,7 @@ The standard every change to `desktop/ui/` follows, so the native window, the we
 - Show what most users need for the task; fold the rest with `<details class="fold">` and a `small` «Advanced» note in the summary.
 - A field that does not apply in the current mode is hidden, never cleared: its value is kept and still saved (allowed chats while discovering all chats; daily time vs interval and window).
 - Prefer recognition over recall: choices are controls (the workday toggles), not syntaxes to remember («1, 2, 3»).
+- Native date/time inputs use `appearance: none`, border-box sizing and a zero minimum width so iOS keeps them inside their labels; verify empty and populated controls at phone widths.
 - Validate what the host would reject before sending, next to the field or in a notice that opens the right category (at least one workday).
 - List rows summarize the item (state, description, location, audience) and open an editor fold; a fold remembers being open across re-renders.
 

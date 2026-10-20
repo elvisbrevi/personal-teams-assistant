@@ -224,7 +224,9 @@
         <div id="settings-models" class="settings-group" role="tabpanel" aria-labelledby="settings-tab-models" data-settings-group="models" hidden>
           <div class="panel" id="panel-llm">
             <div class="panel-head"><h2>Language models</h2><button id="detect-llm" class="secondary small">Detect CLIs again</button></div>
-            <p class="hint">They classify messages, write the answers and pick the references they use. The first active one answers; if it fails (for example, out of credits or with its usage limit reached) the next one answers, and the next call starts again with the first. Codex and Claude use their installed CLI with their own login; DeepSeek uses its API with <code>DEEPSEEK_API_KEY</code>.</p>
+            <p class="hint">They classify messages, write the answers and pick the references they use. The first active one answers; if it fails (for example, out of credits or with its usage limit reached) the next one answers, and the next call starts again with the first. Codex, Claude and OpenCode use their installed CLI with their own login; DeepSeek uses its API with <code>DEEPSEEK_API_KEY</code>.</p>
+            <div class="actions"><label for="add-llm-provider">Provider<select id="add-llm-provider"></select></label><button id="add-llm" class="secondary">Add model</button></div>
+            <p class="hint">You can add the same provider several times with different models or efforts (up to 16 models).</p>
             <ol id="llm-chain" class="chain" aria-label="Model priority order"></ol>
           </div>
         </div>

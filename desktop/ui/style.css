@@ -98,7 +98,10 @@ main { min-width: 0; padding: 1.6rem 2.2rem 6rem; max-width: 1200px; width: 100%
 /* Forms */
 label { display: block; font-weight: 650; font-size: .92rem; margin: .9rem 0; }
 label small { font-weight: 400; color: var(--muted); }
-input:not([type=checkbox]), textarea, select { display: block; width: 100%; min-height: 2.75rem; border: var(--bw) solid var(--line); border-radius: var(--radius-control); padding: .58rem .8rem; font: inherit; font-weight: 400; margin-top: .35rem; background-color: var(--surface); color: inherit; }
+input:not([type=checkbox]), textarea, select { display: block; width: 100%; min-width: 0; max-width: 100%; min-height: 2.75rem; border: var(--bw) solid var(--line); border-radius: var(--radius-control); padding: .58rem .8rem; font: inherit; font-weight: 400; margin-top: .35rem; background-color: var(--surface); color: inherit; }
+/* iOS date/time controls otherwise include native intrinsic sizing and padding. */
+input[type=date], input[type=time], input[type=datetime-local] { appearance: none; -webkit-appearance: none; box-sizing: border-box; }
+.grid > label { min-width: 0; }
 textarea { resize: vertical; line-height: 1.45; }
 input:not([type=checkbox]):focus-visible, textarea:focus-visible, select:focus-visible { outline: 3px solid var(--focus); outline-offset: 1px; }
 input:disabled, textarea:disabled, select:disabled { background-color: var(--surface-2); color: var(--muted); }

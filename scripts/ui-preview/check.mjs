@@ -28,6 +28,24 @@ async function open(options = {}, scenario = 'full') {
   return { context, page, errors };
 }
 
+// Native date/time controls must fit their label, including an empty end date.
+{
+  const { context, page } = await open({ context: { viewport: { width: 320, height: 780 }, isMobile: true, hasTouch: true } });
+  const fits = () => page.locator('input[type=date]:visible, input[type=time]:visible').evaluateAll(inputs => inputs.length > 0 && inputs.every(input => {
+    const field = input.getBoundingClientRect(), parent = input.parentElement.getBoundingClientRect();
+    return field.left >= parent.left - 1 && field.right <= parent.right + 1 && field.width <= parent.width + 1;
+  }));
+  await page.click('nav [data-tab="registration"]');
+  await page.waitForTimeout(200);
+  check('phone date filters fit their fields', await fits());
+  await page.click('nav [data-tab="settings"]');
+  await page.click('#settings-tab-activity');
+  check('phone daily time fits its field', await fits());
+  await page.selectOption('#registration-schedule', 'interval');
+  check('phone interval times fit their fields', await fits());
+  await context.close();
+}
+
 // ---------------------------------------------------------------- axe scans (both versions)
 const axeSummary = {};
 const scan = page => page.evaluate(async () => (await axe.run(document, { runOnly: { type: 'tag', values: ['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa', 'wcag22aa'] } })).violations
@@ -192,6 +210,29 @@ check('axe: no WCAG 2.2 AA violations in any scan', !Object.keys(totals).length,
   check('ArrowRight selects the next settings section', await page.getAttribute('#settings-tab-models', 'aria-selected') === 'true' && await page.evaluate(() => document.activeElement.id) === 'settings-tab-models');
   await page.keyboard.press('End');
   check('End selects the last section', await page.getAttribute('#settings-tab-advanced', 'aria-selected') === 'true');
+  // Repeated providers survive model selection, reordering, removal and saving.
+  await page.click('#settings-tab-models');
+  const modelCount = await page.locator('#llm-chain > li').count();
+  await page.selectOption('#add-llm-provider', 'codex');
+  await page.click('#add-llm');
+  check('adding another model keeps the same provider', await page.locator('#llm-chain > li').count() === modelCount + 1);
+  await page.locator('#llm-chain > li:last-child .field select').first().selectOption('gpt-6-astra');
+  await page.locator('#llm-chain > li:last-child .order button').first().click();
+  await page.click('#save');
+  await page.waitForTimeout(400);
+  const savedChain = await page.evaluate(() => window.__ptaLastSave.config.llm.chain);
+  check('saving retains repeated providers with independent models and priority', savedChain.filter(c => c.provider === 'codex').length === 2 && savedChain[2].model === 'gpt-6-astra' && savedChain[0].model !== savedChain[2].model);
+  await page.locator('#llm-chain > li:nth-child(3) .order button').last().click();
+  await page.selectOption('#add-llm-provider', 'opencode');
+  await page.click('#add-llm');
+  await page.locator('#llm-chain > li:last-child .field input').fill('example/model-b');
+  await page.click('#save');
+  await page.waitForTimeout(400);
+  check('OpenCode accepts a custom provider/model and saves its default effort', await page.evaluate(() => window.__ptaLastSave.config.llm.chain.at(-1).provider === 'opencode' && window.__ptaLastSave.config.llm.chain.at(-1).model === 'example/model-b' && window.__ptaLastSave.config.llm.chain.at(-1).effort === 'default'));
+  await page.locator('#llm-chain > li:last-child .order button').last().click();
+  await page.click('#save');
+  await page.waitForTimeout(400);
+  check('removing a model persists without dropping other entries', await page.evaluate(() => window.__ptaLastSave.config.llm.chain.length) === modelCount);
   // Schedule-dependent fields and weekdays
   await page.click('#settings-tab-activity');
   check('daily schedule shows only its time', await page.isVisible('#registration-at-field') && !(await page.isVisible('#registration-interval-field')));

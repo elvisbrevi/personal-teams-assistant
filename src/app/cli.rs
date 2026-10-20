@@ -51,7 +51,7 @@ Configuration
   tunnel configure token|external|file PATH
 
 Language models
-  llm providers            Detected CLIs (Codex, Claude), their models and efforts, and DeepSeek through its API.
+  llm providers            Detected CLIs (Codex, Claude, OpenCode 2), their models and efforts, and DeepSeek through its API.
                            Order and fallback: pta config set llm.chain '[{\"provider\":\"codex\",\"model\":\"gpt-6.1-sol\",\"effort\":\"medium\"},...]'
   test providers           Tests each active model with synthetic data (uses quota or API credit).
 

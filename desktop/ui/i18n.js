@@ -4,6 +4,10 @@
 const UI_LANGUAGES = ['es', 'en'];
 
 const UI_CATALOG = { es: {
+  'Model default': 'Predeterminado del modelo',
+  'Add model': 'Agregar modelo',
+  'Remove {name} model': 'Eliminar modelo de {name}',
+  'You can add the same provider several times with different models or efforts (up to 16 models).': 'Puedes agregar el mismo proveedor varias veces con distintos modelos o niveles de esfuerzo (hasta 16 modelos).',
   "Daily tasks saved.": "Tareas del día guardadas.",
   "Open activities": "Abrir actividades",
   // Daily task record
@@ -246,7 +250,7 @@ const UI_CATALOG = { es: {
   'Missing: {names}.': 'Faltan: {names}.',
   'The required credentials are stored.': 'Las credenciales necesarias están guardadas.',
   'Language model': 'Modelo de lenguaje',
-  'Turn on and order Codex, Claude Code or DeepSeek.': 'Activa y ordena Codex, Claude Code o DeepSeek.',
+  'Turn on and order Codex, Claude Code, OpenCode or DeepSeek.': 'Activa y ordena Codex, Claude Code, OpenCode o DeepSeek.',
   'Entra registration': 'Registro de Entra',
   'Tenant and client ID of your existing registration.': 'Tenant y client ID de tu registro existente.',
   'Sign in to read and answer as you.': 'Inicia sesión para leer y responder como tú.',
@@ -303,7 +307,7 @@ const UI_CATALOG = { es: {
   '{name} removed.': '{name} eliminada.',
   'Language models': 'Modelos de lenguaje',
   'Detect CLIs again': 'Detectar CLIs de nuevo',
-  'They classify messages, write the answers and pick the references they use. The first active one answers; if it fails (for example, out of credits or with its usage limit reached) the next one answers, and the next call starts again with the first. Codex and Claude use their installed CLI with their own login; DeepSeek uses its API with': 'Clasifican los mensajes, redactan las respuestas y eligen las referencias que usan. Responde el primero activo; si falla (por ejemplo, sin créditos o con su límite de uso alcanzado) responde el siguiente, y la próxima llamada vuelve a empezar por el primero. Codex y Claude usan su CLI instalado con su propio inicio de sesión; DeepSeek usa su API con',
+  'They classify messages, write the answers and pick the references they use. The first active one answers; if it fails (for example, out of credits or with its usage limit reached) the next one answers, and the next call starts again with the first. Codex, Claude and OpenCode use their installed CLI with their own login; DeepSeek uses its API with': 'Clasifican los mensajes, redactan las respuestas y eligen las referencias que usan. Responde el primero activo; si falla (por ejemplo, sin créditos o con su límite de uso alcanzado) responde el siguiente, y la próxima llamada vuelve a empezar por el primero. Codex, Claude y OpenCode usan su CLI instalado con su propio inicio de sesión; DeepSeek usa su API con',
   'Model priority order': 'Orden de prioridad de los modelos',
   'No reasoning': 'Sin razonamiento',
   'Minimal': 'Mínimo',
