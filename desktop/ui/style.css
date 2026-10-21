@@ -199,6 +199,7 @@ nav button, .status-row, .activity-row, .segmented button, .subnav [role=tab], .
 .todo-comment:first-of-type { border-top: 0; }
 .todo-comment .todo-context strong { color: var(--text); }
 .todo-relation { display: flex; align-items: baseline; gap: .5rem; flex-wrap: wrap; border-top: 1px solid var(--rule); padding: .7rem 0; overflow-wrap: anywhere; }
+.todo-relation-filter { margin-bottom: 1rem; }
 #todo-detail-content { min-width: 0; }
 #todo-detail-content .panel { min-width: 0; }
 #todo-detail-content .callout { margin-bottom: 1rem; }

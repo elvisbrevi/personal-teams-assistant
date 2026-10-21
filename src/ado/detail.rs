@@ -197,6 +197,7 @@ async fn history(
 async fn relations(
     client: &Client,
     key: &str,
+    cache: &Store,
     source: &Source,
     project: &str,
     item: &Value,
@@ -204,22 +205,22 @@ async fn relations(
 ) -> Result<()> {
     let values = item["relations"].as_array().cloned().unwrap_or_default();
     let mut related = BTreeMap::new();
+    let mut task_kinds = BTreeMap::new();
     let mut ids = BTreeSet::new();
+    let prefix = format!("{}/", source.organization.trim_end_matches('/'));
     for relation in &values {
-        if let Some(raw) = relation["url"].as_str() {
-            let prefix = format!("{}/", source.organization.trim_end_matches('/'));
-            if raw.starts_with(&prefix)
-                && relation["rel"]
-                    .as_str()
-                    .is_some_and(|r| r.starts_with("System.LinkTypes."))
-                && let Some(id) = raw
-                    .rsplit('/')
-                    .next()
-                    .and_then(|s| s.parse::<u64>().ok())
-                    .filter(|n| *n > 0)
-            {
-                ids.insert(id);
-            }
+        if let Some(raw) = relation["url"].as_str()
+            && raw.starts_with(&prefix)
+            && relation["rel"]
+                .as_str()
+                .is_some_and(|r| r.starts_with("System.LinkTypes."))
+            && let Some(id) = raw
+                .rsplit('/')
+                .next()
+                .and_then(|s| s.parse::<u64>().ok())
+                .filter(|n| *n > 0)
+        {
+            ids.insert(id);
         }
     }
     if !ids.is_empty() {
@@ -235,14 +236,15 @@ async fn relations(
             )
             .append_pair(
                 "fields",
-                "System.Id,System.Title,System.TeamProject,System.WorkItemType,System.State",
+                "System.Id,System.Title,System.TeamProject,System.WorkItemType,System.State,System.CreatedDate,Microsoft.VSTS.Scheduling.StartDate,Microsoft.VSTS.Scheduling.FinishDate,Microsoft.VSTS.Common.ClosedDate",
             )
             .append_pair("errorPolicy", "Omit");
         match request(client, key, Method::GET, url, None).await {
             Ok(reply) => {
                 for item in reply["value"].as_array().into_iter().flatten() {
                     if let Some(id) = item["id"].as_u64().filter(|id| ids.contains(id))
-                        && let Ok(reference) = item_reference(source, project, item)
+                        && let Ok(reference) =
+                            tasks::item(source, field(item, "System.TeamProject"), item)
                     {
                         related.insert(id, reference);
                     }
@@ -254,6 +256,31 @@ async fn relations(
         }
         if ids.len() > 200 {
             detail.warn("Only 200 related work item titles could be resolved.");
+        }
+        for project in related
+            .values()
+            .map(|item| &item.project)
+            .collect::<BTreeSet<_>>()
+        {
+            let url = project_url(
+                source,
+                project,
+                "dev.azure.com",
+                &[
+                    "_apis",
+                    "wit",
+                    "workitemtypecategories",
+                    "Microsoft.TaskCategory",
+                ],
+            )?;
+            match todo::metadata(client, key, cache, url).await {
+                Ok(reply) => {
+                    let kinds: BTreeSet<String> = reply["workItemTypes"].as_array().into_iter().flatten()
+                        .filter_map(|kind| kind["name"].as_str().map(str::to_owned)).collect();
+                    task_kinds.insert(project.clone(), kinds);
+                }
+                Err(_) => detail.warn("Related task types could not be read. Open the original items if their detail is unavailable."),
+            }
         }
     }
     for relation in values {
@@ -277,16 +304,22 @@ async fn relations(
             .next()
             .and_then(|s| s.parse::<u64>().ok())
             .and_then(|id| related.get(&id))
-            .filter(|_| kind.starts_with("System.LinkTypes."));
+            .filter(|_| raw.starts_with(&prefix) && kind.starts_with("System.LinkTypes."));
         let artifact = artifact_link(source, project, raw);
         detail.relations.push(Relation {
+            item: resolved.cloned(),
+            task: resolved.is_some_and(|item| {
+                task_kinds
+                    .get(&item.project)
+                    .is_some_and(|kinds| kinds.contains(&item.kind))
+            }),
             name: name.into(),
             url: resolved
                 .map(|r| r.url.clone())
                 .or_else(|| artifact.as_ref().map(|a| a.0.clone()))
                 .or_else(|| https_link(raw)),
             detail: resolved
-                .map(|r| r.label.clone())
+                .map(|r| format!("#{} {} — {}", r.id, r.title, r.state))
                 .or_else(|| artifact.map(|a| a.1))
                 .unwrap_or_else(|| {
                     (if kind == "AttachedFile" {
@@ -501,7 +534,7 @@ async fn get_kind(
     {
         detail.warn("Comments could not be read. Open the original item or try again.");
     }
-    if relations(client, key, source, project, &item, &mut detail)
+    if relations(client, key, cache, source, project, &item, &mut detail)
         .await
         .is_err()
     {
@@ -561,7 +594,11 @@ mod tests {
         },"relations":[{"rel":"ArtifactLink","url":"vstfs:///Git/Ref/project%2Frepo%2FGBfeature%2Freceipt","attributes":{"name":"Branch"}},
             {"rel":"ArtifactLink","url":"vstfs:///Git/PullRequestId/project%2Frepo%2F12","attributes":{"name":"Pull Request"}},
             {"rel":"AttachedFile","url":"https://dev.azure.com/example/_apis/wit/attachments/file","attributes":{"name":"receipt.png"}},
-            {"rel":"Hyperlink","url":"javascript:alert(1)"}]})
+            {"rel":"Hyperlink","url":"javascript:alert(1)"},
+            {"rel":"System.LinkTypes.Hierarchy-Forward","url":"https://dev.azure.com/example/_apis/wit/workitems/20"},
+            {"rel":"System.LinkTypes.Related","url":"https://dev.azure.com/example/_apis/wit/workitems/21"},
+            {"rel":"System.LinkTypes.Hierarchy-Forward","url":"https://dev.azure.com/example/_apis/wit/workitems/22"},
+            {"rel":"System.LinkTypes.Hierarchy-Forward","url":"https://dev.azure.com/other/_apis/wit/workitems/20"}]})
         };
         for (id, project, kind) in [
             (7, "Payments", "User Story"),
@@ -577,6 +614,18 @@ mod tests {
                 .await;
         }
         for (endpoint, reply) in [
+            (
+                "/example/Payments/_apis/wit/workitemtypecategories/Microsoft.TaskCategory",
+                json!({"workItemTypes":[{"name":"Development task"}]}),
+            ),
+            (
+                "/example/_apis/wit/workitems",
+                json!({"value":[
+                    {"id":20,"fields":{"System.TeamProject":"Payments","System.Title":"Verify downloads","System.WorkItemType":"Development task","System.State":"Done","System.CreatedDate":"2026-10-01T12:00:00Z","Microsoft.VSTS.Common.ClosedDate":"2026-10-02T12:00:00Z"}},
+                    {"id":21,"fields":{"System.TeamProject":"Payments","System.Title":"Download failure","System.WorkItemType":"Bug","System.State":"Active"}},
+                    {"id":22,"fields":{"System.TeamProject":"Private","System.Title":"Private task","System.WorkItemType":"Development task","System.State":"Done"}}
+                ]}),
+            ),
             (
                 "/example/Payments/_apis/wit/workitemtypecategories/Microsoft.RequirementCategory",
                 json!({"workItemTypes":[{"name":"User Story"}]}),
@@ -667,6 +716,18 @@ mod tests {
                 .ends_with("/pullrequest/12")
         );
         assert!(detail.relations[3].url.is_none());
+        let child = &detail.relations[4];
+        assert!(child.task);
+        let child_item = child.item.as_ref().unwrap();
+        assert_eq!(child_item.id, 20);
+        assert_eq!(child_item.kind, "Development task");
+        assert_eq!(child_item.state, "Done");
+        assert_eq!(child_item.dates[0].name, "ClosedDate");
+        assert!(child_item.url.ends_with("/Payments/_workitems/edit/20"));
+        assert!(!detail.relations[5].task);
+        assert_eq!(detail.relations[5].item.as_ref().unwrap().kind, "Bug");
+        assert!(detail.relations[6].item.is_none());
+        assert!(detail.relations[7].item.is_none());
         assert_eq!(detail.history[0].author, "Alex");
         assert!(
             get(&Client::new(), "test-key", catalog, &cache, &args(8))

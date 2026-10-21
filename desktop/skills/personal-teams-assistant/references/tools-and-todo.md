@@ -78,7 +78,8 @@ numbers are local to their repository. It verifies the canonical URL, number and
 rejects pull requests and uses the existing GitHub connection and Issues read access.
 
 Both return `item`, `fields` (reference, original display name, data type, original value and safe rich-text `content` tree for HTML),
-`comments` (author, dates, text and format), `relations` (label, detail and safe URL),
+`comments` (author, dates, text and format), `relations` (label, detail and safe URL,
+optional resolved `item` in the shared list shape, and process-verified `task` flag),
 `history`, `partial` and `warnings`. Azure retains all returned standard and custom fields:
 Assigned To, developer roles, description, acceptance criteria, bug reproduction steps,
 severity, evidence and process-specific data. Relations retain attachments, linked work
@@ -88,7 +89,7 @@ comments, sub-issues and events. No fields or links are inferred from a model.
 
 Reads are fresh and bounded: Azure up to 500 latest comments and the first 200 revisions;
 GitHub up to 500 comments, 500 sub-issues and 200 events. Azure resolves at most 200 linked
-work item titles in configured projects. Unavailable sections and bounds produce explicit
+work item summaries in configured projects. Unavailable sections and bounds produce explicit
 warnings; a failed read is never presented as a complete empty discussion. Original links
 remain available. No response-provided pagination URL receives a credential.
 
@@ -114,6 +115,14 @@ are folded. Rich HTML is parsed in the core into bounded safe trees and rebuilt 
 without browser HTML parsing, scripts, original attributes or remote image loads; images and attachments open through their original links rather than
 inline previews. The same device theme, touch targets and translation rules apply. Refresh,
 inline errors, partial warnings and stale-response guards also apply to detail reads.
+
+Links and evidence has a local work item type selector and an Other links option for artifacts
+and attachments. Resolved Azure work items reuse the saved-day task cards; pressing a task
+opens the same `get_azure_task` detail as Activities, including custom process task types.
+Back restores the preceding detail, filter, scroll and focus. Nested navigation works from
+Activities as well. Plain-text Markdown and Markdown embedded in preformatted evidence use
+the safe Markdown renderer, while explicit code remains code. Bare HTTPS URLs in comments
+and rich text become validated links with the same browser/native behavior.
 
 ## Existing Azure tasks by user and day
 

@@ -121,7 +121,7 @@ check('axe: no WCAG 2.2 AA violations in any scan', !Object.keys(totals).length,
   await page.click('.todo-item:first-child .todo-select');
   await page.waitForSelector('#todo-detail-title');
   check('To-Do opens HU detail through the shared tool with source and project', await page.evaluate(() => window.__ptaLastDetail?.id === 5000 && window.__ptaLastDetail?.source === 'ado-activity' && window.__ptaLastDetail?.project === 'Payments'));
-  check('HU detail includes assignment, acceptance criteria, evidence, discussion and original link', (await page.textContent('#todo-detail-content')).includes('Ana Pérez') && await page.getByRole('heading', { name: 'Criterios de aceptación' }).count() === 1 && (await page.textContent('#todo-detail-content')).includes('Luis Soto') && await page.locator('#todo-detail-content .icon-button').count() === 1);
+  check('HU detail includes assignment, acceptance criteria, evidence, discussion and original link', (await page.textContent('#todo-detail-content')).includes('Ana Pérez') && await page.getByRole('heading', { name: 'Criterios de aceptación' }).count() === 1 && (await page.textContent('#todo-detail-content')).includes('Luis Soto') && await page.locator('#todo-detail-content .todo-detail-header .icon-button').count() === 1);
   await page.locator('#todo-detail-content details').first().locator('summary').click();
   check('HU detail retains custom fields', (await page.textContent('#todo-detail-content details')).includes('feature/receipt-downloads'));
   const safeRichText = await page.evaluate(() => {
@@ -132,8 +132,44 @@ check('axe: no WCAG 2.2 AA violations in any scan', !Object.keys(totals).length,
     return safe;
   });
   check('Provider rich text keeps formatting while removing executable content and remote images', safeRichText);
+  check('Plain Markdown is formatted, code stays literal and credential URLs stay inactive', await page.evaluate(() => {
+    const base = 'https://dev.azure.com/contoso/Payments/_workitems/edit/5000';
+    const plain = todoRich('# Evidence\n\n- Passed\n\nhttps://dev.azure.com/contoso/Payments/_build/results?buildId=42', 'plainText', base);
+    const code = todoRich('', 'html', base, [{ tag: 'pre', children: [{ tag: 'code', children: [{ tag: 'text', text: '# Literal code\nhttps://example.test/' }] }] }]);
+    const unsafe = todoRich('https://secret@example.test/', 'markdown', base);
+    return !!plain.querySelector('h2') && !!plain.querySelector('li') && !!plain.querySelector('.ref') && !!code.querySelector('pre code') && !code.querySelector('.ref, h2') && !unsafe.querySelector('.ref');
+  }));
   await page.click('#todo-back');
   check('Back restores the original list and keyboard focus', await page.isVisible('#todo-master') && await page.evaluate(() => document.activeElement?.classList.contains('todo-select')));
+  for (let index = 1; index < 10; index++) {
+    await page.locator('#todo-list .todo-select').nth(index).click();
+    await page.waitForSelector('#todo-detail-title');
+    check(`To-Do card ${index + 1} opens its own detail`, await page.evaluate(id => window.__ptaLastDetail?.id === id, 5000 - index));
+    await page.click('#todo-back');
+  }
+  await page.click('#todo-list .todo-select');
+  await page.waitForSelector('#todo-detail-title');
+  check('Embedded Markdown evidence renders headings, lists and links', await page.getByRole('heading', { name: 'Development evidence', exact: true }).count() === 1 && await page.locator('#todo-detail-content .md li:visible').filter({ hasText: 'Passed 18 tests' }).count() === 1 && await page.getByRole('button', { name: 'Pull request', exact: true }).count() > 0);
+  check('Bare comment URLs become links without trailing punctuation', (await page.locator('.todo-comment .ref').getAttribute('title')).endsWith('https://dev.azure.com/contoso/Payments/_release?releaseId=42&_a=release-summary'));
+  const relationFilter = page.locator('#todo-detail-content .todo-relation-filter select');
+  await relationFilter.selectOption('Task');
+  check('Relations filter selects work item type and reuses task cards', await page.locator('#todo-detail-content .todo-list .todo-item').count() === 2 && await page.locator('#todo-detail-content .todo-relation').count() === 0);
+  await page.locator('#todo-detail-content .todo-list .todo-select').nth(1).click();
+  await page.waitForFunction(() => window.__ptaLastDetail?.id === 4503 && window.__ptaLastDetail?.method === 'get_azure_task');
+  check('A child task opens the shared task detail inside To-Do', (await page.textContent('#todo-detail-title')).includes('#4503') && await page.isVisible('#todo-detail'));
+  await page.click('#todo-back');
+  check('Back from a child restores the HU, relation filter and focus', (await page.textContent('#todo-detail-title')).includes('#5000') && await relationFilter.inputValue() === 'Task' && await page.evaluate(() => document.activeElement?.textContent.includes('#4503')));
+  await page.evaluate(() => { window.__ptaDetailDelay = 250; });
+  await page.locator('#todo-detail-content .todo-list .todo-select').first().click();
+  await page.click('#todo-back');
+  await page.waitForTimeout(350);
+  check('Back during a child read discards its late response', (await page.textContent('#todo-detail-title')).includes('#5000') && await relationFilter.inputValue() === 'Task');
+  await page.evaluate(() => { window.__ptaDetailDelay = 0; });
+  await relationFilter.selectOption('Bug');
+  check('Other work item types remain filterable', await page.locator('#todo-detail-content .todo-list .todo-item').count() === 1);
+  await relationFilter.selectOption('__links');
+  check('Evidence and attachments remain accessible through Other links', await page.locator('#todo-detail-content .todo-relation').count() === 2 && await page.locator('#todo-detail-content .todo-list .todo-item').count() === 0);
+  await page.click('#todo-back');
   await page.selectOption('#todo-kind', 'bug');
   await page.waitForTimeout(200);
   check('Azure bug filter reaches the tool and keeps only bugs', await page.evaluate(() => window.__ptaLastTodo?.kind === 'bug') && await page.locator('.todo-item').count() === 5);
@@ -492,6 +528,12 @@ check('axe: no WCAG 2.2 AA violations in any scan', !Object.keys(totals).length,
   await page.click('.todo-item:first-child .todo-select');
   await page.waitForSelector('#todo-detail-title');
   check('phone: detail fits the screen and has touch-sized navigation', await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth) && await page.$eval('#todo-back', button => button.getBoundingClientRect().height >= 44));
+  await page.selectOption('#todo-detail-content .todo-relation-filter select', 'Task');
+  await page.locator('#todo-detail-content .todo-list .todo-select').nth(1).tap();
+  await page.waitForFunction(() => window.__ptaLastDetail?.id === 4503);
+  check('phone: child tasks open inside the same detail and fit the viewport', await page.evaluate(() => window.__ptaLastDetail?.method === 'get_azure_task' && document.documentElement.scrollWidth <= window.innerWidth));
+  await page.tap('#todo-back');
+  check('phone: child back keeps the HU relation filter', await page.inputValue('#todo-detail-content .todo-relation-filter select') === 'Task');
   await page.screenshot({ path: `${out}/phone-todo-detail.png`, fullPage: true });
   await page.click('#todo-back');
   await page.click('#nav-more');
@@ -526,6 +568,12 @@ check('axe: no WCAG 2.2 AA violations in any scan', !Object.keys(totals).length,
   await page.evaluate(axeSource);
   const taskViolations = await scan(page);
   check('phone: task detail passes axe WCAG 2.2 AA', taskViolations.length === 0, JSON.stringify(taskViolations));
+  await page.selectOption('#activity-detail-content .todo-relation-filter select', 'Task');
+  await page.locator('#activity-detail-content .todo-list .todo-select').nth(1).tap();
+  await page.waitForFunction(() => window.__ptaLastDetail?.id === 4503);
+  check('phone: Activities opens related tasks through the same detail', (await page.textContent('#activity-detail-title')).includes('#4503') && await page.evaluate(() => window.__ptaLastDetail?.method === 'get_azure_task'));
+  await page.tap('#activity-task-back');
+  check('phone: Activities child back restores the original task and filter', (await page.textContent('#activity-detail-title')).includes('#4502') && await page.inputValue('#activity-detail-content .todo-relation-filter select') === 'Task');
   await page.tap('#activity-task-back');
   check('phone: back restores task focus', await page.evaluate(() => document.activeElement?.matches('#activity-day-tasks .todo-select')));
   await page.tap('#activity-days-back');

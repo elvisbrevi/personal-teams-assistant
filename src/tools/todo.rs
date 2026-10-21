@@ -254,6 +254,11 @@ pub struct Relation {
     pub name: String,
     pub url: Option<String>,
     pub detail: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub item: Option<Item>,
+    /// Verified against the related project's process task category.
+    #[serde(default)]
+    pub task: bool,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Change {
