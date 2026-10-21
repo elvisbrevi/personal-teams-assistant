@@ -117,12 +117,13 @@ inline previews. The same device theme, touch targets and translation rules appl
 inline errors, partial warnings and stale-response guards also apply to detail reads.
 
 Links and evidence has a local work item type selector and an Other links option for artifacts
-and attachments. Resolved Azure work items reuse the saved-day task cards; pressing a task
+and attachments. Resolved Azure tasks reuse the saved-day task cards; pressing a task
 opens the same `get_azure_task` detail as Activities, including custom process task types.
 Back restores the preceding detail, filter, scroll and focus. Nested navigation works from
 Activities as well. Plain-text Markdown and Markdown embedded in preformatted evidence use
 the safe Markdown renderer, while explicit code remains code. Bare HTTPS URLs in comments
 and rich text become validated links with the same browser/native behavior.
+Other related work item types keep their original provider links and remain filterable.
 
 ## Existing Azure tasks by user and day
 

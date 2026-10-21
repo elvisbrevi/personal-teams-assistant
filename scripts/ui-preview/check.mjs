@@ -166,7 +166,7 @@ check('axe: no WCAG 2.2 AA violations in any scan', !Object.keys(totals).length,
   check('Back during a child read discards its late response', (await page.textContent('#todo-detail-title')).includes('#5000') && await relationFilter.inputValue() === 'Task');
   await page.evaluate(() => { window.__ptaDetailDelay = 0; });
   await relationFilter.selectOption('Bug');
-  check('Other work item types remain filterable', await page.locator('#todo-detail-content .todo-list .todo-item').count() === 1);
+  check('Other work item types remain filterable and retain their original links', await page.locator('#todo-detail-content .todo-list .todo-item').count() === 0 && await page.locator('#todo-detail-content .todo-relation .ref').count() === 1);
   await relationFilter.selectOption('__links');
   check('Evidence and attachments remain accessible through Other links', await page.locator('#todo-detail-content .todo-relation').count() === 2 && await page.locator('#todo-detail-content .todo-list .todo-item').count() === 0);
   await page.click('#todo-back');
