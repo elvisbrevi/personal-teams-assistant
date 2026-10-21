@@ -6,6 +6,30 @@ const vm = require('node:vm');
 const source = fs.readFileSync(path.join(__dirname, '../desktop/ui/app.js'), 'utf8');
 const i18n = fs.readFileSync(path.join(__dirname, '../desktop/ui/i18n.js'), 'utf8');
 
+test('every To-Do card opens its own detail after the list is rendered', async () => {
+  const nodes = new Map(), opened = [];
+  const node = props => ({ ...props, replaceChildren(...children) { this.children = children; }, setAttribute() {} });
+  const $ = selector => {
+    if (!nodes.has(selector)) nodes.set(selector, node({ value: '' }));
+    return nodes.get(selector);
+  };
+  $('#todo-provider').value = 'azure'; $('#todo-source').value = 'ado'; $('#todo-limit').value = '10';
+  const items = [7, 8, 9].map(id => ({ id, title: `Item ${id}`, dates: [] }));
+  const context = vm.createContext({ $, window: { scrollY: 0 },
+    el: (tag, props, ...children) => node({ tag, ...props, children }), badge: () => null,
+    todoOriginal: () => null, todoDate: () => null, t: x => x, tx: x => x, tn: () => '',
+    closeTodoDetail() {}, todoSources: () => [{}],
+    invoke: async () => ({ items, states: [], assignment_fields: [] }),
+    loadTodoDetail: () => opened.push(vm.runInContext('todoSelection.item.id', context)),
+  });
+  vm.runInContext('let todoRequest = 0, todoSelection, todoListScroll, todoReturnFocus;\n' +
+    source.slice(source.indexOf('function todoItem('), source.indexOf('\nfunction closeTodoDetail(')) +
+    source.slice(source.indexOf('async function loadTodo()'), source.indexOf('// ---------------------------------------------------------------- settings sections')), context);
+  await vm.runInContext('loadTodo()', context);
+  for (const card of $('#todo-list').children) await card.children[0].children[0].children[0].onclick();
+  assert.deepEqual(opened, [7, 8, 9]);
+});
+
 test('days below or above the hours target and empty days can all be opened', async () => {
   const opened = [];
   const context = vm.createContext({

@@ -12,7 +12,7 @@ use chrono::DateTime;
 fn literal(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
 }
-fn item(source: &Source, project: &str, value: &Value) -> Result<Item> {
+pub(super) fn item(source: &Source, project: &str, value: &Value) -> Result<Item> {
     let reference = item_reference(source, project, value)?;
     Ok(Item {
         id: value["id"].as_u64().context("missing task ID")?,

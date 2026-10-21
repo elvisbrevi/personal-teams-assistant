@@ -168,6 +168,7 @@ let todoDetailRequest = 0;
 let todoSelection = null;
 let todoListScroll = 0;
 let todoReturnFocus = null;
+const detailTrails = { todo: [], activity: [] };
 function todoItem(item, onSelect = null) {
   const select = el('button', { type: 'button', class: 'todo-select', textContent: `#${item.id} · ${item.title}` });
   select.onclick = () => {
@@ -183,9 +184,12 @@ function todoItem(item, onSelect = null) {
     el('dl', { class: 'todo-dates' }, todoDate(t('Created'), item.created_at), ...item.dates.map(date => todoDate(tx(date.name), date.value))));
 }
 function closeTodoDetail(restore = true) {
+  if (restore && backRelatedItem('todo')) return;
+  detailTrails.todo = [];
   ++todoDetailRequest;
   todoSelection = null;
   $('#todo-detail').hidden = true;
+  $('#todo-detail-content').replaceChildren();
   $('#todo-master').hidden = false;
   if (restore) {
     todoReturnFocus?.focus({ preventScroll: true });
@@ -198,9 +202,28 @@ function todoSafeUrl(raw, base) {
     return url.protocol === 'https:' && !url.username && !url.password ? url.href : null;
   } catch { return null; }
 }
+function appendLinkedText(text, parent) {
+  let last = 0;
+  for (const match of text.matchAll(/https:\/\/[^\s<>"\u0000-\u001f]+/g)) {
+    let raw = match[0].replace(/[.,;:!?]+$/, '');
+    while (raw.endsWith(')') && (raw.match(/\)/g) || []).length > (raw.match(/\(/g) || []).length) raw = raw.slice(0, -1);
+    const url = todoSafeUrl(raw);
+    parent.append(text.slice(last, match.index), url ? link(raw, url) : raw);
+    last = match.index + raw.length;
+  }
+  parent.append(text.slice(last));
+}
+function looksLikeMarkdown(text) {
+  return /^(?:#{1,6}\s+\S|\s*[-*+]\s+\S|\s*\d+[.)]\s+\S|\s*```|\|.+\|)/m.test(text);
+}
 /** Render the core's safe rich-text tree; provider HTML never enters the browser's parser. */
 function todoRich(text, format, base, content) {
-  if (format !== 'html') return format === 'markdown' ? markdown(text) : el('div', { class: 'todo-text', textContent: text });
+  if (format !== 'html') {
+    if (format === 'markdown' || format === 'plainText' || looksLikeMarkdown(text)) return markdown(text);
+    const plain = el('div', { class: 'todo-text' });
+    appendLinkedText(text, plain);
+    return plain;
+  }
   if (!Array.isArray(content)) return el('div', { class: 'todo-text', textContent: text });
   const root = el('div', { class: 'md' });
   const allowed = new Set(['p', 'div', 'span', 'strong', 'b', 'em', 'i', 'u', 's', 'del', 'br', 'ul', 'ol', 'li', 'pre', 'code', 'blockquote', 'hr', 'table', 'thead', 'tbody', 'tr', 'th', 'td']);
@@ -209,7 +232,7 @@ function todoRich(text, format, base, content) {
   function rebuild(node, parent, depth = 0) {
     if (--remaining < 0 || depth > 40) { clipped = true; return; }
     if (node.tag === 'notice') { clipped = true; return; }
-    if (node.tag === 'text') { parent.append(node.text || ''); return; }
+    if (node.tag === 'text') { appendLinkedText(node.text || '', parent); return; }
     if (node.tag === 'a' || node.tag === 'img') {
       const url = node.url && todoSafeUrl(node.url, base);
       const label = node.tag === 'img' ? node.text || t('View image') : richLabel(node) || url || '';
@@ -218,6 +241,12 @@ function todoRich(text, format, base, content) {
     }
     const tag = /^h[1-6]$/.test(node.tag) ? 'h3' : allowed.has(node.tag) ? node.tag : null;
     if (!tag) return;
+    if (tag === 'pre' && !node.children?.some(child => child.tag === 'code') && looksLikeMarkdown(richLabel(node))) {
+      parent.append(markdown(richLabel(node)));
+      return;
+    }
+    if (tag === 'code') { parent.append(el(tag, { textContent: richLabel(node) })); return; }
+    if (tag === 'pre') { parent.append(el('pre', {}, el('code', { textContent: richLabel(node) }))); return; }
     const safe = el(tag);
     for (const child of node.children || []) rebuild(child, safe, depth + 1);
     parent.append(tag === 'table' ? el('div', { class: 'table' }, safe) : safe);
@@ -242,6 +271,57 @@ function todoFields(fields, base) {
 function todoFold(label, children, count) {
   return el('details', { class: 'panel fold-panel' }, el('summary', {}, label, count === undefined ? null : el('span', { class: 'count', textContent: count })), ...children);
 }
+function openRelatedItem(relation, button, prefix) {
+  detailTrails[prefix].push({ selection: prefix === 'todo' ? todoSelection : activityTask,
+    nodes: [...$(`#${prefix}-detail-content`).childNodes], scroll: window.scrollY, focus: button });
+  if (prefix === 'todo') {
+    todoSelection = { ...todoSelection, item: relation.item, task: relation.task };
+    loadTodoDetail();
+  } else {
+    activityTask = { ...activityTask, item: relation.item, task: relation.task };
+    loadActivityTask();
+  }
+}
+function backRelatedItem(prefix) {
+  const previous = detailTrails[prefix].pop();
+  if (!previous) return false;
+  if (prefix === 'todo') { ++todoDetailRequest; todoSelection = previous.selection; $('#todo-detail-problem').hidden = true; }
+  else { ++activityDetailRequest; activityTask = previous.selection; }
+  const content = $(`#${prefix}-detail-content`);
+  content.replaceChildren(...previous.nodes);
+  content.setAttribute('aria-busy', 'false');
+  $(`#${prefix}-detail-progress`).textContent = '';
+  $(`#${prefix}-detail-refresh`).disabled = false;
+  previous.focus.focus({ preventScroll: true });
+  window.scrollTo(0, previous.scroll);
+  return true;
+}
+function todoRelations(detail, prefix) {
+  const list = el('div', { class: 'todo-list' });
+  const count = el('span', { class: 'count' });
+  const select = el('select', {}, el('option', { value: '', textContent: t('All types') }),
+    ...[...new Set(detail.relations.map(relation => relation.item?.kind).filter(Boolean))].sort().map(kind => el('option', { value: kind, textContent: tx(kind) })),
+    el('option', { value: '__links', textContent: t('Other links') }));
+  const render = () => {
+    const relations = detail.relations.filter(relation => !select.value || (select.value === '__links' ? !relation.item : relation.item?.kind === select.value));
+    count.textContent = `${relations.length} / ${detail.relations.length}`;
+    list.replaceChildren(...relations.map(relation => {
+      if (relation.item) {
+        const card = todoItem(relation.item, button => openRelatedItem(relation, button, prefix));
+        card.append(badge(tx(relation.name), 'muted'));
+        return card;
+      }
+      return el('div', { class: 'todo-relation' }, badge(tx(relation.name), 'muted'),
+        relation.url && todoSafeUrl(relation.url, detail.item.url) ? link(relation.detail || relation.url, relation.url) : el('span', { textContent: relation.detail }));
+    }));
+    if (!relations.length) list.append(el('p', { class: 'hint', textContent: t('No linked items to show.') }));
+  };
+  select.onchange = render;
+  render();
+  return el('section', { class: 'panel' },
+    el('div', { class: 'panel-head' }, el('h2', { textContent: t('Links and evidence') }), count),
+    el('label', { class: 'todo-relation-filter' }, t('Work item type'), select), list);
+}
 function renderTodoDetail(detail, prefix = 'todo') {
   const item = detail.item;
   const base = item.url;
@@ -258,7 +338,6 @@ function renderTodoDetail(detail, prefix = 'todo') {
     todoFields(shown, base),
     el('dl', { class: 'todo-dates' }, todoDate(t('Created'), item.created_at), ...item.dates.map(date => todoDate(tx(date.name), date.value))));
   const panels = content.map(field => el('section', { class: 'panel' }, el('h2', { textContent: tx(field.name) }), todoValue(field, base)));
-  const relations = detail.relations.map(relation => el('div', { class: 'todo-relation' }, badge(tx(relation.name), 'muted'), relation.url && todoSafeUrl(relation.url, base) ? link(relation.detail || relation.url, relation.url) : el('span', { textContent: relation.detail })));
   const comments = detail.comments.map(comment => el('article', { class: 'todo-comment' },
     el('div', { class: 'todo-context' }, el('strong', { textContent: comment.author || t('Unknown author') }), comment.created_at ? el('time', { dateTime: comment.created_at, textContent: new Date(comment.created_at).toLocaleString(uiLocale(), { dateStyle: 'medium', timeStyle: 'short' }) }) : null,
       comment.modified_at && comment.modified_at !== comment.created_at ? el('span', { textContent: t('Edited') }) : null), todoRich(comment.text, comment.format, base, comment.content)));
@@ -268,7 +347,7 @@ function renderTodoDetail(detail, prefix = 'todo') {
     ...(detail.partial ? [ el('div', { class: 'callout warn', role: 'status' }, ...detail.warnings.map(warning => el('p', { textContent: tx(warning) })))] : []),
     ...panels,
     el('section', { class: 'panel' }, el('div', { class: 'panel-head' }, el('h2', { textContent: t('Comments') }), el('span', { class: 'count', textContent: comments.length })), ...(comments.length ? comments : [el('p', { class: 'hint', textContent: t('No comments to show.') })])),
-    el('section', { class: 'panel' }, el('div', { class: 'panel-head' }, el('h2', { textContent: t('Links and evidence') }), el('span', { class: 'count', textContent: relations.length })), ...(relations.length ? relations : [el('p', { class: 'hint', textContent: t('No linked items to show.') })])),
+    todoRelations(detail, prefix),
     todoFold(t('All fields'), [todoFields(detail.fields, base)], detail.fields.length),
     todoFold(t('Change history'), history.length ? history : [el('p', { class: 'hint', textContent: t('No history to show.') })], history.length));
 }
@@ -292,7 +371,7 @@ async function loadTodoDetail() {
   try {
     const args = { id: selected.item.id, project: selected.item.project };
     if (selected.provider === 'azure') args.source = selected.source;
-    const detail = await invoke(selected.provider === 'azure' ? 'get_azure_hu' : 'get_github_epic', args);
+    const detail = await invoke(selected.provider === 'azure' ? selected.task ? 'get_azure_task' : 'get_azure_hu' : 'get_github_epic', args);
     if (request !== todoDetailRequest) return;
     renderTodoDetail(detail);
     $('#todo-detail-title').focus({ preventScroll: true });
@@ -340,7 +419,7 @@ async function loadTodo() {
     $('#todo-assignment').textContent = azure
       ? t('Your assignment fields: {fields}', { fields: result.assignment_fields.join(', ') })
       : t('Issues of type Epic assigned to your connected GitHub account. GitHub provides open and closed states; unavailable dates stay empty.');
-    $('#todo-list').replaceChildren(...result.items.map(todoItem));
+    $('#todo-list').replaceChildren(...result.items.map(item => todoItem(item)));
     if (!result.items.length) $('#todo-list').append(el('p', { class: 'empty', textContent: t('No items match these filters. Try another state.') }));
     $('#todo-progress').textContent = result.has_more
       ? t('Showing the {n} newest items. Increase the limit to see more.', { n: result.items.length })
@@ -911,6 +990,7 @@ function showActivityView(view) {
   for (const name of ['master', 'day-view', 'detail']) $(`#activity-${name}`).hidden = name !== view;
 }
 async function openActivityDay(day, focus = true) {
+  detailTrails.activity = [];
   const request = ++activityDayRequest;
   ++activityDetailRequest;
   activityDay = day; activityTask = null;
@@ -959,7 +1039,7 @@ async function loadActivityTask() {
   try {
     const args = { id: task.item.id, project: task.item.project };
     if (task.source) args.source = task.source;
-    const detail = await invoke('get_azure_task', args);
+    const detail = await invoke(task.task === false ? 'get_azure_hu' : 'get_azure_task', args);
     if (request !== activityDetailRequest) return;
     renderTodoDetail(detail, 'activity');
     $('#activity-detail-title').focus({ preventScroll: true });
@@ -2023,14 +2103,15 @@ const INLINE = new RegExp([
   /\*([^\s*](?:[^*]*?[^\s*])?)\*|(?<!\w)_([^\s_](?:[^_]*?[^\s_])?)_(?!\w)/,
   /\{(red|orange|green|blue|gray):([^{}]*\S[^{}]*)\}/,
   /\[([^\]]+)\]\((https:\/\/[^\s)]+)\)/,
+  /(https:\/\/[^\s<>"\u0000-\u001f]+)/,
 ].map(part => part.source).join('|'), 'g');
 
 function inline(text, parent) {
   const wrap = (tag, body, props) => { const node = el(tag, props); inline(body, node); return node; };
   let last = 0;
   for (const match of text.matchAll(INLINE)) {
-    if (match.index > last) parent.append(text.slice(last, match.index));
-    const [, escaped, code, both, bold, underBold, strike, italic, underItalic, tone, toned, label, url] = match;
+    if (match.index > last) appendLinkedText(text.slice(last, match.index), parent);
+    const [, escaped, code, both, bold, underBold, strike, italic, underItalic, tone, toned, label, url, bare] = match;
     if (escaped !== undefined) parent.append(escaped);
     else if (code !== undefined) parent.append(el('code', { textContent: code }));
     else if (both !== undefined) parent.append(el('strong', {}, wrap('em', both)));
@@ -2038,10 +2119,11 @@ function inline(text, parent) {
     else if (strike !== undefined) parent.append(wrap('s', strike));
     else if ((italic ?? underItalic) !== undefined) parent.append(wrap('em', italic ?? underItalic));
     else if (tone !== undefined) parent.append(wrap('span', toned.trim(), { class: `tone-${tone}` }));
-    else parent.append(link(label, url));
+    else if (bare !== undefined) appendLinkedText(bare, parent);
+    else parent.append(todoSafeUrl(url) ? link(label, url) : label);
     last = match.index + match[0].length;
   }
-  if (last < text.length) parent.append(text.slice(last));
+  if (last < text.length) appendLinkedText(text.slice(last), parent);
 }
 
 const LIST_ITEM = /^(\s*)([-*+]|\d+[.)])\s+(.*)$/;
@@ -2276,6 +2358,7 @@ $('#activity-days-back').onclick = () => {
   activityDayFocus?.focus({ preventScroll: true }); window.scrollTo(0, activityDaysScroll);
 };
 $('#activity-task-back').onclick = () => {
+  if (backRelatedItem('activity')) return;
   ++activityDetailRequest; activityTask = null;
   showActivityView('day-view');
   activityTaskFocus?.focus({ preventScroll: true }); window.scrollTo(0, activityTasksScroll);

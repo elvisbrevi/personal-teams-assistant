@@ -464,7 +464,8 @@ ID; GitHub also requires OWNER/REPO. Azure verifies the response ID, configured 
 process requirement/bug category without restricting current assignment; duplicate IDs across
 catalog organizations fail as ambiguous. It reads every returned standard/custom field with
 organization field metadata, comments (7.1-preview.4, at most 500 latest), updates (first 200)
-and original relations. It resolves at most 200 related work item titles in scope and turns
+and original relations. It resolves at most 200 related work item summaries in scope, with
+the shared `Item` shape and a process-verified `task` flag on each resolved relation, and turns
 supported vstfs Git branch/PR/commit/build artifacts into pinned Azure web links. GitHub verifies
 issue type, number and canonical repository URL, then reads fields, comments/sub-issues (500 each)
 and events (200) through constructed API URLs, never response URLs with the credential. Missing
@@ -496,6 +497,12 @@ To add an operation: a method in `control::operate` (window or browser only thro
   errors and stale-response guards apply to both views. Provider HTML is parsed by the core with `scraper` into bounded `RichNode` trees,
   then built by the UI from allowed tags and text without browser HTML parsing or original attributes; external images become links, with no content execution or remote
   image loads. The external-link icon remains separate from opening detail.
+  Plain-text Markdown and Markdown embedded in provider preformatted evidence use the existing
+  safe Markdown renderer; explicit code blocks remain code. Bare HTTPS URLs in discussion and
+  rich text become validated links. Links and evidence filter locally by the resolved work item
+  type or other links. Resolved Azure items reuse the Activities task cards and shared detail;
+  process task categories choose `get_azure_task` (including custom task names). Nested Back
+  restores the preceding detail, relation filter, scroll and focus, including during pending reads.
   Provider, state and count selectors call the shared list tools (10 items by default), with an
   Azure source selector when needed. Rows retain each HU and development date separately,
   and show unavailable dates explicitly. Errors and partial coverage appear inline; request

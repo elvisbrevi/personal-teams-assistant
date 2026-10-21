@@ -207,6 +207,8 @@ async fn epic_with(
                                 "invalid sub-issue URL"
                             );
                             detail.relations.push(Relation {
+                                item: None,
+                                task: false,
                                 name: "Sub-issue".into(),
                                 url: Some(url.into()),
                                 detail: format!(
