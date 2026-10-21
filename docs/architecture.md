@@ -500,7 +500,8 @@ To add an operation: a method in `control::operate` (window or browser only thro
   Plain-text Markdown and Markdown embedded in provider preformatted evidence use the existing
   safe Markdown renderer; explicit code blocks remain code. Bare HTTPS URLs in discussion and
   rich text become validated links. Links and evidence filter locally by the resolved work item
-  type or other links. Resolved Azure items reuse the Activities task cards and shared detail;
+  type or other links. Resolved Azure tasks reuse the Activities task cards and shared detail;
+  other related work item types retain their original links and remain filterable.
   process task categories choose `get_azure_task` (including custom task names). Nested Back
   restores the preceding detail, relation filter, scroll and focus, including during pending reads.
   Provider, state and count selectors call the shared list tools (10 items by default), with an

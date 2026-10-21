@@ -306,7 +306,7 @@ function todoRelations(detail, prefix) {
     const relations = detail.relations.filter(relation => !select.value || (select.value === '__links' ? !relation.item : relation.item?.kind === select.value));
     count.textContent = `${relations.length} / ${detail.relations.length}`;
     list.replaceChildren(...relations.map(relation => {
-      if (relation.item) {
+      if (relation.item && relation.task) {
         const card = todoItem(relation.item, button => openRelatedItem(relation, button, prefix));
         card.append(badge(tx(relation.name), 'muted'));
         return card;
@@ -1039,7 +1039,7 @@ async function loadActivityTask() {
   try {
     const args = { id: task.item.id, project: task.item.project };
     if (task.source) args.source = task.source;
-    const detail = await invoke(task.task === false ? 'get_azure_hu' : 'get_azure_task', args);
+    const detail = await invoke('get_azure_task', args);
     if (request !== activityDetailRequest) return;
     renderTodoDetail(detail, 'activity');
     $('#activity-detail-title').focus({ preventScroll: true });
