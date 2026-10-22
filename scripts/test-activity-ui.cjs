@@ -24,14 +24,14 @@ test('every To-Do card opens its own detail after the list is rendered', async (
     loadTodoDetail: () => opened.push(vm.runInContext('todoSelection.item.id', context)),
   });
   vm.runInContext('let todoRequest = 0, todoSelection, todoListScroll, todoReturnFocus;\n' +
-    source.slice(source.indexOf('function todoItem('), source.indexOf('\nfunction closeTodoDetail(')) +
+    source.slice(source.indexOf('function todoStateStyle('), source.indexOf('\nfunction closeTodoDetail(')) +
     source.slice(source.indexOf('async function loadTodo()'), source.indexOf('// ---------------------------------------------------------------- settings sections')), context);
   await vm.runInContext('loadTodo()', context);
   for (const card of $('#todo-list').children) await card.children[0].children[0].children[0].onclick();
   assert.deepEqual(opened, [7, 8, 9]);
 });
 
-test('Bug Desarrollo opens task detail and Done cards use the green state', () => {
+test('Bug Desarrollo opens task detail and workflow states get distinct colors', () => {
   const nodes = new Map(), opened = [];
   const node = props => ({ ...props, children: props?.children ?? [] });
   const $ = selector => {
@@ -44,13 +44,27 @@ test('Bug Desarrollo opens task detail and Done cards use the green state', () =
     t: x => x, tx: x => x, loadTodoDetail: () => opened.push(vm.runInContext('todoSelection.task', context)),
   });
   vm.runInContext('let todoSelection, todoListScroll, todoReturnFocus;\n' +
-    source.slice(source.indexOf('function todoItem('), source.indexOf('\nfunction closeTodoDetail(')), context);
+    source.slice(source.indexOf('function todoStateStyle('), source.indexOf('\nfunction closeTodoDetail(')), context);
   const card = vm.runInContext(`todoItem(${JSON.stringify({ id: 27176, title: 'Bug Desarrollo', kind: 'Bug Desarrollo', state: 'Done', project: 'Payments', created_at: null, dates: [] })})`, context);
   assert.equal(card.class, 'todo-item done');
   assert.equal(card.children[1].children[0].tone, 'ok');
+  const stateStyles = JSON.parse(vm.runInContext(`JSON.stringify(['Active', 'Resolved', 'New'].map(state => {
+    const item = ${JSON.stringify({ id: 1, title: 'Item', kind: 'HU', project: 'Payments', created_at: null, dates: [] })};
+    item.state = state;
+    const card = todoItem(item);
+    return [card.class, card.children[1].children[0].tone];
+  }))`, context));
+  assert.deepEqual(stateStyles, [
+    ['todo-item in-progress', 'active'],
+    ['todo-item review', 'warn'],
+    ['todo-item unstarted', 'muted'],
+  ]);
   card.children[0].children[0].children[0].onclick();
   assert.deepEqual(opened, [true]);
   assert.match(style, /\.todo-item\.done\s*\{\s*background:\s*var\(--ok-soft\);\s*border-color:\s*var\(--ok\);\s*\}/);
+  assert.match(style, /\.todo-item\.in-progress\s*\{\s*background:\s*var\(--active-soft\);\s*border-color:\s*var\(--active\);\s*\}/);
+  assert.match(style, /\.todo-item\.review\s*\{\s*background:\s*var\(--warn-soft\);\s*border-color:\s*var\(--warn\);\s*\}/);
+  assert.match(style, /\.todo-item\.unstarted\s*\{\s*background:\s*var\(--muted-soft\);\s*border-color:\s*var\(--muted-fill\);\s*\}/);
 });
 
 test('To-Do work item actions include a copy button that copies the original URL', async () => {
