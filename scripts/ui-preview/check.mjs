@@ -118,10 +118,14 @@ check('axe: no WCAG 2.2 AA violations in any scan', !Object.keys(totals).length,
   await page.click('.todo-item:first-child .icon-button');
   await page.waitForFunction(() => window.__ptaOpenedWorkItem);
   check('native To-Do link uses the host browser operation', await page.evaluate(() => window.__ptaOpenedWorkItem?.endsWith('/5000')));
+  await page.evaluate(() => Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText: async url => { window.__ptaCopiedWorkItemUrl = url; } } }));
+  await page.click('.todo-item:first-child .todo-actions .icon-button:nth-child(2)');
+  await page.waitForFunction(() => window.__ptaCopiedWorkItemUrl);
+  check('To-Do copy action copies the work item URL and confirms it', await page.evaluate(() => window.__ptaCopiedWorkItemUrl?.endsWith('/5000')) && await page.getByRole('status').filter({ hasText: 'Enlace copiado:' }).count() === 1);
   await page.click('.todo-item:first-child .todo-select');
   await page.waitForSelector('#todo-detail-title');
   check('To-Do opens HU detail through the shared tool with source and project', await page.evaluate(() => window.__ptaLastDetail?.id === 5000 && window.__ptaLastDetail?.source === 'ado-activity' && window.__ptaLastDetail?.project === 'Payments'));
-  check('HU detail includes assignment, acceptance criteria, evidence, discussion and original link', (await page.textContent('#todo-detail-content')).includes('Ana Pérez') && await page.getByRole('heading', { name: 'Criterios de aceptación' }).count() === 1 && (await page.textContent('#todo-detail-content')).includes('Luis Soto') && await page.locator('#todo-detail-content .todo-detail-header .icon-button').count() === 1);
+  check('HU detail includes assignment, acceptance criteria, evidence, discussion and original link', (await page.textContent('#todo-detail-content')).includes('Ana Pérez') && await page.getByRole('heading', { name: 'Criterios de aceptación' }).count() === 1 && (await page.textContent('#todo-detail-content')).includes('Luis Soto') && await page.locator('#todo-detail-content .todo-detail-header .icon-button').count() === 2 && await page.locator('#todo-detail-content .todo-detail-header button[aria-label="Copiar enlace del work item"]').count() === 1);
   await page.locator('#todo-detail-content details').first().locator('summary').click();
   check('HU detail retains custom fields', (await page.textContent('#todo-detail-content details')).includes('feature/receipt-downloads'));
   const safeRichText = await page.evaluate(() => {
@@ -179,7 +183,7 @@ check('axe: no WCAG 2.2 AA violations in any scan', !Object.keys(totals).length,
   await page.evaluate(() => { window.__ptaDetailError = true; });
   await page.click('#todo-detail-refresh');
   await page.waitForTimeout(200);
-  check('Detail failures are inline and retain the original link', await page.isVisible('#todo-detail-problem') && await page.locator('#todo-detail-content .icon-button').count() === 1);
+  check('Detail failures are inline and retain the original link and copy action', await page.isVisible('#todo-detail-problem') && await page.locator('#todo-detail-content .icon-button').count() === 2 && await page.locator('#todo-detail-content .todo-actions button[aria-label="Copiar enlace del work item"]').count() === 1);
   await page.evaluate(() => { window.__ptaDetailError = false; });
   await page.click('#todo-back');
   check('Detail back keeps the type filter', await page.inputValue('#todo-kind') === 'bug');
@@ -561,7 +565,7 @@ check('axe: no WCAG 2.2 AA violations in any scan', !Object.keys(totals).length,
   await page.tap('#activity-log .card:first-child');
   await page.waitForSelector('#activity-day-tasks .todo-select');
   check('phone: day shows its existing task and advisory hours warning', /4502/.test(await page.textContent('#activity-day-tasks')) && await page.isVisible('#activity-day-warning'));
-  check('phone: task has a separate original-link action', await page.locator('#activity-day-tasks .icon-button').count() === 1);
+  check('phone: task has original-link and copy actions', await page.locator('#activity-day-tasks .icon-button').count() === 2 && await page.locator('#activity-day-tasks button[aria-label="Copiar enlace del work item"]').count() === 1);
   await page.tap('#activity-day-tasks .todo-select');
   await page.waitForSelector('#activity-detail-title');
   check('phone: task opens the shared detail through the task tool', await page.evaluate(() => window.__ptaLastDetail?.id === 4502 && window.__ptaCalls.includes('get_azure_task')));

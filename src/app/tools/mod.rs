@@ -56,7 +56,7 @@ pub(super) const TOOLS: &[Tool] = &[
     Tool {
         name: "list_azure_hus",
         title: "My Azure DevOps HUs",
-        description: "HUs and bugs assigned to the catalog user, newest first. Assignment roles are discovered separately for each type; kind optionally filters hu or bug. Discovers the process's developer roles, all HU states and start/finish fields, including separate development dates. Falls back to Assigned To only in processes without developer roles. Local read; no model or Teams audience changes.",
+        description: "HUs and bugs assigned to the catalog user, newest first. Includes the task-category type Bug Desarrollo with bug results. Assignment roles are discovered separately for each type; kind optionally filters hu or bug. Discovers the process's developer roles, all HU states and start/finish fields, including separate development dates. Falls back to Assigned To only in processes without developer roles. Local read; no model or Teams audience changes.",
         effect: Effect::Read,
         schema: todo_schema,
     },
@@ -423,7 +423,7 @@ fn todo_schema() -> Value {
         json!({
             "source": string("Azure DevOps activity source ID; optional when exactly one is enabled."),
             "project": string("One configured Azure project, or GitHub OWNER/REPO."),
-            "kind": {"type":"string", "enum":["hu","bug"], "description":"Azure only: omit for HUs and bugs."},
+            "kind": {"type":"string", "enum":["hu","bug"], "description":"Azure only: omit for HUs, bugs and Bug Desarrollo tasks."},
             "state": string("Exact state returned by the tool; omit to include all states."),
             "limit": {"type":"integer","minimum":1,"maximum":100,"default":10}
         }),

@@ -174,8 +174,10 @@ nav button, .status-row, .activity-row, .segmented button, .subnav [role=tab], .
 .todo-filters label { min-width: 0; }
 .todo-list { display: grid; gap: .75rem; }
 .todo-item { position: relative; padding: 1rem; border: var(--bw) solid var(--line); border-radius: var(--radius-card); box-shadow: var(--shadow); background: var(--surface); min-width: 0; }
+.todo-item.done { background: var(--ok-soft); border-color: var(--ok); }
 .todo-heading { display: flex; align-items: flex-start; gap: .75rem; justify-content: space-between; }
 .todo-heading h3 { font-size: 1rem; margin: .25rem 0; overflow-wrap: anywhere; }
+.todo-actions { display: flex; align-items: center; gap: .25rem; flex: none; position: relative; z-index: 1; }
 .todo-select { display: block; padding: 0; border: 0; border-radius: 0; box-shadow: none; background: none; color: var(--text); text-align: left; font-size: inherit; min-height: 0; }
 .todo-select::after { content: ""; position: absolute; inset: 0; border-radius: var(--radius-card); }
 .todo-select:focus-visible { outline: 0; }

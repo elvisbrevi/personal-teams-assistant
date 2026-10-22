@@ -20,13 +20,13 @@ printf '%s\n' '{"source":"azure-devops-status","state":"Developing","limit":25}'
 - `source`: an enabled Azure DevOps activity source ID. Optional when exactly one is enabled.
 - `project`: optionally narrow to a project in that source's catalog.
 - `state`: an exact state returned by the tool. Omit it for all states.
-- `kind`: `hu` or `bug`; omit for both requirement-category HUs and bug-category items.
+- `kind`: `hu` or `bug`; omit for both requirement-category HUs and bug-category items. Bug results also include the task-category type `Bug Desarrollo`.
 - `limit`: 1–100, default 10, newest creation date first across the selected projects.
 
 The tool reuses the catalog's organization, projects, author identity and read credential.
 `*` retains its meaning: projects of teams the connected user belongs to. It discovers the
-process's requirement and bug categories (including custom types), all defined states, developer
-identity fields and start/finish/target/closure date fields. It matches the catalog user in
+process's requirement and bug categories (including custom types), plus `Bug Desarrollo` from the
+task category, all defined states, developer identity fields and start/finish/target/closure date fields. It matches the catalog user in
 any developer role, rather than the current responsible owner. Assignment is discovered separately
 for each type: a bug without developer identity fields falls back to `System.AssignedTo` even
 when the HU type has developer roles. Returned assignments are checked
@@ -104,12 +104,13 @@ reveals Knowledge and Test chat, and closes on selection, outside click or Escap
 filters discards stale responses.
 
 The link icon opens a new browser tab in the portal and the default browser in the native
-app (`open_work_item`, also a CLI/MCP tool taking `{"url":"…"}`). The host accepts only canonical HTTPS Azure
-work-item and GitHub issue links. These local reads work with Teams stopped, use no model,
-and do not change any source audience or authorize external processing.
+app (`open_work_item`, also a CLI/MCP tool taking `{"url":"…"}`). Its adjacent copy icon copies
+the work item's URL to the clipboard. The host accepts only canonical HTTPS Azure work-item
+and GitHub issue links. These local reads work with Teams stopped, use no model, and do not
+change any source audience or authorize external processing.
 
-Pressing an item opens its mobile detail inside To-Do through `get_azure_hu` or
-`get_github_epic`. Back restores the list, filters, scroll and keyboard focus. Type-specific
+Pressing an item opens its mobile detail inside To-Do through `get_azure_hu`, `get_azure_task`
+(for `Bug Desarrollo`) or `get_github_epic`. Done cards use the green state color. Back restores the list, filters, scroll and keyboard focus. Type-specific
 rich fields, comments and evidence stay readable; all original fields and change history
 are folded. Rich HTML is parsed in the core into bounded safe trees and rebuilt from allowed elements,
 without browser HTML parsing, scripts, original attributes or remote image loads; images and attachments open through their original links rather than

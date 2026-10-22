@@ -5,6 +5,7 @@ const test = require('node:test');
 const vm = require('node:vm');
 const source = fs.readFileSync(path.join(__dirname, '../desktop/ui/app.js'), 'utf8');
 const i18n = fs.readFileSync(path.join(__dirname, '../desktop/ui/i18n.js'), 'utf8');
+const style = fs.readFileSync(path.join(__dirname, '../desktop/ui/style.css'), 'utf8');
 
 test('every To-Do card opens its own detail after the list is rendered', async () => {
   const nodes = new Map(), opened = [];
@@ -28,6 +29,52 @@ test('every To-Do card opens its own detail after the list is rendered', async (
   await vm.runInContext('loadTodo()', context);
   for (const card of $('#todo-list').children) await card.children[0].children[0].children[0].onclick();
   assert.deepEqual(opened, [7, 8, 9]);
+});
+
+test('Bug Desarrollo opens task detail and Done cards use the green state', () => {
+  const nodes = new Map(), opened = [];
+  const node = props => ({ ...props, children: props?.children ?? [] });
+  const $ = selector => {
+    if (!nodes.has(selector)) nodes.set(selector, node({ value: '' }));
+    return nodes.get(selector);
+  };
+  const context = vm.createContext({ $, window: { scrollY: 0 },
+    el: (tag, props, ...children) => node({ tag, ...props, children }),
+    badge: (text, tone) => node({ text, tone }), todoOriginal: () => null, todoDate: () => null,
+    t: x => x, tx: x => x, loadTodoDetail: () => opened.push(vm.runInContext('todoSelection.task', context)),
+  });
+  vm.runInContext('let todoSelection, todoListScroll, todoReturnFocus;\n' +
+    source.slice(source.indexOf('function todoItem('), source.indexOf('\nfunction closeTodoDetail(')), context);
+  const card = vm.runInContext(`todoItem(${JSON.stringify({ id: 27176, title: 'Bug Desarrollo', kind: 'Bug Desarrollo', state: 'Done', project: 'Payments', created_at: null, dates: [] })})`, context);
+  assert.equal(card.class, 'todo-item done');
+  assert.equal(card.children[1].children[0].tone, 'ok');
+  card.children[0].children[0].children[0].onclick();
+  assert.deepEqual(opened, [true]);
+  assert.match(style, /\.todo-item\.done\s*\{\s*background:\s*var\(--ok-soft\);\s*border-color:\s*var\(--ok\);\s*\}/);
+});
+
+test('To-Do work item actions include a copy button that copies the original URL', async () => {
+  const copied = [], notices = [];
+  const context = vm.createContext({
+    window: { ptaTransport: { browser: true } },
+    el: (tag, props, ...children) => ({ tag, ...props, children }),
+    icon: name => ({ icon: name }), t: key => key,
+    copy: async url => { copied.push(url); return true; },
+    busy: async (_button, task) => task(),
+    done: message => notices.push(['ok', message]), fail: message => notices.push(['error', message]),
+  });
+  vm.runInContext(source.slice(source.indexOf('function todoOriginal('), source.indexOf('\nlet todoDetailRequest')), context);
+  const actions = vm.runInContext("todoOriginal({ id: 27176, url: 'https://dev.azure.com/example/_workitems/edit/27176' })", context);
+  assert.equal(actions.class, 'todo-actions');
+  assert.equal(actions.children[0].children[0].icon, 'link');
+  const copyButton = actions.children[1];
+  assert.equal(copyButton['aria-label'], 'Copy work item link');
+  assert.equal(copyButton.children[0].icon, 'copy');
+  await copyButton.onclick();
+  assert.deepEqual(copied, ['https://dev.azure.com/example/_workitems/edit/27176']);
+  assert.deepEqual(notices, [['ok', 'Link copied: {url}']]);
+  assert.match(style, /\.todo-actions\s*\{[^}]*display:\s*flex/);
+  assert.match(i18n, /'Copy work item link': 'Copiar enlace del work item'/);
 });
 
 test('days below or above the hours target and empty days can all be opened', async () => {

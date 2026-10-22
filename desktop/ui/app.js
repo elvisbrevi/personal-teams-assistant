@@ -162,7 +162,15 @@ function todoOriginal(item) {
     ? el('a', { class: 'icon-button secondary', href: item.url, target: '_blank', rel: 'noopener noreferrer', title: label, 'aria-label': label }, icon('link'))
     : el('button', { type: 'button', class: 'icon-button secondary', title: label, 'aria-label': label }, icon('link'));
   if (!window.ptaTransport.browser) open.onclick = () => busy(open, () => invoke('open_work_item', { url: item.url }));
-  return open;
+  const copyButton = el('button', {
+    type: 'button', class: 'icon-button secondary', title: t('Copy work item link'),
+    'aria-label': t('Copy work item link'),
+  }, icon('copy'));
+  copyButton.onclick = () => busy(copyButton, async () => {
+    if (await copy(item.url)) done(t('Link copied: {url}', { url: item.url }));
+    else fail(t('Could not copy the work item link.'));
+  });
+  return el('div', { class: 'todo-actions' }, open, copyButton);
 }
 let todoDetailRequest = 0;
 let todoSelection = null;
@@ -170,17 +178,18 @@ let todoListScroll = 0;
 let todoReturnFocus = null;
 const detailTrails = { todo: [], activity: [] };
 function todoItem(item, onSelect = null) {
+  const done = String(item.state ?? '').toLowerCase() === 'done';
   const select = el('button', { type: 'button', class: 'todo-select', textContent: `#${item.id} · ${item.title}` });
   select.onclick = () => {
     if (onSelect) return onSelect(select);
     todoListScroll = window.scrollY;
     todoReturnFocus = select;
-    todoSelection = { provider: $('#todo-provider').value, source: $('#todo-source').value, item };
+    todoSelection = { provider: $('#todo-provider').value, source: $('#todo-source').value, item, task: item.kind === 'Bug Desarrollo' };
     loadTodoDetail();
   };
-  return el('article', { class: 'todo-item' },
+  return el('article', { class: done ? 'todo-item done' : 'todo-item' },
     el('div', { class: 'todo-heading' }, el('h3', {}, select), todoOriginal(item)),
-    el('div', { class: 'todo-context' }, badge(tx(item.state), 'info'), badge(tx(item.kind || 'HU'), 'muted'), el('span', { textContent: item.project })),
+    el('div', { class: 'todo-context' }, badge(tx(item.state), done ? 'ok' : 'info'), badge(tx(item.kind || 'HU'), 'muted'), el('span', { textContent: item.project })),
     el('dl', { class: 'todo-dates' }, todoDate(t('Created'), item.created_at), ...item.dates.map(date => todoDate(tx(date.name), date.value))));
 }
 function closeTodoDetail(restore = true) {
