@@ -89,6 +89,8 @@ async fn schema(
     for (category, group) in [
         ("Microsoft.RequirementCategory", "hu"),
         ("Microsoft.BugCategory", "bug"),
+        // This process classifies its development bug as a task.
+        ("Microsoft.TaskCategory", "bug"),
     ] {
         if filter.is_some_and(|filter| filter != group) {
             continue;
@@ -114,9 +116,13 @@ async fn schema(
             .as_array()
             .context("invalid work item category")?
         {
-            if let Some(name) = kind["name"].as_str() {
-                names.insert(name.to_owned());
+            let Some(name) = kind["name"].as_str() else {
+                continue;
+            };
+            if category == "Microsoft.TaskCategory" && name != "Bug Desarrollo" {
+                continue;
             }
+            names.insert(name.to_owned());
         }
     }
     ensure!(names.len() <= 40, "invalid work item types");
@@ -433,8 +439,16 @@ mod tests {
                 json!({"workItemTypes":[{"name":"Bug"}]}),
             ),
             (
+                "/example/Payments/_apis/wit/workitemtypecategories/Microsoft.TaskCategory",
+                json!({"workItemTypes":[{"name":"Bug Desarrollo"},{"name":"Task"}]}),
+            ),
+            (
                 "/example/Payments/_apis/wit/workitemtypes/Bug",
                 json!({"fields":[{"referenceName":"System.AssignedTo"}],"states":[{"name":"Resolved"}]}),
+            ),
+            (
+                "/example/Payments/_apis/wit/workitemtypes/Bug%20Desarrollo",
+                json!({"fields":[{"referenceName":"System.AssignedTo"}],"states":[{"name":"New"},{"name":"Done"}]}),
             ),
             (
                 "/example/Payments/_apis/wit/workitemtypes/Custom%20HU",
@@ -450,15 +464,19 @@ mod tests {
         Mock::given(method("POST")).and(path("/example/Payments/_apis/wit/wiql")).respond_with(|r: &wiremock::Request| {
             let query = r.body_json::<Value>().unwrap()["query"].as_str().unwrap().to_owned();
             if query.contains("Custom HU") { assert!(query.contains("[Custom.Developer1] = 'me@example.test' OR [Custom.Developer2] = 'me@example.test'"), "{query}"); }
-            if query.contains("Bug") { assert!(query.contains("[System.WorkItemType] = 'Bug' AND ([System.AssignedTo] = 'me@example.test')")); }
+            if query.contains("[System.WorkItemType] = 'Bug' AND") { assert!(query.contains("[System.WorkItemType] = 'Bug' AND ([System.AssignedTo] = 'me@example.test')")); }
+            if query.contains("Bug Desarrollo") {
+                assert!(query.contains("[System.WorkItemType] = 'Bug Desarrollo' AND ([System.AssignedTo] = 'me@example.test')"), "{query}");
+                assert!(!query.contains("[System.WorkItemType] = 'Task'"), "{query}");
+            }
             assert!(query.contains("[System.CreatedDate] DESC"));
             assert!(r.url.query_pairs().any(|(k,v)| k == "$top" && v == "3"));
             ResponseTemplate::new(200).set_body_json(json!({"workItems":[{"id":1},{"id":2},{"id":3}]}))
         }).mount(&server).await;
         let item = |id, assigned: &str| {
             json!({"id":id,"fields":{
-                "System.TeamProject":"Payments","System.WorkItemType":if id == 2 { "Bug" } else { "Custom HU" },"System.Title":format!("HU {id}"),"System.State":"Developing",
-                "System.CreatedDate":format!("2026-10-0{id}T12:00:00Z"),"System.AssignedTo":{"uniqueName":if id == 2 { "me@example.test" } else { "owner@example.test" }},
+                "System.TeamProject":"Payments","System.WorkItemType":match id { 2 => "Bug", 3 => "Bug Desarrollo", _ => "Custom HU" },"System.Title":format!("HU {id}"),"System.State":"Developing",
+                "System.CreatedDate":format!("2026-10-0{id}T12:00:00Z"),"System.AssignedTo":{"uniqueName":if id == 2 || id == 3 { "me@example.test" } else { "owner@example.test" }},
                 "Custom.Developer2":{"uniqueName":assigned},"Custom.DevStart":"2026-10-04T12:00:00Z","Custom.DevFinish":"2026-10-05T12:00:00Z"
             }})
         };
@@ -487,7 +505,7 @@ mod tests {
                 .starts_with("https://dev.azure.com/example/Payments/_workitems/edit/")
         );
         assert!(result.states.contains(&"Resolved".into()));
-        for (kind, expected) in [("hu", vec![3, 1]), ("bug", vec![2])] {
+        for (kind, expected) in [("hu", vec![1]), ("bug", vec![3, 2])] {
             let filtered = list(&Client::new(), "test-key", "[[sources]]\norganization='https://dev.azure.com/example/'\nprojects=['Payments']\nauthor_email='me@example.test'", &cache, &Filters { limit: 2, kind: Some(kind.into()), ..Default::default() }).await.unwrap();
             assert!(!filtered.partial, "{:?}", filtered.warnings);
             assert_eq!(
@@ -495,7 +513,8 @@ mod tests {
                 expected
             );
             if kind == "bug" {
-                assert_eq!(filtered.states, ["Resolved"]);
+                assert_eq!(filtered.states, ["Done", "New", "Resolved"]);
+                assert_eq!(filtered.assignment_fields, ["Assigned To"]);
             }
         }
         TEST_SERVER.with(|s| *s.borrow_mut() = None);

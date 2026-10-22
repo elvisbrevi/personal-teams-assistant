@@ -968,6 +968,8 @@ const UI_CATALOG = { es: {
   'Copy link: {url}': 'Copiar enlace: {url}',
   'Link copied: {url}': 'Enlace copiado: {url}',
   'Link: {url}': 'Enlace: {url}',
+  'Copy work item link': 'Copiar enlace del work item',
+  'Could not copy the work item link.': 'No se pudo copiar el enlace del work item.',
   'Partial coverage': 'Cobertura parcial',
   'Verified references': 'Referencias verificadas',
   'Select at least one source for the test.': 'Selecciona al menos una fuente para la prueba.',

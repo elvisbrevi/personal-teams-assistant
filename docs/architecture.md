@@ -441,8 +441,8 @@ and MCP. They need no running Teams service or model and never change source aud
 `List` (items, all states, projects, assignment fields, partial coverage/warnings and has_more),
 and item dates retaining their field reference, display name and nullable value.
 `ado/todo.rs` reads an enabled Azure activity source's catalog, resolves `*` to the user's team
-projects and discovers requirement-category HU and bug-category types, workflow states and developer identity
-fields. Assignment is checked separately per type: all its developer roles are ORed, with
+projects and discovers requirement-category HU and bug-category types, plus the task-category
+`Bug Desarrollo` type, workflow states and developer identity fields. Assignment is checked separately per type: all its developer roles are ORed, with
 Assigned To used only when that type has no developer role. The default includes both categories;
 `kind` narrows the category before querying and limiting.
 WIQL filters assignment/type/project/state and orders creation descending; the item read requests
@@ -490,13 +490,15 @@ To add an operation: a method in `control::operate` (window or browser only thro
 
 ## 11. GUI
 
-- **To-Do**: daily work next to Home, with provider/type/state/count filters and pressable cards.
+- **To-Do**: daily work next to Home, with provider/type/state/count filters and pressable cards;
+  Azure's task-category `Bug Desarrollo` is included with bugs and opens through task detail.
+  Work items in `Done` use the green state fill in their cards.
   Detail reads keep process-specific rich fields (HU criteria, bug reproduction/severity, GitHub
   epic description/milestone), assignment, discussion and evidence prominent; all fields and
   history fold below. Back preserves list/filter/scroll/focus; refresh, partial warnings, inline
   errors and stale-response guards apply to both views. Provider HTML is parsed by the core with `scraper` into bounded `RichNode` trees,
   then built by the UI from allowed tags and text without browser HTML parsing or original attributes; external images become links, with no content execution or remote
-  image loads. The external-link icon remains separate from opening detail.
+  image loads. The adjacent original-link and copy buttons open the provider URL or copy it to the clipboard, separately from opening detail.
   Plain-text Markdown and Markdown embedded in provider preformatted evidence use the existing
   safe Markdown renderer; explicit code blocks remain code. Bare HTTPS URLs in discussion and
   rich text become validated links. Links and evidence filter locally by the resolved work item
