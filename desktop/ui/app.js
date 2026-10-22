@@ -177,8 +177,16 @@ let todoSelection = null;
 let todoListScroll = 0;
 let todoReturnFocus = null;
 const detailTrails = { todo: [], activity: [] };
+function todoStateStyle(state) {
+  const value = String(state ?? '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+  if (/\b(review|validation|validate|validating|verification|verify|testing|test|qa|uat|quality assurance|user acceptance|resolved|revision|revisando|validacion|validando|verificacion|pruebas|calidad)\b/.test(value)) return { class: 'review', tone: 'warn' };
+  if (/\b(done|closed|complete|completed|finished|removed|terminado|finalizado|cerrado|completado|hecho|eliminado)\b/.test(value)) return { class: 'done', tone: 'ok' };
+  if (/\b(active|in progress|in development|development|developing|doing|working|assigned|committed|started|en curso|en progreso|en desarrollo|en ejecucion|trabajando|activo|asignado|tomado)\b/.test(value)) return { class: 'in-progress', tone: 'active' };
+  if (/\b(new|proposed|approved|to do|todo|backlog|not started|not taken|unassigned|sin asignar|sin tomar|por hacer|no iniciado|no comenzado|aprobado|propuesto|nuevo|nueva)\b/.test(value)) return { class: 'unstarted', tone: 'muted' };
+  return { class: '', tone: 'info' };
+}
 function todoItem(item, onSelect = null) {
-  const done = String(item.state ?? '').toLowerCase() === 'done';
+  const stateStyle = todoStateStyle(item.state);
   const select = el('button', { type: 'button', class: 'todo-select', textContent: `#${item.id} · ${item.title}` });
   select.onclick = () => {
     if (onSelect) return onSelect(select);
@@ -187,9 +195,9 @@ function todoItem(item, onSelect = null) {
     todoSelection = { provider: $('#todo-provider').value, source: $('#todo-source').value, item, task: item.kind === 'Bug Desarrollo' };
     loadTodoDetail();
   };
-  return el('article', { class: done ? 'todo-item done' : 'todo-item' },
+  return el('article', { class: `todo-item ${stateStyle.class}`.trim() },
     el('div', { class: 'todo-heading' }, el('h3', {}, select), todoOriginal(item)),
-    el('div', { class: 'todo-context' }, badge(tx(item.state), done ? 'ok' : 'info'), badge(tx(item.kind || 'HU'), 'muted'), el('span', { textContent: item.project })),
+    el('div', { class: 'todo-context' }, badge(tx(item.state), stateStyle.tone), badge(tx(item.kind || 'HU'), 'muted'), el('span', { textContent: item.project })),
     el('dl', { class: 'todo-dates' }, todoDate(t('Created'), item.created_at), ...item.dates.map(date => todoDate(tx(date.name), date.value))));
 }
 function closeTodoDetail(restore = true) {
@@ -342,7 +350,7 @@ function renderTodoDetail(detail, prefix = 'todo') {
   const contentRank = field => contentOrder.includes(field.reference) ? contentOrder.indexOf(field.reference) : contentOrder.length;
   content.sort((a, b) => contentRank(a) - contentRank(b) || a.name.localeCompare(b.name));
   const header = el('div', { class: 'panel todo-detail-header' },
-    el('div', { class: 'todo-context' }, badge(tx(item.kind), 'muted'), badge(tx(item.state), 'info'), el('span', { textContent: item.project })),
+    el('div', { class: 'todo-context' }, badge(tx(item.kind), 'muted'), badge(tx(item.state), todoStateStyle(item.state).tone), el('span', { textContent: item.project })),
     el('div', { class: 'todo-heading' }, el('h2', { id: `${prefix}-detail-title`, tabIndex: -1, textContent: `#${item.id} · ${item.title}` }), todoOriginal(item)),
     todoFields(shown, base),
     el('dl', { class: 'todo-dates' }, todoDate(t('Created'), item.created_at), ...item.dates.map(date => todoDate(tx(date.name), date.value))));

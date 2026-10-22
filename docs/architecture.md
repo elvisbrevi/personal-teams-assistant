@@ -492,7 +492,9 @@ To add an operation: a method in `control::operate` (window or browser only thro
 
 - **To-Do**: daily work next to Home, with provider/type/state/count filters and pressable cards;
   Azure's task-category `Bug Desarrollo` is included with bugs and opens through task detail.
-  Work items in `Done` use the green state fill in their cards.
+  Card backgrounds and borders reinforce known workflow states with green for completed, blue for
+  active/development, amber for review/testing/validation and gray for not started; unknown states
+  keep the default card style.
   Detail reads keep process-specific rich fields (HU criteria, bug reproduction/severity, GitHub
   epic description/milestone), assignment, discussion and evidence prominent; all fields and
   history fold below. Back preserves list/filter/scroll/focus; refresh, partial warnings, inline

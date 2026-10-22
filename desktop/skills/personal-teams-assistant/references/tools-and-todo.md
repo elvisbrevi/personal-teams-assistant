@@ -110,7 +110,9 @@ and GitHub issue links. These local reads work with Teams stopped, use no model,
 change any source audience or authorize external processing.
 
 Pressing an item opens its mobile detail inside To-Do through `get_azure_hu`, `get_azure_task`
-(for `Bug Desarrollo`) or `get_github_epic`. Done cards use the green state color. Back restores the list, filters, scroll and keyboard focus. Type-specific
+(for `Bug Desarrollo`) or `get_github_epic`. Card backgrounds and borders reinforce known states:
+green for completed, blue for active/development, amber for review/testing/validation and gray for
+not started; unknown states keep the default card style. Back restores the list, filters, scroll and keyboard focus. Type-specific
 rich fields, comments and evidence stay readable; all original fields and change history
 are folded. Rich HTML is parsed in the core into bounded safe trees and rebuilt from allowed elements,
 without browser HTML parsing, scripts, original attributes or remote image loads; images and attachments open through their original links rather than
