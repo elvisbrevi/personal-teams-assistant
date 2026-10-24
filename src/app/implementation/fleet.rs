@@ -27,6 +27,13 @@ async fn remote(connection: &Connection, mut body: Value) -> Result<Value> {
         .post(endpoint(&connection.url)?)
         .bearer_auth(security::secret("PTA_MACHINE_TOKEN")?)
         .json(&body)
+        .timeout(Duration::from_secs(
+            if body["args"]["method"] == "machine_assistant" {
+                110
+            } else {
+                45
+            },
+        ))
         .send()
         .await?;
     ensure!(
@@ -54,9 +61,9 @@ pub(super) async fn operate(host: &Arc<Host>, method: &str, args: &Value) -> Res
                 return Ok(result);
             }
             let data = state.registry.lock().await;
-            let local = json!({"id":data.id,"name":data.settings.name,"os":std::env::consts::OS,"online":true,"local":true});
+            let local = json!({"id":data.id,"name":data.settings.name,"os":std::env::consts::OS,"online":true,"local":true,"assistant_phase":*host.state.phase.borrow()});
             let mut machines = vec![local];
-            machines.extend(data.machines.iter().map(|m| json!({"id":m.id,"name":m.name,"os":m.os,"online":now()-m.seen<35,"local":false})));
+            machines.extend(data.machines.iter().map(|m| json!({"id":m.id,"name":m.name,"os":m.os,"online":now()-m.seen<35,"local":false,"assistant_phase":m.assistant_phase})));
             Ok(
                 json!({"machines":machines,"teams_machine":data.teams_machine,"this_machine":data.id}),
             )
@@ -210,6 +217,7 @@ pub(in crate::app) async fn register(host: &Arc<Host>, args: &Value) -> Result<V
         seen: now(),
         secret_hash: digest(&token),
         account_version: args["account_version"].as_str().unwrap_or_default().into(),
+        assistant_phase: None,
     });
     state.save(&data)?;
     Ok(json!({"token":token}))
@@ -254,6 +262,15 @@ pub(in crate::app) async fn protocol(host: &Arc<Host>, args: &Value) -> Result<V
             .find(|m| m.id == id && security::constant_eq(&m.secret_hash, &digest(token)))
             .context("Machine is not registered.")?;
         machine.seen = now();
+        if args["action"] == "poll"
+            && let Some(phase) = args.get("assistant_phase")
+        {
+            let phase = Some(serde_json::from_value(phase.clone())?);
+            if machine.assistant_phase != phase {
+                machine.assistant_phase = phase;
+                state.save(&data)?;
+            }
+        }
     }
     match args["action"].as_str().unwrap_or_default() {
         "disconnect" => {
@@ -351,6 +368,7 @@ pub(super) async fn call(
 ) -> Result<Value> {
     ensure!(
         [
+            "machine_assistant",
             "implementation_catalog",
             "implementation_browse",
             "implementation_launch",
@@ -391,7 +409,11 @@ pub(super) async fn call(
             result: None,
         });
     }
-    for _ in 0..160 {
+    for _ in 0..if method == "machine_assistant" {
+        360
+    } else {
+        160
+    } {
         tokio::time::sleep(Duration::from_millis(250)).await;
         let mut calls = state.calls.lock().await;
         if let Some(index) = calls.iter().position(|c| c.id == id && c.result.is_some()) {
@@ -399,12 +421,22 @@ pub(super) async fn call(
             let result = call.result.unwrap();
             ensure!(
                 result["ok"] == true,
-                "The execution machine rejected the operation. Check its directories, installed CLI and running jobs."
+                "{}",
+                if method == "machine_assistant" {
+                    "The machine could not change the assistant state. Check its Teams selection, connection and settings."
+                } else {
+                    "The execution machine rejected the operation. Check its directories, installed CLI and running jobs."
+                }
             );
             return Ok(result["data"].clone());
         }
     }
     state.calls.lock().await.retain(|c| c.id != id);
+    if method == "machine_assistant" {
+        anyhow::bail!(
+            "The machine did not confirm the assistant state. Refresh machines before trying again."
+        );
+    }
     anyhow::bail!("The machine did not reply. Inspect its runs before starting anything again.")
 }
 
@@ -414,7 +446,12 @@ pub(in crate::app) async fn schedule(host: Arc<Host>) {
 async fn poll(host: Arc<Host>) {
     let mut results = Vec::new();
     let mut cursor = 0;
+    // Assistant startup can wait for Graph; keep presence, leases and status flowing meanwhile.
+    let mut assistant_commands = tokio::task::JoinSet::new();
     loop {
+        while let Some(Ok(result)) = assistant_commands.try_join_next() {
+            results.push(result);
+        }
         let state = &host.state.implementation;
         if let Ok(Some(connection)) = state.connection() {
             let own = state.registry.lock().await.id.clone();
@@ -422,26 +459,40 @@ async fn poll(host: Arc<Host>) {
                 .db
                 .changes(cursor)
                 .unwrap_or_else(|_| (cursor, Vec::new()));
+            let assistant_phase = *host.state.phase.borrow();
             if let Ok(reply) = remote(
                 &connection,
-                json!({"action":"poll","id":own,"results":results,"sessions":sessions,"session_cursor":next}),
+                json!({"action":"poll","id":own,"results":results,"sessions":sessions,"session_cursor":next,"assistant_phase":assistant_phase}),
             )
             .await
             {
                 if reply["session_cursor"].as_i64()==Some(next) { cursor=next; }
                 results.clear();
                 if let Some(command) = reply["command"].as_object() {
-                    let result = local(
-                        &host,
-                        command["method"].as_str().unwrap_or_default(),
-                        &command["args"],
-                    )
-                    .await;
-                    let value = match result {
-                        Ok(data) => json!({"ok":true,"data":data}),
-                        Err(_) => json!({"ok":false}),
-                    };
-                    results.push(json!({"id":command["id"],"result":value}));
+                    if command["method"] == "machine_assistant" {
+                        let host = host.clone();
+                        let command = command.clone();
+                        assistant_commands.spawn(async move {
+                            let result = local(&host, "machine_assistant", &command["args"]).await;
+                            let result = match result {
+                                Ok(data) => json!({"ok":true,"data":data}),
+                                Err(_) => json!({"ok":false}),
+                            };
+                            json!({"id":command["id"],"result":result})
+                        });
+                    } else {
+                        let result = local(
+                            &host,
+                            command["method"].as_str().unwrap_or_default(),
+                            &command["args"],
+                        )
+                        .await;
+                        let value = match result {
+                            Ok(data) => json!({"ok":true,"data":data}),
+                            Err(_) => json!({"ok":false}),
+                        };
+                        results.push(json!({"id":command["id"],"result":value}));
+                    }
                 }
             }
         }

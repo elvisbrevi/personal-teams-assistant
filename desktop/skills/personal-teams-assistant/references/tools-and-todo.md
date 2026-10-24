@@ -153,6 +153,13 @@ children and run installed coding agents.
 1. Read `machine_settings` and `machine_list`. The current coordinator defaults to itself as
    the single Teams machine. In Settings > Language models, name this machine and set its
    allowed directory roots. Isolated portal profiles remain restricted to their own repositories.
+   The GUI uses a shared directory sheet for allowed roots and local checkout add/edit paths,
+   with single or multiple selection, a leading `../` row, parent navigation and Apply/Cancel. `machine_browse`
+   takes an optional absolute `path` and reads this host's directories for these choices;
+   an empty path lists its filesystem root (the home drive on Windows). Isolated web
+   profiles can browse only their own repositories. Browsing grants no execution access.
+   Leave Connection portal empty on the coordinator; enter its HTTPS origin on another
+   computer that you want to connect.
 2. On another machine, stop its Teams assistant, connect GitHub using the same immutable
    GitHub identity as the portal account, then call `machine_connect` with the portal's HTTPS
    origin. It registers an account-bound credential in the existing system/file credential store,
@@ -161,10 +168,21 @@ children and run installed coding agents.
 3. Select the single Teams machine in Settings > Microsoft Teams or `machine_teams`. The
    previous machine stops after losing its lease; handover waits up to 120 seconds before a
    new machine can start. Start the Teams assistant explicitly on the selected machine.
+   Settings > Language models shows the same choice as a radio beside each machine;
+   both lists also offer Start/Stop buttons. `machine_assistant` takes `machine`, `action`
+   (`start`/`stop`) and CLI/MCP confirmation. It uses the target's ordinary assistant controls;
+   Start still checks the selected Teams machine, lease, configuration and credentials.
+   It does not change ownership or start automatically after choosing a radio. Refresh the
+   machine list after any timeout; never repeat an uncertain command automatically.
+   Machines report `assistant_phase` through authenticated presence polling (0.8.1 or later).
+   Older workers without a report show an unknown state and disabled controls; an offline
+   machine shows its last reported state. The portal and coordinator data stay where they are.
 4. Use Implement, immediately before the original-link action on a To-Do card/shared detail,
    or call `implementation_prepare` with the verified item selection. Provide context, machine,
    multiple directories, installed CLI, model and effort from that machine's catalog. The
-   directory browser supports multiple selections and an always-available add action.
+   directory sheet supports multiple selections across hierarchy navigation and an
+   always-available add action. Cancel/Escape discards pending selections. Implementation
+   browsing stays within the selected machine's allowed roots.
 5. `implementation_start` on an HU/bug/Epic proposes children. Review/edit/select them and
    confirm `implementation_create`; no child is written just because a model proposed it.
    On a process task, Bug Desarrollo or ordinary GitHub issue, Start implements that item in

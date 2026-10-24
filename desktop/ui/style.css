@@ -98,19 +98,28 @@ main { min-width: 0; padding: 1.6rem 2.2rem 6rem; max-width: 1200px; width: 100%
 /* Forms */
 label { display: block; font-weight: 650; font-size: .92rem; margin: .9rem 0; }
 label small { font-weight: 400; color: var(--muted); }
-input:not([type=checkbox]), textarea, select { display: block; width: 100%; min-width: 0; max-width: 100%; min-height: 2.75rem; border: var(--bw) solid var(--line); border-radius: var(--radius-control); padding: .58rem .8rem; font: inherit; font-weight: 400; margin-top: .35rem; background-color: var(--surface); color: inherit; }
+input:not([type=checkbox]):not([type=radio]), textarea, select { display: block; width: 100%; min-width: 0; max-width: 100%; min-height: 2.75rem; border: var(--bw) solid var(--line); border-radius: var(--radius-control); padding: .58rem .8rem; font: inherit; font-weight: 400; margin-top: .35rem; background-color: var(--surface); color: inherit; }
 /* iOS date/time controls otherwise include native intrinsic sizing and padding. */
 input[type=date], input[type=time], input[type=datetime-local] { appearance: none; -webkit-appearance: none; box-sizing: border-box; }
 .grid > label { min-width: 0; }
 textarea { resize: vertical; line-height: 1.45; }
-input:not([type=checkbox]):focus-visible, textarea:focus-visible, select:focus-visible { outline: 3px solid var(--focus); outline-offset: 1px; }
+input:not([type=checkbox]):not([type=radio]):focus-visible, textarea:focus-visible, select:focus-visible { outline: 3px solid var(--focus); outline-offset: 1px; }
 input:disabled, textarea:disabled, select:disabled { background-color: var(--surface-2); color: var(--muted); }
 select { appearance: none; -webkit-appearance: none; padding-right: 2.5rem; background-image: linear-gradient(45deg, transparent 50%, currentColor 50%), linear-gradient(135deg, currentColor 50%, transparent 50%); background-position: calc(100% - 1.2rem) 52%, calc(100% - .82rem) 52%; background-size: .38rem .38rem; background-repeat: no-repeat; }
-input[type=checkbox] { appearance: none; -webkit-appearance: none; display: inline-grid; place-content: center; width: 1.2rem; height: 1.2rem; margin: 0; flex: none; border: var(--bw) solid var(--line); border-radius: 6px; background: var(--surface); cursor: pointer; }
+input[type=checkbox], input[type=radio] { appearance: none; -webkit-appearance: none; display: inline-grid; place-content: center; width: 1.2rem; height: 1.2rem; margin: 0; flex: none; border: var(--bw) solid var(--line); border-radius: 6px; background: var(--surface); cursor: pointer; }
 input[type=checkbox]::before { content: ""; width: .32rem; height: .62rem; margin-top: -.12rem; border: solid var(--on-color); border-width: 0 2.5px 2.5px 0; transform: rotate(45deg); opacity: 0; }
 input[type=checkbox]:checked { background: var(--primary); }
 input[type=checkbox]:checked::before { opacity: 1; }
 input[type=checkbox]:disabled { opacity: .45; cursor: default; }
+input[type=radio] { border-radius: 50%; }
+input[type=radio]:checked { background: var(--primary); }
+input[type=radio]:checked::before { content: ""; width: .5rem; height: .5rem; border-radius: 50%; background: var(--on-color); }
+input[type=radio]:disabled { opacity: .45; cursor: default; }
+.machine-choice { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: .4rem .65rem; padding: .65rem; margin: .3rem 0; border: 1px solid var(--rule); border-radius: var(--radius-control); }
+.machine-choice .check { margin: 0; min-width: 0; flex-wrap: wrap; }
+.machine-choice > .badge, .machine-choice > .hint { grid-column: 1; justify-self: start; }
+.machine-choice button { grid-column: 2; grid-row: 1 / span 3; }
+.machine-choice strong { overflow-wrap: anywhere; min-width: 0; }
 .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); column-gap: 1rem; }
 /* A short field alone keeps a field's width instead of the whole row. */
 .grid.fill { grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); }
@@ -144,7 +153,7 @@ nav button, .status-row, .activity-row, .segmented button, .subnav [role=tab], .
 .link-button .icon { width: 15px; height: 15px; }
 .icon-button { min-height: 0; padding: .3rem; border: 0; border-radius: 99px; background: none; color: inherit; }
 .actions { display: flex; align-items: center; gap: .6rem; margin-top: 1rem; flex-wrap: wrap; }
-.actions input:not([type=checkbox]) { max-width: 520px; margin: 0; flex: 1; min-width: 200px; }
+.actions input:not([type=checkbox]):not([type=radio]) { max-width: 520px; margin: 0; flex: 1; min-width: 200px; }
 @keyframes spin { to { transform: rotate(360deg); } }
 
 /* Status */
@@ -296,7 +305,7 @@ nav button, .status-row, .activity-row, .segmented button, .subnav [role=tab], .
 .row > div { flex: 1; min-width: 170px; }
 .row > div strong { display: flex; align-items: center; gap: .5rem; flex-wrap: wrap; font-size: .93rem; overflow-wrap: anywhere; }
 .row small { display: block; color: var(--muted); font-size: .84rem; margin-top: .1rem; }
-.row input:not([type=checkbox]) { flex: 2; min-width: 200px; margin: 0; }
+.row input:not([type=checkbox]):not([type=radio]) { flex: 2; min-width: 200px; margin: 0; }
 .row label { margin: 0; font-weight: 400; }
 .cred-name { font-family: var(--mono); font-size: .86rem; }
 
@@ -602,7 +611,7 @@ dialog p { overflow-wrap: anywhere; }
   nav .nav-secondary button[aria-current="page"] { background: var(--inverse); color: var(--inverse-text); }
   nav .nav-secondary button span.short { position: static; width: auto; height: auto; overflow: visible; clip: auto; }
 
-  .app { grid-template-columns: 1fr; }
+  .app { grid-template-columns: 1fr; grid-template-rows: auto 1fr; }
   .sidebar { position: sticky; z-index: 6; height: auto; flex-direction: row; align-items: center; gap: .6rem; padding: .55rem .8rem; border-right: 0; border-bottom: var(--bw) solid var(--line); overflow: visible; }
   .brand div { display: none; }
   /* Visually hidden, still announced: the dot alone shows the state. */
@@ -676,8 +685,9 @@ dialog p { overflow-wrap: anywhere; }
   .page-head p { font-size: .95rem; }
   .panel { padding: 1rem; min-width: 0; border-radius: 20px; }
   .chat-panel { padding: 0; }
-  input:not([type=checkbox]), textarea, select { font-size: 16px; min-height: 44px; }
-  input[type=checkbox] { width: 1.4rem; height: 1.4rem; border-radius: 7px; }
+  input:not([type=checkbox]):not([type=radio]), textarea, select { font-size: 16px; min-height: 44px; }
+  input[type=checkbox], input[type=radio] { width: 1.4rem; height: 1.4rem; border-radius: 7px; }
+  input[type=radio] { border-radius: 50%; }
   input[type=checkbox]::before { width: .38rem; height: .72rem; }
   .check { min-height: 44px; }
   button { min-height: 44px; }
@@ -708,8 +718,8 @@ dialog p { overflow-wrap: anywhere; }
   #messages-refresh .label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
   .chain-row { grid-template-columns: 1fr; }
   .chain-row .rank { grid-column: auto; }
-  .row input:not([type=checkbox]) { flex: 1 1 100%; min-width: 0; }
-  .actions input:not([type=checkbox]) { min-width: 0; }
+  .row input:not([type=checkbox]):not([type=radio]) { flex: 1 1 100%; min-width: 0; }
+  .actions input:not([type=checkbox]):not([type=radio]) { min-width: 0; }
   .history { max-height: 55dvh; min-height: 260px; padding: 1rem; }
   .bubble { max-width: 95%; }
   .toast { top: calc(env(safe-area-inset-top) + .6rem); bottom: auto; left: .75rem; right: .75rem; max-width: none; }
@@ -746,10 +756,27 @@ dialog p { overflow-wrap: anywhere; }
 .implementation-paths { display: grid; gap: .5rem; margin-bottom: .75rem; }
 .implementation-path { display: flex; align-items: center; justify-content: space-between; gap: .75rem; min-width: 0; }
 .implementation-path code { overflow-wrap: anywhere; min-width: 0; }
-.implementation-picker { margin-top: 1rem; }
-.implementation-directory-list { max-height: 20rem; overflow-y: auto; margin: .75rem 0; }
-.implementation-directory-list .implementation-path { justify-content: flex-start; }
-.implementation-directory-list .link-button { overflow-wrap: anywhere; text-align: left; }
+.directory-picker { padding: 0; overflow: hidden; }
+.directory-picker[open] { display: flex; flex-direction: column; }
+.directory-picker-head, .directory-picker-footer { display: flex; align-items: center; justify-content: space-between; gap: .75rem; padding: 1rem; flex: none; }
+.directory-picker-head { border-bottom: 1px solid var(--rule); }
+.directory-picker-head h2 { flex: 1; }
+.directory-picker-head .icon-button { background: var(--surface); color: var(--text); }
+.directory-picker-body { overflow-y: auto; overscroll-behavior: contain; padding: 0 1rem; min-height: 8rem; }
+.directory-picker-location { color: var(--muted); overflow-wrap: anywhere; font-size: .85rem; }
+.directory-picker-list { border: 1px solid var(--rule); border-radius: var(--radius-card); overflow: hidden; margin: .75rem 0; background: var(--surface-2); }
+.directory-picker-row { display: flex; align-items: center; min-width: 0; border-bottom: 1px solid var(--rule); }
+.directory-picker-row:last-child { border-bottom: 0; }
+.directory-picker-row .check { margin: 0; padding: .75rem; flex: none; }
+.directory-picker-row > .hint { padding: .75rem; overflow-wrap: anywhere; min-width: 0; }
+.directory-picker-row .link-button { display: block; flex: 1; min-width: 0; padding: .85rem .75rem; text-align: left; color: var(--text); }
+.directory-picker-row .link-button span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; unicode-bidi: plaintext; text-align: left; }
+.directory-picker-footer { border-top: 1px solid var(--rule); }
+body.directory-picker-open { overflow: hidden; }
+@media (max-width: 680px) {
+  .directory-picker { width: calc(100% - 1rem); max-height: calc(100dvh - env(safe-area-inset-top) - 1rem); margin: auto .5rem .5rem; border-radius: 24px; }
+  .directory-picker-footer { padding-bottom: max(1rem, env(safe-area-inset-bottom)); flex-wrap: wrap; }
+}
 .implementation-run { display: grid; gap: .75rem; padding: 1rem 0; border-bottom: 1px solid var(--rule); }
 .implementation-run fieldset { min-width: 0; }
 .implementation-output { max-height: 28rem; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }

@@ -139,16 +139,33 @@
   const machineId = '11111111-1111-4111-8111-111111111111';
   const remoteMachineId = '22222222-2222-4222-8222-222222222222';
   const implementationRuns = [];
+  let teamsMachine = machineId;
+  const machinePhases = { [machineId]: "stopped", [remoteMachineId]: "stopped" };
+  let machineSettings = { id: machineId, name: 'Preview server', coordinator: null, roots: ['/work'] };
   const handlers = {
-    machine_settings: () => ({ id: machineId, name: 'Preview server', coordinator: null, roots: ['/work'] }),
-    machine_list: () => ({ this_machine: machineId, teams_machine: machineId, machines: [
-      { id: machineId, name: 'Preview server', os: 'linux', online: true },
-      { id: remoteMachineId, name: 'Preview Mac', os: 'macos', online: true },
+    machine_browse: async args => {
+      window.__ptaLastMachineBrowse = args.path;
+      await delay(window.__ptaBrowseDelay || 0);
+      if (window.__ptaBrowseError) throw new Error('Directory read failed.');
+      return { path: args.path || null, parent: args.path === '/work' ? null : '/work', roots: !args.path,
+        directories: !args.path ? ['/work'] : args.path === '/work' ? ['/work/application', '/work/documentation'] : [] };
+    },
+    machine_settings: () => structuredClone(machineSettings),
+    machine_list: () => ({ this_machine: machineId, teams_machine: teamsMachine, machines: [
+      { id: machineId, name: 'Preview server', os: 'linux', online: true, assistant_phase: machinePhases[machineId] },
+      { id: remoteMachineId, name: 'Preview Mac', os: 'macos', online: true, assistant_phase: machinePhases[remoteMachineId] },
     ] }),
-    machine_save: args => { window.__ptaMachineSettings = args; return { saved: true }; },
+    machine_save: args => { machineSettings = { ...machineSettings, ...structuredClone(args) }; window.__ptaMachineSettings = args; return { saved: true }; },
     machine_connect: () => ({ connected: true }),
     machine_disconnect: () => ({ disconnected: true }),
-    machine_teams: args => { window.__ptaTeamsMachine = args.machine; return { handover_pending: true }; },
+    machine_assistant: args => {
+      window.__ptaMachineAssistantCalls = (window.__ptaMachineAssistantCalls || 0) + 1;
+      window.__ptaLastMachineAssistant = structuredClone(args);
+      if (window.__ptaMachineAssistantError) throw new Error('Assistant control failed.');
+      machinePhases[args.machine] = args.action === 'start' ? 'running' : 'stopped';
+      return { assistant_phase: machinePhases[args.machine] };
+    },
+    machine_teams: args => { if (window.__ptaTeamsMachineError) throw new Error('Machine selection failed.'); teamsMachine = args.machine; window.__ptaTeamsMachine = args.machine; return { handover_pending: true }; },
     implementation_prepare: async args => ({ detail: await todoDetail(args.item, args.item.provider === 'github'), planning: !args.item.task && (args.item.provider !== 'github' || args.item.id === 42), creations: {} }),
     implementation_catalog: () => ({ providers: providers.providers.filter(p => p.transport === 'cli' && p.available) }),
     implementation_browse: args => ({ path: args.path || null, parent: args.path === '/work' ? null : '/work', roots: !args.path,
