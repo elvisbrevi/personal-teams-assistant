@@ -450,7 +450,7 @@ async function loadTodo() {
     if (!result.items.length) $('#todo-list').append(el('p', { class: 'empty', textContent: t('No items match these filters. Try another state.') }));
     $('#todo-progress').textContent = result.has_more
       ? t('Showing the {n} newest items. Increase the limit to see more.', { n: result.items.length })
-      : tn('{n} item', '{n} items', result.items.length);
+      : tn(result.items.length, '{n} item', '{n} items');
     if (result.partial) {
       $('#todo-warnings').hidden = false;
       $('#todo-warnings').textContent = t('Some projects could not be read. The list and available states may be incomplete.');
@@ -472,7 +472,7 @@ async function loadTodo() {
 function sessionDestination(session, mobile, native = false) {
   if (!session.session_id) return { reason: t('The agent has not reported its session ID yet.') };
   if (session.provider === 'codex') {
-    if (mobile) return { reason: t('This is a local Codex session on another computer. The documented session link is for the desktop app; open the connected computer in Codex on mobile.') };
+    if (mobile) return { reason: t('This Codex session was created on its execution machine. This button opens Codex Desktop on a computer with access to that session. This run has no verified mobile link.') };
     if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(session.session_id)) return { reason: t('This session ID does not have a supported app link.') };
     return { url: `codex://threads/${encodeURIComponent(session.session_id)}` };
   }
@@ -558,12 +558,11 @@ async function openImplementation(item, selection, trigger) {
     const model = el('select', { id: 'implementation-model' });
     const effort = el('select', { id: 'implementation-effort' });
     const directoryList = el('div', { class: 'implementation-paths' });
-    const picker = el('section', { class: 'panel implementation-picker', hidden: true, 'aria-label': t('Choose working directories') });
     const add = el('button', { type: 'button', class: 'secondary', textContent: t('+ Choose directories') });
     const cancel = el('button', { type: 'button', class: 'secondary', textContent: t('Cancel') });
     const start = el('button', { type: 'button', textContent: t('Start'), disabled: true });
     const runs = el('div', { id: 'implementation-runs' });
-    const form = implementationForm = { request, previous, selected, prepared, machine, context, provider, model, effort, directoryList, picker, start, runs, directories: [], catalog: [], generation: 0, creations: prepared.creations || {} };
+    const form = implementationForm = { request, previous, selected, prepared, machine, context, provider, model, effort, directoryList, start, runs, directories: [], catalog: [], generation: 0, creations: prepared.creations || {} };
     const leave = () => {
       ++implementationRequest; implementationForm = null;
       $('#implementation').hidden = true;
@@ -572,7 +571,9 @@ async function openImplementation(item, selection, trigger) {
       previous.trigger?.focus({ preventScroll: true }); window.scrollTo(0, previous.scroll); renderSavebar(); loadWorkItemSessions().catch(fail);
     };
     cancel.onclick = leave;
-    add.onclick = () => busy(add, () => implementationBrowse(form, ''));
+    add.onclick = () => chooseDirectories({ trigger: add, title: t('Directories on {machine}', { machine: machine.selectedOptions[0].textContent }), selected: form.directories,
+      browse: path => invoke('implementation_browse', { machine: machine.value, path }),
+      apply: paths => { if (implementationForm === form) { form.directories = paths; implementationDirectories(form); } } });
     provider.onchange = () => implementationModels(form);
     model.onchange = () => implementationEfforts(form);
     effort.onchange = () => implementationReady(form);
@@ -588,7 +589,7 @@ async function openImplementation(item, selection, trigger) {
       el('p', { class: 'hint', textContent: prepared.planning ? t('Review and edit the proposed children before creating them. Existing children are included as context.') : t('The selected coding agent will work in the directories you choose.') }),
       el('label', {}, t('Implementation context'), context),
       el('label', {}, t('Execution machine'), machine),
-      el('fieldset', {}, el('legend', { textContent: t('Working directories') }), directoryList, add), picker,
+      el('fieldset', {}, el('legend', { textContent: t('Working directories') }), directoryList, add),
       el('div', { class: 'grid' }, el('label', {}, t('Provider'), provider), el('label', {}, t('Model'), model), el('label', {}, t('Effort'), effort))),
       el('div', { class: 'actions implementation-footer' }, cancel, start),
       el('section', { class: 'panel' }, el('h2', { textContent: t('Implementation runs') }), runs));
@@ -626,7 +627,7 @@ function implementationDirectories(form) {
 }
 async function implementationMachine(form) {
   const generation = ++form.generation;
-  form.directories = []; form.catalog = []; form.picker.hidden = true;
+  form.directories = []; form.catalog = [];
   form.provider.replaceChildren(); implementationModels(form); implementationDirectories(form);
   const catalog = await invoke('implementation_catalog', { machine: form.machine.value });
   if (implementationForm !== form || generation !== form.generation) return;
@@ -636,34 +637,66 @@ async function implementationMachine(form) {
   implementationModels(form);
   await implementationRuns(form);
 }
-async function implementationBrowse(form, path) {
-  const machine = form.machine.value; const generation = form.generation;
-  const result = await invoke('implementation_browse', { machine, path });
-  if (implementationForm !== form || generation !== form.generation) return;
-  const up = el('button', { type: 'button', class: 'secondary small', textContent: t('Parent directory') });
-  up.onclick = () => busy(up, () => implementationBrowse(form, result.parent || ''));
-  const doneButton = el('button', { type: 'button', class: 'secondary', textContent: t('Use selected directories') });
-  doneButton.onclick = () => { form.picker.hidden = true; implementationDirectories(form); };
-  form.picker.hidden = false;
-  const currentDirectory = result.path ? el('input', { type: 'checkbox', checked: form.directories.includes(result.path) }) : null;
-  if (currentDirectory) currentDirectory.onchange = () => {
-    if (currentDirectory.checked && !form.directories.includes(result.path)) form.directories.push(result.path);
-    else if (!currentDirectory.checked) form.directories = form.directories.filter(p => p !== result.path);
-    implementationDirectories(form);
+/** Shared directory sheet: selections are staged until Apply, including across navigation. */
+function chooseDirectories({ trigger, title, selected = [], multiple = true, allowEmpty = false, browse, apply }) {
+  const selection = new Set(selected);
+  const dialog = el('dialog', { class: 'directory-picker', 'aria-label': title });
+  const back = el('button', { type: 'button', class: 'icon-button secondary', 'aria-label': t('Parent directory') }, icon('back'));
+  const close = el('button', { type: 'button', class: 'icon-button secondary', 'aria-label': t('Cancel') }, icon('close'));
+  const body = el('div', { class: 'directory-picker-body' });
+  const count = el('span', { class: 'hint', role: 'status' });
+  const use = el('button', { type: 'button', textContent: t('Use selected directories') });
+  let request = 0;
+  const update = () => {
+    count.textContent = tn(selection.size, '{n} directory selected', '{n} directories selected');
+    use.disabled = !allowEmpty && !selection.size;
   };
-  form.picker.replaceChildren(el('h3', { textContent: t('Directories on {machine}', { machine: form.machine.selectedOptions[0].textContent }) }), el('code', { textContent: result.path || t('Allowed roots') }), up,
-    currentDirectory ? el('label', { class: 'check' }, currentDirectory, t('Select this directory')) : null,
-    el('div', { class: 'implementation-directory-list' }, ...result.directories.map(directory => {
-      const check = el('input', { type: 'checkbox', checked: form.directories.includes(directory), disabled: result.roots });
-      check.onchange = () => {
-        if (check.checked && !form.directories.includes(directory)) form.directories.push(directory);
-        else if (!check.checked) form.directories = form.directories.filter(p => p !== directory);
-        implementationDirectories(form);
-      };
-      const open = el('button', { type: 'button', class: 'link-button', textContent: directory.split(/[\\/]/).filter(Boolean).pop() || directory, 'aria-label': t('Browse directory {path}', { path: directory }) });
-      open.onclick = () => busy(open, () => implementationBrowse(form, directory));
-      return el('div', { class: 'implementation-path' }, el('label', { class: 'check' }, check, el('span', { class: 'sr-only', textContent: t('Select directory {path}', { path: directory }) })), open);
-    })), doneButton);
+  const row = (path, current = false) => {
+    const check = el('input', { type: 'checkbox', checked: selection.has(path), 'aria-label': t('Select directory {path}', { path }) });
+    check.onchange = () => {
+      if (!multiple) { selection.clear(); for (const input of body.querySelectorAll('input')) if (input !== check) input.checked = false; }
+      if (check.checked) selection.add(path); else selection.delete(path);
+      update();
+    };
+    const name = el('span', { textContent: current ? t('Select this directory') : path, title: path });
+    const open = current ? null : el('button', { type: 'button', class: 'link-button', 'aria-label': t('Browse directory {path}', { path }) }, name);
+    if (!current) open.onclick = () => load(path);
+    return el('div', { class: 'directory-picker-row' }, el('label', { class: 'check' }, check, current ? name : icon('folder')), open);
+  };
+  const load = async path => {
+    const generation = ++request;
+    back.disabled = true;
+    body.setAttribute('aria-busy', 'true');
+    body.replaceChildren(el('p', { class: 'hint', role: 'status', textContent: t('Loading…') }));
+    try {
+      const result = await browse(path);
+      if (!dialog.open || generation !== request) return;
+      back.disabled = Boolean(result.roots);
+      back.onclick = () => load(result.parent || '');
+      body.replaceChildren(...[el('p', { class: 'directory-picker-location', textContent: result.path || t('Allowed roots') }),
+        el('div', { class: 'directory-picker-list' },
+          result.path ? el('div', { class: 'directory-picker-row' }, el('button', { type: 'button', class: 'link-button directory-picker-parent', translate: false, textContent: '../', 'aria-label': t('Parent directory'), onclick: () => load(result.parent || '') })) : null,
+          result.path ? row(result.path, true) : null, ...result.directories.map(path => row(path))),
+        result.directories.length ? null : el('p', { class: 'hint', textContent: t('No subdirectories.') })].filter(Boolean));
+    } catch (error) {
+      if (!dialog.open || generation !== request) return;
+      const retry = el('button', { type: 'button', class: 'secondary', textContent: t('Retry') });
+      retry.onclick = () => load(path);
+      back.disabled = !path;
+      back.onclick = () => load('');
+      body.replaceChildren(el('p', { class: 'callout error', role: 'alert', textContent: tx(String(error?.message ?? error)) }), retry);
+    } finally {
+      if (dialog.open && generation === request) { body.setAttribute('aria-busy', 'false'); update(); }
+    }
+  };
+  close.onclick = () => dialog.close();
+  use.onclick = () => { apply([...selection]); dialog.close(); };
+  dialog.onclose = () => { ++request; document.body.classList.remove('directory-picker-open'); dialog.remove(); trigger?.focus({ preventScroll: true }); };
+  dialog.append(el('div', { class: 'directory-picker-head' }, back, el('h2', { textContent: title }), close), body,
+    el('div', { class: 'directory-picker-footer' }, count, use));
+  document.body.append(dialog);
+  document.body.classList.add('directory-picker-open');
+  update(); dialog.showModal(); close.focus(); load('');
 }
 async function implementationRuns(form) {
   const machine = form.machine.value; const generation = form.generation;
@@ -724,16 +757,61 @@ setInterval(() => {
   if (tab === 'implementation' && form && !form.runs.contains(document.activeElement) && !form.runs.querySelector('input, textarea')) implementationRuns(form).catch(fail);
 }, 5000);
 
+let machineRoots = [];
+function renderMachineRoots() {
+  $('#machine-roots').replaceChildren(...machineRoots.map(path => {
+    const remove = el('button', { type: 'button', class: 'secondary small', disabled: $('#machine-roots-choose').disabled, textContent: t('Remove'), 'aria-label': t('Remove directory {path}', { path }) });
+    remove.onclick = () => { machineRoots = machineRoots.filter(root => root !== path); renderMachineRoots(); };
+    return el('div', { class: 'implementation-path' }, el('code', { textContent: path }), remove);
+  }));
+}
+function renderTeamsMachines(fleet) {
+  for (const id of ['machine-list', 'teams-machine-list']) {
+    const list = $('#' + id);
+    list.replaceChildren(...fleet.machines.map(machine => {
+      const radio = el('input', { type: 'radio', name: id, value: machine.id, checked: machine.id === fleet.teams_machine, disabled: !machine.online && machine.id !== fleet.teams_machine });
+      radio.onchange = () => busy(null, async () => {
+        const radios = [...document.querySelectorAll('.machine-choice input')];
+        for (const input of radios) { input.disabled = true; input.checked = input.value === machine.id; }
+        try {
+          const result = await invoke('machine_teams', { machine: machine.id });
+          done(result.handover_pending ? t('Teams machine selected. Waiting for the previous machine to stop.') : t('Teams machine selected. Start the assistant on that machine.'));
+        } finally {
+          // Refresh ownership alone so a Teams choice never discards unsaved machine settings.
+          try { renderTeamsMachines(await invoke('machine_list')); }
+          catch (error) { renderTeamsMachines(fleet); throw error; }
+          if (tab === 'settings' && !list.closest('[hidden]')) list.querySelector('input:checked')?.focus({ preventScroll: true });
+        }
+      });
+      const phase = machine.assistant_phase;
+      const known = ['running', 'stopped', 'starting', 'stopping'].includes(phase);
+      const running = phase === 'running';
+      const phaseText = { running: t('Running'), stopped: t('Stopped'), starting: t('Starting…'), stopping: t('Stopping…') }[phase] || t('Status unknown');
+      const action = running ? 'stop' : 'start';
+      const control = el('button', { type: 'button', class: 'secondary small', textContent: running ? t('Stop') : t('Start'),
+        'aria-label': running ? t('Stop assistant on {machine}', { machine: machine.name }) : t('Start assistant on {machine}', { machine: machine.name }),
+        disabled: !machine.online || !known || ['starting', 'stopping'].includes(phase) || (!running && machine.id !== fleet.teams_machine) });
+      control.onclick = () => busy(control, async () => {
+        for (const button of document.querySelectorAll('.machine-choice button')) button.disabled = true;
+        try { await invoke('machine_assistant', { machine: machine.id, action }); }
+        finally { renderTeamsMachines(await invoke('machine_list')); }
+      });
+      return el('div', { class: 'machine-choice' },
+        el('label', { class: 'check' }, radio, el('strong', { textContent: machine.name }), el('span', { textContent: machine.os })),
+        badge(machine.online ? t('Online') : t('Offline'), machine.online ? 'ok' : 'muted'),
+        el('span', { class: 'hint', textContent: machine.online ? phaseText : t('Last reported assistant state: {state}', { state: phaseText }) }), control);
+    }));
+  }
+}
 async function loadMachines() {
   const [settings, fleet] = await Promise.all([invoke('machine_settings'), invoke('machine_list')]);
   field('#machine-name', settings.name); field('#machine-coordinator', settings.coordinator || '');
-  field('#machine-roots', settings.roots.join('\n'));
-  $('#machine-roots').disabled = Boolean(live?.config.server.webhook_prefix);
+  machineRoots = settings.roots;
+  $('#machine-roots-choose').disabled = Boolean(live?.config.server.webhook_prefix);
+  renderMachineRoots();
   $('#machine-connect').disabled = Boolean(settings.coordinator);
   $('#machine-disconnect').disabled = !settings.coordinator;
-  $('#machine-list').replaceChildren(...fleet.machines.map(machine => el('div', { class: 'todo-context' }, el('strong', { textContent: machine.name }), el('span', { textContent: machine.os }), badge(machine.online ? t('Online') : t('Offline'), machine.online ? 'ok' : 'muted'))));
-  $('#teams-machine').replaceChildren(...fleet.machines.map(machine => el('option', { value: machine.id, disabled: !machine.online && machine.id !== fleet.teams_machine, textContent: machine.name })));
-  $('#teams-machine').value = fleet.teams_machine;
+  renderTeamsMachines(fleet);
 }
 
 // ---------------------------------------------------------------- settings sections
@@ -1997,8 +2075,10 @@ function renderRepositories() {
   if (!entries.length) container.append(el('div', { class: 'empty' }, el('p', { textContent: t('No repositories. Add a local checkout or clone one from GitHub.') })));
   for (const [alias, path] of entries) {
     choices.append(new Option(alias, alias));
-    const input = el('input', { value: path, spellcheck: false, 'aria-label': t('Path of {alias}', { alias }) });
-    input.oninput = () => { current.map.repositories[alias] = input.value.trim(); markDirty(); };
+    const input = el('code', { textContent: path });
+    const choose = el('button', { type: 'button', class: 'secondary', textContent: t('Choose directory'), 'aria-label': t('Choose directory for {alias}', { alias }) });
+    choose.onclick = () => chooseDirectories({ trigger: choose, title: t('Path of {alias}', { alias }), selected: [path], multiple: false,
+      browse: path => invoke('machine_browse', { path }), apply: paths => { current.map.repositories[alias] = paths[0]; input.textContent = paths[0]; markDirty({ target: choose }); } });
     const update = el('button', { class: 'secondary', textContent: t('Update') });
     update.onclick = () => busy(update, async () => { await invoke('update_github_repository', { alias }); done(t('{alias} updated.', { alias })); });
     const remove = el('button', { class: 'danger', textContent: t('Remove') });
@@ -2016,7 +2096,7 @@ function renderRepositories() {
     const asSource = el('button', { class: 'secondary', textContent: t('Use as a source') });
     asSource.onclick = () => { addRepositorySource(alias, t('Knowledge in the {alias} repository', { alias })); };
     container.append(el('div', { class: 'row' },
-      rowText(alias, source ? t('Git checkout · source {id}', { id: source.id }) : t('Git checkout')), input,
+      rowText(alias, source ? t('Git checkout · source {id}', { id: source.id }) : t('Git checkout')), input, choose,
       ...(source ? [] : [asSource]), update, remove));
   }
 }
@@ -2561,20 +2641,19 @@ function resizeComposer() {
 
 $('#machines-refresh').onclick = () => busy($('#machines-refresh'), loadMachines);
 $('#machine-save').onclick = () => busy($('#machine-save'), async () => {
-  await invoke('machine_save', { name: $('#machine-name').value, roots: lines($('#machine-roots').value) });
+  await invoke('machine_save', { name: $('#machine-name').value, roots: machineRoots });
   await loadMachines(); done(t('Machine settings saved.'));
 });
+$('#machine-roots-choose').onclick = () => chooseDirectories({ trigger: $('#machine-roots-choose'), title: t('Allowed directory roots'), selected: machineRoots, allowEmpty: true,
+  browse: path => invoke('machine_browse', { path }), apply: paths => { machineRoots = paths; renderMachineRoots(); } });
+$('#repo-path-choose').onclick = () => chooseDirectories({ trigger: $('#repo-path-choose'), title: t('Checkout path'), selected: lines($('#repo-path').value), multiple: false,
+  browse: path => invoke('machine_browse', { path }), apply: paths => { field('#repo-path', paths[0]); $('#repo-path-value').textContent = paths[0]; } });
 $('#machine-connect').onclick = () => busy($('#machine-connect'), async () => {
   await invoke('machine_connect', { url: $('#machine-coordinator').value.trim() }); await loadMachines();
 });
 $('#machine-disconnect').onclick = () => busy($('#machine-disconnect'), async () => {
   await invoke('machine_disconnect'); await loadMachines();
 });
-$('#teams-machine-save').onclick = () => busy($('#teams-machine-save'), async () => {
-  const result = await invoke('machine_teams', { machine: $('#teams-machine').value });
-  done(result.handover_pending ? t('Teams machine selected. Waiting for the previous machine to stop.') : t('Teams machine selected. Start the assistant on that machine.'));
-});
-
 $('#todo-provider').onchange = () => {
   $('#todo-state').replaceChildren(el('option', { value: '', textContent: t('All states') }));
   loadTodo();
@@ -2738,7 +2817,7 @@ $('#add-repo').onclick = () => {
   if (!/^[a-z][a-z0-9_-]{0,63}$/.test(alias) || !path) return fail(t('Give a valid alias (lowercase letters, digits, - or _) and the checkout path.'));
   if (current.map.repositories[alias]) return fail(t('That alias already exists.'));
   current.map.repositories[alias] = path;
-  field('#repo-alias', ''); field('#repo-path', ''); field('#repo-description', '');
+  field('#repo-alias', ''); field('#repo-path', ''); $('#repo-path-value').textContent = ''; field('#repo-description', '');
   markDirty({ target: $('#add-repo') });
   if (description) addRepositorySource(alias, description);
   else renderRepositories();

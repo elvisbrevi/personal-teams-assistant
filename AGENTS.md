@@ -7,6 +7,7 @@ Read [the architecture](docs/architecture.md) first: it explains components, pip
 - Save, correct or organize facts in the knowledge base: [save-knowledge](.agents/skills/save-knowledge/SKILL.md).
 - Configure, operate or diagnose the installed application: [personal-teams-assistant](desktop/skills/personal-teams-assistant/SKILL.md) (also `pta skill show`); from an agent with MCP, `pta mcp` exposes the same operations ([mcp.md](desktop/skills/personal-teams-assistant/references/mcp.md)).
 - Change the GUI (`desktop/ui/`): follow [the GUI design conventions](docs/ui-design-conventions.md).
+- Every directory input, selector or hierarchy browser uses the shared directory sheet: compact path rows, selection marks, a leading `../` row for parent navigation and explicit confirmation, presented as a bottom sheet on phones. Apply this to implementation machines, allowed roots and local repositories; do not introduce free-text directory fields or inline tree browsers.
 
 ## Priorities
 

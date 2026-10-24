@@ -70,7 +70,7 @@ struct Running {
 
 /// Where the assistant service is in its lifecycle. `start`/`stop` and the service ending on
 /// its own publish it, so the tray and the window follow changes made by any client.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum AssistantPhase {
     Stopped,

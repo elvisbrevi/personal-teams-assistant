@@ -34,6 +34,8 @@ struct Machine {
     secret_hash: String,
     #[serde(default)]
     account_version: String,
+    #[serde(default)]
+    assistant_phase: Option<AssistantPhase>,
 }
 #[derive(Clone, Serialize, Deserialize)]
 struct Connection {
@@ -369,6 +371,24 @@ async fn operation(host: &Arc<Host>, method: &str, args: &Value) -> Result<Value
             }
             Ok(json!({"opened":true}))
         }
+        "machine_browse" => {
+            let config = read_config(&host.state.config_path)?;
+            let allowed = if !config.server.webhook_prefix.is_empty() {
+                vec![config.server.data_dir.join("repositories")]
+            } else {
+                let home = std::env::var_os("HOME")
+                    .or_else(|| std::env::var_os("USERPROFILE"))
+                    .map(PathBuf::from)
+                    .context("Home directory unavailable.")?;
+                vec![
+                    home.ancestors()
+                        .last()
+                        .context("Directory root unavailable.")?
+                        .to_path_buf(),
+                ]
+            };
+            browse_directories(args["path"].as_str(), &allowed)
+        }
         "machine_register" => register(host, args).await,
         "machine_list" | "machine_settings" | "machine_connect" | "machine_disconnect"
         | "machine_teams" | "machine_save" | "machine_protocol" => {
@@ -388,7 +408,8 @@ async fn operation(host: &Arc<Host>, method: &str, args: &Value) -> Result<Value
                 json!({"planning":planning(&selection,&detail),"detail":detail,"creations":creations}),
             )
         }
-        "implementation_catalog"
+        "machine_assistant"
+        | "implementation_catalog"
         | "implementation_browse"
         | "implementation_runs"
         | "implementation_cancel" => {
@@ -443,9 +464,47 @@ async fn operation(host: &Arc<Host>, method: &str, args: &Value) -> Result<Value
     }
 }
 
+fn browse_directories(path: Option<&str>, allowed: &[PathBuf]) -> Result<Value> {
+    if path.is_none_or(str::is_empty) {
+        return Ok(json!({"path":null,"parent":null,"directories":allowed,"roots":true}));
+    }
+    let path = confined(Path::new(path.unwrap()), allowed)?;
+    let mut entries: Vec<PathBuf> = fs::read_dir(&path)?
+        .filter_map(|entry| entry.ok())
+        .map(|e| e.path())
+        .filter(|p| {
+            p.file_name()
+                .is_some_and(|n| !n.to_string_lossy().starts_with('.'))
+                && confined(p, allowed).is_ok()
+        })
+        .take(1000)
+        .collect();
+    entries.sort();
+    let parent = path.parent().and_then(|p| confined(p, allowed).ok());
+    Ok(json!({"path":path,"parent":parent,"directories":entries,"roots":false}))
+}
+
 async fn local(host: &Arc<Host>, method: &str, args: &Value) -> Result<Value> {
     let state = &host.state.implementation;
     match method {
+        "machine_assistant" => {
+            let method = match args["action"].as_str() {
+                Some("start") => "start_assistant",
+                Some("stop") => "stop_assistant",
+                _ => anyhow::bail!("Choose start or stop for the assistant."),
+            };
+            let reply = Box::pin(control::dispatch(host, control::Request::new(method))).await;
+            ensure!(
+                reply.ok,
+                "{}",
+                reply
+                    .message
+                    .as_deref()
+                    .unwrap_or("Assistant operation failed.")
+            );
+            Ok(json!({"assistant_phase":*host.state.phase.borrow()}))
+        }
+
         "implementation_catalog" => {
             let mut catalog = crate::llm::catalog().await;
             catalog
@@ -455,23 +514,7 @@ async fn local(host: &Arc<Host>, method: &str, args: &Value) -> Result<Value> {
         }
         "implementation_browse" => {
             let allowed = roots(host).await?;
-            if args["path"].as_str().is_none_or(str::is_empty) {
-                return Ok(json!({"path":null,"parent":null,"directories":allowed,"roots":true}));
-            }
-            let path = confined(Path::new(args["path"].as_str().unwrap()), &allowed)?;
-            let mut entries: Vec<PathBuf> = fs::read_dir(&path)?
-                .filter_map(|entry| entry.ok())
-                .map(|e| e.path())
-                .filter(|p| {
-                    p.file_name()
-                        .is_some_and(|n| !n.to_string_lossy().starts_with('.'))
-                        && confined(p, &allowed).is_ok()
-                })
-                .take(1000)
-                .collect();
-            entries.sort();
-            let parent = path.parent().and_then(|p| confined(p, &allowed).ok());
-            Ok(json!({"path":path,"parent":parent,"directories":entries,"roots":false}))
+            browse_directories(args["path"].as_str(), &allowed)
         }
         "implementation_runs" => {
             let mut runs = Vec::new();
@@ -817,6 +860,139 @@ mod tests {
             state: init_state(&root.join("profile"), &root.join("data")).unwrap(),
             shell: Box::new(TestShell),
         })
+    }
+    #[tokio::test]
+    async fn assistant_machine_controls_share_local_guards_and_authenticated_one_shot_delivery() {
+        let root = tempfile::tempdir().unwrap();
+        let host = host(root.path());
+        let own = host.state.implementation.registry.lock().await.id.clone();
+        let stopped = operation(
+            &host,
+            "machine_assistant",
+            &json!({"machine":own,"action":"stop"}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(stopped["assistant_phase"], "stopped");
+        assert!(
+            local(&host, "machine_assistant", &json!({"action":"restart"}))
+                .await
+                .is_err()
+        );
+
+        let worker = uuid::Uuid::new_v4().to_string();
+        let registration =
+            fleet::register(&host, &json!({"id":worker,"name":"Worker","os":"linux"}))
+                .await
+                .unwrap();
+        let token = registration["token"].as_str().unwrap();
+        host.state
+            .implementation
+            .registry
+            .lock()
+            .await
+            .teams_machine = worker.clone();
+        // The ordinary start guard rejects another Teams owner before credentials or Graph are read.
+        assert!(
+            operation(
+                &host,
+                "machine_assistant",
+                &json!({"machine":own,"action":"start"})
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(*host.state.phase.borrow(), AssistantPhase::Stopped);
+
+        let caller = host.clone();
+        let target = worker.clone();
+        let call = tokio::spawn(async move {
+            operation(
+                &caller,
+                "machine_assistant",
+                &json!({"machine":target,"action":"stop"}),
+            )
+            .await
+        });
+        let poll = json!({"id":worker,"token":token,"action":"poll","assistant_phase":"running"});
+        let command = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let reply = fleet::protocol(&host, &poll).await.unwrap();
+                if !reply["command"].is_null() {
+                    break reply["command"].clone();
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(command["method"], "machine_assistant");
+        assert_eq!(command["args"]["action"], "stop");
+        assert!(fleet::protocol(&host, &poll).await.unwrap()["command"].is_null());
+        let list = operation(&host, "machine_list", &json!({})).await.unwrap();
+        assert_eq!(list["machines"][1]["assistant_phase"], "running");
+        assert!(
+            fleet::protocol(
+                &host,
+                &json!({"id":worker,"token":"invalid","action":"poll","assistant_phase":"stopped"})
+            )
+            .await
+            .is_err()
+        );
+        fleet::protocol(&host, &json!({"id":worker,"token":token,"action":"poll","assistant_phase":"stopped","results":[{"id":command["id"],"result":{"ok":true,"data":{"assistant_phase":"stopped"}}}]})).await.unwrap();
+        assert_eq!(call.await.unwrap().unwrap()["assistant_phase"], "stopped");
+        let list = operation(&host, "machine_list", &json!({})).await.unwrap();
+        assert_eq!(list["machines"][1]["assistant_phase"], "stopped");
+    }
+    #[tokio::test]
+    async fn directory_configuration_browse_preserves_execution_and_profile_boundaries() {
+        let root = tempfile::tempdir().unwrap();
+        let host = host(root.path());
+        let allowed = root.path().join("allowed");
+        let other = root.path().join("other");
+        fs::create_dir(&allowed).unwrap();
+        fs::create_dir(&other).unwrap();
+        host.state
+            .implementation
+            .registry
+            .lock()
+            .await
+            .settings
+            .roots = vec![allowed];
+        let args = json!({"path":other});
+        assert!(local(&host, "implementation_browse", &args).await.is_err());
+        assert!(operation(&host, "machine_browse", &args).await.is_ok());
+
+        let mut config = read_config(&host.state.config_path).unwrap();
+        config.server.webhook_prefix = "/webhooks/synthetic".into();
+        let repositories = config.server.data_dir.join("repositories");
+        fs::create_dir_all(&repositories).unwrap();
+        fs::write(&host.state.config_path, toml::to_string(&config).unwrap()).unwrap();
+        assert!(operation(&host, "machine_browse", &args).await.is_err());
+        let listing = operation(&host, "machine_browse", &json!({"path":repositories}))
+            .await
+            .unwrap();
+        assert!(listing["parent"].is_null());
+        assert!(local(&host, "implementation_browse", &args).await.is_err());
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&other, repositories.join("escape")).unwrap();
+            assert!(
+                operation(
+                    &host,
+                    "machine_browse",
+                    &json!({"path":repositories.join("escape")})
+                )
+                .await
+                .is_err()
+            );
+            assert_eq!(
+                operation(&host, "machine_browse", &json!({"path":repositories}))
+                    .await
+                    .unwrap()["directories"],
+                json!([])
+            );
+        }
     }
     #[tokio::test]
     async fn worker_authentication_and_claiming_do_not_replay_commands() {

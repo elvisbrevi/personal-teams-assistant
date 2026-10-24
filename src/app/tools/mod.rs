@@ -96,6 +96,18 @@ pub(super) const TOOLS: &[Tool] = &[
         schema: none,
     },
     Tool {
+        name: "machine_browse",
+        title: "Choose local directories",
+        description: "Browse this host's directories to configure allowed roots or local checkouts. Isolated web profiles remain confined to their own repositories. This read grants no execution access.",
+        effect: Effect::Read,
+        schema: || {
+            object(
+                json!({"path":string("Absolute directory; empty lists filesystem roots.")}),
+                &[],
+            )
+        },
+    },
+    Tool {
         name: "machine_save",
         title: "Configure this machine",
         description: "Set this machine's name and allowed implementation roots.",
@@ -125,6 +137,18 @@ pub(super) const TOOLS: &[Tool] = &[
         description: "Disconnect this host from its coordinator after stopping Teams.",
         effect: Effect::External,
         schema: || object(json!({"confirmed":confirmed()}), &[]),
+    },
+    Tool {
+        name: "machine_assistant",
+        title: "Control a machine's assistant",
+        description: "Start or stop the Teams assistant on one enrolled machine. Start still requires Teams ownership and its lease; no ownership change is implied. Refresh machine status after an uncertain result, never retry automatically.",
+        effect: Effect::External,
+        schema: || {
+            object(
+                json!({"machine":string("Online machine ID."),"action":{"type":"string","enum":["start","stop"]},"confirmed":confirmed()}),
+                &["machine", "action"],
+            )
+        },
     },
     Tool {
         name: "machine_teams",
@@ -948,6 +972,11 @@ pub(super) fn confirmation(name: &str, args: &Value) -> Option<String> {
             )
         }
         "machine_disconnect" => "Disconnect this machine from its coordinator?".into(),
+        "machine_assistant" => format!(
+            "{} the Teams assistant on machine {}?",
+            args["action"].as_str().unwrap_or_default(),
+            args["machine"].as_str().unwrap_or_default()
+        ),
         "machine_teams" => {
             "Select this account's only machine for Teams reading and replies?".into()
         }
