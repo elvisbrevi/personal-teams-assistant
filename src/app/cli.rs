@@ -102,10 +102,11 @@ Knowledge
   contexts list | contexts show ID | contexts add | contexts edit ID | contexts remove ID
                            Subjects such as «cobros»: JSON on stdin with id, name, description, keywords,
                            sources (IDs) and instructions. A request naming one reads its sources.
-  cases list | cases show ID             The kinds of request and their default texts (general, status_round,
-                           recap, report_tasks, activity_review, documentation, personal_request, statement).
-  cases edit ID | cases reset ID         JSON on stdin: enabled, description (how the model recognizes it),
-                           keywords, sources and instructions (how to answer); reset restores the defaults.
+  questions list | questions show ID     Configured questions, their selected sources and associated requests.
+  questions add | questions edit ID      JSON on stdin: id, text, sources and optional examples.
+  questions remove ID                   Remove a question.
+  questions associate RESOURCE          JSON on stdin: question_id (existing) or text (new), and sources.
+  cases list | cases show ID | cases edit ID | cases reset ID  Retired; use questions.
   people list | people show ID | people add | people edit ID | people remove ID
                            How you address each person: JSON with id, name, senders (Teams user IDs),
                            aliases, address and notes; used only when answering that person.
@@ -329,6 +330,8 @@ fn validate_args(args: &[String]) -> Result<()> {
             | ["answer", "refine" | "send" | "feedback", _]
             | ["people", "list" | "add"]
             | ["people", "show" | "edit" | "remove", _]
+            | ["questions", "list" | "add"]
+            | ["questions", "show" | "edit" | "remove" | "associate", _]
             | ["cases", "list"]
             | ["cases", "show" | "edit" | "reset", _]
             | ["contexts", "list" | "add"]
@@ -495,6 +498,17 @@ async fn execute(mut args: Vec<String>) -> Result<Reply> {
             _ => json!({}),
         };
         return call(method, values, None, true).await;
+    }
+    if command == "cases" {
+        anyhow::bail!(
+            "Cases were replaced by Questions. Use pta questions list, add, edit, remove or associate."
+        );
+    }
+    if command == "questions" && action == "associate" {
+        let mut value = input()?;
+        ensure!(value.is_object(), "association is a JSON object");
+        value["resource"] = json!(positional(&args, 2)?);
+        return call("question_associate", value, None, true).await;
     }
     if command == "answer" {
         let resource = positional(&args, 2)?;
@@ -824,25 +838,25 @@ async fn execute(mut args: Vec<String>) -> Result<Reply> {
                 .unwrap()
                 .push(resource);
         }
-        ("people", "list") => {
-            snap.data = data["map"]["people"].clone();
+        ("people" | "questions", "list") => {
+            snap.data = data["map"][command].clone();
             if snap.data.is_null() {
                 snap.data = json!([]);
             }
             return Ok(snap);
         }
-        ("people", "add") => {
+        ("people" | "questions", "add") => {
             let person = input()?;
             let map = data["map"].as_object_mut().context("invalid map")?;
-            map.entry("people")
+            map.entry(command)
                 .or_insert_with(|| json!([]))
                 .as_array_mut()
                 .context("invalid people")?
                 .push(person);
         }
-        ("people", "show" | "edit" | "remove") => {
+        ("people" | "questions", "show" | "edit" | "remove") => {
             let id = positional(&args, 2)?;
-            let list = data["map"]["people"]
+            let list = data["map"][command]
                 .as_array_mut()
                 .context("unknown person")?;
             let i = list
@@ -1373,6 +1387,9 @@ mod help_tests {
             &["answer", "feedback", "resource"],
             &["people", "list"],
             &["people", "edit", "ana"],
+            &["questions", "list"],
+            &["questions", "add"],
+            &["questions", "associate", "resource"],
             &["cases", "list"],
             &["cases", "edit", "status_round"],
             &["cases", "reset", "recap"],

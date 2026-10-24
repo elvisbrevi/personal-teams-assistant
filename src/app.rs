@@ -452,6 +452,7 @@ pub(crate) fn init_state(config_dir: &Path, data_dir: &Path) -> Result<DesktopSt
                 resources: Vec::new(),
                 contexts: Vec::new(),
                 cases: Vec::new(),
+                questions: None,
                 people: Vec::new(),
             })?,
         )?;
@@ -826,8 +827,11 @@ fn forget_removed_sources(config: &Config, map: &KnowledgeMap) {
         .map(|r| r.id.as_str())
         .collect();
     let forgotten = crate::index::Index::open(&path).and_then(|index| {
+        if let Some(questions) = &map.questions {
+            index.sync_questions(questions)?;
+        }
         for source in index.status()?.into_keys() {
-            if source != crate::index::NOTES && !kept.contains(source.as_str()) {
+            if !source.starts_with('@') && !kept.contains(source.as_str()) {
                 index.forget(&source)?;
             }
         }
@@ -1494,12 +1498,18 @@ async fn azure_wiki(
                 wiki_ids,
                 author_mode,
                 repository_docs,
+                page_urls,
                 ..
             },
     } = &source.access
     else {
         return Err("[invalid_input] Source is not an Azure DevOps Wiki tool.".into());
     };
+    if operation == "list"
+        && let Some(urls) = page_urls
+    {
+        return Ok(serde_json::json!({"page_urls": urls}));
+    }
     let catalog = tool.catalog(&map.repositories).map_err(fail)?;
     let key = security::resolve(secret_ref, &config.secrets).map_err(|_| {
         "[not_ready] Azure credential unavailable; inspect credentials list.".to_owned()
@@ -1516,6 +1526,13 @@ async fn azure_wiki(
             "[network] Team membership could not be read; check the Azure credential (vso.project)."
                 .to_owned()
         })?;
+    if let Some(urls) = page_urls {
+        return reader
+            .read_urls(urls)
+            .await
+            .map(|v| serde_json::json!(v))
+            .map_err(fail);
+    }
     let result = match operation.as_str() {
         "list" => reader.list().await,
         "search" => {

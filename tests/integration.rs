@@ -68,6 +68,7 @@ fn knowledge(dir: &tempfile::TempDir) -> KnowledgeMap {
         }],
         contexts: Vec::new(),
         cases: Vec::new(),
+        questions: None,
         people: Vec::new(),
     }
 }
@@ -1262,6 +1263,7 @@ fn wiki_resource() -> Resource {
                 wiki_ids: vec![],
                 author_mode: personal_teams_assistant::ado::wiki::AuthorMode::PreferMine,
                 repository_docs: false,
+                page_urls: None,
             },
         },
     }
@@ -1323,6 +1325,7 @@ async fn wiki_priority_current_request_mixed_citations_and_complete_gate_without
                     ],
                     contexts: Vec::new(),
                     cases: Vec::new(),
+                    questions: None,
                     people: Vec::new(),
                 },
                 llm: Arc::new(WikiLlm { used: ids.clone() }),
@@ -1456,6 +1459,7 @@ async fn follow_up_without_subject_searches_the_previous_topic_and_keeps_it_for_
                 resources: vec![wiki_resource()],
                 contexts: Vec::new(),
                 cases: Vec::new(),
+                questions: None,
                 people: Vec::new(),
             },
             llm: Arc::new(FollowUpLlm { resolve }),
@@ -1560,6 +1564,7 @@ async fn a_first_wiki_question_searches_its_topic_not_the_whole_request() {
             resources: vec![wiki_resource()],
             contexts: Vec::new(),
             cases: Vec::new(),
+            questions: None,
             people: Vec::new(),
         },
         llm: Arc::new(TopicLlm),
@@ -1685,6 +1690,7 @@ async fn explicit_local_selection_still_requires_enabled_and_external_processing
                 resources: vec![source],
                 contexts: Vec::new(),
                 cases: Vec::new(),
+                questions: None,
                 people: Vec::new(),
             },
             llm: Arc::new(NoLlm),
@@ -1727,6 +1733,7 @@ async fn implicit_documentation_does_not_bypass_teams_source_audiences() {
             resources: vec![wiki],
             contexts: Vec::new(),
             cases: Vec::new(),
+            questions: None,
             people: Vec::new(),
         },
         llm: Arc::new(NoLlm),
@@ -1861,6 +1868,7 @@ async fn teams_simulation_keeps_who_said_what_in_the_evidence_and_the_log() {
             resources: vec![resource],
             contexts: Vec::new(),
             cases: Vec::new(),
+            questions: None,
             people: Vec::new(),
         },
         llm: Arc::new(TeamsAttributionLlm),
@@ -5060,4 +5068,222 @@ async fn task_report_prioritizes_the_reminder_and_reads_only_confirmed_tasks() {
     .unwrap();
     assert_eq!(result.reason, "no_authorized_resource");
     assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+struct ConfiguredQuestionLlm {
+    identify: bool,
+    seen: std::sync::Mutex<Vec<(String, String)>>,
+}
+#[async_trait]
+impl LlmProvider for ConfiguredQuestionLlm {
+    fn name(&self) -> &str {
+        "question-test"
+    }
+    async fn identify_question(
+        &self,
+        _: &str,
+        _: &str,
+        questions: &BTreeMap<String, String>,
+    ) -> Result<Option<String>> {
+        assert!(questions.contains_key("daily-activities"));
+        Ok(self.identify.then(|| "daily-activities".into()))
+    }
+    async fn generate(&self, input: GenerationInput<'_>) -> Result<String> {
+        self.seen
+            .lock()
+            .unwrap()
+            .push((input.evidence.into(), input.evaluations.into()));
+        Ok("Trabajé en el flujo de pago QR.".into())
+    }
+}
+
+#[tokio::test]
+async fn configured_questions_preserve_dates_limit_sources_and_learn_from_both_ratings() {
+    use personal_teams_assistant::{
+        index::Index,
+        questions::{AnswerEvaluation, Question},
+    };
+    for (text, identified, allowed, rating, expected) in [
+        (
+            "¿Cuál es tu estatus del 2026-10-20?",
+            true,
+            true,
+            None,
+            "supported_answer",
+        ),
+        (
+            "Resumen de tus actividades del 2026-10-20",
+            true,
+            true,
+            Some("good"),
+            "supported_answer",
+        ),
+        (
+            "¿Cuál es tu estatus del 2026-10-20?",
+            true,
+            true,
+            Some("bad"),
+            "rejected_answer_repeated",
+        ),
+        (
+            "¿Dónde está el manual de pagos?",
+            false,
+            true,
+            None,
+            "no_matching_question",
+        ),
+        (
+            "¿Qué hiciste hoy?",
+            true,
+            false,
+            None,
+            "question_sources_unavailable",
+        ),
+    ] {
+        let server = MockServer::start().await;
+        let dir = tempfile::tempdir().unwrap();
+        let store = support::store(&dir);
+        let graph = support::graph(&server, store.clone());
+        let mut cfg = (*graph.config).clone();
+        cfg.policy.dry_run = true;
+        cfg.server.data_dir = dir.path().into();
+        let records = personal_teams_assistant::activity::store::Database::open(
+            &dir.path().join("activity-registration.db"),
+        )
+        .unwrap();
+        for (day, key, task) in [
+            ("2026-10-20", "requested", 26410),
+            ("2026-10-21", "other-day", 26411),
+        ] {
+            record(
+                &records,
+                key,
+                day,
+                &format!("https://dev.azure.com/example/Payments/_git/api/pullrequest/{task}"),
+                "done",
+                Some(task),
+            );
+        }
+        let mut map = knowledge(&dir);
+        let mut record_source = record_resource();
+        record_source.enabled = allowed;
+        map.resources.push(record_source);
+        map.questions = Some(vec![Question {
+            id: "daily-activities".into(),
+            text: "What did you do today?".into(),
+            sources: vec!["activity-record".into()],
+            examples: vec![],
+        }]);
+        if let Some(rating) = rating {
+            Index::open(&dir.path().join("knowledge-index.db"))
+                .unwrap()
+                .save_evaluation(&AnswerEvaluation {
+                    resource: "previous".into(),
+                    question_id: "daily-activities".into(),
+                    request: "A completely different wording".into(),
+                    answer: "Trabajé en el flujo de pago QR.".into(),
+                    rating: rating.into(),
+                    comment: "Use a task list".into(),
+                    sources: vec!["activity-record".into()],
+                })
+                .unwrap();
+        }
+        let llm = Arc::new(ConfiguredQuestionLlm {
+            identify: identified,
+            seen: Default::default(),
+        });
+        let pipeline = Pipeline {
+            config: Arc::new(cfg),
+            store: store.clone(),
+            adapter: graph,
+            knowledge: map,
+            llm: llm.clone(),
+            tools: Arc::new(NoTools),
+            redactor: redactor(),
+        };
+        let sources: Vec<String> = if allowed {
+            vec!["hours".into(), "activity-record".into()]
+        } else {
+            vec!["hours".into()]
+        };
+        let result = simulation::run(
+            &pipeline,
+            SimulationRequest {
+                session: "questions".into(),
+                text: text.into(),
+                group: false,
+                mentioned: false,
+                sources: sources.clone(),
+            },
+            Some(&sources),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.reason, expected, "{text}");
+        assert_eq!(result.identified_question.is_some(), identified);
+        if identified && allowed {
+            assert_eq!(result.selected_sources, ["activity-record"]);
+            let seen = llm.seen.lock().unwrap();
+            assert!(seen[0].0.contains("Registro requested"));
+            assert!(!seen[0].0.contains("Registro other-day"));
+            assert!(!seen[0].0.contains("soporte atiende"));
+            if let Some(rating) = rating {
+                assert!(seen[0].1.contains(rating));
+            }
+        } else {
+            assert!(llm.seen.lock().unwrap().is_empty());
+            assert!(result.answer.is_none());
+        }
+        assert!(server.received_requests().await.unwrap().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn question_identification_uses_closed_ids_and_rejects_uncertain_matches() {
+    for (response, expected, valid) in [
+        (
+            json!({"question_id":"daily","confidence":0.95}),
+            Some("daily"),
+            true,
+        ),
+        (json!({"question_id":"daily","confidence":0.5}), None, true),
+        (json!({"question_id":null,"confidence":0.95}), None, true),
+        (
+            json!({"question_id":"invented","confidence":0.99}),
+            None,
+            false,
+        ),
+        (json!({"question_id":"daily","confidence":1.5}), None, false),
+        (
+            json!({"question_id":"daily","confidence":0.99,"sources":["private"]}),
+            None,
+            false,
+        ),
+    ] {
+        let server = MockServer::start().await;
+        Mock::given(method("POST")).and(path("/chat/completions")).respond_with(ResponseTemplate::new(200).set_body_json(json!({"id":"questions","choices":[{"index":0,"message":{"role":"assistant","content":response.to_string()},"finish_reason":"stop"}]}))).mount(&server).await;
+        let llm = Model::new(
+            DeepSeek::new("synthetic-key", "deepseek-test", "max", &server.uri()).unwrap(),
+            "Brief Spanish",
+        );
+        let result = llm
+            .identify_question(
+                "Resumen de tus actividades de hoy",
+                "",
+                &BTreeMap::from([("daily".into(), "What did you do today?".into())]),
+            )
+            .await;
+        assert_eq!(result.is_ok(), valid);
+        if valid {
+            assert_eq!(result.unwrap().as_deref(), expected);
+        }
+        let requests = server.received_requests().await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
+        assert!(
+            body["messages"][0]["content"]
+                .as_str()
+                .unwrap()
+                .contains("by meaning")
+        );
+    }
 }

@@ -140,7 +140,7 @@ pub(super) async fn refresh(state: &DesktopState, args: &Value) -> Reply {
     }
     let known: BTreeSet<String> = map.resources.iter().map(|r| r.id.clone()).collect();
     for source in index.status().map_err(fail)?.into_keys() {
-        if source != NOTES && !known.contains(&source) {
+        if !source.starts_with('@') && !known.contains(&source) {
             index.forget(&source).map_err(fail)?;
         }
     }
@@ -212,7 +212,7 @@ pub(super) fn search(state: &DesktopState, args: &Value) -> Reply {
 /// `comment`, and `example` (a good answer guides later answers to similar requests, within
 /// `context` when given). Sensitive data in the comment is refused.
 pub(super) fn feedback(state: &DesktopState, args: &Value) -> Reply {
-    let resource = super::answer_resource(args)?;
+    let resource = rating_resource(args)?;
     let (config, map, index) = open(state)?;
     let rating = match args.get("rating") {
         None | Some(Value::Null) => None,
@@ -256,7 +256,7 @@ pub(super) fn feedback(state: &DesktopState, args: &Value) -> Reply {
     if example && rating.as_deref() != Some("good") {
         return Err("[invalid_input] Only an answer rated good can be an example.".into());
     }
-    let db = config.server.data_dir.join("assistant.db");
+    let db = message_database(&config, &resource);
     let row = crate::state::Store::inspect(&db, false, 1, Some(&resource), true)
         .map_err(fail)?
         .into_iter()
@@ -272,9 +272,9 @@ pub(super) fn feedback(state: &DesktopState, args: &Value) -> Reply {
         return Err("[invalid_input] This message has no answer to rate.".into());
     }
     let feedback = rating.map(|rating| crate::state::Feedback {
+        example: example || (audit.identified_question.is_some() && rating == "good"),
         rating,
         comment,
-        example,
         context: context.clone(),
         at: chrono::Utc::now().timestamp(),
     });
@@ -283,18 +283,232 @@ pub(super) fn feedback(state: &DesktopState, args: &Value) -> Reply {
     }
     let request = audit
         .resolved_question
-        .or(audit.question)
+        .clone()
+        .or(audit.question.clone())
         .unwrap_or_default();
-    match (&feedback, answer) {
-        (Some(f), Some(answer)) if f.example && !request.is_empty() => index
-            .save_example(
-                &resource,
-                &request,
-                &crate::evidence::unlinked(&answer),
-                context.as_deref(),
-            )
+    match (&feedback, &answer, &audit.identified_question) {
+        (Some(f), Some(answer), Some(q)) => index
+            .save_evaluation(&crate::questions::AnswerEvaluation {
+                resource: resource.clone(),
+                question_id: q.id.clone(),
+                request: request.clone(),
+                answer: crate::evidence::unlinked(answer),
+                rating: f.rating.clone(),
+                comment: f.comment.clone(),
+                sources: if audit.selected_sources.is_empty() {
+                    audit
+                        .source
+                        .as_deref()
+                        .unwrap_or("")
+                        .split(',')
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_owned)
+                        .collect()
+                } else {
+                    audit.selected_sources.clone()
+                },
+            })
             .map_err(fail)?,
+        _ => index.remove_evaluation(&resource).map_err(fail)?,
+    }
+    match (&feedback, answer) {
+        (Some(f), Some(answer))
+            if audit.identified_question.is_none() && f.example && !request.is_empty() =>
+        {
+            index
+                .save_example(
+                    &resource,
+                    &request,
+                    &crate::evidence::unlinked(&answer),
+                    context.as_deref(),
+                )
+                .map_err(fail)?
+        }
         _ => index.remove_example(&resource).map_err(fail)?,
     }
     Ok(json!({"resource": resource, "feedback": feedback}))
+}
+
+fn rating_resource(args: &Value) -> std::result::Result<String, String> {
+    args.get("resource")
+        .and_then(Value::as_str)
+        .filter(|r| !r.is_empty() && r.len() <= 512 && !r.chars().any(char::is_control))
+        .map(str::to_owned)
+        .ok_or("[invalid_input] Invalid message.".into())
+}
+fn message_database(config: &crate::config::Config, resource: &str) -> std::path::PathBuf {
+    config
+        .server
+        .data_dir
+        .join(if resource.starts_with("simulation:") {
+            "desktop-chat.db"
+        } else {
+            "assistant.db"
+        })
+}
+
+/// Associate an unanswered message with a question, or create one, and keep the owner's
+/// example in the same settings map shown by the Questions editor. Never sends a reply.
+pub(super) async fn associate(state: &DesktopState, args: &Value) -> Reply {
+    let resource = rating_resource(args)?;
+    let (config, mut map, _) = open(state)?;
+    let db = message_database(&config, &resource);
+    let row = crate::state::Store::inspect(&db, false, 1, Some(&resource), true)
+        .map_err(fail)?
+        .into_iter()
+        .next()
+        .ok_or("[invalid_input] Unknown message.")?;
+    let audit: crate::state::Audit = serde_json::from_value(row["audit"].clone()).map_err(fail)?;
+    if audit.sent.is_some()
+        || !["ignored", "dry_run"].contains(&row["status"].as_str().unwrap_or(""))
+    {
+        return Err("[conflict] Associate a message when it is left for review.".into());
+    }
+    let request = audit
+        .resolved_question
+        .or(audit.question)
+        .filter(|s| crate::questions::valid_text(s))
+        .ok_or("[invalid_input] This message has no usable question text.")?;
+    let redactor = crate::security::Redactor::new(&config.policy.sensitive_patterns, Vec::new())
+        .map_err(fail)?;
+    if !redactor.clean(&request) {
+        return Err("[invalid_input] The message contains sensitive data.".into());
+    }
+    let questions = map.questions.get_or_insert_with(Vec::new);
+    let id = if let Some(id) = args.get("question_id").and_then(Value::as_str) {
+        if !questions.iter().any(|q| q.id == id) {
+            return Err("[invalid_input] Unknown question.".into());
+        }
+        id.to_owned()
+    } else {
+        let text = args
+            .get("text")
+            .and_then(Value::as_str)
+            .unwrap_or(&request)
+            .trim();
+        if !crate::questions::valid_text(text) || !redactor.clean(text) {
+            return Err("[invalid_input] Write a question without sensitive data (at most 1000 characters).".into());
+        }
+        let id = format!("question-{}", uuid::Uuid::new_v4().simple());
+        questions.push(crate::questions::Question {
+            id: id.clone(),
+            text: text.into(),
+            sources: vec![],
+            examples: vec![],
+        });
+        id
+    };
+    // A reviewed request belongs to one question. Re-associating it removes the old alias.
+    let normalized = crate::questions::normalize(&request);
+    for q in questions.iter_mut() {
+        q.examples
+            .retain(|s| crate::questions::normalize(s) != normalized);
+    }
+    let q = questions.iter_mut().find(|q| q.id == id).unwrap();
+    if crate::questions::normalize(&q.text) != normalized {
+        q.examples.push(request);
+    }
+    if let Some(sources) = args.get("sources") {
+        q.sources = serde_json::from_value(sources.clone())
+            .map_err(|_| "[invalid_input] Select the question sources.".to_owned())?;
+    }
+    let identified = crate::questions::IdentifiedQuestion {
+        id: q.id.clone(),
+        text: q.text.clone(),
+    };
+    let tunnel = std::fs::read_to_string(&state.tunnel_path).unwrap_or_default();
+    super::save_settings(state, config, map, tunnel).await?;
+    crate::state::Store::associate_question(&db, &resource, &identified).map_err(fail)?;
+    Ok(json!({"resource":resource,"question":identified}))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn review_associates_creates_and_rates_questions_in_the_shared_profile() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = super::super::init_state(&dir.path().join("profile"), &dir.path().join("data"))
+            .unwrap();
+        let (config, map, _) = open(&state).unwrap();
+        let source = map.questions.as_ref().unwrap()[0].sources[0].clone();
+        let db = config.server.data_dir.join("desktop-chat.db");
+        let store = crate::state::Store::open(&db).unwrap();
+        let resource = "simulation:review:one";
+        store.begin_simulation(resource).unwrap();
+        store
+            .record(
+                resource,
+                &crate::state::Audit {
+                    status: "ignored".into(),
+                    reason: "no_matching_question".into(),
+                    question: Some("Summary of your work\non Tuesday".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        associate(
+            &state,
+            &json!({"resource":resource,"question_id":"daily-activities","sources":[source]}),
+        )
+        .await
+        .unwrap();
+        let (_, saved, _) = open(&state).unwrap();
+        assert_eq!(saved.questions.as_ref().unwrap().len(), 1);
+        assert_eq!(
+            saved.questions.as_ref().unwrap()[0].examples,
+            vec!["Summary of your work\non Tuesday"]
+        );
+        assert_eq!(
+            store
+                .audit(resource)
+                .unwrap()
+                .unwrap()
+                .identified_question
+                .unwrap()
+                .id,
+            "daily-activities"
+        );
+        assert!(store.audit(resource).unwrap().unwrap().sent.is_none());
+        // Re-association creates a question and removes the former association.
+        let result = associate(&state, &json!({"resource":resource,"text":"What work was completed on Tuesday?","sources":[source]})).await.unwrap();
+        let (_, saved, index) = open(&state).unwrap();
+        assert_eq!(saved.questions.as_ref().unwrap().len(), 2);
+        assert!(saved.questions.as_ref().unwrap()[0].examples.is_empty());
+        let identified = serde_json::from_value(result["question"].clone()).unwrap();
+        store
+            .record(
+                resource,
+                &crate::state::Audit {
+                    status: "dry_run".into(),
+                    question: Some("Summary of your work\non Tuesday".into()),
+                    identified_question: Some(identified),
+                    proposed: Some("I completed the recorded tasks.".into()),
+                    selected_sources: vec![source.clone()],
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        feedback(
+            &state,
+            &json!({"resource":resource,"rating":"bad","comment":"List the tasks and their hours"}),
+        )
+        .unwrap();
+        let id = result["question"]["id"].as_str().unwrap();
+        assert_eq!(
+            index
+                .evaluations(id, "status", None, std::slice::from_ref(&source))
+                .unwrap()[0]
+                .rating,
+            "bad"
+        );
+        feedback(&state, &json!({"resource":resource,"rating":null})).unwrap();
+        assert!(
+            index
+                .evaluations(id, "status", None, &[source])
+                .unwrap()
+                .is_empty()
+        );
+    }
 }

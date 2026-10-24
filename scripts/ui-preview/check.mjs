@@ -341,7 +341,7 @@ check('axe: no WCAG 2.2 AA violations in any scan', !Object.keys(totals).length,
   check('empty search offers to clear it', await page.isVisible('#messages-list .empty button'));
   await page.click('#messages-list .empty button');
   const counts = await page.$$eval('#messages-filters .count', c => c.map(x => x.textContent));
-  check('filters show counts', counts[0] === '7', counts.join('|'));
+  check('filters show counts', counts[0] === '8', counts.join('|'));
   // An unanswered message: generate an answer from chosen sources, then regenerate or send it.
   const informational = '#messages-list details[data-resource="chats/19:stu@thread.v2/messages/1008"]';
   await page.click(`${informational} summary`);
@@ -406,15 +406,10 @@ check('axe: no WCAG 2.2 AA violations in any scan', !Object.keys(totals).length,
   await page.click('#resources .resource:nth-child(3) .resource-toggles input');
   await page.waitForTimeout(200);
   check('source edit fold stays open after toggling', await page.evaluate(() => document.querySelectorAll('#resources .resource')[2].querySelector('.resource-edit').open));
-  check('the activity record is offered while the map has none', await page.isVisible('#record-offer'));
-  await page.click('#add-record');
-  await page.waitForTimeout(200);
-  check('adding the activity record lists it disabled and hides the offer', !(await page.isVisible('#record-offer'))
-    && await page.evaluate(() => [...document.querySelectorAll('#resources .resource')].some(r => r.textContent.includes('activity-record')
-      && r.textContent.includes('Registro de actividades') && r.textContent.includes('Desactivado'))));
+  check('the default question already has its activity-record source', !(await page.isVisible('#record-offer')));
   check('a repository source shows what its index holds', await page.evaluate(() => [...document.querySelectorAll('#resources .resource')]
     .some(r => r.textContent.includes('handbook') && r.textContent.includes('42 archivos'))));
-  await page.click('#knowledge-sources details.add-form summary');
+  await page.click('#knowledge-sources details.add-form:not(#url-source-form) summary');
   await page.selectOption('#source-kind', 'repository');
   check('a whole repository needs no file path', !(await page.isVisible('#source-path-label')));
   await page.selectOption('#source-kind', 'file');
@@ -429,25 +424,39 @@ check('axe: no WCAG 2.2 AA violations in any scan', !Object.keys(totals).length,
   await page.click('#save');
   await page.waitForTimeout(300);
   check('the context is saved with its new source', await page.evaluate(() => window.__ptaLastSave?.map?.contexts?.[0]?.sources?.includes('handbook')));
-  // Cases: the built-in kinds of request, edited and restored; only changes are saved.
-  await page.click('#knowledge-tab-cases');
-  check('the eight built-in cases are listed', await page.$$eval('#cases .resource', rows => rows.length) === 8);
-  const status = '#cases .resource:has-text("Ronda de avance")';
-  await page.click(`${status} .resource-edit summary`);
-  check('a case shows its default instructions to edit', await page.inputValue(`${status} textarea`) === 'Default instructions of status_round: how it is answered, part by part.');
-  await page.fill(`${status} input:not([type=checkbox])`, 'entrega, despliegue');
-  await page.click(`${status} input[value="ado-activity"]`);
-  check('a changed case is marked', await page.isVisible(`${status} .badge:has-text("Cambiado")`));
-  await page.click('#save');
-  await page.waitForTimeout(300);
-  check('only the change is saved', await page.evaluate(() => JSON.stringify(window.__ptaLastSave?.map?.cases)
-    === JSON.stringify([{ id: 'status_round', keywords: ['entrega', 'despliegue'], sources: ['ado-activity'] }])));
-  await page.click('#knowledge-tab-cases');
-  check('an open case stays open after saving', await page.isVisible(`${status} button:has-text("Restaurar")`));
-  await page.click(`${status} button:has-text("Restaurar")`);
-  await page.click('#save');
-  await page.waitForTimeout(300);
-  check('restoring defaults removes the change', await page.evaluate(() => (window.__ptaLastSave?.map?.cases ?? []).length === 0));
+  // URL sources: public groups and exact authenticated Wiki pages.
+  await page.click('#knowledge-tab-sources');
+  await page.click('#url-source-form summary');
+  await page.fill('#url-source-id', 'public-guides');
+  await page.fill('#url-source-addresses', 'https://docs.example.com/one\nhttps://docs.example.com/two');
+  await page.click('#add-url-source'); await page.click('#save'); await page.waitForTimeout(300);
+  check('a public URL source keeps all selected URLs', await page.evaluate(() => window.__ptaLastSave.map.resources.some(r => r.id === 'public-guides' && r.kind === 'urls' && r.urls.length === 2 && !r.enabled)));
+  await page.click('#url-source-form summary');
+  await page.fill('#url-source-id', 'create-user-wiki');
+  await page.fill('#url-source-addresses', 'https://dev.azure.com/contoso/Payments/_wiki/wikis/Payments.wiki/12/Create-user');
+  await page.selectOption('#url-source-wiki', 'wiki');
+  await page.click('#add-url-source'); await page.click('#save'); await page.waitForTimeout(300);
+  check('an exact Wiki source uses the configured connection without repository discovery', await page.evaluate(() => window.__ptaLastSave.map.resources.some(r => r.id === 'create-user-wiki' && r.tool.type === 'azure_devops_wiki' && r.tool.page_urls.length === 1 && r.tool.repository_docs === false && !r.enabled && !r.external_processing)));
+  // Questions: add a question with explicit sources and keep it in the same map.
+  await page.click('#knowledge-tab-questions');
+  check('the initial question uses the activity record', await page.$$eval('#questions .resource', rows => rows.length) === 1 && /activity-record/.test(await page.textContent('#questions')));
+  await page.click('#question-form summary');
+  await page.fill('#question-text', 'Where is the deployment runbook?');
+  await page.check('#question-sources input[value="create-user-wiki"]');
+  await page.click('#add-question');
+  await page.click('#save'); await page.waitForTimeout(300);
+  check('a new question persists with its selected sources', await page.evaluate(() => window.__ptaLastSave.map.questions.some(q => q.text === 'Where is the deployment runbook?' && JSON.stringify(q.sources) === '["create-user-wiki"]')));
+  await page.click('nav [data-tab="messages"]'); await page.waitForTimeout(300);
+  const review = '#messages-list details[data-resource="chats/19:review/messages/1010"]';
+  await page.locator(`${review} > summary`).click();
+  await page.click(`${review} .question-association summary`);
+  await page.selectOption(`${review} .question-association select`, 'daily-activities');
+  await page.click(`${review} button:has-text("Guardar asociación")`); await page.waitForTimeout(400);
+  check('an unanswered message is associated without being sent', await page.isVisible(`${review} .message-body`) && /Pregunta identificada/.test(await page.textContent(review)) && await page.evaluate(() => window.__ptaLastAssociation.question_id === 'daily-activities'));
+  await page.click('nav [data-tab="knowledge"]'); await page.click('#knowledge-tab-questions');
+  const daily = '#questions .resource:has-text("¿Qué hiciste hoy?")';
+  await page.locator(`${daily} .resource-edit summary`).click();
+  check('the reviewed wording appears in Questions', /Summary of your activities today/.test(await page.textContent(daily)));
   // Notes: searched, added right away with their contexts.
   await page.click('#knowledge-tab-notes');
   await page.waitForTimeout(200);

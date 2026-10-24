@@ -2,7 +2,7 @@
 
 `pta tools list` returns the application's shared tool catalog, descriptions, JSON input schemas
 and effects without starting a host. The same catalog is exposed by `pta mcp`. Existing tools
-for messages, answers, sources, contexts, cases, people, verified notes, the knowledge index,
+for messages, answers, sources, contexts, questions, people, verified notes, the knowledge index,
 activities and assistant control live together with the To-Do tools. They use the same host
 operations as their GUI sections and dedicated CLI commands.
 

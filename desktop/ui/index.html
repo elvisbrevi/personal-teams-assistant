@@ -309,7 +309,7 @@
         <div id="settings-advanced" class="settings-group" role="tabpanel" aria-labelledby="settings-tab-advanced" data-settings-group="advanced" hidden>
           <div class="panel" id="panel-embeddings">
             <h2>Semantic search</h2>
-            <p class="hint">Repositories and notes are always searched by their words. With an embeddings endpoint (OpenAI, or a compatible server such as Ollama on this computer) they are also searched by meaning, so a request finds a passage that says the same thing in other words. The sections searched are sent to that endpoint.</p>
+            <p class="hint">Repositories and notes use text search. Optional embeddings add semantic retrieval for them, configured questions and evaluated requests; these texts are sent to the endpoint, while equivalent questions can still be recognized by the language model without embeddings.</p>
             <div class="grid">
               <label>Endpoint URL<input id="embeddings-url" class="cfg" translate="no" placeholder="https://api.openai.com/v1" spellcheck="false"></label>
               <label>Model<input id="embeddings-model" class="cfg" translate="no" placeholder="text-embedding-3-small" spellcheck="false"></label>
@@ -382,7 +382,7 @@
         <div id="knowledge-tabs" class="subnav" role="tablist" aria-label="Knowledge views">
           <button role="tab" id="knowledge-tab-sources" data-group="sources" aria-controls="knowledge-sources" aria-selected="true">Sources</button>
           <button role="tab" id="knowledge-tab-contexts" data-group="contexts" aria-controls="knowledge-contexts" aria-selected="false" tabindex="-1">Contexts</button>
-          <button role="tab" id="knowledge-tab-cases" data-group="cases" aria-controls="knowledge-cases" aria-selected="false" tabindex="-1">Cases</button>
+          <button role="tab" id="knowledge-tab-questions" data-group="questions" aria-controls="knowledge-questions" aria-selected="false" tabindex="-1">Questions</button>
           <button role="tab" id="knowledge-tab-notes" data-group="notes" aria-controls="knowledge-notes" aria-selected="false" tabindex="-1">Notes</button>
           <button role="tab" id="knowledge-tab-people" data-group="people" aria-controls="knowledge-people" aria-selected="false" tabindex="-1">People</button>
           <button role="tab" id="knowledge-tab-repositories" data-group="repositories" aria-controls="knowledge-repositories" aria-selected="false" tabindex="-1">Repositories</button>
@@ -410,6 +410,15 @@
               <div class="actions"><button id="add-source" class="secondary">Add source</button></div>
               <p class="hint">A whole repository is searched by relevance: each answer reads the sections that best match the request, from its Markdown and text files. A new source starts disabled, without audiences and without external processing. The Wiki, Azure DevOps activity, your Teams messages and other tools are added with <code>pta sources add</code>; here you can enable and authorize them.</p>
             </details>
+            <details class="add-form" id="url-source-form">
+              <summary>Add a source from URLs</summary>
+              <label>Source ID<input id="url-source-id" maxlength="64" spellcheck="false"></label>
+              <label>Description<input id="url-source-description" maxlength="2000"></label>
+              <label>URLs, one per line<textarea id="url-source-addresses" rows="4" spellcheck="false"></textarea></label>
+              <label>Read with<select id="url-source-wiki"></select></label>
+              <p class="hint">Choose public pages or an existing Azure DevOps Wiki connection for protected pages. Only these URLs are read. The new source starts disabled; choose its audience before using it in a question.</p>
+              <div class="actions"><button id="add-url-source" type="button" class="secondary">Add URL source</button></div>
+            </details>
           </div>
         </div>
         <div id="knowledge-contexts" role="tabpanel" aria-labelledby="knowledge-tab-contexts" hidden>
@@ -428,11 +437,17 @@
             </details>
           </div>
         </div>
-        <div id="knowledge-cases" role="tabpanel" aria-labelledby="knowledge-tab-cases" hidden>
+        <div id="knowledge-questions" role="tabpanel" aria-labelledby="knowledge-tab-questions" hidden>
           <div class="panel">
-            <div class="panel-head"><h2>Cases</h2><span id="cases-summary" class="hint"></span></div>
-            <p class="hint">The kinds of request the assistant tells apart. For each one you can change how the model recognizes it, the extra words that identify it, the sources it reads and how it is answered. The rules on evidence, links and sensitive data always apply. The default texts are in English, the language of the prompts; you can write yours in Spanish. To answer about a subject of your own, add a context.</p>
-            <div id="cases" class="list"></div>
+            <div class="panel-head"><h2>Questions</h2><span id="questions-summary" class="hint"></span></div>
+            <p class="hint">Add a question and choose the sources its answers may use. Equivalent requests match by meaning. Unmatched messages stay unanswered for review. Ratings guide future answers to the same question.</p>
+            <details class="fold" id="question-form">
+              <summary>Add question</summary>
+              <label>Question<input id="question-text" maxlength="1000"></label>
+              <fieldset class="choices" id="question-sources"><legend>Sources for this question</legend></fieldset>
+              <div class="actions"><button id="add-question" type="button">Add question</button></div>
+            </details>
+            <div id="questions" class="list"></div>
           </div>
         </div>
         <div id="knowledge-notes" role="tabpanel" aria-labelledby="knowledge-tab-notes" hidden>

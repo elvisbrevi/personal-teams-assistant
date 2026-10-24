@@ -345,7 +345,7 @@ impl Pipeline {
             .as_ref()
             .map(|d| d.sources.as_slice())
             .filter(|ids| !ids.is_empty());
-        let available = if let Some(ids) = local_sources.or(chosen) {
+        let mut available = if let Some(ids) = local_sources.or(chosen) {
             self.knowledge
                 .resources
                 .iter()
@@ -355,6 +355,47 @@ impl Pipeline {
             self.knowledge
                 .available(&message.conversation, &message.sender)
         };
+        let mut history: Option<String> = None;
+        audit.available_sources = available.iter().map(|r| r.id.clone()).collect();
+        let matched_question = if let Some(questions) = &self.knowledge.questions {
+            let context = self.history(&message, &mut audit, &mut history).await;
+            match self
+                .identify_question(&current, &context, questions, &mut audit)
+                .await
+            {
+                Ok(found) => found,
+                Err(_) => {
+                    audit.reason = "question_matching_unavailable".into();
+                    audit.step("question", "matching unavailable; left for review");
+                    return self.store.record(resource, &audit);
+                }
+            }
+        } else {
+            None
+        };
+        if let Some(q) = &matched_question {
+            audit.identified_question = Some(crate::questions::IdentifiedQuestion {
+                id: q.id.clone(),
+                text: q.text.clone(),
+            });
+            audit.step("question", q.id.clone());
+            available.retain(|r| q.sources.contains(&r.id));
+            if available.is_empty() {
+                audit.reason = "question_sources_unavailable".into();
+                audit.step(
+                    "sources",
+                    "none of the question's sources is authorized and enabled",
+                );
+                return self.store.record(resource, &audit);
+            }
+        } else if self.knowledge.questions.is_some() && !drafting {
+            audit.reason = "no_matching_question".into();
+            audit.step(
+                "question",
+                "no configured question matched; left for review",
+            );
+            return self.store.record(resource, &audit);
+        }
         // Earlier messages say what a short follow-up refers to («¿y el endpoint de test?»).
         // Read once, when an intent decision or an answer first needs them.
         // A reply to an activity review in the personal chat may ask to link the work it found
@@ -363,7 +404,8 @@ impl Pipeline {
             && !personal_request(&current)
             && (report_tasks_request(&current) || self.case_named("report_tasks", &current));
         let mut link_plan = None;
-        let link_reply = if own_chat
+        let link_reply = if self.knowledge.questions.is_none()
+            && own_chat
             && !report_tasks
             && !resource.starts_with("simulation:")
             && !self.config.policy.dry_run
@@ -385,7 +427,9 @@ impl Pipeline {
         } else {
             None
         };
-        let mut history: Option<String> = report_tasks.then(String::new);
+        if report_tasks {
+            history = Some(String::new());
+        }
         // Sources an activity review may read, already authorized for this conversation.
         let review_sources: Vec<_> = available
             .iter()
@@ -411,6 +455,9 @@ impl Pipeline {
             );
             false
         } else if link_reply.is_some() {
+            false
+        } else if matched_question.is_some() {
+            audit.step("intent", "configured question");
             false
         } else if greeting(&current) {
             audit.step("intent", "greeting");
@@ -738,7 +785,7 @@ impl Pipeline {
             // section recorded for those days, when it recorded anything there: the user
             // approved each task in it. Status rounds and named work items keep their tools.
             // Sources the user chose are all read, as they are: no routing, recap or status extras.
-            let explicit = chosen.is_some();
+            let explicit = chosen.is_some() || matched_question.is_some();
             // A request that names a context (a subject in the map, such as «cobros») is
             // answered from that context's sources among the authorized ones, with its
             // instructions. It narrows the general routing and the documents read; it never
@@ -1012,6 +1059,7 @@ impl Pipeline {
                     .collect::<Vec<_>>()
                     .join(",")
             });
+            audit.selected_sources = sources.iter().map(|r| r.id.clone()).collect();
             audit.step(
                 "sources",
                 audit.source.clone().unwrap_or_else(|| "none".into()),
@@ -1073,13 +1121,33 @@ impl Pipeline {
                         tool: crate::tools::ToolSpec::ActivityRecord {},
                     } = &source.access
                     {
-                        let today = self.today();
-                        let (since, until) =
+                        let today = if matched_question.is_some() {
+                            self.config
+                                .activity_registration
+                                .zoned(
+                                    chrono::DateTime::from_timestamp(message.created_at, 0)
+                                        .unwrap_or_else(chrono::Utc::now),
+                                )
+                                .date_naive()
+                        } else {
+                            self.today()
+                        };
+                        let (since, until) = (if matched_question.is_some() {
+                            crate::activity::recorded::requested_days(&current, today)
+                        } else {
+                            None
+                        })
+                        .or_else(|| {
                             crate::activity::recorded::requested_days(&tool_question, today)
-                                .unwrap_or_else(|| {
-                                    let days = crate::ado::recent_window(&tool_question);
-                                    (today - chrono::Duration::days(days - 1), today)
-                                });
+                        })
+                        .unwrap_or_else(|| {
+                            if matched_question.is_some() {
+                                (today, today)
+                            } else {
+                                let days = crate::ado::recent_window(&tool_question);
+                                (today - chrono::Duration::days(days - 1), today)
+                            }
+                        });
                         audit.step("activity history", format!("{since} to {until}"));
                         let read = match self.recorded_between(&available, since, until, &mut audit)
                         {
@@ -1300,7 +1368,14 @@ impl Pipeline {
                 audit.person = Some(person.id.clone());
                 audit.step("person", person.id.clone());
             }
-            let examples = if review {
+            let evaluations = if let Some(q) = &matched_question {
+                self.question_evaluations(q, &tool_question, &audit.selected_sources)
+                    .await
+            } else {
+                Vec::new()
+            };
+            let evaluation_text = self.redactor.redact(&serde_json::to_string(&evaluations)?);
+            let examples = if review || matched_question.is_some() {
                 String::new()
             } else {
                 self.approved_examples(&tool_question, context.map(|c| c.id.as_str()), &mut audit)
@@ -1348,9 +1423,22 @@ impl Pipeline {
                         },
                         recipient: &recipient,
                         examples: &examples,
+                        evaluations: &evaluation_text,
                     }),
                 )
                 .await??;
+            if let Some(q) = &matched_question
+                && crate::index::Index::open(&self.config.server.data_dir.join(crate::index::FILE))?
+                    .is_rejected_answer(&q.id, &generated.answer, &audit.selected_sources)?
+            {
+                audit.proposed = Some(generated.answer);
+                audit.reason = "rejected_answer_repeated".into();
+                audit.step(
+                    "feedback",
+                    "the generated answer repeats an answer the owner rejected",
+                );
+                return self.store.record(resource, &audit);
+            }
             // A provider chain names the member that actually wrote the answer.
             if let Some(provider) = &generated.provider {
                 audit.provider = Some(provider.clone());
@@ -1806,15 +1894,100 @@ impl Pipeline {
                 .collect::<String>(),
         )
     }
+    async fn identify_question(
+        &self,
+        request: &str,
+        history: &str,
+        questions: &[crate::questions::Question],
+        audit: &mut Audit,
+    ) -> Result<Option<crate::questions::Question>> {
+        let normalized = crate::questions::normalize(request);
+        if let Some(q) = questions.iter().find(|q| {
+            std::iter::once(&q.text)
+                .chain(&q.examples)
+                .any(|s| crate::questions::normalize(s) == normalized)
+        }) {
+            return Ok(Some(q.clone()));
+        }
+        if questions.is_empty() {
+            return Ok(None);
+        }
+        let index =
+            crate::index::Index::open(&self.config.server.data_dir.join(crate::index::FILE))?;
+        index.sync_questions(questions)?;
+        let vector = self
+            .query_vector(&index, crate::index::QUESTIONS, request)
+            .await;
+        let hits = index.search(
+            &[crate::index::QUESTIONS],
+            request,
+            None,
+            vector.as_deref(),
+            16,
+        )?;
+        let pending = !index.unembedded(&[crate::index::QUESTIONS], 1)?.is_empty();
+        let candidates: BTreeMap<String, String> = questions
+            .iter()
+            .filter(|q| vector.is_none() || pending || hits.iter().any(|h| h.key == q.id))
+            .map(|q| {
+                (
+                    q.id.clone(),
+                    format!(
+                        "{}\nOwner-associated requests: {}",
+                        self.redactor.redact(&q.text),
+                        self.redactor.redact(&q.examples.join("; "))
+                    ),
+                )
+            })
+            .collect();
+        let selected = self
+            .llm
+            .identify_question(request, history, &candidates)
+            .await?;
+        audit.step(
+            "question matching",
+            if vector.is_some() {
+                "hybrid retrieval and semantic identification"
+            } else {
+                "semantic identification without embeddings"
+            },
+        );
+        Ok(selected.and_then(|id| {
+            questions
+                .iter()
+                .find(|q| q.id == id && candidates.contains_key(&id))
+                .cloned()
+        }))
+    }
+
+    async fn question_evaluations(
+        &self,
+        question: &crate::questions::Question,
+        request: &str,
+        allowed: &[String],
+    ) -> Vec<crate::questions::AnswerEvaluation> {
+        let Ok(index) =
+            crate::index::Index::open(&self.config.server.data_dir.join(crate::index::FILE))
+        else {
+            return Vec::new();
+        };
+        let source = crate::index::feedback_source(&question.id);
+        let vector = self.query_vector(&index, &source, request).await;
+        index
+            .evaluations(&question.id, request, vector.as_deref(), allowed)
+            .unwrap_or_default()
+    }
+
     /// Whether a built-in case is on (a case the user did not change is).
     fn case_on(&self, id: &str) -> bool {
-        self.knowledge.case(id).is_none_or(|c| c.enabled)
+        self.knowledge.questions.is_none() && self.knowledge.case(id).is_none_or(|c| c.enabled)
     }
     /// Whether `text` names one of the keywords the user added to a case.
     fn case_named(&self, id: &str, text: &str) -> bool {
-        self.knowledge.case(id).is_some_and(|c| {
-            crate::knowledge::phrases_named(text, c.keywords.iter().map(String::as_str)) > 0
-        })
+        self.knowledge.questions.is_none()
+            && self.knowledge.case(id).is_some_and(|c| {
+                crate::knowledge::phrases_named(text, c.keywords.iter().map(String::as_str)) > 0
+            })
     }
     /// The sources the user chose for a case, if any.
     fn case_sources(&self, id: &str) -> Option<&[String]> {
@@ -1856,6 +2029,13 @@ impl Pipeline {
     }
     /// The user's instructions for each case's part of the answer prompt.
     fn prompts(&self) -> crate::llm::Prompts<'_> {
+        if self.knowledge.questions.is_some() {
+            return crate::llm::Prompts {
+                status_round: "Use only the configured question sources and preserve the actual date or period requested.",
+                recap: "When the evidence is a daily activity record, summarize only the requested days. A saved empty day differs from a day that was never saved.",
+                ..Default::default()
+            };
+        }
         let text = |id: &str| {
             self.knowledge
                 .case(id)

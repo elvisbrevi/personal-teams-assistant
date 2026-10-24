@@ -109,8 +109,10 @@ and a pull request named in a status question is read so it can be linked. The
 full list of cited references and Wiki pages read stays in the message history
 (Messages tab and `pta audit show`).
 
+Questions replace Cases in Knowledge. Add a question and choose its sources; the assistant recognizes equivalent requests by meaning while preserving the requested dates. The initial question is “What did you do today?”, using the activity record. Unknown messages remain unanswered for review, with an action to associate them to an existing question or create a new one with sources. Good and bad ratings guide future answers to the same question, using fresh evidence. Sources can also contain exact public URLs or selected authenticated Azure DevOps Wiki page URLs. See [Questions and evaluations](docs/questions.md).
+
 Version 0.7.23 adds an MCP server for agents: `pta mcp` exposes every operation of
-the app — messages, answers, sources, contexts, cases, notes, people, ratings and
+the app — messages, answers, sources, contexts, questions, notes, people, ratings and
 activity registration — to Claude Code, Codex or any MCP client (`pta mcp config`
 prints how to add it). Sending to Teams, writing to Azure DevOps, authorizing sources
 and changing the mode need your confirmation, asked by the client itself when it
