@@ -31,6 +31,7 @@ mod github;
 #[cfg(feature = "gui")]
 mod gui;
 mod headless;
+mod implementation;
 mod mcp;
 mod notes;
 mod skill;
@@ -102,6 +103,7 @@ pub(crate) struct DesktopState {
     activity_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
     activity_graph: Mutex<Option<Arc<crate::adapters::graph::Graph>>>,
     activity_recovered: Mutex<Option<PathBuf>>,
+    implementation: implementation::State,
 }
 
 #[derive(Serialize)]
@@ -475,6 +477,7 @@ pub(crate) fn init_state(config_dir: &Path, data_dir: &Path) -> Result<DesktopSt
         fs::remove_file(journal)?;
     }
     Ok(DesktopState {
+        implementation: implementation::State::new(config_path.parent().unwrap())?,
         operations: Mutex::new(()),
         loaded_config: Mutex::new(None),
         config_path,
@@ -503,6 +506,8 @@ fn credential_names(config: &Config) -> Vec<String> {
         "DEEPSEEK_API_KEY".into(),
         "GRAPH_WEBHOOK_SECRET".into(),
         "STATE_ENCRYPTION_KEY".into(),
+        "AZURE_IMPLEMENTATION_WRITE_TOKEN".into(),
+        "PTA_MACHINE_TOKEN".into(),
     ];
     if config.server.cloudflare_tunnel {
         names.push("CLOUDFLARE_TUNNEL_TOKEN".into());
@@ -517,6 +522,9 @@ fn credential_names(config: &Config) -> Vec<String> {
 /// only while DeepSeek is in the LLM chain; Codex and Claude use their own CLI login.
 fn required_credentials(config: &Config) -> Vec<String> {
     let mut names = credential_names(config);
+    names.retain(|name| {
+        !["AZURE_IMPLEMENTATION_WRITE_TOKEN", "PTA_MACHINE_TOKEN"].contains(&name.as_str())
+    });
     if !crate::llm::uses_deepseek(&config.llm) {
         names.retain(|name| name != "DEEPSEEK_API_KEY");
     }
@@ -658,6 +666,10 @@ async fn service_ready(
 }
 
 async fn start_service(state: &DesktopState) -> Result<()> {
+    ensure!(
+        implementation::fleet::teams_allowed(state).await?,
+        "This machine is not the selected Teams machine, or the previous machine still holds its lease."
+    );
     let config = read_config(&state.config_path)?;
     web::validate_profile_identity(state.config_path.parent().unwrap(), &config)?;
     let map = KnowledgeMap::load(&state.map_path)?;

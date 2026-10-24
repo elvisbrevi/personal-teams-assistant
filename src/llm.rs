@@ -6,6 +6,7 @@ use serde_json::{Value, json};
 
 mod agent;
 mod deepseek;
+pub(crate) mod implementation;
 pub mod prompts;
 pub use agent::{Catalog, ClaudeCli, CodexCli, OpenCodeCli, catalog};
 pub use deepseek::DeepSeek;

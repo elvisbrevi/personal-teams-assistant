@@ -20,7 +20,7 @@ const PROBE_DEADLINE: Duration = Duration::from_secs(20);
 
 /// Codex features that could reach files, the network, other agents or user customizations.
 /// Set through `-c features.NAME=false`, which older or newer CLIs ignore when unknown.
-const CODEX_DISABLED_FEATURES: [&str; 26] = [
+pub(super) const CODEX_DISABLED_FEATURES: [&str; 26] = [
     "shell_tool",
     "unified_exec",
     "code_mode",
@@ -145,7 +145,7 @@ pub(crate) fn locate(program: &str) -> Option<PathBuf> {
         .find(|path| executable(path))
 }
 
-fn child_env(binary: &Path) -> Vec<(OsString, OsString)> {
+pub(super) fn child_env(binary: &Path) -> Vec<(OsString, OsString)> {
     let mut env: Vec<(OsString, OsString)> = std::env::vars_os()
         .filter(|(name, _)| {
             name.to_str()

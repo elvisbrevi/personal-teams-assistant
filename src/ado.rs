@@ -1,5 +1,6 @@
 //! Bounded, read-only evidence from Azure DevOps. The catalog lives in the private knowledge repo.
 pub mod detail;
+pub(crate) mod implementation;
 pub mod link;
 mod progress;
 pub mod registration;
@@ -158,16 +159,7 @@ async fn request(
     body: Option<Value>,
 ) -> Result<Value> {
     #[cfg(test)]
-    let url = TEST_SERVER.with(|server| match server.borrow().as_ref() {
-        Some(server) => {
-            let mut local = url.clone();
-            let _ = local.set_scheme(server.scheme());
-            let _ = local.set_host(server.host_str());
-            let _ = local.set_port(server.port());
-            local
-        }
-        None => url,
-    });
+    let url = test_url(url);
     let endpoint = url.path().to_owned();
     let mut request = client.request(method, url).basic_auth("", Some(key));
     if let Some(body) = body {
@@ -181,6 +173,19 @@ async fn request(
         response.status().as_u16()
     );
     crate::adapters::bounded_json(response, 1_000_000).await
+}
+#[cfg(test)]
+fn test_url(url: Url) -> Url {
+    TEST_SERVER.with(|server| match server.borrow().as_ref() {
+        Some(server) => {
+            let mut local = url.clone();
+            let _ = local.set_scheme(server.scheme());
+            let _ = local.set_host(server.host_str());
+            let _ = local.set_port(server.port());
+            local
+        }
+        None => url,
+    })
 }
 async fn wiql(
     client: &Client,

@@ -1,7 +1,54 @@
 mod detail;
 use crate::security;
 use anyhow::{Context, Result, ensure};
-pub(super) use detail::epic;
+pub(super) use detail::{epic, issue};
+
+pub(super) async fn create_child(
+    parent: &crate::tools::todo::Detail,
+    child: &serde_json::Value,
+) -> Result<serde_json::Value> {
+    use serde_json::json;
+    crate::tools::todo::validate_repository(&parent.item.project)?;
+    ensure!(
+        parent.item.kind.eq_ignore_ascii_case("Epic"),
+        "Only an Epic can create child issues in this flow."
+    );
+    let token = access_token().await?;
+    let client = client()?;
+    let base = format!(
+        "https://api.github.com/repos/{}/issues",
+        parent.item.project
+    );
+    let response = client
+        .post(&base)
+        .bearer_auth(&token)
+        .json(&json!({"title":child["title"],"body":child["description"]}))
+        .send()
+        .await?;
+    let created: serde_json::Value = checked_json(response).await?;
+    let number = created["number"]
+        .as_u64()
+        .context("Created issue number unavailable.")?;
+    let id = created["id"]
+        .as_u64()
+        .context("Created issue ID unavailable.")?;
+    let url = crate::tools::todo::validate_link(created["html_url"].as_str().unwrap_or_default())?;
+    ensure!(
+        url.as_str() == format!("https://github.com/{}/issues/{number}", parent.item.project),
+        "Invalid created issue URL."
+    );
+    // The issue exists even if linking fails: retain its link and never create it again.
+    let linked = client
+        .post(format!("{base}/{}/sub_issues", parent.item.id))
+        .bearer_auth(&token)
+        .json(&json!({"sub_issue_id":id}))
+        .send()
+        .await
+        .is_ok_and(|r| r.status().is_success());
+    Ok(
+        json!({"id":number,"title":child["title"],"url":url.as_str(),"state":if linked { "created" } else { "created_unlinked" }}),
+    )
+}
 use regex::Regex;
 use reqwest::{Client, Response};
 use serde::{Deserialize, Serialize};
@@ -174,7 +221,7 @@ pub async fn finish(pending: Pending) -> Result<()> {
     }
 }
 
-async fn access_token() -> Result<String> {
+pub(super) async fn access_token() -> Result<String> {
     let mut tokens: Tokens = serde_json::from_str(&security::secret(TOKEN_NAME)?)?;
     if tokens
         .expires_at
@@ -236,6 +283,28 @@ async fn epics_with(
     base: &str,
     filters: &crate::tools::todo::Filters,
 ) -> Result<crate::tools::todo::List> {
+    issues_with(client, token, base, filters, true).await
+}
+pub(super) async fn issues(
+    filters: &crate::tools::todo::Filters,
+) -> Result<crate::tools::todo::List> {
+    filters.validate()?;
+    issues_with(
+        &client()?,
+        &access_token().await?,
+        "https://api.github.com/",
+        filters,
+        false,
+    )
+    .await
+}
+async fn issues_with(
+    client: &Client,
+    token: &str,
+    base: &str,
+    filters: &crate::tools::todo::Filters,
+    epics_only: bool,
+) -> Result<crate::tools::todo::List> {
     use crate::tools::todo::{Date, Item, List, validate_link};
     use serde_json::Value;
     ensure!(
@@ -260,7 +329,10 @@ async fn epics_with(
         !login.is_empty() && login.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'),
         "invalid GitHub login"
     );
-    let mut query = format!("is:issue assignee:{login} type:\"Epic\"");
+    let mut query = format!("is:issue assignee:{login}");
+    if epics_only {
+        query.push_str(" type:\"Epic\"");
+    }
     if let Some(state) = &filters.state {
         query.push_str(&format!(" state:{state}"));
     }
@@ -330,9 +402,10 @@ async fn epics_with(
                 get::<Value>(client, token, &format!("{base}repos/{repo}/issues/{id}")).await?;
             &detail
         };
-        if !issue["type"]["name"]
-            .as_str()
-            .is_some_and(|kind| kind.eq_ignore_ascii_case("Epic"))
+        if epics_only
+            && !issue["type"]["name"]
+                .as_str()
+                .is_some_and(|kind| kind.eq_ignore_ascii_case("Epic"))
         {
             continue;
         }
@@ -350,7 +423,7 @@ async fn epics_with(
             url: raw.into(),
             project: repo,
             state: state.into(),
-            kind: "Epic".into(),
+            kind: issue["type"]["name"].as_str().unwrap_or("Issue").into(),
             created_at: issue["created_at"].as_str().map(str::to_owned),
             dates: vec![
                 Date {

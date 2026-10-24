@@ -132,6 +132,7 @@
             <label>Provider<select id="todo-provider"><option value="azure">Azure DevOps</option><option value="github">GitHub</option></select></label>
             <label id="todo-source-field" hidden>Source<select id="todo-source"></select></label>
             <label id="todo-kind-field">Type<select id="todo-kind"><option value="">HUs and bugs</option><option value="hu">HUs</option><option value="bug">Bugs</option></select></label>
+            <label id="todo-github-kind-field" hidden>Type<select id="todo-github-kind"><option value="epic">Epics</option><option value="all">All issues</option></select></label>
             <label>State<select id="todo-state"><option value="">All states</option></select></label>
             <label>Items to show<select id="todo-limit"><option value="10">10</option><option value="25">25</option><option value="50">50</option><option value="100">100</option></select></label>
           </div>
@@ -148,6 +149,12 @@
           <div id="todo-detail-problem" class="callout error" role="alert" hidden></div>
           <div id="todo-detail-content" aria-busy="false"></div>
         </div>
+      </section>
+
+      <section id="implementation" hidden>
+        <header class="page-head"><span class="page-tile" aria-hidden="true"><svg class="icon"><use href="#i-wrench"/></svg></span><div class="page-title"><h1 tabindex="-1">Implement work item</h1><p id="implementation-item"></p></div></header>
+        <div id="implementation-problem" class="callout error" role="alert" hidden></div>
+        <div id="implementation-content" aria-busy="false"></div>
       </section>
 
       <section id="settings" hidden>
@@ -190,6 +197,12 @@
         </div>
 
         <div id="settings-teams" class="settings-group" role="tabpanel" aria-labelledby="settings-tab-teams" data-settings-group="teams" hidden>
+          <div class="panel" id="panel-teams-machine">
+            <h2>Machine for Teams</h2>
+            <p class="hint">Only the selected machine reads and answers Teams messages. Other connected machines can run implementations. Switching machines waits for the previous machine to stop.</p>
+            <label>Teams machine<select id="teams-machine"></select></label>
+            <div class="actions"><button id="teams-machine-save" class="secondary">Use this machine for Teams</button></div>
+          </div>
           <div class="panel" id="panel-teams">
             <div class="panel-head"><h2>Microsoft Teams and Entra</h2><span id="microsoft-state" class="badge muted"></span></div>
             <p class="hint">Use your existing Entra registration (<em>Mobile and desktop</em> platform with <code>http://localhost</code> and delegated permissions). The user ID is filled in when you connect the account.</p>
@@ -223,6 +236,17 @@
         </div>
 
         <div id="settings-models" class="settings-group" role="tabpanel" aria-labelledby="settings-tab-models" data-settings-group="models" hidden>
+          <div class="panel" id="panel-machines">
+            <div class="panel-head"><h2>Execution machines</h2><button id="machines-refresh" class="secondary small">Refresh machines</button></div>
+            <p class="hint">Connect each machine to this portal with the same GitHub account. Its installed coding agents and directories become available for implementation.</p>
+            <div class="grid">
+              <label>Machine name<input id="machine-name" maxlength="100"></label>
+              <label>Coordinator portal<input id="machine-coordinator" type="url" spellcheck="false" placeholder="https://assistant.example.com" translate="no"></label>
+            </div>
+            <label>Allowed directory roots, one per line<textarea id="machine-roots" rows="3" spellcheck="false"></textarea></label>
+            <div class="actions"><button id="machine-save" class="secondary">Save machine</button><button id="machine-connect" class="secondary">Connect this machine</button><button id="machine-disconnect" class="secondary">Disconnect this machine</button></div>
+            <div id="machine-list" class="todo-list" role="status"></div>
+          </div>
           <div class="panel" id="panel-llm">
             <div class="panel-head"><h2>Language models</h2><button id="detect-llm" class="secondary small">Detect CLIs again</button></div>
             <p class="hint">They classify messages, write the answers and pick the references they use. The first active one answers; if it fails (for example, out of credits or with its usage limit reached) the next one answers, and the next call starts again with the first. Codex, Claude and OpenCode use their installed CLI with their own login; DeepSeek uses its API with <code>DEEPSEEK_API_KEY</code>.</p>

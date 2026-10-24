@@ -42,6 +42,61 @@ fn fixture() -> (tempfile::TempDir, Arc<Portal>, Vec<Account>) {
     let portal = Arc::new(Portal::new(root, PathBuf::from("/unused-test-host")).unwrap());
     (dir, portal, accounts)
 }
+
+#[tokio::test]
+async fn machine_transport_rejects_browser_origins_cookies_and_missing_credentials() {
+    let (_dir, portal, _entries, _server) = configured_fixture().await;
+    assert_eq!(
+        send(
+            &portal,
+            "POST",
+            "/api/machines",
+            None,
+            None,
+            None,
+            json!({"action":"poll"})
+        )
+        .await
+        .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        send(
+            &portal,
+            "POST",
+            "/api/machines",
+            None,
+            None,
+            Some("https://evil.example"),
+            json!({"action":"register"})
+        )
+        .await
+        .status(),
+        StatusCode::FORBIDDEN
+    );
+    for path in ["/api/machines/extra", "/api/machines/register"] {
+        assert_eq!(
+            send(&portal, "POST", path, None, None, None, json!({}))
+                .await
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+    }
+    assert_eq!(
+        send(
+            &portal,
+            "GET",
+            "/api/machines",
+            None,
+            None,
+            None,
+            Value::Null
+        )
+        .await
+        .status(),
+        StatusCode::UNAUTHORIZED
+    );
+}
 async fn send(
     portal: &Arc<Portal>,
     method: &str,
@@ -679,6 +734,35 @@ fn legacy_accounts_preserve_ids_current_profile_hashes_and_credentials_without_a
     assert!(accounts(&portal.root).is_err());
 }
 
+#[test]
+fn browser_allows_shared_implementation_tools_but_rejects_internal_worker_operations() {
+    let (_dir, portal, entries) = fixture();
+    for tool in super::super::tools::TOOLS
+        .iter()
+        .filter(|tool| super::super::implementation::handles(tool.name))
+    {
+        assert!(
+            portal
+                .check_request(&entries[0], &control::Request::new(tool.name))
+                .is_ok(),
+            "{}",
+            tool.name
+        );
+    }
+    for method in [
+        "implementation_launch",
+        "implementation_local",
+        "machine_register",
+        "machine_protocol",
+    ] {
+        assert!(
+            portal
+                .check_request(&entries[0], &control::Request::new(method))
+                .is_err(),
+            "{method}"
+        );
+    }
+}
 #[test]
 fn a_profile_cannot_import_or_save_another_users_paths_or_duplicate_teams_identity() {
     let (_dir, portal, entries) = fixture();

@@ -25,6 +25,7 @@ PUBLIC_ASSETS = ["/favicon.png", "/manifest.webmanifest", "/apple-touch-icon.png
 PANEL_POLICY = "Authorized GitHub identities"
 CALLBACK_POLICY = "Graph callback only"
 ASSET_POLICY = "Public icon only"
+MACHINE_POLICY = "Authenticated machine protocol only"
 
 
 class SetupError(Exception):
@@ -176,9 +177,11 @@ def configure(args):
         definitions.append({"name": APP_NAME + " Graph " + path.split('/')[2] + " " + path.rsplit('/', 1)[1], "domain": args.hostname + path})
     for path in PUBLIC_ASSETS:
         definitions.append({"name": APP_NAME + " asset " + path[1:], "domain": args.hostname + path})
+    definitions.append({"name": APP_NAME + " machines", "domain": args.hostname + "/api/machines"})
     wanted = {item["domain"]: item["name"] for item in definitions}
     policy_names = {item["domain"]: CALLBACK_POLICY if "/webhooks/" in item["domain"] else ASSET_POLICY for item in definitions[1:]}
     policy_names[args.hostname] = PANEL_POLICY
+    policy_names[args.hostname + "/api/machines"] = MACHINE_POLICY
     by_domain = {}
     for app in existing:
         for domain in domains(app):

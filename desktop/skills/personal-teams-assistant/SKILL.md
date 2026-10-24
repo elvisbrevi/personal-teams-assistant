@@ -7,6 +7,7 @@ description: Operating Personal Teams Assistant. Use this skill to configure the
 2. **Inspect.** Read `pta --json status`. Tell apart the host, the assistant, the persisted mode and the loaded configuration. For credentials read `pta --json credentials list`: the host checks the existing store. The account and profile are the GUI's own. Done when: the operation's preconditions and scope are known, including the audiences of the affected sources.
 3. **Operate.** Load only the relevant reference and carry out the whole request:
    - To-Do (personal Azure DevOps HUs and bugs by process-specific assignment, GitHub issues of type Epic), existing Azure tasks by user/day and full detail by ID, shared tool discovery and invocation (`pta tools list/call`): [tools-and-todo.md](references/tools-and-todo.md).
+   - Work item implementation, reviewed child creation, execution machines, Teams ownership and persistent native agent sessions: [tools-and-todo.md](references/tools-and-todo.md#implement-work-items-and-inspect-agent-sessions). Requires `implementation_support`; the implementation flow is separate from read-only daily task records.
    - Configuration, credentials, mode, import or language models (Codex/Claude/OpenCode 2 CLIs, DeepSeek and their fallback order): [configuration.md](references/configuration.md).
    - Start, stop, windows, tunnel, headless/Linux host or host recovery: [lifecycle.md](references/lifecycle.md).
    - Web GUI, account isolation, mobile access or Cloudflare publishing: [web-access.md](references/web-access.md).

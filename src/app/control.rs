@@ -64,6 +64,8 @@ impl Reply {
 #[derive(Serialize, Deserialize)]
 struct Endpoint {
     #[serde(default)]
+    implementation_support: bool,
+    #[serde(default)]
     wiki_support: bool,
     #[serde(default)]
     activity_registration_support: bool,
@@ -303,6 +305,10 @@ pub(super) async fn client_at(request: Request, dir: &Path) -> Result<Reply> {
         // A newly claimed lock can precede descriptor replacement. Retry only
         // connection establishment failures, before any request was delivered.
         let endpoint: Endpoint = serde_json::from_slice(&fs::read(dir.join("control.json"))?)?;
+        ensure!(
+            endpoint.implementation_support || !implementation::handles(&request.method),
+            "Incompatible implementation host: update the host and CLI together."
+        );
         ensure!(endpoint.contract == CONTRACT, "incompatible host contract");
         ensure!(
             endpoint.web_support
@@ -392,6 +398,7 @@ pub(crate) fn launch(
             activity_registration_support: true,
             web_support: true,
             web_access_support: true,
+            implementation_support: true,
             contract: CONTRACT,
             port: listener.local_addr()?.port(),
             token: token.clone(),
@@ -407,11 +414,13 @@ pub(crate) fn launch(
             _lock: lock,
         }));
     Ok(async move {
+        let machines = tokio::spawn(implementation::fleet::schedule(host.clone()));
         let scheduler = tokio::spawn(activity::schedule(host));
         if let Ok(listener) = tokio::net::TcpListener::from_std(listener) {
             let _ = axum::serve(listener, router).await;
         }
         scheduler.abort();
+        machines.abort();
     })
 }
 async fn endpoint(
@@ -456,6 +465,27 @@ pub(crate) async fn dispatch(host: &Arc<Host>, request: Request) -> Reply {
         );
     }
     let state = &host.state;
+    if implementation::handles(&request.method) {
+        return match implementation::operate(host, &request.method, &request.args).await {
+            Ok(data) => Reply::success(data),
+            Err(message) => {
+                let (code, exit) = if message.starts_with("[invalid_input]") {
+                    ("invalid_input", 2)
+                } else if message.starts_with("[network]") {
+                    ("dependency_or_network", 5)
+                } else {
+                    ("operation_failed", 1)
+                };
+                Reply::error(
+                    code,
+                    exit,
+                    message
+                        .split_once("] ")
+                        .map_or(message.as_str(), |(_, text)| text),
+                )
+            }
+        };
+    }
     let _guard = state.operations.lock().await;
     if activity::active(state).await
         && ![
@@ -463,9 +493,11 @@ pub(crate) async fn dispatch(host: &Arc<Host>, request: Request) -> Reply {
             "list_azure_hus",
             "list_azure_tasks",
             "list_github_epics",
+            "list_github_issues",
             "get_azure_hu",
             "get_azure_task",
             "get_github_epic",
+            "get_github_issue",
             "open_work_item",
             "llm_providers",
             "audit",
@@ -507,9 +539,11 @@ pub(crate) async fn dispatch(host: &Arc<Host>, request: Request) -> Reply {
             "list_azure_hus",
             "list_azure_tasks",
             "list_github_epics",
+            "list_github_issues",
             "get_azure_hu",
             "get_azure_task",
             "get_github_epic",
+            "get_github_issue",
             "open_work_item",
             "llm_providers",
             "activity_status",
@@ -545,9 +579,11 @@ pub(crate) async fn dispatch(host: &Arc<Host>, request: Request) -> Reply {
             "list_azure_hus",
             "list_azure_tasks",
             "list_github_epics",
+            "list_github_issues",
             "get_azure_hu",
             "get_azure_task",
             "get_github_epic",
+            "get_github_issue",
             "open_work_item",
             "llm_providers",
             "activity_status",
@@ -639,8 +675,10 @@ async fn operate(
     let state = &host.state;
     let value = match method {
         "snapshot" => serde_json::to_value(snapshot(host).await?).map_err(fail)?,
-        "list_azure_hus" | "list_azure_tasks" | "list_github_epics" | "get_azure_hu"
-        | "get_azure_task" | "get_github_epic" => tools::todo::read(state, method, args).await?,
+        "list_azure_hus" | "list_azure_tasks" | "list_github_epics" | "list_github_issues"
+        | "get_azure_hu" | "get_azure_task" | "get_github_epic" | "get_github_issue" => {
+            tools::todo::read(state, method, args).await?
+        }
         "open_work_item" => {
             let raw: String = arg(args, "url")?;
             let url = crate::tools::todo::validate_link(&raw)
@@ -1016,6 +1054,7 @@ mod tests {
                 binary: None,
                 web_support: true,
                 web_access_support: true,
+                implementation_support: true,
             })
             .unwrap(),
         )
@@ -1034,6 +1073,7 @@ mod tests {
                 binary: None,
                 web_support: true,
                 web_access_support: true,
+                implementation_support: true,
             })
             .unwrap(),
         )
@@ -1061,6 +1101,7 @@ mod tests {
                     binary,
                     web_support: true,
                     web_access_support: true,
+                    implementation_support: true,
                 })
                 .unwrap(),
             )

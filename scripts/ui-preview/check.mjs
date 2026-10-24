@@ -115,17 +115,17 @@ check('axe: no WCAG 2.2 AA violations in any scan', !Object.keys(totals).length,
   check('To-Do initially requests ten Azure HUs', await page.evaluate(() => window.__ptaLastTodo?.provider === 'azure' && window.__ptaLastTodo?.limit === 10) && await page.locator('.todo-item').count() === 10);
   check('To-Do includes states without assigned items', await page.locator('#todo-state option[value="Awaiting validation"]').count() === 1);
   check('To-Do keeps both HU and development date pairs', await page.locator('.todo-item:first-child .todo-dates dt').count() === 5);
-  await page.click('.todo-item:first-child .icon-button');
+  await page.click('.todo-item:first-child .todo-actions .icon-button:nth-child(2)');
   await page.waitForFunction(() => window.__ptaOpenedWorkItem);
   check('native To-Do link uses the host browser operation', await page.evaluate(() => window.__ptaOpenedWorkItem?.endsWith('/5000')));
   await page.evaluate(() => Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText: async url => { window.__ptaCopiedWorkItemUrl = url; } } }));
-  await page.click('.todo-item:first-child .todo-actions .icon-button:nth-child(2)');
+  await page.click('.todo-item:first-child .todo-actions .icon-button:nth-child(3)');
   await page.waitForFunction(() => window.__ptaCopiedWorkItemUrl);
   check('To-Do copy action copies the work item URL and confirms it', await page.evaluate(() => window.__ptaCopiedWorkItemUrl?.endsWith('/5000')) && await page.getByRole('status').filter({ hasText: 'Enlace copiado:' }).count() === 1);
   await page.click('.todo-item:first-child .todo-select');
   await page.waitForSelector('#todo-detail-title');
   check('To-Do opens HU detail through the shared tool with source and project', await page.evaluate(() => window.__ptaLastDetail?.id === 5000 && window.__ptaLastDetail?.source === 'ado-activity' && window.__ptaLastDetail?.project === 'Payments'));
-  check('HU detail includes assignment, acceptance criteria, evidence, discussion and original link', (await page.textContent('#todo-detail-content')).includes('Ana Pérez') && await page.getByRole('heading', { name: 'Criterios de aceptación' }).count() === 1 && (await page.textContent('#todo-detail-content')).includes('Luis Soto') && await page.locator('#todo-detail-content .todo-detail-header .icon-button').count() === 2 && await page.locator('#todo-detail-content .todo-detail-header button[aria-label="Copiar enlace del work item"]').count() === 1);
+  check('HU detail includes assignment, acceptance criteria, evidence, discussion and original link', (await page.textContent('#todo-detail-content')).includes('Ana Pérez') && await page.getByRole('heading', { name: 'Criterios de aceptación' }).count() === 1 && (await page.textContent('#todo-detail-content')).includes('Luis Soto') && await page.locator('#todo-detail-content .todo-detail-header .icon-button:visible').count() === 3 && await page.locator('#todo-detail-content .todo-detail-header button[aria-label="Copiar enlace del work item"]').count() === 1);
   await page.locator('#todo-detail-content details').first().locator('summary').click();
   check('HU detail retains custom fields', (await page.textContent('#todo-detail-content details')).includes('feature/receipt-downloads'));
   const safeRichText = await page.evaluate(() => {
@@ -183,7 +183,7 @@ check('axe: no WCAG 2.2 AA violations in any scan', !Object.keys(totals).length,
   await page.evaluate(() => { window.__ptaDetailError = true; });
   await page.click('#todo-detail-refresh');
   await page.waitForTimeout(200);
-  check('Detail failures are inline and retain the original link and copy action', await page.isVisible('#todo-detail-problem') && await page.locator('#todo-detail-content .icon-button').count() === 2 && await page.locator('#todo-detail-content .todo-actions button[aria-label="Copiar enlace del work item"]').count() === 1);
+  check('Detail failures are inline and retain the original link and copy action', await page.isVisible('#todo-detail-problem') && await page.locator('#todo-detail-content .icon-button:visible').count() === 3 && await page.locator('#todo-detail-content .todo-actions button[aria-label="Copiar enlace del work item"]').count() === 1);
   await page.evaluate(() => { window.__ptaDetailError = false; });
   await page.click('#todo-back');
   check('Detail back keeps the type filter', await page.inputValue('#todo-kind') === 'bug');
@@ -565,7 +565,7 @@ check('axe: no WCAG 2.2 AA violations in any scan', !Object.keys(totals).length,
   await page.tap('#activity-log .card:first-child');
   await page.waitForSelector('#activity-day-tasks .todo-select');
   check('phone: day shows its existing task and advisory hours warning', /4502/.test(await page.textContent('#activity-day-tasks')) && await page.isVisible('#activity-day-warning'));
-  check('phone: task has original-link and copy actions', await page.locator('#activity-day-tasks .icon-button').count() === 2 && await page.locator('#activity-day-tasks button[aria-label="Copiar enlace del work item"]').count() === 1);
+  check('phone: task has implement, original-link and copy actions', await page.locator('#activity-day-tasks .icon-button:visible').count() === 3 && await page.locator('#activity-day-tasks button[aria-label="Copiar enlace del work item"]').count() === 1);
   await page.tap('#activity-day-tasks .todo-select');
   await page.waitForSelector('#activity-detail-title');
   check('phone: task opens the shared detail through the task tool', await page.evaluate(() => window.__ptaLastDetail?.id === 4502 && window.__ptaCalls.includes('get_azure_task')));
@@ -613,6 +613,67 @@ check('axe: no WCAG 2.2 AA violations in any scan', !Object.keys(totals).length,
     await page.waitForTimeout(150);
     await page.screenshot({ path: `${out}/desktop-settings-${g}.png`, fullPage: true });
   }
+  await context.close();
+}
+for (const [label, viewport] of [['desktop', { width: 1440, height: 900 }], ['phone', { width: 393, height: 852 }]]) {
+  const { context, page, errors } = await open({ axe: true, context: { viewport } });
+  await page.evaluate(axeSource);
+  await page.click('nav [data-tab="todo"]');
+  await page.locator('#todo-list button[aria-label="Implementar work item"]').first().click();
+  await page.waitForSelector('#implementation-provider option', { state: 'attached' });
+  check(`${label}: implementation opens before starting and offers both machines`, await page.locator('#implementation-machine option').count() === 2 && await page.locator('.implementation-footer button').last().isDisabled());
+  await page.fill('#implementation-context', 'Implement the receipt flow and check the phone layout.');
+  const chooseDirectories = async () => {
+    await page.getByRole('button', { name: '+ Elegir directorios', exact: true }).click();
+    await page.getByRole('button', { name: 'Explorar el directorio /work', exact: true }).click();
+    await page.getByLabel('Seleccionar el directorio /work/application', { exact: true }).check();
+    await page.getByLabel('Seleccionar el directorio /work/documentation', { exact: true }).check();
+    check(`${label}: remote directory inspector passes axe`, (await scan(page)).length === 0);
+    await page.getByRole('button', { name: 'Usar los directorios seleccionados', exact: true }).click();
+  };
+  await chooseDirectories();
+  check(`${label}: multiple directories are selected and add remains available`, await page.locator('.implementation-paths code').count() === 2 && await page.getByRole('button', { name: '+ Elegir directorios', exact: true }).isVisible());
+  await page.selectOption('#implementation-machine', '22222222-2222-4222-8222-222222222222');
+  check(`${label}: switching machines clears paths from the previous machine`, await page.locator('.implementation-paths code').count() === 0);
+  await page.waitForFunction(() => !document.querySelector('#implementation-machine').disabled);
+  await chooseDirectories();
+  await page.locator('.implementation-footer button').last().click();
+  await page.waitForSelector('.implementation-run input');
+  check(`${label}: parent work item produces an editable child plan`, await page.evaluate(() => window.__ptaLastImplementation.item.task === false && window.__ptaLastImplementation.directories.length === 2));
+  const violations = await scan(page);
+  check(`${label}: implementation form and plan pass WCAG 2.2 AA`, violations.length === 0, JSON.stringify(violations));
+  check(`${label}: implementation fits viewport`, await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth));
+  await page.screenshot({ path: `${out}/${label}-implementation-plan.png`, fullPage: true });
+  await page.getByRole('button', { name: 'Crear los hijos seleccionados', exact: true }).click();
+  check(`${label}: child creation waits for the reviewed confirmation`, await page.evaluate(() => !window.__ptaLastChildCreation));
+  await page.getByRole('button', { name: 'Confirmar creación de hijos', exact: true }).click();
+  await page.waitForFunction(() => window.__ptaLastChildCreation);
+  check(`${label}: child creation includes only the reviewed plan`, await page.evaluate(() => window.__ptaLastChildCreation.confirmed && window.__ptaLastChildCreation.children.length === 1));
+  await page.locator('.implementation-footer button').first().click();
+  check(`${label}: cancel returns to the originating To-Do view`, await page.isVisible('#todo-master'));
+  await page.waitForSelector('#todo-list button[aria-label="Abrir sesión de Codex"]');
+  check(`${label}: a work item with a native session offers its session action`, await page.locator('#todo-list button[aria-label="Abrir sesión de Codex"]').count() === 1);
+  check(`${label}: cancel restores the implementation trigger's keyboard focus`, await page.evaluate(() => document.activeElement?.matches('#todo-list button[aria-label="Implementar work item"]')));
+  await page.locator('#todo-list .todo-select').first().press('Enter');
+  await page.waitForSelector('#todo-detail-title');
+  await page.selectOption('#todo-detail-content .todo-relation-filter select', 'Task');
+  await page.locator('#todo-detail-content .todo-list .todo-select').first().click();
+  await page.waitForFunction(() => window.__ptaLastDetail?.method === 'get_azure_task');
+  await page.locator('#todo-detail-content .todo-detail-header button[aria-label="Implementar work item"]').click();
+  await page.waitForSelector('#implementation-provider option', { state: 'attached' });
+  check(`${label}: task detail opens direct implementation`, (await page.textContent('#implementation-content h2')).includes('Implementar el work item seleccionado'));
+  await chooseDirectories();
+  await page.locator('.implementation-footer button').last().click();
+  await page.waitForSelector('.implementation-output');
+  check(`${label}: direct task execution preserves the verified task classification`, await page.evaluate(() => window.__ptaLastImplementation.item.task === true));
+  await page.click('nav [data-tab="settings"]');
+  await page.click('#settings-tab-teams');
+  await page.waitForFunction(() => document.querySelector('#teams-machine').options.length === 2);
+  await page.selectOption('#teams-machine', '22222222-2222-4222-8222-222222222222');
+  await page.click('#teams-machine-save');
+  await page.waitForFunction(() => window.__ptaTeamsMachine);
+  check(`${label}: Teams machine is configured separately from implementation`, await page.evaluate(() => window.__ptaTeamsMachine === '22222222-2222-4222-8222-222222222222'));
+  check(`${label}: implementation has no browser errors`, errors.length === 0, errors.join('; '));
   await context.close();
 }
 await browser.close();

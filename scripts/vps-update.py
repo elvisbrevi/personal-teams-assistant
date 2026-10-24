@@ -192,6 +192,26 @@ def data_dirs():
 def in_flight():
     """Why a restart now would interrupt work; an unreadable database counts as busy."""
     reasons = []
+    for profile in [PROFILE, *sorted((PROFILE / "web" / "profiles").glob("*"))]:
+        path = profile / "implementation" / "registry.json"
+        if not path.is_file():
+            continue
+        try:
+            value = json.loads(path.read_text())
+            if any(run.get("state") in ("planning", "running") for run in value.get("runs", [])) or any(record.get("state") == "sending" for record in value.get("creations", {}).values()):
+                reasons.append(f"a work item implementation is in flight ({path})")
+        except (OSError, ValueError, TypeError):
+            reasons.append(f"implementation state could not be read ({path})")
+    for profile in [PROFILE, *sorted((PROFILE / "web" / "profiles").glob("*"))]:
+        path = profile / "implementation" / "runs.db"
+        if not path.is_file():
+            continue
+        try:
+            with sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True, timeout=10) as db:
+                if db.execute("SELECT count(*) FROM agent_runs WHERE state IN ('planning','running')").fetchone()[0]:
+                    reasons.append(f"a coding agent is running ({path})")
+        except sqlite3.Error:
+            reasons.append(f"agent execution state could not be read ({path})")
     for directory in data_dirs():
         for name, checks in IN_FLIGHT.items():
             path = directory / name

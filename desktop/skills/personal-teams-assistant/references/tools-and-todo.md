@@ -143,3 +143,84 @@ scope. `get_azure_task` reads one task with the same detail schema and safeguard
 Neither writes to Azure. The Activities screen uses daily saved copies and reuses To-Do's
 cards, detail rendering and original-link icon. See [daily task record](activity-registration.md)
 for date attribution, limits, scheduling and saved history.
+
+## Implement work items and inspect agent sessions
+
+Requires host and CLI `implementation_support: true`. Daily task snapshots and all evidence
+reads retain their read-only behavior. The separate implementation flow can create reviewed
+children and run installed coding agents.
+
+1. Read `machine_settings` and `machine_list`. The current coordinator defaults to itself as
+   the single Teams machine. In Settings > Language models, name this machine and set its
+   allowed directory roots. Isolated portal profiles remain restricted to their own repositories.
+2. On another machine, stop its Teams assistant, connect GitHub using the same immutable
+   GitHub identity as the portal account, then call `machine_connect` with the portal's HTTPS
+   origin. It registers an account-bound credential in the existing system/file credential store,
+   and polls outbound; it needs no public listener. The coordinator must have the exact
+   `/api/machines` Access exception installed by `scripts/configure-web-access.py`.
+3. Select the single Teams machine in Settings > Microsoft Teams or `machine_teams`. The
+   previous machine stops after losing its lease; handover waits up to 120 seconds before a
+   new machine can start. Start the Teams assistant explicitly on the selected machine.
+4. Use Implement, immediately before the original-link action on a To-Do card/shared detail,
+   or call `implementation_prepare` with the verified item selection. Provide context, machine,
+   multiple directories, installed CLI, model and effort from that machine's catalog. The
+   directory browser supports multiple selections and an always-available add action.
+5. `implementation_start` on an HU/bug/Epic proposes children. Review/edit/select them and
+   confirm `implementation_create`; no child is written just because a model proposed it.
+   On a process task, Bug Desarrollo or ordinary GitHub issue, Start implements that item in
+   the chosen directories. Changes remain local; the coding prompt does not authorize pushing,
+   publishing, changing work items or sending Teams messages.
+
+Every tool is available through `pta tools list`, `pta tools call NAME` (JSON on stdin) and MCP.
+Examples use synthetic identifiers; obtain actual machine IDs and verified item details first:
+
+```sh
+printf '%s\n' '{}' | pta --json tools call machine_list
+printf '%s\n' '{"url":"https://assistant.example.com","confirmed":true}' | pta --json tools call machine_connect
+printf '%s\n' '{"item":{"provider":"azure","id":7,"project":"Payments","source":"azure","task":true}}' | pta --json tools call implementation_prepare
+printf '%s\n' '{"machine":"11111111-1111-4111-8111-111111111111","work_item_url":"https://dev.azure.com/example/Payments/_workitems/edit/7"}' | pta --json tools call implementation_runs
+```
+
+Selections contain `provider` (`azure`/`github`), positive `id`, `project`, optional Azure `source`
+and `task` for a process task category. Code checks the category on a fresh read. GitHub
+`list_github_issues` lists all assigned issues, and `get_github_issue` reads an ordinary issue;
+Epic-only tools remain strict. GitHub sub-issues open their shared detail.
+
+`implementation_start` additionally takes `machine`, `context`, `directories` (1–16 canonical
+absolute paths), `provider` (`codex`/`claude`/`opencode`), `model` and `effort`. CLI/MCP require
+confirmation for starting, stopping, enrollment, changing allowed roots/Teams ownership and
+creating children. GUI button presses supply the corresponding user action; creating children
+requires the second confirmation tap on the edited plan.
+
+The private SQLite database `implementation/runs.db` records every execution with its run ID,
+work item provider/project/ID/link, execution machine, agent/model/effort, real native `session_id`,
+state, request time, actual start time and finish time. Session IDs are captured from CLI events
+while the agent runs; a run ID is never substituted for an unavailable native session ID. Native
+sessions persist in their CLI, including planning sessions. Successful implementations become
+`done`; plans become `plan_ready`. Failures, blocked permissions, cancellations and interruptions
+stay distinct. An interrupted run retains its session ID, with no invented finish time. The
+coordinator receives durable session updates, including last-known records for offline machines.
+
+`implementation_runs` filters by machine and optional run `id` or `work_item_url`, returns the
+latest 100 matching executions within an 800 KB response budget and their session/timing/result fields; `partial` signals an omitted older result. Request a run by `id` to retrieve it individually. `implementation_sessions`
+reads the account's session index for up to 100 canonical work item URLs, with up to three recent summaries per item, prioritizing active executions. Work item details show
+agent sessions; cards offer a session action when a native session is recorded. The native
+`implementation_open_session` operation constructs its URL from the recorded provider/session
+and opens only a session on that desktop. A completed local Claude session can use the documented `claude --desktop --resume SESSION_ID` handoff on macOS/x64 Windows with a supported subscription and Claude Code 2.1.285 or later; running sessions cannot be moved. A verified Codex local session can use the documented
+`codex://threads/<thread-id>` desktop link. Browser opening cannot confirm app installation;
+a missing handler shows a reason. Mobile/local-machine mismatches and local Claude/OpenCode
+sessions without a verified remote link show an explanation instead of fabricating a cloud URL.
+See [Codex links](https://learn.chatgpt.com/docs/reference/commands),
+[Claude desktop links](https://support.claude.com/en/articles/14729294-open-claude-desktop-with-a-link),
+[Claude mobile links](https://support.claude.com/en/articles/14898120-open-the-claude-mobile-app-with-a-link)
+and [Claude Remote Control](https://code.claude.com/docs/en/remote-control).
+
+Azure child creation uses the selected source's read catalog and the process's default task type,
+with the parent's area/iteration and catalog user's assignment. Set the dedicated optional
+`AZURE_IMPLEMENTATION_WRITE_TOKEN` through Credentials/stdin with Work Items read/write access;
+legacy activity write credentials do not authorize this flow. GitHub needs Issues write access on
+its existing App connection. Child creation is submitted to the coordinator, even from an enrolled worker, and runs in the background after its durable intent is saved. `implementation_creation` takes the plan's `id` and returns its current state and verified child links, or null before submission. Each new plan can be submitted once; repeated submissions only return its recorded outcome. A lost provider response is `uncertain`
+and must be inspected in the provider without replaying the plan. A GitHub child created without
+its parent link retains its verified URL as `created_unlinked`; review it before proceeding.
+Cancellation stops the coding process tree and preserves its current file changes. Restarting a
+host never relaunches an interrupted run or resubmits an uncertain child creation.

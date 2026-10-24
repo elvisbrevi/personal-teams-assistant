@@ -136,11 +136,43 @@
       partial: !!window.__ptaDetailPartial, warnings: window.__ptaDetailPartial ? ['Comments could not be read. Open the original item or try again.'] : [],
     };
   }
+  const machineId = '11111111-1111-4111-8111-111111111111';
+  const remoteMachineId = '22222222-2222-4222-8222-222222222222';
+  const implementationRuns = [];
   const handlers = {
+    machine_settings: () => ({ id: machineId, name: 'Preview server', coordinator: null, roots: ['/work'] }),
+    machine_list: () => ({ this_machine: machineId, teams_machine: machineId, machines: [
+      { id: machineId, name: 'Preview server', os: 'linux', online: true },
+      { id: remoteMachineId, name: 'Preview Mac', os: 'macos', online: true },
+    ] }),
+    machine_save: args => { window.__ptaMachineSettings = args; return { saved: true }; },
+    machine_connect: () => ({ connected: true }),
+    machine_disconnect: () => ({ disconnected: true }),
+    machine_teams: args => { window.__ptaTeamsMachine = args.machine; return { handover_pending: true }; },
+    implementation_prepare: async args => ({ detail: await todoDetail(args.item, args.item.provider === 'github'), planning: !args.item.task && (args.item.provider !== 'github' || args.item.id === 42), creations: {} }),
+    implementation_catalog: () => ({ providers: providers.providers.filter(p => p.transport === 'cli' && p.available) }),
+    implementation_browse: args => ({ path: args.path || null, parent: args.path === '/work' ? null : '/work', roots: !args.path,
+      directories: !args.path ? ['/work'] : args.path === '/work' ? ['/work/application', '/work/documentation'] : ['/work/application/src'] }),
+    implementation_start: args => {
+      window.__ptaLastImplementation = structuredClone(args);
+      const planning = !args.item.task && (args.item.provider !== 'github' || args.item.id === 42);
+      const id = crypto.randomUUID();
+      implementationRuns.push({ id, machine: args.machine, session_id: crypto.randomUUID(), provider: args.provider, model: args.model, started_at: '2026-10-24T12:00:01Z', finished_at: '2026-10-24T12:02:00Z', item: { id: args.item.id, title: 'Implement receipt downloads', url: args.item.provider === 'github' ? `https://github.com/${args.item.project}/issues/${args.item.id}` : `${org}/${args.item.project}/_workitems/edit/${args.item.id}` },
+        planning, state: planning ? 'plan_ready' : 'done', created_at: '2026-10-24T12:00:00Z', output: planning ? '' : 'Updated receipt downloads and checked the result.',
+        plan: planning ? { children: [{ title: 'Implement receipt download', description: 'Add the receipt download action and verify it on a phone.' }] } : null });
+      return { id, started: true };
+    },
+    implementation_runs: args => ({ runs: implementationRuns.filter(run => run.machine === args.machine) }),
+    implementation_creation: () => null,
+    implementation_sessions: args => ({ sessions: implementationRuns.filter(run => args.urls.includes(run.item.url)).map(run => ({ ...run, online: true })) }),
+    implementation_open_session: args => { window.__ptaOpenedAgentSession = args; return { opened: true }; },
+    implementation_cancel: args => { const run = implementationRuns.find(run => run.id === args.id); if (run) run.state = 'cancelled'; return { cancelled: true }; },
+    implementation_create: args => { window.__ptaLastChildCreation = structuredClone(args); return { state: 'created', created: args.children.map((child, index) => ({ id: 6000 + index, title: child.title, url: `${org}/Payments/_workitems/edit/${6000 + index}` })) }; },
     get_azure_task: async args => { const detail = await todoDetail(args, false); window.__ptaLastDetail.method = 'get_azure_task'; detail.item.kind = 'Task'; return detail; },
     activity_run: args => { window.__ptaLastActivityRun = args; return { running: true }; },
     get_azure_hu: args => todoDetail(args, false),
     get_github_epic: args => todoDetail(args, true),
+    get_github_issue: async args => { const detail = await todoDetail(args, true); detail.item.kind = 'Issue'; return detail; },
     list_azure_hus: async args => {
       window.__ptaLastTodo = { provider: 'azure', ...structuredClone(args) };
       await delay(window.__ptaTodoDelay || 0);
@@ -163,6 +195,7 @@
         dates: [{ field: 'start_date', name: 'Start date', value: null }, { field: 'closed_at', name: 'Completion date', value: null }] }];
       return { items: items.filter(item => !args.state || item.state === args.state), states: ['open', 'closed'], projects: ['contoso/billing'], assignment_fields: ['Assignees'], partial: false, warnings: [], has_more: false };
     },
+    list_github_issues: args => handlers.list_github_epics(args),
     open_work_item: args => { window.__ptaOpenedWorkItem = args.url; return { url: args.url }; },
     snapshot: () => structuredClone(snapshot),
     llm_providers: () => providers,

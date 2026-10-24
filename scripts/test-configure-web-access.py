@@ -75,8 +75,10 @@ class SetupTests(unittest.TestCase):
     def test_exact_exceptions_precede_panel_protection_and_resources_are_reused(self):
         self.run_setup()
         writes = [(method, data) for method, _, data in self.calls if method == "POST"]
-        self.assertEqual([data["type"] for _, data in writes], ["github"] + ["self_hosted"] * 8)
-        self.assertEqual([data["policies"][0]["decision"] for _, data in writes[1:]], ["bypass"] * 7 + ["allow"])
+        self.assertEqual([data["type"] for _, data in writes], ["github"] + ["self_hosted"] * 9)
+        self.assertEqual([data["policies"][0]["decision"] for _, data in writes[1:]], ["bypass"] * 8 + ["allow"])
+        self.assertEqual(writes[-2][1]["domain"], self.args.hostname + "/api/machines")
+        self.assertEqual(writes[-2][1]["policies"][0]["name"], setup.MACHINE_POLICY)
         # Phones fetch home-screen icons without cookies: each static icon gets its own exact bypass.
         assets = [data for _, data in writes[3:8]]
         self.assertEqual([data["domain"] for data in assets], [self.args.hostname + path for path in setup.PUBLIC_ASSETS])
@@ -97,7 +99,7 @@ class SetupTests(unittest.TestCase):
         self.calls.clear()
         self.run_setup()
         self.assertFalse(any(method == "POST" for method, _, _ in self.calls))
-        self.assertEqual(len(self.apps), 8)
+        self.assertEqual(len(self.apps), 9)
 
     def test_cookie_readback_is_required_before_writing_settings(self):
         def missing_cookie(token, method, path, data=None):

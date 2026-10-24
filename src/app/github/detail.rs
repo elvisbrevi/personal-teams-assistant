@@ -15,6 +15,16 @@ pub(in crate::app) async fn epic(args: &DetailRequest) -> Result<Detail> {
     )
     .await
 }
+pub(in crate::app) async fn issue(args: &DetailRequest) -> Result<Detail> {
+    detail_with(
+        &client()?,
+        &access_token().await?,
+        "https://api.github.com/",
+        args,
+        false,
+    )
+    .await
+}
 fn field(reference: &str, name: &str, kind: &str, value: Value) -> DetailField {
     DetailField {
         reference: reference.into(),
@@ -46,15 +56,25 @@ async fn epic_with(
     base: &str,
     args: &DetailRequest,
 ) -> Result<Detail> {
+    detail_with(client, token, base, args, true).await
+}
+async fn detail_with(
+    client: &Client,
+    token: &str,
+    base: &str,
+    args: &DetailRequest,
+    require_epic: bool,
+) -> Result<Detail> {
     args.validate(true)?;
     let repo = args.project.as_deref().unwrap_or_default();
     let endpoint = format!("{base}repos/{repo}/issues/{}", args.id);
     let issue: Value = get(client, token, &endpoint).await?;
     let url = issue_url(&issue, repo, args.id)?;
     ensure!(
-        issue["type"]["name"]
-            .as_str()
-            .is_some_and(|s| s.eq_ignore_ascii_case("Epic")),
+        !require_epic
+            || issue["type"]["name"]
+                .as_str()
+                .is_some_and(|s| s.eq_ignore_ascii_case("Epic")),
         "invalid issue type: select an Epic"
     );
     let mut detail = Detail {
@@ -70,7 +90,7 @@ async fn epic_with(
                 .as_str()
                 .context("invalid Epic state")?
                 .into(),
-            kind: "Epic".into(),
+            kind: issue["type"]["name"].as_str().unwrap_or("Issue").into(),
             created_at: issue["created_at"].as_str().map(str::to_owned),
             dates: vec![Date {
                 field: "closed_at".into(),
@@ -207,7 +227,25 @@ async fn epic_with(
                                 "invalid sub-issue URL"
                             );
                             detail.relations.push(Relation {
-                                item: None,
+                                item: Some(Item {
+                                    id: number,
+                                    title: value["title"].as_str().unwrap_or_default().into(),
+                                    url: url.to_string(),
+                                    project: url
+                                        .path_segments()
+                                        .map(|mut parts| {
+                                            format!(
+                                                "{}/{}",
+                                                parts.next().unwrap_or_default(),
+                                                parts.next().unwrap_or_default()
+                                            )
+                                        })
+                                        .unwrap_or_default(),
+                                    state: value["state"].as_str().unwrap_or_default().into(),
+                                    kind: value["type"]["name"].as_str().unwrap_or("Issue").into(),
+                                    created_at: value["created_at"].as_str().map(str::to_owned),
+                                    dates: Vec::new(),
+                                }),
                                 task: false,
                                 name: "Sub-issue".into(),
                                 url: Some(url.into()),
