@@ -341,17 +341,18 @@ async fn operation(host: &Arc<Host>, method: &str, args: &Value) -> Result<Value
             let session = run
                 .session_id
                 .context("The agent has not reported a session ID yet.")?;
-            uuid(&session)?;
             ensure!(
                 !host.shell.headless(),
                 "This host has no desktop. Open the session from a desktop device with access to this machine."
             );
             match run.launch.request.provider.as_str() {
                 "codex" => {
+                    uuid(&session)?;
                     let url = format!("codex://threads/{session}");
                     host.shell.open_url(&url).map_err(|_|anyhow::anyhow!("The system could not open the Codex app. Check that it is installed and can access this local session."))?;
                 }
                 "claude" => {
+                    uuid(&session)?;
                     ensure!(
                         !["running", "planning"].contains(&run.state.as_str()),
                         "Claude Desktop can open this local session after the CLI finishes. This session is still running."

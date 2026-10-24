@@ -942,7 +942,10 @@ pub(super) fn confirmation(name: &str, args: &Value) -> Option<String> {
             "Stop this implementation run, retaining its current file changes?".into()
         }
         "machine_connect" => {
-            "Register this machine with the selected coordinator for this account?".into()
+            format!(
+                "Register this machine with coordinator {} for this account?",
+                args["url"].as_str().unwrap_or_default()
+            )
         }
         "machine_disconnect" => "Disconnect this machine from its coordinator?".into(),
         "machine_teams" => {
@@ -1064,6 +1067,14 @@ mod tests {
             );
         }
         assert!(confirmation("activity_run", &json!({})).is_none());
+        assert!(
+            confirmation(
+                "machine_connect",
+                &json!({"url":"https://assistant.example.com"})
+            )
+            .unwrap()
+            .contains("https://assistant.example.com")
+        );
         assert!(validate("activity_resolve", &json!({})).is_err());
     }
 

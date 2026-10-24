@@ -688,7 +688,7 @@ async function implementationRuns(form) {
       cancel.onclick = () => busy(cancel, async () => { await invoke('implementation_cancel', { machine, id: run.id }); await implementationRuns(form); });
       panel.append(cancel);
     }
-    if (run.output) panel.append(el('pre', { class: 'implementation-output', textContent: run.output }));
+    if (run.output) panel.append(el('pre', { class: 'implementation-output', textContent: tx(run.output) }));
     if (run.plan?.children && run.state === 'plan_ready') {
       if (form.creations[run.id]) {
         const record = form.creations[run.id];

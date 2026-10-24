@@ -87,6 +87,9 @@ test('known host messages are translated and unknown ones stay as they are', () 
   assert.equal(es.tx('Planning tasks with the configured agents'), 'Planificando tareas con los agentes configurados');
   assert.equal(es.tx('An activity operation is already running. Wait for it to finish.'), 'Ya hay una operación de actividades en curso. Espera a que termine.');
   assert.equal(es.tx('Could not read source ado: HTTP 503'), 'No se pudo leer la fuente ado: HTTP 503');
+  assert.equal(es.tx('Execution machine is offline.'), 'La máquina de ejecución está sin conexión.');
+  assert.equal(es.tx('Claude Code is not installed on this desktop.'), 'Claude Code no está instalado en este equipo.');
+  assert.equal(es.tx('Set AZURE_IMPLEMENTATION_WRITE_TOKEN in Credentials before creating child tasks.'), 'Configura AZURE_IMPLEMENTATION_WRITE_TOKEN en Credenciales antes de crear tareas hijas.');
   assert.equal(es.tx('Something only the host knows'), 'Something only the host knows');
   assert.equal(load('en').tx('Reading source wiki'), 'Reading source wiki');
 });
