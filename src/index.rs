@@ -23,6 +23,10 @@ pub const FILE: &str = "knowledge-index.db";
 pub const NOTES: &str = "@notes";
 /// The requests of answers the user approved as examples.
 pub const EXAMPLES: &str = "@examples";
+pub const QUESTIONS: &str = "@questions";
+pub fn feedback_source(question: &str) -> String {
+    format!("@feedback:{question}")
+}
 /// Characters of one indexed section.
 const SECTION: usize = 1500;
 /// Files of one repository source, and the size of one file.
@@ -170,6 +174,8 @@ impl Index {
             PRAGMA foreign_keys=ON;
             CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY,value TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS notes(id TEXT PRIMARY KEY,payload TEXT NOT NULL,updated_at INTEGER NOT NULL);
+            CREATE TABLE IF NOT EXISTS question_feedback(resource TEXT PRIMARY KEY,question_id TEXT NOT NULL,payload TEXT NOT NULL,updated_at INTEGER NOT NULL);
+            CREATE INDEX IF NOT EXISTS feedback_question ON question_feedback(question_id);
             CREATE TABLE IF NOT EXISTS examples(resource TEXT PRIMARY KEY,request TEXT NOT NULL,answer TEXT NOT NULL,context TEXT,updated_at INTEGER NOT NULL);
             CREATE TABLE IF NOT EXISTS documents(id INTEGER PRIMARY KEY,source TEXT NOT NULL,key TEXT NOT NULL,title TEXT NOT NULL,stamp TEXT NOT NULL,contexts TEXT NOT NULL DEFAULT '[]',UNIQUE(source,key));
             CREATE TABLE IF NOT EXISTS chunks(id INTEGER PRIMARY KEY,document INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE,heading TEXT NOT NULL,text TEXT NOT NULL,embedding BLOB);
@@ -188,6 +194,155 @@ impl Index {
             let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
         }
         Ok(Self { db: Mutex::new(db) })
+    }
+
+    /// Questions and their owner-associated requests share the existing hybrid index.
+    pub fn sync_questions(&self, questions: &[crate::questions::Question]) -> Result<()> {
+        let mut db = self.db.lock().unwrap();
+        let tx = db.transaction()?;
+        let keys: Vec<String> = tx
+            .prepare("SELECT key FROM documents WHERE source=?1")?
+            .query_map([QUESTIONS], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        for key in keys {
+            if !questions.iter().any(|q| q.id == key) {
+                tx.execute(
+                    "DELETE FROM documents WHERE source=?1 AND key=?2",
+                    params![QUESTIONS, key],
+                )?;
+            }
+        }
+        let feedback_questions: Vec<String> = tx
+            .prepare("SELECT DISTINCT question_id FROM question_feedback")?
+            .query_map([], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        for id in feedback_questions {
+            if !questions.iter().any(|q| q.id == id) {
+                tx.execute("DELETE FROM question_feedback WHERE question_id=?1", [&id])?;
+                tx.execute(
+                    "DELETE FROM documents WHERE source=?1",
+                    [feedback_source(&id)],
+                )?;
+            }
+        }
+        for q in questions {
+            let stamp = serde_json::to_string(q)?;
+            let current: Option<String> = tx
+                .query_row(
+                    "SELECT stamp FROM documents WHERE source=?1 AND key=?2",
+                    params![QUESTIONS, q.id],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            if current.as_deref() != Some(&stamp) {
+                write_document(
+                    &tx,
+                    QUESTIONS,
+                    &q.id,
+                    &q.text,
+                    &stamp,
+                    "[]",
+                    &format!("{}\n{}", q.text, q.examples.join("\n")),
+                )?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn save_evaluation(&self, value: &crate::questions::AnswerEvaluation) -> Result<()> {
+        let now = chrono::Utc::now().timestamp();
+        let mut db = self.db.lock().unwrap();
+        let tx = db.transaction()?;
+        tx.execute(
+            "DELETE FROM documents WHERE key=?1 AND source LIKE '@feedback:%'",
+            [&value.resource],
+        )?;
+        tx.execute("INSERT OR REPLACE INTO question_feedback(resource,question_id,payload,updated_at) VALUES (?1,?2,?3,?4)", params![value.resource, value.question_id, serde_json::to_string(value)?, now])?;
+        write_document(
+            &tx,
+            &feedback_source(&value.question_id),
+            &value.resource,
+            "Answer evaluation",
+            &now.to_string(),
+            "[]",
+            &value.request,
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn remove_evaluation(&self, resource: &str) -> Result<()> {
+        let db = self.db.lock().unwrap();
+        db.execute(
+            "DELETE FROM question_feedback WHERE resource=?1",
+            [resource],
+        )?;
+        db.execute(
+            "DELETE FROM documents WHERE key=?1 AND source LIKE '@feedback:%'",
+            [resource],
+        )?;
+        Ok(())
+    }
+
+    /// Rank evaluations within the matched question, then include recent judgments too:
+    /// synonyms without embeddings must still benefit from the owner's corrections.
+    pub fn evaluations(
+        &self,
+        question: &str,
+        query: &str,
+        vector: Option<&[f32]>,
+        allowed: &[String],
+    ) -> Result<Vec<crate::questions::AnswerEvaluation>> {
+        let source = feedback_source(question);
+        let ranked = self.search(&[&source], query, None, vector, 8)?;
+        let db = self.db.lock().unwrap();
+        let mut found: Vec<crate::questions::AnswerEvaluation> = db.prepare("SELECT payload FROM question_feedback WHERE question_id=?1 ORDER BY updated_at DESC,resource LIMIT 100")?.query_map([question], |r| r.get::<_, String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?.into_iter().filter_map(|p| serde_json::from_str(&p).ok()).filter(|v: &crate::questions::AnswerEvaluation| v.sources.iter().all(|s| allowed.contains(s))).collect();
+        found.sort_by_key(|v| {
+            (
+                v.rating != "bad",
+                ranked
+                    .iter()
+                    .position(|h| h.key == v.resource)
+                    .unwrap_or(100),
+            )
+        });
+        let mut selected = Vec::new();
+        for rating in ["bad", "good"] {
+            selected.extend(found.iter().filter(|v| v.rating == rating).take(4).cloned());
+        }
+        for value in found {
+            if selected.len() == 8 {
+                break;
+            }
+            if !selected.iter().any(|v| v.resource == value.resource) {
+                selected.push(value);
+            }
+        }
+        Ok(selected)
+    }
+
+    /// Check every rejected answer, including older evaluations outside the prompt budget.
+    pub fn is_rejected_answer(
+        &self,
+        question: &str,
+        answer: &str,
+        allowed: &[String],
+    ) -> Result<bool> {
+        let wanted = crate::questions::normalize(&crate::evidence::unlinked(answer));
+        let db = self.db.lock().unwrap();
+        let mut statement = db.prepare("SELECT payload FROM question_feedback WHERE question_id=?1 AND json_extract(payload,'$.rating')='bad'")?;
+        let mut rows = statement.query([question])?;
+        while let Some(row) = rows.next()? {
+            let value: crate::questions::AnswerEvaluation =
+                serde_json::from_str(&row.get::<_, String>(0)?)?;
+            if value.sources.iter().all(|s| allowed.contains(s))
+                && crate::questions::normalize(&value.answer) == wanted
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     /// Bring a repository source up to date with its checkout: new and changed files are

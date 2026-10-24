@@ -56,6 +56,9 @@ pub enum ToolSpec {
         /// default: it widens what the source sends to the model.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         repository_docs: bool,
+        /// Exact Wiki page URLs; when set, no Search or repository discovery is performed.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        page_urls: Option<Vec<String>>,
     },
     Rabbitmq {
         url: String,
@@ -140,6 +143,7 @@ impl ToolSpec {
             Self::AzureDevopsWiki {
                 secret_ref,
                 wiki_ids,
+                page_urls,
                 ..
             } => {
                 ensure!(
@@ -150,6 +154,15 @@ impl ToolSpec {
                 );
                 for id in wiki_ids {
                     crate::ado::wiki::validate_id(id)?;
+                }
+                ensure!(
+                    page_urls
+                        .as_ref()
+                        .is_none_or(|urls| !urls.is_empty() && urls.len() <= 10),
+                    "at most 10 pinned Wiki pages are allowed"
+                );
+                for url in page_urls.iter().flatten() {
+                    crate::ado::wiki::validate_page_url(url)?;
                 }
             }
             Self::Rabbitmq { url, secret_ref } => {
@@ -264,7 +277,13 @@ impl ToolSpec {
     pub fn reviews_activity(&self) -> bool {
         matches!(
             self,
-            Self::AzureDevopsStatus { .. } | Self::AzureDevopsWiki { .. } | Self::TeamsMessages {}
+            Self::AzureDevopsStatus { .. } | Self::TeamsMessages {}
+        ) || matches!(
+            self,
+            Self::AzureDevopsWiki {
+                page_urls: None,
+                ..
+            }
         )
     }
 }
@@ -421,6 +440,10 @@ impl ReadOnlyTool for Tools {
         context: &str,
     ) -> Result<String> {
         spec.validate()?;
+        ensure!(
+            spec.reviews_activity(),
+            "this source does not allow activity discovery"
+        );
         let days = days.clamp(1, crate::ado::registration::LOOKBACK_DAYS);
         if let ToolSpec::AzureDevopsStatus { secret_ref, .. } = spec {
             let operation = async {
@@ -655,8 +678,18 @@ impl ReadOnlyTool for Tools {
                     wiki_ids,
                     author_mode,
                     repository_docs,
+                    page_urls,
                     ..
                 } => {
+                    if let Some(page_urls) = page_urls {
+                        let catalog = spec.catalog(&self.repositories)?;
+                        let key = crate::security::resolve(secret_ref, &self.bindings)?;
+                        let reader =
+                            crate::ado::wiki::Reader::new(&self.client, &key, &catalog, wiki_ids)?
+                                .own_scope()
+                                .await?;
+                        return Ok(serde_json::to_string(&reader.read_urls(page_urls).await?)?);
+                    }
                     let query = match crate::ado::wiki::question_query(question) {
                         Ok(query)=>query,
                         Err(_)=>return Ok(serde_json::to_string(&crate::ado::wiki::WikiResult{partial:true,warnings:vec!["The Wiki search topic is missing; ask to specify the procedure or project.".into()],..Default::default()})?),
@@ -740,6 +773,10 @@ impl ReadOnlyTool for Tools {
     }
     async fn review(&self, spec: &ToolSpec, days: i64) -> Result<String> {
         spec.validate()?;
+        ensure!(
+            spec.reviews_activity(),
+            "this source does not allow activity discovery"
+        );
         let days = days.clamp(1, crate::ado::MAX_WINDOW_DAYS);
         let since = chrono::Utc::now() - chrono::Duration::days(days);
         let operation = async {
@@ -784,6 +821,10 @@ impl ReadOnlyTool for Tools {
     }
     async fn status_pages(&self, spec: &ToolSpec, question: &str) -> Result<String> {
         spec.validate()?;
+        ensure!(
+            !matches!(spec, ToolSpec::AzureDevopsWiki { page_urls, .. } if page_urls.is_some()),
+            "pinned Wiki pages do not allow activity discovery"
+        );
         let ToolSpec::AzureDevopsWiki {
             secret_ref,
             wiki_ids,

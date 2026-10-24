@@ -74,6 +74,80 @@ fn validate_path(path: &str) -> Result<()> {
     );
     Ok(())
 }
+/// A page selected by the owner, never by a model. Credentials are sent only to API URLs
+/// reconstructed from a Wiki that the source catalog and team membership already allow.
+struct PinnedPage {
+    organization: String,
+    project: String,
+    wiki: String,
+    path: Option<String>,
+    id: Option<u64>,
+    version: Option<String>,
+}
+pub fn validate_page_url(value: &str) -> Result<()> {
+    pinned_page(value).map(|_| ())
+}
+fn pinned_page(value: &str) -> Result<PinnedPage> {
+    ensure!(value.len() <= 4096, "Wiki URL is too long");
+    let url = crate::knowledge::validate_url(value)?;
+    ensure!(
+        url.host_str() == Some("dev.azure.com"),
+        "use an exact Azure DevOps Wiki page URL"
+    );
+    let decoded = |s: &str| -> String {
+        url::form_urlencoded::parse(format!("v={}", s.replace('+', "%2B")).as_bytes())
+            .next()
+            .unwrap()
+            .1
+            .into_owned()
+    };
+    let parts: Vec<String> = url
+        .path_segments()
+        .context("invalid Wiki URL")?
+        .map(decoded)
+        .collect();
+    ensure!(
+        parts.len() >= 5
+            && parts[2] == "_wiki"
+            && parts[3] == "wikis"
+            && [0, 1, 4].iter().all(|i| !parts[*i].is_empty()
+                && !parts[*i].contains(['/', '\\'])
+                && parts[*i] != "."
+                && parts[*i] != ".."),
+        "invalid Wiki page URL"
+    );
+    ensure!(
+        url.query_pairs()
+            .all(|(k, _)| matches!(k.as_ref(), "pagePath" | "pageId" | "version" | "anchor")),
+        "unsupported Wiki URL query"
+    );
+    let query = |name: &str| {
+        url.query_pairs()
+            .find(|(k, _)| k == name)
+            .map(|(_, v)| v.into_owned())
+    };
+    let path = query("pagePath");
+    if let Some(path) = &path {
+        validate_path(path)?;
+    }
+    let id = query("pageId")
+        .or_else(|| parts.get(5).cloned())
+        .map(|id| id.parse::<u64>())
+        .transpose()?;
+    ensure!(
+        path.is_some() || id.is_some_and(|id| id > 0),
+        "Wiki URL must identify one page by path or ID"
+    );
+    Ok(PinnedPage {
+        organization: format!("https://dev.azure.com/{}", parts[0]),
+        project: parts[1].clone(),
+        wiki: parts[4].clone(),
+        path,
+        id,
+        version: query("version"),
+    })
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Wiki {
     pub organization: String,
@@ -1504,6 +1578,86 @@ impl<'a> Reader<'a> {
         result.pages.push(page);
         Ok(result)
     }
+    /// Read only the selected pages, preserving canonical Wiki evidence and authorship.
+    pub async fn read_urls(&self, urls: &[String]) -> Result<WikiResult> {
+        ensure!(
+            !urls.is_empty() && urls.len() <= 10,
+            "select 1–10 Wiki pages"
+        );
+        let selected: Vec<_> = urls.iter().map(|u| pinned_page(u)).collect::<Result<_>>()?;
+        let mut result = self.list().await?;
+        result.query = "Owner-selected Wiki pages".into();
+        let mut seen = BTreeSet::new();
+        for selected in selected {
+            let candidates: Vec<_> = result
+                .wikis
+                .iter()
+                .filter(|w| {
+                    w.organization
+                        .trim_end_matches('/')
+                        .eq_ignore_ascii_case(&selected.organization)
+                        && (w.project.eq_ignore_ascii_case(&selected.project)
+                            || w.project_id.eq_ignore_ascii_case(&selected.project))
+                        && (w.id.eq_ignore_ascii_case(&selected.wiki)
+                            || w.name.eq_ignore_ascii_case(&selected.wiki))
+                })
+                .cloned()
+                .collect();
+            ensure!(
+                candidates.len() == 1,
+                "pinned Wiki page is outside the authorized catalog"
+            );
+            let wiki = &candidates[0];
+            let version = selected
+                .version
+                .as_deref()
+                .map(|v| v.strip_prefix("GB").unwrap_or(v))
+                .or_else(|| wiki.versions.first().map(String::as_str))
+                .context("Wiki version missing")?;
+            ensure!(
+                wiki.versions.iter().any(|v| v == version),
+                "unpublished Wiki version"
+            );
+            let path = if let Some(id) = selected.id {
+                // https://learn.microsoft.com/rest/api/azure/devops/wiki/pages/get-page-by-id
+                let mut url = self.url(
+                    wiki,
+                    &["_apis", "wiki", "wikis", &wiki.id, "pages", &id.to_string()],
+                )?;
+                url.query_pairs_mut().append_pair("includeContent", "false");
+                let (value, _) = self.request(Method::GET, url, None).await?;
+                ensure!(
+                    value["id"].as_u64() == Some(id),
+                    "Wiki returned another page ID"
+                );
+                let path = value["path"]
+                    .as_str()
+                    .context("Wiki page path missing")?
+                    .to_owned();
+                ensure!(
+                    selected.path.as_ref().is_none_or(|p| p == &path),
+                    "Wiki URL page ID and path disagree"
+                );
+                path
+            } else {
+                selected.path.context("Wiki page path missing")?
+            };
+            if !seen.insert((wiki.id.clone(), version.to_owned(), path.clone())) {
+                continue;
+            }
+            let mut page = self.page(wiki, &path, None, version).await?;
+            result.histories_checked += 1;
+            if let Err(error) = self.attribution(&mut page).await {
+                result.warn(&format!(
+                    "Git attribution incomplete; author unknown: {error}"
+                ));
+            }
+            self.entities(&mut page, &mut result).await;
+            result.pages.push(page);
+        }
+        Ok(result)
+    }
+
     /// Adds the README and OpenAPI files at the root of at most two repositories whose name
     /// carries every word of the search topic, in the catalog's projects as narrowed by
     /// [`Self::own_scope`]; a failed read leaves a warning and the Wiki result intact.
@@ -2331,6 +2485,66 @@ mod tests {
         r.base = Some(server.uri());
         r
     }
+    #[tokio::test]
+    async fn pinned_wiki_urls_read_only_the_selected_pages_and_reject_other_scopes() {
+        let server = MockServer::start().await;
+        fixture(
+            &server,
+            "/",
+            "projectWiki",
+            "/Create-user.md",
+            "/Create user",
+            true,
+        )
+        .await;
+        Mock::given(method("GET"))
+            .and(path(format!("/test/{PID}/_apis/wiki/wikis/{WID}/pages/42")))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!({"id":42,"path":"/Create user"})),
+            )
+            .mount(&server)
+            .await;
+        let client = Client::new();
+        let reader = reader(&client, "token", &catalog(false), &[], &server);
+        let urls = vec![
+            "https://dev.azure.com/test/Project/_wiki/wikis/Documentation?pagePath=%2FCreate%20user".into(),
+            format!("https://dev.azure.com/test/{PID}/_wiki/wikis/{WID}/42/Create-user"),
+        ];
+        let result = reader.read_urls(&urls).await.unwrap();
+        assert_eq!(result.pages.len(), 1);
+        assert!(result.pages[0].content.contains("Procedimiento vigente"));
+        assert_eq!(
+            result.pages[0].reference.authority.as_deref(),
+            Some("edited_by_me")
+        );
+        assert!(
+            server
+                .received_requests()
+                .await
+                .unwrap()
+                .iter()
+                .all(|r| !r.url.path().contains("wikisearchresults"))
+        );
+        assert!(reader.read_urls(&["https://dev.azure.com/other/Project/_wiki/wikis/Documentation?pagePath=/secret".into()]).await.is_err());
+        assert!(
+            reader
+                .read_urls(&[
+                    "https://dev.azure.com/test/Project/_wiki/wikis/Other?pagePath=/secret".into()
+                ])
+                .await
+                .is_err()
+        );
+        for bad in [
+            "https://evil.example/Project/_wiki/wikis/Documentation?pagePath=/p",
+            "https://user:secret@dev.azure.com/test/Project/_wiki/wikis/Documentation?pagePath=/p",
+            "https://dev.azure.com/test/Project/_wiki/wikis/Documentation",
+            "https://dev.azure.com/test/Project/_wiki/wikis/Documentation?pagePath=/../secret",
+            "https://dev.azure.com/test/Project/_wiki/wikis/Documentation?pagePath=/p&redirect=evil",
+        ] {
+            assert!(validate_page_url(bad).is_err(), "{bad}");
+        }
+    }
+
     #[test]
     fn repositories_are_named_by_every_topic_word() {
         let terms = repository_terms("Microservicio Crear Usuario Natural");

@@ -23,7 +23,7 @@ A fact the user confirmed, kept to answer with, optionally tied to contexts.
 _Avoid_: memory, knowledge entry
 
 **Approved example**:
-An answer the user rated good and chose to guide later answers to similar requests, by structure and tone only.
+An answer the user rated good that guides the approach of later answers to the same question, without supplying their facts.
 _Avoid_: few-shot, template, training data
 
 **Person profile**:
@@ -31,12 +31,20 @@ How the user addresses one person who writes to them, used only when answering t
 _Avoid_: contact, user (for the person who writes)
 
 **Knowledge index**:
-The searchable copy of repository sources and verified notes, split into sections.
+The searchable collection of question definitions, repository passages, verified notes and evaluated requests used to find relevant guidance and evidence.
 _Avoid_: vector database, RAG store
 
-**Case**:
-A kind of request the assistant tells apart (a status round, a recap, an activity review, documentation, a request for the person, an informational message, any answer), with how it is recognized and answered.
-_Avoid_: intent (for the configurable kind), route, template
+**Question**:
+A question the user configures with the sources its answers may use. Equivalent requests share the question while retaining the date or period actually asked about.
+_Avoid_: case, intent, route, template
+
+**Associated request**:
+A message the user explicitly linked to a question during review, kept as an example of equivalent wording.
+_Avoid_: training sample, alias
+
+**Answer evaluation**:
+The user's judgment of an answer to a question: a positive evaluation suggests its approach; a negative evaluation identifies an approach or mistake to avoid in later answers to that question. It provides guidance, never facts about current work.
+_Avoid_: model training, automatic fact
 
 **Recap**:
 An answer about what the user did on a named day or period, from the activity record alone.

@@ -28,6 +28,12 @@ pub struct Audit {
     pub status: String,
     pub reason: String,
     pub source: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub identified_question: Option<crate::questions::IdentifiedQuestion>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub available_sources: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub selected_sources: Vec<String>,
     pub confidences: Vec<f64>,
     pub tools: Vec<String>,
     pub provider: Option<String>,
@@ -129,6 +135,19 @@ impl Audit {
     }
 }
 impl Store {
+    pub fn associate_question(
+        path: &Path,
+        resource: &str,
+        question: &crate::questions::IdentifiedQuestion,
+    ) -> Result<()> {
+        let store = Self::attach(path)?;
+        let changed = store.db.lock().unwrap().execute("UPDATE jobs SET audit=json_set(audit,'$.identified_question',json(?2),'$.reason','question_associated','$.trace[#]',json(?3)) WHERE resource=?1 AND status IN ('ignored','dry_run')", params![resource, serde_json::to_string(question)?, serde_json::to_string(&TraceStep { at: chrono::Utc::now().timestamp_millis(), step: "question association".into(), detail: question.id.clone() })?])?;
+        anyhow::ensure!(
+            changed == 1,
+            "message changed while associating the question"
+        );
+        Ok(())
+    }
     /// Attach to an existing database without recovering jobs. Used by account probes.
     pub fn attach(path: &Path) -> Result<Self> {
         let db = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE)?;

@@ -282,6 +282,7 @@ impl Portal {
             "answer_refine",
             "answer_send",
             "answer_feedback",
+            "question_associate",
             "notes_list",
             "notes_save",
             "notes_remove",

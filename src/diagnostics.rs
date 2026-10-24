@@ -58,6 +58,7 @@ pub async fn providers(config: &Config) -> Result<Value> {
                         prompts: Default::default(),
                         recipient: "",
                         examples: "",
+                        evaluations: "",
                     })
                     .await?;
                 let chars = generated.answer.trim().chars().count();

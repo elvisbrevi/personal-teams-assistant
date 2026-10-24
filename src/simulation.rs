@@ -21,6 +21,10 @@ pub struct SimulationRequest {
 
 #[derive(Serialize)]
 pub struct SimulationResult {
+    pub resource: String,
+    pub identified_question: Option<crate::questions::IdentifiedQuestion>,
+    pub available_sources: Vec<String>,
+    pub selected_sources: Vec<String>,
     pub status: String,
     pub reason: String,
     pub answer: Option<String>,
@@ -109,6 +113,10 @@ pub async fn run(
         None
     };
     Ok(SimulationResult {
+        resource,
+        identified_question: audit.identified_question,
+        available_sources: audit.available_sources,
+        selected_sources: audit.selected_sources,
         status: audit.status,
         reason: audit.reason,
         answer,

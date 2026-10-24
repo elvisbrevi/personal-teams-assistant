@@ -19,6 +19,9 @@ pub struct KnowledgeMap {
     /// What the user changed in the built-in cases (kinds of request); see `crate::cases`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub cases: Vec<crate::cases::Case>,
+    /// None is a legacy map; loading it seeds the initial daily-work question.
+    #[serde(default)]
+    pub questions: Option<Vec<crate::questions::Question>>,
     /// People the user writes to, and how the user addresses each.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub people: Vec<Person>,
@@ -86,6 +89,10 @@ pub enum Access {
     Url {
         url: String,
     },
+    /// Exact public pages, read directly without following links.
+    Urls {
+        urls: Vec<String>,
+    },
     Tool {
         tool: crate::tools::ToolSpec,
     },
@@ -108,14 +115,68 @@ impl Access {
 }
 impl KnowledgeMap {
     pub fn load(path: &Path) -> Result<Self> {
-        Self::parse(&std::fs::read_to_string(path)?)
+        let mut map = Self::parse(&std::fs::read_to_string(path)?)?;
+        map.initialize_questions();
+        Ok(map)
+    }
+    /// Add the initial question once. Existing sources keep their audiences; a missing
+    /// activity-record source starts disabled, with no audience or external processing.
+    pub fn initialize_questions(&mut self) {
+        if self.questions.is_some() {
+            return;
+        }
+        let source = self
+            .resources
+            .iter()
+            .find(|r| {
+                matches!(
+                    r.access,
+                    Access::Tool {
+                        tool: crate::tools::ToolSpec::ActivityRecord {}
+                    }
+                )
+            })
+            .map(|r| r.id.clone())
+            .unwrap_or_else(|| {
+                let mut id = "activity-record".to_owned();
+                for n in 2.. {
+                    if !self.resources.iter().any(|r| r.id == id) {
+                        break;
+                    }
+                    id = format!("activity-record-{n}");
+                }
+                self.resources.push(Resource {
+                    id: id.clone(),
+                    description: "Daily activities saved in the Activities section".into(),
+                    topics: vec!["activity".into()],
+                    enabled: false,
+                    external_processing: false,
+                    allowed_conversations: vec![],
+                    allowed_senders: vec![],
+                    access: Access::Tool {
+                        tool: crate::tools::ToolSpec::ActivityRecord {},
+                    },
+                });
+                id
+            });
+        self.questions = Some(vec![crate::questions::Question {
+            id: "daily-activities".into(),
+            text: "What did you do today?".into(),
+            sources: vec![source],
+            examples: vec![],
+        }]);
     }
     pub fn parse(text: &str) -> Result<Self> {
         let map: Self = toml::from_str(text)?;
         ensure!(map.resources.len() <= 250, "too many resources");
         let mut ids = BTreeSet::new();
         let id_pattern = regex::Regex::new(r"^[a-z][a-z0-9_-]{0,63}$")?;
-        crate::cases::validate(&map.cases, |id| map.resources.iter().any(|r| r.id == id))?;
+        if let Some(questions) = &map.questions {
+            crate::questions::validate(questions, |id| map.resources.iter().any(|r| r.id == id))?;
+        }
+        if map.questions.is_none() {
+            crate::cases::validate(&map.cases, |id| map.resources.iter().any(|r| r.id == id))?;
+        }
         ensure!(map.people.len() <= 500, "too many people");
         let mut person_ids = BTreeSet::new();
         for person in &map.people {
@@ -214,6 +275,15 @@ impl KnowledgeMap {
                 }
                 Access::Url { url } => {
                     validate_url(url)?;
+                }
+                Access::Urls { urls } => {
+                    ensure!(
+                        !urls.is_empty() && urls.len() <= 10,
+                        "a URL source needs 1–10 URLs"
+                    );
+                    for url in urls {
+                        validate_url(url)?;
+                    }
                 }
                 Access::Repository { repository } => {
                     ensure!(
@@ -315,26 +385,13 @@ impl KnowledgeMap {
             Access::File { repository, path } => {
                 read_repository_file(&self.repositories, repository, path)?
             }
-            Access::Url { url } => {
-                let client = public_client(url).await?;
-                let r = client.get(url).send().await?;
-                ensure!(r.status().is_success(), "knowledge HTTP read failed");
-                let content_type = r
-                    .headers()
-                    .get("content-type")
-                    .and_then(|h| h.to_str().ok())
-                    .unwrap_or("")
-                    .to_owned();
-                ensure!(
-                    content_type.starts_with("text/") || content_type.contains("json"),
-                    "unsupported web content"
-                );
-                let raw = String::from_utf8(crate::adapters::bounded_bytes(r, 1_000_000).await?)?;
-                if content_type.contains("html") {
-                    crate::adapters::teams::plain_text(&raw)
-                } else {
-                    raw
+            Access::Url { url } => read_public_url(url).await?,
+            Access::Urls { urls } => {
+                let mut parts = Vec::new();
+                for url in urls {
+                    parts.push(format!("### {url}\n{}", read_public_url(url).await?));
                 }
+                parts.join("\n\n")
             }
             Access::Tool { .. } => anyhow::bail!("tool resources require the tool registry"),
             Access::Repository { .. } | Access::Notes { .. } => {
@@ -343,6 +400,27 @@ impl KnowledgeMap {
         };
         Ok(text)
     }
+}
+async fn read_public_url(url: &str) -> Result<String> {
+    let client = public_client(url).await?;
+    let r = client.get(url).send().await?;
+    ensure!(r.status().is_success(), "knowledge HTTP read failed");
+    let content_type = r
+        .headers()
+        .get("content-type")
+        .and_then(|h| h.to_str().ok())
+        .unwrap_or("")
+        .to_owned();
+    ensure!(
+        content_type.starts_with("text/") || content_type.contains("json"),
+        "unsupported web content"
+    );
+    let raw = String::from_utf8(crate::adapters::bounded_bytes(r, 1_000_000).await?)?;
+    Ok(if content_type.contains("html") {
+        crate::adapters::teams::plain_text(&raw)
+    } else {
+        raw
+    })
 }
 /// How many of `phrases` appear in `text` as whole words, ignoring case and accents.
 pub fn phrases_named<'a>(text: &str, phrases: impl IntoIterator<Item = &'a str>) -> usize {

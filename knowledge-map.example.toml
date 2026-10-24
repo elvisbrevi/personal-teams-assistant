@@ -15,6 +15,38 @@ kind = "file"
 repository = "personal"
 path = "topics/assistant/operations.md"
 
+# The initial configurable question. This local record starts disabled and needs an audience.
+[[resources]]
+id = "activity-record"
+description = "Daily activities saved in the Activities section"
+topics = ["activity"]
+enabled = false
+external_processing = false
+allowed_conversations = []
+allowed_senders = []
+kind = "tool"
+[resources.tool]
+type = "activity_record"
+
+[[questions]]
+id = "daily-activities"
+text = "What did you do today?"
+sources = ["activity-record"]
+
+# A group of exact public pages, selectable as one question source.
+# [[resources]]
+# id = "api-docs"
+# description = "Create-user API documentation"
+# topics = []
+# enabled = false
+# external_processing = false
+# allowed_conversations = []
+# kind = "urls"
+# urls = ["https://docs.example.com/create-user", "https://docs.example.com/auth"]
+
+# On an Azure DevOps Wiki tool, page_urls pins exact authenticated pages instead of Search:
+# page_urls = ["https://dev.azure.com/example/Project/_wiki/wikis/Documentation/12/Create-user"]
+
 # A whole repository as one source: its Markdown and text files, searched by relevance through
 # the knowledge index. Each answer reads the sections that best match the request.
 # [[resources]]

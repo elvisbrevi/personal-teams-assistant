@@ -372,9 +372,9 @@ pub(super) const TOOLS: &[Tool] = &[
         schema: none,
     },
     Tool {
-        name: "cases_list",
-        title: "Cases",
-        description: "The built-in kinds of request with their default texts (how the model recognizes each, how it is answered) and the user's changes.",
+        name: "questions_list",
+        title: "Questions",
+        description: "Configured questions, their sources and owner-associated requests. Unmatched messages stay unanswered for review.",
         effect: Effect::Read,
         schema: none,
     },
@@ -493,23 +493,30 @@ pub(super) const TOOLS: &[Tool] = &[
         schema: || object(json!({"id": string("The context ID.")}), &["id"]),
     },
     Tool {
-        name: "case_update",
-        title: "Change a case",
-        description: "Replaces the user's change to a built-in case: enabled, description (how the model recognizes it), keywords, sources and instructions (how to answer it). Omitted fields keep their defaults.",
+        name: "question_save",
+        title: "Save a question",
+        description: "Adds or replaces a configured question: id, text, sources (existing IDs), optional examples. Audiences are never broadened.",
+        effect: Effect::Local,
+        schema: || object(json!({"question":{"type":"object"}}), &["question"]),
+    },
+    Tool {
+        name: "question_remove",
+        title: "Remove a question",
+        description: "Removes a configured question.",
+        effect: Effect::Local,
+        schema: || object(json!({"id":string("Question ID.")}), &["id"]),
+    },
+    Tool {
+        name: "question_associate",
+        title: "Associate a message with a question",
+        description: "Associates an unanswered message with an existing question, or creates a new question with selected sources. Saves the message as an example in Questions; never sends an answer.",
         effect: Effect::Local,
         schema: || {
             object(
-                json!({"id": string("general, status_round, recap, activity_review, documentation, personal_request or statement."), "change": {"type": "object", "description": "enabled, description, keywords, sources, instructions."}}),
-                &["id", "change"],
+                json!({"resource":string("Message resource."),"question_id":string("Existing question ID; omit to create one."),"text":string("New question text."),"sources":strings("Source IDs for the question.")}),
+                &["resource"],
             )
         },
-    },
-    Tool {
-        name: "case_reset",
-        title: "Restore a case",
-        description: "Restores a built-in case's defaults.",
-        effect: Effect::Local,
-        schema: || object(json!({"id": string("The case ID.")}), &["id"]),
     },
     Tool {
         name: "person_save",
@@ -533,7 +540,7 @@ pub(super) const TOOLS: &[Tool] = &[
     Tool {
         name: "answer_rate",
         title: "Rate an answer",
-        description: "Rates an answer good or bad with a comment; a good one can become an example for similar requests (structure and tone only), within a context. null clears the rating.",
+        description: "Rates an answer good or bad with a comment; ratings automatically guide answers to the matched question: good suggests its approach, bad rejects its mistakes. Facts always come from fresh evidence. null clears the rating.",
         effect: Effect::Local,
         schema: || {
             object(
@@ -825,7 +832,7 @@ pub(super) async fn run(name: &str, args: &Value) -> Result<Value, String> {
                 json!({"resource": r["resource"], "status": r["status"], "created_at": r["created_at"], "reason": a["reason"],
                     "intent": a["intent"], "question": a["question"], "answer": answer,
                     "sent": !a["sent"].is_null(), "source": a["source"], "context": a["context"], "sender_name": a["sender_name"],
-                    "person": a["person"], "feedback": a["feedback"]})
+                    "person": a["person"], "feedback": a["feedback"], "identified_question": a["identified_question"], "available_sources": a["available_sources"], "selected_sources": a["selected_sources"]})
             }).collect::<Vec<_>>()))
         }
         "message_show" => {
@@ -835,6 +842,16 @@ pub(super) async fn run(name: &str, args: &Value) -> Result<Value, String> {
         "sources_list" => Ok(ipc("snapshot", json!({})).await?["map"]["resources"].clone()),
         "contexts_list" => Ok(ipc("snapshot", json!({})).await?["map"]["contexts"].clone()),
         "people_list" => Ok(ipc("snapshot", json!({})).await?["map"]["people"].clone()),
+        "questions_list" => Ok(ipc("snapshot", json!({})).await?["map"]["questions"].clone()),
+        "question_save" => {
+            let question = args.get("question").cloned().filter(Value::is_object).ok_or("question must be an object.")?;
+            edit(|p| upsert(p, "questions", question)).await
+        }
+        "question_remove" => {
+            let id = text(args, "id")?.to_owned();
+            edit(|p| remove(p, "questions", &id)).await
+        }
+        "question_associate" => ipc("question_associate", args.clone()).await,
         "cases_list" => {
             let s = ipc("snapshot", json!({})).await?;
             Ok(json!({"built_in": s["cases"], "changes": s["map"]["cases"]}))

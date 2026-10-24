@@ -1046,7 +1046,7 @@ async function reload() {
   dirtyGroups.clear();
   renderSavebar();
   renderLive();
-  renderCredentials(); renderRepositories(); renderResources(); renderContexts(); renderCases(); renderPeople(); renderNoteContexts(); renderChatSources();
+  renderCredentials(); renderRepositories(); renderResources(); renderContexts(); renderQuestions(); renderPeople(); renderNoteContexts(); renderChatSources();
   await Promise.all([loadChain(), loadSelfChat()]);
 }
 
@@ -1464,6 +1464,11 @@ const statusLabels = {
   uncertain: [t('Uncertain send'), 'error'], refining: [t('Generating'), 'active'],
 };
 const reasonLabels = {
+  question_associated: t('The message was associated with a question. Generate an answer to review it.'),
+  no_matching_question: t('No configured question matched. Associate it with a question to handle similar messages.'),
+  question_matching_unavailable: t('The question could not be identified. Left for review.'),
+  question_sources_unavailable: t('The question was identified, but none of its sources is enabled and authorized for this conversation.'),
+  rejected_answer_repeated: t('The answer repeats a response you rejected for this question. Left for review.'),
   ineligible_message: t('Not addressed to the assistant: your own, from a group without a mention, too old, empty or an answer of the app.'),
   sensitive_question: t('The question contains sensitive data; it is left to you.'),
   no_authorized_resource: t('No source is authorized for this conversation.'),
@@ -1689,7 +1694,7 @@ function answerActions(row) {
 }
 
 /** An answer exists (sent or proposed) and the message is not being processed. */
-const rateable = row => !!(row.audit.sent || row.audit.proposed)?.trim() && !row.resource.startsWith('simulation:')
+const rateable = row => !!(row.audit.sent || row.audit.proposed)?.trim()
   && !['pending', 'processing', 'refining', 'sending'].includes(row.status);
 /** Ratings being edited, kept across refreshes: resource → { rating, comment, example, context }. */
 const feedbackDrafts = new Map();
@@ -1710,7 +1715,7 @@ function feedbackBlock(row) {
     el('p', { class: 'hint', textContent: t('An example guides the structure and tone of later answers in any chat, never their facts. Do not choose answers with private details.') }));
   const sync = () => {
     for (const button of ratings.querySelectorAll('button')) button.setAttribute('aria-pressed', String(button.dataset.rating === draft.rating));
-    exampleFields.hidden = draft.rating !== 'good';
+    exampleFields.hidden = !!row.audit.identified_question || draft.rating !== 'good';
   };
   for (const [rating, label] of [['good', t('Good answer')], ['bad', t('Needs work')]]) {
     const button = el('button', { type: 'button', textContent: label });
@@ -1729,7 +1734,7 @@ function feedbackBlock(row) {
     await invoke('answer_feedback', { resource: row.resource, rating: draft.rating, comment: draft.comment.trim(), example: draft.example, context: draft.context || null });
     feedbackDrafts.delete(row.resource);
     done(draft.rating ? t('Rating saved.') : t('Rating cleared.'));
-    await loadMessages();
+    if (!row.resource.startsWith('simulation:')) await loadMessages();
   });
   const asNote = el('button', { type: 'button', class: 'secondary', textContent: t('Save as a note') });
   asNote.onclick = () => noteFromAnswer(row);
@@ -1737,6 +1742,7 @@ function feedbackBlock(row) {
   return el('div', { class: 'field-block feedback' },
     el('strong', { textContent: t('Your rating') }),
     ratings, exampleFields,
+    ...(row.audit.identified_question ? [el('p', { class: 'hint', textContent: t('Good ratings suggest this approach. Bad ratings tell the assistant what to avoid for this question. Current facts always come from the selected sources.') })] : []),
     el('label', {}, t('Comment'), comment),
     el('div', { class: 'actions' }, asNote, save));
 }
@@ -1822,6 +1828,10 @@ function renderMessages() {
     const body = el('div', { class: 'message-body' });
     messageField(body, t('Message'), audit.question, true);
     if (audit.resolved_question) messageField(body, t('Interpreted with the context'), `${audit.resolved_question}${audit.topic ? ` · ${t('topic searched')}: ${audit.topic}` : ''}`);
+    messageField(body, t('Identified question'), audit.identified_question ? t(audit.identified_question.text) : t('No question identified'));
+    if (audit.available_sources?.length) messageField(body, t('Available sources'), audit.available_sources.map(sourceTitle).join(', '));
+    if (audit.selected_sources?.length) messageField(body, t('Sources selected to answer'), audit.selected_sources.map(sourceTitle).join(', '));
+    if (!audit.identified_question && ['no_matching_question', 'question_matching_unavailable'].includes(audit.reason)) body.append(questionAssociation(row));
     messageField(body, t('Outcome'), reasonText(audit.reason, audit));
     if (row.status === 'sent') messageField(body, t('Answer sent'), audit.sent || audit.proposed, 'markdown');
     else messageField(body, row.status === 'dry_run' ? t('Proposal (observation mode)') : t('Proposed answer (not sent)'), audit.proposed, 'markdown');
@@ -1955,7 +1965,7 @@ const catalogText = catalog => catalog.map(c => c.organization.replace(/^https:\
 
 function kindName(resource) {
   if (resource.kind === 'file') return t('File');
-  if (resource.kind === 'url') return 'URL';
+  if (resource.kind === 'url' || resource.kind === 'urls') return 'URL';
   if (resource.kind === 'repository') return t('Repository');
   if (resource.kind === 'notes') return t('Notes');
   return toolNames[resource.tool?.type] || resource.tool?.type || t('Tool');
@@ -1975,11 +1985,13 @@ function indexText(resource) {
 function accessText(resource) {
   if (resource.kind === 'file') return `${resource.repository} / ${resource.path}`;
   if (resource.kind === 'url') return resource.url;
+  if (resource.kind === 'urls') return resource.urls.join(' · ');
   if (resource.kind === 'repository') return `${t('Repository')}: ${resource.repository} · ${indexText(resource)}`;
   if (resource.kind === 'notes') return resource.contexts?.length
     ? t('Your verified notes of {contexts} and the general ones', { contexts: resource.contexts.join(', ') })
     : `${t('Your verified notes')} · ${indexText(resource)}`;
   const tool = resource.tool ?? {};
+  if (tool.page_urls) return tool.page_urls.join(' · ');
   if (tool.organization) return `${tool.organization} / ${tool.project}`;
   if (tool.repository) return `${t('Catalog')}: ${tool.repository} / ${tool.path}`;
   if (tool.catalog?.length) return `${t('Catalog')}: ${catalogText(tool.catalog)}`;
@@ -2004,6 +2016,10 @@ function renderResources() {
   const container = $('#resources');
   container.replaceChildren();
   const resources = current.map.resources;
+  const wikiChoice = $('#url-source-wiki');
+  const wikiValue = wikiChoice.value;
+  wikiChoice.replaceChildren(el('option', { value: '', textContent: t('Public pages (no sign-in)') }), ...resources.filter(r => r.tool?.type === 'azure_devops_wiki' && !r.tool.page_urls).map(r => el('option', { value: r.id, textContent: r.id })));
+  if ([...wikiChoice.options].some(o => o.value === wikiValue)) wikiChoice.value = wikiValue;
   $('#sources-summary').textContent = resources.length ? t('{ready} of {total} ready for Teams', { ready: readySources(current.map).length, total: resources.length }) : '';
   if (!resources.length) {
     container.append(el('div', { class: 'empty' }, el('p', { textContent: t('No sources yet. Add a repository or a file from one, or register the Wiki with pta sources add.') })));
@@ -2032,6 +2048,7 @@ function renderResources() {
     }
     const remove = el('button', { type: 'button', class: 'danger small', textContent: t('Remove source') });
     remove.onclick = () => {
+      if (current.map.questions?.some(q => q.sources.includes(resource.id))) return fail(t('This source belongs to a question. Change or remove that question first.'));
       current.map.resources = current.map.resources.filter(r => r !== resource);
       for (const context of current.map.contexts ?? []) context.sources = context.sources.filter(id => id !== resource.id);
       markDirty(); renderResources(); renderContexts();
@@ -2059,6 +2076,11 @@ function renderResources() {
           state = next;
         })),
       el('div', { class: 'actions' }, ...actions));
+    if (resource.kind === 'urls' || Array.isArray(resource.tool?.page_urls)) {
+      const urls = el('textarea', { rows: 4, value: (resource.urls ?? resource.tool.page_urls).join('\n'), spellcheck: false });
+      urls.oninput = () => { if (resource.kind === 'urls') resource.urls = lines(urls.value); else resource.tool.page_urls = lines(urls.value); renderFacts(); markDirty({ target: urls }); };
+      edit.insertBefore(el('label', {}, t('URLs, one per line'), urls), edit.lastElementChild);
+    }
     edit.ontoggle = () => { if (edit.open) openSources.add(resource.id); else openSources.delete(resource.id); };
     container.append(el('div', { class: 'resource' },
       el('div', { class: 'resource-head' }, el('strong', { textContent: resource.id }), badge(kindName(resource), 'active'), el('span', { class: 'grow' }), state),
@@ -2086,6 +2108,7 @@ function renderRepositories() {
       const tools = current.map.resources.filter(r => r.kind === 'tool' && r.tool?.repository === alias);
       if (tools.length) return fail(t('{alias} cannot be removed: {ids} use it. Remove those sources first.', { alias, ids: tools.map(r => r.id).join(', ') }));
       const files = current.map.resources.filter(r => r.repository === alias);
+      if (current.map.questions?.some(q => files.some(r => q.sources.includes(r.id)))) return fail(t('This source belongs to a question. Change or remove that question first.'));
       delete current.map.repositories[alias];
       current.map.resources = current.map.resources.filter(r => r.repository !== alias);
       markDirty();
@@ -2170,98 +2193,75 @@ function renderContexts() {
   }
 }
 
-// ---------------------------------------------------------------- cases
+// ---------------------------------------------------------------- questions
 
-/** What each built-in case is, in the interface language (the host sends its defaults). */
-const caseTexts = {
-  general: { name: t('Every answer'), summary: t('How every answer sounds, and how the model recognizes a question.') },
-  status_round: { name: t('Status round'), summary: t('Progress, commitments, risks or blockers of your work («avance», «compromiso», «bloqueos», a named HU).'),
-    sources: t('As built it reads Azure DevOps activity, your own recent Wiki pages and the activity record.') },
-  recap: { name: t('What you did'), summary: t('What you did on a day or period («¿qué hice ayer?», «la semana pasada»), from the activity record alone.') },
-  report_tasks: { name: t('Report tasks'), summary: t('Report registered tasks or answer a reminder to log hours, from the activity record alone.') },
-  activity_review: { name: t('Activity review'), summary: t('Your work that no task records yet, compared with your work items.'),
-    sources: t('As built it reads Azure DevOps activity, Wiki edits, your Teams messages and the activity record.') },
-  documentation: { name: t('Documentation'), summary: t('How something works or is used («según la wiki», endpoints, procedures), from the Wiki.'),
-    sources: t('As built it reads every authorized Wiki.') },
-  personal_request: { name: t('Request for you'), summary: t('A call, a meeting or your availability: left for you to answer, outside your personal chat.') },
-  statement: { name: t('Informational message'), summary: t('A message that asks for no answer: left unanswered, and replied to only when you ask for an answer in Messages.') },
-};
-/** Cases whose edit fold is open, kept across re-renders. */
-const openCases = new Set();
-
-/** Keeps only what differs from the built-in case; an unchanged case leaves the map. */
-function setCase(id, change) {
-  const clean = { id };
-  if (change.enabled === false) clean.enabled = false;
-  for (const key of ['description', 'instructions']) if (change[key]?.trim()) clean[key] = change[key].trim();
-  for (const key of ['keywords', 'sources']) if (change[key]?.length) clean[key] = change[key];
-  current.map.cases = (current.map.cases ?? []).filter(c => c.id !== id);
-  if (Object.keys(clean).length > 1) current.map.cases.push(clean);
+const openQuestions = new Set();
+const newQuestionSources = new Set();
+const sourceTitle = id => { const r = current?.map?.resources.find(r => r.id === id); return r ? `${r.id} · ${kindName(r)}` : id; };
+function questionSourceChoices(selected, changed) {
+  const choices = el('fieldset', { class: 'choices' }, el('legend', { textContent: t('Sources for this question') }));
+  for (const source of current.map.resources) {
+    const box = el('input', { type: 'checkbox', value: source.id, checked: selected.has(source.id) });
+    box.onchange = () => { if (box.checked) selected.add(source.id); else selected.delete(source.id); changed([...selected]); };
+    choices.append(el('label', { class: 'check' }, box, el('span', {}, el('strong', { textContent: source.id }),
+      el('small', { textContent: `${kindName(source)}${!source.enabled || !source.external_processing ? ` · ${t('Unavailable until enabled and authorized')}` : ''}` }))));
+  }
+  return choices;
+}
+function renderQuestions() {
+  const container = $('#questions');
+  container.replaceChildren();
+  const questions = current.map.questions ??= [];
+  $('#questions-summary').textContent = tn(questions.length, '1 question', '{n} questions');
+  const choices = questionSourceChoices(newQuestionSources, () => {});
+  choices.id = 'question-sources';
+  $('#question-sources').replaceWith(choices);
+  if (!questions.length) container.append(el('p', { class: 'hint', textContent: t('No questions yet. Add one to let the assistant recognize equivalent requests.') }));
+  for (const question of questions) {
+    const text = el('input', { value: t(question.text), maxLength: 1000 });
+    text.oninput = () => { question.text = text.value; markDirty({ target: container }); };
+    const remove = el('button', { type: 'button', class: 'danger small', textContent: t('Remove question') });
+    remove.onclick = () => { current.map.questions = questions.filter(q => q.id !== question.id); markDirty({ target: container }); renderQuestions(); };
+    const edit = el('details', { class: 'fold resource-edit', open: openQuestions.has(question.id) },
+      el('summary', { textContent: t('Edit question') }), el('label', {}, t('Question'), text),
+      questionSourceChoices(new Set(question.sources), sources => { question.sources = sources; markDirty({ target: container }); }),
+      el('div', { class: 'field-block' }, el('strong', { textContent: t('Associated requests') }),
+        ...(question.examples?.length ? [el('ul', {}, ...question.examples.map(example => el('li', { textContent: example })))] : [el('p', { class: 'hint', textContent: t('Requests associated during review appear here.') })])),
+      el('div', { class: 'actions' }, remove));
+    edit.ontoggle = () => { if (edit.open) openQuestions.add(question.id); else openQuestions.delete(question.id); };
+    container.append(el('div', { class: 'resource' }, el('strong', { textContent: t(question.text) }),
+      el('p', { class: 'resource-facts', textContent: question.sources.map(sourceTitle).join(', ') }), edit));
+  }
 }
 
-function renderCases() {
-  const container = $('#cases');
-  container.replaceChildren();
-  const changed = (current.map.cases ?? []).length;
-  $('#cases-summary').textContent = changed ? tn(changed, '1 changed', '{n} changed') : t('As built');
-  for (const built of current.cases ?? []) {
-    const texts = caseTexts[built.id] ?? { name: built.name, summary: built.summary };
-    const change = structuredClone((current.map.cases ?? []).find(c => c.id === built.id) ?? { id: built.id });
-    const badges = el('span', { class: 'case-badges' });
-    const renderBadges = () => badges.replaceChildren(
-      ...(change.enabled === false ? [badge(t('Off'), 'warn')] : []),
-      ...((current.map.cases ?? []).some(c => c.id === built.id) ? [badge(t('Changed'), 'active')] : [badge(t('As built'), 'muted')]));
-    renderBadges();
-    const keep = () => { setCase(built.id, change); markDirty({ target: container }); renderBadges(); summary(); };
-    const summary = () => {
-      const count = (current.map.cases ?? []).length;
-      $('#cases-summary').textContent = count ? tn(count, '1 changed', '{n} changed') : t('As built');
-    };
-    const area = (label, value, fallback, onchange) => {
-      const element = el('textarea', { value: value || fallback, rows: 6 });
-      element.oninput = () => { onchange(element.value.trim() === fallback.trim() ? '' : element.value); keep(); };
-      return el('label', {}, label, element);
-    };
-    const parts = [];
-    if (built.optional) {
-      const box = el('input', { type: 'checkbox', checked: change.enabled !== false });
-      box.onchange = () => { change.enabled = box.checked; keep(); };
-      parts.push(el('div', { class: 'resource-toggles' }, el('label', { class: 'check' }, box, t('Use this case'))));
-    }
-    if (built.description) parts.push(area(t('How the model recognizes it'), change.description, built.description, value => { change.description = value; }));
-    if (built.keywords) {
-      const words = el('input', { value: (change.keywords ?? []).join(', '), placeholder: t('Comma separated'), spellcheck: false });
-      words.oninput = () => { change.keywords = names(words.value); keep(); };
-      parts.push(el('label', {}, t('Extra words that identify it'), el('small', { textContent: t('Besides the built-in ones; matched whole, ignoring case and accents.') }), words));
-    }
-    if (built.sources) {
-      const choices = el('fieldset', { class: 'choices' }, el('legend', { textContent: t('Sources it reads') }),
-        el('p', { class: 'hint', textContent: `${t('With none chosen, as built.')} ${texts.sources ?? ''}` }));
-      for (const resource of current.map.resources) {
-        const box = el('input', { type: 'checkbox', value: resource.id, checked: (change.sources ?? []).includes(resource.id) });
-        box.onchange = () => {
-          change.sources = box.checked ? [...(change.sources ?? []), resource.id] : (change.sources ?? []).filter(id => id !== resource.id);
-          keep();
-        };
-        choices.append(el('label', { class: 'check' }, box, el('span', {}, el('strong', { textContent: resource.id }), el('small', { textContent: kindName(resource) }))));
-      }
-      parts.push(choices);
-    }
-    if (built.instructions) parts.push(area(t('How to answer it'), change.instructions, built.instructions, value => { change.instructions = value; }));
-    const reset = el('button', { type: 'button', class: 'secondary small', textContent: t('Restore defaults') });
-    reset.onclick = () => {
-      current.map.cases = (current.map.cases ?? []).filter(c => c.id !== built.id);
-      markDirty({ target: container });
-      renderCases();
-    };
-    const edit = el('details', { class: 'fold resource-edit', open: openCases.has(built.id) },
-      el('summary', { textContent: t('Edit case') }), ...parts, el('div', { class: 'actions' }, reset));
-    edit.ontoggle = () => { if (edit.open) openCases.add(built.id); else openCases.delete(built.id); };
-    container.append(el('div', { class: 'resource' },
-      el('div', { class: 'resource-head' }, el('strong', { class: 'title', textContent: texts.name }), el('span', { class: 'grow' }), badges),
-      el('p', { class: 'resource-facts' }, el('span', { textContent: texts.summary })),
-      edit));
-  }
+function questionAssociation(row, associated = () => {}) {
+  const select = el('select', {}, el('option', { value: '', textContent: t('Create a new question') }),
+    ...(current.map.questions ?? []).map(q => el('option', { value: q.id, textContent: t(q.text) })));
+  const text = el('input', { value: row.audit.question ?? '', maxLength: 1000 });
+  const textLabel = el('label', {}, t('New question'), text);
+  let selected = new Set();
+  let choices = questionSourceChoices(selected, () => {});
+  select.onchange = () => {
+    textLabel.hidden = !!select.value;
+    selected = new Set(current.map.questions?.find(q => q.id === select.value)?.sources ?? []);
+    const next = questionSourceChoices(selected, () => {}); choices.replaceWith(next); choices = next;
+  };
+  const outcome = el('p', { class: 'hint', role: 'status' });
+  const save = el('button', { type: 'button', class: 'secondary', textContent: t('Save association') });
+  const form = el('details', { class: 'fold question-association' }, el('summary', { textContent: t('Associate question') }),
+    el('label', {}, t('Existing question or new'), select), textLabel, choices,
+    el('p', { class: 'hint', textContent: t('The message becomes an example of this question. Source audiences still apply. Saving does not send an answer.') }), save, outcome);
+  save.onclick = () => busy(save, async () => {
+    if (!selected.size || (!select.value && !text.value.trim())) throw t('Write a question and select at least one source.');
+    const result = await applying(() => invoke('question_associate', { resource: row.resource,
+      ...(select.value ? { question_id: select.value } : { text: text.value.trim() }), sources: [...selected] }));
+    row.audit.identified_question = result.question;
+    associated(result.question);
+    outcome.textContent = t('Associated with: {question}', { question: t(result.question.text) });
+    done(t('Question associated. You can review it in Questions.'));
+    if (!row.resource.startsWith('simulation:')) await loadMessages();
+  });
+  return form;
 }
 
 // ---------------------------------------------------------------- people
@@ -2618,7 +2618,11 @@ function bubble(kind, ...content) {
 }
 
 function answerBubble(result) {
-  if (!result.answer) return bubble('bot none', `${t('No answer')}: ${reasonText(result.reason) || result.status}`);
+  const row = { resource: result.resource, status: result.status, audit: { ...result, question: result.request, proposed: result.answer } };
+  const question = el('p', { class: 'hint', textContent: result.identified_question ? `${t('Identified question')}: ${t(result.identified_question.text)}` : t('No question identified') });
+  const sources = el('p', { class: 'hint', textContent: `${t('Available sources')}: ${(result.available_sources ?? []).map(sourceTitle).join(', ')}\n${t('Sources selected to answer')}: ${(result.selected_sources ?? []).map(sourceTitle).join(', ')}` });
+  const review = result.resource && !result.identified_question && ['no_matching_question', 'question_matching_unavailable'].includes(result.reason) ? questionAssociation(row, q => { question.textContent = `${t('Identified question')}: ${t(q.text)}`; }) : null;
+  if (!result.answer) return bubble('bot none', `${t('No answer')}: ${reasonText(result.reason) || result.status}`, question, sources, review);
   const meta = el('div', { class: 'meta' });
   for (const id of result.used_sources ?? []) meta.append(badge(id, 'active'));
   if (result.partial) meta.append(badge(t('Partial coverage'), 'warn'));
@@ -2628,7 +2632,7 @@ function answerBubble(result) {
     refs = el('div', { class: 'refs' }, el('strong', { textContent: t('Verified references') }),
       el('ul', {}, ...result.references.map(ref => el('li', {}, link(ref.label || ref.id, ref.url)))));
   }
-  return bubble('bot', markdown(result.answer), meta.childNodes.length ? meta : null, refs);
+  return bubble('bot', markdown(result.answer), question, sources, meta.childNodes.length ? meta : null, refs, result.resource ? feedbackBlock(row) : null);
 }
 
 function resizeComposer() {
@@ -2865,6 +2869,23 @@ $('#add-source').onclick = () => {
   renderResources();
   notify(t('Source {id} added, disabled. Save the changes to keep it.', { id }));
 };
+$('#add-url-source').onclick = () => {
+  const id = $('#url-source-id').value.trim(), urls = [...new Set(lines($('#url-source-addresses').value))];
+  if (!/^[a-z][a-z0-9_-]{0,63}$/.test(id) || current.map.resources.some(r => r.id === id)) return fail(t('Choose a unique source ID using lowercase letters, digits, - or _.'));
+  if (!urls.length || urls.length > 10) return fail(t('Add between one and ten HTTPS URLs.'));
+  let parsed;
+  try { parsed = urls.map(value => new URL(value)); } catch { return fail(t('Add between one and ten HTTPS URLs.')); }
+  if (parsed.some(url => url.protocol !== 'https:' || url.username || url.password || url.hash || (url.port && url.port !== '443'))) return fail(t('Add between one and ten HTTPS URLs.'));
+  const wiki = current.map.resources.find(r => r.id === $('#url-source-wiki').value);
+  if (parsed.some(url => url.hostname === 'dev.azure.com') && !wiki) return fail(t('Select an Azure DevOps Wiki connection for these pages.'));
+  if (wiki && parsed.some(url => url.hostname !== 'dev.azure.com' || !url.pathname.includes('/_wiki/wikis/'))) return fail(t('The Wiki connection reads only Azure DevOps Wiki page URLs.'));
+  current.map.resources.push({ id, description: $('#url-source-description').value.trim() || id, topics: [], enabled: false, external_processing: false, allowed_conversations: [], allowed_senders: [],
+    ...(wiki ? { kind: 'tool', tool: { ...structuredClone(wiki.tool), repository_docs: false, page_urls: urls } } : { kind: 'urls', urls }) });
+  for (const selector of ['#url-source-id', '#url-source-description', '#url-source-addresses']) field(selector, '');
+  $('#url-source-form').open = false; openSources.add(id);
+  markDirty({ target: $('#add-url-source') }); renderResources(); renderQuestions();
+  notify(t('Source {id} added, disabled. Enable it, authorize it, choose its conversations and save.', { id }));
+};
 $('#add-record').onclick = () => {
   if (current.map.resources.some(r => r.tool?.type === 'activity_record')) return;
   const source = recordSource();
@@ -2890,6 +2911,17 @@ $('#add-person').onclick = () => {
   markDirty({ target: $('#add-person') });
   renderPeople();
   notify(t('{name} added. Save the changes to keep it.', { name }));
+};
+$('#add-question').onclick = () => {
+  const text = $('#question-text').value.trim();
+  if (!text || !newQuestionSources.size) return fail(t('Write a question and select at least one source.'));
+  const question = { id: `question-${crypto.randomUUID().replaceAll('-', '')}`, text, sources: [...newQuestionSources], examples: [] };
+  (current.map.questions ??= []).push(question);
+  openQuestions.add(question.id);
+  field('#question-text', ''); newQuestionSources.clear();
+  $('#question-form').open = false;
+  markDirty({ target: $('#add-question') }); renderQuestions();
+  notify(t('Question added. Save the changes to keep it.'));
 };
 $('#add-context').onclick = () => {
   const id = $('#context-id').value.trim();
@@ -2963,7 +2995,7 @@ $('#chat-form').onsubmit = async event => {
   try {
     const result = await invoke('chat', { input: { session, text, group: false, mentioned: false, sources } });
     pending.remove();
-    answerBubble(result);
+    answerBubble({ ...result, request: text });
   } catch (error) {
     pending.remove();
     bubble('bot none', t('The test could not complete: {error}', { error: tx(String(error?.message ?? error)) }));

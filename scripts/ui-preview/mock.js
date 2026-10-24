@@ -46,6 +46,9 @@
     snapshot.credentials.OLD_REVIEWER_KEY = 'retired';
     Object.assign(snapshot, { running: true, active_subscriptions: 1, microsoft_connected: true, github_connected: true, tunnel_running: true });
   }
+  const activitySource = { id: 'activity-record', description: 'Saved daily activities', topics: [], enabled: scenario !== 'fresh', external_processing: scenario !== 'fresh', allowed_conversations: scenario === 'fresh' ? [] : ['*'], allowed_senders: [], kind: 'tool', tool: { type: 'activity_record' } };
+  snapshot.map.resources.push(activitySource);
+  snapshot.map.questions = [{ id: 'daily-activities', text: 'What did you do today?', sources: ['activity-record'], examples: [] }];
   // The built-in cases the host sends, with short synthetic default texts.
   snapshot.cases = [
     ['general', 'Every answer', true, true, false, null, false],
@@ -76,6 +79,7 @@
     { resource: 'chats/48:notes/messages/1007', status: 'processing', created_at: secs(ago(1)), audit: { received_at: ago(1), conversation_kind: 'self', question: 'What did I do yesterday?', reason: 'retrieving', intent: 'activity_review', trace: trace([1, 'received', '']) } },
   ];
 
+  if (scenario !== 'fresh') audit.push({ resource: 'chats/19:review/messages/1010', status: 'ignored', created_at: secs(ago(8)), audit: { received_at: ago(8), conversation_kind: 'direct', question: 'Summary of your activities today', reason: 'no_matching_question', available_sources: ['activity-record'], selected_sources: [], trace: [] } });
   const parents = [
     { id: 4321, title: 'Receipt PDF for card payments', url: `${org}/Payments/_workitems/edit/4321`, organization: org, project: 'Payments', kind: 'User Story', state: 'Active' },
     { id: 4388, title: 'Refund notifications', url: `${org}/Payments/_workitems/edit/4388`, organization: org, project: 'Payments', kind: 'User Story', state: 'New' },
@@ -252,6 +256,18 @@
     index_status: () => ({ sources: snapshot.map.resources.filter(r => ['repository', 'notes'].includes(r.kind)).map(r => ({ id: r.id, kind: r.kind, enabled: r.enabled,
       index: r.kind === 'repository' ? { documents: 42, sections: 318, embedded: 0, synced_at: secs(ago(12)) } : {} })), notes: { documents: notes.length, sections: notes.length, embedded: 0 }, embeddings: null }),
     index_refresh: args => [{ id: args.source, sync: { added: 1, updated: 2, removed: 0, unchanged: 39, skipped: 0 } }],
+    question_associate: args => {
+      const row = audit.find(r => r.resource === args.resource);
+      let question = snapshot.map.questions.find(q => q.id === args.question_id);
+      if (!question) { question = { id: `question-${Date.now()}`, text: args.text, sources: args.sources, examples: [] }; snapshot.map.questions.push(question); }
+      for (const q of snapshot.map.questions) q.examples = q.examples.filter(s => s !== row.audit.question);
+      if (question.text !== row.audit.question) question.examples.push(row.audit.question);
+      question.sources = args.sources;
+      row.audit.identified_question = { id: question.id, text: question.text };
+      row.audit.reason = 'question_associated';
+      window.__ptaLastAssociation = structuredClone(args);
+      return { resource: args.resource, question: structuredClone(row.audit.identified_question) };
+    },
     answer_feedback: args => {
       window.__ptaLastFeedback = structuredClone(args);
       const row = audit.find(r => r.resource === args.resource);
