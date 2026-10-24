@@ -11,7 +11,7 @@ use axum::{
     routing::post,
 };
 use fs2::FileExt;
-use serde_json::json;
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
     collections::VecDeque,
@@ -372,6 +372,7 @@ fn router(portal: Arc<Portal>) -> Router {
         .route("/api/session", get(session))
         .route("/api/logout", post(logout))
         .route("/api/control", post(command))
+        .route("/api/machines", post(machine_command))
         .route(
             "/webhooks/{id}/graph/{kind}",
             post(webhook).layer(DefaultBodyLimit::max(256_000)),
@@ -403,7 +404,7 @@ async fn secure_headers(
     let mut response = if host != Some(expected) {
         StatusCode::MISDIRECTED_REQUEST.into_response()
     } else if (request.method() == axum::http::Method::POST
-        && store::callback_path(request.uri().path()))
+        && (store::callback_path(request.uri().path()) || request.uri().path() == "/api/machines"))
         || (request.method() == axum::http::Method::GET
             && PUBLIC_ASSETS.contains(&request.uri().path()))
     {
@@ -670,6 +671,122 @@ async fn command(
         let _ = portal.resume(
             &account,
             matches!(method.as_str(), "start_assistant" | "restart"),
+        );
+    }
+    Json(reply).into_response()
+}
+
+/// Machine-to-machine transport uses its own account-bound credentials, never browser cookies.
+async fn machine_command(
+    State(portal): State<Arc<Portal>>,
+    headers: HeaderMap,
+    Json(mut args): Json<serde_json::Value>,
+) -> Response {
+    if headers.contains_key(header::ORIGIN) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let Ok(_permit) = portal.requests.try_acquire() else {
+        return StatusCode::TOO_MANY_REQUESTS.into_response();
+    };
+    let Some(token) = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|h| h.to_str().ok())
+        .and_then(|h| h.strip_prefix("Bearer "))
+    else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    let registration = args["action"] == "register";
+    let entries = match accounts(&portal.root) {
+        Ok(entries) => entries,
+        Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
+    };
+    let account = if registration {
+        if !portal.login_limit("machine-register").await {
+            return StatusCode::TOO_MANY_REQUESTS.into_response();
+        }
+        let result = async {
+            let client = reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .timeout(Duration::from_secs(15))
+                .user_agent("personal-teams-assistant")
+                .build()?;
+            let response = client
+                .get("https://api.github.com/user")
+                .bearer_auth(token)
+                .send()
+                .await?;
+            ensure!(
+                response.status().is_success(),
+                "GitHub did not verify the machine's account."
+            );
+            let user: Value = crate::adapters::bounded_json(response, 64_000).await?;
+            user["id"]
+                .as_u64()
+                .filter(|id| *id > 0)
+                .context("Invalid GitHub account.")
+        }
+        .await;
+        let Ok(user) = result else {
+            return StatusCode::UNAUTHORIZED.into_response();
+        };
+        entries.into_iter().find(|a| {
+            a.enabled
+                && a.access_binding
+                    .as_ref()
+                    .is_some_and(|b| b.provider_user_id == user.to_string())
+        })
+    } else {
+        let hash = format!("{:x}", Sha256::digest(token.as_bytes()));
+        let id = args["id"].as_str().unwrap_or_default();
+        entries
+            .into_iter()
+            .filter(|a| a.enabled && a.access_binding.is_some())
+            .find(|a| {
+                fs::read(profile_dir(&portal.root, a).join("implementation/registry.json"))
+                    .ok()
+                    .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+                    .is_some_and(|r| {
+                        r["machines"].as_array().is_some_and(|ms| {
+                            ms.iter().any(|m| {
+                                m["id"] == id
+                                    && m["account_version"] == a.version
+                                    && m["secret_hash"]
+                                        .as_str()
+                                        .is_some_and(|h| security::constant_eq(h, &hash))
+                            })
+                        })
+                    })
+            })
+    };
+    let Some(account) = account else {
+        return StatusCode::FORBIDDEN.into_response();
+    };
+    let dir = match portal.worker(&account).await {
+        Ok(dir) => dir,
+        Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
+    };
+    let mut request = control::Request::new(if registration {
+        "machine_register"
+    } else {
+        "machine_protocol"
+    });
+    if registration {
+        args["account_version"] = json!(account.version);
+    }
+    if !registration {
+        args["token"] = json!(token);
+    }
+    request.args = args;
+    let mut reply = match control::client_at(request, &dir).await {
+        Ok(reply) => reply,
+        Err(_) => return StatusCode::BAD_GATEWAY.into_response(),
+    };
+    if registration && reply.ok {
+        reply.data["account"] = json!(
+            account
+                .access_binding
+                .as_ref()
+                .and_then(|b| b.provider_user_id.parse::<u64>().ok())
         );
     }
     Json(reply).into_response()

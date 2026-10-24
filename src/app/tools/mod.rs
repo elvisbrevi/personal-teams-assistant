@@ -42,6 +42,199 @@ fn confirmed() -> Value {
 
 pub(super) const TOOLS: &[Tool] = &[
     Tool {
+        name: "implementation_sessions",
+        title: "Work item agent sessions",
+        description: "Persisted native coding-agent session IDs, machines, states and start/finish times for verified work item URLs, including the last reported sessions of offline machines.",
+        effect: Effect::Read,
+        schema: || {
+            object(
+                json!({"urls":strings("Canonical work item URLs (up to 100).")}),
+                &["urls"],
+            )
+        },
+    },
+    Tool {
+        name: "implementation_open_session",
+        title: "Open a native agent session",
+        description: "Open a recorded Codex session or hand off a completed local Claude session on a supported desktop. URLs and CLI arguments use the recorded provider/session ID; arbitrary links are rejected. Unsupported apps or remote/local session mismatches return a reason.",
+        effect: Effect::Read,
+        schema: || {
+            object(
+                json!({"machine":string("This desktop's machine ID."),"id":string("Recorded run ID.")}),
+                &["machine", "id"],
+            )
+        },
+    },
+    Tool {
+        name: "list_github_issues",
+        title: "My GitHub issues",
+        description: "All issues assigned to the connected GitHub account, including epics. Pull requests are excluded.",
+        effect: Effect::Read,
+        schema: || {
+            let mut schema = todo_schema();
+            schema["properties"]
+                .as_object_mut()
+                .unwrap()
+                .remove("source");
+            schema["properties"].as_object_mut().unwrap().remove("kind");
+            schema["properties"]["state"] = json!({"type":"string","enum":["open","closed"]});
+            schema
+        },
+    },
+    Tool {
+        name: "machine_list",
+        title: "Execution machines",
+        description: "Online machines connected to this account and the single selected Teams machine.",
+        effect: Effect::Read,
+        schema: none,
+    },
+    Tool {
+        name: "machine_settings",
+        title: "This machine",
+        description: "Name, coordinator and allowed directory roots of this host.",
+        effect: Effect::Read,
+        schema: none,
+    },
+    Tool {
+        name: "machine_save",
+        title: "Configure this machine",
+        description: "Set this machine's name and allowed implementation roots.",
+        effect: Effect::External,
+        schema: || {
+            object(
+                json!({"name":string("Machine name."),"roots":strings("Absolute allowed directory roots."),"confirmed":confirmed()}),
+                &["name", "roots"],
+            )
+        },
+    },
+    Tool {
+        name: "machine_connect",
+        title: "Connect an execution machine",
+        description: "Register this machine with the coordinator using the connected GitHub identity. Teams must be stopped first.",
+        effect: Effect::External,
+        schema: || {
+            object(
+                json!({"url":string("Coordinator HTTPS origin."),"confirmed":confirmed()}),
+                &["url"],
+            )
+        },
+    },
+    Tool {
+        name: "machine_disconnect",
+        title: "Disconnect this machine",
+        description: "Disconnect this host from its coordinator after stopping Teams.",
+        effect: Effect::External,
+        schema: || object(json!({"confirmed":confirmed()}), &[]),
+    },
+    Tool {
+        name: "machine_teams",
+        title: "Choose the Teams machine",
+        description: "Choose the one account machine allowed to receive and answer Teams. Handover waits for the old lease to expire.",
+        effect: Effect::External,
+        schema: || {
+            object(
+                json!({"machine":string("Online machine ID."),"confirmed":confirmed()}),
+                &["machine"],
+            )
+        },
+    },
+    Tool {
+        name: "implementation_prepare",
+        title: "Prepare work item implementation",
+        description: "Read and verify an Azure HU/bug/task or GitHub Epic/issue before configuring its implementation.",
+        effect: Effect::Read,
+        schema: || object(json!({"item":implementation_item()}), &["item"]),
+    },
+    Tool {
+        name: "implementation_catalog",
+        title: "Machine coding agents",
+        description: "Installed coding CLIs, models and efforts on the selected machine.",
+        effect: Effect::Read,
+        schema: || object(json!({"machine":string("Machine ID.")}), &["machine"]),
+    },
+    Tool {
+        name: "implementation_browse",
+        title: "Browse machine directories",
+        description: "List directories under the selected machine's allowed roots. Paths are canonicalized and symlink escapes are rejected.",
+        effect: Effect::Read,
+        schema: || {
+            object(
+                json!({"machine":string("Machine ID."),"path":string("Absolute directory; empty lists allowed roots.")}),
+                &["machine"],
+            )
+        },
+    },
+    Tool {
+        name: "implementation_runs",
+        title: "Implementation runs",
+        description: "Durable run states, results and child plans on the selected machine.",
+        effect: Effect::Read,
+        schema: || {
+            object(
+                json!({"machine":string("Machine ID."),"id":string("Optional run ID."),"work_item_url":string("Optional canonical work item URL.")}),
+                &["machine"],
+            )
+        },
+    },
+    Tool {
+        name: "implementation_cancel",
+        title: "Stop an implementation run",
+        description: "Stop the selected coding run; retain its changes and record the cancellation.",
+        effect: Effect::External,
+        schema: || {
+            object(
+                json!({"machine":string("Machine ID."),"id":string("Run ID."),"confirmed":confirmed()}),
+                &["machine", "id"],
+            )
+        },
+    },
+    Tool {
+        name: "implementation_start",
+        title: "Start work item implementation",
+        description: "HU/bug/Epic: propose children for review. Task/development bug/issue: run the selected coding agent in the selected directories. Never sends Teams messages or automatically publishes changes.",
+        effect: Effect::External,
+        schema: || {
+            object(
+                json!({"machine":string("Machine ID."),"item":implementation_item(),"context":string("The user's implementation context."),"directories":strings("Selected absolute working directories."),"provider":{"type":"string","enum":["codex","claude","opencode"]},"model":string("Available model ID."),"effort":string("Supported model effort."),"confirmed":confirmed()}),
+                &[
+                    "machine",
+                    "item",
+                    "context",
+                    "directories",
+                    "provider",
+                    "model",
+                    "effort",
+                ],
+            )
+        },
+    },
+    Tool {
+        name: "implementation_creation",
+        title: "Child creation outcome",
+        description: "Read the coordinator's durable outcome of a reviewed child creation, including verified links. A sending or uncertain submission must never be replayed.",
+        effect: Effect::Read,
+        schema: || object(json!({"id":string("Plan run ID.")}), &["id"]),
+    },
+    Tool {
+        name: "implementation_create",
+        title: "Create reviewed child work items",
+        description: "Create the explicitly selected and reviewed children of this new implementation plan. Azure requires its dedicated write credential; GitHub requires Issues write access. Never replays a submitted or uncertain plan.",
+        effect: Effect::External,
+        schema: || {
+            object(
+                json!({"machine":string("Plan machine ID."),"id":string("Plan run ID."),"item":implementation_item(),"children":{"type":"array","items":object(json!({"title":string("Reviewed title."),"description":string("Reviewed description.")}), &["title","description"])},"confirmed":confirmed()}),
+                &["machine", "id", "item", "children"],
+            )
+        },
+    },
+    Tool {
+        name: "get_github_issue",
+        title: "GitHub issue detail",
+        description: "Read a verified GitHub issue, including sub-issues. Rejects pull requests and URL-directed credential use.",
+        effect: Effect::Read,
+        schema: || detail_schema(true),
+    },
+    Tool {
         name: "open_work_item",
         title: "Open a work item",
         description: "Opens a verified canonical Azure DevOps HU or GitHub issue URL in the native browser. A headless host returns the URL to open on another device. No item is changed.",
@@ -430,6 +623,12 @@ fn todo_schema() -> Value {
         &[],
     )
 }
+fn implementation_item() -> Value {
+    object(
+        json!({"provider":{"type":"string","enum":["azure","github"]},"id":{"type":"integer","minimum":1},"project":string("Azure project or GitHub OWNER/REPO."),"source":string("Enabled Azure source ID."),"task":{"type":"boolean","description":"Azure task-category item (including Bug Desarrollo)."}}),
+        &["provider", "id", "project"],
+    )
+}
 
 fn detail_schema(github: bool) -> Value {
     let mut properties = json!({"id":{"type":"integer","minimum":1,"maximum":2147483647}, "project":string("Azure project, or required GitHub OWNER/REPO; issue numbers are local to their repository.")});
@@ -482,7 +681,10 @@ pub(super) fn validate(name: &str, args: &Value) -> Result<(), String> {
             return Err(format!("Missing tool argument: {required}"));
         }
     }
-    if matches!(name, "list_azure_hus" | "list_github_epics") {
+    if matches!(
+        name,
+        "list_azure_hus" | "list_github_epics" | "list_github_issues"
+    ) {
         let filters: crate::tools::todo::Filters =
             serde_json::from_value(json!(args)).map_err(|_| "Invalid To-Do filters.")?;
         filters.validate().map_err(|e| e.to_string())?;
@@ -492,11 +694,14 @@ pub(super) fn validate(name: &str, args: &Value) -> Result<(), String> {
             serde_json::from_value(json!(args)).map_err(|_| "Invalid daily task arguments.")?;
         query.validate().map_err(|e| e.to_string())?;
     }
-    if matches!(name, "get_azure_hu" | "get_azure_task" | "get_github_epic") {
+    if matches!(
+        name,
+        "get_azure_hu" | "get_azure_task" | "get_github_epic" | "get_github_issue"
+    ) {
         let detail: crate::tools::todo::DetailRequest =
             serde_json::from_value(json!(args)).map_err(|_| "Invalid work item arguments.")?;
         detail
-            .validate(name == "get_github_epic")
+            .validate(name.starts_with("get_github_"))
             .map_err(|e| e.to_string())?;
     }
     Ok(())
@@ -568,8 +773,15 @@ fn text<'a>(args: &'a Value, name: &str) -> Result<&'a str, String> {
 /// What a tool does, run against the host.
 pub(super) async fn run(name: &str, args: &Value) -> Result<Value, String> {
     validate(name, args)?;
+    if super::implementation::handles(name) {
+        let mut args = args.clone();
+        if name != "implementation_create" {
+            args.as_object_mut().unwrap().remove("confirmed");
+        }
+        return ipc(name, args).await;
+    }
     match name {
-        "list_azure_hus" | "list_azure_tasks" | "list_github_epics" | "get_azure_hu" | "get_azure_task" | "get_github_epic" | "open_work_item" => ipc(name, args.clone()).await,
+        "list_azure_hus" | "list_azure_tasks" | "list_github_epics" | "list_github_issues" | "get_azure_hu" | "get_azure_task" | "get_github_epic" | "get_github_issue" | "open_work_item" => ipc(name, args.clone()).await,
         "status" => {
             let s = ipc("snapshot", json!({})).await?;
             Ok(json!({
@@ -718,6 +930,27 @@ pub(super) async fn run(name: &str, args: &Value) -> Result<Value, String> {
 /// The user's confirmation for an action with effects outside the app, in words they read.
 pub(super) fn confirmation(name: &str, args: &Value) -> Option<String> {
     Some(match name {
+        "implementation_start" => format!(
+            "Start the selected coding agent for item {} on machine {} in the selected directories?",
+            args["item"]["id"], args["machine"]
+        ),
+        "implementation_create" => {
+            "Create the reviewed children of this implementation plan in Azure DevOps or GitHub?"
+                .into()
+        }
+        "implementation_cancel" => {
+            "Stop this implementation run, retaining its current file changes?".into()
+        }
+        "machine_connect" => {
+            "Register this machine with the selected coordinator for this account?".into()
+        }
+        "machine_disconnect" => "Disconnect this machine from its coordinator?".into(),
+        "machine_teams" => {
+            "Select this account's only machine for Teams reading and replies?".into()
+        }
+        "machine_save" => {
+            "Save this machine's name and allowed implementation directory roots?".into()
+        }
         "answer_send" => format!(
             "Send the written answer of {} to Teams, as you?",
             args["resource"].as_str().unwrap_or("this message")

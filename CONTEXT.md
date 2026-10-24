@@ -59,3 +59,24 @@ _Avoid_: activity history (for the data), log
 **HU**:
 A work item that can hold tasks: a user story, backlog item, Basic-process issue or a bug that is not closed.
 _Avoid_: story, parent
+
+### Implementation
+
+**Execution machine**:
+A computer connected to the user's assistant account that can run a coding agent in directories the user selected.
+_Avoid_: worker node, resource
+
+**Coordinator**:
+The user's main assistant installation, where their connected execution machines are listed and the machine responsible for Teams is selected.
+
+**Implementation plan**:
+A proposal of children for an HU, bug or GitHub epic, reviewed and editable by the user before they create the children.
+_Avoid_: activity plan, registration proposal
+
+**Implementation run**:
+One attempt to plan children or implement a selected task, development bug or GitHub issue, using the user's context and chosen coding agent on an execution machine.
+_Avoid_: activity run
+
+**Agent session**:
+The coding agent's own conversation associated with an implementation run and its work item. Its native session ID identifies it in that agent's tools and supported app links.
+_Avoid_: run ID

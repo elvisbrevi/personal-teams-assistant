@@ -7,6 +7,19 @@ const source = fs.readFileSync(path.join(__dirname, '../desktop/ui/app.js'), 'ut
 const i18n = fs.readFileSync(path.join(__dirname, '../desktop/ui/i18n.js'), 'utf8');
 const style = fs.readFileSync(path.join(__dirname, '../desktop/ui/style.css'), 'utf8');
 
+test('session app links use real provider formats and explain unsupported local/mobile sessions', () => {
+  const context = vm.createContext({ t: key => key, encodeURIComponent });
+  vm.runInContext(source.slice(source.indexOf('function sessionDestination('), source.indexOf('\nfunction sessionIsMobile(')), context);
+  const session = { provider: 'codex', session_id: '11111111-1111-4111-8111-111111111111' };
+  context.session = session;
+  assert.equal(vm.runInContext('sessionDestination(session, false).url', context), 'codex://threads/11111111-1111-4111-8111-111111111111');
+  assert.ok(vm.runInContext('sessionDestination(session, true).reason', context));
+  context.session = { ...session, provider: 'claude' };
+  assert.ok(vm.runInContext('sessionDestination(session, true).reason.includes("Remote Control")', context));
+  context.session = { ...session, session_id: 'javascript:alert(1)' };
+  assert.equal(vm.runInContext('sessionDestination(session, false).url', context), undefined);
+});
+
 test('every To-Do card opens its own detail after the list is rendered', async () => {
   const nodes = new Map(), opened = [];
   const node = props => ({ ...props, replaceChildren(...children) { this.children = children; }, setAttribute() {} });
@@ -20,12 +33,13 @@ test('every To-Do card opens its own detail after the list is rendered', async (
     el: (tag, props, ...children) => node({ tag, ...props, children }), badge: () => null,
     todoOriginal: () => null, todoDate: () => null, t: x => x, tx: x => x, tn: () => '',
     closeTodoDetail() {}, todoSources: () => [{}],
+    loadWorkItemSessions: async () => {},
     invoke: async () => ({ items, states: [], assignment_fields: [] }),
     loadTodoDetail: () => opened.push(vm.runInContext('todoSelection.item.id', context)),
   });
   vm.runInContext('let todoRequest = 0, todoSelection, todoListScroll, todoReturnFocus;\n' +
     source.slice(source.indexOf('function todoStateStyle('), source.indexOf('\nfunction closeTodoDetail(')) +
-    source.slice(source.indexOf('async function loadTodo()'), source.indexOf('// ---------------------------------------------------------------- settings sections')), context);
+    source.slice(source.indexOf('async function loadTodo()'), source.indexOf('// ---------------------------------------------------------------- implementation')), context);
   await vm.runInContext('loadTodo()', context);
   for (const card of $('#todo-list').children) await card.children[0].children[0].children[0].onclick();
   assert.deepEqual(opened, [7, 8, 9]);
@@ -80,8 +94,9 @@ test('To-Do work item actions include a copy button that copies the original URL
   vm.runInContext(source.slice(source.indexOf('function todoOriginal('), source.indexOf('\nlet todoDetailRequest')), context);
   const actions = vm.runInContext("todoOriginal({ id: 27176, url: 'https://dev.azure.com/example/_workitems/edit/27176' })", context);
   assert.equal(actions.class, 'todo-actions');
-  assert.equal(actions.children[0].children[0].icon, 'link');
-  const copyButton = actions.children[1];
+  assert.equal(actions.children[0].children[0].icon, 'wrench');
+  assert.equal(actions.children[1].children[0].icon, 'link');
+  const copyButton = actions.children[2];
   assert.equal(copyButton['aria-label'], 'Copy work item link');
   assert.equal(copyButton.children[0].icon, 'copy');
   await copyButton.onclick();

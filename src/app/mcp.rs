@@ -17,7 +17,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines, Stdin, Stdout}
 
 const PROTOCOLS: [&str; 3] = ["2025-06-18", "2025-03-26", "2024-11-05"];
 
-const INSTRUCTIONS: &str = "Personal Teams Assistant answers Microsoft Teams messages as the user, only from the sources the user authorized for each conversation, and keeps daily records of existing Azure tasks. It never creates or changes tasks. Read before you write: status, messages_list, sources_list, contexts_list, cases_list, notes_search, knowledge_search. Local changes (notes, contexts, cases, people, ratings, answer drafts, daily task snapshots and their schedule) are reversible. Tools marked as needing confirmation act outside the app or grant access; the server asks the user, or requires confirmed: true, which you may set only after the user approved that exact action in this conversation. Ask the user whenever a fact is ambiguous, could be someone else's opinion, would replace what they said before, or when the requested task user or day is unclear. Query existing tasks with list_azure_tasks (day and optional user), get_azure_task (id), or activity_history (saved daily record). Never put secrets, emails, phone numbers or IDs in notes or comments; the server refuses them. Answers are never sent to Teams unless answer_send is confirmed.";
+const INSTRUCTIONS: &str = "Personal Teams Assistant answers Microsoft Teams messages as the user, only from the sources the user authorized for each conversation, and keeps daily records of existing Azure tasks. Daily task records never create or change tasks. The separate implementation flow can run a coding agent or create reviewed child tasks only after the user confirms that exact action; never submit an uncertain plan again. Read before you write: status, messages_list, sources_list, contexts_list, cases_list, notes_search, knowledge_search. Local changes (notes, contexts, cases, people, ratings, answer drafts, daily task snapshots and their schedule) are reversible. Tools marked as needing confirmation act outside the app or grant access; the server asks the user, or requires confirmed: true, which you may set only after the user approved that exact action in this conversation. Ask the user whenever a fact is ambiguous, could be someone else's opinion, would replace what they said before, or when the requested task user or day is unclear. Query existing tasks with list_azure_tasks (day and optional user), get_azure_task (id), or activity_history (saved daily record). Never put secrets, emails, phone numbers or IDs in notes or comments; the server refuses them. Answers are never sent to Teams unless answer_send is confirmed.";
 
 use super::tools::{Effect, TOOLS, confirmation, run};
 
@@ -100,7 +100,7 @@ impl Server {
     }
     async fn call_tool(&mut self, params: &Value) -> Result<Value, (i64, String)> {
         let name = params["name"].as_str().unwrap_or_default();
-        let args = params.get("arguments").cloned().unwrap_or(json!({}));
+        let mut args = params.get("arguments").cloned().unwrap_or(json!({}));
         let tool = TOOLS
             .iter()
             .find(|t| t.name == name)
@@ -127,6 +127,7 @@ impl Server {
                 };
                 return Ok(json!({"content": [{"type": "text", "text": text}], "isError": true}));
             }
+            args["confirmed"] = json!(true);
         }
         Ok(match run(name, &args).await {
             Ok(value) => {

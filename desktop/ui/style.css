@@ -742,3 +742,16 @@ dialog p { overflow-wrap: anywhere; }
 /* Pressed rows dim in place; touch screens get no hover. */
 .status-row:active, .activity-row:active, nav button:active:not([aria-current="page"]), .segmented button:active, .subnav [role=tab]:active { opacity: .7; }
 @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } .pill i::after { display: none; } }
+/* Implementation uses the same panels and controls as work item detail. */
+.implementation-paths { display: grid; gap: .5rem; margin-bottom: .75rem; }
+.implementation-path { display: flex; align-items: center; justify-content: space-between; gap: .75rem; min-width: 0; }
+.implementation-path code { overflow-wrap: anywhere; min-width: 0; }
+.implementation-picker { margin-top: 1rem; }
+.implementation-directory-list { max-height: 20rem; overflow-y: auto; margin: .75rem 0; }
+.implementation-directory-list .implementation-path { justify-content: flex-start; }
+.implementation-directory-list .link-button { overflow-wrap: anywhere; text-align: left; }
+.implementation-run { display: grid; gap: .75rem; padding: 1rem 0; border-bottom: 1px solid var(--rule); }
+.implementation-run fieldset { min-width: 0; }
+.implementation-output { max-height: 28rem; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
+.implementation-footer { margin: 1rem 0; }
+#implementation fieldset { min-width: 0; }

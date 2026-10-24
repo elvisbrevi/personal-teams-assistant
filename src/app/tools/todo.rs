@@ -11,6 +11,57 @@ use crate::{
 };
 use serde_json::Value;
 
+pub(in crate::app) async fn create_child(
+    state: &DesktopState,
+    provider: &str,
+    source: Option<&str>,
+    parent: &crate::tools::todo::Detail,
+    child: &Value,
+) -> anyhow::Result<Value> {
+    if provider == "github" {
+        let _guard = state.github_api.lock().await;
+        return github::create_child(parent, child).await;
+    }
+    let config = read_config(&state.config_path)?;
+    let map = KnowledgeMap::load(&state.map_path)?;
+    let sources: Vec<_> = map
+        .resources
+        .iter()
+        .filter(|r| {
+            r.enabled
+                && source.is_none_or(|id| r.id == id)
+                && matches!(
+                    &r.access,
+                    Access::Tool {
+                        tool: ToolSpec::AzureDevopsStatus { .. }
+                    }
+                )
+        })
+        .collect();
+    anyhow::ensure!(sources.len() == 1, "Select one enabled Azure source.");
+    let Access::Tool {
+        tool: tool @ ToolSpec::AzureDevopsStatus { secret_ref, .. },
+    } = &sources[0].access
+    else {
+        unreachable!()
+    };
+    let read_key = security::resolve(secret_ref, &config.secrets)?;
+    let write_key = security::secret("AZURE_IMPLEMENTATION_WRITE_TOKEN")?;
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()?;
+    crate::ado::implementation::create_child(
+        &client,
+        &read_key,
+        &write_key,
+        &tool.catalog(&map.repositories)?,
+        parent,
+        child,
+    )
+    .await
+}
+
 pub(in crate::app) async fn read(
     state: &DesktopState,
     method: &str,
@@ -26,7 +77,10 @@ pub(in crate::app) async fn read(
     } else {
         None
     };
-    let github_read = matches!(method, "list_github_epics" | "get_github_epic");
+    let github_read = matches!(
+        method,
+        "list_github_epics" | "list_github_issues" | "get_github_epic" | "get_github_issue"
+    );
     let detail: Option<DetailRequest> = if method.starts_with("get_") {
         let args: DetailRequest = serde_json::from_value(args.clone())
             .map_err(|_| "[invalid_input] Invalid work item arguments.".to_owned())?;
@@ -63,7 +117,9 @@ pub(in crate::app) async fn read(
         let _guard = state.github_api.lock().await;
         tokio::time::timeout(std::time::Duration::from_secs(90), async {
             match &detail {
+                Some(args) if method == "get_github_issue" => serde_json::to_value(github::issue(args).await?),
                 Some(args) => serde_json::to_value(github::epic(args).await?),
+                None if method == "list_github_issues" => serde_json::to_value(github::issues(&filters).await?),
                 None => serde_json::to_value(github::epics(&filters).await?),
             }.map_err(anyhow::Error::from)
         }).await.map_err(|_| "[network] GitHub Epic read timed out.".to_owned())?

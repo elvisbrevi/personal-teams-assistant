@@ -1,7 +1,7 @@
 const rawInvoke = window.ptaTransport.invoke;
 // Also the answer operations: they do not depend on the profile files, so they neither check
 // nor advance the form's revision.
-const READS = ['snapshot', 'chat', 'github_repositories', 'self_chat_status', 'llm_providers', 'audit', 'activity_status', 'activity_history', 'activity_pending', 'answer_refine', 'answer_send', 'list_azure_hus', 'list_github_epics', 'get_azure_hu', 'get_azure_task', 'list_azure_tasks', 'get_github_epic', 'open_work_item'];
+const READS = ['snapshot', 'chat', 'github_repositories', 'self_chat_status', 'llm_providers', 'audit', 'activity_status', 'activity_history', 'activity_pending', 'answer_refine', 'answer_send', 'list_azure_hus', 'list_github_epics', 'list_github_issues', 'get_azure_hu', 'get_azure_task', 'list_azure_tasks', 'get_github_epic', 'get_github_issue', 'open_work_item'];
 // Revision of the profile files the last reply saw. The form's own revision (`current.revision`)
 // changes only when it reloads or writes, so saving a stale form fails instead of overwriting
 // changes made elsewhere (e.g. with `pta`).
@@ -12,7 +12,7 @@ async function invoke(method, args = {}) {
     return { visible: true };
   }
   let result = await rawInvoke('command', { request: {
-    method, args, revision: READS.includes(method) ? null : current?.revision ?? null, contract: 1
+    method, args, revision: READS.includes(method) || /^(implementation_|machine_)/.test(method) ? null : current?.revision ?? null, contract: 1
   }});
   if (window.ptaTransport.browser && result.code === 'authorization_pending' && method === 'connect_microsoft') {
     result = await browserMicrosoftLogin(result.data.authorization_url);
@@ -27,7 +27,7 @@ async function invoke(method, args = {}) {
     }
   }
   if (result.revision) lastRevision = result.revision;
-  if (result.revision && current && !READS.includes(method)) current.revision = result.revision;
+  if (result.revision && current && !READS.includes(method) && !/^(implementation_|machine_)/.test(method)) current.revision = result.revision;
   if (!result.ok) throw result.message || result.code;
   return result.data;
 }
@@ -108,15 +108,16 @@ async function busy(button, task) {
     if (button) { button.disabled = false; button.classList.remove('busy'); }
     renderLive();
     if (button?.id === 'activity-run') button.disabled = activityRunning;
+    if (implementationForm) implementationReady(implementationForm);
   }
 }
 
 function showTab(name, anchor) {
   tab = name;
   setNavOverflow(false);
-  for (const section of ['overview', 'todo', 'settings', 'messages', 'knowledge', 'chat', 'registration']) $('#' + section).hidden = section !== name;
+  for (const section of ['overview', 'todo', 'implementation', 'settings', 'messages', 'knowledge', 'chat', 'registration']) $('#' + section).hidden = section !== name;
   for (const button of document.querySelectorAll('nav button[data-tab]')) {
-    button.setAttribute('aria-current', button.dataset.tab === name ? 'page' : 'false');
+    button.setAttribute('aria-current', button.dataset.tab === (name === 'implementation' ? 'todo' : name) ? 'page' : 'false');
   }
   $('#nav-more').setAttribute('aria-current', ['knowledge', 'chat'].includes(name) ? 'page' : 'false');
   if (name === 'messages') loadMessages().catch(fail);
@@ -124,6 +125,7 @@ function showTab(name, anchor) {
   if (name === 'registration') loadRegistration().catch(fail);
   if (name === 'knowledge') loadKnowledge().catch(fail);
   if (name === 'todo') loadTodo();
+  if (name === 'settings') loadMachines().catch(fail);
   const target = anchor && document.getElementById(anchor);
   // A panel inside a tab (a Settings section, an Activities view) opens that tab first.
   const owner = target && document.querySelector(`[aria-controls="${target.closest('[role=tabpanel]')?.id}"]`);
@@ -156,7 +158,9 @@ function todoDate(name, raw) {
     ? el('time', { dateTime: raw, textContent: parsed.toLocaleDateString(uiLocale(), { dateStyle: 'medium' }) })
     : t('Not recorded')));
 }
-function todoOriginal(item) {
+function todoOriginal(item, selection = null) {
+  const implement = el('button', { type: 'button', class: 'icon-button secondary', title: t('Implement work item'), 'aria-label': t('Implement work item') }, icon('wrench'));
+  implement.onclick = () => busy(implement, () => openImplementation(item, selection, implement));
   const label = t('Open #{id} in a new tab', { id: item.id });
   const open = window.ptaTransport.browser
     ? el('a', { class: 'icon-button secondary', href: item.url, target: '_blank', rel: 'noopener noreferrer', title: label, 'aria-label': label }, icon('link'))
@@ -170,7 +174,8 @@ function todoOriginal(item) {
     if (await copy(item.url)) done(t('Link copied: {url}', { url: item.url }));
     else fail(t('Could not copy the work item link.'));
   });
-  return el('div', { class: 'todo-actions' }, open, copyButton);
+  const session = el('button', { type: 'button', class: 'icon-button secondary', hidden: true, 'data-session-for': item.url, title: t('Open agent session'), 'aria-label': t('Open agent session') }, icon('chat'));
+  return el('div', { class: 'todo-actions' }, implement, open, copyButton, session);
 }
 let todoDetailRequest = 0;
 let todoSelection = null;
@@ -185,7 +190,7 @@ function todoStateStyle(state) {
   if (/\b(new|proposed|approved|to do|todo|backlog|not started|not taken|unassigned|sin asignar|sin tomar|por hacer|no iniciado|no comenzado|aprobado|propuesto|nuevo|nueva)\b/.test(value)) return { class: 'unstarted', tone: 'muted' };
   return { class: '', tone: 'info' };
 }
-function todoItem(item, onSelect = null) {
+function todoItem(item, onSelect = null, selection = null) {
   const stateStyle = todoStateStyle(item.state);
   const select = el('button', { type: 'button', class: 'todo-select', textContent: `#${item.id} · ${item.title}` });
   select.onclick = () => {
@@ -196,7 +201,7 @@ function todoItem(item, onSelect = null) {
     loadTodoDetail();
   };
   return el('article', { class: `todo-item ${stateStyle.class}`.trim() },
-    el('div', { class: 'todo-heading' }, el('h3', {}, select), todoOriginal(item)),
+    el('div', { class: 'todo-heading' }, el('h3', {}, select), todoOriginal(item, selection)),
     el('div', { class: 'todo-context' }, badge(tx(item.state), stateStyle.tone), badge(tx(item.kind || 'HU'), 'muted'), el('span', { textContent: item.project })),
     el('dl', { class: 'todo-dates' }, todoDate(t('Created'), item.created_at), ...item.dates.map(date => todoDate(tx(date.name), date.value))));
 }
@@ -323,8 +328,9 @@ function todoRelations(detail, prefix) {
     const relations = detail.relations.filter(relation => !select.value || (select.value === '__links' ? !relation.item : relation.item?.kind === select.value));
     count.textContent = `${relations.length} / ${detail.relations.length}`;
     list.replaceChildren(...relations.map(relation => {
-      if (relation.item && relation.task) {
-        const card = todoItem(relation.item, button => openRelatedItem(relation, button, prefix));
+      if (relation.item && (relation.task || relation.item.url.startsWith('https://github.com/'))) {
+        const parentSelection = prefix === 'todo' ? todoSelection : activityTask;
+        const card = todoItem(relation.item, button => openRelatedItem(relation, button, prefix), { source: parentSelection?.source, task: relation.task });
         card.append(badge(tx(relation.name), 'muted'));
         return card;
       }
@@ -351,7 +357,7 @@ function renderTodoDetail(detail, prefix = 'todo') {
   content.sort((a, b) => contentRank(a) - contentRank(b) || a.name.localeCompare(b.name));
   const header = el('div', { class: 'panel todo-detail-header' },
     el('div', { class: 'todo-context' }, badge(tx(item.kind), 'muted'), badge(tx(item.state), todoStateStyle(item.state).tone), el('span', { textContent: item.project })),
-    el('div', { class: 'todo-heading' }, el('h2', { id: `${prefix}-detail-title`, tabIndex: -1, textContent: `#${item.id} · ${item.title}` }), todoOriginal(item)),
+    el('div', { class: 'todo-heading' }, el('h2', { id: `${prefix}-detail-title`, tabIndex: -1, textContent: `#${item.id} · ${item.title}` }), todoOriginal(item, prefix === 'todo' ? todoSelection : { ...activityTask, provider: 'azure', task: activityTask?.task !== false })),
     todoFields(shown, base),
     el('dl', { class: 'todo-dates' }, todoDate(t('Created'), item.created_at), ...item.dates.map(date => todoDate(tx(date.name), date.value))));
   const panels = content.map(field => el('section', { class: 'panel' }, el('h2', { textContent: tx(field.name) }), todoValue(field, base)));
@@ -361,12 +367,14 @@ function renderTodoDetail(detail, prefix = 'todo') {
   const history = detail.history.map(change => el('article', { class: 'todo-comment' }, el('div', { class: 'todo-context' }, el('strong', { textContent: change.author || t('Unknown author') }), change.at ? el('time', { dateTime: change.at, textContent: new Date(change.at).toLocaleString(uiLocale(), { dateStyle: 'medium', timeStyle: 'short' }) }) : null),
     todoFields(change.fields.map(field => ({ ...field, kind: 'string', value: typeof field.value === 'object' && field.value !== null && ('newValue' in field.value || 'oldValue' in field.value) ? `${todoHistoryValue(field.value.oldValue)} → ${todoHistoryValue(field.value.newValue)}` : field.value })), base)));
   $(`#${prefix}-detail-content`).replaceChildren(header,
+    el('section', { class: 'panel', hidden: true, 'data-sessions-for': item.url }),
     ...(detail.partial ? [ el('div', { class: 'callout warn', role: 'status' }, ...detail.warnings.map(warning => el('p', { textContent: tx(warning) })))] : []),
     ...panels,
     el('section', { class: 'panel' }, el('div', { class: 'panel-head' }, el('h2', { textContent: t('Comments') }), el('span', { class: 'count', textContent: comments.length })), ...(comments.length ? comments : [el('p', { class: 'hint', textContent: t('No comments to show.') })])),
     todoRelations(detail, prefix),
     todoFold(t('All fields'), [todoFields(detail.fields, base)], detail.fields.length),
     todoFold(t('Change history'), history.length ? history : [el('p', { class: 'hint', textContent: t('No history to show.') })], history.length));
+  loadWorkItemSessions().catch(fail);
 }
 function todoHistoryValue(value) {
   if (value === undefined || value === null) return t('Not recorded');
@@ -388,7 +396,7 @@ async function loadTodoDetail() {
   try {
     const args = { id: selected.item.id, project: selected.item.project };
     if (selected.provider === 'azure') args.source = selected.source;
-    const detail = await invoke(selected.provider === 'azure' ? selected.task ? 'get_azure_task' : 'get_azure_hu' : 'get_github_epic', args);
+    const detail = await invoke(selected.provider === 'azure' ? selected.task ? 'get_azure_task' : 'get_azure_hu' : selected.item.kind === 'Epic' ? 'get_github_epic' : 'get_github_issue', args);
     if (request !== todoDetailRequest) return;
     renderTodoDetail(detail);
     $('#todo-detail-title').focus({ preventScroll: true });
@@ -411,8 +419,9 @@ async function loadTodo() {
   const request = ++todoRequest;
   const azure = $('#todo-provider').value === 'azure';
   const sources = todoSources();
-  $('#todo-title').textContent = azure ? t('My HUs and bugs') : t('My epics');
+  $('#todo-title').textContent = azure ? t('My HUs and bugs') : $('#todo-github-kind').value === 'all' ? t('My issues') : t('My epics');
   $('#todo-kind-field').hidden = !azure;
+  $('#todo-github-kind-field').hidden = azure;
   $('#todo-list').replaceChildren();
   $('#todo-list').setAttribute('aria-busy', 'true');
   $('#todo-progress').textContent = t('Loading…');
@@ -428,15 +437,16 @@ async function loadTodo() {
       if ($('#todo-kind').value) args.kind = $('#todo-kind').value;
     }
     if ($('#todo-state').value) args.state = $('#todo-state').value;
-    const result = await invoke(azure ? 'list_azure_hus' : 'list_github_epics', args);
+    const result = await invoke(azure ? 'list_azure_hus' : $('#todo-github-kind').value === 'all' ? 'list_github_issues' : 'list_github_epics', args);
     if (request !== todoRequest) return;
     const selected = $('#todo-state').value;
     $('#todo-state').replaceChildren(el('option', { value: '', textContent: t('All states') }), ...result.states.map(state => el('option', { value: state, textContent: tx(state) })));
     $('#todo-state').value = selected;
     $('#todo-assignment').textContent = azure
       ? t('Your assignment fields: {fields}', { fields: result.assignment_fields.join(', ') })
-      : t('Issues of type Epic assigned to your connected GitHub account. GitHub provides open and closed states; unavailable dates stay empty.');
+      : $('#todo-github-kind').value === 'all' ? t('Issues assigned to your connected GitHub account.') : t('Issues of type Epic assigned to your connected GitHub account. GitHub provides open and closed states; unavailable dates stay empty.');
     $('#todo-list').replaceChildren(...result.items.map(item => todoItem(item)));
+    loadWorkItemSessions().catch(fail);
     if (!result.items.length) $('#todo-list').append(el('p', { class: 'empty', textContent: t('No items match these filters. Try another state.') }));
     $('#todo-progress').textContent = result.has_more
       ? t('Showing the {n} newest items. Increase the limit to see more.', { n: result.items.length })
@@ -456,6 +466,274 @@ async function loadTodo() {
       $('#todo-refresh').disabled = false;
     }
   }
+}
+
+// ---------------------------------------------------------------- implementation
+function sessionDestination(session, mobile, native = false) {
+  if (!session.session_id) return { reason: t('The agent has not reported its session ID yet.') };
+  if (session.provider === 'codex') {
+    if (mobile) return { reason: t('This is a local Codex session on another computer. The documented session link is for the desktop app; open the connected computer in Codex on mobile.') };
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(session.session_id)) return { reason: t('This session ID does not have a supported app link.') };
+    return { url: `codex://threads/${encodeURIComponent(session.session_id)}` };
+  }
+  if (session.provider === 'claude') {
+    if (native && !mobile) return ['running', 'planning'].includes(session.state) ? { reason: t('Claude Desktop can open this local session after the CLI finishes. This session is still running.') } : { native: true };
+    return { reason: t('This Claude Code session is local to its execution machine. A mobile or web link needs a session published through Claude Remote Control; this run has no verified remote link.') };
+  }
+  return { reason: t('This agent does not provide a verified app link for the recorded local session. Its session ID is available in implementation runs.') };
+}
+function sessionIsMobile() {
+  return /Android|iPhone|iPad|iPod/i.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+}
+function openAgentSession(session, button) {
+  const destination = sessionDestination(session, sessionIsMobile(), !window.ptaTransport.browser);
+  if (destination.native) return busy(button, () => invoke('implementation_open_session', { machine: session.machine, id: session.id }));
+  if (!destination.url) { notify(destination.reason, 'info'); return; }
+  if (!window.ptaTransport.browser) return busy(button, () => invoke('implementation_open_session', { machine: session.machine, id: session.id }));
+  let opened = false;
+  const left = () => { if (document.hidden) opened = true; };
+  document.addEventListener('visibilitychange', left);
+  window.location.assign(destination.url);
+  setTimeout(() => {
+    document.removeEventListener('visibilitychange', left);
+    if (!opened) notify(t('The browser could not confirm that the app opened. Check that Codex is installed and can access this session on its execution machine.'), 'info');
+  }, 2500);
+}
+let workItemSessionsRequest = 0;
+async function loadWorkItemSessions() {
+  const buttons = [...document.querySelectorAll('[data-session-for]')];
+  const urls = [...new Set(buttons.map(button => button.dataset.sessionFor))].slice(0, 100);
+  if (!urls.length) return;
+  const request = ++workItemSessionsRequest;
+  const result = await invoke('implementation_sessions', { urls });
+  if (request !== workItemSessionsRequest) return;
+  for (const button of buttons) {
+    const sessions = (result.sessions || []).filter(session => session.item.url === button.dataset.sessionFor && session.session_id);
+    const session = sessions.find(session => ['running', 'planning'].includes(session.state)) || sessions[0];
+    button.hidden = !session;
+    if (session) {
+      button.title = t('Open {provider} session', { provider: providerNames[session.provider] || session.provider });
+      button.setAttribute('aria-label', button.title);
+      button.onclick = () => openAgentSession(session, button);
+    }
+  }
+  for (const section of document.querySelectorAll('[data-sessions-for]')) {
+    const sessions = (result.sessions || []).filter(session => session.item.url === section.dataset.sessionsFor);
+    section.hidden = !sessions.length;
+    section.replaceChildren(el('h2', { textContent: t('Agent sessions') }), ...sessions.map(session => {
+      const open = el('button', { type: 'button', class: 'secondary small', textContent: t('Open agent session') });
+      open.onclick = () => openAgentSession(session, open);
+      return el('article', { class: 'implementation-run' }, el('strong', { textContent: `${providerNames[session.provider] || session.provider} · ${session.model}` }),
+        badge(session.online === false ? t('Machine offline. Last reported state: {state}', { state: tx(session.state) }) : tx(session.state), session.state === 'done' ? 'ok' : 'info'),
+        el('code', { textContent: session.session_id || t('The agent has not reported its session ID yet.') }),
+        el('dl', { class: 'todo-fields' }, ...[[t('Started at'), session.started_at], [t('Finished at'), session.finished_at]].map(([label, value]) => el('div', {}, el('dt', { textContent: label }), el('dd', { textContent: value ? new Date(value).toLocaleString(uiLocale()) : t('Not recorded') })))), open);
+    }));
+  }
+}
+setInterval(() => { if (['todo', 'registration'].includes(tab)) loadWorkItemSessions().catch(fail); }, 10000);
+let implementationForm = null;
+let implementationRequest = 0;
+function implementationSelection(item, selection) {
+  const provider = item.url.startsWith('https://github.com/') ? 'github' : 'azure';
+  return { provider, id: item.id, project: item.project, source: provider === 'azure' ? selection?.source || $('#todo-source').value || undefined : undefined,
+    task: provider === 'azure' && (selection?.task ?? ['Task', 'Bug Desarrollo', 'Documentación', 'Tarea de Prueba'].includes(item.kind)) };
+}
+async function openImplementation(item, selection, trigger) {
+  const request = ++implementationRequest;
+  const previous = { tab, scroll: window.scrollY, trigger };
+  implementationForm = null;
+  showTab('implementation');
+  $('#implementation-item').textContent = `#${item.id} · ${item.title}`;
+  $('#implementation-problem').hidden = true;
+  $('#implementation-content').replaceChildren(el('p', { class: 'hint', textContent: t('Loading…') }));
+  $('#implementation h1').focus();
+  const selected = implementationSelection(item, selection);
+  try {
+    const [prepared, fleet] = await Promise.all([invoke('implementation_prepare', { item: selected }), invoke('machine_list')]);
+    if (request !== implementationRequest) return;
+    const machine = el('select', { id: 'implementation-machine' }, ...fleet.machines.map(m => el('option', { value: m.id, disabled: !m.online, textContent: `${m.name} · ${m.os}${m.online ? '' : ` · ${t('Offline')}`}` })));
+    machine.value = fleet.machines.find(m => m.id === fleet.this_machine && m.online)?.id || fleet.machines.find(m => m.online)?.id || '';
+    const context = el('textarea', { id: 'implementation-context', rows: 5, maxLength: 32000 });
+    const provider = el('select', { id: 'implementation-provider' });
+    const model = el('select', { id: 'implementation-model' });
+    const effort = el('select', { id: 'implementation-effort' });
+    const directoryList = el('div', { class: 'implementation-paths' });
+    const picker = el('section', { class: 'panel implementation-picker', hidden: true, 'aria-label': t('Choose working directories') });
+    const add = el('button', { type: 'button', class: 'secondary', textContent: t('+ Choose directories') });
+    const cancel = el('button', { type: 'button', class: 'secondary', textContent: t('Cancel') });
+    const start = el('button', { type: 'button', textContent: t('Start'), disabled: true });
+    const runs = el('div', { id: 'implementation-runs' });
+    const form = implementationForm = { request, previous, selected, prepared, machine, context, provider, model, effort, directoryList, picker, start, runs, directories: [], catalog: [], generation: 0, creations: prepared.creations || {} };
+    const leave = () => {
+      ++implementationRequest; implementationForm = null;
+      $('#implementation').hidden = true;
+      tab = previous.tab; $(`#${tab}`).hidden = false;
+      for (const button of document.querySelectorAll('nav button[data-tab]')) button.setAttribute('aria-current', String(button.dataset.tab === tab ? 'page' : 'false'));
+      previous.trigger?.focus({ preventScroll: true }); window.scrollTo(0, previous.scroll); renderSavebar(); loadWorkItemSessions().catch(fail);
+    };
+    cancel.onclick = leave;
+    add.onclick = () => busy(add, () => implementationBrowse(form, ''));
+    provider.onchange = () => implementationModels(form);
+    model.onchange = () => implementationEfforts(form);
+    effort.onchange = () => implementationReady(form);
+    machine.onchange = () => busy(machine, () => implementationMachine(form));
+    start.onclick = () => busy(start, async () => {
+      const result = await invoke('implementation_start', { machine: machine.value, item: selected, context: context.value, directories: form.directories, provider: provider.value, model: model.value, effort: effort.value });
+      if (implementationForm !== form) return;
+      done(t('Implementation run started.'));
+      await implementationRuns(form);
+    });
+    $('#implementation-content').replaceChildren(el('div', { class: 'panel' },
+      el('h2', { textContent: prepared.planning ? t('Plan child work items') : t('Implement selected work item') }),
+      el('p', { class: 'hint', textContent: prepared.planning ? t('Review and edit the proposed children before creating them. Existing children are included as context.') : t('The selected coding agent will work in the directories you choose.') }),
+      el('label', {}, t('Implementation context'), context),
+      el('label', {}, t('Execution machine'), machine),
+      el('fieldset', {}, el('legend', { textContent: t('Working directories') }), directoryList, add), picker,
+      el('div', { class: 'grid' }, el('label', {}, t('Provider'), provider), el('label', {}, t('Model'), model), el('label', {}, t('Effort'), effort))),
+      el('div', { class: 'actions implementation-footer' }, cancel, start),
+      el('section', { class: 'panel' }, el('h2', { textContent: t('Implementation runs') }), runs));
+    await implementationMachine(form);
+  } catch (error) {
+    if (request !== implementationRequest) return;
+    $('#implementation-problem').hidden = false;
+    $('#implementation-problem').textContent = tx(String(error));
+    const back = el('button', { type: 'button', class: 'secondary', textContent: t('Back') });
+    back.onclick = () => showTab(previous.tab);
+    $('#implementation-content').replaceChildren(back);
+  }
+}
+function implementationReady(form) {
+  form.start.disabled = form.start.classList.contains('busy') || !(form.machine.value && form.directories.length && form.provider.value && form.model.value && form.effort.value);
+}
+function implementationModels(form) {
+  const info = form.catalog.find(p => p.id === form.provider.value);
+  form.model.replaceChildren(...(info?.models || []).map(m => el('option', { value: m.id, textContent: m.name })));
+  implementationEfforts(form);
+}
+function implementationEfforts(form) {
+  const model = form.catalog.find(p => p.id === form.provider.value)?.models.find(m => m.id === form.model.value);
+  form.effort.replaceChildren(...(model?.efforts || []).map(value => el('option', { value, textContent: effortNames[value] || value })));
+  if (model?.default_effort) form.effort.value = model.default_effort;
+  implementationReady(form);
+}
+function implementationDirectories(form) {
+  form.directoryList.replaceChildren(...form.directories.map(path => {
+    const remove = el('button', { type: 'button', class: 'secondary small', textContent: t('Remove'), 'aria-label': t('Remove directory {path}', { path }) });
+    remove.onclick = () => { form.directories = form.directories.filter(p => p !== path); implementationDirectories(form); };
+    return el('div', { class: 'implementation-path' }, el('code', { textContent: path }), remove);
+  }));
+  implementationReady(form);
+}
+async function implementationMachine(form) {
+  const generation = ++form.generation;
+  form.directories = []; form.catalog = []; form.picker.hidden = true;
+  form.provider.replaceChildren(); implementationModels(form); implementationDirectories(form);
+  const catalog = await invoke('implementation_catalog', { machine: form.machine.value });
+  if (implementationForm !== form || generation !== form.generation) return;
+  form.catalog = catalog.providers;
+  form.provider.replaceChildren(...catalog.providers.map(p => el('option', { value: p.id, textContent: providerNames[p.id] || p.id })));
+  if (!catalog.providers.length) form.provider.append(el('option', { value: '', textContent: t('No coding CLI installed on this machine') }));
+  implementationModels(form);
+  await implementationRuns(form);
+}
+async function implementationBrowse(form, path) {
+  const machine = form.machine.value; const generation = form.generation;
+  const result = await invoke('implementation_browse', { machine, path });
+  if (implementationForm !== form || generation !== form.generation) return;
+  const up = el('button', { type: 'button', class: 'secondary small', textContent: t('Parent directory') });
+  up.onclick = () => busy(up, () => implementationBrowse(form, result.parent || ''));
+  const doneButton = el('button', { type: 'button', class: 'secondary', textContent: t('Use selected directories') });
+  doneButton.onclick = () => { form.picker.hidden = true; implementationDirectories(form); };
+  form.picker.hidden = false;
+  const currentDirectory = result.path ? el('input', { type: 'checkbox', checked: form.directories.includes(result.path) }) : null;
+  if (currentDirectory) currentDirectory.onchange = () => {
+    if (currentDirectory.checked && !form.directories.includes(result.path)) form.directories.push(result.path);
+    else if (!currentDirectory.checked) form.directories = form.directories.filter(p => p !== result.path);
+    implementationDirectories(form);
+  };
+  form.picker.replaceChildren(el('h3', { textContent: t('Directories on {machine}', { machine: form.machine.selectedOptions[0].textContent }) }), el('code', { textContent: result.path || t('Allowed roots') }), up,
+    currentDirectory ? el('label', { class: 'check' }, currentDirectory, t('Select this directory')) : null,
+    el('div', { class: 'implementation-directory-list' }, ...result.directories.map(directory => {
+      const check = el('input', { type: 'checkbox', checked: form.directories.includes(directory), disabled: result.roots });
+      check.onchange = () => {
+        if (check.checked && !form.directories.includes(directory)) form.directories.push(directory);
+        else if (!check.checked) form.directories = form.directories.filter(p => p !== directory);
+        implementationDirectories(form);
+      };
+      const open = el('button', { type: 'button', class: 'link-button', textContent: directory.split(/[\\/]/).filter(Boolean).pop() || directory, 'aria-label': t('Browse directory {path}', { path: directory }) });
+      open.onclick = () => busy(open, () => implementationBrowse(form, directory));
+      return el('div', { class: 'implementation-path' }, el('label', { class: 'check' }, check, el('span', { class: 'sr-only', textContent: t('Select directory {path}', { path: directory }) })), open);
+    })), doneButton);
+}
+async function implementationRuns(form) {
+  const machine = form.machine.value; const generation = form.generation;
+  const result = await invoke('implementation_runs', { machine, work_item_url: form.prepared.detail.item.url });
+  if (implementationForm !== form || generation !== form.generation) return;
+  const runs = result.runs.filter(run => run.item.url === form.prepared.detail.item.url);
+  await Promise.all(runs.filter(run => run.state === 'plan_ready' && (!form.creations[run.id] || form.creations[run.id].state === 'sending')).map(async run => {
+    const record = await invoke('implementation_creation', { id: run.id });
+    if (record) form.creations[run.id] = record;
+  }));
+  if (implementationForm !== form || generation !== form.generation) return;
+  form.runs.replaceChildren(...runs.map(run => {
+    const panel = el('article', { class: 'implementation-run' }, badge(tx(run.state), ['done', 'completed', 'created'].includes(run.state) ? 'ok' : 'info'), el('strong', { textContent: `${providerNames[run.provider] || run.provider || ''} · ${run.model || ''}` }),
+      el('dl', { class: 'todo-fields' }, ...[[t('Requested at'), run.created_at], [t('Started at'), run.started_at], [t('Finished at'), run.finished_at]].map(([label, value]) => el('div', {}, el('dt', { textContent: label }), el('dd', { textContent: value ? new Date(value).toLocaleString(uiLocale()) : t('Not recorded') })))));
+    if (run.session_id) {
+      const open = el('button', { type: 'button', class: 'secondary small', textContent: t('Open agent session') });
+      open.onclick = () => openAgentSession({ ...run, machine }, open);
+      panel.append(el('div', { class: 'todo-context' }, t('Agent session'), el('code', { textContent: run.session_id }), open));
+    }
+    if (['running', 'planning'].includes(run.state)) {
+      const cancel = el('button', { type: 'button', class: 'secondary small', textContent: t('Stop run') });
+      cancel.onclick = () => busy(cancel, async () => { await invoke('implementation_cancel', { machine, id: run.id }); await implementationRuns(form); });
+      panel.append(cancel);
+    }
+    if (run.output) panel.append(el('pre', { class: 'implementation-output', textContent: run.output }));
+    if (run.plan?.children && run.state === 'plan_ready') {
+      if (form.creations[run.id]) {
+        const record = form.creations[run.id];
+        panel.append(badge(tx(record.state), record.state === 'created' ? 'ok' : 'warn'), ...(record.created || []).map(item => link(`#${item.id} ${item.title}`, item.url)));
+      } else {
+        const children = run.plan.children.map(child => {
+          const selected = el('input', { type: 'checkbox', checked: true });
+          const title = el('input', { value: child.title, maxLength: 200 });
+          const description = el('textarea', { value: child.description, rows: 3, maxLength: 16000 });
+          panel.append(el('fieldset', {}, el('legend', {}, el('label', { class: 'check' }, selected, t('Create this child'))), el('label', {}, t('Title'), title), el('label', {}, t('Description'), description)));
+          return { selected, title, description };
+        });
+        const create = el('button', { type: 'button', class: 'secondary', textContent: t('Create selected children') });
+        let reviewed = false;
+        panel.addEventListener('input', () => { reviewed = false; create.textContent = t('Create selected children'); });
+        create.onclick = () => busy(create, async () => {
+          if (!reviewed) { reviewed = true; create.textContent = t('Confirm child creation'); return; }
+          const chosen = children.filter(c => c.selected.checked).map(c => ({ title: c.title.value, description: c.description.value }));
+          if (!chosen.length) throw t('Select at least one child.');
+          form.creations[run.id] = await invoke('implementation_create', { machine, id: run.id, item: form.selected, children: chosen, confirmed: true });
+          await implementationRuns(form);
+        });
+        panel.append(create);
+      }
+    }
+    return panel;
+  }));
+  if (result.partial) form.runs.append(el('p', { class: 'hint', textContent: t('Showing recent executions. Older records can be requested by their run ID.') }));
+  if (!runs.length) form.runs.append(el('p', { class: 'hint', textContent: t('No implementation runs for this item on this machine.') }));
+}
+setInterval(() => {
+  const form = implementationForm;
+  if (tab === 'implementation' && form && !form.runs.contains(document.activeElement) && !form.runs.querySelector('input, textarea')) implementationRuns(form).catch(fail);
+}, 5000);
+
+async function loadMachines() {
+  const [settings, fleet] = await Promise.all([invoke('machine_settings'), invoke('machine_list')]);
+  field('#machine-name', settings.name); field('#machine-coordinator', settings.coordinator || '');
+  field('#machine-roots', settings.roots.join('\n'));
+  $('#machine-roots').disabled = Boolean(live?.config.server.webhook_prefix);
+  $('#machine-connect').disabled = Boolean(settings.coordinator);
+  $('#machine-disconnect').disabled = !settings.coordinator;
+  $('#machine-list').replaceChildren(...fleet.machines.map(machine => el('div', { class: 'todo-context' }, el('strong', { textContent: machine.name }), el('span', { textContent: machine.os }), badge(machine.online ? t('Online') : t('Offline'), machine.online ? 'ok' : 'muted'))));
+  $('#teams-machine').replaceChildren(...fleet.machines.map(machine => el('option', { value: machine.id, disabled: !machine.online && machine.id !== fleet.teams_machine, textContent: machine.name })));
+  $('#teams-machine').value = fleet.teams_machine;
 }
 
 // ---------------------------------------------------------------- settings sections
@@ -1030,7 +1308,7 @@ async function openActivityDay(day, focus = true) {
       const card = todoItem(task.item, button => {
         activityTasksScroll = window.scrollY; activityTaskFocus = button;
         activityTask = task; loadActivityTask();
-      });
+      }, { task: true, source: task.source });
       card.append(el('div', { class: 'todo-context' }, el('span', { textContent: hoursText(task.hours) }),
         task.parent ? link(`#${task.parent.id} ${task.parent.title}`, task.parent.url) : null));
       return card;
@@ -2281,6 +2559,22 @@ function resizeComposer() {
 
 // ---------------------------------------------------------------- wiring
 
+$('#machines-refresh').onclick = () => busy($('#machines-refresh'), loadMachines);
+$('#machine-save').onclick = () => busy($('#machine-save'), async () => {
+  await invoke('machine_save', { name: $('#machine-name').value, roots: lines($('#machine-roots').value) });
+  await loadMachines(); done(t('Machine settings saved.'));
+});
+$('#machine-connect').onclick = () => busy($('#machine-connect'), async () => {
+  await invoke('machine_connect', { url: $('#machine-coordinator').value.trim() }); await loadMachines();
+});
+$('#machine-disconnect').onclick = () => busy($('#machine-disconnect'), async () => {
+  await invoke('machine_disconnect'); await loadMachines();
+});
+$('#teams-machine-save').onclick = () => busy($('#teams-machine-save'), async () => {
+  const result = await invoke('machine_teams', { machine: $('#teams-machine').value });
+  done(result.handover_pending ? t('Teams machine selected. Waiting for the previous machine to stop.') : t('Teams machine selected. Start the assistant on that machine.'));
+});
+
 $('#todo-provider').onchange = () => {
   $('#todo-state').replaceChildren(el('option', { value: '', textContent: t('All states') }));
   loadTodo();
@@ -2293,6 +2587,7 @@ $('#todo-kind').onchange = () => {
   $('#todo-state').replaceChildren(el('option', { value: '', textContent: t('All states') }));
   loadTodo();
 };
+$('#todo-github-kind').onchange = () => loadTodo();
 $('#todo-back').onclick = () => closeTodoDetail();
 $('#todo-detail-refresh').onclick = () => loadTodoDetail();
 $('#todo-state').onchange = () => loadTodo();
