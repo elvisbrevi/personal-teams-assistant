@@ -183,12 +183,12 @@ pub(super) const TOOLS: &[Tool] = &[
     Tool {
         name: "machine_connect",
         title: "Connect an execution machine",
-        description: "Register this machine with the coordinator using the connected GitHub identity. Teams must be stopped first.",
+        description: "Pair this machine with your own coordinator using a single-use private pairing file authorized locally there. Teams must be stopped first; GitHub tokens cannot enroll machines.",
         effect: Effect::External,
         schema: || {
             object(
-                json!({"url":string("Coordinator HTTPS origin."),"confirmed":confirmed()}),
-                &["url"],
+                json!({"url":string("Your coordinator HTTPS origin."),"pairing_token":string("Private single-use pairing credential; provide on stdin, never in arguments or chat."),"confirmed":confirmed()}),
+                &["url", "pairing_token"],
             )
         },
     },

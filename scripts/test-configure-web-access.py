@@ -28,9 +28,9 @@ class SetupTests(unittest.TestCase):
         root = Path(self.temp.name)
         self.callbacks = root / "callbacks.json"
         self.paths = [f"/webhooks/{PROFILE}/graph/{kind}" for kind in ["notifications", "lifecycle"]]
-        self.callbacks.write_text(json.dumps({"hostname":"assistant.elvisbrevi.cl","paths":self.paths}))
-        self.args = argparse.Namespace(account_id=ACCOUNT, hostname="assistant.elvisbrevi.cl", callbacks_file=self.callbacks,
-            allow_email=["authorized@example.test"], settings_file=root / "settings.json", dry_run=False)
+        self.callbacks.write_text(json.dumps({"hostname":"assistant.example.com","paths":self.paths}))
+        self.args = argparse.Namespace(account_id=ACCOUNT, hostname="assistant.example.com", callbacks_file=self.callbacks,
+            owner_github_id=1001, allow_email=["authorized@example.test"], settings_file=root / "settings.json", dry_run=False)
         self.apps = {}
         self.providers = []
         self.calls = []
@@ -91,6 +91,7 @@ class SetupTests(unittest.TestCase):
         self.assertNotIn({"everyone":{}}, main["policies"][0]["include"])
         settings = json.loads(self.args.settings_file.read_text())
         self.assertEqual(settings["access"]["github_idp_id"], PROVIDER)
+        self.assertEqual(settings["owner_github_id"], 1001)
         self.assertEqual(self.args.settings_file.stat().st_mode & 0o777, 0o600)
         self.assertNotIn("secret", self.args.settings_file.read_text())
         for app in self.apps.values():
@@ -121,6 +122,17 @@ class SetupTests(unittest.TestCase):
         self.assertTrue(all(method == "GET" for method, _, _ in self.calls))
         self.assertFalse(self.args.settings_file.exists())
 
+    def test_owner_and_single_email_are_required_before_cloudflare_changes(self):
+        self.args.owner_github_id = 0
+        with self.assertRaises(setup.SetupError):
+            self.run_setup()
+        self.assertFalse(self.calls)
+        self.args.owner_github_id = 1001
+        self.args.allow_email.append("another@example.test")
+        with self.assertRaises(setup.SetupError):
+            self.run_setup()
+        self.assertFalse(self.calls)
+
     def test_broad_or_non_graph_exceptions_are_rejected(self):
         for path in ["/webhooks/*", "/webhooks/*/graph/notifications", "/api/control", "/graph/notifications",
             f"/webhooks/{PROFILE}/graph/notifications/extra", f"/webhooks/{PROFILE}/api/control"]:
@@ -132,7 +144,7 @@ class SetupTests(unittest.TestCase):
             setup.callback_paths(self.callbacks,self.args.hostname)
 
     def test_overlapping_foreign_apps_and_unmanaged_policies_are_preserved(self):
-        for domain in [self.args.hostname,"*.elvisbrevi.cl",self.args.hostname + "/webhooks/*",self.args.hostname + "/favicon.png"]:
+        for domain in [self.args.hostname,"*.example.com",self.args.hostname + "/webhooks/*",self.args.hostname + "/favicon.png"]:
             self.apps = {"foreign":{"id":"foreign","domain":domain,"name":"other application","type":"self_hosted"}}
             self.calls.clear()
             with self.assertRaises(setup.SetupError):

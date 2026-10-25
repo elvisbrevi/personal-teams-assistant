@@ -153,6 +153,10 @@ def configure(args):
     account = args.account_id or os.environ.get("CLOUDFLARE_ACCOUNT_ID", "")
     if not re.fullmatch(r"[0-9a-f]{32}", account) or not re.fullmatch(r"[a-z0-9-]+(?:\.[a-z0-9-]+)+", args.hostname):
         raise SetupError("Invalid account ID or hostname.")
+    if not 0 < args.owner_github_id <= 2**64 - 1:
+        raise SetupError("Supply your positive integer GitHub owner ID.")
+    if len(args.allow_email) != 1:
+        raise SetupError("A private installation accepts exactly one owner email.")
     callbacks = callback_paths(args.callbacks_file, args.hostname)
     emails = sorted(set(args.allow_email or []))
     if not emails or any(not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", email) for email in emails):
@@ -221,7 +225,7 @@ def configure(args):
             "require":[{"login_method":{"id":provider["id"]}}]}]})
     if not re.fullmatch(r"[0-9a-f]{64}", main.get("aud", "")):
         raise SetupError("Cloudflare returned an invalid application audience.")
-    settings = {"bind":"127.0.0.1:38656","public_url":"https://" + args.hostname,"session_hours":12,
+    settings = {"bind":"127.0.0.1:38656","public_url":"https://" + args.hostname,"session_hours":12,"owner_github_id":args.owner_github_id,
         "access":{"issuer":"https://" + auth_domain,"audience":main["aud"],"account_id":account,"github_idp_id":provider["id"]}}
     private_json(args.settings_file, settings)
     print(f"Access configuration read back successfully. Private settings: {args.settings_file.resolve()}. GitHub authorization, local identity association, Mac deployment and browser QA still need verification.")
@@ -230,7 +234,8 @@ def configure(args):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--account-id")
-    parser.add_argument("--hostname", default="assistant.elvisbrevi.cl")
+    parser.add_argument("--hostname", required=True)
+    parser.add_argument("--owner-github-id", type=int, required=True)
     parser.add_argument("--allow-email", action="append", required=True)
     parser.add_argument("--callbacks-file", type=Path, required=True)
     parser.add_argument("--settings-file", type=Path)

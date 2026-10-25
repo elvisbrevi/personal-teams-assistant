@@ -101,7 +101,7 @@ flowchart LR
 - **Service.** `runtime::serve` runs as a Tokio task inside the host. `app.rs::start` launches it, waits for `ready` (60 s; `runtime::Service` hands over the Graph handle and the `Pipeline`, kept in `Running` to write and send answers at the user's request, §6.12) and then starts `cloudflared` if needed. Failure before readiness retains the service's error category; a readiness timeout still stops and aborts it. `stop` kills the tunnel, sends `true` on the `watch` and waits 20 s before aborting. Closing the channel also counts as a stop.
 - **Daily task record.** `control::launch` owns a separate 30-second scheduler. Snapshot runs return immediately and run in a tracked task; reads remain available and settings/identity mutations are blocked during a run. It needs neither Teams, Graph nor a model. Quitting aborts the read and preserves the previous saved day; legacy in-flight writes still recover as uncertain, never retried.
 
-### Browser GUI and independent accounts
+### Private browser GUI and owner profiles
 
 `personal-teams-assistant --web` serves the same `desktop/ui` assets on a separate
 loopback listener (default `127.0.0.1:38656`), with an HTTPS origin through the
@@ -109,7 +109,7 @@ dedicated Cloudflare Tunnel. Cloudflare Access owns the interactive GitHub login
 using a dedicated OAuth App unrelated to repository GitHub Device Flow. Access
 protects the complete hostname and API; an explicit email allowlist plus the
 configured GitHub login method gates admission at the edge. Admission never
-creates or selects an application profile.
+creates or selects an application profile. Additive `web/settings.json.owner_github_id` pins the only GitHub identity this installation serves. Login, every session request, machine transport, callbacks and portal host startup enforce that owner. Disabled/non-owner legacy profiles remain intact but cannot use the portal. Existing settings infer an owner only from exactly one operator-associated identity; fresh or ambiguous settings fail closed. `web configure` requires an explicit owner. The public crate contains no maintainer portal/provider credentials or hosting defaults; every installation supplies its own infrastructure.
 
 `app/web/access.rs` accepts exactly one `Cf-Access-Jwt-Assertion` and verifies
 RS256 signature, pinned issuer/application audience, required subject/issuance/
@@ -144,7 +144,7 @@ SameSite=Strict cookie, avoiding a redirect loop without weakening its protectio
 An existing first-party session may redirect to `/`. Sessions
 are bound to the exact Access assertion, provider binding, Access subject and
 account version, and expire at the earlier of local duration or JWT expiration.
-Cookies are HttpOnly/SameSite=Strict and host-only Secure on HTTPS. Every browser
+Cookies are HttpOnly/SameSite=Strict and host-only Secure on HTTPS. HTTPS responses set hostname-only HSTS (`max-age=31536000`), including denied and public asset responses; Access-generated edge responses require matching edge configuration. Every browser
 POST requires the exact configured Origin and a session-specific CSRF header.
 Logout revokes the local session and persists the assertion fingerprint until its
 expiration in private `web/access-revocations.json`, then the browser visits
@@ -152,8 +152,8 @@ expiration in private `web/access-revocations.json`, then the browser visits
 `users revoke` also sets an issuance cutoff so old Access assertions cannot open
 new sessions. Disable, unbind and rebind take effect on the next request.
 
-Hosts advertise additive `web_access_support` in their IPC descriptors and CLI
-capabilities. The portal refuses to reuse a password-era host, and account edits
+Hosts advertise additive `machine_pairing_support` (0.9.4+) and `web_access_support` in their IPC descriptors and CLI
+capabilities. The portal refuses to reuse a password-era or pre-pairing host. IPC rejects `machine_connect` before delivery to a host without `machine_pairing_support`, preventing fallback to older GitHub-token enrollment, and account edits
 refuse to migrate the schema while one is running. A controlled Mac transition
 updates the compatible host/CLI pair and preserves the previous assistant state.
 The native transport remains unchanged and never accepts browser credentials.
@@ -165,7 +165,7 @@ profile; the existing desktop profile and Keychain identifiers remain unchanged
 when it is absent. New web profiles use DeepSeek, with their own key, by default.
 The portal and CLI scrub inherited app/provider credentials when launching isolated
 hosts, preserve proxy/CA configuration, and use private credential files on all OSes.
-These are application profiles under one trusted operator's OS account, not OS-level tenants.
+These are application profiles under one trusted operator's OS account, not OS-level tenants. Only that installation's pinned owner can use any of them; the portal is not a multi-tenant service.
 
 One account may instead use `pta web users add USER --current-profile` followed by a local identity association to operate
 the existing GUI/headless host and its actual data without a copy or re-login.
@@ -548,6 +548,9 @@ To add an operation: a method in `control::operate` (window or browser only thro
 
 ## 15. Known limits
 
+- Initial execution-machine pairing uses the operator-local CLI and a private single-use file; the GUI can manage paired machines but its URL-only Connect action cannot authorize a new one. The portal supports one owner per installation. Profiles and provider working-directory permissions are not OS/container isolation and must not be offered to unrelated tenants.
+- Tauri's Linux GTK 3 dependencies retain RustSec maintenance/GLib Variant notices; the app does not directly use that Variant API, and the deployed headless server excludes the GUI stack. Dependency audits keep the notices visible; see [the security policy](../SECURITY.md). The SQL Server adapter uses Tiberius 0.13 with patched Rustls, and Access tests use a public synthetic DER signing fixture instead of the vulnerable RSA test dependency.
+
 - Maps saved with `questions`, URL groups or pinned Wiki page URLs require host/CLI version 0.9.0 or later. Enrolled machines must be updated before they can run Teams with the new question configuration.
 
 - Implementation machines need explicit enrollment with the user's HTTPS portal before presence is discovered across networks. The coordinator must remain reachable. The native/headless host on each machine must support `implementation_support`; no additional server or package is installed. Coding runs retain changes in the selected directories and report blocked permissions; they do not automatically push, publish or deploy. OpenCode requires V2; CLI-specific permissions still apply, and selected directories are not a general OS isolation boundary. Isolated portal profiles are restricted to their own `data/repositories` roots.
@@ -595,7 +598,7 @@ All GUI directory choices use the same modal directory sheet (a bottom sheet on 
 
 `llm/implementation.rs` is separate from the tool-less answer transports. Planning uses a closed JSON interface in its own persistent, tool-less CLI session; coding runs the selected CLI in the first directory with additional directories passed through provider controls. Prompts travel on stdin, the inherited environment is restricted to the existing CLI/login/proxy allowlist, output is bounded and redacted, and no assistant Graph/ADO credentials enter the child environment. Codex uses workspace-write, Claude uses acceptEdits, and OpenCode V2 uses a dedicated agent with explicit directory permissions/policies. A provider can refuse permissions; Claude permission denials produce needs_attention. The CLI's own login and permission system remain in force. Relevant command references: [Codex](https://developers.openai.com/codex/cli/reference/), [Claude Code](https://code.claude.com/docs/en/cli-reference), [OpenCode V2 permissions](https://opencode.ai/v2/docs/permissions/).
 
-The portal's exact POST `/api/machines` endpoint is separate from authenticated browser control. Enrollment verifies the supplied GitHub credential using the pinned GitHub `/user` endpoint, then matches that immutable ID to an existing enabled Access-bound account. No account is created. Enrollment issues a random machine credential and stores only its hash, bound to the account version. All subsequent calls are authenticated with it; re-association, disabling an account or disconnecting the machine revokes access. Browser Origin requests, cookies without a machine credential and other methods/paths do not authorize machine operations. `configure-web-access.py` installs one exact Access bypass for this machine protocol; the backend still authenticates every request, and `/api/control` remains Access/session/CSRF-protected. Workers poll outbound, so the Mac needs no listener reachable from the Internet.
+The portal's exact POST `/api/machines` endpoint is separate from authenticated browser control. Enrollment requires a single-use, ten-minute, machine-bound pairing credential authorized locally on that installation with `pta web machines authorize MACHINE_ID --output PRIVATE_FILE`. The command writes a 0600 JSON file for `machine_connect` on stdin and persists only a hash under the private portal directory. Consumption is locked and persisted before contacting the host, and checks owner, account version, expiry and machine ID. GitHub tokens never authorize enrollment and are never sent to a coordinator. No account is created. Enrollment issues a random machine credential and stores only its hash, bound to the account version. All subsequent calls are authenticated with it; re-association, disabling an account or disconnecting the machine revokes access. Browser Origin requests, cookies without a machine credential and other methods/paths do not authorize machine operations. `configure-web-access.py` installs one exact Access bypass for this machine protocol; the backend still authenticates every request, and `/api/control` remains Access/session/CSRF-protected. Workers poll outbound, so the Mac needs no listener reachable from the Internet.
 
 A coordinator defaults to itself as the Teams machine. Every service start requires a lease for the selected machine; renewal runs separately from implementation polling every ten seconds. Handover blocks the new machine until the old 120-second lease expires. An existing service stops if it loses renewal or is deselected. The updater also checks implementation runs and child sends before restarting a host. This coordination covers enrolled hosts of the same account; an independent, unconnected installation is not discoverable.
 

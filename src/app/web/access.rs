@@ -138,7 +138,7 @@ pub(super) struct Verified {
     pub expires_at: u64,
     pub issued_at: u64,
 }
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 struct Claims {
     sub: String,
     exp: u64,

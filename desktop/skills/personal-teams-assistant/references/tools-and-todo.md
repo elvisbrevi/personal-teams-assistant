@@ -160,11 +160,7 @@ children and run installed coding agents.
    profiles can browse only their own repositories. Browsing grants no execution access.
    Leave Connection portal empty on the coordinator; enter its HTTPS origin on another
    computer that you want to connect.
-2. On another machine, stop its Teams assistant, connect GitHub using the same immutable
-   GitHub identity as the portal account, then call `machine_connect` with the portal's HTTPS
-   origin. It registers an account-bound credential in the existing system/file credential store,
-   and polls outbound; it needs no public listener. The coordinator must have the exact
-   `/api/machines` Access exception installed by `scripts/configure-web-access.py`.
+2. On another computer you own, read its `machine_settings.id` and stop its Teams assistant. On your own coordinator run `pta web machines authorize MACHINE_ID --output PRIVATE_FILE`, then securely transfer the private pairing JSON file to that computer. Within ten minutes run `pta tools call machine_connect < PRIVATE_FILE` there. Delete the file after use. Approval is single-use and machine/installation-bound; GitHub login or an API token cannot enroll machines. Initial pairing uses the CLI; Settings manages already paired machines. Each installation needs its own coordinator URL and hosting credentials.
 3. Select the single Teams machine in Settings > Microsoft Teams or `machine_teams`. The
    previous machine stops after losing its lease; handover waits up to 120 seconds before a
    new machine can start. Start the Teams assistant explicitly on the selected machine.
@@ -194,7 +190,7 @@ Examples use synthetic identifiers; obtain actual machine IDs and verified item 
 
 ```sh
 printf '%s\n' '{}' | pta --json tools call machine_list
-printf '%s\n' '{"url":"https://assistant.example.com","confirmed":true}' | pta --json tools call machine_connect
+pta --json tools call machine_connect < /private/path/pairing.json
 printf '%s\n' '{"item":{"provider":"azure","id":7,"project":"Payments","source":"azure","task":true}}' | pta --json tools call implementation_prepare
 printf '%s\n' '{"machine":"11111111-1111-4111-8111-111111111111","work_item_url":"https://dev.azure.com/example/Payments/_workitems/edit/7"}' | pta --json tools call implementation_runs
 ```

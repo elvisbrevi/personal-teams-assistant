@@ -87,6 +87,7 @@ struct Settings {
     public_url: String,
     session_hours: u32,
     access: Option<access::Config>,
+    owner_github_id: Option<u64>,
 }
 impl Default for Settings {
     fn default() -> Self {
@@ -95,11 +96,13 @@ impl Default for Settings {
             public_url: "http://localhost:38656".into(),
             session_hours: 12,
             access: None,
+            owner_github_id: None,
         }
     }
 }
 impl Settings {
     fn validate(&self) -> Result<()> {
+        ensure!(self.owner_github_id != Some(0), "invalid GitHub owner ID");
         let bind: std::net::SocketAddr = self.bind.parse()?;
         ensure!(
             bind.ip().is_loopback() && bind.port() > 0,
@@ -126,6 +129,13 @@ impl Settings {
             );
         }
         Ok(())
+    }
+    fn owns(&self, account: &Account) -> bool {
+        account.enabled
+            && account.access_binding.as_ref().is_some_and(|binding| {
+                self.owner_github_id
+                    .is_some_and(|id| binding.provider_user_id == id.to_string())
+            })
     }
     fn origin(&self) -> String {
         url::Url::parse(&self.public_url)
@@ -154,12 +164,24 @@ impl Settings {
 }
 fn settings(root: &Path) -> Result<Settings> {
     let path = root.join("settings.json");
-    let config: Settings = if path.exists() {
+    let mut config: Settings = if path.exists() {
         serde_json::from_slice(&fs::read(path)?)?
     } else {
         Settings::default()
     };
     config.validate()?;
+    // Existing local association is explicit operator authorization. Migrate only an
+    // unambiguous sole owner; new installs and legacy multi-user portals stay closed.
+    if config.owner_github_id.is_none() {
+        let entries = accounts(root)?;
+        let bindings: Vec<_> = entries
+            .iter()
+            .filter_map(|a| a.access_binding.as_ref())
+            .collect();
+        if let [binding] = bindings.as_slice() {
+            config.owner_github_id = binding.provider_user_id.parse().ok().filter(|id| *id > 0);
+        }
+    }
     Ok(config)
 }
 
@@ -245,7 +267,7 @@ impl Portal {
             .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
             .into_iter()
             .find(|e| {
-                e.enabled
+                self.settings.owns(e)
                     && e.id == session.account_id
                     && e.version == session.version
                     && e.access_binding.as_ref() == Some(&identity.binding)
@@ -429,6 +451,12 @@ async fn secure_headers(
             .into_response()
     };
     let headers = response.headers_mut();
+    if portal.settings.https() {
+        headers.insert(
+            header::STRICT_TRANSPORT_SECURITY,
+            "max-age=31536000".parse().unwrap(),
+        );
+    }
     headers.insert(header::CACHE_CONTROL, "no-store".parse().unwrap());
     headers.insert(header::CONTENT_SECURITY_POLICY, "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'".parse().unwrap());
     headers.insert(header::X_CONTENT_TYPE_OPTIONS, "nosniff".parse().unwrap());
@@ -501,7 +529,7 @@ async fn login(
 ) -> Response {
     let entry = match accounts(&portal.root) {
         Ok(entries) => entries.into_iter().find(|e| {
-            e.enabled
+            portal.settings.owns(e)
                 && e.access_binding.as_ref() == Some(&identity.binding)
                 && identity.issued_at >= e.access_valid_after
         }),
@@ -701,46 +729,21 @@ async fn machine_command(
         Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
     };
     let account = if registration {
-        if !portal.login_limit("machine-register").await {
-            return StatusCode::TOO_MANY_REQUESTS.into_response();
+        match store::consume_pairing(
+            &portal.root,
+            &portal.settings,
+            token,
+            args["id"].as_str().unwrap_or_default(),
+        ) {
+            Ok(account) => account,
+            Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
         }
-        let result = async {
-            let client = reqwest::Client::builder()
-                .redirect(reqwest::redirect::Policy::none())
-                .timeout(Duration::from_secs(15))
-                .user_agent("personal-teams-assistant")
-                .build()?;
-            let response = client
-                .get("https://api.github.com/user")
-                .bearer_auth(token)
-                .send()
-                .await?;
-            ensure!(
-                response.status().is_success(),
-                "GitHub did not verify the machine's account."
-            );
-            let user: Value = crate::adapters::bounded_json(response, 64_000).await?;
-            user["id"]
-                .as_u64()
-                .filter(|id| *id > 0)
-                .context("Invalid GitHub account.")
-        }
-        .await;
-        let Ok(user) = result else {
-            return StatusCode::UNAUTHORIZED.into_response();
-        };
-        entries.into_iter().find(|a| {
-            a.enabled
-                && a.access_binding
-                    .as_ref()
-                    .is_some_and(|b| b.provider_user_id == user.to_string())
-        })
     } else {
         let hash = format!("{:x}", Sha256::digest(token.as_bytes()));
         let id = args["id"].as_str().unwrap_or_default();
         entries
             .into_iter()
-            .filter(|a| a.enabled && a.access_binding.is_some())
+            .filter(|a| portal.settings.owns(a))
             .find(|a| {
                 fs::read(profile_dir(&portal.root, a).join("implementation/registry.json"))
                     .ok()
@@ -803,7 +806,7 @@ async fn webhook(
     let Some(account) = accounts(&portal.root).ok().and_then(|entries| {
         entries
             .into_iter()
-            .find(|e| e.enabled && !e.current_profile && e.id == id)
+            .find(|e| portal.settings.owns(e) && !e.current_profile && e.id == id)
     }) else {
         return StatusCode::NOT_FOUND.into_response();
     };
@@ -869,8 +872,8 @@ pub(super) fn run() -> Result<()> {
     lock.try_lock_exclusive()?;
     let portal = Arc::new(Portal::new(root, std::env::current_exe()?)?);
     ensure!(
-        portal.access.is_some(),
-        "Configure Cloudflare Access locally before starting the web portal; legacy passwords cannot authenticate."
+        portal.access.is_some() && portal.settings.owner_github_id.is_some(),
+        "Configure your Cloudflare Access and owner_github_id locally before starting your private web portal."
     );
     tokio::runtime::Runtime::new()?.block_on(async move {
         let listener = tokio::net::TcpListener::bind(&portal.settings.bind).await?;
@@ -885,7 +888,7 @@ pub(super) fn run() -> Result<()> {
         let mut serving = tokio::spawn(axum::serve(listener, router(portal.clone()))
             .with_graceful_shutdown(async { let _ = stopped.await; }).into_future());
         let warm = { let portal = portal.clone(); tokio::spawn(async move {
-            for account in entries.into_iter().filter(|entry| entry.enabled) {
+            for account in entries.into_iter().filter(|entry| portal.settings.owns(entry)) {
                 if let Ok(dir) = portal.worker(&account).await
                     && fs::read_to_string(portal.root.join("resume").join(&account.id)).is_ok_and(|value| value == "1") {
                     let _guard = portal.identities.lock().await;

@@ -109,13 +109,13 @@ pub(super) async fn operate(host: &Arc<Host>, method: &str, args: &Value) -> Res
             );
             let origin = args["url"].as_str().context("Choose a coordinator URL.")?;
             let url = endpoint(origin)?;
-            let _guard = host.state.github_api.lock().await;
-            let token = github::access_token().await?;
+            let token = args["pairing_token"].as_str().filter(|v| v.len() == 44)
+                .context("Authorize this machine on your own coordinator with `pta web machines authorize`, then pass its private JSON file to `pta tools call machine_connect` on stdin.")?;
             let data = state.registry.lock().await;
             let response=client()?.post(url).bearer_auth(token).json(&json!({"action":"register","id":data.id,"name":data.settings.name,"os":std::env::consts::OS})).send().await?;
             ensure!(
                 response.status().is_success(),
-                "Could not connect this machine. Sign in to the same GitHub account used by the portal."
+                "Could not connect this machine. Use an unexpired, unused pairing file from your own coordinator."
             );
             let value: Value = crate::adapters::bounded_json(response, 16_000).await?;
             ensure!(value["ok"] == true, "The coordinator refused this machine.");
@@ -185,7 +185,7 @@ pub(super) async fn operate(host: &Arc<Host>, method: &str, args: &Value) -> Res
     }
 }
 
-/// Invoked only by the portal after GitHub verified the token against the account binding.
+/// Invoked only after the portal consumes an operator-issued, machine-bound pairing credential.
 pub(in crate::app) async fn register(host: &Arc<Host>, args: &Value) -> Result<Value> {
     let id = args["id"].as_str().context("Invalid machine ID.")?;
     uuid(id)?;
