@@ -35,7 +35,7 @@ The app and its answers to Teams follow the configured language, Spanish or Engl
   </picture>
 </p>
 
-You can also register work on a schedule: once a day or every interval in a time window. Select your Azure DevOps activity (commits, pull requests, pipeline runs, releases and stage approvals), Wiki creation/edits and Teams messages/call sources, and a separate work-item write credential. The app proposes or creates **Task** items under the matching HU or bug that is not closed (in development counts), assigned to you, with a description, effort in hours, evidence links and the fields required for **Done**. It deducts hours already registered from the daily target (9 by default), groups related artifacts and never invents work to fill the remaining hours. Unclear descriptions, effort, HUs or calls produce a system notification that opens a separate review window with suggestions and an **Other / more context** field. The **Activities** tab shows pending decisions and history by day. Everything is also available through `pta`; see the [activity registration guide](desktop/skills/personal-teams-assistant/references/activity-registration.md).
+Activities can save the user's existing Azure tasks on a daily or interval schedule. These snapshots are read-only: they never create or modify work items. Only the separate, explicitly confirmed implementation flow creates reviewed children.
 
 ## Installation
 
@@ -69,15 +69,11 @@ GUI and CLI share the same profile, Keychain/Credential Manager credentials and 
 
 ### Web and phone access
 
-The same GUI can run in a browser, including settings, messages, activity decisions
-and history, knowledge and the test chat. Each login has its own Teams account,
-configuration, credentials and data. Create users with `pta web users add USER`
-and associate their verified GitHub identities locally with `pta web users bind USER`,
-configure Cloudflare Access and the HTTPS origin with `pta web configure`,
-and run `personal-teams-assistant --web` on an always-on machine behind Cloudflare
-Tunnel. `--current-profile` gives one account access to the existing desktop profile
-without copying its history or reconnecting Teams. See the
-[web and Cloudflare setup guide](desktop/skills/personal-teams-assistant/references/web-access.md).
+This is self-hosted software, not a shared hosted service. Installing the crate gives you your own local installation. Configure your own Microsoft application, provider credentials and, for web access, your own domain, Cloudflare account, Access GitHub OAuth app, tunnel and always-on machine. No maintainer infrastructure, credentials or remote machine is included or selected by default. The maintainer's private portal is not a public login service.
+
+Each portal accepts only its locally configured GitHub owner (`owner_github_id`), verified through that installation's Cloudflare Access provider. Associate the owner's verified identity locally with `pta web users bind USER`; `--current-profile` preserves the existing desktop profile and Microsoft session. Legacy additional profiles are retained, but other identities cannot use the portal or its execution machines.
+
+To connect another computer you own, authorize its machine ID locally on your coordinator with `pta web machines authorize MACHINE_ID --output PRIVATE_FILE`. Transfer that private file securely, then feed it to `pta tools call machine_connect` on the intended machine's stdin within ten minutes. Approval is single-use and tied to that machine and installation; a GitHub token cannot enroll a machine. The GUI can manage paired machines; initial pairing currently uses the CLI. See the [web setup guide](desktop/skills/personal-teams-assistant/references/web-access.md) and [security policy](SECURITY.md).
 
 ### Update
 

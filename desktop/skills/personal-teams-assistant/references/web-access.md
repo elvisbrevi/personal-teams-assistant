@@ -1,4 +1,4 @@
-# Web access with Cloudflare Access and GitHub
+# Your private web installation
 
 The same host binary serves the existing GUI in a browser: Home, Messages,
 Activities, Knowledge, Test chat and Settings. Native Tauri and the CLI keep their
@@ -7,34 +7,30 @@ existing dedicated Tunnel. Its HTTPS hostname and complete API must be protected
 by Cloudflare Access. GitHub owns the interactive sign-in; there is no second
 password form, public registration or password authentication endpoint.
 
-Read [the Mac deployment guide](https://github.com/elvisbrevi/personal-teams-assistant/blob/main/docs/web-macos-deployment.md) for the
-production transition. Registry version 0.7.0 includes Access; the preceding 0.6.9
-registry package still has the password portal. Configure Access before updating
-a password-based portal and install the compatible host/CLI pair before
-associating identities. Both the registry release and pinned source support the
-same account migration without replacing existing profiles.
+Installing the public crate never grants access to a maintainer's server. Each person supplies their own computer/VPS, HTTPS hostname, Cloudflare account/tunnel/Access application, dedicated GitHub OAuth app, Microsoft application and provider credentials. No production URL or login identity is a runtime default. One installation serves only its configured GitHub owner, not unrelated tenants.
+
+Configure `owner_github_id` to your verified positive integer GitHub user ID. Existing portals with exactly one locally associated identity infer that owner for compatibility; ambiguous legacy associations cannot start until an owner is explicitly configured. Other accounts remain on disk but cannot authenticate, receive callbacks or start a portal-owned host.
 
 ## Operator-local accounts and recovery
 
 ```sh
 pta web status
 pta web users list
-pta web users add alice
-pta web users add elvis --current-profile
-pta web users bind alice < /private/path/verified-alice-identity.json
-pta web users unbind alice
-pta web users revoke alice
-pta web users disable alice
-pta web users enable alice
+pta web users add owner --current-profile
+pta web users bind owner < /private/path/verified-owner-identity.json
+pta web users unbind owner
+pta web users revoke owner
+pta web users disable owner
+pta web users enable owner
 pta --json web callbacks > /private/path/production-callbacks.json
 ```
 
-Create `elvis --current-profile` only if it is absent. An existing `elvis` account
+Create `elvis --current-profile` only if it is absent. An existing `owner` account
 must keep its ID and current profile association. `add` takes no password and does
 not grant access until `bind`. No username/email similarity associates accounts.
 
 After authorizing the **dedicated login OAuth App**, obtain the identity response
-from `https://assistant.elvisbrevi.cl/cdn-cgi/access/get-identity` in the signed-in
+from `https://assistant.example.com/cdn-cgi/access/get-identity` in the signed-in
 browser. Save that response locally in a private file. The local operator checks
 that it is the intended person's identity from the configured GitHub provider,
 then supplies it to `users bind USER`. The response must include `id` (provider
@@ -83,7 +79,7 @@ separate from the GitHub App/Device Flow used for repositories. Cloudflare's
 requires the team origin as homepage and this callback:
 
 ```text
-https://small-forest-4923.cloudflareaccess.com/cdn-cgi/access/callback
+https://YOUR-TEAM.cloudflareaccess.com/cdn-cgi/access/callback
 ```
 
 Verify the team domain again before creating/reusing the OAuth App. GitHub OAuth
@@ -93,7 +89,7 @@ authorization/Test flow in Cloudflare before declaring login operational.
 
 The helper `scripts/configure-web-access.py` inspects existing resources, refuses
 to overwrite overlapping/unmanaged apps, uses only the dedicated GitHub IdP,
-limits edge admission to explicitly authorized emails plus that login method,
+limits edge admission to your one explicit owner email plus that login method,
 and reads back the apps/policies before writing private portal settings. The
 allowlist is an edge restriction only; a local provider-subject binding is still
 required. Never use an everyone or whole-domain Allow policy.
@@ -113,10 +109,12 @@ Do not reuse `GITHUB_OAUTH_TOKENS` or a Tunnel connector token.
 
 ```sh
 python3 scripts/configure-web-access.py \
-  --hostname assistant.elvisbrevi.cl --allow-email AUTHORIZED_GITHUB_EMAIL \
+  --hostname assistant.example.com --owner-github-id YOUR_NUMERIC_GITHUB_ID \
+  --allow-email YOUR_VERIFIED_GITHUB_EMAIL \
   --callbacks-file /private/path/production-callbacks.json --dry-run
 python3 scripts/configure-web-access.py \
-  --hostname assistant.elvisbrevi.cl --allow-email AUTHORIZED_GITHUB_EMAIL \
+  --hostname assistant.example.com --owner-github-id YOUR_NUMERIC_GITHUB_ID \
+  --allow-email YOUR_VERIFIED_GITHUB_EMAIL \
   --callbacks-file /private/path/production-callbacks.json \
   --settings-file /private/path/access-settings.json
 pta web configure < /private/path/access-settings.json
@@ -126,7 +124,7 @@ Run this helper from a checkout of the project's `main` branch; Cargo installs
 the binaries and embedded skill, while the setup script stays in the repository.
 
 The real helper-generated settings contain `bind`, `public_url`, `session_hours`
-and `access` (`issuer`, `audience`, `account_id`, `github_idp_id`). Audience/provider
+`owner_github_id` and `access` (`issuer`, `audience`, `account_id`, `github_idp_id`). Audience/provider
 IDs come from actual Cloudflare resources; never invent them. Configuration takes
 effect when the portal restarts. Plain HTTP previews cannot authenticate Access.
 
@@ -185,7 +183,18 @@ or provider logins. The portal remembers Assistant Start/Stop state and stops on
 hosts it owns on exit; a running desktop host remains owned by the desktop.
 
 Verify GitHub sign-in over HTTPS from the Mac and phone with no password form,
-two distinct approved users' settings/credentials/history, blocked unknown and
+owner access, blocked additional identities and
 disabled identities, JWT rejection, logout/replay/expiration, exact Graph callbacks,
 and native Tauri/CLI behavior. Use synthetic data and existing status reads; never
 send real Teams messages as a smoke test.
+
+## Authorize a computer you own
+
+1. On the computer to connect, call `machine_settings` through CLI/MCP and read its `id`. Stop its Teams assistant before pairing.
+2. On your own coordinator, run `pta web machines authorize MACHINE_ID --output /private/unused/pairing.json`. This operator-local command requires your enabled owner binding. It writes a 0600 JSON credential file; command output contains only its path and expiration. The server stores only a hash. Never paste the file or token in chat or command arguments.
+3. Transfer that file securely to the intended computer. Run `pta tools call machine_connect < /private/path/pairing.json` there within ten minutes. Delete the file after use. It carries your coordinator URL; there is no default shared server.
+4. Confirm `machine_list` shows your computer. A pairing cannot be reused, used for a different machine or installation, or used after account revocation/reassociation. A failed registration needs a new local authorization; never retry an uncertain enrollment with the old file.
+
+Machine registration never sends a GitHub access token to a coordinator. Existing machine credentials remain account-version-bound and revocable. Initial pairing requires CLI 0.9.4 or later; the GUI's URL-only Connect action cannot authorize it. Normal management remains available in the GUI after pairing.
+
+HTTPS origin responses include hostname-only HSTS. Configure matching edge HSTS for Access-generated responses without enabling parent-domain includeSubDomains or preload indiscriminately.

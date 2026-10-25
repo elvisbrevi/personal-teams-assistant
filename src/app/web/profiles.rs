@@ -105,6 +105,10 @@ pub(super) fn worker_command(binary: &Path, dir: &Path) -> tokio::process::Comma
 
 impl Portal {
     pub(super) async fn worker(&self, account: &Account) -> Result<PathBuf> {
+        ensure!(
+            self.settings.owns(account),
+            "This account does not own this installation."
+        );
         let dir = profile_dir(&self.root, account);
         let mut workers = self.workers.lock().await;
         if control::existing_host_at(&dir).is_ok() {
@@ -198,7 +202,7 @@ impl Portal {
             return;
         };
         for entry in &entries {
-            if !entry.enabled {
+            if !self.settings.owns(entry) {
                 let worker = self.workers.lock().await.remove(&entry.id);
                 if let Some(worker) = worker {
                     worker.shutdown().await;
@@ -245,6 +249,10 @@ impl Portal {
         account: &Account,
         request: &control::Request,
     ) -> Result<()> {
+        ensure!(
+            self.settings.owns(account),
+            "Operation is unavailable for this installation."
+        );
         const METHODS: &[&str] = &[
             "snapshot",
             "get_github_issue",

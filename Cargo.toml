@@ -1,6 +1,6 @@
 [package]
 name = "personal-teams-assistant"
-version = "0.9.3"
+version = "0.9.4"
 edition = "2024"
 rust-version = "1.95"
 build = "build.rs"
@@ -15,6 +15,7 @@ include = [
     "/Cargo.toml",
     "/LICENSE",
     "/README.md",
+    "/SECURITY.md",
     "/build.rs",
     "/src/**",
     "/config.example.toml",
@@ -73,7 +74,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = "2"
 uuid = { version = "1", features = ["v4"] }
 notify-rust = { version = "4.18.2", optional = true }
-tiberius = { version = "0.12", default-features = false, features = ["rustls", "tds73"] }
+tiberius = { version = "0.13", default-features = false, features = ["rustls", "tds73"] }
 
 [target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
 keyring = "4.2"
@@ -82,7 +83,6 @@ keyring = "4.2"
 tauri-build = { version = "2", features = [], optional = true }
 
 [dev-dependencies]
-rsa = "0.9"
 tokio = { version = "1", features = ["full", "test-util"] }
 tempfile = "3"
 wiremock = "0.6"

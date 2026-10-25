@@ -23,7 +23,7 @@ fn fixture() -> (tempfile::TempDir, Arc<Portal>, Vec<Account>) {
             access_binding: Some(access::Binding {
                 issuer: access::tests::config().issuer,
                 idp_id: access::tests::config().github_idp_id,
-                provider_user_id: format!("github-{name}"),
+                provider_user_id: if name == "alice" { "1001" } else { "1002" }.into(),
             }),
             access_valid_after: 0,
             version: uuid::Uuid::new_v4().to_string(),
@@ -37,6 +37,15 @@ fn fixture() -> (tempfile::TempDir, Arc<Portal>, Vec<Account>) {
     write_private(
         &root.join("accounts.json"),
         &serde_json::to_string(&accounts).unwrap(),
+    )
+    .unwrap();
+    write_private(
+        &root.join("settings.json"),
+        &serde_json::to_string(&Settings {
+            owner_github_id: Some(1001),
+            ..Settings::default()
+        })
+        .unwrap(),
     )
     .unwrap();
     let portal = Arc::new(Portal::new(root, PathBuf::from("/unused-test-host")).unwrap());
@@ -95,6 +104,248 @@ async fn machine_transport_rejects_browser_origins_cookies_and_missing_credentia
         .await
         .status(),
         StatusCode::UNAUTHORIZED
+    );
+}
+
+#[tokio::test]
+async fn only_the_local_owner_can_login_even_if_another_account_is_enabled_and_bound() {
+    let (_dir, portal, entries, _server) = configured_fixture().await;
+    let other = TestSession {
+        cookie: String::new(),
+        assertion: assertion(&entries[1]),
+    };
+    assert_eq!(
+        send(
+            &portal,
+            "GET",
+            "/login",
+            Some(&other),
+            None,
+            None,
+            Value::Null
+        )
+        .await
+        .status(),
+        StatusCode::FORBIDDEN
+    );
+    let (forged, _) = session_cookie(&portal, &entries[1]).await;
+    assert_eq!(
+        send(
+            &portal,
+            "GET",
+            "/api/session",
+            Some(&forged),
+            None,
+            None,
+            Value::Null
+        )
+        .await
+        .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    assert!(portal.worker(&entries[1]).await.is_err());
+    assert!(
+        portal
+            .check_request(&entries[1], &control::Request::new("snapshot"))
+            .is_err()
+    );
+}
+
+#[test]
+fn pairing_is_single_use_machine_bound_private_and_local_to_an_installation() {
+    let (dir, portal, entries) = fixture();
+    let config = Settings {
+        owner_github_id: Some(1001),
+        public_url: "https://assistant.example.com".into(),
+        access: Some(access::tests::config()),
+        ..Settings::default()
+    };
+    write_private(
+        &portal.root.join("settings.json"),
+        &serde_json::to_string(&config).unwrap(),
+    )
+    .unwrap();
+    let machine = uuid::Uuid::new_v4().to_string();
+    let file = dir.path().join("pairing.json");
+    let reply = store::authorize_machine(&portal.root, &machine, &file).unwrap();
+    let payload: Value = serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
+    let token = payload["pairing_token"].as_str().unwrap();
+    assert!(!reply.to_string().contains(token));
+    assert!(
+        !fs::read_to_string(portal.root.join("machine-pairings.json"))
+            .unwrap()
+            .contains(token)
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            fs::metadata(&file).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+    assert!(store::authorize_machine(&portal.root, &machine, &file).is_err());
+    assert!(
+        store::consume_pairing(
+            &portal.root,
+            &config,
+            token,
+            &uuid::Uuid::new_v4().to_string()
+        )
+        .unwrap()
+        .is_none()
+    );
+    let (_other_dir, other_portal, _) = fixture();
+    assert!(
+        store::consume_pairing(&other_portal.root, &config, token, &machine)
+            .unwrap()
+            .is_none()
+    );
+    let account = store::consume_pairing(&portal.root, &config, token, &machine)
+        .unwrap()
+        .unwrap();
+    assert_eq!(account.id, entries[0].id);
+    assert!(
+        store::consume_pairing(&portal.root, &config, token, &machine)
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn machine_registration_accepts_only_a_locally_approved_pairing_and_never_github_tokens() {
+    let (dir, portal, entries, _server) = configured_fixture().await;
+    let (host, _lock) = fake_host(&portal, &entries[0]).await;
+    let settings = Settings {
+        public_url: "https://assistant.example.com".into(),
+        access: Some(access::tests::config()),
+        ..portal.settings.clone()
+    };
+    write_private(
+        &portal.root.join("settings.json"),
+        &serde_json::to_string(&settings).unwrap(),
+    )
+    .unwrap();
+    let machine = uuid::Uuid::new_v4().to_string();
+    let file = dir.path().join("pairing.json");
+    store::authorize_machine(&portal.root, &machine, &file).unwrap();
+    let payload: Value = serde_json::from_slice(&fs::read(file).unwrap()).unwrap();
+    let token = payload["pairing_token"].as_str().unwrap();
+    for (credential, status) in [
+        ("ghp_synthetic_github_token", StatusCode::FORBIDDEN),
+        (token, StatusCode::OK),
+        (token, StatusCode::FORBIDDEN),
+    ] {
+        let request = Request::builder()
+            .method("POST")
+            .uri("/api/machines")
+            .header(header::HOST, "localhost:38656")
+            .header(header::CONTENT_TYPE, "application/json")
+            .header(header::AUTHORIZATION, format!("Bearer {credential}"))
+            .body(Body::from(
+                json!({"action":"register","id":machine,"name":"Synthetic","os":"linux"})
+                    .to_string(),
+            ))
+            .unwrap();
+        assert_eq!(
+            router(portal.clone())
+                .oneshot(request)
+                .await
+                .unwrap()
+                .status(),
+            status
+        );
+    }
+    let requests = host.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 1);
+    let request: Value = serde_json::from_slice(&requests[0].body).unwrap();
+    assert_eq!(request["method"], "machine_register");
+    assert!(!request.to_string().contains(token));
+}
+
+#[test]
+fn default_and_ambiguous_legacy_settings_have_no_owner_or_vendor_url() {
+    let config = Settings::default();
+    assert!(config.owner_github_id.is_none());
+    assert_eq!(config.public_url, "http://localhost:38656");
+    let (_dir, portal, _) = fixture();
+    write_private(&portal.root.join("settings.json"), "{}").unwrap();
+    assert!(settings(&portal.root).unwrap().owner_github_id.is_none());
+    store::edit_accounts(&portal.root, |entries| {
+        entries[1].access_binding = None;
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(settings(&portal.root).unwrap().owner_github_id, Some(1001));
+}
+
+#[test]
+fn expired_revoked_disabled_and_wrong_owner_pairings_are_rejected() {
+    for rejection in ["expired", "revoked", "disabled", "owner"] {
+        let (dir, portal, _) = fixture();
+        let mut config = Settings {
+            public_url: "https://assistant.example.com".into(),
+            access: Some(access::tests::config()),
+            ..portal.settings.clone()
+        };
+        write_private(
+            &portal.root.join("settings.json"),
+            &serde_json::to_string(&config).unwrap(),
+        )
+        .unwrap();
+        let machine = uuid::Uuid::new_v4().to_string();
+        let file = dir.path().join("pairing.json");
+        store::authorize_machine(&portal.root, &machine, &file).unwrap();
+        let payload: Value = serde_json::from_slice(&fs::read(file).unwrap()).unwrap();
+        let token = payload["pairing_token"].as_str().unwrap();
+        match rejection {
+            "expired" => {
+                let path = portal.root.join("machine-pairings.json");
+                let mut entries: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+                for value in entries.as_object_mut().unwrap().values_mut() {
+                    value["expires_at"] = json!(access::now());
+                }
+                write_private(&path, &entries.to_string()).unwrap();
+            }
+            "revoked" => store::edit_accounts(&portal.root, |entries| {
+                entries[0].version = uuid::Uuid::new_v4().to_string();
+                Ok(())
+            })
+            .unwrap(),
+            "disabled" => store::edit_accounts(&portal.root, |entries| {
+                entries[0].enabled = false;
+                Ok(())
+            })
+            .unwrap(),
+            "owner" => config.owner_github_id = Some(1002),
+            _ => unreachable!(),
+        }
+        assert!(
+            store::consume_pairing(&portal.root, &config, token, &machine)
+                .unwrap()
+                .is_none(),
+            "{rejection}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn https_responses_include_hostname_only_hsts() {
+    let (_dir, mut portal, _, _) = configured_fixture().await;
+    Arc::get_mut(&mut portal).unwrap().settings.public_url = "https://localhost:38656".into();
+    let response = send(
+        &portal,
+        "GET",
+        "/favicon.png",
+        None,
+        None,
+        None,
+        Value::Null,
+    )
+    .await;
+    assert_eq!(
+        response.headers()[header::STRICT_TRANSPORT_SECURITY],
+        "max-age=31536000"
     );
 }
 async fn send(
@@ -215,7 +466,7 @@ async fn fake_host(portal: &Portal, account: &Account) -> (MockServer, fs::File)
     write_private(
         &dir.join("control.json"),
         &json!({"contract":1,"port":port,"token":"synthetic-ipc-token",
-        "wiki_support":true,"activity_registration_support":true,"web_support":true,"web_access_support":true})
+        "wiki_support":true,"activity_registration_support":true,"web_support":true,"web_access_support":true,"implementation_support":true})
         .to_string(),
     )
     .unwrap();
@@ -407,7 +658,7 @@ async fn commands_are_session_scoped_and_require_csrf_even_for_reads() {
     let (_alice, _alice_lock) = fake_host(&portal, &entries[0]).await;
     let (_bob, _bob_lock) = fake_host(&portal, &entries[1]).await;
     let request = serde_json::to_value(control::Request::new("snapshot")).unwrap();
-    for entry in &entries {
+    for entry in entries.iter().take(1) {
         let (cookie, csrf) = session_cookie(&portal, entry).await;
         for (token, origin) in [
             (None, Some("http://localhost:38656")),
@@ -856,6 +1107,11 @@ async fn callbacks_route_only_to_the_matching_enabled_profile_without_administra
             entry.id
         );
         let response = send(&portal, "POST", &url, None, None, None, json!({})).await;
+        if entry.id == entries[1].id {
+            assert_eq!(response.status(), StatusCode::NOT_FOUND);
+            assert!(server.received_requests().await.unwrap().is_empty());
+            continue;
+        }
         assert_eq!(response.status(), StatusCode::OK);
         let body = to_bytes(response.into_body(), 4096).await.unwrap();
         assert_eq!(body.as_ref(), entry.username.as_bytes());
@@ -895,7 +1151,7 @@ async fn callbacks_route_only_to_the_matching_enabled_profile_without_administra
 fn remote_http_and_public_bindings_are_rejected_and_secure_cookies_are_host_only() {
     for settings in [
         Settings {
-            public_url: "http://assistant.elvisbrevi.cl".into(),
+            public_url: "http://assistant.example.com".into(),
             ..Settings::default()
         },
         Settings {
@@ -903,14 +1159,14 @@ fn remote_http_and_public_bindings_are_rejected_and_secure_cookies_are_host_only
             ..Settings::default()
         },
         Settings {
-            public_url: "https://assistant.elvisbrevi.cl/path".into(),
+            public_url: "https://assistant.example.com/path".into(),
             ..Settings::default()
         },
     ] {
         assert!(settings.validate().is_err());
     }
     let config = Settings {
-        public_url: "https://assistant.elvisbrevi.cl".into(),
+        public_url: "https://assistant.example.com".into(),
         ..Settings::default()
     };
     config.validate().unwrap();
@@ -921,7 +1177,7 @@ fn remote_http_and_public_bindings_are_rejected_and_secure_cookies_are_host_only
             && !cookie.contains("Domain=")
     );
     let upper = Settings {
-        public_url: "HTTPS://assistant.elvisbrevi.cl".into(),
+        public_url: "HTTPS://assistant.example.com".into(),
         ..Settings::default()
     };
     upper.validate().unwrap();

@@ -127,9 +127,10 @@ pub(super) fn callback_path(value: &str) -> bool {
     matches!(segments.as_slice(), ["", "webhooks", id, "graph", "notifications" | "lifecycle"] if access::canonical_uuid(id))
 }
 fn callbacks(root: &Path) -> Result<Vec<String>> {
+    let settings = settings(root)?;
     Ok(accounts(root)?
         .iter()
-        .filter(|e| !e.current_profile)
+        .filter(|e| settings.owns(e) && !e.current_profile)
         .flat_map(|e| {
             [
                 format!("/webhooks/{}/graph/notifications", e.id),
@@ -137,6 +138,105 @@ fn callbacks(root: &Path) -> Result<Vec<String>> {
             ]
         })
         .collect())
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Pairing {
+    account_id: String,
+    version: String,
+    machine_id: String,
+    expires_at: u64,
+}
+fn pairings(root: &Path) -> Result<HashMap<String, Pairing>> {
+    let path = root.join("machine-pairings.json");
+    if !path.exists() {
+        return Ok(HashMap::new());
+    }
+    let entries: HashMap<String, Pairing> = serde_json::from_slice(&fs::read(path)?)?;
+    ensure!(entries.len() <= 100, "invalid machine pairing count");
+    Ok(entries)
+}
+fn save_pairings(root: &Path, entries: &HashMap<String, Pairing>) -> Result<()> {
+    write_private(
+        &root.join("machine-pairings.json"),
+        &serde_json::to_string(entries)?,
+    )
+}
+pub(super) fn authorize_machine(root: &Path, machine_id: &str, output: &Path) -> Result<Value> {
+    ensure!(access::canonical_uuid(machine_id), "invalid machine ID");
+    ensure!(output.is_absolute(), "use an absolute private output path");
+    let config = settings(root)?;
+    ensure!(
+        config.https() && config.access.is_some(),
+        "configure your private HTTPS portal first"
+    );
+    let account = accounts(root)?
+        .into_iter()
+        .find(|a| config.owns(a))
+        .context("associate this installation's owner before authorizing machines")?;
+    let _lock = file_lock(root, "machine-pairings.lock")?;
+    let mut entries = pairings(root)?;
+    entries.retain(|_, p| p.expires_at > access::now() && p.machine_id != machine_id);
+    ensure!(entries.len() < 100, "machine pairing limit reached");
+    let token = security::random_secret();
+    let expires_at = access::now() + 600;
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(output)
+        .context("use an unused private output file")?;
+    security::protect_file(output)?;
+    use std::io::Write as _;
+    file.write_all(
+        serde_json::to_string(
+            &json!({"url":config.origin(),"pairing_token":token,"confirmed":true}),
+        )?
+        .as_bytes(),
+    )?;
+    file.sync_all()?;
+    entries.insert(
+        format!("{:x}", Sha256::digest(token.as_bytes())),
+        Pairing {
+            account_id: account.id,
+            version: account.version,
+            machine_id: machine_id.into(),
+            expires_at,
+        },
+    );
+    save_pairings(root, &entries)?;
+    Ok(json!({"machine_id":machine_id,"expires_at":expires_at,"private_file":output}))
+}
+pub(super) fn consume_pairing(
+    root: &Path,
+    config: &Settings,
+    token: &str,
+    machine_id: &str,
+) -> Result<Option<Account>> {
+    if token.len() != 44 || !access::canonical_uuid(machine_id) {
+        return Ok(None);
+    }
+    let _lock = file_lock(root, "machine-pairings.lock")?;
+    let mut entries = pairings(root)?;
+    let hash = format!("{:x}", Sha256::digest(token.as_bytes()));
+    let Some(pairing) = entries.get(&hash) else {
+        return Ok(None);
+    };
+    if pairing.expires_at <= access::now() || pairing.machine_id != machine_id {
+        return Ok(None);
+    }
+    let account = accounts(root)?
+        .into_iter()
+        .find(|a| config.owns(a) && a.id == pairing.account_id && a.version == pairing.version);
+    // Consume before contacting a host: a lost registration response cannot replay approval.
+    entries.remove(&hash);
+    save_pairings(root, &entries)?;
+    Ok(account)
 }
 
 /// Only the local OS operator can associate identities, recover accounts or revoke
@@ -161,8 +261,8 @@ pub(super) fn admin(args: &[String]) -> Result<control::Reply> {
             let config: Settings = json_stdin()?;
             config.validate()?;
             ensure!(
-                config.access.is_some(),
-                "invalid web settings: Cloudflare Access configuration is required"
+                config.access.is_some() && config.owner_github_id.is_some(),
+                "invalid web settings: your Cloudflare Access and owner_github_id are required"
             );
             security::private_dir(&root)?;
             write_private(
@@ -170,6 +270,15 @@ pub(super) fn admin(args: &[String]) -> Result<control::Reply> {
                 &serde_json::to_string(&config)?,
             )?;
             json!({"configured":true,"restart_portal":true,"settings":config})
+        }
+        "machines" => {
+            ensure!(
+                args.get(2).map(String::as_str) == Some("authorize")
+                    && args.len() == 6
+                    && args[4] == "--output",
+                "use: pta web machines authorize MACHINE_ID --output PRIVATE_FILE"
+            );
+            authorize_machine(&root, &args[3], Path::new(&args[5]))?
         }
         "users" => {
             let operation = args.get(2).map(String::as_str).unwrap_or("");
@@ -195,11 +304,19 @@ pub(super) fn admin(args: &[String]) -> Result<control::Reply> {
                 }
                 let name = username(args.get(3).context("missing username")?)?;
                 let binding = if operation == "bind" {
-                    let config = settings(&root)?
+                    let settings = settings(&root)?;
+                    let config = settings
                         .access
                         .context("configure Access before associating an identity")?;
                     let identity: access::Identity = json_stdin()?;
-                    Some(identity.binding(&config)?)
+                    let binding = identity.binding(&config)?;
+                    ensure!(
+                        settings
+                            .owner_github_id
+                            .is_some_and(|id| binding.provider_user_id == id.to_string()),
+                        "This private installation accepts only its configured GitHub owner."
+                    );
+                    Some(binding)
                 } else {
                     None
                 };

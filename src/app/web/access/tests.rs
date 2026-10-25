@@ -1,9 +1,6 @@
 use super::*;
-use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use jsonwebtoken::{EncodingKey, Header, encode};
-use rsa::{RsaPrivateKey, pkcs1::EncodeRsaPrivateKey, traits::PublicKeyParts};
 use serde_json::Value;
-use std::sync::OnceLock;
 use wiremock::{
     Mock, MockServer, ResponseTemplate,
     matchers::{method, path},
@@ -11,10 +8,9 @@ use wiremock::{
 
 const SUBJECT: &str = "2f102676-72cd-4d60-9f49-a94a33f9b231";
 const IDP: &str = "f43dbf29-6f6b-4f38-ac06-d8a973fb4e47";
-fn key() -> &'static RsaPrivateKey {
-    static KEY: OnceLock<RsaPrivateKey> = OnceLock::new();
-    KEY.get_or_init(|| RsaPrivateKey::new(&mut rsa::rand_core::OsRng, 2048).unwrap())
-}
+// Public synthetic signing fixture, compiled only in tests. Production trusts only
+// the pinned Cloudflare team's fetched public keys, never this test key.
+const KEY: &[u8] = include_bytes!("synthetic-rsa.der");
 pub(crate) fn config() -> Config {
     Config {
         issuer: "https://synthetic.cloudflareaccess.com".into(),
@@ -24,8 +20,9 @@ pub(crate) fn config() -> Config {
     }
 }
 fn jwks(kid: &str) -> Value {
+    let public: Value = serde_json::from_str(include_str!("synthetic-rsa-public.json")).unwrap();
     json!({"keys":[{"kty":"RSA","alg":"RS256","use":"sig","kid":kid,
-        "n":URL_SAFE_NO_PAD.encode(key().n().to_bytes_be()), "e":URL_SAFE_NO_PAD.encode(key().e().to_bytes_be())}]})
+        "n":public["n"], "e":public["e"]}]})
 }
 pub(crate) fn claims(subject: &str) -> Value {
     json!({"aud":[config().audience],"iss":config().issuer,"exp":now()+3600,"iat":now()-1,"nbf":now()-1,
@@ -34,12 +31,7 @@ pub(crate) fn claims(subject: &str) -> Value {
 pub(crate) fn token(claims: &Value, kid: &str) -> String {
     let mut header = Header::new(Algorithm::RS256);
     header.kid = Some(kid.into());
-    encode(
-        &header,
-        claims,
-        &EncodingKey::from_rsa_der(key().to_pkcs1_der().unwrap().as_bytes()),
-    )
-    .unwrap()
+    encode(&header, claims, &EncodingKey::from_rsa_der(KEY)).unwrap()
 }
 pub(crate) fn identity(subject: &str, id: &str) -> Value {
     json!({"id":id,"user_uuid":subject,"account_id":config().account_id,"idp":{"id":IDP,"type":"github"}})

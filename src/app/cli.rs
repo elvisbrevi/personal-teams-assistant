@@ -27,9 +27,12 @@ Application (host)
 Web portal
   Requires Cloudflare Access and a dedicated GitHub OAuth App; see pta skill show.
   web status              Web URL, settings and account profiles (never passwords).
-  web configure           JSON on stdin: bind, public_url, session_hours and access.
+  web configure           JSON on stdin: bind, public_url, session_hours, owner_github_id and access.
                            access: issuer, audience, account_id, github_idp_id from Cloudflare.
   web callbacks           Exact Graph callback paths for Cloudflare Access bypass applications.
+  web machines authorize MACHINE_ID --output PRIVATE_FILE
+                           Locally approve your machine for 10 minutes; writes a private single-use
+                           pairing JSON file for `pta tools call machine_connect` on that machine's stdin.
   web users list          Lists web accounts and their isolated profile directories.
   web users add USER      Creates an isolated profile, blocked until an Access identity is associated locally.
                            --current-profile attaches it to the existing desktop profile; identity binding is still required.
@@ -251,6 +254,14 @@ fn validate_args(args: &[String]) -> Result<()> {
                     "invalid source ID"
                 );
             }
+            "--output" => {
+                i += 1;
+                ensure!(
+                    args.get(i)
+                        .is_some_and(|v| std::path::Path::new(v).is_absolute()),
+                    "use an absolute private output path"
+                );
+            }
             _ => {
                 ensure!(!a.starts_with("--"), "unknown flag");
                 positional.push(a);
@@ -277,6 +288,7 @@ fn validate_args(args: &[String]) -> Result<()> {
             | ["tools", "call", _]
             | ["web", "status" | "configure" | "callbacks"]
             | ["web", "users", "list"]
+            | ["web", "machines", "authorize", _]
             | [
                 "web",
                 "users",
@@ -360,6 +372,10 @@ fn validate_args(args: &[String]) -> Result<()> {
         (
             "--current-profile",
             p.as_slice().starts_with(&["web", "users", "add"]),
+        ),
+        (
+            "--output",
+            p.as_slice().starts_with(&["web", "machines", "authorize"]),
         ),
         ("--limit", ["audit", "logs", "notes"].contains(&p[0])),
         (
@@ -1285,6 +1301,32 @@ mod wiki_tests {
             serde_json::from_value::<crate::ado::wiki::SearchInput>(
                 json!({"query":"deploy","author_mode":"infer_mine"})
             )
+            .is_err()
+        );
+    }
+    #[test]
+    fn machine_pairing_output_flag_accepts_only_private_absolute_paths_for_authorization() {
+        let output = std::env::temp_dir().join("synthetic-pairing.json");
+        let mut args: Vec<String> = [
+            "web",
+            "machines",
+            "authorize",
+            "11111111-1111-4111-8111-111111111111",
+            "--output",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+        args.push(output.to_string_lossy().into_owned());
+        assert!(validate_args(&args).is_ok());
+        *args.last_mut().unwrap() = "relative.json".into();
+        assert!(validate_args(&args).is_err());
+        assert!(
+            validate_args(&[
+                "status".into(),
+                "--output".into(),
+                output.to_string_lossy().into_owned()
+            ])
             .is_err()
         );
     }

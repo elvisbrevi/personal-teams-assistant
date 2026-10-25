@@ -39,9 +39,12 @@ A push to `main` whose `Cargo.toml` version crates.io does not have yet runs eve
 | UI and scripts | `ubuntu-latest` | `bun build desktop/ui/app.js`; `node --test scripts/test-activity-ui.cjs scripts/test-ui-i18n.cjs`; the Python script tests; `scripts/ui-preview/check.mjs` with Playwright's Chromium (axe WCAG 2.2 AA on every section, theme and phone, plus the interaction checks; any violation fails); the results are an artifact for 7 days |
 | macOS | `macos-latest` | clippy and tests with `gui` |
 | Windows (informative) | `windows-latest` | build and clippy with `gui`; `continue-on-error`, so a failure shows but blocks nothing |
+| Security | `ubuntu-latest` | full-history and working-tree Gitleaks scan with a pinned checksum-verified release; `cargo audit` against RustSec; no repository secrets |
 | CI result | `ubuntu-latest` | fails if a required job failed or was cancelled; skipped jobs pass. It is the one check to require before merging |
 
 Rust jobs cache dependencies with `Swatinem/rust-cache`, saved only from `main` (pull requests restore it). Third-party actions are pinned to a commit.
+
+The Security job also runs weekly. On scheduled runs, the build/UI jobs are skipped and `CI result` requires the security result. GitHub secret scanning, push protection, vulnerability alerts and automated security updates are enabled for the public repository; Dependabot proposes Cargo and Actions updates weekly. Audit output retains upstream maintenance/GUI notices, documented in [SECURITY.md](../SECURITY.md); known-vulnerability failures block delivery.
 
 ### Measured times
 
