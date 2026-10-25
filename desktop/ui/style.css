@@ -788,3 +788,8 @@ body.directory-picker-open { overflow: hidden; }
 #agent-history .todo-fields dd { overflow-wrap: anywhere; min-width: 0; }
 
 .request-footer, .todo-create-actions { margin: 1rem 0; }
+
+.request-target { width: 100%; text-align: left; white-space: normal; overflow-wrap: anywhere; border-radius: var(--radius-control); }
+.destination-search { padding: .75rem 1rem; margin: 0; flex: none; }
+.destination-picker .directory-picker-row button { white-space: normal; overflow-wrap: anywhere; }
+.destination-picker .directory-picker-row button[aria-pressed="true"] { background: var(--ok-soft); }

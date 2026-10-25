@@ -49,14 +49,14 @@ pub(super) async fn create_child(
         json!({"id":number,"title":child["title"],"url":url.as_str(),"state":if linked { "created" } else { "created_unlinked" }}),
     )
 }
-/// The caller verifies the repository against the connected installation catalog before sending.
+/// The caller verifies the repository against the GitHub CLI catalog before sending.
 pub(super) async fn create_request(
     repository: &str,
     draft: &serde_json::Value,
 ) -> Result<serde_json::Value> {
     use serde_json::Value;
     crate::tools::todo::validate_repository(repository)?;
-    let token = access_token().await?;
+    let token = super::github_cli::token().await?;
     let client = client()?;
     let user: Value = get(&client, &token, "https://api.github.com/user").await?;
     let login = user["login"]

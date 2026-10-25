@@ -466,6 +466,9 @@ pub(crate) async fn dispatch(host: &Arc<Host>, request: Request) -> Reply {
     }
     let state = &host.state;
     // A CLI/network probe must not hold the profile operations mutex while Home loads.
+    if request.method == "github_cli_status" {
+        return Reply::success(github_cli::status().await);
+    }
     if request.method == "azure_cli_status" {
         return Reply::success(json!(azure_cli::status().await));
     }

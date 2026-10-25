@@ -1,7 +1,7 @@
 const rawInvoke = window.ptaTransport.invoke;
 // Also the answer operations: they do not depend on the profile files, so they neither check
 // nor advance the form's revision.
-const READS = ['snapshot', 'chat', 'github_repositories', 'self_chat_status', 'llm_providers', 'azure_cli_status', 'audit', 'activity_status', 'activity_history', 'activity_pending', 'answer_refine', 'answer_send', 'list_azure_hus', 'list_github_epics', 'list_github_issues', 'get_azure_hu', 'get_azure_task', 'list_azure_tasks', 'get_github_epic', 'get_github_issue', 'open_work_item'];
+const READS = ['snapshot', 'chat', 'github_repositories', 'self_chat_status', 'llm_providers', 'azure_cli_status', 'github_cli_status', 'audit', 'activity_status', 'activity_history', 'activity_pending', 'answer_refine', 'answer_send', 'list_azure_hus', 'list_github_epics', 'list_github_issues', 'get_azure_hu', 'get_azure_task', 'list_azure_tasks', 'get_github_epic', 'get_github_issue', 'open_work_item'];
 // Revision of the profile files the last reply saw. The form's own revision (`current.revision`)
 // changes only when it reloads or writes, so saving a stale form fails instead of overwriting
 // changes made elsewhere (e.g. with `pta`).
@@ -488,8 +488,8 @@ async function openRequest() {
   try {
     const catalog = await invoke('implementation_request_catalog', { provider: azure ? 'azure' : 'github', ...(azure ? { source } : {}) });
     if (generation !== requestGeneration || tab !== 'create-request') return;
-    const target = el('select', { id: 'request-target' }, el('option', { value: '', textContent: azure ? t('Choose a project') : t('Choose a repository') }),
-      ...catalog.targets.map((target, index) => el('option', { value: String(index), textContent: target.organization ? `${target.project} · ${target.organization}` : target.project })));
+    const target = el('button', { id: 'request-target', type: 'button', class: 'secondary request-target', value: '', 'aria-haspopup': 'dialog', 'aria-labelledby': 'request-target-label request-target', textContent: azure ? t('Choose a project') : t('Choose a repository') });
+    target.onclick = () => chooseRequestTarget(target, catalog, azure);
     const context = el('textarea', { id: 'request-context', rows: 7, maxLength: 32000, required: true });
     const provider = el('select', { id: 'request-provider' }, ...catalog.providers.map(p => el('option', { value: p.id, textContent: providerNames[p.id] || p.id })));
     const model = el('select', { id: 'request-model' });
@@ -524,14 +524,14 @@ async function openRequest() {
         result.append(inspect);
       }
     });
-    const sessionStatus = el('button', { type: 'button', class: 'secondary', textContent: t('Check Azure CLI status') });
-    sessionStatus.onclick = () => { showTab('overview', 'azure-cli-status'); loadAzureCliStatus(); };
+    const sessionStatus = el('button', { type: 'button', class: 'secondary', textContent: azure ? t('Check Azure CLI status') : t('Check GitHub CLI status') });
+    sessionStatus.onclick = () => { showTab('overview', azure ? 'azure-cli-status' : 'github-cli-status'); azure ? loadAzureCliStatus() : loadGithubCliStatus(); };
     $('#request-content').replaceChildren(el('div', { class: 'panel' },
-      el('label', {}, azure ? t('Project') : t('Repository'), target), kind,
+      el('div', { class: 'field-block' }, el('label', { id: 'request-target-label', textContent: azure ? t('Project') : t('Repository') }), target), kind,
       el('label', {}, t('Request context'), context),
       el('div', { class: 'grid' }, el('label', {}, t('CLI'), provider), el('label', {}, t('Model'), model), el('label', {}, t('Effort'), effort)),
-      catalog.write_ready === false ? el('div', { class: 'callout warn' }, el('p', { textContent: t('Sign in with az login on the machine running this app, then refresh Azure CLI status.') }), sessionStatus) : null,
-      !catalog.targets.length ? el('p', { class: 'callout warn', textContent: t('No destinations are available. Check the selected source or GitHub connection.') }) : null,
+      catalog.write_ready === false ? el('div', { class: 'callout warn' }, el('p', { textContent: azure ? t('Sign in with az login on the machine running this app, then refresh Azure CLI status.') : t('Sign in with gh auth login on the machine running this app, then refresh GitHub CLI status.') }), sessionStatus) : null,
+      !catalog.targets.length ? el('p', { class: 'callout warn', textContent: t('No destinations are available. Check the selected source or GitHub CLI session.') }) : null,
       !catalog.providers.length ? el('p', { class: 'callout warn', textContent: t('No coding CLI installed on this machine') }) : null),
       el('div', { class: 'actions request-footer' }, cancel, start), result);
   } catch (error) {
@@ -540,6 +540,50 @@ async function openRequest() {
     $('#request-problem').textContent = tx(String(error));
     $('#request-content').replaceChildren(cancel);
   }
+}
+function requestTargetLabel(target) {
+  return target.organization ? `${target.project} · ${target.organization}` : target.project;
+}
+function chooseRequestTarget(trigger, catalog, azure) {
+  const title = azure ? t('Choose a project') : t('Choose a repository');
+  const dialog = el('dialog', { class: 'directory-picker destination-picker', 'aria-label': title });
+  const close = el('button', { type: 'button', class: 'icon-button secondary', 'aria-label': t('Cancel') }, icon('close'));
+  const search = el('input', { id: 'request-target-search', type: 'search', autocomplete: 'off' });
+  const body = el('div', { class: 'directory-picker-body' });
+  const count = el('p', { class: 'hint', role: 'status' });
+  const normalize = text => text.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLocaleLowerCase();
+  const recent = (catalog.recent || []).map(target => catalog.targets.findIndex(t => t.project === target.project && t.organization === target.organization)).filter(index => index >= 0).slice(0, 3);
+  const render = () => {
+    const query = normalize(search.value.trim());
+    const matches = catalog.targets.map((target, index) => ({ target, index })).filter(({ target }) => normalize(target.project).includes(query));
+    const row = ({ target, index }) => {
+      const button = el('button', { type: 'button', class: 'link-button', value: String(index), textContent: requestTargetLabel(target), 'aria-pressed': trigger.value === String(index) });
+      button.onclick = () => {
+        trigger.value = String(index); trigger.textContent = requestTargetLabel(target);
+        trigger.onchange(); dialog.close();
+      };
+      return el('div', { class: 'directory-picker-row' }, button);
+    };
+    const recentMatches = matches.filter(({ index }) => recent.includes(index)).sort((a, b) => recent.indexOf(a.index) - recent.indexOf(b.index));
+    const otherMatches = matches.filter(({ index }) => !recent.includes(index));
+    body.replaceChildren(...[
+      recentMatches.length ? el('h3', { textContent: t('Recent') }) : null,
+      recentMatches.length ? el('div', { class: 'directory-picker-list', 'data-recent': '' }, ...recentMatches.map(row)) : null,
+      otherMatches.length ? el('h3', { textContent: azure ? t('All projects') : t('All repositories') }) : null,
+      otherMatches.length ? el('div', { class: 'directory-picker-list' }, ...otherMatches.map(row)) : null,
+      !matches.length ? el('p', { class: 'hint', textContent: t('No matching destinations.') }) : null,
+    ].filter(Boolean));
+    count.textContent = tn(matches.length, '{n} destination', '{n} destinations');
+  };
+  search.oninput = render;
+  dialog.onkeydown = event => { if (event.key === 'Escape') { event.preventDefault(); dialog.close(); } };
+  close.onclick = () => dialog.close();
+  dialog.onclose = () => { document.body.classList.remove('directory-picker-open'); dialog.remove(); trigger.focus({ preventScroll: true }); };
+  dialog.append(el('div', { class: 'directory-picker-head' }, el('h2', { textContent: title }), close),
+    el('label', { class: 'destination-search' }, t('Filter by name'), search), body,
+    el('div', { class: 'directory-picker-footer' }, count));
+  document.body.append(dialog); document.body.classList.add('directory-picker-open');
+  render(); dialog.showModal(); search.focus();
 }
 async function loadRequestStatus(form) {
   const record = await invoke('implementation_request_status', { id: form.id });
@@ -1074,7 +1118,32 @@ function azureCliTile() {
   };
   return row;
 }
-setInterval(() => { if (current && tab === 'overview') loadAzureCliStatus(); }, 60000);
+let githubCliStatus = { state: 'checking', authenticated: false };
+let githubCliPending = null;
+function loadGithubCliStatus() {
+  if (githubCliPending) return githubCliPending;
+  githubCliPending = invoke('github_cli_status').then(result => { githubCliStatus = result; })
+    .catch(() => { githubCliStatus = { state: 'unavailable', authenticated: false }; })
+    .finally(() => { githubCliPending = null; if (live) renderTiles(live); });
+  return githubCliPending;
+}
+function githubCliTile() {
+  const state = githubCliStatus;
+  const value = { authenticated: t('Authenticated'), not_authenticated: t('Not authenticated'), not_installed: t('Not installed'), unavailable: t('Session unavailable'), checking: t('Checking…') }[state.state] || t('Session unavailable');
+  const hint = state.authenticated ? t('GitHub session is valid. Select to refresh.')
+    : state.state === 'not_installed' ? t('Install GitHub CLI on the machine running this app.')
+    : state.state === 'checking' ? t('Checking the GitHub session on this machine…')
+    : t('Sign in with gh auth login on the machine running this app, then refresh GitHub CLI status.');
+  const row = tile(t('GitHub CLI'), value, state.authenticated ? 'ok' : state.state === 'checking' ? 'muted' : 'warn',
+    state.user ? `${state.user} · ${hint}` : hint, ['overview'], 'chip');
+  row.id = 'github-cli-status';
+  row.onclick = async () => {
+    await busy(row, loadGithubCliStatus);
+    if (tab === 'overview') $('#github-cli-status')?.focus({ preventScroll: true });
+  };
+  return row;
+}
+setInterval(() => { if (current && tab === 'overview') { loadAzureCliStatus(); loadGithubCliStatus(); } }, 60000);
 
 function renderTiles(s) {
   const config = s.config;
@@ -1087,7 +1156,7 @@ function renderTiles(s) {
   $('#tiles').replaceChildren(
     tile(t('Microsoft account'), s.microsoft_connected ? t('Connected') : t('Not connected'), s.microsoft_connected ? 'ok' : 'warn',
       s.microsoft_connected ? t('Reads and answers as you') : t('Connect it in Settings'), ['settings', 'panel-teams'], 'user'),
-    azureCliTile(),
+    azureCliTile(), githubCliTile(),
     tile(t('Mode'), config.policy.dry_run ? t('Observation') : t('Sending on'), config.policy.dry_run ? 'info' : 'ok',
       config.policy.dry_run ? t('Sends nothing to Teams') : t('Answers in Teams'), ['settings', 'panel-behavior'], 'eye'),
     tile(t('Reception'), config.graph.discover_all_chats ? t('All my chats') : t('{n} chat(s)', { n: config.graph.allowed_chats.length }),
@@ -1208,7 +1277,7 @@ async function reload() {
   renderSavebar();
   renderLive();
   renderCredentials(); renderRepositories(); renderResources(); renderContexts(); renderQuestions(); renderPeople(); renderNoteContexts(); renderChatSources();
-  loadAzureCliStatus();
+  loadAzureCliStatus(); loadGithubCliStatus();
   await Promise.all([loadChain(), loadSelfChat()]);
 }
 
