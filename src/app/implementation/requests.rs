@@ -38,14 +38,7 @@ fn azure(state: &DesktopState, source: &str) -> Result<(reqwest::Client, String,
 }
 async fn targets(host: &Host, provider: &str, source: Option<&str>) -> Result<Vec<Value>> {
     match provider {
-        "github" => {
-            let _guard = host.state.github_api.lock().await;
-            Ok(github::repositories()
-                .await?
-                .into_iter()
-                .map(|r| json!({"provider":"github","project":r.full_name}))
-                .collect())
-        }
+        "github" => super::super::github_cli::repositories().await,
         "azure" => {
             let source = source.context("Choose an Azure source.")?;
             let (client, key, catalog) = azure(&host.state, source)?;
@@ -81,7 +74,6 @@ pub(super) async fn operate(host: &Arc<Host>, method: &str, args: &Value) -> Res
     match method {
         "implementation_request_catalog" => {
             let provider = args["provider"].as_str().context("Choose a provider.")?;
-            let destinations = targets(host, provider, args["source"].as_str()).await?;
             let mut catalog = crate::llm::catalog().await;
             catalog
                 .providers
@@ -91,9 +83,32 @@ pub(super) async fn operate(host: &Arc<Host>, method: &str, args: &Value) -> Res
             } else {
                 None
             };
-            let write_ready = azure_cli.as_ref().is_none_or(|s| s.authenticated);
+            let github_cli = if provider == "github" {
+                Some(super::super::github_cli::status().await)
+            } else {
+                None
+            };
+            let write_ready = azure_cli.as_ref().is_none_or(|s| s.authenticated)
+                && github_cli
+                    .as_ref()
+                    .is_none_or(|s| s["authenticated"] == true);
+            let destinations = if provider == "github" && !write_ready {
+                Vec::new()
+            } else {
+                targets(host, provider, args["source"].as_str()).await?
+            };
+            let mut recent = Vec::new();
+            for run in state.db.requests(None)? {
+                let target = &run["target"];
+                if destinations.contains(target) && !recent.contains(target) {
+                    recent.push(target.clone());
+                    if recent.len() == 3 {
+                        break;
+                    }
+                }
+            }
             Ok(
-                json!({"targets":destinations,"providers":catalog.providers,"write_ready":write_ready,"azure_cli":azure_cli}),
+                json!({"targets":destinations,"providers":catalog.providers,"write_ready":write_ready,"azure_cli":azure_cli,"github_cli":github_cli,"recent":recent}),
             )
         }
         "implementation_request_status" => {

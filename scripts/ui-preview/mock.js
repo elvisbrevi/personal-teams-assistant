@@ -151,7 +151,15 @@
     const state = window.__ptaAzureCliState || (scenario === 'fresh' ? 'not_authenticated' : 'authenticated');
     return { state, authenticated: state === 'authenticated', user: state === 'not_installed' ? null : 'ana@contoso.example', tenant: '11111111-1111-4111-8111-111111111111' };
   };
+  const githubCli = () => {
+    const state = window.__ptaGithubCliState || (scenario === 'fresh' ? 'not_authenticated' : 'authenticated');
+    return { state, authenticated: state === 'authenticated', user: state === 'authenticated' ? 'example' : null };
+  };
+  const requestTargets = args => args.provider === 'github'
+    ? ['example/checkout', 'example/private-tools', 'example/public-site', 'example/receipts'].map(project => ({ provider: 'github', project }))
+    : ['Payments', 'Exports', 'Digital processes', 'Receipts'].map(project => ({ provider: 'azure', source: args.source, organization: org, project }));
   const handlers = {
+    github_cli_status: () => githubCli(),
     azure_cli_status: () => { window.__ptaAzureCliChecks = (window.__ptaAzureCliChecks || 0) + 1; return azureCli(); },
     machine_browse: async args => {
       window.__ptaLastMachineBrowse = args.path;
@@ -176,7 +184,7 @@
       return { assistant_phase: machinePhases[args.machine] };
     },
     machine_teams: args => { if (window.__ptaTeamsMachineError) throw new Error('Machine selection failed.'); teamsMachine = args.machine; window.__ptaTeamsMachine = args.machine; return { handover_pending: true }; },
-    implementation_request_catalog: args => ({ write_ready: args.provider !== 'azure' || azureCli().authenticated, azure_cli: args.provider === 'azure' ? azureCli() : null, targets: args.provider === 'github' ? [{ provider: 'github', project: 'example/checkout' }] : [{ provider: 'azure', source: args.source, organization: org, project: 'Payments' }], providers: providers.providers.filter(p => p.transport === 'cli' && p.available) }),
+    implementation_request_catalog: args => ({ write_ready: args.provider === 'azure' ? azureCli().authenticated : githubCli().authenticated, azure_cli: args.provider === 'azure' ? azureCli() : null, github_cli: args.provider === 'github' ? githubCli() : null, targets: requestTargets(args), recent: requestTargets(args).slice(0, 3).reverse(), providers: providers.providers.filter(p => p.transport === 'cli' && p.available) }),
     implementation_request_start: args => {
       window.__ptaLastRequestCreation = structuredClone(args);
       const existing = requestRuns.find(r => r.id === args.id);

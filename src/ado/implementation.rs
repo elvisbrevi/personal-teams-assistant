@@ -9,23 +9,30 @@ fn html(text: &str) -> String {
         .replace('\n', "<br>")
 }
 
-/// Only projects in an enabled source's resolved team catalog are offered.
+/// Explicit requests may select any accessible project in the configured organizations.
 pub(crate) async fn request_targets(
     client: &Client,
     key: &str,
     catalog: &str,
 ) -> Result<Vec<Value>> {
-    let catalog = Catalog::parse(catalog)?.own(client, key).await?;
-    Ok(catalog
-        .sources
-        .iter()
-        .flat_map(|source| {
-            source
-                .projects
-                .iter()
-                .map(|project| json!({"organization":source.organization,"project":project}))
-        })
-        .collect())
+    let catalog = Catalog::parse(catalog)?;
+    let mut targets = Vec::new();
+    for mut source in catalog.sources {
+        source.projects = vec!["*".into()];
+        for project in projects(client, key, &source).await? {
+            ensure!(
+                !project.trim().is_empty()
+                    && project.len() <= 120
+                    && !project.chars().any(char::is_control),
+                "Invalid Azure project."
+            );
+            let target = json!({"organization":source.organization,"project":project});
+            if !targets.contains(&target) {
+                targets.push(target);
+            }
+        }
+    }
+    Ok(targets)
 }
 
 pub(crate) async fn request_target(
@@ -40,15 +47,21 @@ pub(crate) async fn request_target(
         "bug" => "Microsoft.BugCategory",
         _ => anyhow::bail!("Choose HU or bug."),
     };
-    let catalog = Catalog::parse(catalog)?.own(client, key).await?;
+    let available = catalog;
+    let catalog = Catalog::parse(catalog)?;
     let source = catalog
         .sources
         .iter()
-        .find(|s| {
-            target["organization"] == s.organization
-                && s.projects.iter().any(|p| target["project"] == *p)
-        })
+        .find(|s| target["organization"] == s.organization)
         .context("Project outside the Azure source catalog.")?;
+    ensure!(
+        request_targets(client, key, available)
+            .await?
+            .iter()
+            .any(|t| t["organization"] == target["organization"]
+                && t["project"] == target["project"]),
+        "Project outside the Azure request catalog."
+    );
     let project = target["project"].as_str().context("Choose a project.")?;
     let value = request(
         client,
@@ -342,11 +355,22 @@ mod tests {
             .is_err()
         );
         assert!(server.received_requests().await.unwrap().is_empty());
-        Mock::given(method("GET")).and(path("/example/Payments/_apis/wit/workitemtypecategories/Microsoft.RequirementCategory")).respond_with(ResponseTemplate::new(200).set_body_json(json!({"defaultWorkItemType":{"name":"Product Backlog Item"},"workItemTypes":[{"name":"Product Backlog Item"}]}))).expect(1).mount(&server).await;
+        Mock::given(method("GET"))
+            .and(path("/example/_apis/projects"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"value":[{"name":"Payments"},{"name":"Other project"}]})),
+            )
+            .mount(&server)
+            .await;
+        let targets = request_targets(&client, "read", catalog).await.unwrap();
+        assert_eq!(targets.len(), 2);
+        assert_eq!(targets[1]["project"], "Other project");
+        Mock::given(method("GET")).and(path("/example/Other%20project/_apis/wit/workitemtypecategories/Microsoft.RequirementCategory")).respond_with(ResponseTemplate::new(200).set_body_json(json!({"defaultWorkItemType":{"name":"Product Backlog Item"},"workItemTypes":[{"name":"Product Backlog Item"}]}))).expect(1).mount(&server).await;
         Mock::given(method("GET")).and(path("/example/_apis/wit/fields")).respond_with(ResponseTemplate::new(200).set_body_json(json!({"value":[{"name":"Developer","referenceName":"Custom.Developer","isIdentity":true}]}))).mount(&server).await;
         Mock::given(method("GET"))
             .and(path(
-                "/example/Payments/_apis/wit/workitemtypes/Product%20Backlog%20Item",
+                "/example/Other%20project/_apis/wit/workitemtypes/Product%20Backlog%20Item",
             ))
             .respond_with(
                 ResponseTemplate::new(200)
@@ -358,7 +382,7 @@ mod tests {
             &client,
             "read",
             catalog,
-            &json!({"organization":"https://dev.azure.com/example","project":"Payments"}),
+            &json!({"organization":"https://dev.azure.com/example","project":"Other project"}),
             "hu",
         )
         .await
@@ -380,11 +404,53 @@ mod tests {
             .is_err()
         );
         let requests = server.received_requests().await.unwrap();
-        assert_eq!(requests.len(), 4);
-        let body: Value = serde_json::from_slice(&requests[3].body).unwrap();
+        assert_eq!(requests.len(), 6);
+        let body: Value = serde_json::from_slice(&requests[5].body).unwrap();
         assert_eq!(body[1]["value"], "Escape &lt;script&gt;");
         assert_eq!(body[3]["path"], "/fields/Custom.Developer");
-        assert_eq!(requests[3].headers["authorization"], "Bearer write");
+        assert_eq!(requests[5].headers["authorization"], "Bearer write");
+        super::super::TEST_SERVER.with(|s| *s.borrow_mut() = None);
+    }
+    #[tokio::test]
+    async fn request_catalog_reads_every_page_without_narrowing_to_team_projects() {
+        use wiremock::{
+            Mock, MockServer, ResponseTemplate,
+            matchers::{method, path, query_param},
+        };
+        let server = MockServer::start().await;
+        super::super::TEST_SERVER
+            .with(|s| *s.borrow_mut() = Some(Url::parse(&server.uri()).unwrap()));
+        let first: Vec<_> = (0..100)
+            .map(|n| json!({"name":format!("Project {n}")}))
+            .collect();
+        Mock::given(method("GET"))
+            .and(path("/example/_apis/projects"))
+            .and(query_param("$skip", "0"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"value":first})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/example/_apis/projects"))
+            .and(query_param("$skip", "100"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"value":[{"name":"Last project"}]})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let targets = request_targets(&Client::new(), "read", "[[sources]]\norganization='https://dev.azure.com/example'\nprojects=['Payments']\nauthor_email='me@example.test'").await.unwrap();
+        assert_eq!(targets.len(), 101);
+        assert_eq!(targets.last().unwrap()["project"], "Last project");
+        assert!(
+            server
+                .received_requests()
+                .await
+                .unwrap()
+                .iter()
+                .all(|r| r.method == "GET")
+        );
         super::super::TEST_SERVER.with(|s| *s.borrow_mut() = None);
     }
     #[test]

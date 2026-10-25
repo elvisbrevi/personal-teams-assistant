@@ -29,6 +29,7 @@ mod azure_cli;
 pub mod cli;
 pub mod control;
 mod github;
+mod github_cli;
 #[cfg(feature = "gui")]
 mod gui;
 mod headless;

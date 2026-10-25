@@ -4,6 +4,21 @@
 const UI_LANGUAGES = ['es', 'en'];
 
 const UI_CATALOG = { es: {
+  'No destinations are available. Check the selected source or GitHub CLI session.': 'No hay destinos disponibles. Revisa la fuente seleccionada o la sesión de GitHub CLI.',
+  "Check GitHub CLI status": "Consultar estado de GitHub CLI",
+  "Sign in with gh auth login on the machine running this app, then refresh GitHub CLI status.": "Inicia sesión con gh auth login en el equipo que ejecuta esta app y actualiza el estado de GitHub CLI.",
+  "GitHub session is valid. Select to refresh.": "La sesión de GitHub es válida. Selecciona para actualizar.",
+  "Install GitHub CLI on the machine running this app.": "Instala GitHub CLI en el equipo que ejecuta esta app.",
+  "Checking the GitHub session on this machine…": "Comprobando la sesión de GitHub en este equipo…",
+  "GitHub CLI": "GitHub CLI",
+  "Filter by name": "Filtrar por nombre",
+  "Recent": "Recientes",
+  "All projects": "Todos los proyectos",
+  "All repositories": "Todos los repositorios",
+  "No matching destinations.": "No hay destinos que coincidan.",
+  "{n} destination": "{n} destino",
+  "{n} destinations": "{n} destinos",
+
   "Not installed": "No instalada",
   "Checking…": "Comprobando…",
   "Azure CLI": "Azure CLI",
