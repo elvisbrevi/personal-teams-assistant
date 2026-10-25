@@ -6,6 +6,7 @@ use sha2::{Digest, Sha256};
 use std::time::Duration;
 
 pub(super) mod fleet;
+mod requests;
 mod store;
 pub(super) use fleet::register;
 
@@ -95,6 +96,8 @@ struct SessionSummary {
     item: crate::tools::todo::Item,
     provider: String,
     model: String,
+    #[serde(default)]
+    effort: String,
     state: String,
     session_id: Option<String>,
     created_at: String,
@@ -111,6 +114,7 @@ impl From<Run> for SessionSummary {
             item,
             provider: run.launch.request.provider,
             model: run.launch.request.model,
+            effort: run.launch.request.effort,
             state: run.state,
             session_id: run.session_id,
             created_at: run.created_at,
@@ -325,6 +329,10 @@ pub(super) async fn operate(
 }
 async fn operation(host: &Arc<Host>, method: &str, args: &Value) -> Result<Value> {
     match method {
+        "implementation_request_catalog"
+        | "implementation_request_start"
+        | "implementation_request_status"
+        | "implementation_history" => requests::operate(host, method, args).await,
         "implementation_sessions" => fleet::session_index(host, args).await,
         "implementation_open_session" => {
             let id = args["id"].as_str().context("Choose a run.")?;
@@ -334,12 +342,10 @@ async fn operation(host: &Arc<Host>, method: &str, args: &Value) -> Result<Value
                 args["machine"] == own,
                 "This session belongs to another machine. Open the assistant on that machine."
             );
-            let run = host
-                .state
-                .implementation
-                .db
-                .get(id)?
-                .context("Session record unavailable.")?;
+            let run = host.state.implementation.db.get(id)?;
+            let Some(run) = run else {
+                return requests::open_session(host, id).await;
+            };
             let session = run
                 .session_id
                 .context("The agent has not reported a session ID yet.")?;

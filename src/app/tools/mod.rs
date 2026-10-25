@@ -42,6 +42,53 @@ fn confirmed() -> Value {
 
 pub(super) const TOOLS: &[Tool] = &[
     Tool {
+        name: "implementation_request_catalog",
+        title: "Request destinations and agents",
+        description: "Enabled Azure source projects or connected GitHub repositories, plus installed CLIs, models and efforts on this host.",
+        effect: Effect::Read,
+        schema: || {
+            object(
+                json!({"provider":{"type":"string","enum":["azure","github"]},"source":string("Azure source ID.")}),
+                &["provider"],
+            )
+        },
+    },
+    Tool {
+        name: "implementation_request_start",
+        title: "Create a request with an agent",
+        description: "Generate and create one GitHub Epic or Azure HU/bug from the confirmed context and exact catalog target. Retains the native session. A stable UUID prevents repeated provider writes; inspect status after any timeout.",
+        effect: Effect::External,
+        schema: || {
+            object(
+                json!({"id":string("Stable request UUID."),"target":{"type":"object","description":"Exact target returned by implementation_request_catalog."},"kind":{"type":"string","enum":["epic","hu","bug"]},"context":string("User context."),"provider":{"type":"string","enum":["codex","claude","opencode"]},"model":string("Available model ID."),"effort":string("Supported effort."),"confirmed":confirmed()}),
+                &[
+                    "id",
+                    "target",
+                    "kind",
+                    "context",
+                    "provider",
+                    "model",
+                    "effort",
+                    "confirmed",
+                ],
+            )
+        },
+    },
+    Tool {
+        name: "implementation_request_status",
+        title: "Request creation status",
+        description: "Read a recorded request execution and its verified created item without retrying creation.",
+        effect: Effect::Read,
+        schema: || object(json!({"id":string("Request run UUID.")}), &["id"]),
+    },
+    Tool {
+        name: "implementation_history",
+        title: "Agent execution history",
+        description: "Latest 100 local request runs and implementation sessions, including cached sessions from enrolled machines. Each result has its run ID, native session ID, model, effort, state and dates; partial reports bounded history.",
+        effect: Effect::Read,
+        schema: none,
+    },
+    Tool {
         name: "implementation_sessions",
         title: "Work item agent sessions",
         description: "Persisted native coding-agent session IDs, machines, states and start/finish times for verified work item URLs, including the last reported sessions of offline machines.",
@@ -806,7 +853,7 @@ pub(super) async fn run(name: &str, args: &Value) -> Result<Value, String> {
     validate(name, args)?;
     if super::implementation::handles(name) {
         let mut args = args.clone();
-        if name != "implementation_create" {
+        if !["implementation_create", "implementation_request_start"].contains(&name) {
             args.as_object_mut().unwrap().remove("confirmed");
         }
         return ipc(name, args).await;
@@ -971,6 +1018,10 @@ pub(super) async fn run(name: &str, args: &Value) -> Result<Value, String> {
 /// The user's confirmation for an action with effects outside the app, in words they read.
 pub(super) fn confirmation(name: &str, args: &Value) -> Option<String> {
     Some(match name {
+        "implementation_request_start" => format!(
+            "Generate and create one {} in {} using the supplied context and selected agent?",
+            args["kind"], args["target"]["project"]
+        ),
         "implementation_start" => format!(
             "Start the selected coding agent for item {} on machine {} in the selected directories?",
             args["item"]["id"], args["machine"]

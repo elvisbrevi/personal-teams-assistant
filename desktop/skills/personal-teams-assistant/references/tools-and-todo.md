@@ -242,3 +242,17 @@ and must be inspected in the provider without replaying the plan. A GitHub child
 its parent link retains its verified URL as `created_unlinked`; review it before proceeding.
 Cancellation stops the coding process tree and preserves its current file changes. Restarting a
 host never relaunches an interrupted run or resubmits an uncertain child creation.
+
+## Create a request and inspect agent history
+
+Requires host/CLI 0.9.1 or later. In To-Do select Azure or GitHub, then Create request below the filters. Select a project (Azure, from the enabled source's catalog) or repository (GitHub installation list), supply context and select an installed CLI, model and effort. Azure offers HU and bug radios; GitHub creates an Epic. Cancel discards an unsubmitted form. Create explicitly authorizes generation and creation of this one request. The session runs on this host and is retained in the CLI; no coding directories or execution-machine selection are needed.
+
+Agents use the same operations through `pta tools call` or MCP:
+
+1. `implementation_request_catalog` with `provider: azure|github` and, for Azure, `source`. It returns exact `targets` and available CLI providers/models/efforts. Keep a target as returned; arbitrary or edited targets are rejected.
+2. After the user approves the context, target, type and agent, call `implementation_request_start` with a new stable UUID `id`, the exact `target`, `kind: epic|hu|bug`, `context`, CLI `provider`, `model`, `effort` and `confirmed: true`. Azure requires the existing dedicated `AZURE_IMPLEMENTATION_WRITE_TOKEN`; read credentials cannot create requests. The process defines the actual Azure work item type. Creation uses its To-Do developer assignment role (or Assigned To) and description/reproduction field.
+3. Inspect `implementation_request_status` with `id` until generation/sending ends. Reusing that ID with the same submission only reads the saved record; another submission cannot reuse it. After any timeout inspect status, never start a replacement automatically. A failed/uncertain send is never retried. An uncertain request may already exist: inspect the provider first. If GitHub silently drops the Epic type or own assignment, `needs_attention` preserves its verified issue URL for review.
+4. `implementation_history` takes no arguments and returns the latest 100 recorded local requests and local/cached implementation sessions, bounded to 800 KB; `partial` indicates bounded history. The GUI's Agent history screen is in navigation (More on phones) and To-Do. Run IDs belong to PTA; session IDs belong to the native coding CLI. Missing session IDs and finish times remain empty, including interrupted executions.
+5. Use `implementation_open_session` with the recorded `machine` and run `id` on that machine's native desktop. The existing Codex/Claude platform limits apply; OpenCode and unsupported remote/mobile sessions retain their ID with an explanation rather than an invented app URL.
+
+Daily task snapshots, activity runs and all evidence tools remain read-only. This is a distinct explicit request-creation action; it does not authorize autonomous work item creation by the assistant.

@@ -17,6 +17,23 @@ fn developer(field: &Value) -> bool {
     let name = field["name"].as_str().unwrap_or_default().to_lowercase();
     field["isIdentity"] == true && (name.contains("desarrollador") || name.contains("developer"))
 }
+pub(super) fn assignment_fields(fields: &[Value], type_fields: &BTreeSet<&str>) -> Vec<Value> {
+    let mut assignments: Vec<Value> = fields
+        .iter()
+        .filter(|f| {
+            developer(f)
+                && f["referenceName"]
+                    .as_str()
+                    .is_some_and(|r| type_fields.contains(r))
+        })
+        .cloned()
+        .collect();
+    // Assignment is process-specific per type: bugs may lack the HU's developer roles.
+    if assignments.is_empty() {
+        assignments.push(json!({"name":"Assigned To","referenceName":"System.AssignedTo"}));
+    }
+    assignments
+}
 pub(super) fn date_field(field: &Value) -> bool {
     if field["type"] != "dateTime" {
         return false;
@@ -156,20 +173,7 @@ async fn schema(
             .iter()
             .filter_map(|f| f["referenceName"].as_str().filter(|name| reference(name)))
             .collect();
-        let mut assignments: Vec<Value> = fields
-            .iter()
-            .filter(|f| {
-                developer(f)
-                    && f["referenceName"]
-                        .as_str()
-                        .is_some_and(|r| type_fields.contains(r))
-            })
-            .cloned()
-            .collect();
-        // Assignment is process-specific per type: bugs may lack the HU's developer roles.
-        if assignments.is_empty() {
-            assignments.push(json!({"name":"Assigned To","referenceName":"System.AssignedTo"}));
-        }
+        let assignments = assignment_fields(fields, &type_fields);
         used.extend(type_fields.into_iter().map(str::to_owned));
         kinds.push(Kind {
             name: kind,

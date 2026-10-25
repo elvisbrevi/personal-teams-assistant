@@ -49,6 +49,62 @@ pub(super) async fn create_child(
         json!({"id":number,"title":child["title"],"url":url.as_str(),"state":if linked { "created" } else { "created_unlinked" }}),
     )
 }
+/// The caller verifies the repository against the connected installation catalog before sending.
+pub(super) async fn create_request(
+    repository: &str,
+    draft: &serde_json::Value,
+) -> Result<serde_json::Value> {
+    use serde_json::Value;
+    crate::tools::todo::validate_repository(repository)?;
+    let token = access_token().await?;
+    let client = client()?;
+    let user: Value = get(&client, &token, "https://api.github.com/user").await?;
+    let login = user["login"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .context("GitHub identity unavailable.")?;
+    create_request_at(
+        &client,
+        &token,
+        "https://api.github.com/",
+        repository,
+        login,
+        draft,
+    )
+    .await
+}
+async fn create_request_at(
+    client: &reqwest::Client,
+    token: &str,
+    api: &str,
+    repository: &str,
+    login: &str,
+    draft: &serde_json::Value,
+) -> Result<serde_json::Value> {
+    use serde_json::{Value, json};
+    let response = client.post(format!("{api}repos/{repository}/issues"))
+        .header("Accept","application/vnd.github+json").bearer_auth(token)
+        .json(&json!({"title":draft["title"],"body":draft["description"],"type":"Epic","assignees":[login]})).send().await?;
+    let created: Value = checked_json(response).await?;
+    let id = created["number"]
+        .as_u64()
+        .filter(|id| *id > 0)
+        .context("Created issue number unavailable.")?;
+    let url = crate::tools::todo::validate_link(created["html_url"].as_str().unwrap_or_default())?;
+    ensure!(
+        url.as_str() == format!("https://github.com/{repository}/issues/{id}"),
+        "Invalid created issue URL."
+    );
+    let epic = created["type"]["name"]
+        .as_str()
+        .is_some_and(|s| s.eq_ignore_ascii_case("Epic"));
+    let assigned = created["assignees"]
+        .as_array()
+        .is_some_and(|a| a.iter().any(|u| u["login"] == login));
+    Ok(
+        json!({"id":id,"title":draft["title"],"url":url.as_str(),"kind":created["type"]["name"],"project":repository,"state":if epic && assigned {"created"} else {"needs_attention"}}),
+    )
+}
 use regex::Regex;
 use reqwest::{Client, Response};
 use serde::{Deserialize, Serialize};
@@ -677,6 +733,33 @@ mod todo_tests {
         matchers::{method, path},
     };
 
+    #[tokio::test]
+    async fn requests_send_epic_type_once_and_keep_links_when_type_is_dropped() {
+        use wiremock::{
+            Mock, MockServer, ResponseTemplate,
+            matchers::{method, path},
+        };
+        let server = MockServer::start().await;
+        Mock::given(method("POST")).and(path("/repos/example/work/issues")).respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({"number":77,"html_url":"https://github.com/example/work/issues/77","type":null,"assignees":[{"login":"example-user"}]}))).expect(1).mount(&server).await;
+        let created = create_request_at(
+            &Client::new(),
+            "synthetic-token",
+            &format!("{}/", server.uri()),
+            "example/work",
+            "example-user",
+            &serde_json::json!({"title":"Receipts","description":"Support downloads"}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(created["state"], "needs_attention");
+        assert_eq!(created["url"], "https://github.com/example/work/issues/77");
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 1);
+        let body: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
+        assert_eq!(body["type"], "Epic");
+        assert_eq!(body["assignees"][0], "example-user");
+        assert_eq!(body["body"], "Support downloads");
+    }
     #[tokio::test]
     async fn epics_use_issue_type_own_assignment_and_server_side_filters() {
         let server = MockServer::start().await;

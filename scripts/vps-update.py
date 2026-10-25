@@ -210,6 +210,8 @@ def in_flight():
             with sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True, timeout=10) as db:
                 if db.execute("SELECT count(*) FROM agent_runs WHERE state IN ('planning','running')").fetchone()[0]:
                     reasons.append(f"a coding agent is running ({path})")
+                if db.execute("SELECT count(*) FROM sqlite_master WHERE type='table' AND name='request_runs'").fetchone()[0] and db.execute("SELECT count(*) FROM request_runs WHERE state IN ('generating','sending')").fetchone()[0]:
+                    reasons.append(f"a request agent or creation is running ({path})")
         except sqlite3.Error:
             reasons.append(f"agent execution state could not be read ({path})")
     for directory in data_dirs():

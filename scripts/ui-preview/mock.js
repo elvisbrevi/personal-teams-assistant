@@ -143,6 +143,7 @@
   const machineId = '11111111-1111-4111-8111-111111111111';
   const remoteMachineId = '22222222-2222-4222-8222-222222222222';
   const implementationRuns = [];
+  const requestRuns = [];
   let teamsMachine = machineId;
   const machinePhases = { [machineId]: "stopped", [remoteMachineId]: "stopped" };
   let machineSettings = { id: machineId, name: 'Preview server', coordinator: null, roots: ['/work'] };
@@ -170,6 +171,16 @@
       return { assistant_phase: machinePhases[args.machine] };
     },
     machine_teams: args => { if (window.__ptaTeamsMachineError) throw new Error('Machine selection failed.'); teamsMachine = args.machine; window.__ptaTeamsMachine = args.machine; return { handover_pending: true }; },
+    implementation_request_catalog: args => ({ write_ready: args.provider !== 'azure' || window.__ptaRequestWriteReady !== false, targets: args.provider === 'github' ? [{ provider: 'github', project: 'example/checkout' }] : [{ provider: 'azure', source: args.source, organization: org, project: 'Payments' }], providers: providers.providers.filter(p => p.transport === 'cli' && p.available) }),
+    implementation_request_start: args => {
+      window.__ptaLastRequestCreation = structuredClone(args);
+      const existing = requestRuns.find(r => r.id === args.id);
+      if (existing) return existing;
+      const run = { id: args.id, machine: machineId, purpose: 'request', project: args.target.project, kind: args.kind, provider: args.provider, model: args.model, effort: args.effort, state: 'created', created_at: '2026-10-25T12:00:00Z', started_at: '2026-10-25T12:00:01Z', finished_at: '2026-10-25T12:00:15Z', session_id: crypto.randomUUID(), item: { id: 6000, title: 'Improve receipt downloads', url: args.target.provider === 'github' ? 'https://github.com/example/checkout/issues/6000' : `${org}/Payments/_workitems/edit/6000` } };
+      requestRuns.push(run); return run;
+    },
+    implementation_request_status: args => requestRuns.find(r => r.id === args.id) || null,
+    implementation_history: () => ({ runs: [...requestRuns, ...implementationRuns], partial: false }),
     implementation_prepare: async args => ({ detail: await todoDetail(args.item, args.item.provider === 'github'), planning: !args.item.task && (args.item.provider !== 'github' || args.item.id === 42), creations: {} }),
     implementation_catalog: () => ({ providers: providers.providers.filter(p => p.transport === 'cli' && p.available) }),
     implementation_browse: args => ({ path: args.path || null, parent: args.path === '/work' ? null : '/work', roots: !args.path,
