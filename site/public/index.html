@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light dark">
   <title>Personal Teams Assistant — answers in Teams as you</title>
-  <meta name="description" content="Open-source personal assistant for Microsoft Teams: it replies with your own identity, only from the sources you authorize, verifies every link and sensitive value in code, and never sends twice.">
+  <meta name="description" content="Self-hosted personal assistant for Microsoft Teams: owner-only web access, locally approved machines, authorized sources and code checks before sending.">
   <meta property="og:title" content="Personal Teams Assistant">
   <meta property="og:description" content="Answers in Teams as you, and only with what you authorize. Tray app, phone-ready web portal, CLI and headless host in a single Cargo package.">
   <meta property="og:type" content="website">
@@ -46,7 +46,7 @@
         <div class="hero-copy">
           <img class="hero-icon" src="assets/icon.png" alt="" width="112" height="112">
           <h1>Answers in Teams as you, and only with what you authorize.</h1>
-          <p class="lead">It replies for you when someone messages you directly, mentions you, or when you ask it in your chat with yourself. It gathers evidence from your sources, drafts with Codex, Claude Code or DeepSeek, verifies every link and sensitive value in code, and sends exactly once.</p>
+          <p class="lead">It replies for you when someone messages you directly, mentions you, or when you ask it in your chat with yourself. It gathers evidence from your sources, drafts with Codex, Claude Code, OpenCode 2 or DeepSeek, checks references and known sensitive data in code, and never automatically retries a send.</p>
           <div class="install"><span class="prompt" aria-hidden="true">$</span><code class="cmd">cargo install personal-teams-assistant --locked</code></div>
           <div class="cta">
             <a class="button" href="#install">Get started</a>
@@ -76,7 +76,7 @@
       <div class="wrap strip-inner">
         <div class="stat lime"><strong>No bot</strong><span>delegated OAuth with PKCE</span></div>
         <div class="stat sky"><strong>4 permissions</strong><span>the Graph minimum</span></div>
-        <div class="stat orange"><strong>3 providers</strong><span>of models, with fallback</span></div>
+        <div class="stat orange"><strong>4 providers</strong><span>of models, with fallback</span></div>
         <div class="stat lilac"><strong>0 retries</strong><span>when sending to Teams</span></div>
       </div>
     </section>
@@ -91,7 +91,7 @@
           <li><span class="num">1</span><h3>Receives</h3><p>Microsoft Graph notifies it of every new message through a webhook. Your chat with yourself is also checked every 10 s.</p></li>
           <li><span class="num">2</span><h3>Decides whether to answer</h3><p>Only direct messages, real mentions or your chat with yourself. Calls, meetings and “got a minute?” are left to you.</p></li>
           <li><span class="num">3</span><h3>Gathers evidence</h3><p>It reads only the sources open to that conversation: Git repositories, URLs, Azure DevOps wikis and activity, verified notes and your own Teams messages.</p></li>
-          <li><span class="num">4</span><h3>Drafts</h3><p>Codex → Claude Code → DeepSeek. If the first one fails or runs out of credits, the next one answers; the following call starts again from your default.</p></li>
+          <li><span class="num">4</span><h3>Drafts</h3><p>Your configured order of Codex, Claude Code, OpenCode 2 and DeepSeek. If one fails or runs out of credits, the next active provider answers; the following call starts again from your default.</p></li>
           <li><span class="num">5</span><h3>Verifies in code</h3><p>References, IDs, URLs and sensitive data. If something can't be checked, the reply is held back and you get a note in your chat with yourself.</p></li>
           <li><span class="num">6</span><h3>Sends once</h3><p>As Teams HTML, logged before it goes out. It never retries: when in doubt, the message is left for human review.</p></li>
         </ol>
@@ -106,12 +106,12 @@
         <div class="features">
           <article><span class="tile lime"><svg class="icon"><use href="#i-user"/></svg></span><h3>Your own identity</h3><p>It replies as you, not as a bot. A public Entra client with PKCE and only <code>User.Read</code>, <code>Chat.Read</code>, <code>ChatMessage.Send</code> and <code>offline_access</code>.</p></article>
           <article><span class="tile lilac"><svg class="icon"><use href="#i-book"/></svg></span><h3>Sources with audiences</h3><p>Every source starts disabled, with no audiences and no external processing. You decide which conversation can use what. Answers link the Wiki pages, work items and pipelines they cite.</p></article>
-          <article><span class="tile sky"><svg class="icon"><use href="#i-search"/></svg></span><h3>Work you didn't log</h3><p>Ask what you did in the last two weeks that no task records. It compares your commits, pull requests, pipeline runs, releases, Wiki edits and Teams messages with your work items, lists what is missing with verified links and proposes where each piece goes. Say yes in your chat with yourself and it registers them.</p></article>
-          <article><span class="tile orange"><svg class="icon"><use href="#i-check"/></svg></span><h3>Register your work on a schedule</h3><p>Once a day or at intervals, register verified work as completed Azure DevOps tasks under the right user story, against a daily target (9 hours by default). Unclear descriptions, effort, HUs or calls wait for your context, and History shows what you approved, day by day. Everything is also in <code>pta activity</code>.</p></article>
+          <article><span class="tile sky"><svg class="icon"><use href="#i-search"/></svg></span><h3>Work you didn't log</h3><p>Review your activity against existing work items, using the sources you authorize and verified links. Daily activity runs never create, link or change provider work items.</p></article>
+          <article><span class="tile orange"><svg class="icon"><use href="#i-check"/></svg></span><h3>Daily activity records</h3><p>Save existing Azure tasks by day, with verified links and registered hours. Schedule read-only snapshots and review saved days in Activities or with <code>pta activity</code>.</p></article>
           <article><span class="tile yellow"><svg class="icon"><use href="#i-eye"/></svg></span><h3>Observation mode</h3><p>Start with drafts that are never sent. Review them in the app, rate them, keep the good ones as examples, and turn on sending once you trust them.</p></article>
           <article><span class="tile pink"><svg class="icon"><use href="#i-inbox"/></svg></span><h3>Every message, explained</h3><p>What it decided, how it read the question, which model answered, what failed first and a log of every step, in the Messages tab or with <code>pta audit</code>.</p></article>
-          <article><span class="tile sky"><svg class="icon"><use href="#i-phone"/></svg></span><h3>On your desk and in your pocket</h3><p>The tray app and a web portal behind Cloudflare Access share one interface: install the portal on your phone's home screen and use it in light or dark.</p></article>
-          <article><span class="tile lime"><svg class="icon"><use href="#i-chip"/></svg></span><h3>App, CLI and agents</h3><p>The <code>pta</code> CLI with stable JSON output, a built-in skill, and <code>pta mcp</code>: an MCP server so Claude Code, Codex or any client can operate it, asking you before anything leaves your machine.</p></article>
+          <article><span class="tile sky"><svg class="icon"><use href="#i-phone"/></svg></span><h3>On your desk and in your pocket</h3><p>The tray app and your own private portal behind Cloudflare Access share one interface: add it to your phone's home screen and use it in light or dark.</p></article>
+          <article><span class="tile lime"><svg class="icon"><use href="#i-chip"/></svg></span><h3>App, CLI and agents</h3><p>The <code>pta</code> CLI with stable JSON output, a built-in skill, and <code>pta mcp</code>: an MCP server so Claude Code, Codex or any client can operate it. Sending, access changes and implementation actions are marked for confirmation.</p></article>
         </div>
         <div class="screens">
           <figure class="window">
@@ -119,7 +119,7 @@
               <source srcset="assets/app-chat-dark.jpg" media="(prefers-color-scheme: dark)">
               <img src="assets/app-chat-light.jpg" width="1280" height="800" loading="lazy" alt="Test chat: a review of the work done in the last two weeks that no task records, with the user story each piece could go under.">
             </picture>
-            <figcaption>The test chat runs the same pipeline as Teams, without sending anything.</figcaption>
+            <figcaption>Illustrative interface with synthetic data. Current activity records are read-only.</figcaption>
           </figure>
           <figure class="phone">
             <picture>
@@ -135,16 +135,22 @@
     <section id="security" class="section">
       <div class="wrap split">
         <header class="section-head left">
-          <h2>Model decisions don't grant permissions</h2>
-          <p>Audiences, paths, URLs and limits are verified in code. The question, the documents and the results are treated as untrusted data.</p>
+          <h2>A private installation you control</h2>
+          <p>Run it on your own computer or server, with your own accounts, credentials and HTTPS address. Each portal accepts only the GitHub owner you configure. The maintainer's portal is private.</p>
+          <div class="cta">
+            <a class="button secondary" href="https://github.com/elvisbrevi/personal-teams-assistant/blob/main/SECURITY.md">Security policy</a>
+            <a class="button secondary" href="https://github.com/elvisbrevi/personal-teams-assistant/blob/main/desktop/skills/personal-teams-assistant/references/web-access.md">Set up your portal</a>
+          </div>
+          <p class="fine">You configure Cloudflare Access, TLS and edge HSTS, SSH keys and a firewall for your host. Profiles share your OS account; selected coding directories are not OS isolation for untrusted code. The security policy tracks these limits and upstream dependency notices.</p>
         </header>
         <ul class="checks">
-          <li><strong>Credentials in the system store.</strong> macOS Keychain or Windows Credential Manager; on Linux, private files in the profile. They only come in through stdin.</li>
-          <li><strong>Encrypted tokens.</strong> OAuth tokens are stored with AES-256-GCM-SIV.</li>
-          <li><strong>Models without tools.</strong> The Codex and Claude CLIs run without a shell, files, web access or subagents, in an empty directory and without your credentials.</li>
-          <li><strong>Redaction before the model.</strong> Secrets, tokens, emails, phone numbers, Chilean RUTs and your own patterns are masked in the evidence and in the audit log.</li>
-          <li><strong>One send, never two.</strong> Graph offers no idempotency, so a doubtful send is marked “uncertain” for you to review.</li>
-          <li><strong>Writes you authorize.</strong> Work registration needs a separate Azure DevOps credential: confirm a personal-chat plan or explicitly enable automatic activity registration. Unclear work stays pending for your context; each write is logged before it is sent and never retried.</li>
+          <li><strong>Owner-only sign-in.</strong> Your Cloudflare Access configuration and a locally bound GitHub identity protect your portal. There is no public registration.</li>
+          <li><strong>Machines you approve.</strong> Authorize each new machine locally on your coordinator. Its private pairing file expires in ten minutes and works once, for that machine and installation.</li>
+          <li><strong>Protected web sessions.</strong> Signed identity assertions, expiring and revocable sessions, protected cookies and Origin/CSRF checks guard browser operations. HTTPS origin responses include HSTS.</li>
+          <li><strong>Credentials under your control.</strong> Use macOS Keychain, Windows Credential Manager or private profile files on Linux. Stored Microsoft OAuth tokens are encrypted.</li>
+          <li><strong>Model decisions grant no access.</strong> Code checks audiences, paths and URLs. Answer generation runs without tools, with configured redaction for known secrets and sensitive patterns. Coding agents use their selected implementation permissions.</li>
+          <li><strong>Activity records are read-only.</strong> Creating work items uses separate workflows that need your confirmation. An uncertain Teams send is left for review and never automatically retried.</li>
+          <li><strong>Checks before delivery.</strong> Source and history secret scans, RustSec and GitHub dependency advisories, required CI checks and weekly audits support the public repository.</li>
         </ul>
       </div>
     </section>
@@ -153,7 +159,7 @@
       <div class="wrap">
         <header class="section-head">
           <h2>A single Cargo package</h2>
-          <p>It installs the app, the host and the <code>pta</code> CLI. Your profile, credentials and account carry over between versions.</p>
+          <p>It installs the app, the host and the <code>pta</code> CLI on your own machine. You supply the accounts, credentials and hosting; your profile carries over between versions.</p>
         </header>
         <div class="platforms">
           <article class="platform">
@@ -171,12 +177,12 @@
           </article>
         </div>
         <ol class="steps">
-          <li><span class="num">1</span><h3>Configure</h3><p>Save your credentials, pick the reply language and the order of the models, and register your Entra app. Its Home tab tells you what's missing.</p><code>pta status</code></li>
-          <li><span class="num">2</span><h3>Connect</h3><p>Sign in with your Microsoft account and expose the local port through a stable HTTPS URL, for example with Cloudflare Tunnel.</p><code>pta auth microsoft login</code></li>
+          <li><span class="num">1</span><h3>Configure</h3><p>Save your own provider credentials, pick the reply language and model order, and register your own Entra app. Its Home tab tells you what's missing.</p><code>pta status</code></li>
+          <li><span class="num">2</span><h3>Connect</h3><p>Sign in with your Microsoft account and expose the local port through your own stable HTTPS URL, for example with your own Cloudflare Tunnel.</p><code>pta auth microsoft login</code></li>
           <li><span class="num">3</span><h3>Observe</h3><p>Authorize your sources, start the assistant and review its drafts without sending anything.</p><code>pta start</code></li>
           <li><span class="num">4</span><h3>Go live</h3><p>Once you trust the drafts, turn off observation mode.</p><code>pta mode active</code></li>
         </ol>
-        <p class="note">To receive messages, the machine running the assistant must be on and reachable through a public HTTPS URL. Don't run two active instances for the same account.</p>
+        <p class="note">To receive messages, the machine running the assistant must be on and reachable through a public HTTPS URL. Use your own Cloudflare Access configuration for the private web portal. Don't run two active instances for the same account.</p>
       </div>
     </section>
 
@@ -205,6 +211,7 @@
       <div class="brand"><img src="assets/icon.png" alt="" width="28" height="28"><span>Personal Teams Assistant</span></div>
       <nav aria-label="Documentation">
         <a href="https://github.com/elvisbrevi/personal-teams-assistant#readme">README</a>
+        <a href="https://github.com/elvisbrevi/personal-teams-assistant/blob/main/SECURITY.md">Security policy</a>
         <a href="https://github.com/elvisbrevi/personal-teams-assistant/blob/main/docs/architecture.md">Architecture</a>
         <a href="https://github.com/elvisbrevi/personal-teams-assistant/blob/main/desktop/skills/personal-teams-assistant/SKILL.md">Agent skill</a>
         <a href="https://github.com/elvisbrevi/personal-teams-assistant/releases">Releases</a>

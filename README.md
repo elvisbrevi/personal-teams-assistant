@@ -3,7 +3,7 @@
 <h1 align="center">Personal Teams Assistant</h1>
 
 <p align="center"><strong>Answers in Teams as you, and only with what you authorize.</strong><br>
-<a href="https://teams-assistant.elvisbrevi.cl/">Website</a> · <a href="https://crates.io/crates/personal-teams-assistant">crates.io</a> · <a href="docs/architecture.md">Architecture</a> · <a href="desktop/skills/personal-teams-assistant/SKILL.md">Agent skill</a></p>
+<a href="https://teams-assistant.elvisbrevi.cl/">Website</a> · <a href="https://crates.io/crates/personal-teams-assistant">crates.io</a> · <a href="docs/architecture.md">Architecture</a> · <a href="#security-and-privacy">Security</a> · <a href="desktop/skills/personal-teams-assistant/SKILL.md">Agent skill</a></p>
 
 <p align="center">
   <picture>
@@ -74,6 +74,19 @@ This is self-hosted software, not a shared hosted service. Installing the crate 
 Each portal accepts only its locally configured GitHub owner (`owner_github_id`), verified through that installation's Cloudflare Access provider. Associate the owner's verified identity locally with `pta web users bind USER`; `--current-profile` preserves the existing desktop profile and Microsoft session. Legacy additional profiles are retained, but other identities cannot use the portal or its execution machines.
 
 To connect another computer you own, authorize its machine ID locally on your coordinator with `pta web machines authorize MACHINE_ID --output PRIVATE_FILE`. Transfer that private file securely, then feed it to `pta tools call machine_connect` on the intended machine's stdin within ten minutes. Approval is single-use and tied to that machine and installation; a GitHub token cannot enroll a machine. The GUI can manage paired machines; initial pairing currently uses the CLI. See the [web setup guide](desktop/skills/personal-teams-assistant/references/web-access.md) and [security policy](SECURITY.md).
+
+### Security and privacy
+
+- **Private web access.** Each portal admits its configured GitHub owner through that installation's Cloudflare Access provider. Signed identity assertions, expiring and revocable sessions, protected cookies, and Origin/CSRF checks guard browser operations.
+- **Machines you approve.** A new machine needs local authorization on your coordinator. Its pairing file expires in ten minutes, works once and is bound to that machine, installation and account version. Older hosts cannot fall back to GitHub-token enrollment.
+- **Credentials under your control.** Use the platform credential store or private profile files on Linux. Stored Microsoft OAuth tokens use AES-256-GCM-SIV encryption. Keep credentials and deployment records outside the public repository.
+- **Sources and model boundaries.** New sources start disabled, without audiences or external processing. Code enforces audiences, paths and URLs; model decisions grant no access. Answer generation runs without tools, and configured redaction masks known secrets and sensitive patterns before model processing.
+- **Controlled actions.** Daily activity records are read-only. Separate work-item creation workflows require your confirmation. Teams sends are never automatically retried; uncertain results need review.
+- **Checks before delivery.** Required CI scans source/history for secrets and dependencies against RustSec and GitHub advisories. GitHub push protection and Dependabot complement the checks, with scheduled weekly audits.
+
+Operators configure their own Cloudflare Access/Tunnel, HTTPS and edge HSTS, SSH keys and host firewall. The app sends hostname-only HSTS on HTTPS origin responses. Installing the crate does not provision or harden a server.
+
+Profiles share the trusted operator's OS account. Selected coding directories and provider permissions are not OS isolation for untrusted code. The [security policy](SECURITY.md) documents these limits, upstream desktop dependency notices and private vulnerability reporting; the [web setup guide](desktop/skills/personal-teams-assistant/references/web-access.md) covers deployment.
 
 ### Update
 
@@ -222,6 +235,7 @@ pta activity history 2026-10-01..2026-10-15   # the activities of every day in a
 ## Documentation
 
 - Project site: [teams-assistant.elvisbrevi.cl](https://teams-assistant.elvisbrevi.cl/), HTML and CSS in [`site/`](site/) published as a Cloudflare Worker.
+- [Security policy](SECURITY.md): access boundaries, deployment responsibilities, upstream notices and private vulnerability reporting.
 - [Architecture](docs/architecture.md): components, pipeline, data, security, CLI contract and change recipes.
 - [Proposed improvements](docs/proposed-improvements.md).
 - [Operating skill](desktop/skills/personal-teams-assistant/SKILL.md) and [guide for agents](AGENTS.md).
