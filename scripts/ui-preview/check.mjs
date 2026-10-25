@@ -53,7 +53,7 @@ const scan = page => page.evaluate(async () => (await axe.run(document, { runOnl
 for (const [label, ctx] of [['desktop-light', {}], ['desktop-dark', { colorScheme: 'dark' }], ['phone', { viewport: { width: 393, height: 852 }, isMobile: true, hasTouch: true }]]) {
   const { context, page } = await open({ axe: true, context: ctx });
   await page.evaluate(axeSource);
-  for (const tab of ['overview', 'todo', 'messages', 'registration', 'knowledge', 'chat', 'settings']) {
+  for (const tab of ['overview', 'todo', 'agent-history', 'messages', 'registration', 'knowledge', 'chat', 'settings']) {
     await page.evaluate(t => showTab(t), tab);
     await page.waitForTimeout(300);
     // Every tab of the section's tab list (Settings sections, Activities and Knowledge views) is scanned.
@@ -109,7 +109,7 @@ check('axe: no WCAG 2.2 AA violations in any scan', !Object.keys(totals).length,
   const { context, page, errors } = await open();
   // Navigation order and Settings in the footer
   const order = await page.$$eval('nav [data-tab]', b => b.map(x => x.dataset.tab));
-  check('nav order: daily work first, Settings last', JSON.stringify(order) === JSON.stringify(['overview', 'todo', 'messages', 'registration', 'knowledge', 'chat', 'settings']), order.join(','));
+  check('nav order: daily work first, Settings last', JSON.stringify(order) === JSON.stringify(['overview', 'todo', 'messages', 'registration', 'agent-history', 'knowledge', 'chat', 'settings']), order.join(','));
   await page.click('nav [data-tab="todo"]');
   await page.waitForTimeout(200);
   check('To-Do initially requests ten Azure HUs', await page.evaluate(() => window.__ptaLastTodo?.provider === 'azure' && window.__ptaLastTodo?.limit === 10) && await page.locator('.todo-item').count() === 10);
@@ -556,7 +556,7 @@ check('axe: no WCAG 2.2 AA violations in any scan', !Object.keys(totals).length,
   await page.click('#nav-more');
   check('phone: More reveals Knowledge and Test chat', await page.isVisible('nav [data-tab="knowledge"]') && await page.isVisible('nav [data-tab="chat"]'));
   await page.keyboard.press('Tab');
-  check('phone: Tab enters the More disclosure in reading order', await page.evaluate(() => document.activeElement?.dataset.tab === 'knowledge'));
+  check('phone: Tab enters the More disclosure in reading order', await page.evaluate(() => document.activeElement?.dataset.tab === 'agent-history'));
   await page.keyboard.press('Escape');
   check('phone: Escape closes More and restores focus', await page.getAttribute('#nav-more', 'aria-expanded') === 'false' && await page.evaluate(() => document.activeElement.id === 'nav-more'));
   await page.click('#nav-more');
@@ -750,6 +750,64 @@ for (const [label, viewport] of [['desktop', { width: 1440, height: 900 }], ['ph
   check(`${label}: existing checkout editor reuses the same sheet`, await page.isVisible('.directory-picker'));
   await page.keyboard.press('Escape');
   check(`${label}: implementation has no browser errors`, errors.length === 0, errors.join('; '));
+  await context.close();
+}
+// Request creation shares the implementation model controls and records native sessions.
+if (flag !== '--axe-only') for (const [label, viewport] of [['desktop', { width: 1440, height: 900 }], ['phone', { width: 393, height: 852 }]]) {
+  const { context, page, errors } = await open({ axe: true, context: { viewport } });
+  await page.evaluate(axeSource);
+  await page.evaluate(() => showTab('todo'));
+  await page.click('#todo-create');
+  await page.waitForSelector('#request-target');
+  check(`${label}: request requires context and a catalog destination`, await page.isDisabled('#request-create'));
+  check(`${label}: Azure request exposes HU and bug radios`, await page.locator('input[name="request-kind"]').count() === 2);
+  await page.selectOption('#request-target', '0');
+  await page.fill('#request-context', 'Download receipts and verify their contents.');
+  await page.check('input[name="request-kind"][value="bug"]');
+  check(`${label}: request enables creation after model and context selection`, !await page.isDisabled('#request-create'));
+  check(`${label}: request form WCAG 2.2 AA`, (await scan(page)).length === 0, JSON.stringify(await scan(page)));
+  await page.screenshot({ path: `${out}/request-${label}.png`, fullPage: true });
+  await page.click('#request-create');
+  await page.waitForSelector('#request-result .implementation-run');
+  const submitted = await page.evaluate(() => window.__ptaLastRequestCreation);
+  check(`${label}: Azure bug creation uses the selected agent and project`, submitted.kind === 'bug' && submitted.target.provider === 'azure' && !!submitted.model && !!submitted.effort);
+  check(`${label}: a submitted request cannot be sent again`, await page.isDisabled('#request-create'));
+  if (label === 'desktop') {
+    await page.locator('#request-result').getByRole('button', { name: 'Abrir sesión del agente', exact: true }).click();
+    await page.waitForFunction(() => window.__ptaOpenedAgentSession);
+    check('request session button opens its recorded native session', await page.evaluate(id => window.__ptaOpenedAgentSession?.id === id, submitted.id));
+  }
+  await page.evaluate(() => showTab('agent-history'));
+  await page.waitForSelector('#agent-history-list .implementation-run');
+  const history = await page.textContent('#agent-history-list');
+  check(`${label}: history includes run and native session IDs`, history.includes(submitted.id) && history.includes('ID de sesión del agente'));
+  check(`${label}: history WCAG 2.2 AA`, (await scan(page)).length === 0, JSON.stringify(await scan(page)));
+  await page.screenshot({ path: `${out}/agent-history-${label}.png`, fullPage: true });
+  await page.evaluate(() => showTab('todo'));
+  await page.selectOption('#todo-provider', 'github');
+  await page.click('#todo-create');
+  await page.waitForSelector('#request-target');
+  check(`${label}: GitHub hides HU/bug choices and uses a closed repository selector`, !await page.isVisible('input[name="request-kind"]') && await page.locator('#request-target option').count() === 2);
+  await page.selectOption('#request-target', '0');
+  await page.fill('#request-context', 'Build receipt download support.');
+  await page.click('#request-create');
+  await page.waitForSelector('#request-result .implementation-run');
+  check(`${label}: GitHub creates an Epic`, await page.evaluate(() => window.__ptaLastRequestCreation.kind === 'epic'));
+  await page.evaluate(() => showTab('agent-history'));
+  await page.waitForFunction(() => document.querySelectorAll('#agent-history-list .implementation-run').length === 2);
+  await page.evaluate(() => showTab('todo'));
+  await page.click('#todo-create');
+  await page.waitForSelector('#request-target');
+  await page.getByRole('button', { name: 'Cancelar', exact: true }).click();
+  check(`${label}: cancel returns to To-Do without another execution`, await page.isVisible('#todo-master') && await page.evaluate(() => window.__ptaLastRequestCreation.kind === 'epic'));
+  await page.evaluate(() => { window.__ptaRequestWriteReady = false; });
+  await page.selectOption('#todo-provider', 'azure');
+  await page.click('#todo-create');
+  await page.waitForSelector('#request-target');
+  await page.selectOption('#request-target', '0');
+  await page.fill('#request-context', 'Synthetic request with a missing write credential.');
+  check(`${label}: missing Azure write credential prevents a run and offers settings`, await page.isDisabled('#request-create') && await page.getByRole('button', { name: 'Configurar credencial de escritura de Azure', exact: true }).isVisible());
+  check(`${label}: request and history have no browser errors`, errors.length === 0, errors.join('; '));
   await context.close();
 }
 await browser.close();

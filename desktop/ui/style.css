@@ -782,3 +782,9 @@ body.directory-picker-open { overflow: hidden; }
 .implementation-output { max-height: 28rem; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
 .implementation-footer { margin: 1rem 0; }
 #implementation fieldset { min-width: 0; }
+
+[data-tab="agent-history"], #agent-history { --tile: var(--c-todo); }
+#create-request { --tile: var(--c-todo); }
+#agent-history .todo-fields dd { overflow-wrap: anywhere; min-width: 0; }
+
+.request-footer, .todo-create-actions { margin: 1rem 0; }

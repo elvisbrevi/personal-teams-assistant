@@ -61,6 +61,7 @@
         <span class="nav-gap" aria-hidden="true"></span>
         <button id="nav-more" class="nav-more" aria-expanded="false" aria-controls="nav-secondary" title="More sections"><span class="tile" aria-hidden="true"><svg class="icon"><use href="#i-more"/></svg></span><span>More</span></button>
         <div id="nav-secondary" class="nav-secondary">
+          <button data-tab="agent-history" title="Agent history"><span class="tile" aria-hidden="true"><svg class="icon"><use href="#i-chip"/></svg></span><span>Agent history</span></button>
           <button data-tab="knowledge" title="Knowledge"><span class="tile" aria-hidden="true"><svg class="icon"><use href="#i-book"/></svg></span><span class="long">Knowledge</span><span class="short">Sources</span></button>
           <button data-tab="chat" title="Test chat"><span class="tile" aria-hidden="true"><svg class="icon"><use href="#i-chat"/></svg></span><span class="long">Test chat</span><span class="short">Test</span></button>
         </div>
@@ -137,6 +138,7 @@
             <label>State<select id="todo-state"><option value="">All states</option></select></label>
             <label>Items to show<select id="todo-limit"><option value="10">10</option><option value="25">25</option><option value="50">50</option><option value="100">100</option></select></label>
           </div>
+          <div class="actions todo-create-actions"><button id="todo-create" type="button">Create request</button><button id="todo-agent-history" class="secondary" type="button">Agent history</button></div>
           <div class="panel-head"><h2 id="todo-title">My HUs and bugs</h2><button id="todo-refresh" class="secondary small"><svg class="icon"><use href="#i-refresh"/></svg>Refresh</button></div>
           <p id="todo-assignment" class="hint"></p>
           <p id="todo-progress" class="hint" role="status" aria-live="polite"></p>
@@ -149,6 +151,22 @@
           <p id="todo-detail-progress" class="hint" role="status" aria-live="polite"></p>
           <div id="todo-detail-problem" class="callout error" role="alert" hidden></div>
           <div id="todo-detail-content" aria-busy="false"></div>
+        </div>
+      </section>
+
+      <section id="create-request" hidden>
+        <header class="page-head"><span class="page-tile" aria-hidden="true"><svg class="icon"><use href="#i-todo"/></svg></span><div class="page-title"><h1 tabindex="-1">Create request</h1><p id="request-destination"></p></div></header>
+        <div id="request-problem" class="callout error" role="alert" hidden></div>
+        <div id="request-content"></div>
+      </section>
+
+      <section id="agent-history" hidden>
+        <header class="page-head"><span class="page-tile" aria-hidden="true"><svg class="icon"><use href="#i-chip"/></svg></span><div class="page-title"><h1 tabindex="-1">Agent history</h1><p>Request creation and implementation runs, with their native agent sessions.</p></div></header>
+        <div class="panel">
+          <div class="actions"><button id="agent-history-back" class="secondary" type="button">Back to To-Do</button><button id="agent-history-refresh" class="secondary" type="button">Refresh</button></div>
+          <p id="agent-history-progress" class="hint" role="status" aria-live="polite"></p>
+          <div id="agent-history-problem" class="callout error" role="alert" hidden></div>
+          <div id="agent-history-list"></div>
         </div>
       </section>
 

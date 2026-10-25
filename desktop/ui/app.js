@@ -109,22 +109,24 @@ async function busy(button, task) {
     renderLive();
     if (button?.id === 'activity-run') button.disabled = activityRunning;
     if (implementationForm) implementationReady(implementationForm);
+    if (requestForm) implementationReady(requestForm);
   }
 }
 
 function showTab(name, anchor) {
   tab = name;
   setNavOverflow(false);
-  for (const section of ['overview', 'todo', 'implementation', 'settings', 'messages', 'knowledge', 'chat', 'registration']) $('#' + section).hidden = section !== name;
+  for (const section of ['overview', 'todo', 'implementation', 'create-request', 'agent-history', 'settings', 'messages', 'knowledge', 'chat', 'registration']) $('#' + section).hidden = section !== name;
   for (const button of document.querySelectorAll('nav button[data-tab]')) {
-    button.setAttribute('aria-current', button.dataset.tab === (name === 'implementation' ? 'todo' : name) ? 'page' : 'false');
+    button.setAttribute('aria-current', button.dataset.tab === (['implementation', 'create-request'].includes(name) ? 'todo' : name) ? 'page' : 'false');
   }
-  $('#nav-more').setAttribute('aria-current', ['knowledge', 'chat'].includes(name) ? 'page' : 'false');
+  $('#nav-more').setAttribute('aria-current', ['knowledge', 'chat', 'agent-history'].includes(name) ? 'page' : 'false');
   if (name === 'messages') loadMessages().catch(fail);
   if (name === 'overview') loadActivity();
   if (name === 'registration') loadRegistration().catch(fail);
   if (name === 'knowledge') loadKnowledge().catch(fail);
   if (name === 'todo') loadTodo();
+  if (name === 'agent-history') loadAgentHistory();
   if (name === 'settings') loadMachines().catch(fail);
   const target = anchor && document.getElementById(anchor);
   // A panel inside a tab (a Settings section, an Activities view) opens that tab first.
@@ -468,6 +470,132 @@ async function loadTodo() {
   }
 }
 
+// ---------------------------------------------------------------- request creation and agent history
+let requestForm = null;
+let requestGeneration = 0;
+async function openRequest() {
+  const generation = ++requestGeneration;
+  requestForm = null;
+  const azure = $('#todo-provider').value === 'azure';
+  const source = $('#todo-source').value;
+  showTab('create-request');
+  $('#create-request h1').focus();
+  $('#request-destination').textContent = azure ? t('Azure DevOps · HU or bug') : t('GitHub · Epic');
+  $('#request-problem').hidden = true;
+  $('#request-content').replaceChildren(el('p', { class: 'hint', textContent: t('Loading…') }));
+  const cancel = el('button', { type: 'button', class: 'secondary', textContent: t('Cancel') });
+  cancel.onclick = () => { ++requestGeneration; requestForm = null; showTab('todo'); $('#todo-create').focus(); };
+  try {
+    const catalog = await invoke('implementation_request_catalog', { provider: azure ? 'azure' : 'github', ...(azure ? { source } : {}) });
+    if (generation !== requestGeneration || tab !== 'create-request') return;
+    const target = el('select', { id: 'request-target' }, el('option', { value: '', textContent: azure ? t('Choose a project') : t('Choose a repository') }),
+      ...catalog.targets.map((target, index) => el('option', { value: String(index), textContent: target.organization ? `${target.project} · ${target.organization}` : target.project })));
+    const context = el('textarea', { id: 'request-context', rows: 7, maxLength: 32000, required: true });
+    const provider = el('select', { id: 'request-provider' }, ...catalog.providers.map(p => el('option', { value: p.id, textContent: providerNames[p.id] || p.id })));
+    const model = el('select', { id: 'request-model' });
+    const effort = el('select', { id: 'request-effort' });
+    const start = el('button', { id: 'request-create', type: 'button', textContent: t('Create'), disabled: true });
+    const result = el('div', { id: 'request-result', 'aria-live': 'polite' });
+    const kind = el('fieldset', {}, el('legend', { textContent: t('Request type') }));
+    for (const [value, label] of [['hu', t('HU')], ['bug', t('Bug')]]) {
+      const radio = el('input', { type: 'radio', name: 'request-kind', value, checked: value === ($('#todo-kind').value || 'hu') });
+      kind.append(el('label', { class: 'check' }, radio, label));
+    }
+    kind.hidden = !azure;
+    const form = requestForm = { purpose: 'request', generation, id: crypto.randomUUID(), target, context, provider, model, effort, start, catalog: catalog.providers, targets: catalog.targets, writeReady: catalog.write_ready, result, cancel, submitted: false };
+    provider.onchange = () => implementationModels(form);
+    model.onchange = () => implementationEfforts(form);
+    effort.onchange = context.oninput = target.onchange = () => implementationReady(form);
+    implementationModels(form);
+    start.onclick = () => busy(start, async () => {
+      if (form.submitted) return;
+      form.submitted = true;
+      for (const control of [target, context, provider, model, effort, ...kind.querySelectorAll('input')]) control.disabled = true;
+      cancel.textContent = t('Back to To-Do');
+      result.replaceChildren(el('p', { class: 'hint', textContent: t('Creating request…') }));
+      try {
+        await invoke('implementation_request_start', { id: form.id, target: form.targets[Number(target.value)], kind: azure ? kind.querySelector('input:checked').value : 'epic', context: context.value, provider: provider.value, model: model.value, effort: effort.value, confirmed: true });
+        await loadRequestStatus(form);
+      } catch (error) {
+        // Creation may have started: retain the UUID and inspect status without replaying the send.
+        result.replaceChildren(el('p', { class: 'callout error', role: 'alert', textContent: tx(String(error)) }));
+        const inspect = el('button', { class: 'secondary', textContent: t('Check creation status') });
+        inspect.onclick = () => busy(inspect, () => loadRequestStatus(form));
+        result.append(inspect);
+      }
+    });
+    const credentials = el('button', { type: 'button', class: 'secondary', textContent: t('Configure Azure write credential') });
+    credentials.onclick = () => showTab('settings', 'panel-credentials');
+    $('#request-content').replaceChildren(el('div', { class: 'panel' },
+      el('label', {}, azure ? t('Project') : t('Repository'), target), kind,
+      el('label', {}, t('Request context'), context),
+      el('div', { class: 'grid' }, el('label', {}, t('CLI'), provider), el('label', {}, t('Model'), model), el('label', {}, t('Effort'), effort)),
+      catalog.write_ready === false ? el('div', { class: 'callout warn' }, el('p', { textContent: t('Set AZURE_IMPLEMENTATION_WRITE_TOKEN in Credentials before creating requests.') }), credentials) : null,
+      !catalog.targets.length ? el('p', { class: 'callout warn', textContent: t('No destinations are available. Check the selected source or GitHub connection.') }) : null,
+      !catalog.providers.length ? el('p', { class: 'callout warn', textContent: t('No coding CLI installed on this machine') }) : null),
+      el('div', { class: 'actions request-footer' }, cancel, start), result);
+  } catch (error) {
+    if (generation !== requestGeneration) return;
+    $('#request-problem').hidden = false;
+    $('#request-problem').textContent = tx(String(error));
+    $('#request-content').replaceChildren(cancel);
+  }
+}
+async function loadRequestStatus(form) {
+  const record = await invoke('implementation_request_status', { id: form.id });
+  if (requestForm !== form || tab !== 'create-request') return;
+  if (!record) {
+    form.result.replaceChildren(el('p', { class: 'hint', textContent: t('No execution was recorded. Return to To-Do to correct the request.') }));
+    return;
+  }
+  form.result.replaceChildren(agentRunCard(record));
+  if (['generating', 'sending'].includes(record.state)) setTimeout(() => {
+    if (requestForm === form && tab === 'create-request') loadRequestStatus(form).catch(fail);
+  }, 3000);
+}
+function agentRunCard(run) {
+  const open = el('button', { type: 'button', class: 'secondary small', textContent: t('Open agent session') });
+  open.onclick = () => openAgentSession(run, open);
+  const destination = sessionDestination(run, sessionIsMobile(), !window.ptaTransport.browser);
+  open.disabled = !destination.url && !destination.native;
+  if (open.disabled) open.title = destination.reason;
+  const pairs = [[t('Run ID'), run.id], [t('Agent session ID'), run.session_id || t('Not recorded')],
+    [t('Execution machine'), run.machine_name || run.machine], [t('Effort'), effortNames[run.effort] || run.effort || t('Not recorded')],
+    ...[[t('Requested at'), run.created_at], [t('Started at'), run.started_at], [t('Finished at'), run.finished_at]].map(([key, value]) => [key, value ? new Date(value).toLocaleString(uiLocale()) : t('Not recorded')])];
+  const copySession = el('button', { type: 'button', class: 'secondary small', textContent: t('Copy session ID'), disabled: !run.session_id });
+  copySession.onclick = () => busy(copySession, async () => { if (!await copy(run.session_id)) fail(t('Could not copy the session ID.')); });
+  const card = el('article', { class: 'implementation-run' },
+    el('div', { class: 'todo-context' }, badge(run.purpose === 'request' && run.state === 'created' ? t('Request created') : tx(run.state), ['created', 'done', 'plan_ready'].includes(run.state) ? 'ok' : ['failed', 'uncertain', 'needs_attention'].includes(run.state) ? 'warn' : 'info'),
+      el('strong', { textContent: `${providerNames[run.provider] || run.provider} · ${run.model}` }), run.purpose === 'request' ? badge(t('Request creation'), 'muted') : badge(t('Implementation'), 'muted')),
+    run.project ? el('p', { textContent: `${run.project} · ${{ hu: t('HU'), bug: t('Bug'), epic: t('Epic') }[run.kind] || tx(run.kind)}` }) : null,
+    run.item?.url ? link(`#${run.item.id} · ${run.item.title}`, run.item.url) : null,
+    el('dl', { class: 'todo-fields' }, ...pairs.map(([label, value]) => el('div', {}, el('dt', { textContent: label }), el('dd', { textContent: value })))),
+    el('div', { class: 'actions' }, open, copySession),
+    open.disabled ? el('p', { class: 'hint', textContent: destination.reason }) : null,
+    run.output ? el('p', { class: 'hint', textContent: tx(run.output) }) : null,
+    run.state === 'uncertain' ? el('p', { class: 'callout warn', textContent: t('The provider may have created the request. Inspect it before creating another; this execution will not be retried.') }) : null,
+    run.state === 'needs_attention' && run.purpose === 'request' ? el('p', { class: 'callout warn', textContent: t('The issue was created, but its Epic type or assignment could not be confirmed. Review the original issue.') }) : null);
+  return card;
+}
+let historyGeneration = 0;
+async function loadAgentHistory() {
+  const generation = ++historyGeneration;
+  $('#agent-history-problem').hidden = true;
+  $('#agent-history-progress').textContent = t('Loading…');
+  try {
+    const result = await invoke('implementation_history');
+    if (generation !== historyGeneration || tab !== 'agent-history') return;
+    $('#agent-history-list').replaceChildren(...result.runs.map(agentRunCard));
+    if (!result.runs.length) $('#agent-history-list').append(el('p', { class: 'empty', textContent: t('No agent executions recorded yet.') }));
+    $('#agent-history-progress').textContent = result.partial ? t('Showing the latest executions. Older records remain saved.') : tn(result.runs.length, '{count} execution', '{count} executions');
+  } catch (error) {
+    if (generation !== historyGeneration) return;
+    $('#agent-history-progress').textContent = '';
+    $('#agent-history-problem').hidden = false;
+    $('#agent-history-problem').textContent = tx(String(error));
+  }
+}
+
 // ---------------------------------------------------------------- implementation
 function sessionDestination(session, mobile, native = false) {
   if (!session.session_id) return { reason: t('The agent has not reported its session ID yet.') };
@@ -477,7 +605,7 @@ function sessionDestination(session, mobile, native = false) {
     return { url: `codex://threads/${encodeURIComponent(session.session_id)}` };
   }
   if (session.provider === 'claude') {
-    if (native && !mobile) return ['running', 'planning'].includes(session.state) ? { reason: t('Claude Desktop can open this local session after the CLI finishes. This session is still running.') } : { native: true };
+    if (native && !mobile) return ['running', 'planning', 'generating', 'sending'].includes(session.state) ? { reason: t('Claude Desktop can open this local session after the CLI finishes. This session is still running.') } : { native: true };
     return { reason: t('This Claude Code session is local to its execution machine. A mobile or web link needs a session published through Claude Remote Control; this run has no verified remote link.') };
   }
   return { reason: t('This agent does not provide a verified app link for the recorded local session. Its session ID is available in implementation runs.') };
@@ -509,7 +637,7 @@ async function loadWorkItemSessions() {
   if (request !== workItemSessionsRequest) return;
   for (const button of buttons) {
     const sessions = (result.sessions || []).filter(session => session.item.url === button.dataset.sessionFor && session.session_id);
-    const session = sessions.find(session => ['running', 'planning'].includes(session.state)) || sessions[0];
+    const session = sessions.find(session => ['running', 'planning', 'generating', 'sending'].includes(session.state)) || sessions[0];
     button.hidden = !session;
     if (session) {
       button.title = t('Open {provider} session', { provider: providerNames[session.provider] || session.provider });
@@ -530,6 +658,7 @@ async function loadWorkItemSessions() {
     }));
   }
 }
+setInterval(() => { if (tab === 'agent-history') loadAgentHistory(); }, 10000);
 setInterval(() => { if (['todo', 'registration'].includes(tab)) loadWorkItemSessions().catch(fail); }, 10000);
 let implementationForm = null;
 let implementationRequest = 0;
@@ -604,6 +733,10 @@ async function openImplementation(item, selection, trigger) {
   }
 }
 function implementationReady(form) {
+  if (form.purpose === 'request') {
+    form.start.disabled = form.writeReady === false || form.submitted || form.start.classList.contains('busy') || !(form.context.value.trim() && form.target.value && form.provider.value && form.model.value && form.effort.value);
+    return;
+  }
   form.start.disabled = form.start.classList.contains('busy') || !(form.machine.value && form.directories.length && form.provider.value && form.model.value && form.effort.value);
 }
 function implementationModels(form) {
@@ -2675,6 +2808,10 @@ $('#todo-back').onclick = () => closeTodoDetail();
 $('#todo-detail-refresh').onclick = () => loadTodoDetail();
 $('#todo-state').onchange = () => loadTodo();
 $('#todo-limit').onchange = () => loadTodo();
+$('#todo-create').onclick = openRequest;
+$('#todo-agent-history').onclick = () => showTab('agent-history');
+$('#agent-history-back').onclick = () => showTab('todo');
+$('#agent-history-refresh').onclick = () => busy($('#agent-history-refresh'), loadAgentHistory);
 $('#todo-refresh').onclick = () => busy($('#todo-refresh'), loadTodo);
 
 // After a section change, focus its heading so a screen reader starts there (no visible ring after a click).

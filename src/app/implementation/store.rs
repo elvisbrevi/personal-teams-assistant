@@ -28,7 +28,89 @@ impl Database {
             INSERT INTO agent_run_events(run_id) SELECT id FROM agent_runs WHERE state IN ('running','planning');
             UPDATE agent_runs SET state='interrupted' WHERE state IN ('running','planning');
             COMMIT;")?;
+        db.execute_batch("CREATE TABLE IF NOT EXISTS request_runs (id TEXT PRIMARY KEY, state TEXT NOT NULL, requested_at TEXT NOT NULL, payload TEXT NOT NULL);
+            UPDATE request_runs SET state=CASE WHEN state='sending' THEN 'uncertain' ELSE 'interrupted' END WHERE state IN ('generating','sending');")?;
         Ok(Self(std::sync::Mutex::new(db)))
+    }
+    pub(super) fn request_insert(&self, record: &Value) -> Result<()> {
+        self.0.lock().unwrap().execute(
+            "INSERT INTO request_runs(id,state,requested_at,payload) VALUES (?1,?2,?3,?4)",
+            params![
+                record["id"].as_str(),
+                record["state"].as_str(),
+                record["created_at"].as_str(),
+                record.to_string()
+            ],
+        )?;
+        Ok(())
+    }
+    pub(super) fn request_update(
+        &self,
+        id: &str,
+        change: impl FnOnce(&mut Value) -> Result<()>,
+    ) -> Result<()> {
+        let mut db = self.0.lock().unwrap();
+        let tx = db.transaction()?;
+        let (payload, state): (String, String) = tx.query_row(
+            "SELECT payload,state FROM request_runs WHERE id=?1",
+            [id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        let mut value: Value = serde_json::from_str(&payload)?;
+        value["state"] = json!(state);
+        change(&mut value)?;
+        tx.execute(
+            "UPDATE request_runs SET state=?2,payload=?3 WHERE id=?1",
+            params![id, value["state"].as_str(), value.to_string()],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+    pub(super) fn requests(&self, id: Option<&str>) -> Result<Vec<Value>> {
+        let db = self.0.lock().unwrap();
+        let mut query = db.prepare("SELECT payload,state FROM request_runs WHERE (?1 IS NULL OR id=?1) ORDER BY requested_at DESC LIMIT 100")?;
+        let rows = query.query_map([id], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })?;
+        rows.map(|row| {
+            let (payload, state) = row?;
+            let mut value: Value = serde_json::from_str(&payload)?;
+            value["state"] = json!(state);
+            Ok(value)
+        })
+        .collect()
+    }
+    pub(super) fn history(&self) -> Result<Vec<Value>> {
+        let mut runs: BTreeMap<String, Value> = self
+            .list(None, None, false)?
+            .into_iter()
+            .map(|r| {
+                let id = r.launch.id.clone();
+                (id, serde_json::to_value(SessionSummary::from(r)).unwrap())
+            })
+            .collect();
+        let db = self.0.lock().unwrap();
+        let mut query = db.prepare(
+            "SELECT metadata FROM agent_session_index ORDER BY requested_at DESC LIMIT 100",
+        )?;
+        for row in query.query_map([], |r| r.get::<_, String>(0))? {
+            let value: Value = serde_json::from_str(&row?)?;
+            if let Some(id) = value["id"].as_str() {
+                runs.entry(id.into()).or_insert(value);
+            }
+        }
+        drop(query);
+        drop(db);
+        for mut value in self.requests(None)? {
+            value.as_object_mut().unwrap().remove("context");
+            value.as_object_mut().unwrap().remove("target");
+            value.as_object_mut().unwrap().remove("submission");
+            value.as_object_mut().unwrap().remove("draft");
+            runs.insert(value["id"].as_str().unwrap().into(), value);
+        }
+        let mut runs: Vec<_> = runs.into_values().collect();
+        runs.sort_by(|a, b| b["created_at"].as_str().cmp(&a["created_at"].as_str()));
+        Ok(runs)
     }
     pub(super) fn insert(&self, run: &Run) -> Result<()> {
         let launch = &run.launch;
@@ -236,6 +318,41 @@ mod tests {
         assert_eq!(done.session_id, running.session_id);
         assert_eq!(done.started_at, running.started_at);
         assert!(done.finished_at.is_some());
+    }
+    #[test]
+    fn request_intents_sessions_and_uncertainty_survive_restart_without_replay() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("runs.db");
+        let id = "44444444-4444-4444-8444-444444444444";
+        let generating = json!({"id":id,"state":"generating","created_at":"2026-10-25T12:00:00Z","session_id":null,"submission":{"context":"Synthetic request"}});
+        {
+            let db = Database::open(&path).unwrap();
+            db.request_insert(&generating).unwrap();
+            assert!(db.request_insert(&generating).is_err());
+            db.request_update(id, |r| {
+                r["state"] = json!("sending");
+                r["session_id"] = json!("55555555-5555-4555-8555-555555555555");
+                Ok(())
+            })
+            .unwrap();
+        }
+        let db = Database::open(&path).unwrap();
+        let record = db.requests(Some(id)).unwrap().pop().unwrap();
+        assert_eq!(record["state"], "uncertain");
+        assert_eq!(record["session_id"], "55555555-5555-4555-8555-555555555555");
+        assert!(db.request_insert(&generating).is_err());
+        let mut second = generating.clone();
+        second["id"] = json!("66666666-6666-4666-8666-666666666666");
+        db.request_insert(&second).unwrap();
+        drop(db);
+        let db = Database::open(&path).unwrap();
+        assert_eq!(
+            db.requests(second["id"].as_str()).unwrap()[0]["state"],
+            "interrupted"
+        );
+        let history = db.history().unwrap();
+        assert_eq!(history.len(), 2);
+        assert!(history.iter().all(|r| r.get("submission").is_none()));
     }
     #[test]
     fn an_interrupted_session_retains_its_native_id_without_an_invented_finish_time() {

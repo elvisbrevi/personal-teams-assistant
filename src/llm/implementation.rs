@@ -72,7 +72,7 @@ pub(crate) async fn plan(
         (provider, model, effort),
         directories,
         &prompt,
-        true,
+        Some(plan_schema()),
         observer,
     )
     .await?;
@@ -159,6 +159,32 @@ fn arguments(
     Ok(args)
 }
 
+/// Generate one request in a retained, tool-less native agent session.
+pub(crate) async fn request(
+    choice: (&str, &str, &str),
+    directory: PathBuf,
+    input: &str,
+    observer: SessionObserver<'_>,
+) -> Result<Value> {
+    let binary =
+        agent::locate(choice.0).ok_or_else(|| anyhow::anyhow!("Selected CLI is unavailable."))?;
+    let schema = json!({"type":"object","additionalProperties":false,"required":["title","description"],"properties":{"title":{"type":"string"},"description":{"type":"string"}}});
+    let prompt = format!(
+        "Write one request of the selected type using the user's context. For an Epic describe its goal, scope and acceptance criteria; for an HU use a user story and acceptance criteria; for a bug describe observed behavior, expected behavior and reproduction details only when supplied. Do not invent facts; identify missing details. Write in the requested language. Return only JSON matching {schema}. Do not execute tools or write to a provider.\n{input}"
+    );
+    let (ok, text) = execute_at(
+        &binary,
+        choice,
+        &[directory],
+        &prompt,
+        Some(schema),
+        observer,
+    )
+    .await?;
+    ensure!(ok, "Request generation did not complete.");
+    Ok(serde_json::from_str(&text)?)
+}
+
 /// Drain both pipes, retaining a bounded tail. Raw CLI output never reaches the host log.
 async fn tail(mut stream: impl tokio::io::AsyncRead + Unpin) -> std::io::Result<Vec<u8>> {
     let mut retained = Vec::new();
@@ -190,7 +216,7 @@ pub(crate) async fn execute(
         (provider, model, effort),
         directories,
         prompt,
-        false,
+        None,
         observer,
     )
     .await
@@ -353,7 +379,7 @@ async fn execute_at(
     choice: (&str, &str, &str),
     directories: &[PathBuf],
     prompt: &str,
-    planning: bool,
+    schema: Option<Value>,
     observer: SessionObserver<'_>,
 ) -> Result<(bool, String)> {
     let (provider, model, effort) = choice;
@@ -363,6 +389,7 @@ async fn execute_at(
         uuid::Uuid::new_v4().to_string()
     };
     let temporary = tempfile::tempdir()?;
+    let planning = schema.is_some();
     let mut args = arguments(provider, model, effort, directories)?;
     if provider == "claude" {
         args.extend(["--session-id".into(), requested.clone().into()]);
@@ -377,11 +404,11 @@ async fn execute_at(
                     *arg = "read-only".into();
                 }
             }
-            let schema = temporary.path().join("schema.json");
-            std::fs::write(&schema, plan_schema().to_string())?;
+            let schema_path = temporary.path().join("schema.json");
+            std::fs::write(&schema_path, schema.as_ref().unwrap().to_string())?;
             args.extend([
                 "--output-schema".into(),
-                schema.into_os_string(),
+                schema_path.into_os_string(),
                 "--ignore-user-config".into(),
                 "--ignore-rules".into(),
             ]);
@@ -393,7 +420,7 @@ async fn execute_at(
                 "--tools".into(),
                 "".into(),
                 "--json-schema".into(),
-                plan_schema().to_string().into(),
+                schema.as_ref().unwrap().to_string().into(),
             ]);
         }
     }
@@ -412,6 +439,9 @@ async fn execute_at(
     if provider == "opencode" {
         let mut config = opencode_config(directories)?;
         if planning {
+            config["agents"]["pta-implementation"]["system"] = json!(
+                "Generate only the requested JSON from the supplied context. Do not use tools or write to providers."
+            );
             let deny = json!([{"action":"*","resource":"*","effect":"deny"}]);
             config["agents"]["pta-implementation"]["permissions"] = deny.clone();
             config["permissions"] = deny;
@@ -508,7 +538,7 @@ mod tests {
             ("codex", "test-model", "high"),
             &[root.path().into()],
             "Synthetic implementation.",
-            false,
+            None,
             &|_| Ok(()),
         )
         .await
