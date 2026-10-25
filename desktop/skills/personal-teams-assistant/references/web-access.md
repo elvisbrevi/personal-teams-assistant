@@ -25,7 +25,7 @@ pta web users enable owner
 pta --json web callbacks > /private/path/production-callbacks.json
 ```
 
-Create `elvis --current-profile` only if it is absent. An existing `owner` account
+Create `owner --current-profile` only if it is absent. An existing `owner` account
 must keep its ID and current profile association. `add` takes no password and does
 not grant access until `bind`. No username/email similarity associates accounts.
 
@@ -123,14 +123,17 @@ pta web configure < /private/path/access-settings.json
 Run this helper from a checkout of the project's `main` branch; Cargo installs
 the binaries and embedded skill, while the setup script stays in the repository.
 
-The real helper-generated settings contain `bind`, `public_url`, `session_hours`
+The real helper-generated settings contain `bind`, `public_url`, `session_hours`,
 `owner_github_id` and `access` (`issuer`, `audience`, `account_id`, `github_idp_id`). Audience/provider
 IDs come from actual Cloudflare resources; never invent them. Configuration takes
 effect when the portal restarts. Plain HTTP previews cannot authenticate Access.
 
 `pta web callbacks` exports only exact `/webhooks/<profile-id>/graph/notifications`
-and `/webhooks/<profile-id>/graph/lifecycle` paths. Re-run setup when adding an
-isolated account. Only these callback POST handlers are exempt in the backend;
+and `/webhooks/<profile-id>/graph/lifecycle` paths for the enabled, bound owner only. For a fresh isolated owner, the first
+export is empty while Access/binding are being configured. After binding the owner,
+export `pta --json web callbacks` again to the callbacks file and rerun the Access
+helper with that refreshed file before starting Teams. Repeat after any owner-profile
+change; an old callback export never updates itself. Only these callback POST handlers are exempt in the backend;
 the exact matching paths have separate Access Bypass apps at the edge. No broad
 `/webhooks/*` bypass is accepted. The static icons and PWA manifest (`/favicon.png`,
 `/manifest.webmanifest`, `/apple-touch-icon.png`, `/icon-192.png`, `/icon-512.png`)
@@ -198,3 +201,5 @@ send real Teams messages as a smoke test.
 Machine registration never sends a GitHub access token to a coordinator. Existing machine credentials remain account-version-bound and revocable. Initial pairing requires CLI 0.9.4 or later; the GUI's URL-only Connect action cannot authorize it. Normal management remains available in the GUI after pairing.
 
 HTTPS origin responses include hostname-only HSTS. Configure matching edge HSTS for Access-generated responses without enabling parent-domain includeSubDomains or preload indiscriminately.
+
+Both CLI and host must advertise `machine_pairing_support: true` (0.9.4 or later). The portal refuses to reuse an older native/headless host, and IPC rejects machine connection before forwarding any request to one. This prevents an older host from falling back to GitHub-token enrollment.

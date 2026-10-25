@@ -466,7 +466,7 @@ async fn fake_host(portal: &Portal, account: &Account) -> (MockServer, fs::File)
     write_private(
         &dir.join("control.json"),
         &json!({"contract":1,"port":port,"token":"synthetic-ipc-token",
-        "wiki_support":true,"activity_registration_support":true,"web_support":true,"web_access_support":true,"implementation_support":true})
+        "wiki_support":true,"activity_registration_support":true,"web_support":true,"web_access_support":true,"implementation_support":true,"machine_pairing_support":true})
         .to_string(),
     )
     .unwrap();
@@ -1227,4 +1227,30 @@ async fn the_portal_refuses_a_password_era_host_without_changing_its_profile() {
     let before = fs::read(dir.join("config.toml")).unwrap();
     assert!(portal.worker(&entries[0]).await.is_err());
     assert_eq!(fs::read(dir.join("config.toml")).unwrap(), before);
+}
+
+#[tokio::test]
+async fn older_hosts_never_receive_a_machine_connection_or_its_credentials() {
+    let (_dir, portal, entries, _server) = configured_fixture().await;
+    let (host, _lock) = fake_host(&portal, &entries[0]).await;
+    let dir = profile_dir(&portal.root, &entries[0]);
+    let path = dir.join("control.json");
+    let mut descriptor: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    descriptor
+        .as_object_mut()
+        .unwrap()
+        .remove("machine_pairing_support");
+    write_private(&path, &descriptor.to_string()).unwrap();
+    assert!(portal.worker(&entries[0]).await.is_err());
+    let mut request = control::Request::new("machine_connect");
+    request.args = json!({"url":"https://untrusted.example.com","pairing_token":"synthetic"});
+    assert!(
+        control::client_at(request, &dir)
+            .await
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("pairing")
+    );
+    assert!(host.received_requests().await.unwrap().is_empty());
 }

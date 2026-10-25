@@ -152,8 +152,8 @@ expiration in private `web/access-revocations.json`, then the browser visits
 `users revoke` also sets an issuance cutoff so old Access assertions cannot open
 new sessions. Disable, unbind and rebind take effect on the next request.
 
-Hosts advertise additive `web_access_support` in their IPC descriptors and CLI
-capabilities. The portal refuses to reuse a password-era host, and account edits
+Hosts advertise additive `machine_pairing_support` (0.9.4+) and `web_access_support` in their IPC descriptors and CLI
+capabilities. The portal refuses to reuse a password-era or pre-pairing host. IPC rejects `machine_connect` before delivery to a host without `machine_pairing_support`, preventing fallback to older GitHub-token enrollment, and account edits
 refuse to migrate the schema while one is running. A controlled Mac transition
 updates the compatible host/CLI pair and preserves the previous assistant state.
 The native transport remains unchanged and never accepts browser credentials.

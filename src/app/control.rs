@@ -64,6 +64,8 @@ impl Reply {
 #[derive(Serialize, Deserialize)]
 struct Endpoint {
     #[serde(default)]
+    machine_pairing_support: bool,
+    #[serde(default)]
     implementation_support: bool,
     #[serde(default)]
     wiki_support: bool,
@@ -208,8 +210,8 @@ pub(super) fn require_web_access_host_at(dir: &Path) -> Result<()> {
     existing_host_at(dir)?;
     let endpoint: Endpoint = serde_json::from_slice(&fs::read(dir.join("control.json"))?)?;
     ensure!(
-        endpoint.web_access_support,
-        "incompatible Access account schema: update the host and CLI together, preserving the assistant's running state"
+        endpoint.web_access_support && endpoint.machine_pairing_support,
+        "incompatible Access or machine pairing host: update the host and CLI together, preserving the assistant's running state"
     );
     Ok(())
 }
@@ -306,6 +308,10 @@ pub(super) async fn client_at(request: Request, dir: &Path) -> Result<Reply> {
         // connection establishment failures, before any request was delivered.
         let endpoint: Endpoint = serde_json::from_slice(&fs::read(dir.join("control.json"))?)?;
         ensure!(
+            endpoint.machine_pairing_support || request.method != "machine_connect",
+            "Incompatible machine pairing host: update the host and CLI together before connecting a machine."
+        );
+        ensure!(
             endpoint.implementation_support || !implementation::handles(&request.method),
             "Incompatible implementation host: update the host and CLI together."
         );
@@ -399,6 +405,7 @@ pub(crate) fn launch(
             web_support: true,
             web_access_support: true,
             implementation_support: true,
+            machine_pairing_support: true,
             contract: CONTRACT,
             port: listener.local_addr()?.port(),
             token: token.clone(),
@@ -1063,6 +1070,7 @@ mod tests {
                 web_support: true,
                 web_access_support: true,
                 implementation_support: true,
+                machine_pairing_support: true,
             })
             .unwrap(),
         )
@@ -1082,6 +1090,7 @@ mod tests {
                 web_support: true,
                 web_access_support: true,
                 implementation_support: true,
+                machine_pairing_support: true,
             })
             .unwrap(),
         )
@@ -1110,6 +1119,7 @@ mod tests {
                     web_support: true,
                     web_access_support: true,
                     implementation_support: true,
+                    machine_pairing_support: true,
                 })
                 .unwrap(),
             )
