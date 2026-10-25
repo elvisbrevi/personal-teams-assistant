@@ -234,8 +234,8 @@ See [Codex links](https://learn.chatgpt.com/docs/reference/commands),
 and [Claude Remote Control](https://code.claude.com/docs/en/remote-control).
 
 Azure child creation uses the selected source's read catalog and the process's default task type,
-with the parent's area/iteration and catalog user's assignment. Set the dedicated optional
-`AZURE_IMPLEMENTATION_WRITE_TOKEN` through Credentials/stdin with Work Items read/write access;
+with the parent's area/iteration and catalog user's assignment. Use
+a valid Azure CLI session (`az login`) on the host performing the write, with the user's Work Items permissions;
 legacy activity write credentials do not authorize this flow. GitHub needs Issues write access on
 its existing App connection. Child creation is submitted to the coordinator, even from an enrolled worker, and runs in the background after its durable intent is saved. `implementation_creation` takes the plan's `id` and returns its current state and verified child links, or null before submission. Each new plan can be submitted once; repeated submissions only return its recorded outcome. A lost provider response is `uncertain`
 and must be inspected in the provider without replaying the plan. A GitHub child created without
@@ -250,9 +250,15 @@ Requires host/CLI 0.9.1 or later. In To-Do select Azure or GitHub, then Create r
 Agents use the same operations through `pta tools call` or MCP:
 
 1. `implementation_request_catalog` with `provider: azure|github` and, for Azure, `source`. It returns exact `targets` and available CLI providers/models/efforts. Keep a target as returned; arbitrary or edited targets are rejected.
-2. After the user approves the context, target, type and agent, call `implementation_request_start` with a new stable UUID `id`, the exact `target`, `kind: epic|hu|bug`, `context`, CLI `provider`, `model`, `effort` and `confirmed: true`. Azure requires the existing dedicated `AZURE_IMPLEMENTATION_WRITE_TOKEN`; read credentials cannot create requests. The process defines the actual Azure work item type. Creation uses its To-Do developer assignment role (or Assigned To) and description/reproduction field.
+2. After the user approves the context, target, type and agent, call `implementation_request_start` with a new stable UUID `id`, the exact `target`, `kind: epic|hu|bug`, `context`, CLI `provider`, `model`, `effort` and `confirmed: true`. Azure requires the authenticated Azure CLI session on this host; read credentials cannot create requests. The process defines the actual Azure work item type. Creation uses its To-Do developer assignment role (or Assigned To) and description/reproduction field.
 3. Inspect `implementation_request_status` with `id` until generation/sending ends. Reusing that ID with the same submission only reads the saved record; another submission cannot reuse it. After any timeout inspect status, never start a replacement automatically. A failed/uncertain send is never retried. An uncertain request may already exist: inspect the provider first. If GitHub silently drops the Epic type or own assignment, `needs_attention` preserves its verified issue URL for review.
 4. `implementation_history` takes no arguments and returns the latest 100 recorded local requests and local/cached implementation sessions, bounded to 800 KB; `partial` indicates bounded history. The GUI's Agent history screen is in navigation (More on phones) and To-Do. Run IDs belong to PTA; session IDs belong to the native coding CLI. Missing session IDs and finish times remain empty, including interrupted executions.
 5. Use `implementation_open_session` with the recorded `machine` and run `id` on that machine's native desktop. The existing Codex/Claude platform limits apply; OpenCode and unsupported remote/mobile sessions retain their ID with an explanation rather than an invented app URL.
 
 Daily task snapshots, activity runs and all evidence tools remain read-only. This is a distinct explicit request-creation action; it does not authorize autonomous work item creation by the assistant.
+
+## Azure CLI authentication status
+
+From 0.9.2, explicit Azure request and child creation reuse Azure CLI's Entra session instead of a separate PAT. Home lists Azure CLI status and its account; select the row to refresh. A stored account whose Azure DevOps session cannot be renewed is unavailable rather than authenticated. The user still needs the project's Work Items permissions; a signed-in state alone does not guarantee them.
+
+Read the shared operation with `printf '%s\n' '{}' | pta --json tools call azure_cli_status` (or MCP `azure_cli_status`). It returns state/authenticated/user/tenant only. The app acquires short-lived credentials internally with Azure CLI and never returns or prints them. Do not run token commands that print tokens. Use `az login` on the host under the same OS user/profile, then refresh status. For an isolated web profile use its own `home/.azure`; never copy or reuse the operator's Azure session. The old `AZURE_IMPLEMENTATION_WRITE_TOKEN` remains untouched in storage if present and is retired; do not configure it for this flow. Daily snapshots and evidence remain read-only.

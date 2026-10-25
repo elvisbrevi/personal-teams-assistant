@@ -86,10 +86,14 @@ pub(super) async fn operate(host: &Arc<Host>, method: &str, args: &Value) -> Res
             catalog
                 .providers
                 .retain(|p| p.transport == "cli" && p.available);
-            let write_ready = provider != "azure"
-                || security::secret_source("AZURE_IMPLEMENTATION_WRITE_TOKEN")?.is_some();
+            let azure_cli = if provider == "azure" {
+                Some(super::super::azure_cli::status().await)
+            } else {
+                None
+            };
+            let write_ready = azure_cli.as_ref().is_none_or(|s| s.authenticated);
             Ok(
-                json!({"targets":destinations,"providers":catalog.providers,"write_ready":write_ready}),
+                json!({"targets":destinations,"providers":catalog.providers,"write_ready":write_ready,"azure_cli":azure_cli}),
             )
         }
         "implementation_request_status" => {
@@ -154,11 +158,11 @@ pub(super) async fn operate(host: &Arc<Host>, method: &str, args: &Value) -> Res
                 &request.effort,
             )
             .await?;
-            // Resolve the process type and check the dedicated credential before starting the CLI.
+            // Resolve the process type and check the Azure CLI session before starting the model.
             let prepared = if provider == "azure" {
                 let (client, key, catalog) =
                     azure(&host.state, request.target["source"].as_str().unwrap())?;
-                security::secret("AZURE_IMPLEMENTATION_WRITE_TOKEN").map_err(|_| anyhow::anyhow!("Set AZURE_IMPLEMENTATION_WRITE_TOKEN in Credentials before creating requests."))?;
+                super::super::azure_cli::require().await?;
                 crate::ado::implementation::request_target(
                     &client,
                     &key,
@@ -229,8 +233,8 @@ async fn run(host: &Host, request: Request, prepared: Value, directory: PathBuf)
             available.contains(&request.target),
             "The destination is no longer available."
         );
-        let write_key = if provider == "azure" {
-            Some(security::secret("AZURE_IMPLEMENTATION_WRITE_TOKEN")?)
+        let write_session = if provider == "azure" {
+            Some(super::super::azure_cli::require().await?)
         } else {
             None
         };
@@ -246,7 +250,7 @@ async fn run(host: &Host, request: Request, prepared: Value, directory: PathBuf)
             let (client, _, _) = azure(&host.state, request.target["source"].as_str().unwrap())?;
             crate::ado::implementation::create_request(
                 &client,
-                write_key.as_deref().unwrap(),
+                write_session.as_ref().unwrap().token(),
                 &prepared,
                 &draft,
             )

@@ -42,6 +42,13 @@ fn confirmed() -> Value {
 
 pub(super) const TOOLS: &[Tool] = &[
     Tool {
+        name: "azure_cli_status",
+        title: "Azure CLI session",
+        description: "Read whether Azure CLI is installed and can obtain an Azure DevOps Entra session for this profile. Returns account and tenant metadata only, never tokens. Authentication does not prove project write permissions.",
+        effect: Effect::Read,
+        schema: none,
+    },
+    Tool {
         name: "implementation_request_catalog",
         title: "Request destinations and agents",
         description: "Enabled Azure source projects or connected GitHub repositories, plus installed CLIs, models and efforts on this host.",
@@ -289,7 +296,7 @@ pub(super) const TOOLS: &[Tool] = &[
     Tool {
         name: "implementation_create",
         title: "Create reviewed child work items",
-        description: "Create the explicitly selected and reviewed children of this new implementation plan. Azure requires its dedicated write credential; GitHub requires Issues write access. Never replays a submitted or uncertain plan.",
+        description: "Create the explicitly selected and reviewed children of this new implementation plan. Azure requires its authenticated Azure CLI session; GitHub requires Issues write access. Never replays a submitted or uncertain plan.",
         effect: Effect::External,
         schema: || {
             object(
@@ -860,6 +867,7 @@ pub(super) async fn run(name: &str, args: &Value) -> Result<Value, String> {
     }
     match name {
         "list_azure_hus" | "list_azure_tasks" | "list_github_epics" | "list_github_issues" | "get_azure_hu" | "get_azure_task" | "get_github_epic" | "get_github_issue" | "open_work_item" => ipc(name, args.clone()).await,
+        "azure_cli_status" => ipc(name, args.clone()).await,
         "status" => {
             let s = ipc("snapshot", json!({})).await?;
             Ok(json!({

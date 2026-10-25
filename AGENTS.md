@@ -22,7 +22,7 @@ Read [the architecture](docs/architecture.md) first: it explains components, pip
 - Do not remove or rename fields of `Config`/`KnowledgeMap` (`deny_unknown_fields`); add only with `#[serde(default)]`. The single authorized exception is the retired `[jev]` section: `Config::retired_reviewer` accepts it so older profiles load, and never writes it again.
 - Do not add Graph scopes or change the OAuth flow (public client + PKCE + loopback).
 - Never retry a send to Graph; when in doubt, `uncertain` and human review.
-- Azure evidence and daily activity runs are read-only. The implementation flow may create children only from a new implementation plan the user explicitly reviewed and confirmed, using its dedicated write credential. Daily activity runs never create, link or change work items. Legacy write credentials and audit attempts remain intact, and plans saved by older hosts cannot authorize new writes.
+- Azure evidence and daily activity runs are read-only. The implementation flow may create children only from a new implementation plan the user explicitly reviewed and confirmed, using the authenticated Azure CLI session for Azure writes. Daily activity runs never create, link or change work items. Legacy write credentials and audit attempts remain intact, and plans saved by older hosts cannot authorize new writes.
 - Model decisions grant no permissions: audiences, paths, URLs and limits are checked in code.
 - New sources start disabled, without audiences and without `external_processing`.
 - Never print or log secrets; credentials only on stdin or from the system store.

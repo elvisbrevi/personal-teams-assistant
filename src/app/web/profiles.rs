@@ -282,6 +282,7 @@ impl Portal {
             "github_repositories",
             "self_chat_status",
             "llm_providers",
+            "azure_cli_status",
             "audit",
             "answer_refine",
             "answer_send",
