@@ -1,7 +1,7 @@
 const rawInvoke = window.ptaTransport.invoke;
 // Also the answer operations: they do not depend on the profile files, so they neither check
 // nor advance the form's revision.
-const READS = ['snapshot', 'chat', 'github_repositories', 'self_chat_status', 'llm_providers', 'audit', 'activity_status', 'activity_history', 'activity_pending', 'answer_refine', 'answer_send', 'list_azure_hus', 'list_github_epics', 'list_github_issues', 'get_azure_hu', 'get_azure_task', 'list_azure_tasks', 'get_github_epic', 'get_github_issue', 'open_work_item'];
+const READS = ['snapshot', 'chat', 'github_repositories', 'self_chat_status', 'llm_providers', 'azure_cli_status', 'audit', 'activity_status', 'activity_history', 'activity_pending', 'answer_refine', 'answer_send', 'list_azure_hus', 'list_github_epics', 'list_github_issues', 'get_azure_hu', 'get_azure_task', 'list_azure_tasks', 'get_github_epic', 'get_github_issue', 'open_work_item'];
 // Revision of the profile files the last reply saw. The form's own revision (`current.revision`)
 // changes only when it reloads or writes, so saving a stale form fails instead of overwriting
 // changes made elsewhere (e.g. with `pta`).
@@ -524,13 +524,13 @@ async function openRequest() {
         result.append(inspect);
       }
     });
-    const credentials = el('button', { type: 'button', class: 'secondary', textContent: t('Configure Azure write credential') });
-    credentials.onclick = () => showTab('settings', 'panel-credentials');
+    const sessionStatus = el('button', { type: 'button', class: 'secondary', textContent: t('Check Azure CLI status') });
+    sessionStatus.onclick = () => { showTab('overview', 'azure-cli-status'); loadAzureCliStatus(); };
     $('#request-content').replaceChildren(el('div', { class: 'panel' },
       el('label', {}, azure ? t('Project') : t('Repository'), target), kind,
       el('label', {}, t('Request context'), context),
       el('div', { class: 'grid' }, el('label', {}, t('CLI'), provider), el('label', {}, t('Model'), model), el('label', {}, t('Effort'), effort)),
-      catalog.write_ready === false ? el('div', { class: 'callout warn' }, el('p', { textContent: t('Set AZURE_IMPLEMENTATION_WRITE_TOKEN in Credentials before creating requests.') }), credentials) : null,
+      catalog.write_ready === false ? el('div', { class: 'callout warn' }, el('p', { textContent: t('Sign in with az login on the machine running this app, then refresh Azure CLI status.') }), sessionStatus) : null,
       !catalog.targets.length ? el('p', { class: 'callout warn', textContent: t('No destinations are available. Check the selected source or GitHub connection.') }) : null,
       !catalog.providers.length ? el('p', { class: 'callout warn', textContent: t('No coding CLI installed on this machine') }) : null),
       el('div', { class: 'actions request-footer' }, cancel, start), result);
@@ -1049,6 +1049,33 @@ function tile(label, value, tone, detail, go, symbol) {
   return row;
 }
 
+let azureCliStatus = { state: 'checking', authenticated: false };
+let azureCliPending = null;
+function loadAzureCliStatus() {
+  if (azureCliPending) return azureCliPending;
+  azureCliPending = invoke('azure_cli_status').then(result => { azureCliStatus = result; })
+    .catch(() => { azureCliStatus = { state: 'unavailable', authenticated: false }; })
+    .finally(() => { azureCliPending = null; if (live) renderTiles(live); });
+  return azureCliPending;
+}
+function azureCliTile() {
+  const state = azureCliStatus;
+  const value = { authenticated: t('Authenticated'), not_authenticated: t('Not authenticated'), not_installed: t('Not installed'), unavailable: t('Session unavailable'), checking: t('Checking…') }[state.state] || t('Session unavailable');
+  const hint = state.authenticated ? t('Azure DevOps session is valid. Select to refresh.')
+    : state.state === 'not_installed' ? t('Install Azure CLI on the machine running this app.')
+    : state.state === 'checking' ? t('Checking the Azure DevOps session on this machine…')
+    : t('Sign in with az login on the machine running this app, then refresh Azure CLI status.');
+  const row = tile(t('Azure CLI'), value, state.authenticated ? 'ok' : state.state === 'checking' ? 'muted' : 'warn',
+    state.user ? `${state.user} · ${hint}` : hint, ['overview'], 'chip');
+  row.id = 'azure-cli-status';
+  row.onclick = async () => {
+    await busy(row, loadAzureCliStatus);
+    if (tab === 'overview') $('#azure-cli-status')?.focus({ preventScroll: true });
+  };
+  return row;
+}
+setInterval(() => { if (current && tab === 'overview') loadAzureCliStatus(); }, 60000);
+
 function renderTiles(s) {
   const config = s.config;
   const chain = enabledChain(config);
@@ -1060,6 +1087,7 @@ function renderTiles(s) {
   $('#tiles').replaceChildren(
     tile(t('Microsoft account'), s.microsoft_connected ? t('Connected') : t('Not connected'), s.microsoft_connected ? 'ok' : 'warn',
       s.microsoft_connected ? t('Reads and answers as you') : t('Connect it in Settings'), ['settings', 'panel-teams'], 'user'),
+    azureCliTile(),
     tile(t('Mode'), config.policy.dry_run ? t('Observation') : t('Sending on'), config.policy.dry_run ? 'info' : 'ok',
       config.policy.dry_run ? t('Sends nothing to Teams') : t('Answers in Teams'), ['settings', 'panel-behavior'], 'eye'),
     tile(t('Reception'), config.graph.discover_all_chats ? t('All my chats') : t('{n} chat(s)', { n: config.graph.allowed_chats.length }),
@@ -1180,6 +1208,7 @@ async function reload() {
   renderSavebar();
   renderLive();
   renderCredentials(); renderRepositories(); renderResources(); renderContexts(); renderQuestions(); renderPeople(); renderNoteContexts(); renderChatSources();
+  loadAzureCliStatus();
   await Promise.all([loadChain(), loadSelfChat()]);
 }
 

@@ -145,7 +145,7 @@ pub(crate) fn locate(program: &str) -> Option<PathBuf> {
         .find(|path| executable(path))
 }
 
-pub(super) fn child_env(binary: &Path) -> Vec<(OsString, OsString)> {
+pub(crate) fn child_env(binary: &Path) -> Vec<(OsString, OsString)> {
     let mut env: Vec<(OsString, OsString)> = std::env::vars_os()
         .filter(|(name, _)| {
             name.to_str()

@@ -25,6 +25,7 @@ use std::{
 use tokio::sync::{Mutex, oneshot, watch};
 
 mod activity;
+mod azure_cli;
 pub mod cli;
 pub mod control;
 mod github;
@@ -500,14 +501,13 @@ pub(crate) fn init_state(config_dir: &Path, data_dir: &Path) -> Result<DesktopSt
 
 /// Credentials earlier versions required and nothing reads any more. A stored one is listed as
 /// `retired` so it can be removed; it is never deleted automatically and cannot be set.
-const RETIRED_CREDENTIALS: [&str; 1] = ["TYPESAFE_API_KEY"];
+const RETIRED_CREDENTIALS: [&str; 2] = ["TYPESAFE_API_KEY", "AZURE_IMPLEMENTATION_WRITE_TOKEN"];
 
 fn credential_names(config: &Config) -> Vec<String> {
     let mut names = vec![
         "DEEPSEEK_API_KEY".into(),
         "GRAPH_WEBHOOK_SECRET".into(),
         "STATE_ENCRYPTION_KEY".into(),
-        "AZURE_IMPLEMENTATION_WRITE_TOKEN".into(),
         "PTA_MACHINE_TOKEN".into(),
     ];
     if config.server.cloudflare_tunnel {
@@ -523,9 +523,7 @@ fn credential_names(config: &Config) -> Vec<String> {
 /// only while DeepSeek is in the LLM chain; Codex and Claude use their own CLI login.
 fn required_credentials(config: &Config) -> Vec<String> {
     let mut names = credential_names(config);
-    names.retain(|name| {
-        !["AZURE_IMPLEMENTATION_WRITE_TOKEN", "PTA_MACHINE_TOKEN"].contains(&name.as_str())
-    });
+    names.retain(|name| name != "PTA_MACHINE_TOKEN");
     if !crate::llm::uses_deepseek(&config.llm) {
         names.retain(|name| name != "DEEPSEEK_API_KEY");
     }

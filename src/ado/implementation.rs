@@ -132,7 +132,7 @@ pub(crate) async fn request_target(
 
 pub(crate) async fn create_request(
     client: &Client,
-    write_key: &str,
+    write_token: &str,
     target: &Value,
     draft: &Value,
 ) -> Result<Value> {
@@ -164,7 +164,7 @@ pub(crate) async fn create_request(
     }
     let response = client
         .post(url)
-        .basic_auth("", Some(write_key))
+        .bearer_auth(write_token)
         .header("Content-Type", "application/json-patch+json")
         .json(&body)
         .send()
@@ -198,7 +198,7 @@ pub(crate) async fn create_request(
 pub(crate) async fn create_child(
     client: &Client,
     read_key: &str,
-    write_key: &str,
+    write_token: &str,
     catalog: &str,
     parent: &Detail,
     child: &Value,
@@ -285,7 +285,7 @@ pub(crate) async fn create_child(
     let url = super::test_url(url);
     let response = client
         .post(url)
-        .basic_auth("", Some(write_key))
+        .bearer_auth(write_token)
         .header("Content-Type", "application/json-patch+json")
         .json(&body)
         .send()
@@ -384,10 +384,7 @@ mod tests {
         let body: Value = serde_json::from_slice(&requests[3].body).unwrap();
         assert_eq!(body[1]["value"], "Escape &lt;script&gt;");
         assert_eq!(body[3]["path"], "/fields/Custom.Developer");
-        assert_ne!(
-            requests[0].headers["authorization"],
-            requests[3].headers["authorization"]
-        );
+        assert_eq!(requests[3].headers["authorization"], "Bearer write");
         super::super::TEST_SERVER.with(|s| *s.borrow_mut() = None);
     }
     #[test]
@@ -395,7 +392,7 @@ mod tests {
         assert_eq!(html("<script>&\n"), "&lt;script&gt;&amp;<br>");
     }
     #[tokio::test]
-    async fn reviewed_children_use_process_task_types_and_only_the_dedicated_write_key() {
+    async fn reviewed_children_use_process_task_types_and_the_azure_cli_bearer_token() {
         use wiremock::{
             Mock, MockServer, ResponseTemplate,
             matchers::{method, path},
@@ -420,9 +417,9 @@ mod tests {
         assert_eq!(created["id"], 88);
         let requests = server.received_requests().await.unwrap();
         assert_eq!(requests.len(), 2);
-        assert_ne!(
-            requests[0].headers["authorization"],
-            requests[1].headers["authorization"]
+        assert_eq!(
+            requests[1].headers["authorization"],
+            "Bearer synthetic-write"
         );
         let body: Value = serde_json::from_slice(&requests[1].body).unwrap();
         assert!(

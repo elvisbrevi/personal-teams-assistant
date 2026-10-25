@@ -737,10 +737,9 @@ fn legacy_accounts_preserve_ids_current_profile_hashes_and_credentials_without_a
 #[test]
 fn browser_allows_shared_implementation_tools_but_rejects_internal_worker_operations() {
     let (_dir, portal, entries) = fixture();
-    for tool in super::super::tools::TOOLS
-        .iter()
-        .filter(|tool| super::super::implementation::handles(tool.name))
-    {
+    for tool in super::super::tools::TOOLS.iter().filter(|tool| {
+        super::super::implementation::handles(tool.name) || tool.name == "azure_cli_status"
+    }) {
         assert!(
             portal
                 .check_request(&entries[0], &control::Request::new(tool.name))

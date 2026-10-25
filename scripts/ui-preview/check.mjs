@@ -800,13 +800,20 @@ if (flag !== '--axe-only') for (const [label, viewport] of [['desktop', { width:
   await page.waitForSelector('#request-target');
   await page.getByRole('button', { name: 'Cancelar', exact: true }).click();
   check(`${label}: cancel returns to To-Do without another execution`, await page.isVisible('#todo-master') && await page.evaluate(() => window.__ptaLastRequestCreation.kind === 'epic'));
-  await page.evaluate(() => { window.__ptaRequestWriteReady = false; });
+  await page.evaluate(() => { window.__ptaAzureCliState = 'not_authenticated'; });
   await page.selectOption('#todo-provider', 'azure');
   await page.click('#todo-create');
   await page.waitForSelector('#request-target');
   await page.selectOption('#request-target', '0');
-  await page.fill('#request-context', 'Synthetic request with a missing write credential.');
-  check(`${label}: missing Azure write credential prevents a run and offers settings`, await page.isDisabled('#request-create') && await page.getByRole('button', { name: 'Configurar credencial de escritura de Azure', exact: true }).isVisible());
+  await page.fill('#request-context', 'Synthetic request without an authenticated Azure CLI session.');
+  check(`${label}: an unauthenticated Azure CLI session prevents a run and links to status`, await page.isDisabled('#request-create') && await page.getByRole('button', { name: 'Consultar estado de Azure CLI', exact: true }).isVisible());
+  await page.getByRole('button', { name: 'Consultar estado de Azure CLI', exact: true }).click();
+  await page.waitForFunction(() => document.querySelector('#azure-cli-status')?.textContent.includes('Sin autenticar'));
+  check(`${label}: Home shows the actual Azure CLI authentication state`, await page.isVisible('#azure-cli-status') && (await page.textContent('#azure-cli-status')).includes('az login'));
+  await page.evaluate(() => { window.__ptaAzureCliState = 'authenticated'; });
+  await page.click('#azure-cli-status');
+  await page.waitForFunction(() => document.querySelector('#azure-cli-status')?.textContent.includes('Autenticada'));
+  check(`${label}: Azure CLI status can be refreshed without editing credentials`, (await page.textContent('#azure-cli-status')).includes('ana@contoso.example'));
   check(`${label}: request and history have no browser errors`, errors.length === 0, errors.join('; '));
   await context.close();
 }

@@ -46,7 +46,7 @@ pub(in crate::app) async fn create_child(
         unreachable!()
     };
     let read_key = security::resolve(secret_ref, &config.secrets)?;
-    let write_key = security::secret("AZURE_IMPLEMENTATION_WRITE_TOKEN")?;
+    let write_session = super::super::azure_cli::require().await?;
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
         .redirect(reqwest::redirect::Policy::none())
@@ -54,7 +54,7 @@ pub(in crate::app) async fn create_child(
     crate::ado::implementation::create_child(
         &client,
         &read_key,
-        &write_key,
+        write_session.token(),
         &tool.catalog(&map.repositories)?,
         parent,
         child,

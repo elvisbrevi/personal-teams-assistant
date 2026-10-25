@@ -711,9 +711,7 @@ async fn create(host: &Arc<Host>, args: &Value) -> Result<Value> {
         validate_child(child)?;
     }
     if selection.provider == "azure" {
-        security::secret("AZURE_IMPLEMENTATION_WRITE_TOKEN").context(
-            "Set AZURE_IMPLEMENTATION_WRITE_TOKEN in Credentials before creating child tasks.",
-        )?;
+        super::azure_cli::require().await?;
     }
     let state = &host.state.implementation;
     {

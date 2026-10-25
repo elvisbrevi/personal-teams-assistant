@@ -67,6 +67,7 @@ The standard every change to `desktop/ui/` follows, so the native window, the we
 
 - Buttons: outlined pills with a shadow. One primary action per panel or form (the next step, `--primary` lime); everything else `.secondary` (paper); destructive actions `.danger` and visually apart; navigation-like actions `.link-button`. An irreversible action (dismiss, send to Teams) asks for a second tap instead of a modal.
 - Asynchronous actions run through `busy(button, task)`: the button shows progress and is disabled; errors become a notice.
+- Home includes the Azure CLI session in its status list: installed/authenticated state and the current account, with a direct refresh action. Missing authentication explains `az login` on the machine running the app; it never asks for a write token.
 - To-Do places Create request below filters, with context, closed project/repository choices and the shared CLI/model/effort controls. Azure offers HU/bug radios; GitHub fixes the type to Epic. Agent history shows app run IDs separately from native session IDs and reuses the existing session opener.
 - To-Do cards open an in-section detail; Activities reuses these cards and detail after selecting a recorded day; the external-link icon remains a separate action. Back
   restores filters, list position and focus. Keep assignment, type-specific content and discussion

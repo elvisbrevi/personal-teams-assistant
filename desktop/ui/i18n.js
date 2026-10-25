@@ -4,6 +4,18 @@
 const UI_LANGUAGES = ['es', 'en'];
 
 const UI_CATALOG = { es: {
+  "Not installed": "No instalada",
+  "Checking…": "Comprobando…",
+  "Azure CLI": "Azure CLI",
+  "Authenticated": "Autenticada",
+  "Not authenticated": "Sin autenticar",
+  "Session unavailable": "Sesión no disponible",
+  "Check Azure CLI status": "Consultar estado de Azure CLI",
+  "Azure DevOps session is valid. Select to refresh.": "La sesión de Azure DevOps es válida. Selecciona para actualizar.",
+  "Install Azure CLI on the machine running this app.": "Instala Azure CLI en la máquina donde se ejecuta esta app.",
+  "Checking the Azure DevOps session on this machine…": "Comprobando la sesión de Azure DevOps en esta máquina…",
+  "Sign in with az login on the machine running this app, then refresh Azure CLI status.": "Inicia sesión con az login en la máquina donde se ejecuta esta app y actualiza el estado de Azure CLI.",
+
   "Request created": "Solicitud creada",
   "{count} execution": "{count} ejecución",
   "Configure Azure write credential": "Configurar credencial de escritura de Azure",
