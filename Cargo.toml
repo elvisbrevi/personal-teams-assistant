@@ -70,7 +70,7 @@ tempfile = "3"
 tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["compat"] }
 tokio-tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
-toml = "0.9"
+toml = "1.1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = "2"
