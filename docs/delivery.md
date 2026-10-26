@@ -4,9 +4,9 @@ Agents develop, open a pull request, wait for CI and merge. Everything after the
 
 ```mermaid
 flowchart LR
-  PR[pull request] --> CI[ci.yml: Linux, UI, macOS, Windows] --> M[merge to main]
+  PR[pull request] --> CI[ci.yml: full checks for changed paths] --> M[merge to main]
   M --> CF[Cloudflare Workers Builds: site/ only] --> L[landing]
-  M --> CI2[ci.yml on main] --> R[release.yml: new version?] --> C[crates.io + tag + GitHub release]
+  M --> CI2[ci.yml on main: Linux tests/package + security] --> R[release.yml: new version?] --> C[crates.io + tag + GitHub release]
   C --> U[server timer: vps-update.py] --> P[web portal on the new version]
 ```
 
@@ -20,31 +20,39 @@ The landing (`site/`) stays on Cloudflare Workers Builds (free plan), which publ
 
 ## CI (`.github/workflows/ci.yml`)
 
-Runs on every pull request and every push to `main`, with `contents: read` and no secrets (pull requests from forks run it too). A newer push to a pull request cancels its older run; runs on `main` always finish, because the release waits for them.
+Runs on every pull request, every push to `main` and weekly, with `contents: read` and no secrets (pull requests from forks run it too). A newer push to a pull request cancels its older run; runs on `main` always finish, because the release waits for them.
+
+| Event | Checks |
+| --- | --- |
+| Pull request | Full checks for changed paths: Linux lint/tests/package, UI/scripts, macOS and native Windows; security always runs |
+| Push to `main` | Linux tests with and without GUI and verified Cargo package when Rust/package inputs changed or a new version needs publication; security always runs |
+| Weekly | Full Linux/UI/macOS/Windows/security matrix on `main`, also refreshing trusted shared caches |
+
+Formatting, clippy, browser previews, macOS and the clean native Windows installation run on the PR instead of repeating after each merge; Windows remains informative. Linux still tests the exact merged commit with both feature sets and verifies the `.crate` before publication. Cross-platform and browser checks on the final `main` combination run weekly rather than on every push. This is not reuse of a PR's success or artifacts: the release still requires successful Linux verification on its exact `main` commit.
 
 `Changes` decides what a change needs by comparing it with its base:
 
-| Changed paths | Rust jobs (Linux, macOS, Windows) | UI and scripts job |
+| Changed paths | Rust checks requested | UI/scripts checks requested |
 | --- | --- | --- |
 | only `site/`, `docs/`, `.agents/`, `.claude/`, `AGENTS.md`, `CLAUDE.md`, `CONTEXT.md`, `README.md`, `LICENSE`, `.gitignore` | skipped | skipped |
 | `scripts/` | skipped | run |
 | `desktop/ui/`, `.github/` | run | run |
 | anything else (`src/`, `tests/`, `Cargo.*`, `build.rs`, `desktop/`, …) | run | skipped unless also above |
 
-A push to `main` whose `Cargo.toml` version crates.io does not have yet runs everything: it is a release candidate. Without a base to compare with (a new branch, a force push), everything runs.
+A push to `main` whose `Cargo.toml` version crates.io does not have yet always requests Linux tests/package verification, even when the diff would skip it. Without a base to compare with (a new branch, a force push), all path flags are enabled; the event policy above still applies. Weekly runs enable both flags without a diff.
 
 | Job | Runner | What it runs |
 | --- | --- | --- |
-| Linux | `ubuntu-latest` | Tauri 2 system libraries; versions agree (`Cargo.toml`, `desktop/tauri.conf.json`; `--locked` checks `Cargo.lock`); `cargo fmt --check`; clippy and tests with and without `gui`; `cargo package --locked` (the `.crate` as crates.io receives it, built from the package) |
-| UI and scripts | `ubuntu-latest` | `bun build desktop/ui/app.js`; `node --test scripts/test-activity-ui.cjs scripts/test-ui-i18n.cjs`; the Python script tests; `scripts/ui-preview/check.mjs` with Playwright's Chromium (axe WCAG 2.2 AA on every section, theme and phone, plus the interaction checks; any violation fails); the results are an artifact for 7 days |
-| macOS | `macos-latest` | clippy and tests with `gui` |
-| Windows (informative) | `windows-latest` | clean release `cargo install --path . --locked`; PE stack fields and native GUI open/status/close/reopen/quit/relaunch with Teams stopped; clippy with `gui`; `continue-on-error`, so a failure shows but blocks nothing |
+| Linux | `ubuntu-latest` | Tauri 2 system libraries; versions agree (`Cargo.toml`, `desktop/tauri.conf.json`; `--locked` checks `Cargo.lock`); `cargo fmt --check` and clippy only on PR/weekly runs; tests with and without `gui` and `cargo package --locked` on every selected run (the `.crate` as crates.io receives it, built from the package) |
+| UI and scripts | `ubuntu-latest` | PR/weekly only: `bun scripts/test-ci-workflow.mjs` (actual workflow routing and merge gate); `bun build desktop/ui/app.js`; `node --test scripts/test-activity-ui.cjs scripts/test-ui-i18n.cjs`; the Python script tests; `scripts/ui-preview/check.mjs` with Playwright's Chromium (axe WCAG 2.2 AA on every section, theme and phone, plus the interaction checks; any violation fails); the results are an artifact for 7 days |
+| macOS | `macos-latest` | PR/weekly only: clippy and tests with `gui` |
+| Windows (informative) | `windows-latest` | PR/weekly only: clean release `cargo install --path . --locked`; PE stack fields and native GUI open/status/close/reopen/quit/relaunch with Teams stopped; clippy with `gui`; `continue-on-error`, so a failure shows but blocks nothing |
 | Security | `ubuntu-latest` | GitHub dependency review on PRs; full-history and working-tree Gitleaks scan with a pinned checksum-verified release; `cargo audit` against RustSec; no repository secrets |
 | CI result | `ubuntu-latest` | fails if a required job failed or was cancelled; skipped jobs pass. It is the one check to require before merging |
 
 Rust jobs cache dependencies with `Swatinem/rust-cache`, saved only from `main` (pull requests restore it). Third-party actions are pinned to a commit.
 
-The Security job also runs weekly. On scheduled runs, the build/UI jobs are skipped and `CI result` requires the security result. GitHub secret scanning, push protection, vulnerability alerts and automated security updates are enabled for the public repository; Dependabot proposes Cargo and Actions updates weekly. Audit output retains upstream maintenance/GUI notices, documented in [SECURITY.md](../SECURITY.md); known-vulnerability failures block delivery.
+Weekly runs execute the full matrix and require all mandatory results, including security. `scripts/test-ci-workflow.mjs` exercises the YAML's actual change filter with synthetic Git/registry inputs, event conditions and required-job failure handling; run it with the existing Bun runtime. GitHub secret scanning, push protection, vulnerability alerts and automated security updates are enabled for the public repository; Dependabot proposes Cargo and Actions updates weekly. Audit output retains upstream maintenance/GUI notices, documented in [SECURITY.md](../SECURITY.md); known-vulnerability failures block delivery.
 
 ### Measured times
 
