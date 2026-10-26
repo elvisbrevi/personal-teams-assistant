@@ -154,7 +154,7 @@ impl Store {
         db.busy_timeout(std::time::Duration::from_secs(2))?;
         Ok(Self { db: Mutex::new(db) })
     }
-    pub fn open(path: &Path) -> Result<Self> {
+    fn initialize(path: &Path) -> Result<Self> {
         let db = Connection::open(path)?;
         db.busy_timeout(std::time::Duration::from_secs(2))?;
         db.execute_batch(r#"PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;
@@ -164,11 +164,20 @@ impl Store {
             CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY,time INTEGER NOT NULL DEFAULT (unixepoch()),kind TEXT NOT NULL,detail TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS conversation_context(conversation TEXT PRIMARY KEY,question TEXT NOT NULL,answer TEXT NOT NULL,updated_at INTEGER NOT NULL DEFAULT (unixepoch()));
             CREATE TABLE IF NOT EXISTS outputs(nonce TEXT PRIMARY KEY,conversation TEXT NOT NULL,message_id TEXT,created_at INTEGER NOT NULL DEFAULT (unixepoch()));
-            CREATE TABLE IF NOT EXISTS activity_cache(key TEXT PRIMARY KEY,value TEXT NOT NULL,updated_at INTEGER NOT NULL DEFAULT (unixepoch()));
+            CREATE TABLE IF NOT EXISTS activity_cache(key TEXT PRIMARY KEY,value TEXT NOT NULL,updated_at INTEGER NOT NULL DEFAULT (unixepoch()));"#)?;
+        Ok(Self { db: Mutex::new(db) })
+    }
+    pub fn open(path: &Path) -> Result<Self> {
+        let store = Self::initialize(path)?;
+        store.db.lock().unwrap().execute_batch(r#"
             UPDATE jobs SET status='pending' WHERE status='processing' AND resource NOT LIKE 'simulation:%';
             UPDATE jobs SET status='uncertain',audit='{"reason":"restart_during_send"}' WHERE status='sending';
             UPDATE jobs SET status='ignored',audit=json_set(coalesce(audit,'{}'),'$.status','ignored','$.reason','refinement_failed') WHERE status='refining';"#)?;
-        Ok(Self { db: Mutex::new(db) })
+        Ok(store)
+    }
+    /// Append a host diagnostic without recovering or changing in-flight jobs.
+    pub(crate) fn append_event(path: &Path, kind: &str, detail: &str) -> Result<()> {
+        Self::initialize(path)?.event(kind, detail)
     }
     /// Set (or clear) the user's judgment of an answer without touching anything else in the
     /// job, so it never races with a job being processed. False when the job does not exist or
