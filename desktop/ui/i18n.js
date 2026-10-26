@@ -4,6 +4,33 @@
 const UI_LANGUAGES = ['es', 'en'];
 
 const UI_CATALOG = { es: {
+  "Codex Remote Control could not connect. Update Codex and check its ChatGPT login and workspace access on the execution machine.": "No se pudo conectar Codex Remote Control. Actualiza Codex y revisa su sesión de ChatGPT y el acceso al espacio de trabajo en la máquina de ejecución.",
+  "Codex Remote Control is not connected. Check its ChatGPT login and workspace access on the execution machine.": "Codex Remote Control no está conectado. Revisa su sesión de ChatGPT y el acceso al espacio de trabajo en la máquina de ejecución.",
+  "Claude Remote Control could not connect. Update Claude Code and check its subscription login and organization policy on the execution machine.": "No se pudo conectar Claude Remote Control. Actualiza Claude Code y revisa su sesión de suscripción y la política de la organización en la máquina de ejecución.",
+  "Remote Control did not connect when this run started. Let the current run finish before reconnecting it.": "Remote Control no se conectó al iniciar esta ejecución. Espera a que termine antes de volver a conectarla.",
+  "Close an existing mobile session before connecting another (maximum 16).": "Cierra una sesión móvil antes de conectar otra (máximo 16).",
+  "This provider does not support mobile session connections.": "Este proveedor no permite conectar sesiones móviles.",
+  "Codex could not complete the session operation. Check its CLI version and recorded session on the execution machine.": "Codex no pudo completar la operación. Revisa su versión y la sesión registrada en la máquina de ejecución.",
+
+  'Mobile session ID': 'ID de sesión móvil',
+  'This older CLI session has a mobile copy with its conversation history. Continue in that copy; the original session is kept.': 'Esta sesión antigua de CLI tiene una copia móvil con su historial de conversación. Continúa en esa copia; la sesión original se conserva.',
+
+  "Close": "Cerrar",
+  "Connect mobile session": "Conectar sesión móvil",
+  "Disconnect mobile session": "Desconectar sesión móvil",
+  "Open in app": "Abrir en la app",
+  "Open on web": "Abrir en la web",
+  "The provider did not return a supported remote session URL.": "El proveedor no devolvió un enlace remoto compatible.",
+  "This session is available in your Claude account while the execution machine stays online. The connection lasts up to two hours; reconnect here when needed.": "Esta sesión está disponible en tu cuenta de Claude mientras la máquina de ejecución siga conectada. La conexión dura hasta dos horas; vuelve a conectarla aquí cuando lo necesites.",
+  "If the app is missing or does not open, use the web link. Sign in with the same provider account as on the execution machine.": "Si no tienes la app o no se abre, usa el enlace web. Inicia sesión con la misma cuenta del proveedor que en la máquina de ejecución.",
+  "Pair this phone with Codex": "Vincular este teléfono con Codex",
+  "Copy pairing code": "Copiar código de vinculación",
+  "Could not copy the pairing code.": "No se pudo copiar el código de vinculación.",
+  "Enter this code in the ChatGPT mobile app to connect the execution machine. It expires at {time}.": "Ingresa este código en la app móvil de ChatGPT para conectar la máquina de ejecución. Vence a las {time}.",
+  "Codex Remote Control is connected to {machine}.": "Codex Remote Control está conectado a {machine}.",
+  "Open Codex in the ChatGPT mobile app, select this computer, then select the session. If this computer is missing, pair it using the button below. A direct mobile link to this local session is not available.": "Abre Codex en la app móvil de ChatGPT, selecciona este equipo y luego la sesión. Si no aparece el equipo, vincúlalo con el botón de abajo. No hay un enlace móvil directo para esta sesión local.",
+  "Connecting the recorded session through its execution machine…": "Conectando la sesión registrada mediante su máquina de ejecución…",
+
   'No destinations are available. Check the selected source or GitHub CLI session.': 'No hay destinos disponibles. Revisa la fuente seleccionada o la sesión de GitHub CLI.',
   "Check GitHub CLI status": "Consultar estado de GitHub CLI",
   "Sign in with gh auth login on the machine running this app, then refresh GitHub CLI status.": "Inicia sesión con gh auth login en el equipo que ejecuta esta app y actualiza el estado de GitHub CLI.",

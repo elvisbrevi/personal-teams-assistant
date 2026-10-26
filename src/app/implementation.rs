@@ -87,6 +87,8 @@ struct Run {
     session_id: Option<String>,
     #[serde(default)]
     started_at: Option<String>,
+    #[serde(default)]
+    remote: Option<crate::llm::implementation::mobile::Access>,
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -100,6 +102,8 @@ struct SessionSummary {
     effort: String,
     state: String,
     session_id: Option<String>,
+    #[serde(default)]
+    remote: Option<crate::llm::implementation::mobile::Access>,
     created_at: String,
     started_at: Option<String>,
     finished_at: Option<String>,
@@ -117,6 +121,7 @@ impl From<Run> for SessionSummary {
             effort: run.launch.request.effort,
             state: run.state,
             session_id: run.session_id,
+            remote: run.remote,
             created_at: run.created_at,
             started_at: run.started_at,
             finished_at: run.finished_at,
@@ -334,6 +339,15 @@ async fn operation(host: &Arc<Host>, method: &str, args: &Value) -> Result<Value
         | "implementation_request_status"
         | "implementation_history" => requests::operate(host, method, args).await,
         "implementation_sessions" => fleet::session_index(host, args).await,
+        "implementation_mobile_session" => {
+            ensure!(
+                args["confirmed"] == true,
+                "Confirm connecting this agent session to your mobile app."
+            );
+            let machine = args["machine"].as_str().context("Choose a machine.")?;
+            uuid(machine)?;
+            fleet::call(host, machine, method, args.clone()).await
+        }
         "implementation_open_session" => {
             let id = args["id"].as_str().context("Choose a run.")?;
             uuid(id)?;
@@ -493,6 +507,7 @@ fn browse_directories(path: Option<&str>, allowed: &[PathBuf]) -> Result<Value> 
 async fn local(host: &Arc<Host>, method: &str, args: &Value) -> Result<Value> {
     let state = &host.state.implementation;
     match method {
+        "implementation_mobile_session" => mobile_session(host, args).await,
         "machine_assistant" => {
             let method = match args["action"].as_str() {
                 Some("start") => "start_assistant",
@@ -530,7 +545,7 @@ async fn local(host: &Arc<Host>, method: &str, args: &Value) -> Result<Value> {
                 .db
                 .list(args["work_item_url"].as_str(), args["id"].as_str(), false)?
             {
-                let value = json!({"id":run.launch.id,"item":run.launch.detail.item,"planning":run.launch.planning,"state":run.state,"created_at":run.created_at,"started_at":run.started_at,"finished_at":run.finished_at,"session_id":run.session_id,"provider":run.launch.request.provider,"model":run.launch.request.model,"effort":run.launch.request.effort,"machine":run.launch.request.machine,"output":run.output,"plan":run.plan});
+                let value = json!({"id":run.launch.id,"item":run.launch.detail.item,"planning":run.launch.planning,"state":run.state,"created_at":run.created_at,"started_at":run.started_at,"finished_at":run.finished_at,"session_id":run.session_id,"remote":run.remote,"provider":run.launch.request.provider,"model":run.launch.request.model,"effort":run.launch.request.effort,"machine":run.launch.request.machine,"output":run.output,"plan":run.plan});
                 size += serde_json::to_vec(&value)?.len();
                 if size > 800_000 && !runs.is_empty() {
                     partial = true;
@@ -543,14 +558,22 @@ async fn local(host: &Arc<Host>, method: &str, args: &Value) -> Result<Value> {
         "implementation_cancel" => {
             let id = args["id"].as_str().context("Choose a run.")?;
             uuid(id)?;
-            let data = state.registry.lock().await;
-            state.db.finish(id, "cancelled", "", None)?;
+            let run = state.db.get(id)?;
             let task = state.tasks.lock().await.remove(id);
-            drop(data);
             if let Some(task) = task {
                 task.abort();
                 let _ = task.await;
             }
+            if let Some(run) = run.filter(|run| {
+                ["running", "planning"].contains(&run.state.as_str())
+                    && run.launch.request.provider == "codex"
+                    && run.remote.as_ref().is_some_and(|a| a.status == "connected")
+            }) && let Some(session) = run.session_id
+            {
+                // Keep the run active, and its directories reserved, until the daemon confirms stop.
+                crate::llm::implementation::mobile::cancel_codex(&session).await?;
+            }
+            state.db.finish(id, "cancelled", "", None)?;
             Ok(json!({"cancelled":true}))
         }
         "implementation_launch" => {
@@ -603,6 +626,7 @@ async fn local(host: &Arc<Host>, method: &str, args: &Value) -> Result<Value> {
                 plan: None,
                 session_id: None,
                 started_at: None,
+                remote: None,
             })?;
             let host = host.clone();
             let task = tokio::spawn(async move {
@@ -615,11 +639,128 @@ async fn local(host: &Arc<Host>, method: &str, args: &Value) -> Result<Value> {
         _ => anyhow::bail!("Unavailable machine operation."),
     }
 }
-async fn run(host: &Host, launch: Launch) {
+fn remote_observer(host: &Arc<Host>, id: &str) -> crate::llm::implementation::mobile::Observer {
+    let host = host.clone();
+    let id = id.to_owned();
+    Arc::new(move |access| host.state.implementation.db.remote(&id, access))
+}
+
+async fn mobile_session(host: &Arc<Host>, args: &Value) -> Result<Value> {
+    use crate::llm::implementation::mobile;
+    ensure!(
+        args["confirmed"] == true,
+        "Confirm connecting this agent session to your mobile app."
+    );
+    let id = args["id"].as_str().context("Choose a recorded run.")?;
+    uuid(id)?;
+    let db = &host.state.implementation.db;
+    let (provider, model, effort, session, working, planning, active, reported) =
+        if let Some(run) = db.get(id)? {
+            let request = run.launch.request;
+            ensure!(
+                request.machine == host.state.implementation.registry.lock().await.id,
+                "This session belongs to another execution machine."
+            );
+            (
+                request.provider,
+                request.model,
+                request.effort,
+                run.session_id,
+                directories(host, &request.directories).await?,
+                run.launch.planning,
+                ["running", "planning"].contains(&run.state.as_str()),
+                run.remote,
+            )
+        } else {
+            let record = db
+                .requests(Some(id))?
+                .pop()
+                .context("Session record unavailable.")?;
+            (
+                record["provider"].as_str().unwrap_or_default().to_owned(),
+                record["model"].as_str().unwrap_or_default().to_owned(),
+                record["effort"].as_str().unwrap_or_default().to_owned(),
+                record["session_id"].as_str().map(str::to_owned),
+                vec![host.state.implementation.root.join("requests").join(id)],
+                true,
+                record["state"] == "generating",
+                serde_json::from_value::<mobile::Access>(record["remote"].clone()).ok(),
+            )
+        };
+    let session = session.context("The agent has not reported a session ID yet.")?;
+    uuid(&session)?;
+    let observer = remote_observer(host, id);
+    match args["action"].as_str().unwrap_or("connect") {
+        "close" => {
+            ensure!(
+                !active,
+                "Let the current run finish before disconnecting its mobile session."
+            );
+            ensure!(
+                provider == "claude",
+                "Codex Remote Control is shared by this machine. Manage it in Codex."
+            );
+            mobile::close(&session).await;
+            let access = mobile::Access {
+                status: "offline".into(),
+                ..mobile::Access::default()
+            };
+            observer(access.clone())?;
+            Ok(json!({"remote":access}))
+        }
+        action @ ("connect" | "pair") => {
+            if active
+                && reported.as_ref().is_some_and(|r| {
+                    r.status == "connected"
+                        && (provider == "codex" || r.expires_at.is_some_and(|t| t > now()))
+                })
+            {
+                let pairing = if action == "pair" {
+                    ensure!(
+                        provider == "codex",
+                        "Pairing codes are available only for Codex."
+                    );
+                    Some(mobile::pair_codex().await?)
+                } else {
+                    None
+                };
+                return Ok(json!({"remote":reported,"pairing":pairing}));
+            }
+            ensure!(
+                !active,
+                "Remote Control did not connect when this run started. Let the current run finish before reconnecting it."
+            );
+            let access = mobile::reconnect(
+                (&provider, &model, &effort),
+                &session,
+                reported.as_ref().and_then(|r| r.session_id.as_deref()),
+                &working,
+                planning,
+                observer.clone(),
+            )
+            .await?;
+            observer(access.clone())?;
+            let pairing = if action == "pair" {
+                ensure!(
+                    provider == "codex",
+                    "Pairing codes are available only for Codex."
+                );
+                Some(mobile::pair_codex().await?)
+            } else {
+                None
+            };
+            Ok(json!({"remote":access,"pairing":pairing}))
+        }
+        _ => anyhow::bail!("Choose connect, pair or close for this mobile session."),
+    }
+}
+
+async fn run(host: &Arc<Host>, launch: Launch) {
     let request = &launch.request;
     let input = json!({"verified_item":launch.detail,"user_context":request.context,"working_directories":request.directories,"language":launch.language}).to_string();
     let observer =
         |session: Option<&str>| host.state.implementation.db.session(&launch.id, session);
+    let remote = remote_observer(host, &launch.id);
     let result = if launch.planning {
         async {
             let plan = crate::llm::implementation::plan(
@@ -629,6 +770,7 @@ async fn run(host: &Host, launch: Launch) {
                 &request.directories,
                 &input,
                 &observer,
+                remote.clone(),
             )
             .await?;
             let children = plan["children"].as_array().context("Invalid child plan.")?;
@@ -653,6 +795,7 @@ async fn run(host: &Host, launch: Launch) {
             &request.directories,
             &prompt,
             &observer,
+            remote,
         )
         .await
         .map(|(ok, text)| (ok, text, None))

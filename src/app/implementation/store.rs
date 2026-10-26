@@ -173,6 +173,29 @@ impl Database {
         tx.commit()?;
         Ok(())
     }
+    pub(super) fn remote(
+        &self,
+        id: &str,
+        access: crate::llm::implementation::mobile::Access,
+    ) -> Result<()> {
+        let value = serde_json::to_string(&access)?;
+        let mut db = self.0.lock().unwrap();
+        let tx = db.transaction()?;
+        if tx.execute(
+            "UPDATE agent_runs SET payload=json_set(payload,'$.remote',json(?2)) WHERE id=?1",
+            params![id, value],
+        )? > 0
+        {
+            tx.execute("INSERT INTO agent_run_events(run_id) VALUES (?1)", [id])?;
+        } else {
+            tx.execute(
+                "UPDATE request_runs SET payload=json_set(payload,'$.remote',json(?2)) WHERE id=?1",
+                params![id, value],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
     pub(super) fn finish(
         &self,
         id: &str,
@@ -229,6 +252,13 @@ impl Database {
                 "Invalid agent session owner."
             );
             crate::tools::todo::validate_link(&session.item.url)?;
+            if let Some(url) = session.remote.as_ref().and_then(|a| a.url.as_ref()) {
+                ensure!(
+                    session.provider == "claude",
+                    "Invalid remote session provider."
+                );
+                crate::llm::implementation::mobile::claude_url(url)?;
+            }
             let metadata = serde_json::to_string(&session)?;
             ensure!(metadata.len() <= 6_000, "Session metadata is too large.");
             tx.execute("INSERT INTO agent_session_index(run_id,machine_id,item_url,requested_at,metadata) VALUES (?1,?2,?3,?4,?5) ON CONFLICT(run_id) DO UPDATE SET metadata=excluded.metadata WHERE machine_id=excluded.machine_id",params![session.id,machine,session.item.url,session.created_at,metadata])?;
@@ -290,6 +320,15 @@ mod tests {
         db.session(id, None).unwrap();
         db.session(id, Some("33333333-3333-4333-8333-333333333333"))
             .unwrap();
+        db.remote(
+            id,
+            crate::llm::implementation::mobile::Access {
+                status: "connected".into(),
+                environment_id: Some("env_synthetic".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
         let running = db.get(id).unwrap().unwrap();
         assert_eq!(running.state, "running");
         assert!(running.session_id.is_some());
@@ -310,12 +349,22 @@ mod tests {
             .sessions(std::slice::from_ref(&run.launch.detail.item.url))
             .unwrap();
         assert_eq!(indexed[0].state, "done");
+        assert_eq!(
+            indexed[0]
+                .remote
+                .as_ref()
+                .unwrap()
+                .environment_id
+                .as_deref(),
+            Some("env_synthetic")
+        );
         assert!(indexed[0].finished_at.is_some());
         drop(db);
         let restarted = Database::open(&path).unwrap();
         let done = restarted.get(id).unwrap().unwrap();
         assert_eq!(done.state, "done");
         assert_eq!(done.session_id, running.session_id);
+        assert_eq!(done.remote.as_ref().unwrap().status, "connected");
         assert_eq!(done.started_at, running.started_at);
         assert!(done.finished_at.is_some());
     }

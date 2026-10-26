@@ -222,12 +222,36 @@ agent sessions; cards offer a session action when a native session is recorded. 
 `implementation_open_session` operation constructs its URL from the recorded provider/session
 and opens only a session on that desktop. A completed local Claude session can use the documented `claude --desktop --resume SESSION_ID` handoff on macOS/x64 Windows with a supported subscription and Claude Code 2.1.285 or later; running sessions cannot be moved. A verified Codex local session can use the documented
 `codex://threads/<thread-id>` desktop link. Browser opening cannot confirm app installation;
-a missing handler shows a reason. Mobile/local-machine mismatches and local Claude/OpenCode
-sessions without a verified remote link show an explanation instead of fabricating a cloud URL.
+a missing handler shows a reason. Mobile browsers offer the provider connection sheet for Codex/Claude. Unsupported providers
+show an explanation instead of fabricating a cloud URL.
 See [Codex links](https://learn.chatgpt.com/docs/reference/commands),
 [Claude desktop links](https://support.claude.com/en/articles/14729294-open-claude-desktop-with-a-link),
 [Claude mobile links](https://support.claude.com/en/articles/14898120-open-the-claude-mobile-app-with-a-link)
 and [Claude Remote Control](https://code.claude.com/docs/en/remote-control).
+
+Mobile/PWA session access uses the provider's own login on the execution machine.
+New implementation/request sessions try to enable it automatically. Codex uses its shared Remote
+Control daemon so the phone sees the same live thread. Claude publishes a real remote session
+whose `session_…` ID differs from the local UUID. The retained Claude process serves mobile for
+up to two hours (at most 16 per host); the original PTA run still ends with its initial result.
+Internal Teams model calls remain tool-less and ephemeral without remote access.
+
+Use `implementation_mobile_session` with `machine`, recorded run `id`, `action` (`connect`,
+`pair`, `close`) and `confirmed: true`. `connect` returns verified `remote` metadata and can
+resume a completed Claude session without generating another prompt; it revalidates saved roots.
+A running Claude session can use its existing connection but cannot be resumed concurrently.
+`pair` is for Codex and returns an expiring `pairing.manual_code` only to the authenticated caller;
+never save it as knowledge or include it in logs. `close` terminates a retained Claude connection
+after the initial run, preserving its transcript. Codex's shared daemon is managed in Codex.
+
+On a phone, **Open agent session** opens the connection sheet. Claude offers the recorded remote
+session in its native iOS/Android app and on the web, as separate real links so iOS preserves the
+user gesture from an installed PWA. Codex shows
+its connected computer and offers pairing: open Codex in the ChatGPT mobile app, select that
+computer and then the conversation. A local Codex UUID has no verified direct mobile URL. Older `exec` sessions get a native mobile
+copy with their history; its actual `remote.session_id` is persisted and reused while the original
+local session stays recorded.
+Do not confuse merged code, a connected provider host and a phone actually paired to that host.
 
 Azure child creation uses the selected source's read catalog and the process's default task type,
 with the parent's area/iteration and catalog user's assignment. Use

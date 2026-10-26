@@ -1,5 +1,7 @@
 //! Interactive coding is separate from the tool-less answer providers.
 use super::agent;
+mod codex;
+pub(crate) mod mobile;
 use anyhow::{Result, ensure};
 use serde_json::{Value, json};
 use std::{ffi::OsString, path::PathBuf, time::Duration};
@@ -31,6 +33,7 @@ pub(crate) async fn open_claude_session(session: &str, directory: &std::path::Pa
     );
     let binary = agent::locate("claude")
         .ok_or_else(|| anyhow::anyhow!("Claude Code is not installed on this desktop."))?;
+    mobile::close(session).await;
     let mut command = tokio::process::Command::new(&binary);
     command
         .args(["--desktop", "--resume", session])
@@ -59,6 +62,7 @@ pub(crate) async fn plan(
     directories: &[PathBuf],
     input: &str,
     observer: SessionObserver<'_>,
+    remote: mobile::Observer,
 ) -> Result<Value> {
     let binary =
         agent::locate(provider).ok_or_else(|| anyhow::anyhow!("Selected CLI is unavailable."))?;
@@ -74,6 +78,7 @@ pub(crate) async fn plan(
         &prompt,
         Some(plan_schema()),
         observer,
+        remote,
     )
     .await?;
     ensure!(ok, "Planning did not complete.");
@@ -118,6 +123,8 @@ fn arguments(
         "claude" => [
             "-p",
             "--output-format",
+            "stream-json",
+            "--input-format",
             "stream-json",
             "--verbose",
             "--safe-mode",
@@ -165,6 +172,7 @@ pub(crate) async fn request(
     directory: PathBuf,
     input: &str,
     observer: SessionObserver<'_>,
+    remote: mobile::Observer,
 ) -> Result<Value> {
     let binary =
         agent::locate(choice.0).ok_or_else(|| anyhow::anyhow!("Selected CLI is unavailable."))?;
@@ -179,6 +187,7 @@ pub(crate) async fn request(
         &prompt,
         Some(schema),
         observer,
+        remote,
     )
     .await?;
     ensure!(ok, "Request generation did not complete.");
@@ -208,6 +217,7 @@ pub(crate) async fn execute(
     directories: &[PathBuf],
     prompt: &str,
     observer: SessionObserver<'_>,
+    remote: mobile::Observer,
 ) -> Result<(bool, String)> {
     let binary =
         agent::locate(provider).ok_or_else(|| anyhow::anyhow!("Selected CLI is unavailable."))?;
@@ -218,6 +228,7 @@ pub(crate) async fn execute(
         prompt,
         None,
         observer,
+        remote,
     )
     .await
 }
@@ -381,6 +392,7 @@ async fn execute_at(
     prompt: &str,
     schema: Option<Value>,
     observer: SessionObserver<'_>,
+    remote: mobile::Observer,
 ) -> Result<(bool, String)> {
     let (provider, model, effort) = choice;
     let requested = if provider == "opencode" {
@@ -422,6 +434,35 @@ async fn execute_at(
                 "--json-schema".into(),
                 schema.as_ref().unwrap().to_string().into(),
             ]);
+        }
+    }
+    if provider == "claude" {
+        return mobile::execute(
+            binary,
+            &args,
+            &directories[0],
+            prompt,
+            &requested,
+            observer,
+            remote,
+        )
+        .await;
+    }
+    if provider == "codex" {
+        match codex::Client::connect(binary).await {
+            Ok(client) => {
+                return client
+                    .execute(
+                        (model, effort),
+                        directories,
+                        prompt,
+                        schema,
+                        observer,
+                        remote,
+                    )
+                    .await;
+            }
+            Err(_) => remote(mobile::Access::unavailable())?,
         }
     }
     let mut command = tokio::process::Command::new(binary);
@@ -492,6 +533,32 @@ async fn execute_at(
 mod tests {
     use super::*;
     #[tokio::test]
+    #[ignore = "Requires the user's provider login and a small synthetic model call"]
+    async fn remote_provider_smoke() {
+        let provider = std::env::var("PTA_REMOTE_SMOKE_PROVIDER").unwrap();
+        let model = if provider == "codex" {
+            "gpt-6.1-sol"
+        } else {
+            "claude-sonnet-5-5"
+        };
+        let binary = agent::locate(&provider).unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let native = std::sync::Mutex::new(String::new());
+        let observed = std::sync::Arc::new(std::sync::Mutex::new(mobile::Access::default()));
+        let updates = observed.clone();
+        let result = execute_at(&binary, (&provider, model, "low"), &[root.path().into()],
+            "Return exactly the requested JSON with title Synthetic mobile check and description Connection check only. Do not use tools.",
+            Some(json!({"type":"object","additionalProperties":false,"required":["title","description"],"properties":{"title":{"type":"string"},"description":{"type":"string"}}})),
+            &|id| { if let Some(id) = id { *native.lock().unwrap() = id.into(); } Ok(()) },
+            std::sync::Arc::new(move |access| { *updates.lock().unwrap() = access; Ok(()) })).await.unwrap();
+        assert!(result.0, "Provider did not complete its synthetic turn.");
+        assert!(serde_json::from_str::<Value>(&result.1).unwrap()["title"].is_string());
+        assert_eq!(observed.lock().unwrap().status, "connected");
+        let id = native.lock().unwrap().clone();
+        assert!(!id.is_empty());
+        mobile::close(&id).await;
+    }
+    #[tokio::test]
     async fn native_session_id_is_observed_while_the_agent_is_still_running() {
         let (mut writer, reader) = tokio::io::duplex(8192);
         let (sender, receiver) = tokio::sync::oneshot::channel();
@@ -540,6 +607,7 @@ mod tests {
             "Synthetic implementation.",
             None,
             &|_| Ok(()),
+            std::sync::Arc::new(|_| Ok(())),
         )
         .await
         .unwrap();
