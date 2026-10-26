@@ -575,6 +575,14 @@
       </div>
     </main>
   </div>
+  <dialog id="azure-cli-dialog" aria-labelledby="azure-cli-title">
+    <h2 id="azure-cli-title">Sign in to Azure CLI</h2>
+    <p>Enter this code on the Microsoft page, sign in, then return to this app. Your session updates automatically.</p>
+    <p><strong id="azure-cli-code" class="code"></strong></p>
+    <p><a id="azure-cli-link" target="_blank" rel="noopener noreferrer" hidden>Open Microsoft sign-in</a></p>
+    <p id="azure-cli-login-status" class="hint" role="status"></p>
+    <div class="actions"><button id="azure-cli-copy" type="button" class="secondary" disabled>Copy code</button><button id="azure-cli-cancel" type="button" class="secondary">Cancel</button></div>
+  </dialog>
   <dialog id="web-microsoft-dialog" aria-labelledby="web-microsoft-title">
     <h2 id="web-microsoft-title">Connect your Microsoft account</h2>
     <p>Open Microsoft sign-in on this device. When it finishes at a localhost address that cannot open, copy that full address and paste it below.</p>

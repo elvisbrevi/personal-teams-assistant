@@ -581,13 +581,20 @@ pub(crate) async fn dispatch(host: &Arc<Host>, request: Request) -> Reply {
             "Finish or cancel Microsoft authorization before mutating this profile.",
         );
     }
+    let azure_pending = state
+        .azure_login
+        .lock()
+        .await
+        .as_ref()
+        .is_some_and(|p| !p.task.is_finished());
     let github_pending = state
         .github_finish
         .lock()
         .await
         .as_ref()
         .is_some_and(|t| !t.is_finished());
-    if github_pending
+    if (github_pending || azure_pending)
+        && !(azure_pending && request.method == "begin_azure_cli_login")
         && ![
             "snapshot",
             "list_azure_hus",
@@ -612,6 +619,9 @@ pub(crate) async fn dispatch(host: &Arc<Host>, request: Request) -> Reply {
             "index_status",
             "finish_github_login",
             "cancel_github",
+            "finish_azure_cli_login",
+            "cancel_azure_cli_login",
+            "open_azure_cli_login",
             "disconnect_github",
             "app_open",
             "app_hide",
@@ -622,7 +632,7 @@ pub(crate) async fn dispatch(host: &Arc<Host>, request: Request) -> Reply {
         return Reply::error(
             "authorization_pending",
             4,
-            "Finish or cancel GitHub authorization before mutating this profile.",
+            "Finish or cancel CLI authorization before mutating this profile.",
         );
     }
     let args = request.args;
@@ -806,6 +816,44 @@ async fn operate(
             .await?
         }
         "chat" => serde_json::to_value(chat(state, arg(args, "input")?).await?).map_err(fail)?,
+        "open_azure_cli_login" => {
+            host.shell
+                .open_url("https://microsoft.com/devicelogin")
+                .map_err(fail)?;
+            json!({"url":"https://microsoft.com/devicelogin"})
+        }
+        "begin_azure_cli_login" => {
+            let mut pending = state.azure_login.lock().await;
+            if pending.is_none() {
+                let config = read_config(&state.config_path).map_err(fail)?;
+                *pending = Some(
+                    azure_cli::begin(&config.graph.tenant_id)
+                        .await
+                        .map_err(fail)?,
+                );
+            }
+            serde_json::to_value(&pending.as_ref().unwrap().prompt).map_err(fail)?
+        }
+        "finish_azure_cli_login" => {
+            let mut pending = state.azure_login.lock().await;
+            let login = pending
+                .as_mut()
+                .ok_or_else(|| "Begin Azure CLI sign-in first.".to_string())?;
+            if !login.task.is_finished() {
+                json!({"pending":true,"provider":"azure_cli"})
+            } else {
+                let mut login = pending.take().unwrap();
+                (&mut login.task)
+                    .await
+                    .map_err(|_| "Azure CLI sign-in failed.".to_string())??;
+                serde_json::to_value(azure_cli::require().await.map_err(fail)?.status)
+                    .map_err(fail)?
+            }
+        }
+        "cancel_azure_cli_login" => {
+            state.azure_login.lock().await.take();
+            json!({"cancelled":true})
+        }
         "begin_github_login" => serde_json::to_value(
             begin_github_login(
                 state,
@@ -1018,6 +1066,7 @@ async fn operate(
             json!({"visible":false})
         }
         "app_quit" => {
+            state.azure_login.lock().await.take();
             activity::shutdown(state).await;
             if let Some(task) = state.microsoft_login.lock().await.take() {
                 task.abort();
