@@ -257,7 +257,7 @@ pub(crate) async fn close(id: &str) {
         });
     }
 }
-#[cfg(test)]
+#[cfg(all(test, unix))]
 async fn is_live(id: &str) -> bool {
     sessions()
         .lock()

@@ -900,7 +900,13 @@ pub(super) async fn run(name: &str, args: &Value) -> Result<Value, String> {
     validate(name, args)?;
     if super::implementation::handles(name) {
         let mut args = args.clone();
-        if !["implementation_create", "implementation_request_start"].contains(&name) {
+        if ![
+            "implementation_create",
+            "implementation_request_start",
+            "implementation_mobile_session",
+        ]
+        .contains(&name)
+        {
             args.as_object_mut().unwrap().remove("confirmed");
         }
         return ipc(name, args).await;
