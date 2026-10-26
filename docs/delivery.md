@@ -38,7 +38,7 @@ A push to `main` whose `Cargo.toml` version crates.io does not have yet runs eve
 | Linux | `ubuntu-latest` | Tauri 2 system libraries; versions agree (`Cargo.toml`, `desktop/tauri.conf.json`; `--locked` checks `Cargo.lock`); `cargo fmt --check`; clippy and tests with and without `gui`; `cargo package --locked` (the `.crate` as crates.io receives it, built from the package) |
 | UI and scripts | `ubuntu-latest` | `bun build desktop/ui/app.js`; `node --test scripts/test-activity-ui.cjs scripts/test-ui-i18n.cjs`; the Python script tests; `scripts/ui-preview/check.mjs` with Playwright's Chromium (axe WCAG 2.2 AA on every section, theme and phone, plus the interaction checks; any violation fails); the results are an artifact for 7 days |
 | macOS | `macos-latest` | clippy and tests with `gui` |
-| Windows (informative) | `windows-latest` | build and clippy with `gui`; `continue-on-error`, so a failure shows but blocks nothing |
+| Windows (informative) | `windows-latest` | clean release `cargo install --path . --locked`; PE stack fields and native GUI open/status/close/reopen/quit/relaunch with Teams stopped; clippy with `gui`; `continue-on-error`, so a failure shows but blocks nothing |
 | Security | `ubuntu-latest` | GitHub dependency review on PRs; full-history and working-tree Gitleaks scan with a pinned checksum-verified release; `cargo audit` against RustSec; no repository secrets |
 | CI result | `ubuntu-latest` | fails if a required job failed or was cancelled; skipped jobs pass. It is the one check to require before merging |
 
