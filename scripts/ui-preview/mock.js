@@ -219,6 +219,13 @@
     implementation_creation: () => null,
     implementation_sessions: args => ({ sessions: implementationRuns.filter(run => args.urls.includes(run.item.url)).map(run => ({ ...run, online: true })) }),
     implementation_open_session: args => { window.__ptaOpenedAgentSession = args; return { opened: true }; },
+    implementation_mobile_session: args => {
+      window.__ptaMobileSession = args;
+      const run = [...requestRuns, ...implementationRuns].find(run => run.id === args.id);
+      const provider = window.__ptaMobileProvider || run?.provider || 'codex';
+      return { remote: provider === 'claude' ? { status: 'connected', url: 'https://claude.ai/code/session_SyntheticMobile123', expires_at: Math.floor(Date.now() / 1000) + 7200 } : { status: 'connected', server_name: 'Synthetic execution machine', environment_id: 'env_synthetic' },
+        pairing: args.action === 'pair' ? { manual_code: 'TEST-CODE', expires_at: Math.floor(Date.now() / 1000) + 600 } : null };
+    },
     implementation_cancel: args => { const run = implementationRuns.find(run => run.id === args.id); if (run) run.state = 'cancelled'; return { cancelled: true }; },
     implementation_create: args => { window.__ptaLastChildCreation = structuredClone(args); return { state: 'created', created: args.children.map((child, index) => ({ id: 6000 + index, title: child.title, url: `${org}/Payments/_workitems/edit/${6000 + index}` })) }; },
     get_azure_task: async args => { const detail = await todoDetail(args, false); window.__ptaLastDetail.method = 'get_azure_task'; detail.item.kind = 'Task'; return detail; },

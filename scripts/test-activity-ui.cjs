@@ -7,17 +7,32 @@ const source = fs.readFileSync(path.join(__dirname, '../desktop/ui/app.js'), 'ut
 const i18n = fs.readFileSync(path.join(__dirname, '../desktop/ui/i18n.js'), 'utf8');
 const style = fs.readFileSync(path.join(__dirname, '../desktop/ui/style.css'), 'utf8');
 
-test('session app links use real provider formats and explain unsupported local/mobile sessions', () => {
+test('mobile sessions connect through the provider instead of disabling the opener', () => {
   const context = vm.createContext({ t: key => key, encodeURIComponent });
   vm.runInContext(source.slice(source.indexOf('function sessionDestination('), source.indexOf('\nfunction sessionIsMobile(')), context);
   const session = { provider: 'codex', session_id: '11111111-1111-4111-8111-111111111111' };
   context.session = session;
   assert.equal(vm.runInContext('sessionDestination(session, false).url', context), 'codex://threads/11111111-1111-4111-8111-111111111111');
-  assert.ok(vm.runInContext('sessionDestination(session, true).reason', context));
+  assert.equal(vm.runInContext('sessionDestination(session, true).connect', context), true);
   context.session = { ...session, provider: 'claude' };
-  assert.ok(vm.runInContext('sessionDestination(session, true).reason.includes("Remote Control")', context));
+  assert.equal(vm.runInContext('sessionDestination(session, true).connect', context), true);
+  assert.equal(vm.runInContext('sessionDestination(session, false).connect', context), true);
+  assert.equal(vm.runInContext('sessionDestination(session, true, true).connect', context), true);
   context.session = { ...session, session_id: 'javascript:alert(1)' };
   assert.equal(vm.runInContext('sessionDestination(session, false).url', context), undefined);
+});
+
+test('PWA app and web links keep the user gesture without asking the server to open a window', () => {
+  const context = vm.createContext({ el: (tag, props) => ({ tag, ...props }) });
+  vm.runInContext(source.slice(source.indexOf('function mobileSessionLink('), source.indexOf('\nfunction showMobileSession(')), context);
+  for (const url of ['https://claude.ai/code/session_123', 'claude://code/session_123']) {
+    context.url = url;
+    const anchor = vm.runInContext("mobileSessionLink('Open', url)", context);
+    assert.equal(anchor.href, url);
+    assert.equal(anchor.target, '_blank');
+    assert.equal(anchor.rel, 'noopener noreferrer');
+    assert.equal(anchor.onclick, undefined);
+  }
 });
 
 test('every To-Do card opens its own detail after the list is rendered', async () => {

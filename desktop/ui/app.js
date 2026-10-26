@@ -601,14 +601,14 @@ function agentRunCard(run) {
   const open = el('button', { type: 'button', class: 'secondary small', textContent: t('Open agent session') });
   open.onclick = () => openAgentSession(run, open);
   const destination = sessionDestination(run, sessionIsMobile(), !window.ptaTransport.browser);
-  open.disabled = !destination.url && !destination.native;
+  open.disabled = !destination.url && !destination.native && !destination.connect;
   if (open.disabled) open.title = destination.reason;
   const pairs = [[t('Run ID'), run.id], [t('Agent session ID'), run.session_id || t('Not recorded')],
     [t('Execution machine'), run.machine_name || run.machine], [t('Effort'), effortNames[run.effort] || run.effort || t('Not recorded')],
     ...[[t('Requested at'), run.created_at], [t('Started at'), run.started_at], [t('Finished at'), run.finished_at]].map(([key, value]) => [key, value ? new Date(value).toLocaleString(uiLocale()) : t('Not recorded')])];
   const copySession = el('button', { type: 'button', class: 'secondary small', textContent: t('Copy session ID'), disabled: !run.session_id });
   copySession.onclick = () => busy(copySession, async () => { if (!await copy(run.session_id)) fail(t('Could not copy the session ID.')); });
-  const card = el('article', { class: 'implementation-run' },
+  const card = el('article', { class: 'implementation-run', 'data-run-id': run.id },
     el('div', { class: 'todo-context' }, badge(run.purpose === 'request' && run.state === 'created' ? t('Request created') : tx(run.state), ['created', 'done', 'plan_ready'].includes(run.state) ? 'ok' : ['failed', 'uncertain', 'needs_attention'].includes(run.state) ? 'warn' : 'info'),
       el('strong', { textContent: `${providerNames[run.provider] || run.provider} · ${run.model}` }), run.purpose === 'request' ? badge(t('Request creation'), 'muted') : badge(t('Implementation'), 'muted')),
     run.project ? el('p', { textContent: `${run.project} · ${{ hu: t('HU'), bug: t('Bug'), epic: t('Epic') }[run.kind] || tx(run.kind)}` }) : null,
@@ -643,34 +643,81 @@ async function loadAgentHistory() {
 // ---------------------------------------------------------------- implementation
 function sessionDestination(session, mobile, native = false) {
   if (!session.session_id) return { reason: t('The agent has not reported its session ID yet.') };
-  if (session.provider === 'codex') {
-    if (mobile) return { reason: t('This Codex session was created on its execution machine. This button opens Codex Desktop on a computer with access to that session. This run has no verified mobile link.') };
-    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(session.session_id)) return { reason: t('This session ID does not have a supported app link.') };
-    return { url: `codex://threads/${encodeURIComponent(session.session_id)}` };
-  }
+  if (['codex', 'claude'].includes(session.provider) && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(session.session_id)) return { reason: t('This session ID does not have a supported app link.') };
+  if (mobile && ['codex', 'claude'].includes(session.provider)) return { connect: true };
+  if (session.provider === 'codex') return { url: `codex://threads/${encodeURIComponent(session.session_id)}` };
   if (session.provider === 'claude') {
-    if (native && !mobile) return ['running', 'planning', 'generating', 'sending'].includes(session.state) ? { reason: t('Claude Desktop can open this local session after the CLI finishes. This session is still running.') } : { native: true };
-    return { reason: t('This Claude Code session is local to its execution machine. A mobile or web link needs a session published through Claude Remote Control; this run has no verified remote link.') };
+    if (native) return ['running', 'planning', 'generating', 'sending'].includes(session.state) ? { reason: t('Claude Desktop can open this local session after the CLI finishes. This session is still running.') } : { native: true };
+    return { connect: true };
   }
   return { reason: t('This agent does not provide a verified app link for the recorded local session. Its session ID is available in implementation runs.') };
 }
 function sessionIsMobile() {
   return /Android|iPhone|iPad|iPod/i.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
 }
+function mobileSessionLink(label, url) {
+  return el('a', { class: 'button secondary', href: url, target: '_blank', rel: 'noopener noreferrer', textContent: label });
+}
+
+function showMobileSession(session, trigger) {
+  const dialog = el('dialog', { class: 'directory-picker', 'aria-label': t('Open agent session') });
+  const close = el('button', { type: 'button', class: 'icon-button secondary', 'aria-label': t('Close') }, icon('close'));
+  const body = el('div', { class: 'directory-picker-body mobile-session-body' });
+  const connect = el('button', { type: 'button', class: 'secondary', textContent: t('Connect mobile session') });
+  const operation = action => invoke('implementation_mobile_session', { machine: session.machine, id: session.id, action, confirmed: true });
+  const render = result => {
+    if (!dialog.isConnected) return;
+    session.remote = result.remote;
+    if (session.provider === 'claude') {
+      const url = result.remote?.url;
+      if (!/^https:\/\/claude\.ai\/code\/session_[a-zA-Z0-9_]+$/.test(url || '')) throw new Error(t('The provider did not return a supported remote session URL.'));
+      const nativeUrl = `claude://code/${encodeURIComponent(url.split('/').pop())}`;
+      const stop = el('button', { type: 'button', class: 'secondary', textContent: t('Disconnect mobile session') });
+      stop.onclick = () => busy(stop, async () => { await operation('close'); dialog.close(); });
+      body.replaceChildren(...[el('p', { class: 'hint', textContent: t('This session is available in your Claude account while the execution machine stays online. The connection lasts up to two hours; reconnect here when needed.') }),
+        el('div', { class: 'actions' }, mobileSessionLink(t('Open in app'), nativeUrl), mobileSessionLink(t('Open on web'), url)),
+        el('p', { class: 'hint', textContent: t('If the app is missing or does not open, use the web link. Sign in with the same provider account as on the execution machine.') }), ['running', 'planning', 'generating'].includes(session.state) ? null : stop].filter(Boolean));
+    } else {
+      const pair = el('button', { type: 'button', class: 'secondary', textContent: t('Pair this phone with Codex') });
+      const pairing = el('div', { role: 'status' });
+      pair.onclick = () => busy(pair, async () => {
+        const result = await operation('pair');
+        if (!dialog.isConnected) return;
+        const value = result.pairing;
+        const code = el('code', { textContent: value.manual_code });
+        const copyCode = el('button', { type: 'button', class: 'secondary small', textContent: t('Copy pairing code') });
+        copyCode.onclick = () => busy(copyCode, async () => { if (!await copy(value.manual_code)) fail(t('Could not copy the pairing code.')); });
+        pairing.replaceChildren(el('p', { textContent: t('Enter this code in the ChatGPT mobile app to connect the execution machine. It expires at {time}.', { time: new Date(value.expires_at * 1000).toLocaleTimeString(uiLocale()) }) }), code, copyCode);
+      });
+      const remoteId = result.remote?.session_id || session.session_id;
+      const copySession = el('button', { type: 'button', class: 'secondary small', textContent: t('Copy session ID') });
+      copySession.onclick = () => busy(copySession, async () => { if (!await copy(remoteId)) fail(t('Could not copy the session ID.')); });
+      body.replaceChildren(...[el('p', { textContent: t('Codex Remote Control is connected to {machine}.', { machine: result.remote?.server_name || session.machine_name || session.machine }) }),
+        el('p', { class: 'hint', textContent: t('Open Codex in the ChatGPT mobile app, select this computer, then select the session. If this computer is missing, pair it using the button below. A direct mobile link to this local session is not available.') }),
+        remoteId !== session.session_id ? el('p', { class: 'hint', textContent: t('This older CLI session has a mobile copy with its conversation history. Continue in that copy; the original session is kept.') }) : null,
+        el('p', {}, el('strong', { textContent: t('Mobile session ID') }), ' ', el('code', { textContent: remoteId })), copySession, pair, pairing].filter(Boolean));
+
+    }
+  };
+  connect.onclick = () => busy(connect, async () => render(await operation('connect')));
+  close.onclick = () => dialog.close();
+  dialog.onclose = () => { document.body.classList.remove('directory-picker-open'); dialog.remove();
+    const focus = trigger.isConnected ? trigger : [...document.querySelectorAll('[data-run-id]')].find(card => card.dataset.runId === session.id)?.querySelector('button');
+    focus?.focus({ preventScroll: true }); };
+  dialog.append(el('div', { class: 'directory-picker-head' }, el('h2', { textContent: t('Open agent session') }), close), body);
+  body.append(el('p', { class: 'hint', textContent: t('Connecting the recorded session through its execution machine…') }), connect);
+  document.body.append(dialog); document.body.classList.add('directory-picker-open'); dialog.showModal();
+  connect.onclick();
+}
 function openAgentSession(session, button) {
   const destination = sessionDestination(session, sessionIsMobile(), !window.ptaTransport.browser);
+  if (destination.connect) return showMobileSession(session, button);
   if (destination.native) return busy(button, () => invoke('implementation_open_session', { machine: session.machine, id: session.id }));
   if (!destination.url) { notify(destination.reason, 'info'); return; }
   if (!window.ptaTransport.browser) return busy(button, () => invoke('implementation_open_session', { machine: session.machine, id: session.id }));
-  let opened = false;
-  const left = () => { if (document.hidden) opened = true; };
-  document.addEventListener('visibilitychange', left);
   window.location.assign(destination.url);
-  setTimeout(() => {
-    document.removeEventListener('visibilitychange', left);
-    if (!opened) notify(t('The browser could not confirm that the app opened. Check that Codex is installed and can access this session on its execution machine.'), 'info');
-  }, 2500);
 }
+
 let workItemSessionsRequest = 0;
 async function loadWorkItemSessions() {
   const buttons = [...document.querySelectorAll('[data-session-for]')];
@@ -695,7 +742,7 @@ async function loadWorkItemSessions() {
     section.replaceChildren(el('h2', { textContent: t('Agent sessions') }), ...sessions.map(session => {
       const open = el('button', { type: 'button', class: 'secondary small', textContent: t('Open agent session') });
       open.onclick = () => openAgentSession(session, open);
-      return el('article', { class: 'implementation-run' }, el('strong', { textContent: `${providerNames[session.provider] || session.provider} · ${session.model}` }),
+      return el('article', { class: 'implementation-run', 'data-run-id': session.id }, el('strong', { textContent: `${providerNames[session.provider] || session.provider} · ${session.model}` }),
         badge(session.online === false ? t('Machine offline. Last reported state: {state}', { state: tx(session.state) }) : tx(session.state), session.state === 'done' ? 'ok' : 'info'),
         el('code', { textContent: session.session_id || t('The agent has not reported its session ID yet.') }),
         el('dl', { class: 'todo-fields' }, ...[[t('Started at'), session.started_at], [t('Finished at'), session.finished_at]].map(([label, value]) => el('div', {}, el('dt', { textContent: label }), el('dd', { textContent: value ? new Date(value).toLocaleString(uiLocale()) : t('Not recorded') })))), open);

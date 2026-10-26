@@ -148,6 +148,18 @@ pub(super) const TOOLS: &[Tool] = &[
         },
     },
     Tool {
+        name: "implementation_mobile_session",
+        title: "Connect an agent session on mobile",
+        description: "Connect a recorded Codex or Claude session through its execution machine's own provider login. Claude returns its verified remote URL; Codex returns its connected host and can issue a short-lived manual pairing code. Close stops a retained Claude connection. Pairing codes are not saved.",
+        effect: Effect::External,
+        schema: || {
+            object(
+                json!({"machine":string("Recorded execution machine ID."),"id":string("Recorded run ID."),"action":{"type":"string","enum":["connect","pair","close"]},"confirmed":confirmed()}),
+                &["machine", "id", "confirmed"],
+            )
+        },
+    },
+    Tool {
         name: "list_github_issues",
         title: "My GitHub issues",
         description: "All issues assigned to the connected GitHub account, including epics. Pull requests are excluded.",
@@ -1058,6 +1070,7 @@ pub(super) async fn run(name: &str, args: &Value) -> Result<Value, String> {
 /// The user's confirmation for an action with effects outside the app, in words they read.
 pub(super) fn confirmation(name: &str, args: &Value) -> Option<String> {
     Some(match name {
+        "implementation_mobile_session" => "Connect or manage this recorded agent session in your provider account for mobile access?".into(),
         "implementation_request_start" => format!(
             "Generate and create one {} in {} using the supplied context and selected agent?",
             args["kind"], args["target"]["project"]

@@ -754,7 +754,7 @@ for (const [label, viewport] of [['desktop', { width: 1440, height: 900 }], ['ph
 }
 // Request creation shares the implementation model controls and records native sessions.
 if (flag !== '--axe-only') for (const [label, viewport] of [['desktop', { width: 1440, height: 900 }], ['phone', { width: 393, height: 852 }]]) {
-  const { context, page, errors } = await open({ axe: true, context: { viewport } });
+  const { context, page, errors } = await open({ axe: true, context: { viewport, ...(label === 'phone' ? { isMobile: true, hasTouch: true, userAgent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 Version/18.0 Mobile/15E148 Safari/604.1' } : {}) } });
   await page.evaluate(axeSource);
   await page.evaluate(() => showTab('todo'));
   await page.click('#todo-create');
@@ -797,6 +797,25 @@ if (flag !== '--axe-only') for (const [label, viewport] of [['desktop', { width:
   check(`${label}: history includes run and native session IDs`, history.includes(submitted.id) && history.includes('ID de sesión del agente'));
   check(`${label}: history WCAG 2.2 AA`, (await scan(page)).length === 0, JSON.stringify(await scan(page)));
   await page.screenshot({ path: `${out}/agent-history-${label}.png`, fullPage: true });
+  if (label === 'phone') {
+    await page.locator('#agent-history-list').getByRole('button', { name: 'Abrir sesión del agente', exact: true }).first().click();
+    await page.getByRole('button', { name: 'Vincular este teléfono con Codex', exact: true }).waitFor();
+    await page.getByRole('button', { name: 'Vincular este teléfono con Codex', exact: true }).click();
+    await page.getByText('TEST-CODE', { exact: true }).waitFor();
+    check('PWA: Codex pairing is shown on demand without replacing the page', (await page.textContent('dialog[open]')).includes('TEST-CODE') && await page.evaluate(() => window.__ptaMobileSession.action === 'pair'));
+    check('PWA: the session sheet never renders an absent mobile-copy hint as null', !(await page.textContent('dialog[open]')).includes('null'));
+    check('PWA: mobile session sheet WCAG 2.2 AA', (await scan(page)).length === 0, JSON.stringify(await scan(page)));
+    await page.screenshot({ path: `${out}/mobile-codex.png`, fullPage: true });
+    await page.keyboard.press('Escape');
+    await page.evaluate(() => { window.__ptaMobileProvider = 'claude'; });
+    await page.evaluate(() => showMobileSession({ id: 'synthetic-run', machine: 'synthetic-machine', provider: 'claude', session_id: '11111111-1111-4111-8111-111111111111', state: 'done' }, document.querySelector('#agent-history-list button')));
+    await page.getByRole('link', { name: 'Abrir en la app', exact: true }).waitFor();
+    check('PWA: Claude offers the provider app link with a separate web fallback', await page.getByRole('link', { name: 'Abrir en la app', exact: true }).getAttribute('href') === 'claude://code/session_SyntheticMobile123' && await page.getByRole('link', { name: 'Abrir en la web', exact: true }).getAttribute('href') === 'https://claude.ai/code/session_SyntheticMobile123');
+    check('PWA: Claude connection WCAG 2.2 AA', (await scan(page)).length === 0, JSON.stringify(await scan(page)));
+    await page.screenshot({ path: `${out}/mobile-claude.png`, fullPage: true });
+    await page.keyboard.press('Escape');
+    await page.evaluate(() => { delete window.__ptaMobileProvider; });
+  }
   await page.evaluate(() => showTab('todo'));
   await page.selectOption('#todo-provider', 'github');
   await page.click('#todo-create');

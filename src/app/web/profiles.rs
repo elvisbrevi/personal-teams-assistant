@@ -266,6 +266,7 @@ impl Portal {
             "machine_assistant",
             "implementation_sessions",
             "implementation_open_session",
+            "implementation_mobile_session",
             "implementation_prepare",
             "implementation_request_catalog",
             "implementation_request_start",

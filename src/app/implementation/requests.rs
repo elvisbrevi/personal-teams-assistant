@@ -209,7 +209,7 @@ pub(super) async fn operate(host: &Arc<Host>, method: &str, args: &Value) -> Res
         _ => anyhow::bail!("Unknown request operation."),
     }
 }
-async fn run(host: &Host, request: Request, prepared: Value, directory: PathBuf) {
+async fn run(host: &Arc<Host>, request: Request, prepared: Value, directory: PathBuf) {
     let db = &host.state.implementation.db;
     let result = async {
         let language = read_config(&host.state.config_path)?.llm.language;
@@ -238,6 +238,7 @@ async fn run(host: &Host, request: Request, prepared: Value, directory: PathBuf)
             directory,
             &input,
             &observer,
+            super::remote_observer(host, &request.id),
         )
         .await?;
         validate_child(&draft)?;

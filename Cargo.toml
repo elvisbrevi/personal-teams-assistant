@@ -1,6 +1,6 @@
 [package]
 name = "personal-teams-assistant"
-version = "0.9.6"
+version = "0.9.7"
 edition = "2024"
 rust-version = "1.95"
 build = "build.rs"
@@ -53,6 +53,7 @@ base64 = "0.22"
 chrono = { version = "0.4", features = ["serde"] }
 chrono-tz = "0.10"
 fs2 = "0.4"
+futures-util = { version = "0.3", features = ["sink"] }
 rand = "0.9"
 regex = "1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
@@ -68,6 +69,7 @@ tauri-plugin-opener = { version = "2", optional = true }
 tempfile = "3"
 tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["compat"] }
+tokio-tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
 toml = "0.9"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

@@ -373,7 +373,8 @@ pub(super) async fn call(
             "implementation_browse",
             "implementation_launch",
             "implementation_runs",
-            "implementation_cancel"
+            "implementation_cancel",
+            "implementation_mobile_session"
         ]
         .contains(&method),
         "Unavailable execution operation."

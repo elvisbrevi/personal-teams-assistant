@@ -134,14 +134,15 @@ input.switch:checked { background: var(--primary); }
 input.switch:checked::after { transform: translateX(1.2rem); background: var(--eye-white); border-color: var(--eye-ink); }
 
 /* Buttons: pill stickers that sink into their shadow when pressed. */
-button { --lift: 3px; --rest: 3px 3px 0 var(--shadow-ink); --raised: 4px 4px 0 var(--shadow-ink);
+button, .button { --lift: 3px; --rest: 3px 3px 0 var(--shadow-ink); --raised: 4px 4px 0 var(--shadow-ink);
   display: inline-flex; align-items: center; justify-content: center; gap: .45rem; min-height: 2.6rem; padding: .5rem 1.1rem;
   border: var(--bw) solid var(--line); border-radius: 99px; background: var(--primary); color: var(--on-color); box-shadow: var(--rest);
   cursor: pointer; font: inherit; font-family: var(--display); font-weight: 750; font-size: .93rem; line-height: 1.2; touch-action: manipulation;
   transition: transform .08s ease-out, box-shadow .08s ease-out, background-color .15s; }
-button:active:not(:disabled) { transform: translate(var(--lift), var(--lift)); box-shadow: none; }
+.button { text-decoration: none; }
+button:active:not(:disabled), .button:active { transform: translate(var(--lift), var(--lift)); box-shadow: none; }
 button:disabled { opacity: .45; cursor: default; box-shadow: none; }
-button.secondary { background: var(--surface); color: var(--text); }
+button.secondary, .button.secondary { background: var(--surface); color: var(--text); }
 button.danger { background: var(--error-soft); color: var(--text); }
 button.small { --lift: 2px; --rest: 2px 2px 0 var(--shadow-ink); --raised: 3px 3px 0 var(--shadow-ink); min-height: 2.15rem; padding: .3rem .8rem; font-size: .85rem; }
 button.busy { position: relative; color: transparent !important; }
@@ -738,7 +739,7 @@ dialog p { overflow-wrap: anywhere; }
 }
 @media (hover: hover) {
   button:hover:not(:disabled) { transform: translate(calc(var(--lift) / -3), calc(var(--lift) / -3)); box-shadow: var(--raised); }
-  button:active:not(:disabled) { transform: translate(var(--lift), var(--lift)); box-shadow: none; }
+  button:active:not(:disabled), .button:active { transform: translate(var(--lift), var(--lift)); box-shadow: none; }
   nav button:hover:not([aria-current="page"]) { background: var(--surface-2); }
   .status-row:hover, .activity-row:hover { background: var(--surface-2); }
   .segmented button:hover:not([aria-pressed="true"]), .subnav [role=tab]:hover:not([aria-selected="true"]) { background: var(--surface-2); }
@@ -793,3 +794,7 @@ body.directory-picker-open { overflow: hidden; }
 .destination-search { padding: .75rem 1rem; margin: 0; flex: none; }
 .destination-picker .directory-picker-row button { white-space: normal; overflow-wrap: anywhere; }
 .destination-picker .directory-picker-row button[aria-pressed="true"] { background: var(--ok-soft); }
+
+@media (max-width: 680px) { .button { min-height: 44px; } }
+
+.mobile-session-body { padding-bottom: max(1rem, env(safe-area-inset-bottom)); }
