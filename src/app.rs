@@ -28,6 +28,7 @@ mod activity;
 mod azure_cli;
 pub mod cli;
 pub mod control;
+mod diagnostics;
 mod github;
 mod github_cli;
 #[cfg(feature = "gui")]
@@ -159,8 +160,13 @@ impl std::fmt::Display for Rejected {
 
 impl std::error::Error for Rejected {}
 
+#[track_caller]
 fn fail<E: Into<anyhow::Error>>(error: E) -> String {
     let error = error.into();
+    diagnostics::capture_error(&error, std::panic::Location::caller());
+    if let Some(error) = error.downcast_ref::<azure_cli::LoginError>() {
+        return format!("[not_ready] {error}");
+    }
     if let Some(message) = error.downcast_ref::<SetupError>() {
         return format!("[not_ready] {}", message.0);
     }

@@ -1,7 +1,10 @@
 //! Azure CLI owns the user's Entra login; tokens stay in memory and never enter model sessions.
 use super::*;
 use serde_json::Value;
-use std::{process::Stdio, time::Duration};
+use std::{
+    process::Stdio,
+    time::{Duration, Instant},
+};
 use tokio::io::{AsyncReadExt, BufReader};
 
 const RESOURCE: &str = "499b84ac-1321-427f-aa17-267ca6975798";
@@ -16,7 +19,69 @@ pub(super) struct Prompt {
 }
 pub(super) struct Pending {
     pub prompt: Prompt,
-    pub task: tokio::task::JoinHandle<std::result::Result<(), String>>,
+    pub task: tokio::task::JoinHandle<std::result::Result<(), LoginError>>,
+}
+
+#[derive(Debug, Serialize)]
+pub(super) struct LoginError {
+    stage: &'static str,
+    reason: &'static str,
+    elapsed_ms: u64,
+    stderr_bytes: usize,
+    exit_code: Option<i32>,
+    io_kind: Option<String>,
+    provider_codes: Vec<String>,
+    transport: Option<&'static str>,
+}
+impl std::fmt::Display for LoginError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(if self.stage == "verify_session" {
+            LOGIN
+        } else {
+            LOGIN_FAILED
+        })
+    }
+}
+impl std::error::Error for LoginError {}
+impl LoginError {
+    fn new(
+        stage: &'static str,
+        reason: &'static str,
+        started: Instant,
+        stderr_bytes: usize,
+        exit_code: Option<i32>,
+    ) -> Self {
+        Self {
+            stage,
+            reason,
+            elapsed_ms: started.elapsed().as_millis().min(u64::MAX as u128) as u64,
+            stderr_bytes,
+            exit_code,
+            io_kind: None,
+            provider_codes: Vec::new(),
+            transport: None,
+        }
+    }
+    fn output(mut self, bytes: &[u8]) -> Self {
+        let text = String::from_utf8_lossy(bytes);
+        self.provider_codes = regex::Regex::new(r"\bAADSTS[0-9]{4,10}\b")
+            .unwrap()
+            .find_iter(&text)
+            .take(8)
+            .map(|code| code.as_str().to_owned())
+            .collect();
+        self.transport = if text.contains("SSLError") || text.contains("CERTIFICATE_VERIFY_FAILED")
+        {
+            Some("tls")
+        } else if text.contains("ConnectTimeout") || text.contains("ReadTimeout") {
+            Some("timeout")
+        } else if text.contains("ConnectionError") {
+            Some("connection")
+        } else {
+            None
+        };
+        self
+    }
 }
 impl Drop for Pending {
     fn drop(&mut self) {
@@ -26,7 +91,10 @@ impl Drop for Pending {
 
 // Only the known public verification URL and a bounded user code may leave the host.
 fn prompt(text: &str) -> Option<Prompt> {
-    let (_, rest) = text.split_once(DEVICE_URL)?;
+    // Both Microsoft pages reach the same verification flow. Keep the public IPC URL stable.
+    let rest = [DEVICE_URL, "https://login.microsoft.com/device"]
+        .iter()
+        .find_map(|url| text.split_once(url).map(|(_, rest)| rest))?;
     let rest = rest.strip_prefix(" and enter the code ")?;
     let (code, _) = rest.split_once(" to authenticate")?;
     (code.len() >= 6
@@ -41,6 +109,7 @@ fn prompt(text: &str) -> Option<Prompt> {
 }
 
 async fn begin_at(binary: &Path, profile: Option<&Path>, tenant: &str) -> Result<Pending> {
+    let started = Instant::now();
     let mut cmd = command(binary, profile);
     cmd.args([
         "login",
@@ -60,44 +129,120 @@ async fn begin_at(binary: &Path, profile: Option<&Path>, tenant: &str) -> Result
     if !tenant.is_empty() && tenant != "common" && tenant != "organizations" {
         cmd.args(["--tenant", tenant]);
     }
-    let mut child = cmd.spawn().map_err(|_| anyhow::anyhow!(LOGIN_FAILED))?;
+    let mut child = cmd.spawn().map_err(|error| {
+        let mut failure = LoginError::new("start", "spawn_failed", started, 0, None);
+        failure.io_kind = Some(format!("{:?}", error.kind()));
+        failure
+    })?;
     let mut stderr = BufReader::new(child.stderr.take().unwrap());
-    let prompt = tokio::time::timeout(Duration::from_secs(30), async {
-        let mut bytes = Vec::new();
+    let mut bytes = Vec::new();
+    let result = tokio::time::timeout(Duration::from_secs(30), async {
         while bytes.len() < 16_384 {
-            let byte = stderr.read_u8().await.ok()?;
+            let byte = stderr.read_u8().await.map_err(|error| {
+                let mut failure = LoginError::new(
+                    "read_device_prompt",
+                    "read_failed",
+                    started,
+                    bytes.len(),
+                    None,
+                );
+                failure.io_kind = Some(format!("{:?}", error.kind()));
+                failure
+            })?;
             bytes.push(byte);
-            if byte == b'\n'
-                && let Some(prompt) = prompt(&String::from_utf8_lossy(&bytes))
-            {
-                return Some(prompt);
+            if byte == b'\n' {
+                let text = String::from_utf8_lossy(&bytes);
+                if let Some(prompt) = prompt(&text) {
+                    return Ok(prompt);
+                }
+                if text.contains("enter the code ") && text.contains(" to authenticate") {
+                    return Err(LoginError::new(
+                        "read_device_prompt",
+                        "unrecognized_prompt",
+                        started,
+                        bytes.len(),
+                        None,
+                    ));
+                }
             }
         }
-        None
+        Err(LoginError::new(
+            "read_device_prompt",
+            "output_limit",
+            started,
+            bytes.len(),
+            None,
+        ))
     })
-    .await
-    .ok()
-    .flatten()
-    .ok_or_else(|| anyhow::anyhow!(LOGIN_FAILED))?;
+    .await;
+    let prompt = match result.unwrap_or_else(|_| {
+        Err(LoginError::new(
+            "read_device_prompt",
+            "timeout",
+            started,
+            bytes.len(),
+            None,
+        ))
+    }) {
+        Ok(prompt) => prompt,
+        Err(mut error) => {
+            let exit = child
+                .try_wait()
+                .ok()
+                .flatten()
+                .and_then(|status| status.code());
+            error.exit_code = exit;
+            return Err(error.output(&bytes).into());
+        }
+    };
     let task = tokio::spawn(async move {
-        // Drain diagnostics without retaining, returning or logging provider output.
+        // Inspect bounded output for allowlisted error codes; never retain raw provider text in logs.
+        let mut tail = Vec::new();
+        let mut total_bytes = bytes.len();
         let result = tokio::time::timeout(Duration::from_secs(600), async {
-            let mut sink = tokio::io::sink();
-            let (status, _) = tokio::join!(child.wait(), tokio::io::copy(&mut stderr, &mut sink));
-            status.is_ok_and(|status| status.success())
+            let (status, _) = tokio::join!(child.wait(), async {
+                total_bytes += (&mut stderr).take(16_384).read_to_end(&mut tail).await?;
+                let mut sink = tokio::io::sink();
+                total_bytes = total_bytes.saturating_add(
+                    tokio::io::copy(&mut stderr, &mut sink)
+                        .await?
+                        .min(usize::MAX as u64) as usize,
+                );
+                Ok::<_, std::io::Error>(())
+            });
+            status
         })
         .await;
-        if result == Ok(true) {
-            Ok(())
-        } else {
-            Err(LOGIN_FAILED.into())
+        match result {
+            Ok(Ok(status)) if status.success() => Ok(()),
+            Ok(Ok(status)) => Err(LoginError::new(
+                "wait_for_login",
+                "process_failed",
+                started,
+                total_bytes,
+                status.code(),
+            )
+            .output(&tail)),
+            Ok(Err(error)) => {
+                let mut failure =
+                    LoginError::new("wait_for_login", "wait_failed", started, total_bytes, None)
+                        .output(&tail);
+                failure.io_kind = Some(format!("{:?}", error.kind()));
+                Err(failure)
+            }
+            Err(_) => Err(
+                LoginError::new("wait_for_login", "expired", started, total_bytes, None)
+                    .output(&tail),
+            ),
         }
     });
     Ok(Pending { prompt, task })
 }
 
 pub(super) async fn begin(tenant: &str) -> Result<Pending> {
-    let binary = binary().context("Install Azure CLI on the machine running this app.")?;
+    let binary = binary().ok_or(SetupError(
+        "Install Azure CLI on the machine running this app.",
+    ))?;
     let profile = control::isolated_profile_dir()?;
     begin_at(&binary, profile.as_deref(), tenant).await
 }
@@ -243,12 +388,21 @@ pub(super) async fn status() -> Status {
     }
 }
 pub(super) async fn require() -> Result<Session> {
+    let started = Instant::now();
     session().await.map_err(|status| {
-        anyhow::anyhow!(if status.state == "not_installed" {
-            "Install Azure CLI on the machine running this app."
+        if status.state == "not_installed" {
+            anyhow::Error::new(SetupError(
+                "Install Azure CLI on the machine running this app.",
+            ))
         } else {
-            LOGIN
-        })
+            anyhow::Error::new(LoginError::new(
+                "verify_session",
+                status.state,
+                started,
+                0,
+                None,
+            ))
+        }
     })
 }
 
@@ -257,12 +411,33 @@ mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
     #[test]
+    fn provider_diagnostics_keep_codes_and_transport_without_provider_text() {
+        let error = LoginError::new("read_device_prompt", "read_failed", Instant::now(), 150, Some(1))
+            .output(b"AADSTS53003 CERTIFICATE_VERIFY_FAILED token=synthetic-private-error code ABCD12345 https://example.test/?code=secret");
+        assert_eq!(error.provider_codes, ["AADSTS53003"]);
+        assert_eq!(error.transport, Some("tls"));
+        let saved = serde_json::to_string(&error).unwrap();
+        for private in [
+            "synthetic-private-error",
+            "ABCD12345",
+            "example.test",
+            "secret",
+        ] {
+            assert!(!saved.contains(private));
+        }
+    }
+    #[test]
     fn login_prompt_only_accepts_the_microsoft_device_page_and_user_code() {
         let text = "To sign in, use a web browser to open the page https://microsoft.com/devicelogin and enter the code ABCD12345 to authenticate.";
         assert_eq!(prompt(text).unwrap().user_code, "ABCD12345");
+        let current = text.replace(DEVICE_URL, "https://login.microsoft.com/device");
+        assert_eq!(prompt(&current).unwrap().user_code, "ABCD12345");
+        assert_eq!(prompt(&current).unwrap().verification_uri, DEVICE_URL);
         for text in [
             text.replace("microsoft.com", "evil.example"),
             text.replace("devicelogin", "devicelogin.evil"),
+            text.replace(DEVICE_URL, "https://login.microsoft.com/device.evil"),
+            text.replace(DEVICE_URL, "https://login.microsoft.com.evil/device"),
             text.replace("ABCD12345", "private token"),
             text.replace("ABCD12345", "ABC\n12345"),
         ] {
@@ -276,7 +451,7 @@ mod tests {
         let profile = root.path().join("profile");
         fs::create_dir_all(profile.join("home/.azure")).unwrap();
         let script = format!(
-            "#!/bin/sh\n[ \"$AZURE_CONFIG_DIR\" = '{}' ] || exit 9\n[ \"$AZURE_CORE_LOGIN_EXPERIENCE_V2\" = off ] || exit 9\n[ -z \"${{GRAPH_WEBHOOK_SECRET+x}}\" ] || exit 9\n[ -z \"${{AZURE_DEVOPS_EXT_PAT+x}}\" ] || exit 9\n[ \"$*\" = 'login --use-device-code --allow-no-subscriptions --scope {RESOURCE}/.default --output none --tenant example.test' ] || exit 9\nprintf '%s\\n' 'To sign in, use a web browser to open the page https://microsoft.com/devicelogin and enter the code ABCD12345 to authenticate.' >&2\nexit 0\n",
+            "#!/bin/sh\n[ \"$AZURE_CONFIG_DIR\" = '{}' ] || exit 9\n[ \"$AZURE_CORE_LOGIN_EXPERIENCE_V2\" = off ] || exit 9\n[ -z \"${{GRAPH_WEBHOOK_SECRET+x}}\" ] || exit 9\n[ -z \"${{AZURE_DEVOPS_EXT_PAT+x}}\" ] || exit 9\n[ \"$*\" = 'login --use-device-code --allow-no-subscriptions --scope {RESOURCE}/.default --output none --tenant example.test' ] || exit 9\nprintf '%s\\n' 'To sign in, use a web browser to open the page https://login.microsoft.com/device and enter the code ABCD12345 to authenticate.' >&2\nexit 0\n",
             profile.join("home/.azure").display()
         );
         fs::write(&binary, &script).unwrap();
@@ -288,15 +463,43 @@ mod tests {
         (&mut pending.task).await.unwrap().unwrap();
         fs::write(
             &binary,
-            script.replace("exit 0", "echo synthetic-private-error >&2\nexit 1"),
+            script.replace(
+                "https://login.microsoft.com/device",
+                "https://untrusted.example/device",
+            ),
+        )
+        .unwrap();
+        let error = begin_at(&binary, Some(&profile), "example.test")
+            .await
+            .err()
+            .unwrap();
+        let diagnostic = error.downcast_ref::<LoginError>().unwrap();
+        assert_eq!(diagnostic.stage, "read_device_prompt");
+        assert_eq!(diagnostic.reason, "unrecognized_prompt");
+        let saved = serde_json::to_string(diagnostic).unwrap();
+        assert!(saved.contains("stderr_bytes"));
+        assert!(!saved.contains("ABCD12345"));
+        assert!(!saved.contains("untrusted.example"));
+        assert!(fail(error).starts_with("[not_ready] Azure CLI sign-in failed"));
+        fs::write(
+            &binary,
+            script.replace(
+                "exit 0",
+                "echo 'AADSTS53003 token=synthetic-private-error' >&2\nexit 23",
+            ),
         )
         .unwrap();
         let mut pending = begin_at(&binary, Some(&profile), "example.test")
             .await
             .unwrap();
-        assert_eq!(
-            (&mut pending.task).await.unwrap().unwrap_err(),
-            LOGIN_FAILED
+        let error = (&mut pending.task).await.unwrap().unwrap_err();
+        assert_eq!(error.to_string(), LOGIN_FAILED);
+        assert_eq!(error.exit_code, Some(23));
+        assert_eq!(error.provider_codes, ["AADSTS53003"]);
+        assert!(
+            !serde_json::to_string(&error)
+                .unwrap()
+                .contains("synthetic-private-error")
         );
         fs::write(
             &binary,

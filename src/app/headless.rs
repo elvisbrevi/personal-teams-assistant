@@ -85,6 +85,14 @@ mod tests {
         let reply = control::dispatch(&host, control::Request::new("app_open")).await;
         assert_eq!((reply.ok, reply.exit_code), (false, 3));
         assert!(reply.message.unwrap().contains("pta"));
+        let logs = control::dispatch(&host, control::Request::new("logs")).await;
+        assert!(logs.ok);
+        assert_eq!(logs.data[0]["kind"], "app_operation_failed");
+        let detail: serde_json::Value =
+            serde_json::from_str(logs.data[0]["detail"].as_str().unwrap()).unwrap();
+        assert_eq!(detail["operation"], "app_open");
+        assert_eq!(detail["code"], "not_ready");
+        assert_eq!(detail["causes"][0]["chain"][0]["type"], "precondition");
         let reply = control::dispatch(&host, control::Request::new("app_quit")).await;
         assert!(reply.ok);
         tokio::time::timeout(std::time::Duration::from_secs(2), quit_requested.changed())

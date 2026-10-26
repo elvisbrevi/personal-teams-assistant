@@ -464,6 +464,15 @@ fn arg<T: serde::de::DeserializeOwned>(
         .map_err(|_| format!("invalid argument: {name}"))
 }
 pub(crate) async fn dispatch(host: &Arc<Host>, request: Request) -> Reply {
+    let method = request.method.clone();
+    let started = std::time::Instant::now();
+    let (reply, causes) = diagnostics::capture(dispatch_inner(host, request)).await;
+    if !reply.ok && reply.code != "authorization_pending" {
+        diagnostics::record(&host.state, &method, &reply, started.elapsed(), causes);
+    }
+    reply
+}
+async fn dispatch_inner(host: &Arc<Host>, request: Request) -> Reply {
     if request.contract != CONTRACT {
         return Reply::error(
             "contract_mismatch",
@@ -843,9 +852,7 @@ async fn operate(
                 json!({"pending":true,"provider":"azure_cli"})
             } else {
                 let mut login = pending.take().unwrap();
-                (&mut login.task)
-                    .await
-                    .map_err(|_| "Azure CLI sign-in failed.".to_string())??;
+                (&mut login.task).await.map_err(fail)?.map_err(fail)?;
                 serde_json::to_value(azure_cli::require().await.map_err(fail)?.status)
                     .map_err(fail)?
             }
