@@ -101,7 +101,7 @@ jobs:
             libayatana-appindicator3-dev librsvg2-dev libxdo-dev libssl-dev
       - name: Rust toolchain from rust-toolchain.toml
         run: rustup toolchain install && rustc --version
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       # Linting already gated the PR; main still tests and packages the exact release commit.
@@ -174,7 +174,7 @@ jobs:
           persist-credentials: false
       - name: Rust toolchain from rust-toolchain.toml
         run: rustup toolchain install && rustc --version
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo clippy --locked --all-targets -- -D warnings
@@ -197,7 +197,7 @@ jobs:
           persist-credentials: false
       - name: Rust toolchain from rust-toolchain.toml
         run: rustup toolchain install && rustc --version
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       # A fresh release installation exercises the same linker path as cargo install from crates.io.
@@ -242,7 +242,7 @@ jobs:
           "$RUNNER_TEMP/gitleaks" dir --redact --no-banner .
       - name: Rust toolchain from rust-toolchain.toml
         run: rustup toolchain install
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: security-audit
           save-if: ${{ github.ref == 'refs/heads/main' }}
