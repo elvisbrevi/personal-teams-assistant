@@ -111,9 +111,11 @@ mod tests {
         // An error log must not trigger startup recovery of a job already being processed.
         store.begin_simulation("synthetic-job").unwrap();
         let (reply, causes) = capture(async {
-            let error = anyhow::Error::new(std::io::Error::from_raw_os_error(13)).context(
-                "token=synthetic-secret code ABCD12345 https://example.test/?code=private",
-            );
+            let error =
+                anyhow::Error::new(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
+                    .context(
+                        "token=synthetic-secret code ABCD12345 https://example.test/?code=private",
+                    );
             fail(error);
             control::Reply::error("operation_failed", 1, "synthetic-private-message")
         })
