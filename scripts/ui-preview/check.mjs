@@ -799,6 +799,7 @@ if (flag !== '--axe-only') for (const [label, viewport] of [['desktop', { width:
   await page.screenshot({ path: `${out}/agent-history-${label}.png`, fullPage: true });
   if (label === 'phone') {
     await page.locator('#agent-history-list').getByRole('button', { name: 'Abrir sesión del agente', exact: true }).first().click();
+    await page.getByText('Este equipo no aparece en Codex', { exact: true }).click();
     await page.getByRole('button', { name: 'Vincular este teléfono con Codex', exact: true }).waitFor();
     await page.getByRole('button', { name: 'Vincular este teléfono con Codex', exact: true }).click();
     await page.getByText('TEST-CODE', { exact: true }).waitFor();

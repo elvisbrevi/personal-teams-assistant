@@ -26,9 +26,11 @@ const UI_CATALOG = { es: {
   "Pair this phone with Codex": "Vincular este teléfono con Codex",
   "Copy pairing code": "Copiar código de vinculación",
   "Could not copy the pairing code.": "No se pudo copiar el código de vinculación.",
-  "Enter this code in the ChatGPT mobile app to connect the execution machine. It expires at {time}.": "Ingresa este código en la app móvil de ChatGPT para conectar la máquina de ejecución. Vence a las {time}.",
+  "In the ChatGPT app, open Codex, choose to add a computer and enter this code. It expires at {time}.": "En la app de ChatGPT abre Codex, elige agregar un equipo e ingresa este código. Vence a las {time}.",
+  "This computer is not listed in Codex": "Este equipo no aparece en Codex",
+  "Your phone only needs this once: if the computer already appears in Codex, ignore this.": "Solo se necesita una vez: si el equipo ya aparece en Codex, ignora esto.",
   "Codex Remote Control is connected to {machine}.": "Codex Remote Control está conectado a {machine}.",
-  "Open Codex in the ChatGPT mobile app, select this computer, then select the session. If this computer is missing, pair it using the button below. A direct mobile link to this local session is not available.": "Abre Codex en la app móvil de ChatGPT, selecciona este equipo y luego la sesión. Si no aparece el equipo, vincúlalo con el botón de abajo. No hay un enlace móvil directo para esta sesión local.",
+  "Open Codex in the ChatGPT mobile app, select this computer, then select the session. A direct mobile link to this local session is not available.": "Abre Codex en la app móvil de ChatGPT, selecciona este equipo y luego la sesión. No hay un enlace móvil directo para esta sesión local.",
   "Connecting the recorded session through its execution machine…": "Conectando la sesión registrada mediante su máquina de ejecución…",
 
   'No destinations are available. Check the selected source or GitHub CLI session.': 'No hay destinos disponibles. Revisa la fuente seleccionada o la sesión de GitHub CLI.',

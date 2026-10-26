@@ -687,15 +687,16 @@ function showMobileSession(session, trigger) {
         const code = el('code', { textContent: value.manual_code });
         const copyCode = el('button', { type: 'button', class: 'secondary small', textContent: t('Copy pairing code') });
         copyCode.onclick = () => busy(copyCode, async () => { if (!await copy(value.manual_code)) fail(t('Could not copy the pairing code.')); });
-        pairing.replaceChildren(el('p', { textContent: t('Enter this code in the ChatGPT mobile app to connect the execution machine. It expires at {time}.', { time: new Date(value.expires_at * 1000).toLocaleTimeString(uiLocale()) }) }), code, copyCode);
+        pairing.replaceChildren(el('p', { class: 'hint', textContent: t('In the ChatGPT app, open Codex, choose to add a computer and enter this code. It expires at {time}.', { time: new Date(value.expires_at * 1000).toLocaleTimeString(uiLocale()) }) }), el('div', { class: 'actions' }, code, copyCode));
       });
       const remoteId = result.remote?.session_id || session.session_id;
       const copySession = el('button', { type: 'button', class: 'secondary small', textContent: t('Copy session ID') });
       copySession.onclick = () => busy(copySession, async () => { if (!await copy(remoteId)) fail(t('Could not copy the session ID.')); });
       body.replaceChildren(...[el('p', { textContent: t('Codex Remote Control is connected to {machine}.', { machine: result.remote?.server_name || session.machine_name || session.machine }) }),
-        el('p', { class: 'hint', textContent: t('Open Codex in the ChatGPT mobile app, select this computer, then select the session. If this computer is missing, pair it using the button below. A direct mobile link to this local session is not available.') }),
+        el('p', { class: 'hint', textContent: t('Open Codex in the ChatGPT mobile app, select this computer, then select the session. A direct mobile link to this local session is not available.') }),
         remoteId !== session.session_id ? el('p', { class: 'hint', textContent: t('This older CLI session has a mobile copy with its conversation history. Continue in that copy; the original session is kept.') }) : null,
-        el('p', {}, el('strong', { textContent: t('Mobile session ID') }), ' ', el('code', { textContent: remoteId })), copySession, pair, pairing].filter(Boolean));
+        el('p', {}, el('strong', { textContent: t('Mobile session ID') }), ' ', el('code', { textContent: remoteId })), copySession,
+        el('details', { class: 'fold' }, el('summary', { textContent: t('This computer is not listed in Codex') }), el('p', { class: 'hint', textContent: t('Your phone only needs this once: if the computer already appears in Codex, ignore this.') }), pair, pairing)].filter(Boolean));
 
     }
   };
