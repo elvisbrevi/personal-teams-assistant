@@ -1,7 +1,7 @@
 const rawInvoke = window.ptaTransport.invoke;
 // Also the answer operations: they do not depend on the profile files, so they neither check
 // nor advance the form's revision.
-const READS = ['snapshot', 'chat', 'github_repositories', 'self_chat_status', 'llm_providers', 'azure_cli_status', 'github_cli_status', 'audit', 'activity_status', 'activity_history', 'activity_pending', 'answer_refine', 'answer_send', 'list_azure_hus', 'list_github_epics', 'list_github_issues', 'get_azure_hu', 'get_azure_task', 'list_azure_tasks', 'get_github_epic', 'get_github_issue', 'open_work_item'];
+const READS = ['snapshot', 'chat', 'github_repositories', 'self_chat_status', 'llm_providers', 'azure_cli_status', 'begin_azure_cli_login', 'open_azure_cli_login', 'finish_azure_cli_login', 'cancel_azure_cli_login', 'github_cli_status', 'audit', 'activity_status', 'activity_history', 'activity_pending', 'answer_refine', 'answer_send', 'list_azure_hus', 'list_github_epics', 'list_github_issues', 'get_azure_hu', 'get_azure_task', 'list_azure_tasks', 'get_github_epic', 'get_github_issue', 'open_work_item'];
 // Revision of the profile files the last reply saw. The form's own revision (`current.revision`)
 // changes only when it reloads or writes, so saving a stale form fails instead of overwriting
 // changes made elsewhere (e.g. with `pta`).
@@ -530,7 +530,7 @@ async function openRequest() {
       el('div', { class: 'field-block' }, el('label', { id: 'request-target-label', textContent: azure ? t('Project') : t('Repository') }), target), kind,
       el('label', {}, t('Request context'), context),
       el('div', { class: 'grid' }, el('label', {}, t('CLI'), provider), el('label', {}, t('Model'), model), el('label', {}, t('Effort'), effort)),
-      catalog.write_ready === false ? el('div', { class: 'callout warn' }, el('p', { textContent: azure ? t('Sign in with az login on the machine running this app, then refresh Azure CLI status.') : t('Sign in with gh auth login on the machine running this app, then refresh GitHub CLI status.') }), sessionStatus) : null,
+      catalog.write_ready === false ? el('div', { class: 'callout warn' }, el('p', { textContent: azure ? t('Select Azure CLI on Home to sign in with Microsoft in your browser.') : t('Sign in with gh auth login on the machine running this app, then refresh GitHub CLI status.') }), sessionStatus) : null,
       !catalog.targets.length ? el('p', { class: 'callout warn', textContent: t('No destinations are available. Check the selected source or GitHub CLI session.') }) : null,
       !catalog.providers.length ? el('p', { class: 'callout warn', textContent: t('No coding CLI installed on this machine') }) : null),
       el('div', { class: 'actions request-footer' }, cancel, start), result);
@@ -1108,12 +1108,12 @@ function azureCliTile() {
   const hint = state.authenticated ? t('Azure DevOps session is valid. Select to refresh.')
     : state.state === 'not_installed' ? t('Install Azure CLI on the machine running this app.')
     : state.state === 'checking' ? t('Checking the Azure DevOps session on this machine…')
-    : t('Sign in with az login on the machine running this app, then refresh Azure CLI status.');
+    : t('Select to sign in with Microsoft in your browser.');
   const row = tile(t('Azure CLI'), value, state.authenticated ? 'ok' : state.state === 'checking' ? 'muted' : 'warn',
     state.user ? `${state.user} · ${hint}` : hint, ['overview'], 'chip');
   row.id = 'azure-cli-status';
   row.onclick = async () => {
-    await busy(row, loadAzureCliStatus);
+    await busy(row, state.authenticated || ['checking', 'not_installed'].includes(state.state) ? loadAzureCliStatus : azureCliLogin);
     if (tab === 'overview') $('#azure-cli-status')?.focus({ preventScroll: true });
   };
   return row;
@@ -1144,6 +1144,54 @@ function githubCliTile() {
   return row;
 }
 setInterval(() => { if (current && tab === 'overview') { loadAzureCliStatus(); loadGithubCliStatus(); } }, 60000);
+
+async function azureCliLogin() {
+  const dialog = $('#azure-cli-dialog'), status = $('#azure-cli-login-status'), link = $('#azure-cli-link');
+  if (dialog.open) return;
+  let cancelled = false;
+  $('#azure-cli-code').textContent = '';
+  $('#azure-cli-copy').disabled = true;
+  link.hidden = true; link.removeAttribute('href');
+  status.textContent = t('Starting Microsoft sign-in…');
+  dialog.showModal();
+  const cancel = event => { event?.preventDefault(); cancelled = true; };
+  dialog.oncancel = cancel;
+  $('#azure-cli-cancel').onclick = cancel;
+  try {
+    const prompt = await invoke('begin_azure_cli_login');
+    if (cancelled) return;
+    if (prompt.verification_uri !== 'https://microsoft.com/devicelogin' || !/^[A-Z0-9-]{6,16}$/.test(prompt.user_code)) throw new Error(t('Invalid Microsoft sign-in address.'));
+    $('#azure-cli-code').textContent = prompt.user_code;
+    $('#azure-cli-copy').disabled = false;
+    $('#azure-cli-copy').onclick = () => busy($('#azure-cli-copy'), async () => {
+      if (await copy(prompt.user_code)) done(t('Code copied.'));
+    });
+    link.href = prompt.verification_uri; link.hidden = false;
+    link.onclick = event => {
+      if (!window.ptaTransport.browser) { event.preventDefault(); invoke('open_azure_cli_login').catch(fail); }
+    };
+    status.textContent = t('Waiting for Microsoft sign-in…');
+    link.focus();
+    const deadline = Date.now() + 600_000;
+    while (!cancelled && Date.now() < deadline) {
+      const result = await rawInvoke('command', { request: { method: 'finish_azure_cli_login', args: {}, revision: null, contract: 1 } });
+      if (cancelled) return;
+      if (result.ok) {
+        azureCliStatus = result.data;
+        done(t('Azure CLI connected.'));
+        return;
+      }
+      if (result.code !== 'authorization_pending') throw new Error(tx(result.message || result.code));
+      await sleep(2000);
+    }
+    if (!cancelled) throw new Error(t('Azure CLI sign-in failed or expired. Select Azure CLI to try again.'));
+  } finally {
+    await rawInvoke('command', { request: { method: 'cancel_azure_cli_login', args: {}, revision: null, contract: 1 } }).catch(() => {});
+    dialog.close();
+    link.removeAttribute('href'); $('#azure-cli-code').textContent = '';
+    await loadAzureCliStatus();
+  }
+}
 
 function renderTiles(s) {
   const config = s.config;

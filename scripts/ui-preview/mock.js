@@ -161,6 +161,14 @@
   const handlers = {
     github_cli_status: () => githubCli(),
     azure_cli_status: () => { window.__ptaAzureCliChecks = (window.__ptaAzureCliChecks || 0) + 1; return azureCli(); },
+    begin_azure_cli_login: async () => { await delay(window.__ptaAzureLoginDelay || 0); window.__ptaAzureLoginPending = true; return { verification_uri: 'https://microsoft.com/devicelogin', user_code: 'ABCD12345' }; },
+    finish_azure_cli_login: () => {
+      if (window.__ptaAzureLoginError) throw new Error('Azure CLI sign-in failed or expired. Select Azure CLI to try again.');
+      if (window.__ptaAzureCliState === 'authenticated') return azureCli();
+      return { pending: true, provider: 'azure_cli' };
+    },
+    cancel_azure_cli_login: () => { window.__ptaAzureLoginPending = false; return { cancelled: true }; },
+    open_azure_cli_login: () => ({ url: 'https://microsoft.com/devicelogin' }),
     machine_browse: async args => {
       window.__ptaLastMachineBrowse = args.path;
       await delay(window.__ptaBrowseDelay || 0);
@@ -320,7 +328,8 @@
       await delay(40);
       const handler = handlers[request.method];
       if (!handler) return { ok: false, code: 'not_ready', message: `mock: ${request.method} not implemented` };
-      return reply(await handler(request.args || {}));
+      const data = await handler(request.args || {});
+      return reply(data, request.method === 'finish_azure_cli_login' && data.pending ? { ok: false, code: 'authorization_pending' } : {});
     } },
     event: { listen: () => Promise.resolve(() => {}) },
   };

@@ -78,6 +78,8 @@ Accounts
                            login [--no-browser]; finish [--wait] [--redirect URL]
                            (--redirect: the http://localhost:PORT/?code=... URL opened on another device)
   auth github status|login CLIENT_ID|finish|cancel|logout
+  auth azure status|login|finish|cancel
+                           login returns a Microsoft device code; finish [--wait] verifies the Azure DevOps session.
   github repos             Repositories authorized for the GitHub App.
 
 Personal chat
@@ -317,6 +319,7 @@ fn validate_args(args: &[String]) -> Result<()> {
                 "status" | "login" | "finish" | "cancel" | "logout"
             ]
             | ["auth", "github", "status" | "finish" | "cancel" | "logout"]
+            | ["auth", "azure", "status" | "login" | "finish" | "cancel"]
             | ["auth", "github", "login", _]
             | ["github", "repos"]
             | ["llm", "providers"]
@@ -700,10 +703,13 @@ async fn execute(mut args: Vec<String>) -> Result<Reply> {
     if command == "auth" {
         let provider = action;
         ensure!(
-            ["github", "microsoft"].contains(&provider),
+            ["github", "microsoft", "azure"].contains(&provider),
             "unknown provider"
         );
         let action = positional(&args, 2)?;
+        if provider == "azure" && action == "status" {
+            return call("azure_cli_status", json!({}), None, true).await;
+        }
         if action == "status" {
             let mut s = snapshot().await?;
             if s.ok {
@@ -712,6 +718,9 @@ async fn execute(mut args: Vec<String>) -> Result<Reply> {
             return Ok(s);
         }
         let method = match (provider, action) {
+            ("azure", "login") => "begin_azure_cli_login",
+            ("azure", "finish") => "finish_azure_cli_login",
+            ("azure", "cancel") => "cancel_azure_cli_login",
             ("github", "login") => "begin_github_login",
             ("github", "finish") => "finish_github_login",
             ("github", "cancel") => "cancel_github",
@@ -735,7 +744,7 @@ async fn execute(mut args: Vec<String>) -> Result<Reply> {
             json!({"open":!non_interactive && !args.iter().any(|a|a=="--no-browser")})
         };
         let mut reply = call(method, value, None, true).await?;
-        if provider == "github" && action == "login" && reply.ok {
+        if ["github", "azure"].contains(&provider) && action == "login" && reply.ok {
             reply.ok = false;
             reply.code = "authorization_pending".into();
             reply.exit_code = 4;
@@ -1414,6 +1423,10 @@ mod help_tests {
             &["activity", "open"],
             &["activity", "resolve", "activity-id"],
             &["credentials", "list"],
+            &["auth", "azure", "status"],
+            &["auth", "azure", "login"],
+            &["auth", "azure", "finish"],
+            &["auth", "azure", "cancel"],
             &["auth", "microsoft", "status"],
             &["auth", "github", "login", "client"],
             &["github", "repos"],

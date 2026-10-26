@@ -654,6 +654,12 @@ async fn command(
         ))
         .into_response();
     }
+    if request.method == "open_azure_cli_login" {
+        return Json(control::Reply::success(
+            json!({"url":"https://microsoft.com/devicelogin"}),
+        ))
+        .into_response();
+    }
     if request.method == "connect_microsoft" {
         request.args["open"] = json!(false);
     }

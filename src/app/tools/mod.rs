@@ -49,6 +49,27 @@ pub(super) const TOOLS: &[Tool] = &[
         schema: none,
     },
     Tool {
+        name: "begin_azure_cli_login",
+        title: "Start Azure CLI sign-in",
+        description: "Start Microsoft device-code sign-in on this profile's host. Return only the public verification page and user code; the user completes sign-in in their browser.",
+        effect: Effect::Local,
+        schema: none,
+    },
+    Tool {
+        name: "finish_azure_cli_login",
+        title: "Check Azure CLI sign-in",
+        description: "Check pending device-code sign-in and verify the resulting Azure DevOps session. Returns only account metadata, never tokens.",
+        effect: Effect::Local,
+        schema: none,
+    },
+    Tool {
+        name: "cancel_azure_cli_login",
+        title: "Cancel Azure CLI sign-in",
+        description: "Stop this profile's pending Azure CLI sign-in process. Does not log out an existing session.",
+        effect: Effect::Local,
+        schema: none,
+    },
+    Tool {
         name: "azure_cli_status",
         title: "Azure CLI session",
         description: "Read whether Azure CLI is installed and can obtain an Azure DevOps Entra session for this profile. Returns account and tenant metadata only, never tokens. Authentication does not prove project write permissions.",
@@ -874,7 +895,11 @@ pub(super) async fn run(name: &str, args: &Value) -> Result<Value, String> {
     }
     match name {
         "list_azure_hus" | "list_azure_tasks" | "list_github_epics" | "list_github_issues" | "get_azure_hu" | "get_azure_task" | "get_github_epic" | "get_github_issue" | "open_work_item" => ipc(name, args.clone()).await,
-        "azure_cli_status" | "github_cli_status" => ipc(name, args.clone()).await,
+        "azure_cli_status" | "github_cli_status" | "begin_azure_cli_login" | "cancel_azure_cli_login" => ipc(name, args.clone()).await,
+        "finish_azure_cli_login" => {
+            let reply = cli::call(name, args.clone(), None, true).await.map_err(|_| "The host could not be reached; check pta status.".to_string())?;
+            if reply.code == "authorization_pending" { Ok(reply.data) } else { data(Ok(reply)) }
+        }
         "status" => {
             let s = ipc("snapshot", json!({})).await?;
             Ok(json!({
