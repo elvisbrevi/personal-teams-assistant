@@ -309,6 +309,11 @@ nav button, .status-row, .activity-row, .segmented button, .subnav [role=tab], .
 .row input:not([type=checkbox]):not([type=radio]) { flex: 2; min-width: 200px; margin: 0; }
 .row label { margin: 0; font-weight: 400; }
 .cred-name { font-family: var(--mono); font-size: .86rem; }
+/* The value is typed into a textarea so line breaks survive; the engine masks it like a password. */
+.secret-entry { font-family: var(--mono); -webkit-text-security: disc; text-security: disc; }
+.secret-entry.shown { -webkit-text-security: none; text-security: none; }
+.row textarea.secret-entry { flex: 2; min-width: 200px; margin: 0; min-height: 2.75rem; }
+#panel-variables h3 { margin: 1.1rem 0 .2rem; font-size: 1rem; }
 
 /* Sources, contexts, cases, notes and people */
 .resource { display: grid; gap: .4rem; padding: .9rem 0; border-top: 1.5px solid var(--rule); }

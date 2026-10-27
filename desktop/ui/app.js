@@ -12,7 +12,7 @@ async function invoke(method, args = {}) {
     return { visible: true };
   }
   let result = await rawInvoke('command', { request: {
-    method, args, revision: READS.includes(method) || /^(implementation_|machine_)/.test(method) ? null : current?.revision ?? null, contract: 1
+    method, args, revision: READS.includes(method) || /^(implementation_|machine_|variable_)/.test(method) ? null : current?.revision ?? null, contract: 1
   }});
   if (window.ptaTransport.browser && result.code === 'authorization_pending' && method === 'connect_microsoft') {
     result = await browserMicrosoftLogin(result.data.authorization_url);
@@ -27,7 +27,7 @@ async function invoke(method, args = {}) {
     }
   }
   if (result.revision) lastRevision = result.revision;
-  if (result.revision && current && !READS.includes(method) && !/^(implementation_|machine_)/.test(method)) current.revision = result.revision;
+  if (result.revision && current && !READS.includes(method) && !/^(implementation_|machine_|variable_)/.test(method)) current.revision = result.revision;
   if (!result.ok) throw result.message || result.code;
   return result.data;
 }
@@ -127,7 +127,7 @@ function showTab(name, anchor) {
   if (name === 'knowledge') loadKnowledge().catch(fail);
   if (name === 'todo') loadTodo();
   if (name === 'agent-history') loadAgentHistory();
-  if (name === 'settings') loadMachines().catch(fail);
+  if (name === 'settings') { loadMachines().catch(fail); loadVariables(); }
   const target = anchor && document.getElementById(anchor);
   // A panel inside a tab (a Settings section, an Activities view) opens that tab first.
   const owner = target && document.querySelector(`[aria-controls="${target.closest('[role=tabpanel]')?.id}"]`);
@@ -1499,6 +1499,109 @@ function renderCredentials() {
     container.append(el('div', { class: 'row' }, rowText(title, detail, state), input, save, remove));
   }
 }
+
+// ---------------------------------------------------------------- account variables
+
+/** Metadata only: the host never returns a value, and the form clears it as soon as it is stored. */
+let variableState = { variables: [], pending: [], error: '' };
+/** One entry ID per attempt, so repeating an interrupted save cannot create a duplicate. */
+let variableAttempt = null;
+const VARIABLE_NAME = /^[A-Za-z_][A-Za-z0-9_]{0,127}$/;
+const UNSAFE_TEXT = /[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/;
+
+async function loadVariables() {
+  try {
+    const reply = await invoke('variable_list');
+    variableState = { variables: reply.variables, pending: reply.pending, error: '' };
+  } catch (error) {
+    variableState = { variables: [], pending: [], error: String(error?.message ?? error) };
+  }
+  renderVariables();
+}
+
+/** Plain text only: names and descriptions are user data, never markup or instructions. */
+function renderVariables() {
+  const { variables, pending, error } = variableState;
+  const query = $('#variables-search').value.trim().toLowerCase();
+  const shown = variables.filter(v => !query || v.name.toLowerCase().includes(query) || v.description.toLowerCase().includes(query));
+  const list = $('#variables');
+  list.replaceChildren();
+  $('#variables-count').hidden = !variables.length;
+  $('#variables-count').textContent = tn(variables.length, '{n} variable', '{n} variables');
+  $('#variables-search-field').hidden = variables.length < 6;
+  if (error) {
+    list.append(el('p', { class: 'hint', role: 'status', textContent: tx(error) }));
+  } else if (!variables.length) {
+    list.append(el('p', { class: 'hint', textContent: t('No variables yet. Add one below, or ask your agent to request one.') }));
+  } else if (!shown.length) {
+    list.append(el('p', { class: 'hint', textContent: t('No variable matches this search.') }));
+  }
+  for (const variable of shown) {
+    const title = el('span', { class: 'cred-name', textContent: variable.name, translate: 'no' });
+    list.append(el('div', { class: 'row' }, rowText(title, variable.description, badge(t('Stored · version {n}', { n: variable.version }), 'ok'))));
+  }
+  renderPendingVariables(pending);
+  updateVariableForm();
+}
+
+function renderPendingVariables(pending) {
+  const box = $('#variables-pending');
+  box.hidden = !pending.length;
+  box.replaceChildren();
+  if (!pending.length) return;
+  box.append(el('p', { class: 'hint', textContent: t('Your agent asked you to store these. Type each value here: the agent never sees it.') }));
+  for (const entry of pending) {
+    const title = el('span', { class: 'cred-name', textContent: entry.name, translate: 'no' });
+    const input = el('textarea', { class: 'secret-entry', rows: 1, autocomplete: 'off', autocapitalize: 'off', spellcheck: false,
+      placeholder: t('Enter the value'), 'aria-label': t('Value of {name}', { name: entry.name }) });
+    const save = el('button', { textContent: t('Save'), disabled: true });
+    const cancel = el('button', { class: 'secondary', textContent: t('Cancel'), 'aria-label': t('Cancel request for {name}', { name: entry.name }) });
+    input.oninput = () => { save.disabled = !input.value; };
+    save.onclick = () => busy(save, async () => {
+      checkVariableValue(input.value);
+      await invoke('variable_entry_complete', { request: entry.request, value: input.value });
+      input.value = '';
+      await loadVariables();
+      done(t('{name} stored.', { name: entry.name }));
+    });
+    cancel.onclick = () => busy(cancel, async () => {
+      await invoke('variable_entry_cancel', { request: entry.request });
+      await loadVariables();
+      done(t('Request for {name} cancelled.', { name: entry.name }));
+    });
+    box.append(el('div', { class: 'row' }, rowText(title, entry.description, badge(t('Waiting for you'), 'warn')), input, save, cancel));
+  }
+}
+
+function checkVariableValue(value) {
+  if (!value || value.includes('\u0000') || new TextEncoder().encode(value).length > 16384) throw t('A value has 1 byte to 16 KiB of text without NUL characters.');
+}
+
+function variableForm() {
+  return { name: $('#variable-name').value.trim(), description: $('#variable-description').value.trim(), value: $('#variable-value').value };
+}
+function updateVariableForm() {
+  const form = variableForm();
+  $('#variable-create').disabled = !form.name || !form.description || !form.value;
+}
+
+$('#variables-search').oninput = renderVariables;
+for (const id of ['#variable-name', '#variable-description', '#variable-value']) $(id).oninput = updateVariableForm;
+$('#variable-show').onchange = event => $('#variable-value').classList.toggle('shown', event.target.checked);
+$('#variable-create').onclick = event => busy(event.currentTarget, async () => {
+  const form = variableForm();
+  if (!VARIABLE_NAME.test(form.name)) throw t('A variable name uses letters, digits and _, cannot start with a digit and has at most 128 characters.');
+  if (form.description.length > 500 || UNSAFE_TEXT.test(form.description)) throw t('A description is plain text on one line, up to 500 characters.');
+  checkVariableValue(form.value);
+  const fingerprint = JSON.stringify([form.name, form.description, form.value]);
+  if (variableAttempt?.fingerprint !== fingerprint) variableAttempt = { id: crypto.randomUUID(), fingerprint };
+  const reply = await invoke('variable_create', { id: variableAttempt.id, ...form });
+  variableAttempt = null;
+  for (const id of ['#variable-name', '#variable-description', '#variable-value']) $(id).value = '';
+  await loadVariables();
+  done(reply.replayed ? t('{name} was already stored.', { name: form.name }) : t('{name} stored.', { name: form.name }));
+});
+setInterval(() => { if (tab === 'settings' && !$('#panel-variables').closest('[role=tabpanel]').hidden) loadVariables(); }, 10_000);
 
 const effortNames = { default: t('Model default'), none: t('No reasoning'), minimal: t('Minimal'), low: t('Low'), medium: t('Medium'), high: t('High'), xhigh: t('Very high'), max: t('Maximum') };
 let llmCatalog = { providers: [] };

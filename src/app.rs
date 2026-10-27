@@ -40,6 +40,7 @@ mod mcp;
 mod notes;
 mod skill;
 mod tools;
+mod variables;
 mod web;
 
 /// What the process owning the host can do beyond operations: a Tauri window, or nothing.
@@ -110,6 +111,7 @@ pub(crate) struct DesktopState {
     activity_graph: Mutex<Option<Arc<crate::adapters::graph::Graph>>>,
     activity_recovered: Mutex<Option<PathBuf>>,
     implementation: implementation::State,
+    variables: variables::State,
 }
 
 #[derive(Serialize)]
@@ -507,6 +509,7 @@ pub(crate) fn init_state(config_dir: &Path, data_dir: &Path) -> Result<DesktopSt
     Ok(DesktopState {
         authority: web::account_scope(&config_dir)?,
         implementation: implementation::State::new(config_path.parent().unwrap())?,
+        variables: variables::State::new(config_path.parent().unwrap()),
         operations: Mutex::new(()),
         loaded_config: Mutex::new(None),
         config_path,
