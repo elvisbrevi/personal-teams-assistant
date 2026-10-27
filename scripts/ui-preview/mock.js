@@ -379,7 +379,8 @@
     },
     notes_remove: args => { notes.splice(notes.findIndex(n => n.id === args.id), 1); return { removed: args.id }; },
     // Account variables: the list is metadata only; only variable_reveal returns a (synthetic) value.
-    variable_list: () => ({ variables: structuredClone(variables), total: variables.length, pending: structuredClone(pendingVariables),
+    variable_list: () => ({ variables: structuredClone(window.__ptaVariablesFor?.[window.__ptaStanding?.account_key] ?? variables), total: variables.length, pending: structuredClone(pendingVariables),
+      standing: window.__ptaStanding ? structuredClone(window.__ptaStanding) : undefined,
       sync: structuredClone(window.__ptaVariableSync || { mode: 'authoritative', state: 'authoritative', revision: 7 }),
       limits: { name: 128, description: 500, value_bytes: 16384, variables: 500 } }),
     // A connected installation's mirror: Synchronize now asks the coordinator, which may be unreachable.
@@ -391,7 +392,7 @@
       return { sync: structuredClone(sync), changes: { added: 0, updated: 0, removed: 0 } };
     },
     // An installation signed in to an account: the account configuration it loaded, and Synchronize now.
-    portable_status: () => ({ sync: structuredClone(window.__ptaAccountConfig || { mode: 'authoritative', state: 'authoritative', revision: { generation: 3, digest: 'abcdef012345' } }) }),
+    portable_status: () => ({ standing: window.__ptaStanding ? structuredClone(window.__ptaStanding) : undefined, sync: structuredClone(window.__ptaAccountConfig || { mode: 'authoritative', state: 'authoritative', revision: { generation: 3, digest: 'abcdef012345' } }) }),
     portable_sync: args => {
       const sync = window.__ptaAccountConfig;
       if (!sync || sync.mode !== 'replica') return { sync: { mode: 'authoritative', state: 'authoritative' } };
@@ -453,7 +454,7 @@
       if (index >= 0) pendingVariables.splice(index, 1);
       return { request: args.request, state: 'cancelled' };
     },
-    variable_consumer_list: () => ({ launchers_available: true, launchers: structuredClone(launchers), consumers: [{ id: 'deepseek', title: 'DeepSeek API',
+    variable_consumer_list: () => ({ standing: window.__ptaStanding ? structuredClone(window.__ptaStanding) : undefined, launchers_available: true, launchers: structuredClone(launchers), consumers: [{ id: 'deepseek', title: 'DeepSeek API',
       summary: 'The key the assistant uses to call the DeepSeek language-model API when DeepSeek is in the model chain.', destination: 'https://api.deepseek.com', slot: 'api_key', operations: ['check'], binding: bindingView() }] }),
     variable_consumer_bind: args => {
       window.__ptaConsumerCalls.push({ method: 'bind', ...args });

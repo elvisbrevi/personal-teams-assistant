@@ -484,6 +484,11 @@ struct Failure {
     exit: i32,
     message: &'static str,
 }
+const REVOKED: Failure = Failure {
+    code: "not_ready",
+    exit: 3,
+    message: standing::REVOKED,
+};
 const UNREACHABLE: Failure = Failure {
     code: "dependency_or_network",
     exit: 5,
@@ -557,6 +562,15 @@ async fn call_coordinator(
     implementation::fleet::account_reply(state, method, args).await
 }
 
+/// The failure of an exchange that did not return: a credential the coordinator no longer
+/// accepts is told apart from an outage.
+fn unreachable(error: &anyhow::Error) -> Failure {
+    match standing::refusal(error) {
+        Some(standing::Refusal::Rejected) => REVOKED,
+        _ => UNREACHABLE,
+    }
+}
+
 struct Fetched {
     source: String,
     revision: Revision,
@@ -575,7 +589,7 @@ async fn fetch_part(
         &json!({"section":section,"offset":offset,"limit":core::NOTES_PAGE}),
     )
     .await
-    .map_err(|_| UNREACHABLE)?
+    .map_err(|error| unreachable(&error))?
     .ok_or(UNREACHABLE)?;
     if reply["ok"] != true {
         let unsupported = reply["message"]
@@ -1010,12 +1024,17 @@ pub(super) async fn operate(host: &Arc<Host>, request: &control::Request) -> Rep
             let Some(link) = link else {
                 // Coordinator or standalone installation: its own configuration is the authority.
                 return match authoritative(host).await {
-                    Ok(sync) => Reply::success(json!({"sync": sync})),
+                    Ok(sync) => Reply::success(
+                        json!({"sync": sync, "standing": host.state.standing.view(None)}),
+                    ),
                     Err(_) => refused("The configuration could not be read."),
                 };
             };
             if method == "portable_status" {
-                return Reply::success(json!({"sync": describe(host, &link, true).await}));
+                return Reply::success(json!({
+                    "sync": describe(host, &link, true).await,
+                    "standing": host.state.standing.view(Some(&link)),
+                }));
             }
             synchronize(host, &link, args.reset, Mode::Explicit).await
         }
@@ -1039,6 +1058,7 @@ pub(super) async fn operate(host: &Arc<Host>, request: &control::Request) -> Rep
             .await
             {
                 Ok(Some(outcome)) => outcome,
+                Err(error) => return failure_reply(&unreachable(&error)),
                 _ => return failure_reply(&UNREACHABLE),
             };
             if outcome["ok"] != true {

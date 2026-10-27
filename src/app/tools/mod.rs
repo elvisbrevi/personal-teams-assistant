@@ -233,7 +233,7 @@ pub(super) const TOOLS: &[Tool] = &[
     Tool {
         name: "portable_status",
         title: "Account configuration synchronization status",
-        description: "The loaded and saved revisions, last synchronization time, state, unsaved local changes, sources/questions unavailable on this computer, the local setup still required (repository folders, providers, Microsoft sign-in, directories) and the list of portable fields. Does not contact the coordinator. Safe to repeat.",
+        description: "The loaded and saved revisions, last synchronization time, state, unsaved local changes, sources/questions unavailable on this computer, the local setup still required (repository folders, providers, Microsoft sign-in, directories) and the list of portable fields. Also reports `standing` (live, unknown, offline, revoked or signed_out) from the latest exchange with the coordinator, with when it was last confirmed and how to recover. Does not contact the coordinator. Safe to repeat.",
         effect: Effect::Read,
         schema: || object(json!({}), &[]),
     },
@@ -331,7 +331,7 @@ pub(super) const TOOLS: &[Tool] = &[
     Tool {
         name: "consumer_bind",
         title: "Use a variable for a consumer",
-        description: "Make a built-in consumer (for example deepseek) use one stored variable, chosen by its ID from variable_list. The consumer's own rules are checked against the value without showing it. The destination and operation are fixed in code; nothing in a name or description can change them. A running assistant applies the change when it restarts. Needs the user's confirmation.",
+        description: "Make a built-in consumer (for example deepseek) use one stored variable, chosen by its ID from variable_list. The consumer's own rules are checked against the value without showing it. The destination and operation are fixed in code; nothing in a name or description can change them. A running assistant applies the change when it restarts. On an installation signed in to a coordinator this needs a live coordinator answer: offline is `dependency_or_network` and a revoked installation is `not_ready`, never a fallback. Needs the user's confirmation.",
         effect: Effect::External,
         schema: || {
             object(
@@ -355,7 +355,7 @@ pub(super) const TOOLS: &[Tool] = &[
     Tool {
         name: "consumer_check",
         title: "Check a consumer's variable",
-        description: "Use the bound variable once against the consumer's fixed destination to learn whether it is accepted. Returns the reference (ID, name, version) and a status only; the value is never returned. Fails if the variable was deleted, changed from the version you pass, or the account or device authority changed. Needs the user's confirmation.",
+        description: "Use the bound variable once against the consumer's fixed destination to learn whether it is accepted. Returns the reference (ID, name, version) and a status only; the value is never returned. Fails if the variable was deleted, changed from the version you pass, or the account or device authority changed (offline: `dependency_or_network`; revoked or signed out: `not_ready`). Needs the user's confirmation.",
         effect: Effect::External,
         schema: || {
             object(
@@ -391,7 +391,7 @@ pub(super) const TOOLS: &[Tool] = &[
     Tool {
         name: "launcher_run",
         title: "Run a local launcher",
-        description: "Run an approved launcher: its program receives only the variables it names, resolved now under live account authority. Returns status, exit code, duration and the variable references used; the program's output is not captured and never returned. Fails before starting if a variable was deleted or differs from a version you pin. Needs the user's confirmation.",
+        description: "Run an approved launcher: its program receives only the variables it names, resolved now under live account authority. Returns status, exit code, duration and the variable references used; the program's output is not captured and never returned. Fails before starting if a variable was deleted, differs from a version you pin or the coordinator cannot be reached or no longer accepts this installation. Needs the user's confirmation.",
         effect: Effect::External,
         schema: || {
             object(

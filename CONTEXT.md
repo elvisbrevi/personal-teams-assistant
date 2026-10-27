@@ -74,6 +74,10 @@ _Avoid_: story, parent
 The preferences, model choices, sources with their audiences, contexts, questions and verified notes that follow an assistant account to every installation signed in to it. Folders, credentials, sign-ins and tunnels are never part of it.
 _Avoid_: profile (the profile is one computer's whole set of files), settings sync
 
+**Account standing**:
+Whether an installation signed in to an account may still act for it, from its latest exchange with the coordinator: live, offline, signed out or revoked. Cached configuration stays readable in every state; a new use of an account variable needs a live answer.
+_Avoid_: connection status, login state
+
 **Unavailable source**:
 A source of the account that this computer cannot read because its repository has no folder here; it keeps its meaning for the account and is never reinterpreted.
 _Avoid_: broken source, missing source

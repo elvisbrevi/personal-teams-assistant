@@ -1,4 +1,4 @@
-use super::*;
+use super::{standing::Refusal, *};
 
 fn client() -> Result<reqwest::Client> {
     Ok(reqwest::Client::builder()
@@ -21,12 +21,14 @@ pub(super) fn endpoint(origin: &str) -> Result<url::Url> {
     url.set_path("/api/machines");
     Ok(url)
 }
-/// One exchange with the coordinator: its whole reply, successful or not.
+/// One exchange with the coordinator: its whole reply, successful or not. A refusal of the
+/// credential and an outage are told apart (`standing::Refusal`) so a client can say which.
 async fn exchange(connection: &Connection, mut body: Value) -> Result<Value> {
     body["id"] = json!(connection.id);
+    let token = security::secret("PTA_MACHINE_TOKEN").map_err(|_| Refusal::Rejected)?;
     let response = client()?
         .post(endpoint(&connection.url)?)
-        .bearer_auth(security::secret("PTA_MACHINE_TOKEN")?)
+        .bearer_auth(token)
         .json(&body)
         .timeout(Duration::from_secs(
             if body["args"]["method"] == "machine_assistant" {
@@ -36,11 +38,17 @@ async fn exchange(connection: &Connection, mut body: Value) -> Result<Value> {
             },
         ))
         .send()
-        .await?;
-    ensure!(
-        response.status().is_success(),
-        "Machine coordinator is unavailable or this machine was disconnected."
-    );
+        .await
+        .map_err(|_| Refusal::Unavailable)?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(if matches!(status.as_u16(), 401 | 403) {
+            Refusal::Rejected
+        } else {
+            Refusal::Unavailable
+        }
+        .into());
+    }
     crate::adapters::bounded_json(response, 1_000_000).await
 }
 async fn remote(connection: &Connection, body: Value) -> Result<Value> {
@@ -130,8 +138,7 @@ pub(super) async fn operate(host: &Arc<Host>, method: &str, args: &Value) -> Res
                 id: data.id.clone(),
             };
             state.reset_roots(&mut data)?;
-            host.state.variables.forget_catalog();
-            host.state.portable.forget();
+            standing::forget_account(&host.state);
             write_private(
                 &state.root.join("connection.json"),
                 &serde_json::to_string(&connection)?,
@@ -143,16 +150,24 @@ pub(super) async fn operate(host: &Arc<Host>, method: &str, args: &Value) -> Res
                 host.state.running.lock().await.is_none(),
                 "Stop the Teams assistant before disconnecting this machine."
             );
+            // Signing out always works on this computer. Telling the coordinator is attempted
+            // first; a credential it already refuses is revoked (so repeating is safe) and an
+            // unreachable coordinator leaves this machine listed there until it is revoked from
+            // another signed-in client.
+            let mut notified = true;
             if let Some(connection) = state.connection()? {
-                remote(&connection, json!({"action":"disconnect"})).await?;
+                match remote(&connection, json!({"action":"disconnect"})).await {
+                    Ok(_) => {}
+                    Err(error) if standing::refusal(&error) == Some(Refusal::Rejected) => {}
+                    Err(_) => notified = false,
+                }
             }
             if state.root.join("connection.json").exists() {
                 fs::remove_file(state.root.join("connection.json"))?;
             }
             let _ = security::delete_desktop_secret("default", "PTA_MACHINE_TOKEN");
-            host.state.variables.forget_catalog();
-            host.state.portable.forget();
-            Ok(json!({"disconnected":true}))
+            standing::forget_account(&host.state);
+            Ok(json!({"disconnected":true,"coordinator_notified":notified}))
         }
         "machine_teams" => {
             if let Some(connection) = state.connection()? {
@@ -277,9 +292,9 @@ pub(in crate::app) async fn teams_allowed(state: &DesktopState) -> Result<bool> 
     );
     let own = state.implementation.registry.lock().await.id.clone();
     if let Some(connection) = state.implementation.connection()? {
-        return Ok(
-            remote(&connection, json!({"action":"lease","id":own})).await?["allowed"] == true,
-        );
+        let reply = remote(&connection, json!({"action":"lease","id":own})).await;
+        standing::note(state, &reply);
+        return Ok(reply?["allowed"] == true);
     }
     let mut data = state.implementation.registry.lock().await;
     let result = leased(&mut data, &own);
@@ -396,13 +411,12 @@ pub(in crate::app) async fn protocol(host: &Arc<Host>, args: &Value) -> Result<V
                 ))
                 .await
             }
-            "variable_catalog" | "variable_create" | "variable_update" | "variable_delete" => {
-                variables::machine_call(
-                    host,
-                    args["method"].as_str().unwrap_or_default(),
-                    &args["args"],
-                )
-            }
+            "variable_catalog" | "variable_resolve" | "variable_create" | "variable_update"
+            | "variable_delete" => variables::machine_call(
+                host,
+                args["method"].as_str().unwrap_or_default(),
+                &args["args"],
+            ),
             "portable_snapshot"
             | "portable_apply"
             | "portable_note_save"
@@ -452,15 +466,6 @@ pub(super) async fn coordinator(
         None => Ok(None),
     }
 }
-/// An account call to the coordinator that keeps its refusal (`code`, `message`) for the caller,
-/// or `None` when this installation is not connected to one.
-pub(in crate::app) async fn coordinator_reply(
-    host: &Arc<Host>,
-    method: &str,
-    args: &Value,
-) -> Result<Option<Value>> {
-    account_reply(&host.state, method, args).await
-}
 /// The same exchange for code that holds the profile state rather than the host.
 pub(in crate::app) async fn account_reply(
     state: &DesktopState,
@@ -468,12 +473,15 @@ pub(in crate::app) async fn account_reply(
     args: &Value,
 ) -> Result<Option<Value>> {
     match state.implementation.connection()? {
-        Some(connection) => exchange(
-            &connection,
-            json!({"action":"call","method":method,"args":args}),
-        )
-        .await
-        .map(Some),
+        Some(connection) => {
+            let reply = exchange(
+                &connection,
+                json!({"action":"call","method":method,"args":args}),
+            )
+            .await;
+            standing::note(state, &reply);
+            reply.map(Some)
+        }
         None => Ok(None),
     }
 }
@@ -644,13 +652,16 @@ async fn poll(host: Arc<Host>) {
                 .unwrap_or_else(|_| (cursor, Vec::new()));
             let assistant_phase = *host.state.phase.borrow();
             let roots = state.registry.lock().await.settings.roots.clone();
-            if let Ok(reply) = remote(
+            let polled = remote(
                 &connection,
                 json!({"action":"poll","id":own,"results":results,"sessions":sessions,"session_cursor":next,"assistant_phase":assistant_phase,"management_support":true,"roots":roots}),
             )
-            .await
-            {
-                if reply["session_cursor"].as_i64()==Some(next) { cursor=next; }
+            .await;
+            standing::note(&host.state, &polled);
+            if let Ok(reply) = polled {
+                if reply["session_cursor"].as_i64() == Some(next) {
+                    cursor = next;
+                }
                 results.clear();
                 if let Some(command) = reply["command"].as_object() {
                     if command["method"] == "machine_assistant" {

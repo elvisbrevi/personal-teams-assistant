@@ -1073,7 +1073,9 @@ async function editAccountMachine(machine, trigger) {
 }
 let loadedCoordinator = '';
 async function loadMachines() {
+  const epoch = accountEpoch;
   const [settings, fleet] = await Promise.all([invoke('machine_settings'), invoke('machine_list')]);
+  if (epoch !== accountEpoch) return;
   const coordinator = settings.coordinator || settings.coordinator_origin || '';
   // Refreshing after another action must not discard an address the user has typed but not yet connected.
   if ($('#machine-coordinator').value === loadedCoordinator) field('#machine-coordinator', coordinator);
@@ -1502,6 +1504,68 @@ function renderCredentials() {
   }
 }
 
+// ---------------------------------------------------------------- account standing
+
+/**
+ * The opaque identity of the account on screen (from the host's standing), and a counter that
+ * moves whenever the screen leaves an account. A reply requested before the move is dropped, so a
+ * late answer for the former account can never fill the next one's screen.
+ */
+let accountKey = null;
+let accountEpoch = 0;
+/** Whether the coordinator answered, did not, or refused this installation (offline, revoked…). */
+let accountStanding = null;
+
+/** Forget everything shown for the former account: lists, drafts, a revealed value and results. */
+function leaveAccount() {
+  accountEpoch += 1;
+  accountKey = null;
+  clearTypedVariableValues();
+  variableState = { variables: [], pending: [], error: '', sync: null };
+  variableAttempt = null;
+  consumerState = { consumers: [], launchers: [], error: '' };
+  for (const key of Object.keys(consumerChoice)) delete consumerChoice[key];
+  for (const key of Object.keys(consumerNote)) delete consumerNote[key];
+  accountConfig = null;
+  accountStanding = null;
+  renderStanding();
+  renderVariables();
+  renderConsumers();
+  renderAccountConfig();
+}
+
+/**
+ * Take a reply requested at `epoch`. False when the screen left that account meanwhile; a reply
+ * for another account than the one shown (requested after the last move) switches the screen.
+ */
+function adoptAccount(epoch, standing) {
+  if (epoch !== accountEpoch) return false;
+  const key = standing?.account_key ?? '';
+  const switched = accountKey !== null && key !== accountKey;
+  if (switched) leaveAccount();
+  accountKey = key;
+  accountStanding = standing ?? null;
+  renderStanding();
+  // Other requests of the former screen are dropped; ask again for the account now shown.
+  if (switched) setTimeout(() => { loadVariables().catch(() => {}); loadAccountConfig().catch(() => {}); }, 0);
+  return true;
+}
+
+function renderStanding() {
+  const standing = accountStanding;
+  const problem = standing && ['offline', 'revoked'].includes(standing.state);
+  const text = !problem ? '' : [
+    standing.state === 'offline' ? t('Offline') : t('Signed out or revoked'),
+    tx(standing.recovery),
+    standing.last_live_at ? t('Last confirmed {when}.', { when: ago(standing.last_live_at * 1000) }) : '',
+  ].filter(Boolean).join(' ');
+  for (const id of ['#account-standing', '#variables-standing', '#consumers-standing']) {
+    const line = $(id);
+    line.textContent = text;
+    line.hidden = !text;
+  }
+}
+
 // ---------------------------------------------------------------- account variables
 
 /** Metadata only: lists never carry a value, and the forms clear it as soon as it is stored. */
@@ -1568,10 +1632,13 @@ async function changeVariable(method, variable, extra = {}) {
 }
 
 async function loadVariables() {
+  const epoch = accountEpoch;
   try {
     const reply = await invoke('variable_list');
+    if (!adoptAccount(epoch, reply.standing)) return;
     variableState = { variables: reply.variables, pending: reply.pending, error: '', sync: reply.sync ?? null };
   } catch (error) {
+    if (epoch !== accountEpoch) return;
     variableState = { variables: [], pending: [], error: String(error?.message ?? error), sync: null };
   }
   renderVariables();
@@ -1585,7 +1652,15 @@ let accountConfig = null;
 let accountResetArmed = false;
 
 async function loadAccountConfig() {
-  try { accountConfig = (await invoke('portable_status')).sync; } catch { accountConfig = null; }
+  const epoch = accountEpoch;
+  try {
+    const reply = await invoke('portable_status');
+    if (!adoptAccount(epoch, reply.standing)) return;
+    accountConfig = reply.sync;
+  } catch {
+    if (epoch !== accountEpoch) return;
+    accountConfig = null;
+  }
   renderAccountConfig();
 }
 
@@ -1653,10 +1728,13 @@ const consumerChoice = {};
 const consumerNote = {};
 
 async function loadConsumers() {
+  const epoch = accountEpoch;
   try {
     const reply = await invoke('variable_consumer_list');
+    if (!adoptAccount(epoch, reply.standing)) return;
     consumerState = { consumers: reply.consumers, launchers: reply.launchers ?? [], error: '' };
   } catch (error) {
+    if (epoch !== accountEpoch) return;
     consumerState = { consumers: [], launchers: [], error: String(error?.message ?? error) };
   }
   renderConsumers();
@@ -3557,10 +3635,14 @@ async function machineLogin() {
     dialog.close();
     link.removeAttribute('href'); $('#machine-login-code').textContent = '';
     await loadMachines().catch(fail);
+    if (connected) { leaveAccount(); await Promise.all([loadVariables(), loadAccountConfig()]).catch(fail); }
   }
 }
 $('#machine-disconnect').onclick = () => busy($('#machine-disconnect'), async () => {
-  await invoke('machine_disconnect'); await loadMachines();
+  await invoke('machine_disconnect');
+  leaveAccount();
+  await loadMachines();
+  await Promise.all([loadVariables(), loadAccountConfig()]);
 });
 $('#todo-provider').onchange = () => {
   $('#todo-state').replaceChildren(el('option', { value: '', textContent: t('All states') }));
@@ -3999,7 +4081,7 @@ if (window.ptaTransport.browser) {
     for (const id of ['#public-url', '#bind', '#tunnel-config', '#cloudflare-tunnel']) $(id).disabled = true;
     for (const button of [$('#web-logout'), $('#web-logout-settings')]) {
       button.onclick = () => busy(button, async () => {
-        clearTypedVariableValues();
+        leaveAccount();
         const result = await window.ptaTransport.request('/api/logout', {});
         window.location.replace(result.logout_url);
       });

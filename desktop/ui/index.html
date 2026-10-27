@@ -212,6 +212,7 @@
           <div id="panel-account-config" class="panel" hidden>
             <div class="panel-head"><h2>Account configuration</h2><span id="account-config-state" class="badge muted"></span><button id="account-config-sync" type="button" class="secondary">Synchronize now</button></div>
             <p class="hint">Your preferences, model choices, sources and their audiences, contexts, questions and verified notes follow your account. Folders, credentials, sign-ins and tunnels stay on each computer.</p>
+            <p id="account-standing" class="callout warn" role="status" hidden></p>
             <p id="account-config-summary" class="hint" role="status"></p>
             <p id="account-config-problem" class="callout warn" role="status" hidden></p>
             <div id="account-config-setup" class="account-config-setup"></div>
@@ -336,6 +337,7 @@
           <div class="panel" id="panel-variables">
             <div class="panel-head"><h2>Variables</h2><span id="variables-count" class="badge muted" hidden></span><button id="variables-refresh" type="button" class="secondary">Refresh</button></div>
             <p class="hint">Private to your assistant account. Each variable has a name, a description and a value: values are encrypted, stay hidden and are never given to your agents. Describe what each one is for so you and your agents can pick the right one.</p>
+            <p id="variables-standing" class="callout warn" role="status" hidden></p>
             <p id="variables-sync" class="hint" role="status" hidden></p>
             <div id="variables-pending" class="list" hidden></div>
             <label id="variables-search-field" hidden>Search variables<input id="variables-search" type="search" autocomplete="off" spellcheck="false" placeholder="Name or description"></label>
@@ -352,6 +354,7 @@
           <div class="panel" id="panel-consumers">
             <h2>Where variables are used</h2>
             <p class="hint">A variable does nothing until you choose where it is used. Your agents see only names and versions, never values; every use checks your account and the variable's current version again, and a deleted variable stops working instead of falling back to another credential.</p>
+            <p id="consumers-standing" class="callout warn" role="status" hidden></p>
             <div id="consumers" class="list"></div>
             <div id="launchers" hidden>
               <h3>Approved local programs</h3>
