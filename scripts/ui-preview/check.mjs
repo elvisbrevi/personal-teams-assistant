@@ -1143,6 +1143,30 @@ for (const [label, ctx] of [['variables-desktop', {}], ['variables-phone', { vie
   await page.locator('#variables-refresh').click();
   await page.locator('#notice.ok').getByText('Variables actualizadas').waitFor();
   check(`${label}: Refresh reloads the list on request`, await page.evaluate(n => window.__ptaCalls.filter(call => call === 'variable_list').length > n, listsBefore));
+  // Consumers: pick a variable by name, test it and stop; only references and status move.
+  const consumers = page.locator('#consumers .row').first();
+  const consumerCalls = () => page.evaluate(() => window.__ptaConsumerCalls.map(call => call.method));
+  check(`${label}: the consumer states its fixed destination and shows no value`, await consumers.innerText().then(text => text.includes('https://api.deepseek.com') && text.includes('Ninguna variable elegida') && !text.includes('release.example.test')));
+  check(`${label}: choosing a variable is required before using it`, await consumers.getByRole('button', { name: 'Usar esta variable' }).isDisabled());
+  await consumers.getByRole('combobox').selectOption(DEPLOY_ID);
+  await consumers.getByRole('button', { name: 'Usar esta variable' }).click();
+  await consumers.locator('.badge', { hasText: 'Usa DEPLOY_ENDPOINT' }).waitFor();
+  check(`${label}: binding names the variable by ID and the seen version, then asks to restart`, await page.evaluate(id => {
+    const call = window.__ptaConsumerCalls.at(-1);
+    return call.method === 'bind' && call.variable === id && call.version === 3 && call.consumer === 'deepseek';
+  }, DEPLOY_ID) && await consumers.innerText().then(text => text.includes('Reinicia el asistente')));
+  await consumers.getByRole('button', { name: /^Probar clave/ }).click();
+  await consumers.getByText('aceptó la clave').waitFor();
+  check(`${label}: a test shows only a status sentence`, JSON.stringify(await consumerCalls()) === '["bind","check"]' && await consumers.innerText().then(text => !text.includes('rotated-synthetic') && !text.includes('release.example.test')));
+  check(`${label}: the approved launcher is listed as text with its variables`, await page.locator('#launchers').innerText().then(text => text.includes('release-tool') && text.includes('RELEASE_URL desde DEPLOY_ENDPOINT') && text.includes('<b>not markup</b>')) && await page.locator('#launcher-list b').count() === 0);
+  await page.evaluate(axeSource);
+  check(`${label}: consumers pass axe`, (await scan(page)).length === 0, JSON.stringify(await scan(page)));
+  check(`${label}: consumers keep the phone boundary`, await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+  await consumers.getByRole('button', { name: 'Dejar de usar' }).click();
+  await consumers.locator('.badge', { hasText: 'Ninguna variable elegida' }).waitFor();
+  await page.locator('#launcher-list').getByRole('button', { name: /^Eliminar/ }).click();
+  await page.locator('#launchers').waitFor({ state: 'hidden' });
+  check(`${label}: stopping and removing call only their own operations`, JSON.stringify(await consumerCalls()) === '["bind","check","unbind","remove"]');
   check(`${label}: variable management keeps the phone boundary`, await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
   await page.evaluate(axeSource);
   check(`${label}: variables pass axe`, (await scan(page)).length === 0, JSON.stringify(await scan(page)));

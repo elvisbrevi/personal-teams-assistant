@@ -2701,6 +2701,142 @@ async fn account_variables_are_private_to_each_account_and_never_leave_as_values
 }
 
 #[tokio::test]
+async fn consumer_bindings_are_private_per_account_and_shared_accounts_run_no_processes() {
+    use crate::security::AccountSecrets;
+    use authority::Transport::{Browser, Local, Machine};
+    const ALICE_KEY: &str = "synthetic-alice-api-key-61a8e0c4";
+    const BOB_KEY: &str = "synthetic-bob-api-key-0d7f93b2";
+    let (_dir, portal, entries, _issuer) = configured_fixture().await;
+    let hosts: Vec<_> = entries
+        .iter()
+        .map(|account| {
+            let profile = profile_dir(&portal.root, account);
+            Arc::new(Host {
+                state: init_state(&profile, &profile.join("data")).unwrap(),
+                shell: Box::new(NativeShell),
+            })
+        })
+        .collect();
+    async fn invoke(
+        host: &Arc<Host>,
+        transport: authority::Transport,
+        method: &str,
+        args: Value,
+    ) -> control::Reply {
+        let mut request = control::Request::new(method);
+        request.args = args;
+        authority::within(
+            authority::Invocation {
+                scope: host.state.authority.clone(),
+                transport,
+            },
+            control::dispatch(host, request),
+        )
+        .await
+    }
+    let (alice, bob) = (&hosts[0], &hosts[1]);
+    let mut entry = std::collections::BTreeMap::new();
+    for (host, name, value) in [(alice, "ALICE_KEY", ALICE_KEY), (bob, "BOB_KEY", BOB_KEY)] {
+        let id = uuid::Uuid::new_v4().to_string();
+        let created = invoke(
+            host,
+            Browser,
+            "variable_create",
+            json!({"id":id,"name":name,"description":format!("Synthetic {name}"),"value":value}),
+        )
+        .await;
+        assert!(created.ok, "{:?}", created.message);
+        entry.insert(name, id);
+    }
+
+    // A browser binds only its own account's entry; another account's ID is simply absent.
+    let refused = invoke(
+        bob,
+        Browser,
+        "variable_consumer_bind",
+        json!({"consumer":"deepseek","variable":entry["ALICE_KEY"]}),
+    )
+    .await;
+    assert_eq!(refused.code, "invalid_input");
+    assert!(
+        invoke(
+            alice,
+            Browser,
+            "variable_consumer_bind",
+            json!({"consumer":"deepseek","variable":entry["ALICE_KEY"]})
+        )
+        .await
+        .ok
+    );
+    let seen = invoke(bob, Browser, "variable_consumer_list", json!({})).await;
+    assert!(seen.data["consumers"][0]["binding"].is_null());
+    let own = invoke(alice, Browser, "variable_consumer_list", json!({})).await;
+    assert_eq!(
+        own.data["consumers"][0]["binding"]["variable"]["name"],
+        "ALICE_KEY"
+    );
+    for reply in [&seen, &own] {
+        let text = serde_json::to_string(reply).unwrap();
+        assert!(!text.contains(ALICE_KEY) && !text.contains(BOB_KEY));
+    }
+    // Bob has nothing bound, so a use cannot reach Alice's variable.
+    let unbound = invoke(
+        bob,
+        Browser,
+        "variable_consumer_check",
+        json!({"consumer":"deepseek"}),
+    )
+    .await;
+    assert_eq!(unbound.code, "invalid_input");
+    let (alice_credentials, bob_credentials) = (
+        crate::app::consumers::Resolver::new(alice),
+        crate::app::consumers::Resolver::new(bob),
+    );
+    assert!(alice_credentials.bound("DEEPSEEK_API_KEY").unwrap());
+    assert_eq!(
+        alice_credentials.value("DEEPSEEK_API_KEY").unwrap(),
+        ALICE_KEY
+    );
+    assert!(!bob_credentials.bound("DEEPSEEK_API_KEY").unwrap());
+
+    // No process execution for ordinary accounts, from any client; machines never reach it.
+    assert!(hosts.iter().any(|host| !host.state.authority.owner));
+    for host in &hosts {
+        for method in [
+            "variable_launcher_define",
+            "variable_launcher_remove",
+            "variable_launcher_run",
+        ] {
+            for transport in [Browser, Local, Machine] {
+                let denied = invoke(host, transport, method, json!({"id":"deploy"})).await;
+                // The installation owner's own local channel is the one place a launcher runs.
+                if host.state.authority.owner && transport == Local {
+                    continue;
+                }
+                assert!(!denied.ok, "{method} {transport:?}");
+                if !host.state.authority.owner && transport != Machine {
+                    assert!(
+                        denied
+                            .message
+                            .unwrap_or_default()
+                            .contains("OS security boundary"),
+                        "{method} {transport:?}"
+                    );
+                }
+            }
+        }
+        assert!(
+            !invoke(host, Machine, "variable_consumer_list", json!({}))
+                .await
+                .ok
+        );
+        let listed = invoke(host, Browser, "variable_consumer_list", json!({})).await;
+        assert_eq!(listed.data["launchers_available"], false);
+        assert!(listed.data.get("launchers").is_none());
+    }
+}
+
+#[tokio::test]
 async fn variable_reveal_edits_and_deletion_reach_only_the_signed_in_hosts_and_are_never_cached() {
     let (_dir, portal, entries, _server) = configured_fixture().await;
     let (alice, _alice_lock) = fake_host(&portal, &entries[0]).await;

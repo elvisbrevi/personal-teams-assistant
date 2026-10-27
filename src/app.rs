@@ -28,6 +28,7 @@ mod activity;
 mod authority;
 mod azure_cli;
 pub mod cli;
+mod consumers;
 pub mod control;
 mod diagnostics;
 mod github;

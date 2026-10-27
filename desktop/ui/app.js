@@ -1575,6 +1575,109 @@ async function loadVariables() {
     variableState = { variables: [], pending: [], error: String(error?.message ?? error) };
   }
   renderVariables();
+  await loadConsumers();
+}
+
+// ---------------------------------------------------------------- variable consumers
+
+/** Which variable each consumer uses (name and version only) and the approved local launchers. */
+let consumerState = { consumers: [], launchers: [], error: '' };
+/** The variable picked in each selector, kept across refreshes until it is applied. */
+const consumerChoice = {};
+/** The last result shown under each consumer: a status sentence, never a value. */
+const consumerNote = {};
+
+async function loadConsumers() {
+  try {
+    const reply = await invoke('variable_consumer_list');
+    consumerState = { consumers: reply.consumers, launchers: reply.launchers ?? [], error: '' };
+  } catch (error) {
+    consumerState = { consumers: [], launchers: [], error: String(error?.message ?? error) };
+  }
+  renderConsumers();
+}
+
+const CHECK_RESULTS = {
+  ok: '{destination} accepted the key.',
+  rejected: '{destination} rejected the key.',
+  failed: '{destination} answered with an unexpected error.',
+  unreachable: 'Could not reach {destination}.',
+};
+
+function consumerRow(consumer) {
+  const { id, binding } = consumer;
+  const title = el('span', { class: 'cred-name', textContent: tx(consumer.title), translate: 'no' });
+  const usable = binding?.state === 'ok';
+  const status = !binding ? badge(t('No variable chosen'), 'muted')
+    : usable ? badge(t('Using {name} · version {n}', { name: binding.variable.name, n: binding.variable.version }), 'ok')
+    : badge(binding.state === 'deleted' ? t('Variable deleted') : t('Variable missing'), 'warn');
+  const chosen = consumerChoice[id] ?? binding?.id ?? '';
+  const select = el('select', { 'aria-label': t('Variable for {consumer}', { consumer: consumer.title }) },
+    el('option', { value: '', textContent: t('Choose a variable') }),
+    variableState.variables.map(v => el('option', { value: v.id, textContent: `${v.name} · v${v.version}`, selected: v.id === chosen, translate: 'no' })));
+  const use = el('button', { type: 'button', textContent: t('Use this variable') });
+  const sync = () => { use.disabled = !select.value || (usable && select.value === binding.id); };
+  select.onchange = () => { consumerChoice[id] = select.value; sync(); };
+  sync();
+  use.onclick = () => busy(use, async () => {
+    const variable = variableState.variables.find(v => v.id === select.value);
+    const reply = await invoke('variable_consumer_bind', { consumer: id, variable: select.value, version: variable?.version });
+    delete consumerChoice[id];
+    consumerNote[id] = t('{consumer} now uses {name}.', { consumer: consumer.title, name: reply.binding.variable.name }) + (reply.restart_required ? ' ' + t('Restart the assistant to apply this change.') : '');
+    await loadConsumers();
+  });
+  const actions = [select, use];
+  if (binding) {
+    const test = el('button', { type: 'button', class: 'secondary', textContent: t('Test key'), disabled: !usable,
+      'aria-label': t('Test key with {destination}', { destination: consumer.destination }) });
+    test.onclick = () => busy(test, async () => {
+      const reply = await invoke('variable_consumer_check', { consumer: id });
+      consumerNote[id] = t(CHECK_RESULTS[reply.result.status] ?? CHECK_RESULTS.failed, { destination: consumer.destination });
+      await loadConsumers();
+    });
+    const stop = el('button', { type: 'button', class: 'secondary', textContent: t('Stop using') });
+    stop.onclick = () => busy(stop, async () => {
+      const reply = await invoke('variable_consumer_unbind', { consumer: id });
+      delete consumerChoice[id];
+      consumerNote[id] = t('{consumer} no longer uses a variable.', { consumer: consumer.title }) + (reply.restart_required ? ' ' + t('Restart the assistant to apply this change.') : '');
+      await loadConsumers();
+    });
+    actions.push(test, stop);
+  }
+  return el('div', { class: 'row variable-row' },
+    rowText(title, tx(consumer.summary), status),
+    el('p', { class: 'hint variable-note', textContent: t('Sent only to {destination}. The value is never shown here.', { destination: consumer.destination }) }),
+    el('div', { class: 'variable-actions' }, actions),
+    consumerNote[id] ? el('p', { class: 'hint variable-note', role: 'status', textContent: consumerNote[id] }) : null);
+}
+
+function launcherRow(launcher) {
+  const title = el('span', { class: 'cred-name', textContent: launcher.id, translate: 'no' });
+  const uses = launcher.variables.map(v => v.state === 'ok'
+    ? t('{env} from {name}', { env: v.env, name: v.variable.name })
+    : t('{env}: variable deleted or missing', { env: v.env })).join(', ');
+  const remove = el('button', { type: 'button', class: 'danger', textContent: t('Remove'), 'aria-label': t('Remove launcher {name}', { name: launcher.id }) });
+  remove.onclick = () => busy(remove, async () => {
+    await invoke('variable_launcher_remove', { id: launcher.id });
+    await loadConsumers();
+    done(t('Launcher {name} removed.', { name: launcher.id }));
+  });
+  return el('div', { class: 'row variable-row' },
+    rowText(title, launcher.description),
+    el('p', { class: 'hint variable-note', textContent: `${launcher.program} · ${launcher.directory}`, translate: 'no' }),
+    el('p', { class: 'hint variable-note', textContent: uses, translate: 'no' }),
+    el('div', { class: 'variable-actions' }, remove));
+}
+
+/** Plain text only: summaries come from the host's fixed registry; names and paths are user data. */
+function renderConsumers() {
+  const { consumers, launchers, error } = consumerState;
+  const list = $('#consumers');
+  list.replaceChildren();
+  if (error) list.append(el('p', { class: 'hint', role: 'status', textContent: tx(error) }));
+  for (const consumer of consumers) list.append(consumerRow(consumer));
+  $('#launchers').hidden = !launchers.length;
+  $('#launcher-list').replaceChildren(...launchers.map(launcherRow));
 }
 
 /** Plain text only: names and descriptions are user data, never markup or instructions. */
@@ -1769,7 +1872,7 @@ $('#variables-refresh').onclick = event => busy(event.currentTarget, async () =>
   done(t('Variables refreshed.'));
 });
 // The periodic refresh never rebuilds a form the user is typing in.
-const typingVariable = () => editingVariable || [...document.querySelectorAll('#variables-pending textarea')].some(field => field.value);
+const typingVariable = () => editingVariable || document.activeElement?.closest?.('#consumers') || [...document.querySelectorAll('#variables-pending textarea')].some(field => field.value);
 setInterval(() => { if (tab === 'settings' && !$('#panel-variables').closest('[role=tabpanel]').hidden && !typingVariable()) loadVariables(); }, 10_000);
 
 const effortNames = { default: t('Model default'), none: t('No reasoning'), minimal: t('Minimal'), low: t('Low'), medium: t('Medium'), high: t('High'), xhigh: t('Very high'), max: t('Maximum') };

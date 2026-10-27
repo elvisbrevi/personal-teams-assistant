@@ -102,6 +102,20 @@ Account variables
   variables entry start NAME --description TEXT  Asks for a value to be typed by the user (GUI or complete).
   variables entry replace ID  Asks for a replacement value to be typed by the user (GUI or complete).
   variables entry status|cancel|complete REQUEST  complete reads the value from stdin like create.
+  variables consumers         Built-in consumers, the variable each uses (name and version only) and approved launchers.
+  variables bind CONSUMER ID [--expected-version N] --confirmed
+                           Makes a built-in consumer (deepseek) use the variable; its value is checked, never shown.
+  variables unbind CONSUMER   Stops that use; the variable is kept.
+  variables check CONSUMER [--expected-version N] --confirmed
+                           Uses the bound variable once against the consumer's fixed destination; prints status only.
+  variables launcher list     Approved local launchers (owner's trusted machine only).
+  variables launcher define NAME --description TEXT --program PATH --directory DIR --env ENV=ID [--env ...]
+                           [--arg ARG ...] [--timeout SECONDS] --confirmed
+                           Approves a program to receive the named variables as environment variables of that one
+                           process (never arguments). Protected settings such as PATH or LD_* are refused.
+  variables launcher run NAME [--pin ENV=VERSION ...] --confirmed
+                           Runs it with the values resolved now; prints status and references, never output or values.
+  variables launcher remove NAME  Removes an approved launcher.
   variables audit [--limit N]  Operator-local: recent variable edits, deletions and reveals (never values).
   variables verify            Checks that every stored variable authenticates with the current keys.
   variables key backup --output PRIVATE_FILE  Operator-local: writes the master keys (not values) to a new 0600 file.
@@ -222,6 +236,12 @@ fn words(args: &[String]) -> Vec<&str> {
                 | "--context"
                 | "--source"
                 | "--redirect"
+                | "--program"
+                | "--directory"
+                | "--env"
+                | "--arg"
+                | "--timeout"
+                | "--pin"
         ) {
             skip = true;
         } else if !arg.starts_with("--") {
@@ -235,6 +255,45 @@ fn option<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
         .position(|a| a == flag)
         .and_then(|i| args.get(i + 1))
         .map(String::as_str)
+}
+/// Every value of a repeatable flag, in order.
+fn options<'a>(args: &'a [String], flag: &str) -> Vec<&'a str> {
+    args.iter()
+        .enumerate()
+        .filter(|(_, a)| *a == flag)
+        .filter_map(|(i, _)| args.get(i + 1))
+        .map(String::as_str)
+        .collect()
+}
+/// Access-granting steps need the user's confirmation, like `tools call ... confirmed:true`.
+fn unconfirmed(args: &[String], question: String) -> Option<Reply> {
+    (!args.iter().any(|a| a == "--confirmed")).then(|| {
+        Reply::error(
+            "invalid_input",
+            2,
+            &format!(
+                "Confirm this exact action with the user, then repeat with --confirmed: {question}"
+            ),
+        )
+    })
+}
+fn pairs<T>(
+    values: Vec<&str>,
+    parse: impl Fn(&str) -> Option<T>,
+    what: &str,
+) -> Result<std::collections::BTreeMap<String, T>> {
+    let mut map = std::collections::BTreeMap::new();
+    for value in values {
+        let (name, rest) = value
+            .split_once('=')
+            .with_context(|| format!("{what} must look like NAME=VALUE"))?;
+        let parsed = parse(rest).with_context(|| format!("invalid {what}"))?;
+        ensure!(
+            map.insert(name.to_owned(), parsed).is_none(),
+            "{what} repeats {name}"
+        );
+    }
+    Ok(map)
 }
 async fn variables_command(args: &[String]) -> Result<Reply> {
     let words = words(args);
@@ -352,6 +411,102 @@ async fn variables_command(args: &[String]) -> Result<Reply> {
             )
             .await
         }
+        ("consumers", _) => call("variable_consumer_list", json!({}), None, true).await,
+        ("bind", _) | ("check", _) => {
+            let consumer = word(2)?;
+            let version = option(args, "--expected-version")
+                .map(|v| v.parse::<u64>().context("invalid version"))
+                .transpose()?;
+            if word(1)? == "bind" {
+                let variable = word(3)?;
+                if let Some(reply) = unconfirmed(
+                    args,
+                    format!("Use variable {variable} as the {consumer} credential?"),
+                ) {
+                    return Ok(reply);
+                }
+                let mut body = json!({"consumer":consumer,"variable":variable});
+                if let Some(version) = version {
+                    body["version"] = json!(version);
+                }
+                call("variable_consumer_bind", body, None, true).await
+            } else {
+                if let Some(reply) = unconfirmed(
+                    args,
+                    format!(
+                        "Send the variable bound to {consumer} to its fixed destination to test it?"
+                    ),
+                ) {
+                    return Ok(reply);
+                }
+                call(
+                    "variable_consumer_check",
+                    json!({"consumer":consumer,"version":version}),
+                    None,
+                    true,
+                )
+                .await
+            }
+        }
+        ("unbind", _) => {
+            call(
+                "variable_consumer_unbind",
+                json!({"consumer":word(2)?}),
+                None,
+                true,
+            )
+            .await
+        }
+        ("launcher", Some("list")) => call("variable_consumer_list", json!({}), None, true).await,
+        ("launcher", Some("remove")) => {
+            call(
+                "variable_launcher_remove",
+                json!({"id":word(3)?}),
+                None,
+                true,
+            )
+            .await
+        }
+        ("launcher", Some("define")) => {
+            let env = pairs(options(args, "--env"), |v| Some(v.to_owned()), "--env")?;
+            let program = option(args, "--program").context("--program is required")?;
+            let directory = option(args, "--directory").context("--directory is required")?;
+            if let Some(reply) = unconfirmed(
+                args,
+                format!(
+                    "Allow program {program} in {directory} to receive the variables {} as environment variables?",
+                    serde_json::to_string(&env)?
+                ),
+            ) {
+                return Ok(reply);
+            }
+            let mut body = json!({"id":word(3)?,"description":description()?,"program":program,
+                "args":options(args, "--arg"),"directory":directory,"env":env});
+            if let Some(timeout) = option(args, "--timeout") {
+                body["timeout_seconds"] = json!(timeout.parse::<u64>().context("invalid timeout")?);
+            }
+            call("variable_launcher_define", body, None, true).await
+        }
+        ("launcher", Some("run")) => {
+            let name = word(3)?;
+            let versions = pairs(options(args, "--pin"), |v| v.parse::<u64>().ok(), "--pin")?;
+            if let Some(reply) = unconfirmed(
+                args,
+                format!("Run launcher {name} now, giving its program the variables it names?"),
+            ) {
+                return Ok(reply);
+            }
+            call(
+                "variable_launcher_run",
+                json!({"id":name,"versions":versions}),
+                None,
+                true,
+            )
+            .await
+            .map_err(|error| {
+                error.context("The result is unknown. The program may have run; inspect its effects before repeating.")
+            })
+        }
         ("verify", _) => call("variable_verify", json!({}), None, true).await,
         ("key", Some("backup")) => {
             let output = option(args, "--output").context("--output is required")?;
@@ -428,7 +583,37 @@ fn validate_args(args: &[String]) -> Result<()> {
         let a = args[i].as_str();
         match a {
             "--json" | "--non-interactive" | "--offline" | "--no-browser" | "--wait"
-            | "--content" | "--current-profile" | "--context-stdin" | "--value" => {}
+            | "--content" | "--current-profile" | "--context-stdin" | "--value" | "--confirmed" => {
+            }
+            "--program" | "--directory" => {
+                i += 1;
+                ensure!(
+                    args.get(i)
+                        .is_some_and(|v| std::path::Path::new(v).is_absolute()),
+                    "invalid absolute path"
+                );
+            }
+            "--env" | "--pin" => {
+                i += 1;
+                ensure!(
+                    args.get(i).is_some_and(|v| v
+                        .split_once('=')
+                        .is_some_and(|(name, rest)| !name.is_empty() && !rest.is_empty())),
+                    "invalid NAME=VALUE pair"
+                );
+            }
+            "--arg" => {
+                // A fixed argument may itself look like a flag (`--check`); it is never a value.
+                i += 1;
+                ensure!(args.get(i).is_some(), "invalid argument");
+            }
+            "--timeout" => {
+                i += 1;
+                ensure!(
+                    args.get(i).is_some_and(|v| v.parse::<u64>().is_ok()),
+                    "invalid timeout"
+                );
+            }
             "--expected-version" => {
                 i += 1;
                 ensure!(
@@ -517,6 +702,11 @@ fn validate_args(args: &[String]) -> Result<()> {
             | ["tools", "call", _]
             | ["variables", "list" | "verify" | "audit"]
             | ["variables", "search" | "create" | "update" | "delete", _]
+            | ["variables", "consumers"]
+            | ["variables", "unbind" | "check", _]
+            | ["variables", "bind", _, _]
+            | ["variables", "launcher", "list"]
+            | ["variables", "launcher", "define" | "remove" | "run", _]
             | [
                 "variables",
                 "entry",
@@ -624,12 +814,53 @@ fn validate_args(args: &[String]) -> Result<()> {
             "--description",
             p.as_slice().starts_with(&["variables", "create"])
                 || p.as_slice().starts_with(&["variables", "update"])
-                || p.as_slice().starts_with(&["variables", "entry", "start"]),
+                || p.as_slice().starts_with(&["variables", "entry", "start"])
+                || p.as_slice()
+                    .starts_with(&["variables", "launcher", "define"]),
         ),
         (
             "--expected-version",
             p.as_slice().starts_with(&["variables", "update"])
-                || p.as_slice().starts_with(&["variables", "delete"]),
+                || p.as_slice().starts_with(&["variables", "delete"])
+                || p.as_slice().starts_with(&["variables", "bind"])
+                || p.as_slice().starts_with(&["variables", "check"]),
+        ),
+        (
+            "--confirmed",
+            p.as_slice().starts_with(&["variables", "bind"])
+                || p.as_slice().starts_with(&["variables", "check"])
+                || p.as_slice()
+                    .starts_with(&["variables", "launcher", "define"])
+                || p.as_slice().starts_with(&["variables", "launcher", "run"]),
+        ),
+        (
+            "--program",
+            p.as_slice()
+                .starts_with(&["variables", "launcher", "define"]),
+        ),
+        (
+            "--directory",
+            p.as_slice()
+                .starts_with(&["variables", "launcher", "define"]),
+        ),
+        (
+            "--env",
+            p.as_slice()
+                .starts_with(&["variables", "launcher", "define"]),
+        ),
+        (
+            "--arg",
+            p.as_slice()
+                .starts_with(&["variables", "launcher", "define"]),
+        ),
+        (
+            "--timeout",
+            p.as_slice()
+                .starts_with(&["variables", "launcher", "define"]),
+        ),
+        (
+            "--pin",
+            p.as_slice().starts_with(&["variables", "launcher", "run"]),
         ),
         (
             "--value",

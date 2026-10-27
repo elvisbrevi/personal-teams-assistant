@@ -18,6 +18,25 @@ static FILE_STORE: OnceLock<RwLock<Option<PathBuf>>> = OnceLock::new();
 static PREFER_FILE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static ACCOUNT_ONLY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// An account-owned source for named application credentials: while a credential name is bound
+/// to a stored variable, only that variable supplies it. The binding never falls back to the
+/// environment or system store, so deleting or revoking the variable cannot silently switch to
+/// another credential.
+pub(crate) trait AccountSecrets: Send + Sync {
+    /// Whether this credential currently resolves from an account variable.
+    fn bound(&self, name: &str) -> Result<bool>;
+    /// The value of a bound credential, checked against live account authority.
+    fn value(&self, name: &str) -> Result<String>;
+}
+static ACCOUNT_SECRETS: RwLock<Option<std::sync::Arc<dyn AccountSecrets>>> = RwLock::new(None);
+
+pub(crate) fn account_secrets(source: Option<std::sync::Arc<dyn AccountSecrets>>) {
+    *ACCOUNT_SECRETS.write().unwrap() = source;
+}
+fn account_source() -> Option<std::sync::Arc<dyn AccountSecrets>> {
+    ACCOUNT_SECRETS.read().unwrap().clone()
+}
+
 /// Ordinary shared accounts resolve only their selected file store, even when
 /// the operator launches a host directly with inherited environment credentials.
 pub(crate) fn account_only_credentials(value: bool) {
@@ -192,6 +211,11 @@ fn validate_secret(name: &str, value: &str) -> Result<()> {
 
 pub fn secret_source(name: &str) -> Result<Option<&'static str>> {
     validate_name(name)?;
+    if let Some(source) = account_source()
+        && source.bound(name)?
+    {
+        return Ok(Some("variable"));
+    }
     if !account_only() && std::env::var_os(format!("{name}_FILE")).is_some() {
         return Ok(Some("file"));
     }
@@ -245,6 +269,13 @@ pub fn secret_source(name: &str) -> Result<Option<&'static str>> {
 
 pub fn secret(name: &str) -> Result<String> {
     validate_name(name)?;
+    if let Some(source) = account_source()
+        && source.bound(name)?
+    {
+        let value = source.value(name)?;
+        validate_secret(name, &value)?;
+        return Ok(value);
+    }
     let value = if let Some(file) = (!account_only())
         .then(|| std::env::var(format!("{name}_FILE")).ok())
         .flatten()
@@ -484,6 +515,37 @@ mod tests {
             assert!(!r.clean(s), "{s}");
         }
         assert!(r.clean("El servicio está disponible."));
+    }
+    #[test]
+    fn a_bound_account_credential_comes_only_from_its_variable() {
+        struct Account;
+        impl AccountSecrets for Account {
+            fn bound(&self, name: &str) -> Result<bool> {
+                Ok(name.starts_with("SYNTHETIC_BOUND_"))
+            }
+            fn value(&self, name: &str) -> Result<String> {
+                match name {
+                    "SYNTHETIC_BOUND_OK" => Ok("synthetic-variable-value-81c0".into()),
+                    "SYNTHETIC_BOUND_SHORT" => Ok("short".into()),
+                    _ => anyhow::bail!("deleted"),
+                }
+            }
+        }
+        account_secrets(Some(std::sync::Arc::new(Account)));
+        let outcomes = (
+            secret("SYNTHETIC_BOUND_OK"),
+            secret_source("SYNTHETIC_BOUND_OK"),
+            secret("SYNTHETIC_BOUND_SHORT"),
+            secret("SYNTHETIC_BOUND_GONE"),
+            secret_source("SYNTHETIC_UNBOUND_NAME"),
+        );
+        account_secrets(None);
+        assert_eq!(outcomes.0.unwrap(), "synthetic-variable-value-81c0");
+        assert_eq!(outcomes.1.unwrap(), Some("variable"));
+        // A bound credential that is too short or gone is an error, never another source.
+        assert!(outcomes.2.is_err());
+        assert!(outcomes.3.is_err());
+        assert_eq!(outcomes.4.unwrap(), None);
     }
     #[test]
     fn file_store_is_private_atomic_and_reports_absence() {

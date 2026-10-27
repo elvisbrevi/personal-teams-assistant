@@ -1183,7 +1183,10 @@ fn connect(path: &Path) -> Result<Connection> {
             deleted_at INTEGER NOT NULL, PRIMARY KEY (account, id));
         CREATE TABLE IF NOT EXISTS variable_audit (
             seq INTEGER PRIMARY KEY AUTOINCREMENT, account TEXT NOT NULL, portal_account TEXT,
-            at INTEGER NOT NULL, action TEXT NOT NULL, entry TEXT, outcome TEXT NOT NULL);",
+            at INTEGER NOT NULL, action TEXT NOT NULL, entry TEXT, outcome TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS consumer_bindings (
+            account TEXT NOT NULL, consumer TEXT NOT NULL, slot TEXT NOT NULL, entry TEXT NOT NULL,
+            bound_at INTEGER NOT NULL, PRIMARY KEY (account, consumer, slot));",
     )?;
     Ok(db)
 }
@@ -1230,6 +1233,9 @@ pub fn write_new_private(path: &Path, content: &str) -> Result<()> {
     file.sync_all()?;
     Ok(())
 }
+
+mod bindings;
+pub use bindings::{Binding, BoundVariable};
 
 #[cfg(test)]
 mod tests;
