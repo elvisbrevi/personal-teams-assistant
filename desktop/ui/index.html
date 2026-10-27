@@ -209,6 +209,14 @@
               <button type="button" data-theme-choice="dark" aria-pressed="false">Dark</button>
             </div>
           </div>
+          <div id="panel-account-config" class="panel" hidden>
+            <div class="panel-head"><h2>Account configuration</h2><span id="account-config-state" class="badge muted"></span><button id="account-config-sync" type="button" class="secondary">Synchronize now</button></div>
+            <p class="hint">Your preferences, model choices, sources and their audiences, contexts, questions and verified notes follow your account. Folders, credentials, sign-ins and tunnels stay on each computer.</p>
+            <p id="account-config-summary" class="hint" role="status"></p>
+            <p id="account-config-problem" class="callout warn" role="status" hidden></p>
+            <div id="account-config-setup" class="account-config-setup"></div>
+            <div class="actions"><button id="account-config-reset" type="button" class="secondary" hidden>Replace this computer's settings with the account's</button></div>
+          </div>
           <div id="panel-web-account" class="panel" hidden>
             <div class="panel-head"><h2>Your web account</h2><button id="web-logout-settings" class="secondary small">Sign out</button></div>
             <p class="hint">You signed in with GitHub. Your configuration, Teams account, credentials and history belong to your profile. Contact the portal operator to recover access.</p>

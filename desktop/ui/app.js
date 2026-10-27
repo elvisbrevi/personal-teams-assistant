@@ -128,7 +128,7 @@ function showTab(name, anchor) {
   if (name === 'knowledge') loadKnowledge().catch(fail);
   if (name === 'todo') loadTodo();
   if (name === 'agent-history') loadAgentHistory();
-  if (name === 'settings') { loadMachines().catch(fail); loadVariables(); }
+  if (name === 'settings') { loadMachines().catch(fail); loadVariables(); loadAccountConfig(); }
   const target = anchor && document.getElementById(anchor);
   // A panel inside a tab (a Settings section, an Activities view) opens that tab first.
   const owner = target && document.querySelector(`[aria-controls="${target.closest('[role=tabpanel]')?.id}"]`);
@@ -1577,6 +1577,71 @@ async function loadVariables() {
   renderVariables();
   await loadConsumers();
 }
+
+// ---------------------------------------------------------------- account configuration
+
+/** What this installation knows about the account's configuration (paths and credentials never). */
+let accountConfig = null;
+let accountResetArmed = false;
+
+async function loadAccountConfig() {
+  try { accountConfig = (await invoke('portable_status')).sync; } catch { accountConfig = null; }
+  renderAccountConfig();
+}
+
+const ACCOUNT_STATES = {
+  synced: ['Synchronized', 'ok'], stale: ['Newer version available', 'warn'], diverged: ['Unsaved changes', 'warn'],
+  conflict: ['Conflict', 'warn'], error: ['Failed', 'warn'], never: ['Not loaded yet', 'muted'], syncing: ['Synchronizing…', 'muted'],
+};
+
+function renderAccountConfig() {
+  const panel = $('#panel-account-config');
+  const sync = accountConfig;
+  panel.hidden = sync?.mode !== 'replica';
+  if (panel.hidden) return;
+  const [label, tone] = ACCOUNT_STATES[sync.state] ?? ACCOUNT_STATES.never;
+  const badge = $('#account-config-state');
+  badge.textContent = t(label);
+  badge.className = `badge ${tone}`;
+  const loaded = sync.loaded ? t('Loaded revision {loaded}; account revision {saved}.', { loaded: sync.loaded.generation, saved: (sync.saved ?? sync.loaded).generation }) : '';
+  const when = sync.synced_at ? t('Synchronized {when}.', { when: ago(sync.synced_at * 1000) }) : t('Not synchronized yet.');
+  $('#account-config-summary').textContent = `${loaded} ${when}`.trim();
+  const problem = $('#account-config-problem');
+  const message = sync.conflict ? `${t('A change conflicted with a newer one. Synchronize, review the result and try again.')} ${tx(sync.conflict)}`
+    : sync.state === 'diverged' ? t('This computer has configuration changes that were never saved to the account. Nothing was replaced.')
+    : sync.error ? tx(sync.error.message) : '';
+  problem.textContent = message.trim();
+  problem.hidden = !problem.textContent;
+  const setup = $('#account-config-setup');
+  setup.replaceChildren();
+  const items = [...(sync.local_setup ?? [])];
+  if (items.length) setup.append(el('h3', { textContent: t('Still needed on this computer') }));
+  for (const item of items) setup.append(el('p', { class: 'hint', textContent: tx(item.message) }));
+  const hidden = (sync.unavailable?.sources?.length ?? 0) + (sync.unavailable?.questions?.length ?? 0);
+  if (hidden) setup.append(el('p', { class: 'hint', textContent: tn(hidden, '{n} item from your account is unavailable on this computer.', '{n} items from your account are unavailable on this computer.') }));
+  const reset = $('#account-config-reset');
+  reset.hidden = !['diverged', 'conflict', 'error'].includes(sync.state) && !(sync.state === 'never' && sync.error);
+  reset.textContent = accountResetArmed ? t('Tap again to replace') : t("Replace this computer's settings with the account's");
+}
+
+$('#account-config-sync').onclick = event => busy(event.currentTarget, async () => {
+  try { await invoke('portable_sync'); } finally { await loadAccountConfig(); }
+  done(t('Account configuration synchronized.'));
+});
+$('#account-config-reset').onclick = event => {
+  if (!accountResetArmed) {
+    accountResetArmed = true;
+    renderAccountConfig();
+    setTimeout(() => { accountResetArmed = false; renderAccountConfig(); }, 4000);
+    return;
+  }
+  accountResetArmed = false;
+  busy(event.currentTarget, async () => {
+    try { await invoke('portable_sync', { reset: true }); } finally { await loadAccountConfig(); }
+    done(t('This computer now uses the account configuration. The previous settings are kept in a private backup.'));
+  });
+};
+setInterval(() => { if (tab === 'settings' && !$('#panel-account-config').hidden) loadAccountConfig(); }, 10_000);
 
 // ---------------------------------------------------------------- variable consumers
 

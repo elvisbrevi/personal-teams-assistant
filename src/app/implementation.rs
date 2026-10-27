@@ -257,7 +257,7 @@ impl State {
     }
 }
 
-async fn roots(host: &Host) -> Result<Vec<PathBuf>> {
+pub(super) async fn roots(host: &Host) -> Result<Vec<PathBuf>> {
     let settings = host
         .state
         .implementation

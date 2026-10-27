@@ -343,6 +343,7 @@ pub(in crate::app) async fn finish_with(
         state.reset_roots(&mut data)?;
     }
     host.state.variables.forget_catalog();
+    host.state.portable.forget();
     write_private(
         &state.root.join("connection.json"),
         &serde_json::to_string(&Connection {

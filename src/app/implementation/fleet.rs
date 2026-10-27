@@ -131,6 +131,7 @@ pub(super) async fn operate(host: &Arc<Host>, method: &str, args: &Value) -> Res
             };
             state.reset_roots(&mut data)?;
             host.state.variables.forget_catalog();
+            host.state.portable.forget();
             write_private(
                 &state.root.join("connection.json"),
                 &serde_json::to_string(&connection)?,
@@ -150,6 +151,7 @@ pub(super) async fn operate(host: &Arc<Host>, method: &str, args: &Value) -> Res
             }
             let _ = security::delete_desktop_secret("default", "PTA_MACHINE_TOKEN");
             host.state.variables.forget_catalog();
+            host.state.portable.forget();
             Ok(json!({"disconnected":true}))
         }
         "machine_teams" => {
@@ -401,6 +403,18 @@ pub(in crate::app) async fn protocol(host: &Arc<Host>, args: &Value) -> Result<V
                     &args["args"],
                 )
             }
+            "portable_snapshot"
+            | "portable_apply"
+            | "portable_note_save"
+            | "portable_note_remove"
+            | "portable_records" => {
+                portable::machine_call(
+                    host,
+                    args["method"].as_str().unwrap_or_default(),
+                    &args["args"],
+                )
+                .await
+            }
             "machine_list" | "machine_teams" => {
                 Box::pin(operate(
                     host,
@@ -445,7 +459,15 @@ pub(in crate::app) async fn coordinator_reply(
     method: &str,
     args: &Value,
 ) -> Result<Option<Value>> {
-    match host.state.implementation.connection()? {
+    account_reply(&host.state, method, args).await
+}
+/// The same exchange for code that holds the profile state rather than the host.
+pub(in crate::app) async fn account_reply(
+    state: &DesktopState,
+    method: &str,
+    args: &Value,
+) -> Result<Option<Value>> {
+    match state.implementation.connection()? {
         Some(connection) => exchange(
             &connection,
             json!({"action":"call","method":method,"args":args}),
@@ -615,6 +637,7 @@ async fn poll(host: Arc<Host>) {
             let own = state.registry.lock().await.id.clone();
             // The account's variable catalog follows this machine without delaying presence.
             variables::auto(&host);
+            portable::auto(&host);
             let (next, sessions) = state
                 .db
                 .changes(cursor)

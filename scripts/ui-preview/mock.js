@@ -390,6 +390,16 @@
       Object.assign(sync, { state: 'synced', error: null, conflict: null, revision: sync.revision + 1, synced_at: secs(NOW) });
       return { sync: structuredClone(sync), changes: { added: 0, updated: 0, removed: 0 } };
     },
+    // An installation signed in to an account: the account configuration it loaded, and Synchronize now.
+    portable_status: () => ({ sync: structuredClone(window.__ptaAccountConfig || { mode: 'authoritative', state: 'authoritative', revision: { generation: 3, digest: 'abcdef012345' } }) }),
+    portable_sync: args => {
+      const sync = window.__ptaAccountConfig;
+      if (!sync || sync.mode !== 'replica') return { sync: { mode: 'authoritative', state: 'authoritative' } };
+      window.__ptaAccountSyncs = [...(window.__ptaAccountSyncs || []), args || {}];
+      if (window.__ptaAccountFail) { sync.state = 'error'; sync.error = { code: 'dependency_or_network', message: "The coordinator could not be reached, or this installation is no longer connected to it. This computer's configuration is unchanged." }; throw new Error(sync.error.message); }
+      Object.assign(sync, { state: 'synced', error: null, conflict: null, local_changes: false, loaded: { generation: 5, digest: 'abc' }, saved: { generation: 5, digest: 'abc' }, synced_at: secs(NOW) });
+      return { sync: structuredClone(sync), changes: { changed: true } };
+    },
     variable_create: args => {
       window.__ptaVariableCreates.push({ id: args.id, name: args.name, description: args.description, valueLength: args.value.length });
       if (window.__ptaVariableError) throw new Error('The result is unknown.');
