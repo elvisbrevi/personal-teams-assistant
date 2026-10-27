@@ -496,7 +496,7 @@ async fn fake_host(portal: &Portal, account: &Account) -> (MockServer, fs::File)
         &dir.join("control.json"),
         &json!({"contract":1,"port":port,"token":"synthetic-ipc-token",
         "wiki_support":true,"activity_registration_support":true,"web_support":true,"web_access_support":true,"implementation_support":true,"machine_pairing_support":true,
-        "shared_accounts_support":true,"account_authority_support":true,"account_binding":{"id":account.id,"version":account.version},
+        "machine_login_support":true,"shared_accounts_support":true,"account_authority_support":true,"account_binding":{"id":account.id,"version":account.version},
         "browser_token":"synthetic-browser-token","machine_token":"synthetic-machine-token"})
         .to_string(),
     )
@@ -1030,7 +1030,8 @@ fn legacy_accounts_preserve_ids_current_profile_hashes_and_credentials_without_a
 fn browser_allows_shared_implementation_tools_but_rejects_internal_worker_operations() {
     let (_dir, portal, entries) = fixture();
     for tool in super::super::tools::TOOLS.iter().filter(|tool| {
-        super::super::implementation::handles(tool.name)
+        (super::super::implementation::handles(tool.name)
+            && !tool.name.starts_with("machine_login"))
             || matches!(tool.name, "azure_cli_status" | "github_cli_status")
             || tool.name.ends_with("azure_cli_login")
     }) {
@@ -1042,11 +1043,16 @@ fn browser_allows_shared_implementation_tools_but_rejects_internal_worker_operat
             tool.name
         );
     }
+    // The portal profile is the coordinator: a browser approves other computers, never joins.
     for method in [
         "implementation_launch",
         "implementation_local",
         "machine_register",
         "machine_protocol",
+        "machine_login",
+        "machine_login_status",
+        "machine_login_finish",
+        "machine_login_cancel",
     ] {
         assert!(
             portal
@@ -1613,4 +1619,542 @@ async fn an_exited_managed_child_cannot_quit_a_replacement_host_for_the_same_pro
     .shutdown()
     .await;
     assert!(replacement.received_requests().await.unwrap().is_empty());
+}
+
+// Browser-assisted machine sign-in: synthetic accounts, installations and verifiers only.
+fn login_verifier() -> (String, String) {
+    let verifier = security::random_secret();
+    let challenge = format!("{:x}", Sha256::digest(verifier.as_bytes()));
+    (verifier, challenge)
+}
+async fn machine_post(portal: &Arc<Portal>, body: Value, bearer: Option<&str>) -> Response {
+    let mut request = Request::builder()
+        .method("POST")
+        .uri("/api/machines")
+        .header(header::HOST, "localhost:38656")
+        .header(header::CONTENT_TYPE, "application/json");
+    if let Some(bearer) = bearer {
+        request = request.header(header::AUTHORIZATION, format!("Bearer {bearer}"));
+    }
+    router(portal.clone())
+        .oneshot(request.body(Body::from(body.to_string())).unwrap())
+        .await
+        .unwrap()
+}
+async fn start_login(
+    portal: &Arc<Portal>,
+    machine: &str,
+    challenge: &str,
+    expected: Value,
+) -> String {
+    let response = machine_post(
+        portal,
+        json!({"action":"login_start","id":machine,"name":"Synthetic laptop","os":"windows",
+            "installation":"a".repeat(64),"challenge":challenge,"expected_account":expected}),
+        None,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let reply = json_body(response).await;
+    assert_eq!(reply["ok"], true, "{reply}");
+    reply["data"]["transaction"].as_str().unwrap().to_owned()
+}
+async fn login_poll(
+    portal: &Arc<Portal>,
+    action: &str,
+    machine: &str,
+    transaction: &str,
+    verifier: &str,
+) -> Response {
+    machine_post(
+        portal,
+        json!({"action":action,"id":machine,"transaction":transaction,"verifier":verifier}),
+        None,
+    )
+    .await
+}
+async fn registration_mock(server: &MockServer) {
+    Mock::given(method("POST"))
+        .and(path("/control"))
+        .and(wiremock::matchers::body_partial_json(
+            json!({"method":"machine_register"}),
+        ))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(control::Reply::success(
+                json!({"token":"synthetic-machine-credential-0000000000000"}),
+            )),
+        )
+        .with_priority(1)
+        .mount(server)
+        .await;
+}
+
+#[tokio::test]
+async fn machine_login_needs_browser_trust_and_the_initiating_installations_verifier() {
+    let (_dir, portal, entries, _server) = configured_fixture().await;
+    let (host, _lock) = fake_host(&portal, &entries[0]).await;
+    registration_mock(&host).await;
+    let machine = uuid::Uuid::new_v4().to_string();
+    let (verifier, challenge) = login_verifier();
+    let start = json!({"action":"login_start","id":machine,"name":"Synthetic laptop","os":"windows",
+        "installation":"a".repeat(64),"challenge":challenge});
+    // Sign-in never accepts bearer credentials, forged authority or malformed installations.
+    for (body, bearer, status) in [
+        (
+            start.clone(),
+            Some("ghp_synthetic_github_token"),
+            StatusCode::FORBIDDEN,
+        ),
+        (
+            json!({"action":"login_start","id":machine,"name":"Laptop","os":"windows","installation":"a".repeat(64),"challenge":challenge,"account":"bob"}),
+            None,
+            StatusCode::FORBIDDEN,
+        ),
+        (
+            json!({"action":"login_start","id":"not-a-machine","name":"Laptop","os":"windows","installation":"a".repeat(64),"challenge":challenge}),
+            None,
+            StatusCode::BAD_REQUEST,
+        ),
+    ] {
+        assert_eq!(machine_post(&portal, body, bearer).await.status(), status);
+    }
+    let transaction = start_login(&portal, &machine, &challenge, Value::Null).await;
+    // Only the verifier and machine that started it can read or finish it.
+    let (other_verifier, _) = login_verifier();
+    for (id, secret) in [
+        (machine.as_str(), other_verifier.as_str()),
+        ("11111111-1111-4111-8111-111111111111", verifier.as_str()),
+    ] {
+        assert_eq!(
+            login_poll(&portal, "login_finish", id, &transaction, secret)
+                .await
+                .status(),
+            StatusCode::FORBIDDEN
+        );
+    }
+    let pending =
+        json_body(login_poll(&portal, "login_finish", &machine, &transaction, &verifier).await)
+            .await;
+    assert_eq!(pending["data"]["state"], "pending");
+
+    // The approval link survives Access and local-session redirects.
+    let (alice, csrf) = session_cookie(&portal, &entries[0]).await;
+    let location = |response: Response| {
+        response.headers()[header::LOCATION]
+            .to_str()
+            .unwrap()
+            .to_owned()
+    };
+    let enroll = format!("?enroll={transaction}");
+    assert_eq!(
+        location(
+            send(
+                &portal,
+                "GET",
+                &format!("/login{enroll}"),
+                Some(&alice),
+                None,
+                None,
+                Value::Null
+            )
+            .await
+        ),
+        format!("/{enroll}")
+    );
+    let unsigned = TestSession {
+        cookie: String::new(),
+        assertion: alice.assertion.clone(),
+    };
+    assert_eq!(
+        location(
+            send(
+                &portal,
+                "GET",
+                &format!("/{enroll}"),
+                Some(&unsigned),
+                None,
+                None,
+                Value::Null
+            )
+            .await
+        ),
+        format!("/login{enroll}")
+    );
+    assert_eq!(
+        location(
+            send(
+                &portal,
+                "GET",
+                "/login?enroll=../../evil",
+                Some(&alice),
+                None,
+                None,
+                Value::Null
+            )
+            .await
+        ),
+        "/"
+    );
+
+    // Browser decisions need the session's CSRF token and same-origin request.
+    let origin = portal.settings.origin();
+    let inspect = json!({"action":"inspect","transaction":transaction});
+    assert_eq!(
+        send(
+            &portal,
+            "POST",
+            "/api/enrollment",
+            Some(&alice),
+            None,
+            Some(&origin),
+            inspect.clone()
+        )
+        .await
+        .status(),
+        StatusCode::FORBIDDEN
+    );
+    let shown = json_body(
+        send(
+            &portal,
+            "POST",
+            "/api/enrollment",
+            Some(&alice),
+            Some(&csrf),
+            Some(&origin),
+            inspect,
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(shown["ok"], true, "{shown}");
+    assert_eq!(shown["data"]["machine"]["name"], "Synthetic laptop");
+    assert_eq!(shown["data"]["machine"]["os"], "windows");
+    assert_eq!(shown["data"]["username"], "alice");
+    assert!(!shown.to_string().contains(&verifier));
+    // Opening and inspecting in a browser registers nothing.
+    assert!(host.received_requests().await.unwrap().is_empty());
+    let trusted = json_body(
+        send(
+            &portal,
+            "POST",
+            "/api/enrollment",
+            Some(&alice),
+            Some(&csrf),
+            Some(&origin),
+            json!({"action":"trust","transaction":transaction}),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(trusted["ok"], true, "{trusted}");
+    // One decision only: another account cannot take over an approved request.
+    let (bob, bob_csrf) = session_cookie(&portal, &entries[1]).await;
+    let taken = json_body(
+        send(
+            &portal,
+            "POST",
+            "/api/enrollment",
+            Some(&bob),
+            Some(&bob_csrf),
+            Some(&origin),
+            json!({"action":"trust","transaction":transaction}),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(taken["ok"], false);
+    let approved =
+        json_body(login_poll(&portal, "login_status", &machine, &transaction, &verifier).await)
+            .await;
+    assert_eq!(approved["data"]["state"], "approved");
+    assert!(host.received_requests().await.unwrap().is_empty());
+
+    let finished =
+        json_body(login_poll(&portal, "login_finish", &machine, &transaction, &verifier).await)
+            .await;
+    assert_eq!(finished["ok"], true, "{finished}");
+    assert_eq!(finished["data"]["account"], 1001);
+    assert_eq!(finished["data"]["username"], "alice");
+    let requests = host.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 1);
+    let request: Value = serde_json::from_slice(&requests[0].body).unwrap();
+    assert_eq!(request["method"], "machine_register");
+    assert_eq!(request["args"]["id"], machine.as_str());
+    assert_eq!(request["args"]["enrollment"], "login");
+    assert_eq!(request["args"]["installation"], "a".repeat(64));
+    let forwarded = request.to_string();
+    assert!(!forwarded.contains(&verifier) && !forwarded.contains(&transaction));
+    // Single use: a replayed finish issues nothing and does not reach the host again.
+    let replay =
+        json_body(login_poll(&portal, "login_finish", &machine, &transaction, &verifier).await)
+            .await;
+    assert_eq!(replay["data"]["state"], "expired");
+    assert_eq!(host.received_requests().await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn machine_login_denied_mismatched_revoked_expired_and_cancelled_requests_issue_nothing() {
+    let (_dir, portal, entries, _server) = configured_fixture().await;
+    let (host, _lock) = fake_host(&portal, &entries[1]).await;
+    registration_mock(&host).await;
+    let machine = uuid::Uuid::new_v4().to_string();
+    let finish = |transaction: String, verifier: String| {
+        let portal = portal.clone();
+        let machine = machine.clone();
+        async move {
+            json_body(login_poll(&portal, "login_finish", &machine, &transaction, &verifier).await)
+                .await["data"]["state"]
+                .clone()
+        }
+    };
+    // A computer already in Alice's account cannot be trusted by Bob.
+    let (verifier, challenge) = login_verifier();
+    let owned = start_login(&portal, &machine, &challenge, json!(1001)).await;
+    assert!(enrollment::inspect(&portal.root, &entries[1], &owned).is_err());
+    assert!(enrollment::decide(&portal.root, &entries[1], &owned, true).is_err());
+    enrollment::decide(&portal.root, &entries[0], &owned, false).unwrap();
+    assert_eq!(finish(owned, verifier).await, "denied");
+
+    // Approval is bound to the account version: revocation before finishing issues nothing.
+    let (verifier, challenge) = login_verifier();
+    let revoked = start_login(&portal, &machine, &challenge, Value::Null).await;
+    enrollment::decide(&portal.root, &entries[1], &revoked, true).unwrap();
+    store::edit_accounts(&portal.root, |accounts| {
+        accounts[1].version = uuid::Uuid::new_v4().to_string();
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(
+        finish(revoked.clone(), verifier.clone()).await,
+        "unavailable"
+    );
+    assert_eq!(finish(revoked, verifier).await, "expired");
+
+    // Expired requests disappear.
+    let (verifier, challenge) = login_verifier();
+    let expired = start_login(&portal, &machine, &challenge, Value::Null).await;
+    let path = portal.root.join("machine-logins.json");
+    let mut stored: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    for entry in stored.as_object_mut().unwrap().values_mut() {
+        entry["expires_at"] = json!(1);
+    }
+    write_private(&path, &stored.to_string()).unwrap();
+    assert!(enrollment::inspect(&portal.root, &entries[0], &expired).is_err());
+    assert_eq!(finish(expired, verifier).await, "expired");
+
+    // Only the initiating installation can cancel; a cancelled request cannot be trusted.
+    let (verifier, challenge) = login_verifier();
+    let cancelled = start_login(&portal, &machine, &challenge, Value::Null).await;
+    let (other, _) = login_verifier();
+    assert_eq!(
+        login_poll(&portal, "login_cancel", &machine, &cancelled, &other)
+            .await
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        json_body(login_poll(&portal, "login_cancel", &machine, &cancelled, &verifier).await).await
+            ["ok"],
+        true
+    );
+    assert!(enrollment::decide(&portal.root, &entries[0], &cancelled, true).is_err());
+    assert_eq!(finish(cancelled, verifier).await, "expired");
+    assert!(host.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn machine_login_is_rate_limited_and_never_reaches_an_older_host() {
+    let (_dir, portal, entries, _server) = configured_fixture().await;
+    let machine = uuid::Uuid::new_v4().to_string();
+    let (_, challenge) = login_verifier();
+    for _ in 0..5 {
+        start_login(&portal, &machine, &challenge, Value::Null).await;
+    }
+    // Restarting from the same installation replaces its own pending request.
+    let stored: Value =
+        serde_json::from_slice(&fs::read(portal.root.join("machine-logins.json")).unwrap())
+            .unwrap();
+    assert_eq!(stored.as_object().unwrap().len(), 1);
+    let limited = machine_post(
+        &portal,
+        json!({"action":"login_start","id":machine,"name":"Laptop","os":"linux","installation":"a".repeat(64),"challenge":challenge}),
+        None,
+    )
+    .await;
+    assert_eq!(limited.status(), StatusCode::TOO_MANY_REQUESTS);
+
+    // A host without the installation-proof check never receives a sign-in registration.
+    let (host, _lock) = fake_host(&portal, &entries[0]).await;
+    let file = profile_dir(&portal.root, &entries[0]).join("control.json");
+    let mut descriptor: Value = serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
+    descriptor
+        .as_object_mut()
+        .unwrap()
+        .remove("machine_login_support");
+    write_private(&file, &descriptor.to_string()).unwrap();
+    let other = uuid::Uuid::new_v4().to_string();
+    let (verifier, challenge) = login_verifier();
+    let transaction = start_login(&portal, &other, &challenge, Value::Null).await;
+    enrollment::decide(&portal.root, &entries[0], &transaction, true).unwrap();
+    assert_eq!(
+        login_poll(&portal, "login_finish", &other, &transaction, &verifier)
+            .await
+            .status(),
+        StatusCode::BAD_GATEWAY
+    );
+    assert!(host.received_requests().await.unwrap().is_empty());
+}
+
+struct NativeShell;
+impl Shell for NativeShell {
+    fn headless(&self) -> bool {
+        true
+    }
+    fn show(&self) -> Result<()> {
+        Ok(())
+    }
+    fn hide(&self) -> Result<()> {
+        Ok(())
+    }
+    fn open_url(&self, _: &str) -> Result<()> {
+        panic!("A headless installation returns the approval URL instead of opening it.")
+    }
+    fn exit(&self) {}
+}
+
+#[tokio::test]
+async fn machine_login_native_installation_finishes_only_after_trust_and_keeps_prior_state() {
+    let (dir, portal, entries, _server) = configured_fixture().await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let origin = format!("https://{address}");
+    write_private(
+        &portal.root.join("settings.json"),
+        &serde_json::to_string(&Settings {
+            public_url: origin.clone(),
+            ..portal.settings.clone()
+        })
+        .unwrap(),
+    )
+    .unwrap();
+    let served = Arc::new(Portal::new(portal.root.clone(), portal.binary.clone()).unwrap());
+    let (account_host, _lock) = fake_host(&served, &entries[0]).await;
+    registration_mock(&account_host).await;
+    tokio::spawn(axum::serve(listener, router(served.clone())).into_future());
+    // The coordinator protocol is exercised over loopback HTTP; production requires HTTPS.
+    let endpoint = url::Url::parse(&format!("http://{address}/api/machines")).unwrap();
+    let native = Arc::new(Host {
+        state: init_state(&dir.path().join("native"), &dir.path().join("native-data")).unwrap(),
+        shell: Box::new(NativeShell),
+    });
+    use super::implementation::login::{begin_at, cancel, finish_with, status};
+
+    let begun = begin_at(&native, &origin, endpoint.clone(), None, true)
+        .await
+        .unwrap();
+    let mut keys: Vec<_> = begun.as_object().unwrap().keys().cloned().collect();
+    keys.sort();
+    assert_eq!(
+        keys,
+        [
+            "approval_url",
+            "code",
+            "coordinator",
+            "expires_at",
+            "machine",
+            "opened",
+            "state"
+        ]
+    );
+    assert_eq!(begun["opened"], false);
+    assert_eq!(begun["machine"]["os"], std::env::consts::OS);
+    let approval = begun["approval_url"].as_str().unwrap();
+    let transaction = approval
+        .strip_prefix(&format!("{origin}/login?enroll="))
+        .unwrap()
+        .to_owned();
+    // Reusing the pending request keeps the same approval.
+    let again = begin_at(&native, &origin, endpoint.clone(), None, false)
+        .await
+        .unwrap();
+    assert_eq!(again["approval_url"], approval);
+
+    let mut stored = None;
+    let pending = finish_with(&native, |token| {
+        stored = Some(token.to_owned());
+        Ok(())
+    })
+    .await
+    .unwrap();
+    assert_eq!(pending["pending"], true);
+    assert!(stored.is_none());
+    enrollment::decide(&served.root, &entries[0], &transaction, true).unwrap();
+    assert_eq!(status(&native).await.unwrap()["state"], "approved");
+    let connected = finish_with(&native, |token| {
+        stored = Some(token.to_owned());
+        Ok(())
+    })
+    .await
+    .unwrap();
+    assert_eq!(connected["connected"], true);
+    assert_eq!(connected["username"], "alice");
+    assert_eq!(
+        stored.as_deref(),
+        Some("synthetic-machine-credential-0000000000000")
+    );
+    let connection_path = dir.path().join("native/implementation/connection.json");
+    let connection: Value = serde_json::from_slice(&fs::read(&connection_path).unwrap()).unwrap();
+    assert_eq!(connection["url"], origin.as_str());
+    assert_eq!(connection["account"], 1001);
+    assert!(
+        !fs::read_to_string(&connection_path)
+            .unwrap()
+            .contains("synthetic-machine-credential")
+    );
+    let none = status(&native).await.unwrap();
+    assert_eq!(none["state"], "none");
+    assert_eq!(none["connected"], true);
+    assert!(finish_with(&native, |_| Ok(())).await.is_err());
+
+    // A denied re-sign-in trusts nothing and leaves the previous connection in place.
+    let before = fs::read(&connection_path).unwrap();
+    let denied = begin_at(&native, &origin, endpoint.clone(), Some(1001), false)
+        .await
+        .unwrap();
+    let denied_transaction = denied["approval_url"]
+        .as_str()
+        .unwrap()
+        .rsplit('=')
+        .next()
+        .unwrap()
+        .to_owned();
+    enrollment::decide(&served.root, &entries[0], &denied_transaction, false).unwrap();
+    let mut called = false;
+    let error = finish_with(&native, |_| {
+        called = true;
+        Ok(())
+    })
+    .await
+    .unwrap_err();
+    assert!(error.to_string().contains("denied"), "{error}");
+    assert!(!called);
+    assert_eq!(fs::read(&connection_path).unwrap(), before);
+
+    // Another account cannot approve a computer bound to a different account; cancel ends it.
+    let foreign = begin_at(&native, &origin, endpoint, Some(1002), false)
+        .await
+        .unwrap();
+    let foreign_transaction = foreign["approval_url"]
+        .as_str()
+        .unwrap()
+        .rsplit('=')
+        .next()
+        .unwrap()
+        .to_owned();
+    assert!(enrollment::decide(&served.root, &entries[0], &foreign_transaction, true).is_err());
+    cancel(&native).await.unwrap();
+    assert!(enrollment::decide(&served.root, &entries[1], &foreign_transaction, true).is_err());
+    assert!(finish_with(&native, |_| Ok(())).await.is_err());
+    assert_eq!(fs::read(&connection_path).unwrap(), before);
+    assert_eq!(account_host.received_requests().await.unwrap().len(), 1);
 }

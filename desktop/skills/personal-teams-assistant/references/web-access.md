@@ -197,18 +197,64 @@ disabled identities, JWT rejection, logout/replay/expiration, exact Graph callba
 and native Tauri/CLI behavior. Use synthetic data and existing status reads; never
 send real Teams messages as a smoke test.
 
-## Authorize a computer you own
+## Add a computer you own by signing in (0.9.12+)
+
+This is the normal path for a new desktop, CLI or headless installation. Both the
+installation's CLI/host and the coordinator must advertise `machine_login_support: true`.
+
+1. On the computer to add, stop its Teams assistant. In Settings > Language models enter
+   your coordinator's HTTPS origin under Connection portal and select Connect this machine,
+   or run `pta auth machine login https://your-portal.example` (add `--no-browser` on a
+   headless host). Through MCP/CLI tools call `machine_login` with `url` (and `open: true`
+   on a desktop host). The origin is validated (HTTPS, no credentials, path or query) and
+   remembered for the next sign-in; there is no default coordinator.
+2. The host opens the system browser or returns a public approval URL
+   (`https://your-portal.example/login?enroll=…`) and a confirmation code such as
+   `1A2B-3C4D`. Nothing else leaves the host: its verifier never reaches GUI, CLI or MCP.
+3. Open the URL on any device, sign in with your GitHub identity through Access, check that
+   the page names this computer and shows the same code, then choose Trust this machine (or
+   Deny). This one confirmation is the only approval; signing in alone registers nothing.
+4. On the computer, select nothing more in the GUI (it finishes by itself), or run
+   `pta auth machine finish --wait` / call `machine_login_finish` until it returns
+   `connected`. `pta auth machine status` (`machine_login_status`) reports `pending`,
+   `approved`, `denied`, `expired` or `none` without finishing. `pta auth machine cancel`
+   (`machine_login_cancel`) withdraws a pending request.
+5. Confirm `machine_list` shows the computer. Then choose its allowed roots, and separately
+   the Teams machine and Start, if wanted: trust grants no directories, Teams ownership,
+   assistant start or provider login.
+
+Security properties: each request expires after ten minutes, is single use and bound to the
+installation's machine ID, its private installation key (sent only as a hash) and the verifier
+it holds. Approval is bound to the signed-in account and its version; disable, revoke, unbind or
+rebind before finishing issues nothing. A computer already connected to an account can only be
+re-approved by that account; another account's approval is refused and the existing
+connection stays. A different installation cannot claim an enrolled machine ID; repeating the
+sign-in from the same installation rotates its own credential without duplicate entries.
+Denied, expired, cancelled or mismatched sign-ins store nothing. Browser cookies and Access
+assertions never reach the installation, GitHub tokens are never accepted, and the credential
+is written only to the installation's own credential store. The unauthenticated start endpoint
+is rate limited and holds at most 100 pending requests.
+
+Recovery: start again after a denial or expiry. If an installation was lost or its credential
+was not stored, signing in again from the same installation replaces its own entry. If a
+different installation reports that the machine ID belongs to another installation, disconnect
+it on that computer (`machine_disconnect`) or use an operator pairing file.
+
+## Authorize a computer with a pairing file
+
+The operator-local pairing file remains available, for example for coordinators that do not
+offer browser sign-in.
 
 1. On the computer to connect, call `machine_settings` through CLI/MCP and read its `id`. Stop its Teams assistant before pairing.
 2. On your own coordinator, run `pta web machines authorize MACHINE_ID [USER] --output /private/unused/pairing.json`. This operator-local command requires an enabled admitted account. Omit USER for the owner, or supply the explicitly authorized account's local username. It writes a 0600 JSON credential file; command output contains only its path and expiration. The server stores only a hash. Never paste the file or token in chat or command arguments.
 3. Transfer that file securely to the intended computer. Run `pta tools call machine_connect < /private/path/pairing.json` there within ten minutes. Delete the file after use. It carries your coordinator URL; there is no default shared server.
 4. Confirm `machine_list` shows your computer. A pairing cannot be reused, used for a different machine or installation, or used after account revocation/reassociation. A failed registration needs a new local authorization; never retry an uncertain enrollment with the old file.
 
-Machine registration never sends a GitHub access token to a coordinator. Existing machine credentials remain account-version-bound and revocable. Initial pairing requires CLI 0.9.4 or later; the GUI's URL-only Connect action cannot authorize it. Normal management remains available in the GUI after pairing.
+Machine registration never sends a GitHub access token to a coordinator. Existing machine credentials remain account-version-bound and revocable. Initial pairing requires CLI 0.9.4 or later. The GUI's Connect action uses browser sign-in, not pairing files. Normal management remains available in the GUI after pairing.
 
 HTTPS origin responses include hostname-only HSTS. Configure matching edge HSTS for Access-generated responses without enabling parent-domain includeSubDomains or preload indiscriminately.
 
-Both CLI and host must advertise `machine_pairing_support: true` (0.9.4 or later). The portal refuses to reuse an older native/headless host, and IPC rejects machine connection before forwarding any request to one. This prevents an older host from falling back to GitHub-token enrollment.
+Both CLI and host must advertise `machine_pairing_support: true` (0.9.4 or later). The portal refuses to reuse an older native/headless host, and IPC rejects machine connection before forwarding any request to one. This prevents an older host from falling back to GitHub-token enrollment. Browser sign-in likewise requires `machine_login_support: true` (0.9.12+) on the CLI and host before any sign-in operation is sent, and the portal never forwards a sign-in registration to an account host without it. An older coordinator answers the start request as unsupported; nothing falls back to GitHub-token enrollment.
 
 ## Account and execution authority
 

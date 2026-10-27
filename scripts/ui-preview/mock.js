@@ -188,6 +188,19 @@
     ] }),
     machine_save: args => { machineSettings = { ...machineSettings, ...structuredClone(args) }; window.__ptaMachineSettings = args; return { saved: true }; },
     machine_connect: () => ({ connected: true }),
+    machine_login: args => {
+      window.__ptaMachineLogin = structuredClone(args);
+      window.__ptaMachineLoginPending = true;
+      return { state: 'pending', coordinator: 'https://assistant.example.com', approval_url: `https://assistant.example.com/login?enroll=${'a'.repeat(64)}`,
+        code: '1A2B-3C4D', expires_at: Math.floor(Date.now() / 1000) + 600, opened: true, machine: { id: machineId, name: 'Preview server', os: 'linux' } };
+    },
+    machine_login_finish: () => {
+      if (!window.__ptaMachineLoginTrusted) return { pending: true, state: 'pending' };
+      window.__ptaMachineLoginPending = false;
+      machineSettings = { ...machineSettings, coordinator: 'https://assistant.example.com' };
+      return { connected: true, coordinator: 'https://assistant.example.com', username: 'ana' };
+    },
+    machine_login_cancel: () => { window.__ptaMachineLoginPending = false; return { cancelled: true }; },
     machine_disconnect: () => ({ disconnected: true }),
     machine_assistant: args => {
       window.__ptaMachineAssistantCalls = (window.__ptaMachineAssistantCalls || 0) + 1;
@@ -341,7 +354,7 @@
       const handler = handlers[request.method];
       if (!handler) return { ok: false, code: 'not_ready', message: `mock: ${request.method} not implemented` };
       const data = await handler(request.args || {});
-      return reply(data, request.method === 'finish_azure_cli_login' && data.pending ? { ok: false, code: 'authorization_pending' } : {});
+      return reply(data, ['finish_azure_cli_login', 'machine_login_finish'].includes(request.method) && data.pending ? { ok: false, code: 'authorization_pending' } : {});
     } },
     event: { listen: () => Promise.resolve(() => {}) },
   };

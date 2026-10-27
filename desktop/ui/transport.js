@@ -10,7 +10,9 @@
   async function response(path, options = {}) {
     const reply = await fetch(path, { credentials: 'same-origin', cache: 'no-store', ...options });
     if (reply.status === 401) {
-      window.location.replace('/login');
+      // Keep a pending machine approval across a new sign-in.
+      const enroll = new URLSearchParams(window.location.search).get('enroll');
+      window.location.replace(/^[0-9a-f]{64}$/.test(enroll || '') ? `/login?enroll=${enroll}` : '/login');
       throw new Error('Your session has expired. Sign in again.');
     }
     if (!reply.ok) throw new Error(reply.status === 429

@@ -81,6 +81,10 @@ Accounts
   auth github status|login CLIENT_ID|finish|cancel|logout
   auth azure status|login|finish|cancel
                            login returns a Microsoft device code; finish [--wait] verifies the Azure DevOps session.
+  auth machine status|login [URL]|finish|cancel
+                           Adds this computer to your account on your own coordinator (HTTPS origin; omitted reuses
+                           the remembered one). login [--no-browser] returns the approval URL and code; sign in there
+                           and choose Trust this machine, then finish [--wait]. No credential is printed.
   github repos             Repositories authorized for the GitHub App.
 
 Personal chat
@@ -322,6 +326,8 @@ fn validate_args(args: &[String]) -> Result<()> {
             ]
             | ["auth", "github", "status" | "finish" | "cancel" | "logout"]
             | ["auth", "azure", "status" | "login" | "finish" | "cancel"]
+            | ["auth", "machine", "status" | "login" | "finish" | "cancel"]
+            | ["auth", "machine", "login", _]
             | ["auth", "github", "login", _]
             | ["github", "repos"]
             | ["llm", "providers"]
@@ -482,7 +488,7 @@ async fn execute(mut args: Vec<String>) -> Result<Reply> {
         }
         "capabilities" => {
             return Ok(Reply::success(
-                json!({"contract":control::CONTRACT,"commands":HELP,"skill_version":env!("CARGO_PKG_VERSION"),"activity_registration_support":true,"web_support":true,"web_access_support":true,"knowledge_index_support":true,"mcp_support":true,"tools_support":true,"todo_support":true,"implementation_support":true,"machine_pairing_support":true,"account_authority_support":true,"shared_accounts_support":true}),
+                json!({"contract":control::CONTRACT,"commands":HELP,"skill_version":env!("CARGO_PKG_VERSION"),"activity_registration_support":true,"web_support":true,"web_access_support":true,"knowledge_index_support":true,"mcp_support":true,"tools_support":true,"todo_support":true,"implementation_support":true,"machine_pairing_support":true,"machine_login_support":true,"account_authority_support":true,"shared_accounts_support":true}),
             ));
         }
         "skill" => return crate::app::skill::command(action, args.get(2).map(String::as_str)),
@@ -705,10 +711,46 @@ async fn execute(mut args: Vec<String>) -> Result<Reply> {
     if command == "auth" {
         let provider = action;
         ensure!(
-            ["github", "microsoft", "azure"].contains(&provider),
+            ["github", "microsoft", "azure", "machine"].contains(&provider),
             "unknown provider"
         );
         let action = positional(&args, 2)?;
+        if provider == "machine" {
+            let method = match action {
+                "status" => "machine_login_status",
+                "login" => "machine_login",
+                "finish" => "machine_login_finish",
+                "cancel" => "machine_login_cancel",
+                _ => anyhow::bail!("unknown auth action"),
+            };
+            let value = if action == "login" {
+                let mut value =
+                    json!({"open":!non_interactive && !args.iter().any(|a|a=="--no-browser")});
+                if let Some(url) = args.iter().skip(3).find(|a| !a.starts_with("--")) {
+                    value["url"] = json!(url);
+                }
+                value
+            } else {
+                json!({})
+            };
+            let mut reply = call(method, value, None, true).await?;
+            if action == "login" && reply.ok {
+                reply.ok = false;
+                reply.code = "authorization_pending".into();
+                reply.exit_code = 4;
+                reply.message = Some("Sign in at the approval URL, choose Trust this machine, then run pta auth machine finish --wait.".into());
+            }
+            if action == "finish" && args.iter().any(|a| a == "--wait") {
+                let deadline = tokio::time::Instant::now() + Duration::from_secs(600);
+                while reply.code == "authorization_pending"
+                    && tokio::time::Instant::now() < deadline
+                {
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                    reply = call(method, json!({}), None, true).await?;
+                }
+            }
+            return Ok(reply);
+        }
         if provider == "azure" && action == "status" {
             return call("azure_cli_status", json!({}), None, true).await;
         }

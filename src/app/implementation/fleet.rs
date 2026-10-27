@@ -6,7 +6,7 @@ fn client() -> Result<reqwest::Client> {
         .redirect(reqwest::redirect::Policy::none())
         .build()?)
 }
-fn endpoint(origin: &str) -> Result<url::Url> {
+pub(super) fn endpoint(origin: &str) -> Result<url::Url> {
     let mut url = url::Url::parse(origin)?;
     ensure!(
         url.scheme() == "https"
@@ -71,7 +71,7 @@ pub(super) async fn operate(host: &Arc<Host>, method: &str, args: &Value) -> Res
         "machine_settings" => {
             let data = state.registry.lock().await;
             Ok(
-                json!({"id":data.id,"name":data.settings.name,"coordinator":state.connection()?.map(|c| c.url),"roots":data.settings.roots,"teams_machine":data.teams_machine}),
+                json!({"id":data.id,"name":data.settings.name,"coordinator":state.connection()?.map(|c| c.url),"coordinator_origin":super::login::retained(&state.root),"roots":data.settings.roots,"teams_machine":data.teams_machine}),
             )
         }
         "machine_save" => {
@@ -112,7 +112,7 @@ pub(super) async fn operate(host: &Arc<Host>, method: &str, args: &Value) -> Res
             let token = args["pairing_token"].as_str().filter(|v| v.len() == 44)
                 .context("Authorize this machine on your own coordinator with `pta web machines authorize`, then pass its private JSON file to `pta tools call machine_connect` on stdin.")?;
             let data = state.registry.lock().await;
-            let response=client()?.post(url).bearer_auth(token).json(&json!({"action":"register","id":data.id,"name":data.settings.name,"os":std::env::consts::OS})).send().await?;
+            let response=client()?.post(url).bearer_auth(token).json(&json!({"action":"register","id":data.id,"name":data.settings.name,"os":std::env::consts::OS,"installation":super::login::installation(&state.root)?})).send().await?;
             ensure!(
                 response.status().is_success(),
                 "Could not connect this machine. Use an unexpired, unused pairing file from your own coordinator."
@@ -185,7 +185,8 @@ pub(super) async fn operate(host: &Arc<Host>, method: &str, args: &Value) -> Res
     }
 }
 
-/// Invoked only after the portal consumes an operator-issued, machine-bound pairing credential.
+/// Invoked only after the portal consumes an operator-issued pairing credential or a
+/// browser-approved sign-in whose verifier the initiating installation presented.
 pub(in crate::app) async fn register(host: &Arc<Host>, args: &Value) -> Result<Value> {
     let id = args["id"].as_str().context("Invalid machine ID.")?;
     uuid(id)?;
@@ -198,6 +199,18 @@ pub(in crate::app) async fn register(host: &Arc<Host>, args: &Value) -> Result<V
             && ["linux", "macos", "windows"].contains(&os),
         "Invalid machine registration."
     );
+    let installation = args["installation"].as_str().unwrap_or_default();
+    ensure!(
+        installation.is_empty()
+            || (installation.len() == 64 && installation.bytes().all(|c| c.is_ascii_hexdigit())),
+        "Invalid machine registration."
+    );
+    let login = args["enrollment"] == "login";
+    let account_version = authority::invocation(&host.state)?
+        .scope
+        .account
+        .map(|a| a.version)
+        .unwrap_or_default();
     let state = &host.state.implementation;
     let mut data = state.registry.lock().await;
     ensure!(
@@ -208,6 +221,21 @@ pub(in crate::app) async fn register(host: &Arc<Host>, args: &Value) -> Result<V
         data.machines.len() < 32 || data.machines.iter().any(|m| m.id == id),
         "Machine limit reached."
     );
+    // Browser sign-in re-enrolls only the same installation. An operator pairing file
+    // explicitly authorized this machine ID and may replace it.
+    if login {
+        ensure!(!installation.is_empty(), "Invalid machine registration.");
+        if let Some(existing) = data
+            .machines
+            .iter()
+            .find(|m| m.id == id && m.account_version == account_version)
+        {
+            ensure!(
+                security::constant_eq(&existing.installation, installation),
+                "This machine ID is already connected from another installation. Disconnect it there, then sign in again."
+            );
+        }
+    }
     let token = security::random_secret();
     data.machines.retain(|m| m.id != id);
     data.machines.push(Machine {
@@ -216,12 +244,9 @@ pub(in crate::app) async fn register(host: &Arc<Host>, args: &Value) -> Result<V
         os: os.into(),
         seen: now(),
         secret_hash: digest(&token),
-        account_version: authority::invocation(&host.state)?
-            .scope
-            .account
-            .map(|a| a.version)
-            .unwrap_or_default(),
+        account_version,
         assistant_phase: None,
+        installation: installation.into(),
     });
     state.save(&data)?;
     Ok(json!({"token":token}))

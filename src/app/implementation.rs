@@ -6,6 +6,7 @@ use sha2::{Digest, Sha256};
 use std::time::Duration;
 
 pub(super) mod fleet;
+pub(super) mod login;
 mod requests;
 mod store;
 pub(super) use fleet::register;
@@ -37,6 +38,9 @@ struct Machine {
     account_version: String,
     #[serde(default)]
     assistant_phase: Option<AssistantPhase>,
+    /// Hash of the enrolled installation's identity key; empty for older pairings.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    installation: String,
 }
 #[derive(Clone, Serialize, Deserialize)]
 struct Connection {
@@ -152,6 +156,7 @@ pub(super) struct State {
     registry: Mutex<Registry>,
     tasks: Mutex<HashMap<String, tokio::task::JoinHandle<()>>>,
     calls: Mutex<Vec<Call>>,
+    login: Mutex<Option<login::Pending>>,
     db: store::Database,
 }
 fn now() -> i64 {
@@ -200,6 +205,7 @@ impl State {
             registry: Mutex::new(registry),
             tasks: Mutex::new(HashMap::new()),
             calls: Mutex::new(Vec::new()),
+            login: Mutex::new(None),
         };
         Ok(state)
     }
@@ -413,6 +419,10 @@ async fn operation(host: &Arc<Host>, method: &str, args: &Value) -> Result<Value
             browse_directories(args["path"].as_str(), &allowed)
         }
         "machine_register" => register(host, args).await,
+        "machine_login" => login::begin(host, args).await,
+        "machine_login_status" => login::status(host).await,
+        "machine_login_finish" => login::finish(host).await,
+        "machine_login_cancel" => login::cancel(host).await,
         "machine_list" | "machine_settings" | "machine_connect" | "machine_disconnect"
         | "machine_teams" | "machine_save" | "machine_protocol" => {
             fleet::operate(host, method, args).await
@@ -1222,6 +1232,106 @@ mod tests {
         let _operations = host.state.operations.lock().await;
         let reply = control::dispatch(&host, control::Request::new("machine_settings")).await;
         assert!(reply.ok);
+    }
+    #[tokio::test]
+    async fn machine_login_reenrolls_only_the_same_installation_without_duplicates_or_grants() {
+        let root = tempfile::tempdir().unwrap();
+        let host = host(root.path());
+        let id = uuid::Uuid::new_v4().to_string();
+        let (own, other) = ("a".repeat(64), "b".repeat(64));
+        let login = |installation: &str| json!({"id":id,"name":"Synthetic laptop","os":"windows","installation":installation,"enrollment":"login"});
+        let poll = |token: &Value| json!({"id":id,"token":token,"action":"poll"});
+        let first = fleet::register(&host, &login(&own)).await.unwrap();
+        // Repeating sign-in from the same installation rotates its credential in place.
+        let second = fleet::register(&host, &login(&own)).await.unwrap();
+        assert_ne!(first["token"], second["token"]);
+        assert!(
+            fleet::protocol(&host, &poll(&first["token"]))
+                .await
+                .is_err()
+        );
+        assert!(
+            fleet::protocol(&host, &poll(&second["token"]))
+                .await
+                .is_ok()
+        );
+        // Another installation claiming this public machine ID is refused and changes nothing.
+        let clone = fleet::register(&host, &login(&other)).await.unwrap_err();
+        assert!(
+            clone.to_string().contains("another installation"),
+            "{clone}"
+        );
+        assert!(fleet::register(&host, &login("")).await.is_err());
+        assert!(
+            fleet::protocol(&host, &poll(&second["token"]))
+                .await
+                .is_ok()
+        );
+        {
+            let data = host.state.implementation.registry.lock().await;
+            assert_eq!(data.machines.len(), 1);
+            assert_eq!(data.machines[0].installation, own);
+            assert_eq!(data.machines[0].os, "windows");
+            // Trust grants no roots, Teams ownership or assistant start.
+            assert_eq!(data.teams_machine, data.id);
+            assert!(data.settings.roots.is_empty());
+        }
+        assert!(host.state.running.lock().await.is_none());
+        // An operator pairing file explicitly authorizes this machine ID and may replace it.
+        let paired = json!({"id":id,"name":"Synthetic laptop","os":"windows","installation":other,"enrollment":"pairing"});
+        assert!(fleet::register(&host, &paired).await.is_ok());
+        // A legacy pairing without an installation proof cannot be claimed by sign-in.
+        let legacy = uuid::Uuid::new_v4().to_string();
+        fleet::register(&host, &json!({"id":legacy,"name":"Older","os":"macos"}))
+            .await
+            .unwrap();
+        let claim = json!({"id":legacy,"name":"Older","os":"macos","installation":own,"enrollment":"login"});
+        assert!(fleet::register(&host, &claim).await.is_err());
+        assert_eq!(
+            host.state
+                .implementation
+                .registry
+                .lock()
+                .await
+                .machines
+                .len(),
+            2
+        );
+    }
+    #[tokio::test]
+    async fn machine_login_operations_return_no_secrets_and_clean_up_locally() {
+        let root = tempfile::tempdir().unwrap();
+        let host = host(root.path());
+        let _operations = host.state.operations.lock().await;
+        let none = control::dispatch(&host, control::Request::new("machine_login_status")).await;
+        assert!(none.ok);
+        assert_eq!(none.data["state"], "none");
+        let finish = control::dispatch(&host, control::Request::new("machine_login_finish")).await;
+        assert!(!finish.ok);
+        assert_eq!(finish.code, "invalid_input");
+        let cancel = control::dispatch(&host, control::Request::new("machine_login_cancel")).await;
+        assert!(cancel.ok);
+        // Only HTTPS coordinator origins without credentials, paths or queries are accepted.
+        for url in [
+            "http://assistant.example.com",
+            "https://user@assistant.example.com",
+            "https://assistant.example.com/other",
+        ] {
+            let mut request = control::Request::new("machine_login");
+            request.args = json!({"url":url});
+            assert!(!control::dispatch(&host, request).await.ok);
+        }
+        let mut request = control::Request::new("machine_login");
+        request.args = json!({});
+        let missing = control::dispatch(&host, request).await;
+        assert!(!missing.ok);
+        assert!(missing.message.unwrap().contains("HTTPS address"));
+        // The installation key stays local and stable; only its hash is ever sent.
+        let profile = &host.state.implementation.root;
+        let first = login::installation(profile).unwrap();
+        assert_eq!(first, login::installation(profile).unwrap());
+        let local = fs::read_to_string(profile.join("installation.json")).unwrap();
+        assert!(!local.contains(&first));
     }
     #[test]
     fn restart_preserves_uncertain_creations_without_replaying_writes() {

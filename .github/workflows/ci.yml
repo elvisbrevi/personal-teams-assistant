@@ -217,6 +217,8 @@ jobs:
       - run: cargo clippy --locked --all-targets -- -D warnings
       - name: Operator admission and account recovery on Windows
         run: cargo test --locked --no-default-features --test account_authority operator_admission_binding_recovery_and_revocation_preserve_the_original_profile
+      - name: Browser-assisted machine sign-in and trust on Windows
+        run: cargo test --locked --no-default-features --lib machine_login
 
   security:
     name: Security

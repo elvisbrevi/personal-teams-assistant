@@ -20,6 +20,7 @@ use std::{
 use tokio::sync::Semaphore;
 
 mod access;
+mod enrollment;
 mod profiles;
 mod store;
 use profiles::{Worker, create_profile, profile_dir};
@@ -441,6 +442,10 @@ impl Portal {
         Ok((token, session))
     }
     async fn login_limit(&self, name: &str) -> bool {
+        self.limit(&[("*", 60), (name, 5)]).await
+    }
+    /// Sliding one-minute limits; every key must have room before any attempt is recorded.
+    async fn limit(&self, keys: &[(&str, usize)]) -> bool {
         let now = Instant::now();
         let mut attempts = self.attempts.lock().await;
         attempts.retain(|_, times| {
@@ -450,12 +455,18 @@ impl Portal {
         if attempts.len() >= 1024 {
             return false;
         }
-        for (key, limit) in [("*", 60), (name, 5)] {
-            let times = attempts.entry(key.to_owned()).or_default();
-            if times.len() >= limit {
-                return false;
-            }
-            times.push_back(now);
+        if keys.iter().any(|(key, limit)| {
+            attempts
+                .get(*key)
+                .is_some_and(|times| times.len() >= *limit)
+        }) {
+            return false;
+        }
+        for (key, _) in keys {
+            attempts
+                .entry((*key).to_owned())
+                .or_default()
+                .push_back(now);
         }
         true
     }
@@ -519,6 +530,7 @@ fn router(portal: Arc<Portal>) -> Router {
         .route("/api/logout", post(logout))
         .route("/api/control", post(command))
         .route("/api/machines", post(machine_command))
+        .route("/api/enrollment", post(enrollment::browser))
         .route(
             "/webhooks/{id}/graph/{kind}",
             post(webhook).layer(DefaultBodyLimit::max(256_000)),
@@ -588,17 +600,26 @@ async fn secure_headers(
     headers.insert(header::X_FRAME_OPTIONS, "DENY".parse().unwrap());
     response
 }
+/// Keep a machine approval handle across Access and local-session redirects.
+fn enroll_query(uri: &Uri) -> String {
+    uri.query()
+        .and_then(|query| query.strip_prefix("enroll="))
+        .and_then(enrollment::transaction)
+        .map(|transaction| format!("?enroll={transaction}"))
+        .unwrap_or_default()
+}
 async fn index(
     State(portal): State<Arc<Portal>>,
     Extension(identity): Extension<access::Verified>,
     headers: HeaderMap,
+    uri: Uri,
 ) -> Response {
     if portal
         .authenticate(&headers, &identity, false)
         .await
         .is_err()
     {
-        return Redirect::to("/login").into_response();
+        return Redirect::to(&format!("/login{}", enroll_query(&uri))).into_response();
     }
     asset(
         "text/html; charset=utf-8",
@@ -645,6 +666,7 @@ async fn login(
     State(portal): State<Arc<Portal>>,
     Extension(identity): Extension<access::Verified>,
     headers: HeaderMap,
+    uri: Uri,
 ) -> Response {
     let entry = match accounts(&portal.root) {
         Ok(entries) => entries.into_iter().find(|e| {
@@ -666,7 +688,7 @@ async fn login(
         .await
         .is_ok()
     {
-        return Redirect::to("/").into_response();
+        return Redirect::to(&format!("/{}", enroll_query(&uri))).into_response();
     }
     if !portal.login_limit(&account.id).await {
         return StatusCode::TOO_MANY_REQUESTS.into_response();
@@ -850,6 +872,19 @@ async fn machine_command(
     let Ok(_permit) = portal.requests.try_acquire() else {
         return StatusCode::TOO_MANY_REQUESTS.into_response();
     };
+    // Browser-assisted sign-in starts before this installation has any credential.
+    // These actions never accept bearer tokens and grant nothing without browser trust.
+    if args["action"]
+        .as_str()
+        .is_some_and(|action| action.starts_with("login_"))
+    {
+        if headers.contains_key(header::AUTHORIZATION)
+            || authority::reject_authority_arguments(&args).is_err()
+        {
+            return StatusCode::FORBIDDEN.into_response();
+        }
+        return enrollment::machine(&portal, args).await;
+    }
     let Some(token) = headers
         .get(header::AUTHORIZATION)
         .and_then(|h| h.to_str().ok())
@@ -901,19 +936,38 @@ async fn machine_command(
     let Some(account) = account else {
         return StatusCode::FORBIDDEN.into_response();
     };
+    if registration {
+        // The operator authorized this machine ID locally; the installation key is recorded.
+        args["enrollment"] = json!("pairing");
+        return register(&portal, account, args).await;
+    }
     let dir = match portal.worker(&account).await {
         Ok(dir) => dir,
         Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
     };
-    let mut request = control::Request::new(if registration {
-        "machine_register"
-    } else {
-        "machine_protocol"
-    });
-
-    if !registration {
-        args["token"] = json!(token);
+    let mut request = control::Request::new("machine_protocol");
+    args["token"] = json!(token);
+    request.args = args;
+    match control::client_scoped(
+        request,
+        &dir,
+        &account.id,
+        &account.version,
+        authority::Transport::Machine,
+    )
+    .await
+    {
+        Ok(reply) => Json(reply).into_response(),
+        Err(_) => StatusCode::BAD_GATEWAY.into_response(),
     }
+}
+/// Issue a machine credential in the approved account's own host, after the approval was consumed.
+async fn register(portal: &Arc<Portal>, account: Account, args: Value) -> Response {
+    let dir = match portal.worker(&account).await {
+        Ok(dir) => dir,
+        Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
+    };
+    let mut request = control::Request::new("machine_register");
     request.args = args;
     let mut reply = match control::client_scoped(
         request,
@@ -927,13 +981,14 @@ async fn machine_command(
         Ok(reply) => reply,
         Err(_) => return StatusCode::BAD_GATEWAY.into_response(),
     };
-    if registration && reply.ok {
+    if reply.ok {
         reply.data["account"] = json!(
             account
                 .access_binding
                 .as_ref()
                 .and_then(|b| b.provider_user_id.parse::<u64>().ok())
         );
+        reply.data["username"] = json!(account.username);
     }
     Json(reply).into_response()
 }

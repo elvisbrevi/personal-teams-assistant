@@ -142,6 +142,10 @@ pub(super) fn check_shared_operation(request: &control::Request) -> Result<()> {
                 | "implementation_open_session"
                 | "implementation_create"
                 | "machine_connect"
+                | "machine_login"
+                | "machine_login_status"
+                | "machine_login_finish"
+                | "machine_login_cancel"
         ),
         "{EXECUTION_DENIED}"
     );

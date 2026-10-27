@@ -741,6 +741,28 @@ for (const [label, viewport] of [['desktop', { width: 1440, height: 900 }], ['ph
   await page.click('#machine-save');
   await page.waitForFunction(() => window.__ptaMachineSettings?.roots.includes('/work/application'));
   check(`${label}: machine root picker saves selected directories`, await page.evaluate(() => window.__ptaMachineSettings.roots.includes('/work/application')));
+  await page.fill('#machine-coordinator', 'https://assistant.example.com');
+  await page.click('#machine-connect');
+  await page.waitForFunction(() => document.querySelector('#machine-login-code')?.textContent === '1A2B-3C4D');
+  check(`${label}: connecting this machine starts browser sign-in and shows its code`, await page.isVisible('#machine-login-dialog') && await page.evaluate(() => window.__ptaMachineLogin.url === 'https://assistant.example.com' && window.__ptaMachineLogin.open === true));
+  await page.evaluate(axeSource);
+  check(`${label}: machine sign-in dialog has no accessibility violations`, (await scan(page)).length === 0);
+  await page.click('#machine-login-cancel');
+  await page.waitForFunction(() => !window.__ptaMachineLoginPending && !document.querySelector('#machine-login-dialog').open);
+  check(`${label}: cancelling machine sign-in withdraws it and trusts nothing`, await page.evaluate(() => window.__ptaCalls.includes('machine_login_cancel')) && !await page.isDisabled('#machine-connect'));
+  await page.click('#machine-connect');
+  await page.waitForFunction(() => document.querySelector('#machine-login-code')?.textContent === '1A2B-3C4D');
+  await page.evaluate(() => { window.__ptaMachineLoginTrusted = true; });
+  await page.waitForFunction(() => !document.querySelector('#machine-login-dialog').open && document.querySelector('#machine-connect').disabled);
+  check(`${label}: a trusted sign-in connects this machine without another step`, !await page.isDisabled('#machine-disconnect') && (await page.textContent('#notice-text')).includes('ana'));
+  await page.click('#notice-close');
+  await page.evaluate(() => {
+    $('#machine-trust-name').textContent = 'Synthetic laptop'; $('#machine-trust-os').textContent = 'Windows';
+    $('#machine-trust-code').textContent = '1A2B-3C4D'; $('#machine-trust-account').textContent = 'ana';
+    $('#machine-trust-dialog').showModal();
+  });
+  check(`${label}: the trust dialog has no accessibility violations`, (await scan(page)).length === 0);
+  await page.evaluate(() => $('#machine-trust-dialog').close());
   if (!await page.isVisible('nav [data-tab="knowledge"]')) await page.click('#nav-more');
   await page.click('nav [data-tab="knowledge"]');
   await page.click('#knowledge-tabs [data-group="repositories"]');
