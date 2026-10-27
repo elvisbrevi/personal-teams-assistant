@@ -154,6 +154,9 @@ pub(super) fn check_shared_operation(request: &control::Request) -> Result<()> {
                 | "machine_login_status"
                 | "machine_login_finish"
                 | "machine_login_cancel"
+                | "variable_launcher_define"
+                | "variable_launcher_remove"
+                | "variable_launcher_run"
         ),
         "{EXECUTION_DENIED}"
     );

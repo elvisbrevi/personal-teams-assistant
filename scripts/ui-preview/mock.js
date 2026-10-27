@@ -176,6 +176,15 @@
     'aaaaaaaa-0000-4000-8000-000000000002': '-----BEGIN SYNTHETIC KEY-----\nline two  with  spaces\n\tand a tab\n-----END SYNTHETIC KEY-----\n',
   };
   const touch = variable => { variable.version += 1; variable.updated_at = secs(NOW); };
+  // Consumers: the one built-in registry entry (as the host reports it) and one approved launcher.
+  let consumerBinding = null;
+  const launchers = [{ id: 'release-tool', description: 'Publishes the release <b>not markup</b>', program: '/usr/local/bin/release', args: ['--fixed'], directory: '/home/user/work', timeout_seconds: 60,
+    variables: [{ env: 'RELEASE_URL', id: 'aaaaaaaa-0000-4000-8000-000000000001', state: 'ok', variable: { name: 'DEPLOY_ENDPOINT', version: 1 } }] }];
+  const bindingView = () => {
+    if (!consumerBinding) return null;
+    const variable = variables.find(v => v.id === consumerBinding);
+    return variable ? { state: 'ok', id: variable.id, variable: { name: variable.name, version: variable.version }, bound_at: secs(NOW) } : { state: 'deleted', id: consumerBinding, variable: null, bound_at: secs(NOW) };
+  };
   const staleVariable = (variable, expected, verb) => {
     if (variable.version !== expected) throw new Error(`${variable.name} changed since it was loaded (it is now version ${variable.version}). Inspect it before ${verb}.`);
   };
@@ -425,11 +434,28 @@
       if (index >= 0) pendingVariables.splice(index, 1);
       return { request: args.request, state: 'cancelled' };
     },
+    variable_consumer_list: () => ({ launchers_available: true, launchers: structuredClone(launchers), consumers: [{ id: 'deepseek', title: 'DeepSeek API',
+      summary: 'The key the assistant uses to call the DeepSeek language-model API when DeepSeek is in the model chain.', destination: 'https://api.deepseek.com', slot: 'api_key', operations: ['check'], binding: bindingView() }] }),
+    variable_consumer_bind: args => {
+      window.__ptaConsumerCalls.push({ method: 'bind', ...args });
+      const variable = variables.find(v => v.id === args.variable);
+      if (!variable) throw new Error('This variable was deleted. Refresh the list; create a new entry to store it again.');
+      consumerBinding = variable.id;
+      return { consumer: args.consumer, binding: bindingView(), restart_required: true };
+    },
+    variable_consumer_unbind: args => { window.__ptaConsumerCalls.push({ method: 'unbind', ...args }); consumerBinding = null; return { consumer: args.consumer, unbound: true, restart_required: false }; },
+    variable_consumer_check: args => {
+      window.__ptaConsumerCalls.push({ method: 'check', ...args });
+      const binding = bindingView();
+      return { consumer: args.consumer, operation: 'check', reference: { id: binding.id, name: binding.variable.name, version: binding.variable.version }, result: { status: 'ok', http_status: 200 } };
+    },
+    variable_launcher_remove: args => { window.__ptaConsumerCalls.push({ method: 'remove', ...args }); launchers.splice(0); return { launcher: args.id, removed: true }; },
     set_credential: args => { snapshot.credentials[args.name] = 'system'; return {}; },
     delete_credential: args => { snapshot.credentials[args.name] = 'missing'; return {}; },
   };
   window.__ptaCalls = [];
   window.__ptaVariableCreates = [];
+  window.__ptaConsumerCalls = [];
   window.__ptaVariableReveals = [];
   window.__ptaVariableUpdates = [];
   window.__ptaVariableDeletes = [];

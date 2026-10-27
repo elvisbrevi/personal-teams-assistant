@@ -5,7 +5,7 @@
 //! application window or an authenticated portal browser) can invoke: never the CLI, MCP, tools
 //! or machines. An agent starts a protected-entry request (to store or to replace a value) by
 //! name or ID and later reads only its state.
-use super::{authority, control::Reply, *};
+use super::{authority, consumers, control::Reply, *};
 use crate::variables::{self as vault, KeyBackup, NewVariable, Secret, Store};
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
@@ -18,6 +18,7 @@ pub(super) struct State {
     profile: PathBuf,
     store: std::sync::Mutex<Option<Arc<Store>>>,
     entries: std::sync::Mutex<BTreeMap<String, Entry>>,
+    pub(super) consumers: consumers::State,
 }
 
 struct Entry {
@@ -36,9 +37,10 @@ impl State {
             profile: profile.to_path_buf(),
             store: std::sync::Mutex::new(None),
             entries: std::sync::Mutex::new(BTreeMap::new()),
+            consumers: consumers::State::new(profile),
         }
     }
-    fn store(&self, host: &Host) -> std::result::Result<Arc<Store>, vault::Error> {
+    pub(super) fn store(&self, host: &Host) -> std::result::Result<Arc<Store>, vault::Error> {
         let mut slot = self.store.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(store) = slot.as_ref() {
             return Ok(store.clone());
@@ -143,7 +145,7 @@ fn parse<T: DeserializeOwned>(args: &Value) -> std::result::Result<T, vault::Err
         .map_err(|_| vault::Error::Input("Invalid arguments for this variable operation.".into()))
 }
 
-fn failure(error: vault::Error) -> Reply {
+pub(super) fn failure(error: vault::Error) -> Reply {
     let (code, exit) = match &error {
         vault::Error::Input(_) => ("invalid_input", 2),
         vault::Error::Conflict(_) => ("state_conflict", 6),
@@ -154,6 +156,9 @@ fn failure(error: vault::Error) -> Reply {
 }
 
 pub(super) async fn operate(host: &Arc<Host>, request: &control::Request) -> Reply {
+    if consumers::handles(&request.method) {
+        return consumers::operate(host, request).await;
+    }
     match run(host, &request.method, &request.args) {
         Ok(data) => Reply::success(data),
         Err(error) => failure(error),

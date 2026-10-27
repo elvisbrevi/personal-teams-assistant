@@ -804,6 +804,170 @@ async fn an_agent_edits_metadata_and_requests_replacements_but_has_no_way_to_rea
     assert!(!f.disk().windows(NEXT.len()).any(|w| w == NEXT.as_bytes()));
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn a_consumer_uses_a_variable_by_reference_and_nothing_shows_the_value() {
+    let f = fixture();
+    let (_, created) = f
+        .json(
+            &[
+                "variables",
+                "create",
+                "DEEPSEEK_KEY",
+                "--description",
+                "My DeepSeek key",
+            ],
+            Some(SECRET),
+        )
+        .await;
+    let entry = created["data"]["variable"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let source = || async {
+        let (_, credentials) = f.json(&["credentials", "list"], None).await;
+        credentials["data"]["DEEPSEEK_API_KEY"].clone()
+    };
+    let before = source().await;
+    assert_ne!(before, "variable");
+
+    // Granting access needs the user's confirmation; a refused command changes nothing.
+    let (code, refused) = f
+        .json(&["variables", "bind", "deepseek", &entry], None)
+        .await;
+    assert_eq!(code, 2, "{refused}");
+    assert!(refused["message"].as_str().unwrap().contains("--confirmed"));
+    let (_, listed) = f.json(&["variables", "consumers"], None).await;
+    assert!(listed["data"]["consumers"][0]["binding"].is_null());
+    for args in [
+        vec![
+            "variables",
+            "bind",
+            "https://attacker.invalid",
+            &entry,
+            "--confirmed",
+        ],
+        vec!["variables", "bind", "deepseek", "not-a-uuid", "--confirmed"],
+        vec![
+            "variables",
+            "check",
+            "deepseek",
+            "--confirmed",
+            "--destination",
+            "x",
+        ],
+        vec![
+            "variables",
+            "launcher",
+            "run",
+            "x",
+            "--confirmed",
+            "--env",
+            "A=B",
+        ],
+    ] {
+        let (code, _) = f.json(&args, None).await;
+        assert_ne!(code, 0, "{args:?}");
+    }
+
+    let (code, bound) = f
+        .json(
+            &["variables", "bind", "deepseek", &entry, "--confirmed"],
+            None,
+        )
+        .await;
+    assert_eq!(code, 0, "{bound}");
+    assert_eq!(bound["data"]["binding"]["variable"]["name"], "DEEPSEEK_KEY");
+    let (_, listed) = f.json(&["variables", "consumers"], None).await;
+    let consumer = &listed["data"]["consumers"][0];
+    assert_eq!(consumer["destination"], "https://api.deepseek.com");
+    assert_eq!(consumer["binding"]["variable"]["version"], 1);
+    // The application credential now comes from the variable (real host, real lookup).
+    assert_eq!(source().await, "variable");
+
+    // An agent sees references and statuses; a launcher is refused outside allowed roots.
+    let replies = f
+        .mcp(&[
+            ("consumer_list", json!({})),
+            ("consumer_bind", json!({"consumer":"deepseek","variable":entry})),
+            ("consumer_unbind", json!({"consumer":"deepseek"})),
+            ("consumer_bind", json!({"consumer":"deepseek","variable":entry,"value":SECRET})),
+            ("consumer_bind", json!({"consumer":"deepseek","variable":entry,"confirmed":true})),
+            (
+                "launcher_define",
+                json!({"id":"tool","description":"d","program":"/bin/true","directory":"/","env":{"TOKEN":entry},"confirmed":true}),
+            ),
+        ])
+        .await;
+    let refused = |reply: &Value| reply["error"].is_object() || reply["result"]["isError"] == true;
+    assert!(!refused(&replies[0]), "{}", replies[0]);
+    let seen = tool_json(&replies[0]);
+    assert_eq!(
+        seen["consumers"][0]["binding"]["variable"]["name"],
+        "DEEPSEEK_KEY"
+    );
+    assert!(refused(&replies[1]), "binding needs confirmation");
+    assert!(!refused(&replies[2]), "{}", replies[2]);
+    assert!(refused(&replies[3]), "no tool accepts a value");
+    assert!(!refused(&replies[4]), "{}", replies[4]);
+    assert!(
+        refused(&replies[5]),
+        "empty allowed roots grant no execution"
+    );
+    let tools = replies.last().unwrap()["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .clone();
+    for name in [
+        "consumer_list",
+        "consumer_bind",
+        "consumer_unbind",
+        "consumer_check",
+        "launcher_define",
+        "launcher_remove",
+        "launcher_run",
+    ] {
+        assert!(tools.iter().any(|t| t["name"] == name), "{name}");
+    }
+
+    // Deleting the variable leaves the binding in place and unusable: no fallback.
+    let (_, current) = f.json(&["variables", "list"], None).await;
+    let version = current["data"]["variables"][0]["version"]
+        .as_u64()
+        .unwrap()
+        .to_string();
+    let (code, _) = f
+        .json(
+            &[
+                "variables",
+                "delete",
+                &entry,
+                "--expected-version",
+                &version,
+            ],
+            None,
+        )
+        .await;
+    assert_eq!(code, 0);
+    let (_, listed) = f.json(&["variables", "consumers"], None).await;
+    assert_eq!(
+        listed["data"]["consumers"][0]["binding"]["state"],
+        "deleted"
+    );
+    let (code, checked) = f
+        .json(&["variables", "check", "deepseek", "--confirmed"], None)
+        .await;
+    assert_ne!(code, 0, "{checked}");
+    assert!(checked["message"].as_str().unwrap().contains("deleted"));
+    let (_, unbound) = f.json(&["variables", "unbind", "deepseek"], None).await;
+    assert_eq!(unbound["data"]["unbound"], true);
+    assert_ne!(source().await, "variable");
+    assert!(
+        !f.disk()
+            .windows(SECRET.len())
+            .any(|w| w == SECRET.as_bytes())
+    );
+}
+
 #[test]
 fn the_public_fixtures_hold_no_synthetic_variable_values() {
     // Source, preview data and packaged skill text may describe the feature but never carry a

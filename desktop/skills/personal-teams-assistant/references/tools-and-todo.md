@@ -176,8 +176,8 @@ children and run installed coding agents.
    its credential and deselecting Teams without starting another assistant. The old lease
    still delays a successor. Inspect list/detail to verify `trust: revoked`; another enrollment
    requires fresh browser trust or operator-local pairing. The coordinator cannot revoke
-   itself this way. No operation returns credential values; variable use is a future feature
-   and must require the same live authorization. Revocation cannot retract data already
+   itself this way. No operation returns credential values; variable use by consumers
+   (`consumer_*`, `launcher_*`) re-checks the same live authorization. Revocation cannot retract data already
    received by an external program. CLI/MCP edits and revocation require confirmation.
    After any timeout/failure, refresh `machine_list` and `machine_detail` before a deliberate
    repeat. Never automatically replay start, send, implementation or root edits.

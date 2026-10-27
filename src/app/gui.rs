@@ -304,6 +304,7 @@ fn start_host(app: &tauri::App, host_lock: fs::File) -> Result<Arc<Host>> {
         state: init_state(&config_dir, &app.path().app_data_dir()?)?,
         shell: Box::new(TauriShell(app.handle().clone())),
     });
+    consumers::install(&host);
     tauri::async_runtime::spawn(control::launch(host.clone(), host_lock)?);
     Ok(host)
 }

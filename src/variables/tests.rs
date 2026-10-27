@@ -773,3 +773,89 @@ fn audit_events_name_action_account_entry_and_outcome_never_a_value() {
         AUDIT_KEPT as usize
     );
 }
+
+#[test]
+fn bindings_belong_to_one_account_and_fail_closed_when_the_entry_is_gone() {
+    let f = fixture();
+    let (alice, bob) = (account(&f, "alice"), account(&f, "bob"));
+    let entry = alice.create(new("ALICE_KEY", SECRET)).unwrap().variable.id;
+    let other = bob.create(new("BOB_KEY", OTHER)).unwrap().variable.id;
+
+    assert!(alice.binding("deepseek", "api_key").unwrap().is_none());
+    assert!(alice.bound_value("deepseek", "api_key").unwrap().is_none());
+    let bound = alice.bind("deepseek", "api_key", &entry).unwrap();
+    assert_eq!(bound.state, "ok");
+    assert_eq!(bound.variable.as_ref().unwrap().name, "ALICE_KEY");
+    assert!(alice.is_bound("deepseek", "api_key").unwrap());
+    // Another account sees no binding and cannot bind or use this account's entry.
+    assert!(bob.bindings().unwrap().is_empty());
+    assert!(!bob.is_bound("deepseek", "api_key").unwrap());
+    assert!(matches!(
+        bob.bind("deepseek", "api_key", &entry),
+        Err(Error::Input(_))
+    ));
+    assert!(matches!(bob.use_entry(&entry, None), Err(Error::Input(_))));
+    assert!(matches!(
+        alice.bind("deepseek", "api_key", &other),
+        Err(Error::Input(_))
+    ));
+    assert!(matches!(
+        alice.bind("deepseek", "api_key", "not-a-uuid"),
+        Err(Error::Input(_))
+    ));
+
+    // A pinned version must match; the current one is used otherwise.
+    let (metadata, value) = alice.bound_value("deepseek", "api_key").unwrap().unwrap();
+    assert_eq!((metadata.version, value.expose()), (1, SECRET));
+    alice
+        .update(&entry, 1, None, Some(&Secret::new(OTHER)))
+        .unwrap();
+    assert!(matches!(
+        alice.use_entry(&entry, Some(1)),
+        Err(Error::Conflict(_))
+    ));
+    assert_eq!(alice.use_entry(&entry, Some(2)).unwrap().1.expose(), OTHER);
+    assert_eq!(
+        alice
+            .bound_value("deepseek", "api_key")
+            .unwrap()
+            .unwrap()
+            .1
+            .expose(),
+        OTHER
+    );
+
+    // Deletion leaves the binding in place and unusable.
+    alice.delete(&entry, 2).unwrap();
+    assert_eq!(alice.bindings().unwrap()[0].state, "deleted");
+    assert!(alice.is_bound("deepseek", "api_key").unwrap());
+    assert!(matches!(
+        alice.bound_value("deepseek", "api_key"),
+        Err(Error::Conflict(message)) if message.contains("deleted")
+    ));
+    assert!(matches!(
+        alice.bind("deepseek", "api_key", &entry),
+        Err(Error::Conflict(_))
+    ));
+    assert_eq!(alice.reference(&entry).unwrap().0, "deleted");
+    assert_eq!(
+        alice
+            .reference(&uuid::Uuid::new_v4().to_string())
+            .unwrap()
+            .0,
+        "missing"
+    );
+    assert!(alice.unbind("deepseek", "api_key").unwrap());
+    assert!(!alice.unbind("deepseek", "api_key").unwrap());
+    // Bindings never hold or expose a value.
+    alice
+        .bind(
+            "deepseek",
+            "api_key",
+            &alice.create(new("SECOND", SECRET)).unwrap().variable.id,
+        )
+        .unwrap();
+    for file in raw_files(&f) {
+        assert!(!contains(&file, SECRET));
+    }
+}

@@ -340,6 +340,16 @@
             <label class="check"><input id="variable-show" type="checkbox"> Show the value while I type</label>
             <div class="actions"><button id="variable-create" disabled>Add variable</button></div>
           </div>
+          <div class="panel" id="panel-consumers">
+            <h2>Where variables are used</h2>
+            <p class="hint">A variable does nothing until you choose where it is used. Your agents see only names and versions, never values; every use checks your account and the variable's current version again, and a deleted variable stops working instead of falling back to another credential.</p>
+            <div id="consumers" class="list"></div>
+            <div id="launchers" hidden>
+              <h3>Approved local programs</h3>
+              <p class="hint">Programs you approved to receive named variables as environment variables of that one process. Define and run them with the CLI or your agent: each approval and run needs your confirmation, and their output is never shown.</p>
+              <div id="launcher-list" class="list"></div>
+            </div>
+          </div>
         </div>
 
         <div id="settings-advanced" class="settings-group" role="tabpanel" aria-labelledby="settings-tab-advanced" data-settings-group="advanced" hidden>

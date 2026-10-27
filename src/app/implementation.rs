@@ -268,7 +268,7 @@ fn confined(path: &Path, roots: &[PathBuf]) -> Result<PathBuf> {
     );
     Ok(canonical)
 }
-async fn directories(host: &Host, selected: &[PathBuf]) -> Result<Vec<PathBuf>> {
+pub(super) async fn directories(host: &Host, selected: &[PathBuf]) -> Result<Vec<PathBuf>> {
     ensure!(
         (1..=16).contains(&selected.len()),
         "Select between one and sixteen directories."
