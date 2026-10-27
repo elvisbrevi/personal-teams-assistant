@@ -769,7 +769,7 @@ fn detail_schema(github: bool) -> Value {
 
 pub(super) fn catalog() -> Value {
     json!(TOOLS.iter().map(|tool| json!({"name":tool.name,"title":tool.title,"description":tool.description,
-        "inputSchema":(tool.schema)(),"effect":match tool.effect { Effect::Read => "read", Effect::Local => "local", Effect::External => "needs confirmation" }
+        "inputSchema":(tool.schema)(),"authority":"authenticated profile; operator maintenance is local only; shared-host execution requires owner authority", "effect":match tool.effect { Effect::Read => "read", Effect::Local => "local", Effect::External => "needs confirmation" }
     })).collect::<Vec<_>>())
 }
 

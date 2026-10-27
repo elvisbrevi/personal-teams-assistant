@@ -242,6 +242,7 @@ pub(super) fn consume_pairing(
 /// Only the local OS operator can associate identities, recover accounts or revoke
 /// sessions. A GitHub login never creates or selects a local profile.
 pub(super) fn admin(args: &[String]) -> Result<control::Reply> {
+    authority::require_operator(&control::profile_dir()?)?;
     let root = control::profile_dir()?.join("web");
     let action = args.get(1).map(String::as_str).unwrap_or("");
     let public_account = |account: &Account| {

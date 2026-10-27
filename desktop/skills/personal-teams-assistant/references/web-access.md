@@ -203,3 +203,32 @@ Machine registration never sends a GitHub access token to a coordinator. Existin
 HTTPS origin responses include hostname-only HSTS. Configure matching edge HSTS for Access-generated responses without enabling parent-domain includeSubDomains or preload indiscriminately.
 
 Both CLI and host must advertise `machine_pairing_support: true` (0.9.4 or later). The portal refuses to reuse an older native/headless host, and IPC rejects machine connection before forwarding any request to one. This prevents an older host from falling back to GitHub-token enrollment.
+
+## Account and execution authority
+
+Version 0.9.10 adds mandatory `account_authority_support` to CLI capabilities and
+host descriptors. Update the host and CLI together before operating through the
+new catalog. Older hosts are refused before forwarding; never work around this
+by selecting another profile or using an operator credential. The existing matched
+local-installation update may inspect/stop an older owner host solely to retire it
+and preserve its running state; this is not a portal operation or security downgrade.
+
+The host derives account/profile ownership from its private registry and verifies
+the binding again on each call. Browser and machine invocations use distinct
+scoped IPC credentials and cannot grant operator maintenance authority. Do not
+supply account, owner, transport or maintenance flags as tool arguments. After an
+account reassociation, restart its host before continuing. The existing owner,
+profile identifiers, Microsoft session and safe single-use pairing remain intact.
+
+Additional people cannot use this portal yet. An ordinary legacy profile cannot
+run providers, coding or generic variable consumers in the operator's OS context.
+Use a personal trusted machine; selecting a working directory or removing tools
+from a prompt does not provide OS isolation. A paired machine cannot forward a
+coding/provider/directory operation into the coordinator's local context. Existing
+account-qualified polling, session summaries, results, leases and remote execution
+on personal machines retain their checks.
+
+Different people sharing one computer need separate OS security contexts. App
+account switching cannot protect against someone who controls the same OS account,
+including its private IPC descriptors and credential store. Portal administration
+is a local operator operation, unavailable from an isolated account profile.

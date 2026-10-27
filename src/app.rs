@@ -25,6 +25,7 @@ use std::{
 use tokio::sync::{Mutex, oneshot, watch};
 
 mod activity;
+mod authority;
 mod azure_cli;
 pub mod cli;
 pub mod control;
@@ -88,6 +89,7 @@ fn set_phase(sender: &watch::Sender<AssistantPhase>, phase: AssistantPhase) {
 }
 
 pub(crate) struct DesktopState {
+    authority: authority::Scope,
     operations: Mutex<()>,
     loaded_config: Mutex<Option<Config>>,
     config_path: PathBuf,
@@ -487,6 +489,7 @@ pub(crate) fn init_state(config_dir: &Path, data_dir: &Path) -> Result<DesktopSt
         fs::remove_file(journal)?;
     }
     Ok(DesktopState {
+        authority: web::account_scope(&config_dir)?,
         implementation: implementation::State::new(config_path.parent().unwrap())?,
         operations: Mutex::new(()),
         loaded_config: Mutex::new(None),
@@ -629,6 +632,12 @@ async fn stop(state: &DesktopState) -> Result<()> {
 }
 
 async fn start(state: &DesktopState) -> Result<()> {
+    // Machine service controls retain their existing Teams lease; arbitrary execution does not.
+    ensure!(
+        authority::invocation(state)?.scope.owner,
+        "{}",
+        authority::EXECUTION_DENIED
+    );
     // Starting an assistant that already runs changes nothing, so it does not flash `starting`.
     if *state.phase.borrow() == AssistantPhase::Stopped {
         set_phase(&state.phase, AssistantPhase::Starting);

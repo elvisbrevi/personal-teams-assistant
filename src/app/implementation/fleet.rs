@@ -216,7 +216,11 @@ pub(in crate::app) async fn register(host: &Arc<Host>, args: &Value) -> Result<V
         os: os.into(),
         seen: now(),
         secret_hash: digest(&token),
-        account_version: args["account_version"].as_str().unwrap_or_default().into(),
+        account_version: authority::invocation(&host.state)?
+            .scope
+            .account
+            .map(|a| a.version)
+            .unwrap_or_default(),
         assistant_phase: None,
     });
     state.save(&data)?;
@@ -237,6 +241,10 @@ fn leased(data: &mut Registry, id: &str) -> bool {
     true
 }
 pub(in crate::app) async fn teams_allowed(state: &DesktopState) -> Result<bool> {
+    ensure!(
+        authority::invocation(state)?.scope.owner,
+        "Account binding changed."
+    );
     let own = state.implementation.registry.lock().await.id.clone();
     if let Some(connection) = state.implementation.connection()? {
         return Ok(
@@ -249,6 +257,8 @@ pub(in crate::app) async fn teams_allowed(state: &DesktopState) -> Result<bool> 
     Ok(result)
 }
 pub(in crate::app) async fn protocol(host: &Arc<Host>, args: &Value) -> Result<Value> {
+    authority::reject_authority_arguments(args)?;
+    let binding = authority::invocation(&host.state)?.scope.account;
     let state = &host.state.implementation;
     let id = args["id"].as_str().context("Invalid machine ID.")?;
     let token = args["token"]
@@ -259,7 +269,15 @@ pub(in crate::app) async fn protocol(host: &Arc<Host>, args: &Value) -> Result<V
         let machine = data
             .machines
             .iter_mut()
-            .find(|m| m.id == id && security::constant_eq(&m.secret_hash, &digest(token)))
+            .find(|m| {
+                m.id == id
+                    && m.account_version
+                        == binding
+                            .as_ref()
+                            .map(|a| a.version.as_str())
+                            .unwrap_or_default()
+                    && security::constant_eq(&m.secret_hash, &digest(token))
+            })
             .context("Machine is not registered.")?;
         machine.seen = now();
         if args["action"] == "poll"
@@ -454,7 +472,9 @@ async fn poll(host: Arc<Host>) {
             results.push(result);
         }
         let state = &host.state.implementation;
-        if let Ok(Some(connection)) = state.connection() {
+        if authority::invocation(&host.state).is_ok_and(|i| i.scope.owner)
+            && let Ok(Some(connection)) = state.connection()
+        {
             let own = state.registry.lock().await.id.clone();
             let (next, sessions) = state
                 .db
