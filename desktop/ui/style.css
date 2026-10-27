@@ -314,6 +314,17 @@ nav button, .status-row, .activity-row, .segmented button, .subnav [role=tab], .
 .secret-entry.shown { -webkit-text-security: none; text-security: none; }
 .row textarea.secret-entry { flex: 2; min-width: 200px; margin: 0; min-height: 2.75rem; }
 #panel-variables h3 { margin: 1.1rem 0 .2rem; font-size: 1rem; }
+/* A stored variable: masked value, then its actions, then the optional edit forms. */
+.row .variable-value-box, .row .variable-actions, .row .variable-note, .row .variable-edit { flex: 1 1 100%; min-width: 0; }
+.variable-row { align-items: flex-start; }
+.variable-mask { font-family: var(--mono); letter-spacing: .15em; color: var(--muted); }
+.variable-value { margin: 0; padding: .6rem .75rem; border: 1.5px solid var(--rule); border-radius: 10px; background: var(--sunken); font-family: var(--mono); font-size: .86rem; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 14rem; overflow: auto; }
+.variable-actions { display: flex; gap: .5rem; flex-wrap: wrap; }
+.variable-note { margin: 0; }
+.variable-edit { border-top: 1.5px dashed var(--rule); padding-top: .4rem; }
+.row .variable-edit label { display: block; margin: .6rem 0 0; }
+.row .variable-edit label.check { display: flex; }
+.row .variable-edit input:not([type=checkbox]), .row .variable-edit textarea { width: 100%; }
 
 /* Sources, contexts, cases, notes and people */
 .resource { display: grid; gap: .4rem; padding: .9rem 0; border-top: 1.5px solid var(--rule); }

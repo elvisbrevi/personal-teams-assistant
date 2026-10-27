@@ -23,7 +23,10 @@ pub(super) struct Scope {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Transport {
+    /// The control endpoint's local token: the CLI, MCP and anything an agent can run.
     Local,
+    /// The application's own window, reaching the host in process.
+    Window,
     Browser,
     Machine,
 }
@@ -53,7 +56,7 @@ pub(super) fn invocation(state: &DesktopState) -> Result<Invocation> {
     );
     let invocation = CURRENT.try_with(Clone::clone).unwrap_or(Invocation {
         scope: scope.clone(),
-        transport: Transport::Local,
+        transport: Transport::Window,
     });
     ensure!(invocation.scope == scope, "Account binding mismatch.");
     ensure!(
@@ -90,7 +93,8 @@ pub(super) fn authorize(state: &DesktopState, request: &control::Request) -> Res
     reject_authority_arguments(&request.args)?;
     // Ordinary native/agent calls have the same account/path limits as the browser.
     if !invocation.scope.owner
-        && !(invocation.transport == Transport::Local && request.method == "app_quit")
+        && !(matches!(invocation.transport, Transport::Local | Transport::Window)
+            && request.method == "app_quit")
     {
         if invocation.transport != Transport::Machine {
             web::check_bound_request(&invocation.scope, request)?;
@@ -104,7 +108,7 @@ pub(super) fn authorize(state: &DesktopState, request: &control::Request) -> Res
         }
     }
     match invocation.transport {
-        Transport::Local => {}
+        Transport::Local | Transport::Window => {}
         Transport::Browser => web::check_bound_request(&invocation.scope, request)?,
         Transport::Machine => ensure!(
             matches!(

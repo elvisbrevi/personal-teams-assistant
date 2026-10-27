@@ -190,7 +190,10 @@ impl Fixture {
 }
 
 fn tool_json(reply: &Value) -> Value {
-    serde_json::from_str(reply["result"]["content"][0]["text"].as_str().unwrap()).unwrap()
+    let text = reply["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap_or_else(|| panic!("no tool text in {reply}"));
+    serde_json::from_str(text).unwrap_or_else(|_| panic!("not JSON: {text}"))
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -431,6 +434,374 @@ async fn operator_key_commands_back_up_restore_and_rotate_through_the_cli() {
     assert_eq!(rotated["data"]["rotation"]["master_version"], 2);
     let (_, verify) = f.json(&["variables", "verify"], None).await;
     assert_eq!(verify["data"]["ok"], true);
+}
+
+const NEXT: &str = "synthetic-rotated-value-4f3e2d1c";
+
+#[tokio::test(flavor = "multi_thread")]
+async fn cli_edits_rotates_and_deletes_with_versions_and_a_protected_pipe() {
+    let f = fixture();
+    let (code, created) = f
+        .json(
+            &["variables", "create", "EDITED", "--description", "Before"],
+            Some(SECRET),
+        )
+        .await;
+    assert_eq!(code, 0, "{created}");
+    let entry = created["data"]["variable"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    // Description only, then value only through a pipe: the ID and the other field stay.
+    let (code, described) = f
+        .json(
+            &[
+                "variables",
+                "update",
+                &entry,
+                "--expected-version",
+                "1",
+                "--description",
+                "After",
+            ],
+            None,
+        )
+        .await;
+    assert_eq!(code, 0, "{described}");
+    assert_eq!(described["data"]["variable"]["version"], 2, "{described}");
+    assert_eq!(described["data"]["variable"]["description"], "After");
+    let (code, rotated) = f
+        .json(
+            &[
+                "variables",
+                "update",
+                &entry,
+                "--expected-version",
+                "2",
+                "--value",
+            ],
+            Some(&format!("{NEXT}\n")),
+        )
+        .await;
+    assert_eq!(code, 0, "{rotated}");
+    assert_eq!(rotated["data"]["variable"]["version"], 3, "{rotated}");
+    assert_eq!(rotated["data"]["variable"]["id"], entry.as_str());
+    assert_eq!(rotated["data"]["variable"]["description"], "After");
+    assert!(!rotated.to_string().contains(NEXT));
+
+    // A stale version is a conflict that changes nothing; a value is never an argument.
+    let (code, stale) = f
+        .json(
+            &[
+                "variables",
+                "update",
+                &entry,
+                "--expected-version",
+                "1",
+                "--description",
+                "Older",
+            ],
+            None,
+        )
+        .await;
+    assert_eq!((code, stale["code"].as_str()), (6, Some("state_conflict")));
+    for args in [
+        vec![
+            "variables",
+            "update",
+            &entry,
+            "--expected-version",
+            "3",
+            "--value",
+            NEXT,
+        ],
+        vec!["variables", "update", &entry, "--expected-version", "3"],
+        vec!["variables", "update", &entry, "--description", "No version"],
+        vec![
+            "variables",
+            "update",
+            &entry,
+            "--expected-version",
+            "0",
+            "--description",
+            "Zero",
+        ],
+        vec![
+            "variables",
+            "update",
+            "not-a-uuid",
+            "--expected-version",
+            "3",
+            "--description",
+            "Bad ID",
+        ],
+        // `--version` is the CLI's own option: it must never look like a successful edit.
+        vec![
+            "variables",
+            "update",
+            &entry,
+            "--version",
+            "3",
+            "--description",
+            "Wrong flag",
+        ],
+        vec!["variables", "delete", &entry, "--version", "3"],
+        vec!["variables", "reveal", &entry],
+        vec!["variables", "copy", &entry],
+        vec!["tools", "call", "variable_reveal"],
+    ] {
+        let output = f.pta(&args, Some(NEXT)).await;
+        assert_ne!(output.code, 0, "{args:?}");
+        assert!(
+            !output.stdout.contains(NEXT) && !output.stderr.contains(NEXT),
+            "{args:?}"
+        );
+    }
+    // Replacing from an empty or oversized pipe is refused and the value is unchanged.
+    let (code, _) = f
+        .json(
+            &[
+                "variables",
+                "update",
+                &entry,
+                "--expected-version",
+                "3",
+                "--value",
+            ],
+            Some(""),
+        )
+        .await;
+    assert_ne!(code, 0);
+    let (_, list) = f.json(&["variables", "list"], None).await;
+    assert_eq!(list["data"]["variables"][0]["version"], 3);
+    assert_eq!(list["data"]["variables"][0]["description"], "After");
+
+    // An agent-style replacement request is completed by the user on their own channel.
+    let (code, asked) = f
+        .json(&["variables", "entry", "replace", &entry], None)
+        .await;
+    assert_eq!(code, 0, "{asked}");
+    assert_eq!(asked["data"]["action"], "replace_value");
+    let request = asked["data"]["request"].as_str().unwrap().to_owned();
+    let (code, done) = f
+        .json(
+            &["variables", "entry", "complete", &request],
+            Some("synthetic-third-value\n"),
+        )
+        .await;
+    assert_eq!(code, 0, "{done}");
+    assert_eq!(done["data"]["variable"]["version"], 4);
+
+    // Deletion names the version seen and is final for later writes.
+    let (code, early) = f
+        .json(
+            &["variables", "delete", &entry, "--expected-version", "3"],
+            None,
+        )
+        .await;
+    assert_eq!((code, early["code"].as_str()), (6, Some("state_conflict")));
+    let (code, deleted) = f
+        .json(
+            &["variables", "delete", &entry, "--expected-version", "4"],
+            None,
+        )
+        .await;
+    assert_eq!(code, 0, "{deleted}");
+    assert_eq!(deleted["data"]["deleted"]["name"], "EDITED");
+    let (_, empty) = f.json(&["variables", "list"], None).await;
+    assert_eq!(empty["data"]["total"], 0);
+    let (code, late) = f
+        .json(
+            &[
+                "variables",
+                "update",
+                &entry,
+                "--expected-version",
+                "4",
+                "--description",
+                "Revived",
+            ],
+            None,
+        )
+        .await;
+    assert_eq!((code, late["code"].as_str()), (6, Some("state_conflict")));
+    assert!(late["message"].as_str().unwrap().contains("was deleted"));
+
+    // The operator's audit names action, entry and outcome, never a value, name or description.
+    let (code, trail) = f.json(&["variables", "audit"], None).await;
+    assert_eq!(code, 0, "{trail}");
+    let events: Vec<(&str, &str)> = trail["data"]["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| {
+            (
+                e["action"].as_str().unwrap(),
+                e["outcome"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    for expected in [
+        ("update", "ok"),
+        ("update", "stale"),
+        ("rotate", "ok"),
+        ("delete", "ok"),
+        ("update", "deleted"),
+    ] {
+        assert!(events.contains(&expected), "{expected:?} in {events:?}");
+    }
+    // An event names its entry; only a malformed ID (nothing valid to name) leaves it empty.
+    for event in trail["data"]["events"].as_array().unwrap() {
+        assert!(
+            event["entry"].is_null() || event["entry"] == entry.as_str(),
+            "{event}"
+        );
+    }
+    assert!(
+        trail["data"]["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["entry"] == entry.as_str())
+    );
+    for hidden in [SECRET, NEXT, "EDITED", "After", "synthetic-third-value"] {
+        assert!(!trail.to_string().contains(hidden), "{hidden}");
+    }
+    let disk = f.disk();
+    for secret in [SECRET, NEXT, "synthetic-third-value"] {
+        assert!(
+            !disk.windows(secret.len()).any(|w| w == secret.as_bytes()),
+            "{secret}"
+        );
+    }
+    let (_, logs) = f.json(&["logs", "--limit", "200"], None).await;
+    assert!(!logs.to_string().contains("synthetic-"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_agent_edits_metadata_and_requests_replacements_but_has_no_way_to_read_a_value() {
+    let f = fixture();
+    let (_, created) = f
+        .json(
+            &[
+                "variables",
+                "create",
+                "AGENT_VISIBLE",
+                "--description",
+                "Original",
+            ],
+            Some(SECRET),
+        )
+        .await;
+    let entry = created["data"]["variable"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let replies = f
+        .mcp(&[
+            (
+                "variable_update",
+                json!({"id":entry,"version":1,"description":"Agent edit"}),
+            ),
+            (
+                "variable_update",
+                json!({"id":entry,"version":1,"description":"Stale"}),
+            ),
+            (
+                "variable_update",
+                json!({"id":entry,"version":2,"value":NEXT}),
+            ),
+            (
+                "variable_update",
+                json!({"id":entry,"version":2,"description":"d","account":"other"}),
+            ),
+            ("variable_rotation_request", json!({"id":entry})),
+            ("variable_delete", json!({"id":entry,"version":2})),
+            ("variable_list", json!({})),
+        ])
+        .await;
+    // A refused call is a protocol error (invalid arguments) or a tool result flagged as an error.
+    let refused = |reply: &Value| reply["error"].is_object() || reply["result"]["isError"] == true;
+    assert!(!refused(&replies[0]), "{}", replies[0]);
+    assert_eq!(tool_json(&replies[0])["variable"]["version"], 2);
+    assert!(refused(&replies[1]), "a stale edit is a conflict");
+    assert!(refused(&replies[2]), "no tool accepts a value");
+    assert!(refused(&replies[3]), "authority is never an argument");
+    assert!(!refused(&replies[4]), "{}", replies[4]);
+    let request = tool_json(&replies[4]);
+    assert_eq!(request["action"], "replace_value");
+    assert!(
+        refused(&replies[5]),
+        "deleting needs the user's confirmation"
+    );
+    assert!(replies[5].to_string().contains("confirm"));
+    assert!(!refused(&replies[6]), "{}", replies[6]);
+    let listed = tool_json(&replies[6]);
+    assert_eq!(listed["total"], 1, "an unconfirmed delete deleted nothing");
+    assert_eq!(listed["variables"][0]["description"], "Agent edit");
+    assert_eq!(listed["pending"][0]["action"], "replace_value");
+
+    // The advertised tools can edit metadata and delete, and none reads, copies or takes a value.
+    let tools = replies.last().unwrap()["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .clone();
+    for name in [
+        "variable_update",
+        "variable_rotation_request",
+        "variable_delete",
+    ] {
+        assert!(tools.iter().any(|t| t["name"] == name), "{name}");
+    }
+    for tool in &tools {
+        let name = tool["name"].as_str().unwrap();
+        assert!(
+            !["reveal", "copy", "read", "get_value", "show"]
+                .iter()
+                .any(|word| name.contains(word) && name.starts_with("variable_")),
+            "{name}"
+        );
+        let properties = tool["inputSchema"]["properties"].as_object().unwrap();
+        assert!(
+            !["value", "secret", "password"]
+                .iter()
+                .any(|key| properties.contains_key(*key)),
+            "{name}"
+        );
+    }
+
+    // With the user's approval the same call deletes; the replacement is completed by the user.
+    let (code, done) = f
+        .json(
+            &[
+                "variables",
+                "entry",
+                "complete",
+                request["request"].as_str().unwrap(),
+            ],
+            Some(&format!("{NEXT}\n")),
+        )
+        .await;
+    assert_eq!(code, 0, "{done}");
+    let replies = f
+        .mcp(&[
+            (
+                "variable_entry_status",
+                json!({"request":request["request"]}),
+            ),
+            (
+                "variable_delete",
+                json!({"id":entry,"version":3,"confirmed":true}),
+            ),
+            ("variable_search", json!({"query":"agent"})),
+        ])
+        .await;
+    assert_eq!(tool_json(&replies[0])["state"], "completed");
+    assert_eq!(tool_json(&replies[0])["action"], "replace_value");
+    assert!(!refused(&replies[1]), "{}", replies[1]);
+    assert_eq!(tool_json(&replies[2])["total"], 0);
+    assert!(!f.disk().windows(NEXT.len()).any(|w| w == NEXT.as_bytes()));
 }
 
 #[test]

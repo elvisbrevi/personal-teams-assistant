@@ -236,6 +236,42 @@ pub(super) const TOOLS: &[Tool] = &[
         },
     },
     Tool {
+        name: "variable_update",
+        title: "Edit a variable's description",
+        description: "Change the description of a stored variable you found with variable_list, keeping its ID, name and value. Pass the version you saw: if the variable changed since, the call fails and you inspect it again instead of overwriting. The description is plain text for the user; never put a secret in it. You cannot read or set a value: to replace one, call variable_rotation_request.",
+        effect: Effect::Local,
+        schema: || {
+            object(
+                json!({"id":string("Variable ID from variable_list."),"version":{"type":"integer","minimum":1,"description":"Version from variable_list."},"description":string("New description, 1 to 500 characters.")}),
+                &["id", "version", "description"],
+            )
+        },
+    },
+    Tool {
+        name: "variable_rotation_request",
+        title: "Ask the user to replace a variable's value",
+        description: "Start a protected entry that replaces the value of an existing variable, keeping its ID, name and description so references continue to work. The user types the new value in Settings > Credentials > Variables or pipes it to `pta variables entry complete`; you never receive it. Check variable_entry_status afterwards. The request fails if the variable changes first.",
+        effect: Effect::Local,
+        schema: || {
+            object(
+                json!({"id":string("Variable ID from variable_list.")}),
+                &["id"],
+            )
+        },
+    },
+    Tool {
+        name: "variable_delete",
+        title: "Delete a variable",
+        description: "Delete a stored variable. Future references to it stop working and cannot be recovered; this does not revoke the credential at its provider or retract a value a program already received. Pass the version you saw so a changed variable is not deleted by mistake. There is no tool to read a value.",
+        effect: Effect::External,
+        schema: || {
+            object(
+                json!({"id":string("Variable ID from variable_list."),"version":{"type":"integer","minimum":1,"description":"Version from variable_list."},"confirmed":confirmed()}),
+                &["id", "version"],
+            )
+        },
+    },
+    Tool {
         name: "machine_list",
         title: "Execution machines",
         description: "Authoritative trusted and revoked machines of this account, presence and last-known assistant state, capabilities, allowed roots and the single selected Teams machine.",
@@ -1069,6 +1105,13 @@ pub(super) async fn run(name: &str, args: &Value) -> Result<Value, String> {
         "variable_list" | "variable_entry_status" | "variable_entry_cancel" => ipc(name, args.clone()).await,
         "variable_search" => ipc("variable_list", args.clone()).await,
         "variable_entry_request" => ipc("variable_entry_start", args.clone()).await,
+        "variable_update" => ipc(name, args.clone()).await,
+        "variable_rotation_request" => ipc("variable_rotation_start", args.clone()).await,
+        "variable_delete" => {
+            let mut args = args.clone();
+            args.as_object_mut().unwrap().remove("confirmed");
+            ipc(name, args).await
+        }
         "finish_azure_cli_login" => {
             let reply = cli::call(name, args.clone(), None, true).await.map_err(|_| "The host could not be reached; check pta status.".to_string())?;
             if reply.code == "authorization_pending" { Ok(reply.data) } else { data(Ok(reply)) }
@@ -1253,6 +1296,7 @@ pub(super) fn confirmation(name: &str, args: &Value) -> Option<String> {
                 args["url"].as_str().unwrap_or_default()
             )
         }
+        "variable_delete" => "Delete this stored variable? Its value cannot be recovered.".into(),
         "machine_disconnect" => "Disconnect this machine from its coordinator?".into(),
         "machine_update" => "Change this account machine's name or allowed roots?".into(),
         "machine_revoke" => "Revoke this machine and deny its future account access?".into(),

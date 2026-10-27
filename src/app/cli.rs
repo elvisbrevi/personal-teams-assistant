@@ -95,8 +95,14 @@ Account variables
                            or a terminal). Names: letters, digits and _ (up to 128); descriptions are required (up to
                            500 characters); values are up to 16 KiB of UTF-8 text with newlines. It never overwrites:
                            after a timeout, inspect with list, or repeat with the printed --id.
+  variables update ID --expected-version N [--description TEXT] [--value]
+                           Edits a description and/or replaces the value (read from a protected pipe on stdin when
+                           --value is given). ID and version come from list; a changed variable is a conflict.
+  variables delete ID --expected-version N  Deletes a variable; its value cannot be recovered (the provider's credential is not revoked).
   variables entry start NAME --description TEXT  Asks for a value to be typed by the user (GUI or complete).
+  variables entry replace ID  Asks for a replacement value to be typed by the user (GUI or complete).
   variables entry status|cancel|complete REQUEST  complete reads the value from stdin like create.
+  variables audit [--limit N]  Operator-local: recent variable edits, deletions and reveals (never values).
   variables verify            Checks that every stored variable authenticates with the current keys.
   variables key backup --output PRIVATE_FILE  Operator-local: writes the master keys (not values) to a new 0600 file.
   variables key restore       Operator-local: master-key backup JSON on stdin; never replaces an existing key.
@@ -210,6 +216,7 @@ fn words(args: &[String]) -> Vec<&str> {
             arg.as_str(),
             "--description"
                 | "--id"
+                | "--expected-version"
                 | "--output"
                 | "--limit"
                 | "--context"
@@ -257,6 +264,56 @@ async fn variables_command(args: &[String]) -> Result<Reply> {
                 // The host may have stored it before the timeout: inspect, then repeat only with this ID.
                 error.context(format!("The result is unknown. Inspect with `pta variables list`; if it is absent, repeat with --id {id}."))
             })
+        }
+        ("update", _) => {
+            let version = option(args, "--expected-version")
+                .context("--expected-version is required")?
+                .parse::<u64>()
+                .context("invalid version")?;
+            let description = option(args, "--description");
+            let replace_value = args.iter().any(|a| a == "--value");
+            ensure!(
+                description.is_some() || replace_value,
+                "give --description, --value or both"
+            );
+            let mut body = json!({"id":word(2)?,"version":version});
+            if let Some(description) = description {
+                body["description"] = json!(description);
+            }
+            if replace_value {
+                body["value"] = json!(protected_value()?);
+            }
+            call("variable_update", body, None, true).await.map_err(|error| {
+                error.context("The result is unknown. Inspect with `pta variables list` before repeating.")
+            })
+        }
+        ("delete", _) => {
+            let version = option(args, "--expected-version")
+                .context("--expected-version is required")?
+                .parse::<u64>()
+                .context("invalid version")?;
+            call(
+                "variable_delete",
+                json!({"id":word(2)?,"version":version}),
+                None,
+                true,
+            )
+            .await
+        }
+        ("audit", _) => {
+            let limit = option(args, "--limit")
+                .map(|v| v.parse::<usize>().context("invalid limit"))
+                .transpose()?;
+            call("variable_audit", json!({"limit":limit}), None, true).await
+        }
+        ("entry", Some("replace")) => {
+            call(
+                "variable_rotation_start",
+                json!({"id":word(3)?}),
+                None,
+                true,
+            )
+            .await
         }
         ("entry", Some("start")) => {
             call(
@@ -371,7 +428,15 @@ fn validate_args(args: &[String]) -> Result<()> {
         let a = args[i].as_str();
         match a {
             "--json" | "--non-interactive" | "--offline" | "--no-browser" | "--wait"
-            | "--content" | "--current-profile" | "--context-stdin" => {}
+            | "--content" | "--current-profile" | "--context-stdin" | "--value" => {}
+            "--expected-version" => {
+                i += 1;
+                ensure!(
+                    args.get(i)
+                        .is_some_and(|v| v.parse::<u64>().is_ok_and(|n| n > 0)),
+                    "invalid version"
+                );
+            }
             "--description" => {
                 i += 1;
                 ensure!(
@@ -450,12 +515,12 @@ fn validate_args(args: &[String]) -> Result<()> {
             | ["mcp", "config"]
             | ["tools", "list"]
             | ["tools", "call", _]
-            | ["variables", "list" | "verify"]
-            | ["variables", "search" | "create", _]
+            | ["variables", "list" | "verify" | "audit"]
+            | ["variables", "search" | "create" | "update" | "delete", _]
             | [
                 "variables",
                 "entry",
-                "start" | "status" | "cancel" | "complete",
+                "start" | "status" | "cancel" | "complete" | "replace",
                 _
             ]
             | ["variables", "key", "backup" | "restore" | "rotate"]
@@ -558,7 +623,17 @@ fn validate_args(args: &[String]) -> Result<()> {
         (
             "--description",
             p.as_slice().starts_with(&["variables", "create"])
+                || p.as_slice().starts_with(&["variables", "update"])
                 || p.as_slice().starts_with(&["variables", "entry", "start"]),
+        ),
+        (
+            "--expected-version",
+            p.as_slice().starts_with(&["variables", "update"])
+                || p.as_slice().starts_with(&["variables", "delete"]),
+        ),
+        (
+            "--value",
+            p.as_slice().starts_with(&["variables", "update"]),
         ),
         ("--id", p.as_slice().starts_with(&["variables", "create"])),
         (
@@ -1393,7 +1468,7 @@ pub async fn run() -> i32 {
         }
         return 0;
     }
-    if args.iter().any(|a| a == "--version") {
+    if args.iter().any(|a| a == "--version") && !args.iter().any(|a| a == "variables") {
         if args.iter().any(|a| a == "--json") {
             println!(
                 "{}",

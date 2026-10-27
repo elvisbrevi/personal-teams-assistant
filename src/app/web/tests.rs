@@ -496,7 +496,7 @@ async fn fake_host(portal: &Portal, account: &Account) -> (MockServer, fs::File)
         &dir.join("control.json"),
         &json!({"contract":1,"port":port,"token":"synthetic-ipc-token",
         "wiki_support":true,"activity_registration_support":true,"web_support":true,"web_access_support":true,"implementation_support":true,"machine_pairing_support":true,
-        "machine_login_support":true,"machine_management_support":true,"shared_accounts_support":true,"account_authority_support":true,"account_binding":{"id":account.id,"version":account.version},
+        "machine_login_support":true,"machine_management_support":true,"shared_accounts_support":true,"account_authority_support":true,"account_variables_support":true,"account_binding":{"id":account.id,"version":account.version},
         "browser_token":"synthetic-browser-token","machine_token":"synthetic-machine-token"})
         .to_string(),
     )
@@ -2585,6 +2585,97 @@ async fn account_variables_are_private_to_each_account_and_never_leave_as_values
         );
     }
 
+    // The shared GUI (a signed-in browser) can reveal, edit and delete its own account's entries;
+    // another account's browser, the CLI/MCP channel and machines never read a value.
+    let own = invoke(
+        alice,
+        Browser,
+        "variable_list",
+        json!({"query":"ALICE_ONLY"}),
+    )
+    .await
+    .data["variables"][0]
+        .clone();
+    let entry = own["id"].as_str().unwrap().to_owned();
+    for (method, args) in [
+        ("variable_reveal", json!({"id":entry})),
+        (
+            "variable_update",
+            json!({"id":entry,"version":1,"value":BOB_SECRET}),
+        ),
+        ("variable_delete", json!({"id":entry,"version":1})),
+    ] {
+        let refused = invoke(bob, Browser, method, args).await;
+        assert_eq!(refused.code, "invalid_input", "{method}");
+        assert!(
+            !serde_json::to_string(&refused)
+                .unwrap()
+                .contains(ALICE_SECRET)
+        );
+    }
+    let revealed = invoke(alice, Browser, "variable_reveal", json!({"id":entry})).await;
+    assert!(revealed.ok, "{:?}", revealed.message);
+    assert_eq!(revealed.data["value"], ALICE_SECRET);
+    for transport in [Local, Machine] {
+        let refused = invoke(alice, transport, "variable_reveal", json!({"id":entry})).await;
+        assert!(!refused.ok);
+        assert!(
+            !serde_json::to_string(&refused)
+                .unwrap()
+                .contains(ALICE_SECRET)
+        );
+    }
+    for method in ["variable_rotation_start", "variable_audit"] {
+        assert!(
+            !invoke(alice, Browser, method, json!({"id":entry})).await.ok,
+            "{method}"
+        );
+        assert!(
+            !invoke(alice, Machine, method, json!({"id":entry})).await.ok,
+            "{method}"
+        );
+    }
+    let edited = invoke(
+        alice,
+        Browser,
+        "variable_update",
+        json!({"id":entry,"version":1,"description":"Edited by Alice"}),
+    )
+    .await;
+    assert!(edited.ok, "{:?}", edited.message);
+    assert_eq!(edited.data["variable"]["version"], 2);
+    let temporary = body("ALICE_TEMPORARY", ALICE_SECRET);
+    let temporary_id = temporary["id"].as_str().unwrap().to_owned();
+    assert!(
+        invoke(alice, Browser, "variable_create", temporary)
+            .await
+            .ok
+    );
+    assert!(
+        invoke(
+            alice,
+            Browser,
+            "variable_delete",
+            json!({"id":temporary_id,"version":1})
+        )
+        .await
+        .ok
+    );
+    assert_eq!(
+        names(&invoke(alice, Browser, "variable_list", json!({})).await),
+        ["ALICE_ONLY", "SHARED_NAME"]
+    );
+    assert!(
+        !invoke(
+            alice,
+            Browser,
+            "variable_reveal",
+            json!({"id":temporary_id})
+        )
+        .await
+        .ok
+    );
+
     // Separate stores and keys on disk; neither holds a value in clear or the other's names.
     let stores: Vec<_> = entries
         .iter()
@@ -2607,4 +2698,57 @@ async fn account_variables_are_private_to_each_account_and_never_leave_as_values
     }
     let master = |dir: &Path| fs::read(dir.join("keys").join("master-1.key")).unwrap();
     assert_ne!(master(&stores[0]), master(&stores[1]));
+}
+
+#[tokio::test]
+async fn variable_reveal_edits_and_deletion_reach_only_the_signed_in_hosts_and_are_never_cached() {
+    let (_dir, portal, entries, _server) = configured_fixture().await;
+    let (alice, _alice_lock) = fake_host(&portal, &entries[0]).await;
+    let (bob, _bob_lock) = fake_host(&portal, &entries[1]).await;
+    let (cookie, csrf) = session_cookie(&portal, &entries[0]).await;
+    let entry = uuid::Uuid::new_v4().to_string();
+    let post = |method: &str, args: Value| {
+        let mut request = serde_json::to_value(control::Request::new(method)).unwrap();
+        request["args"] = args;
+        send(
+            &portal,
+            "POST",
+            "/api/control",
+            Some(&cookie),
+            Some(&csrf),
+            Some("https://localhost:38656"),
+            request,
+        )
+    };
+    for (method, args) in [
+        ("variable_reveal", json!({"id":entry})),
+        (
+            "variable_update",
+            json!({"id":entry,"version":1,"description":"Edited"}),
+        ),
+        ("variable_delete", json!({"id":entry,"version":1})),
+    ] {
+        let response = post(method, args).await;
+        assert_eq!(response.status(), StatusCode::OK, "{method}");
+        // A revealed value must not be stored by the browser or an intermediary.
+        assert_eq!(
+            response.headers()[header::CACHE_CONTROL],
+            "no-store",
+            "{method}"
+        );
+        assert_eq!(json_body(response).await["ok"], true, "{method}");
+    }
+    assert_eq!(alice.received_requests().await.unwrap().len(), 3);
+    assert!(bob.received_requests().await.unwrap().is_empty());
+
+    // Another account's profile or identity cannot be named from the browser.
+    for key in ["account", "profile", "owner", "transport"] {
+        let mut args = json!({"id":entry});
+        args[key] = json!(entries[1].id);
+        let data = json_body(post("variable_reveal", args).await).await;
+        assert_eq!(data["ok"], false, "{key}");
+        assert_eq!(data["code"], "invalid_input", "{key}");
+    }
+    assert_eq!(alice.received_requests().await.unwrap().len(), 3);
+    assert!(bob.received_requests().await.unwrap().is_empty());
 }

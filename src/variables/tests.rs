@@ -483,3 +483,293 @@ fn the_published_package_has_no_variable_stores_or_keys() {
         );
     }
 }
+
+fn stored(store: &Store, name: &str, value: &str) -> Metadata {
+    store.create(new(name, value)).unwrap().variable
+}
+fn conflict(result: Result<impl std::fmt::Debug>) -> String {
+    match result {
+        Err(Error::Conflict(message)) => message,
+        other => panic!("expected a conflict, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_description_edit_keeps_the_id_name_and_value() {
+    let f = fixture();
+    let store = account(&f, "alice");
+    let before = stored(&store, "DEPLOY_ENDPOINT", SECRET);
+    let updated = store
+        .update(&before.id, 1, Some("Where releases are published"), None)
+        .unwrap();
+    assert!(!updated.replayed);
+    assert_eq!(updated.variable.id, before.id);
+    assert_eq!(updated.variable.name, "DEPLOY_ENDPOINT");
+    assert_eq!(updated.variable.description, "Where releases are published");
+    assert_eq!(updated.variable.version, 2);
+    assert_eq!(store.resolve("DEPLOY_ENDPOINT").unwrap().expose(), SECRET);
+    let listed = store.list(None).unwrap();
+    assert_eq!(listed[0].description, "Where releases are published");
+    assert_eq!(listed[0].version, 2);
+    // The value is still ciphertext on disk and still authenticates under its new revision.
+    assert!(raw_files(&f).iter().all(|file| !contains(file, SECRET)));
+    assert!(store.verify().unwrap().failed.is_empty());
+}
+
+#[test]
+fn rotation_replaces_the_value_and_keeps_the_reference_and_description() {
+    let f = fixture();
+    let store = account(&f, "alice");
+    let before = stored(&store, "API_HOST", SECRET);
+    let updated = store
+        .update(
+            &before.id,
+            1,
+            None,
+            Some(&Secret::new("line one\nline two")),
+        )
+        .unwrap();
+    assert_eq!(updated.variable.id, before.id);
+    assert_eq!(updated.variable.description, before.description);
+    assert_eq!(updated.variable.version, 2);
+    assert_eq!(
+        store.reveal(&before.id).unwrap().1.expose(),
+        "line one\nline two"
+    );
+    assert!(
+        raw_files(&f)
+            .iter()
+            .all(|file| !contains(file, SECRET) && !contains(file, "line one"))
+    );
+    // Both fields in one change bump the version once.
+    let both = store
+        .update(&before.id, 2, Some("New text"), Some(&Secret::new(OTHER)))
+        .unwrap();
+    assert_eq!(both.variable.version, 3);
+    let (metadata, value) = store.reveal(&before.id).unwrap();
+    assert_eq!(
+        (metadata.description.as_str(), value.expose()),
+        ("New text", OTHER)
+    );
+}
+
+#[test]
+fn a_stale_edit_never_overwrites_a_newer_change() {
+    let f = fixture();
+    let store = account(&f, "alice");
+    let entry = stored(&store, "SHARED_TARGET", SECRET);
+    store
+        .update(&entry.id, 1, Some("First client"), None)
+        .unwrap();
+    // A second client still holding version 1 is told, not allowed to overwrite.
+    let message = conflict(store.update(&entry.id, 1, Some("Second client"), None));
+    assert!(message.contains("now version 2") && !message.contains(SECRET));
+    let message = conflict(store.update(&entry.id, 1, None, Some(&Secret::new(OTHER))));
+    assert!(message.contains("SHARED_TARGET"));
+    assert_eq!(store.resolve("SHARED_TARGET").unwrap().expose(), SECRET);
+    assert_eq!(store.list(None).unwrap()[0].description, "First client");
+    // Stale deletion is refused too.
+    conflict(store.delete(&entry.id, 1));
+    assert_eq!(store.list(None).unwrap().len(), 1);
+}
+
+#[test]
+fn repeating_an_applied_edit_is_reported_not_applied_twice() {
+    let f = fixture();
+    let store = account(&f, "alice");
+    let entry = stored(&store, "RETRIED", SECRET);
+    let value = Secret::new(OTHER);
+    let first = store
+        .update(&entry.id, 1, Some("Retried text"), Some(&value))
+        .unwrap();
+    let again = store
+        .update(&entry.id, 1, Some("Retried text"), Some(&value))
+        .unwrap();
+    assert!(!first.replayed && again.replayed);
+    assert_eq!(again.variable.version, 2);
+    // A different change on the same stale version is still a conflict.
+    conflict(store.update(&entry.id, 1, Some("Other text"), Some(&value)));
+    conflict(store.update(
+        &entry.id,
+        1,
+        Some("Retried text"),
+        Some(&Secret::new(SECRET)),
+    ));
+}
+
+#[test]
+fn an_edit_that_changes_nothing_or_is_malformed_is_refused() {
+    let f = fixture();
+    let store = account(&f, "alice");
+    let entry = stored(&store, "STEADY", SECRET);
+    let bad = |result: Result<Updated>| matches!(result, Err(Error::Input(_)));
+    assert!(bad(store.update(&entry.id, 1, None, None)));
+    assert!(bad(store.update(
+        &entry.id,
+        1,
+        Some(&entry.description),
+        None
+    )));
+    assert!(bad(store.update(&entry.id, 1, Some(""), None)));
+    assert!(bad(store.update(&entry.id, 1, Some("two\nlines"), None)));
+    assert!(bad(store.update(
+        &entry.id,
+        1,
+        None,
+        Some(&Secret::new(""))
+    )));
+    assert!(bad(store.update(
+        &entry.id,
+        1,
+        None,
+        Some(&Secret::new("nul\0byte"))
+    )));
+    assert!(bad(store.update(
+        &entry.id,
+        1,
+        None,
+        Some(&Secret::new("x".repeat(MAX_VALUE + 1)))
+    )));
+    assert!(bad(store.update("not-a-uuid", 1, Some("d"), None)));
+    assert_eq!(store.list(None).unwrap()[0].version, 1);
+    assert_eq!(store.resolve("STEADY").unwrap().expose(), SECRET);
+}
+
+#[test]
+fn deletion_leaves_a_tombstone_that_rejects_stale_writes_and_resurrection() {
+    let f = fixture();
+    let store = account(&f, "alice");
+    let entry = stored(&store, "TO_DELETE", SECRET);
+    store
+        .update(&entry.id, 1, Some("Edited before deletion"), None)
+        .unwrap();
+    let deleted = store.delete(&entry.id, 2).unwrap();
+    assert_eq!((deleted.version, deleted.replayed), (3, false));
+    assert!(store.list(None).unwrap().is_empty());
+    assert!(store.resolve("TO_DELETE").is_err());
+    // Nothing of the entry stays readable on disk.
+    assert!(raw_files(&f).iter().all(|file| !contains(file, SECRET)));
+    // A stale edit, reveal or repeat creation cannot bring it back.
+    assert!(conflict(store.update(&entry.id, 2, Some("Late edit"), None)).contains("deleted"));
+    assert!(conflict(store.reveal(&entry.id)).contains("deleted"));
+    assert!(conflict(store.delete(&entry.id, 1)).contains("deleted"));
+    let resurrect = NewVariable {
+        id: entry.id.clone(),
+        name: "TO_DELETE".into(),
+        description: "Late retry of the creation".into(),
+        value: Secret::new(SECRET),
+    };
+    assert!(conflict(store.create(resurrect)).contains("deleted"));
+    assert!(store.list(None).unwrap().is_empty());
+    // Repeating the same deletion is reported; the name is free again for a new entry.
+    let again = store.delete(&entry.id, 2).unwrap();
+    assert!(again.replayed && again.version == 3);
+    let fresh = stored(&store, "TO_DELETE", OTHER);
+    assert_ne!(fresh.id, entry.id);
+    assert_eq!(store.resolve("TO_DELETE").unwrap().expose(), OTHER);
+}
+
+#[test]
+fn reveal_returns_the_exact_value_only_for_an_entry_of_the_same_account() {
+    let f = fixture();
+    let alice = account(&f, "alice");
+    let bob = account(&f, "bob");
+    let multiline = "-----BEGIN SYNTHETIC-----\r\nabc\n\nlast line without break";
+    let mine = stored(&alice, "PRIVATE_PEM", multiline);
+    let (metadata, value) = alice.reveal(&mine.id).unwrap();
+    assert_eq!(value.expose(), multiline);
+    assert_eq!(metadata.name, "PRIVATE_PEM");
+    // Another account cannot read it with the real ID, nor with forged or malformed ones.
+    assert!(matches!(bob.reveal(&mine.id), Err(Error::Input(_))));
+    assert!(matches!(bob.reveal(&id()), Err(Error::Input(_))));
+    assert!(matches!(
+        bob.reveal("'; DROP TABLE variables; --"),
+        Err(Error::Input(_))
+    ));
+    assert!(matches!(
+        bob.update(&mine.id, 1, Some("hijack"), None),
+        Err(Error::Input(_))
+    ));
+    assert!(matches!(bob.delete(&mine.id, 1), Err(Error::Input(_))));
+    assert_eq!(alice.reveal(&mine.id).unwrap().1.expose(), multiline);
+    assert_eq!(alice.list(None).unwrap()[0].description, mine.description);
+}
+
+#[test]
+fn ciphertext_is_bound_to_its_revision_after_an_edit() {
+    let f = fixture();
+    let store = account(&f, "alice");
+    let entry = stored(&store, "BOUND", SECRET);
+    let old: Vec<u8> = Connection::open(&f.db)
+        .unwrap()
+        .query_row(
+            "SELECT ciphertext FROM variables WHERE id=?1",
+            [&entry.id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    store
+        .update(&entry.id, 1, None, Some(&Secret::new(OTHER)))
+        .unwrap();
+    // Putting the previous revision's ciphertext back is detected, not served.
+    let db = Connection::open(&f.db).unwrap();
+    db.execute(
+        "UPDATE variables SET ciphertext=?1 WHERE id=?2",
+        params![old, entry.id],
+    )
+    .unwrap();
+    assert!(matches!(store.reveal(&entry.id), Err(Error::Integrity(_))));
+    assert_eq!(store.verify().unwrap().failed, ["BOUND"]);
+}
+
+#[test]
+fn edited_entries_survive_key_rotation_and_a_missing_key_fails_closed() {
+    let f = fixture();
+    let store = account(&f, "alice");
+    let entry = stored(&store, "ROTATED", SECRET);
+    store
+        .update(&entry.id, 1, None, Some(&Secret::new(OTHER)))
+        .unwrap();
+    store.rotate().unwrap();
+    assert_eq!(store.reveal(&entry.id).unwrap().1.expose(), OTHER);
+    let after = store
+        .update(&entry.id, 2, Some("After rotation"), None)
+        .unwrap();
+    assert_eq!(after.variable.version, 3);
+    assert_eq!(store.reveal(&entry.id).unwrap().1.expose(), OTHER);
+    std::fs::remove_dir_all(&f.keys).unwrap();
+    assert!(matches!(store.reveal(&entry.id), Err(Error::Key(_))));
+    assert!(matches!(
+        store.update(&entry.id, 3, None, Some(&Secret::new(SECRET))),
+        Err(Error::Key(_))
+    ));
+    assert_eq!(store.list(None).unwrap()[0].version, 3);
+}
+
+#[test]
+fn audit_events_name_action_account_entry_and_outcome_never_a_value() {
+    let f = fixture();
+    let store = account(&f, "alice");
+    let entry = stored(&store, "AUDITED", SECRET);
+    store.audit("update", Some(&entry.id), "ok");
+    store.audit("reveal", Some(&entry.id), "denied_client");
+    store.audit("delete", None, "rejected");
+    let events = store.audit_events(10).unwrap();
+    assert_eq!(
+        events.iter().map(|e| e.action.as_str()).collect::<Vec<_>>(),
+        ["delete", "reveal", "update"]
+    );
+    assert!(events.iter().all(|e| e.account == "alice"));
+    assert_eq!(events[2].entry.as_deref(), Some(entry.id.as_str()));
+    assert_eq!(events[1].outcome, "denied_client");
+    assert!(!serde_json::to_string(&events).unwrap().contains(SECRET),);
+    // Another account sees none of it.
+    assert!(account(&f, "bob").audit_events(10).unwrap().is_empty());
+    for index in 0..(AUDIT_KEPT + 5) {
+        store.audit("reveal", None, &format!("ok{index}"));
+    }
+    assert_eq!(
+        store.audit_events(100_000).unwrap().len(),
+        AUDIT_KEPT as usize
+    );
+}

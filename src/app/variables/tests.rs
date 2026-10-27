@@ -1,5 +1,5 @@
 use super::*;
-use authority::Transport::{Local, Machine};
+use authority::Transport::{Local, Machine, Window};
 
 const SECRET: &str = "synthetic-secret-value-1a2b3c4d";
 const MULTILINE: &str = "-----BEGIN SYNTHETIC KEY-----\nabc123\n-----END SYNTHETIC KEY-----";
@@ -483,11 +483,29 @@ async fn agent_tools_never_accept_or_return_a_value() {
             "variable_search",
             "variable_entry_request",
             "variable_entry_status",
-            "variable_entry_cancel"
+            "variable_entry_cancel",
+            "variable_update",
+            "variable_rotation_request",
+            "variable_delete"
         ]
     );
+    // Revealing or copying a value is human-only: no agent-facing tool, under any name, reads one.
+    assert!(
+        TOOLS
+            .iter()
+            .all(|tool| !["reveal", "copy", "read", "get", "show"]
+                .iter()
+                .any(|word| tool.name.starts_with("variable_") && tool.name.contains(word))),
+        "an agent tool reads a variable value"
+    );
+    // Deleting is irreversible, so it alone needs the user's confirmation; nothing else does.
     for tool in &variable_tools {
-        assert!(tool.effect != Effect::External, "{}", tool.name);
+        assert_eq!(
+            tool.effect == Effect::External,
+            tool.name == "variable_delete",
+            "{}",
+            tool.name
+        );
     }
     // No tool anywhere takes a secret-bearing argument.
     for tool in TOOLS {
@@ -520,4 +538,441 @@ async fn agent_tools_never_accept_or_return_a_value() {
     ] {
         assert!(validate(name, &args).is_err(), "{name}");
     }
+}
+
+const EXACT: &str = "line one\n\tindented  with  spaces\nlast line without a newline\n";
+
+fn audit(reply: &Reply) -> Vec<(String, Option<String>, String)> {
+    reply.data["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|event| {
+            (
+                event["action"].as_str().unwrap().to_owned(),
+                event["entry"].as_str().map(str::to_owned),
+                event["outcome"].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn reveal_is_human_only_and_never_reaches_agents_or_machines() {
+    let root = tempfile::tempdir().unwrap();
+    let host = host(root.path());
+    let body = create("REVEALED", EXACT);
+    let entry = body["id"].as_str().unwrap().to_owned();
+    assert!(call(&host, Local, "variable_create", body).await.ok);
+
+    // The application window gets the exact value, line breaks included (an authenticated
+    // browser does too: see the portal test with account-bound hosts).
+    for transport in [Window] {
+        let reply = call(&host, transport, "variable_reveal", json!({"id":entry})).await;
+        assert!(reply.ok, "{:?}", reply.message);
+        assert_eq!(reply.data["value"], EXACT);
+        assert_eq!(reply.data["variable"]["name"], "REVEALED");
+        assert_eq!(reply.data["variable"]["version"], 1);
+    }
+    // The control endpoint's local token is what the CLI, MCP and agents hold: never a reveal.
+    let local = call(&host, Local, "variable_reveal", json!({"id":entry})).await;
+    assert!(!local.ok);
+    assert_eq!(local.code, "state_conflict");
+    assert!(!text(&local).contains("last line"));
+    // Machine credentials are stopped earlier, by the account authority, before any variable code.
+    let machine = call(&host, Machine, "variable_reveal", json!({"id":entry})).await;
+    assert!(!machine.ok);
+    assert!(!text(&machine).contains("last line"));
+    // Malformed and forged requests are refused and name no value.
+    for args in [
+        json!({}),
+        json!({"id":"not-a-uuid"}),
+        json!({"id":entry,"extra":true}),
+        json!({"id":id()}),
+    ] {
+        let reply = call(&host, Window, "variable_reveal", args).await;
+        assert!(!reply.ok);
+        assert_eq!(reply.code, "invalid_input");
+        assert!(!text(&reply).contains("last line"));
+    }
+    // Neither the list nor any other reply carries it.
+    for method in ["variable_list", "snapshot"] {
+        assert!(!text(&call(&host, Local, method, json!({})).await).contains("last line"));
+    }
+
+    // The audit shows what happened to which entry, to the local operator only.
+    for transport in [Window, Machine] {
+        assert!(!call(&host, transport, "variable_audit", json!({})).await.ok);
+    }
+    let events = call(&host, Local, "variable_audit", json!({})).await;
+    assert!(events.ok);
+    let trail = audit(&events);
+    let reveals = |outcome: &str| {
+        trail
+            .iter()
+            .filter(|(action, who, result)| {
+                action == "reveal" && who.as_deref() == Some(entry.as_str()) && result == outcome
+            })
+            .count()
+    };
+    assert_eq!(reveals("ok"), 1);
+    assert_eq!(reveals("denied_client"), 1);
+    let forged = trail
+        .iter()
+        .filter(|(action, who, _)| {
+            action == "reveal" && who.is_some() && who.as_deref() != Some(entry.as_str())
+        })
+        .count();
+    assert_eq!(forged, 1, "a reveal of an unknown entry is traced once");
+    let shown = text(&events);
+    for hidden in ["last line", "REVEALED", "Synthetic"] {
+        assert!(!shown.contains(hidden), "the audit holds {hidden}");
+    }
+    assert!(events.data["events"][0]["account"].is_string());
+}
+
+#[tokio::test]
+async fn edits_rotation_and_deletion_go_through_versions_and_leave_a_tombstone() {
+    let root = tempfile::tempdir().unwrap();
+    let host = host(root.path());
+    let body = create("EDITED", SECRET);
+    let entry = body["id"].as_str().unwrap().to_owned();
+    assert!(
+        call(&host, Window, "variable_create", body.clone())
+            .await
+            .ok
+    );
+    let reveal = || call(&host, Window, "variable_reveal", json!({"id":entry}));
+
+    // Description only: value, name and ID stay.
+    let described = call(
+        &host,
+        Window,
+        "variable_update",
+        json!({"id":entry,"version":1,"description":"Edited description"}),
+    )
+    .await;
+    assert!(described.ok, "{:?}", described.message);
+    assert_eq!(described.data["variable"]["version"], 2);
+    assert_eq!(
+        described.data["variable"]["description"],
+        "Edited description"
+    );
+    assert_eq!(described.data["replayed"], false);
+    assert_eq!(reveal().await.data["value"], SECRET);
+
+    // Value only: the reference and description stay.
+    let rotated = call(
+        &host,
+        Window,
+        "variable_update",
+        json!({"id":entry,"version":2,"value":EXACT}),
+    )
+    .await;
+    assert!(rotated.ok, "{:?}", rotated.message);
+    assert_eq!(rotated.data["variable"]["version"], 3);
+    assert_eq!(rotated.data["variable"]["id"], entry.as_str());
+    assert_eq!(
+        rotated.data["variable"]["description"],
+        "Edited description"
+    );
+    assert!(!text(&rotated).contains("last line") && !text(&described).contains(SECRET));
+    let current = reveal().await;
+    assert_eq!(current.data["value"], EXACT);
+    let list = call(&host, Local, "variable_list", json!({})).await;
+    assert_eq!(list.data["variables"][0]["version"], 3);
+    assert!(!text(&list).contains("last line"));
+
+    // A repeat of the applied rotation is reported, not applied twice; a stale one is a conflict.
+    let repeat = call(
+        &host,
+        Window,
+        "variable_update",
+        json!({"id":entry,"version":2,"value":EXACT}),
+    )
+    .await;
+    assert!(repeat.ok);
+    assert_eq!(repeat.data["replayed"], true);
+    assert_eq!(repeat.data["variable"]["version"], 3);
+    let stale = call(
+        &host,
+        Window,
+        "variable_update",
+        json!({"id":entry,"version":1,"description":"Older client"}),
+    )
+    .await;
+    assert_eq!(
+        (stale.code.as_str(), stale.exit_code),
+        ("state_conflict", 6)
+    );
+    assert!(stale.message.unwrap().contains("version 3"));
+    assert_eq!(
+        call(&host, Local, "variable_list", json!({})).await.data["variables"][0]["description"],
+        "Edited description"
+    );
+
+    // Malformed and forged payloads change nothing and never echo a value.
+    let oversized = "x".repeat(vault::MAX_VALUE + 1);
+    for args in [
+        json!({"id":entry,"version":3}),
+        json!({"id":entry,"version":3,"description":""}),
+        json!({"id":entry,"version":3,"description":"two\nlines"}),
+        json!({"id":entry,"version":3,"value":""}),
+        json!({"id":entry,"version":3,"value":oversized}),
+        json!({"id":entry,"version":3,"value":"with\u{0}nul"}),
+        json!({"id":entry,"version":"3","value":SECRET}),
+        json!({"id":entry,"version":3,"value":SECRET,"name":"RENAMED"}),
+        json!({"id":"not-a-uuid","version":3,"value":SECRET}),
+        json!({"id":id(),"version":1,"value":SECRET}),
+        json!({"id":entry,"version":3,"value":EXACT}),
+    ] {
+        let reply = call(&host, Window, "variable_update", args.clone()).await;
+        assert!(!reply.ok, "{args:?}");
+        assert!(!text(&reply).contains(SECRET) && !text(&reply).contains("last line"));
+    }
+    assert_eq!(reveal().await.data["value"], EXACT);
+    assert!(
+        !call(
+            &host,
+            Machine,
+            "variable_update",
+            json!({"id":entry,"version":3,"value":SECRET})
+        )
+        .await
+        .ok
+    );
+    assert!(
+        !call(
+            &host,
+            Machine,
+            "variable_delete",
+            json!({"id":entry,"version":3})
+        )
+        .await
+        .ok
+    );
+
+    // Deletion names the version seen; a stale delete changes nothing; a real one is final.
+    assert_eq!(
+        call(
+            &host,
+            Window,
+            "variable_delete",
+            json!({"id":entry,"version":2})
+        )
+        .await
+        .code,
+        "state_conflict"
+    );
+    let deleted = call(
+        &host,
+        Window,
+        "variable_delete",
+        json!({"id":entry,"version":3}),
+    )
+    .await;
+    assert!(deleted.ok, "{:?}", deleted.message);
+    assert_eq!(deleted.data["deleted"]["name"], "EDITED");
+    assert_eq!(deleted.data["replayed"], false);
+    assert_eq!(
+        call(&host, Local, "variable_list", json!({})).await.data["total"],
+        0
+    );
+    for (method, args) in [
+        ("variable_reveal", json!({"id":entry})),
+        (
+            "variable_update",
+            json!({"id":entry,"version":3,"value":SECRET}),
+        ),
+        ("variable_delete", json!({"id":entry,"version":1})),
+        ("variable_create", body.clone()),
+    ] {
+        let reply = call(&host, Window, method, args).await;
+        assert!(!reply.ok, "{method}");
+        assert_eq!(reply.code, "state_conflict", "{method}");
+        assert!(!text(&reply).contains(SECRET));
+    }
+    // An identical repeat of the delete is reported; the name is free for a new entry.
+    let again = call(
+        &host,
+        Window,
+        "variable_delete",
+        json!({"id":entry,"version":3}),
+    )
+    .await;
+    assert!(again.ok);
+    assert_eq!(again.data["replayed"], true);
+    assert!(
+        call(&host, Window, "variable_create", create("EDITED", "next"))
+            .await
+            .ok
+    );
+
+    // The trail names action, entry and outcome, never a value, name or description.
+    let events = call(&host, Local, "variable_audit", json!({"limit":100})).await;
+    let trail = audit(&events);
+    let seen = |action: &str, outcome: &str| {
+        trail
+            .iter()
+            .filter(|(a, who, o)| {
+                a == action && o == outcome && who.as_deref() == Some(entry.as_str())
+            })
+            .count()
+    };
+    assert_eq!(seen("update", "ok"), 2);
+    assert_eq!(seen("update", "replayed"), 1);
+    assert!(seen("update", "stale") >= 1 && seen("update", "rejected") >= 1);
+    assert_eq!(seen("delete", "ok"), 1);
+    assert_eq!(seen("delete", "replayed"), 1);
+    assert!(seen("update", "deleted") >= 1 && seen("reveal", "deleted") >= 1);
+    for hidden in [SECRET, "last line", "EDITED", "Edited description"] {
+        assert!(!text(&events).contains(hidden), "the audit holds {hidden}");
+    }
+}
+
+#[tokio::test]
+async fn a_rotation_request_replaces_a_value_only_while_the_variable_is_unchanged() {
+    let root = tempfile::tempdir().unwrap();
+    let host = host(root.path());
+    let body = create("ROTATED", SECRET);
+    let entry = body["id"].as_str().unwrap().to_owned();
+    assert!(call(&host, Local, "variable_create", body).await.ok);
+    let reveal = || call(&host, Window, "variable_reveal", json!({"id":entry}));
+
+    // Only the local channel (an agent's tool or the CLI) starts one; a stranger's ID is refused.
+    for transport in [Window, Machine] {
+        assert!(
+            !call(
+                &host,
+                transport,
+                "variable_rotation_start",
+                json!({"id":entry})
+            )
+            .await
+            .ok
+        );
+    }
+    for args in [
+        json!({"id":id()}),
+        json!({"id":"nope"}),
+        json!({}),
+        json!({"id":entry,"value":SECRET}),
+    ] {
+        let reply = call(&host, Local, "variable_rotation_start", args).await;
+        assert_eq!(reply.code, "invalid_input");
+        assert!(!text(&reply).contains(SECRET));
+    }
+    let started = call(&host, Local, "variable_rotation_start", json!({"id":entry})).await;
+    assert!(started.ok, "{:?}", started.message);
+    let request = started.data["request"].as_str().unwrap().to_owned();
+    assert_eq!(started.data["action"], "replace_value");
+    assert_eq!(started.data["id"], entry.as_str());
+    assert!(!text(&started).contains(SECRET));
+    assert_eq!(
+        call(&host, Local, "variable_rotation_start", json!({"id":entry}))
+            .await
+            .code,
+        "state_conflict"
+    );
+    let waiting = call(&host, Window, "variable_list", json!({})).await;
+    assert_eq!(waiting.data["pending"][0]["action"], "replace_value");
+    assert_eq!(waiting.data["pending"][0]["id"], entry.as_str());
+
+    // The user completes it from the GUI: the value changes, the reference and description stay.
+    let done = call(
+        &host,
+        Window,
+        "variable_entry_complete",
+        json!({"request":request,"value":EXACT}),
+    )
+    .await;
+    assert!(done.ok, "{:?}", done.message);
+    assert_eq!(done.data["variable"]["version"], 2);
+    assert_eq!(done.data["variable"]["id"], entry.as_str());
+    assert_eq!(done.data["variable"]["description"], "Synthetic ROTATED");
+    assert!(!text(&done).contains("last line"));
+    assert_eq!(reveal().await.data["value"], EXACT);
+    let status = call(
+        &host,
+        Local,
+        "variable_entry_status",
+        json!({"request":request}),
+    )
+    .await;
+    assert_eq!(
+        (
+            status.data["state"].as_str(),
+            status.data["action"].as_str()
+        ),
+        (Some("completed"), Some("replace_value"))
+    );
+    assert_eq!(status.data["version"], 2);
+    // A repeat of the completion is a replay, not a second rotation.
+    let repeat = call(
+        &host,
+        Window,
+        "variable_entry_complete",
+        json!({"request":request,"value":EXACT}),
+    )
+    .await;
+    assert!(repeat.ok && repeat.data["replayed"] == true);
+
+    // A change made after the request was opened refuses the typed value instead of overwriting.
+    let second = call(&host, Local, "variable_rotation_start", json!({"id":entry})).await;
+    let later = second.data["request"].as_str().unwrap().to_owned();
+    assert!(
+        call(
+            &host,
+            Window,
+            "variable_update",
+            json!({"id":entry,"version":2,"description":"Changed meanwhile"})
+        )
+        .await
+        .ok
+    );
+    let refused = call(
+        &host,
+        Window,
+        "variable_entry_complete",
+        json!({"request":later,"value":"typed-too-late"}),
+    )
+    .await;
+    assert_eq!(refused.code, "state_conflict");
+    assert!(!text(&refused).contains("typed-too-late"));
+    assert_eq!(reveal().await.data["value"], EXACT);
+    let trail = audit(&call(&host, Local, "variable_audit", json!({})).await);
+    assert!(
+        trail.iter().any(|(a, who, o)| a == "rotate"
+            && o == "ok"
+            && who.as_deref() == Some(entry.as_str()))
+    );
+    assert!(trail.iter().any(|(a, _, o)| a == "rotate" && o == "stale"));
+}
+
+#[tokio::test]
+async fn a_second_account_cannot_reveal_edit_or_delete_the_first_ones_entry() {
+    let first = tempfile::tempdir().unwrap();
+    let second = tempfile::tempdir().unwrap();
+    let (alice, bob) = (host(first.path()), host(second.path()));
+    let body = create("PRIVATE", SECRET);
+    let entry = body["id"].as_str().unwrap().to_owned();
+    assert!(call(&alice, Window, "variable_create", body).await.ok);
+    for (method, args) in [
+        ("variable_reveal", json!({"id":entry})),
+        (
+            "variable_update",
+            json!({"id":entry,"version":1,"value":"stolen"}),
+        ),
+        ("variable_delete", json!({"id":entry,"version":1})),
+    ] {
+        let reply = call(&bob, Window, method, args).await;
+        assert_eq!(reply.code, "invalid_input", "{method}");
+        assert!(!text(&reply).contains(SECRET));
+    }
+    assert_eq!(
+        call(&alice, Window, "variable_reveal", json!({"id":entry}))
+            .await
+            .data["value"],
+        SECRET
+    );
 }
