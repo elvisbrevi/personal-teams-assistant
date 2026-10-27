@@ -4,7 +4,9 @@
 name: CI
 
 on:
+  # Pull requests into an epic/ integration branch skip CI; the epic's own pull request into main runs it.
   pull_request:
+    branches-ignore: ['epic/**']
   push:
     branches: [main]
   schedule:
