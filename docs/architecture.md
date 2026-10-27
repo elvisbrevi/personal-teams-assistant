@@ -112,7 +112,16 @@ dedicated Cloudflare Tunnel. Cloudflare Access owns the interactive GitHub login
 using a dedicated OAuth App unrelated to repository GitHub Device Flow. Access
 protects the complete hostname and API; an explicit email allowlist plus the
 configured GitHub login method gates admission at the edge. Admission never
-creates or selects an application profile. Additive `web/settings.json.owner_github_id` pins the only GitHub identity this installation serves. Login, every session request, machine transport, callbacks and portal host startup enforce that owner. Disabled/non-owner legacy profiles remain intact but cannot use the portal. Existing settings infer an owner only from exactly one operator-associated identity; fresh or ambiguous settings fail closed. `web configure` requires an explicit owner. The public crate contains no maintainer portal/provider credentials or hosting defaults; every installation supplies its own infrastructure.
+creates or selects an application profile. `web/settings.json.owner_github_id` pins the
+installation owner. Owner-only admission remains the upgrade default; legacy non-owner
+profiles stay closed. The operator can explicitly admit another private assistant account
+with `web users authorize USER`, then bind its verified immutable provider identity and
+enable it. Additive `Account.authorized` defaults to false and never grants access to
+`--current-profile`; only the configured owner can bind that original profile. Existing
+settings infer an owner only from exactly one operator-associated identity; fresh or
+ambiguous settings fail closed. `web configure` requires an explicit owner. The public
+crate contains no maintainer portal/provider credentials or hosting defaults.
+
 
 `app/web/access.rs` accepts exactly one `Cf-Access-Jwt-Assertion` and verifies
 RS256 signature, pinned issuer/application audience, required subject/issuance/
@@ -128,7 +137,7 @@ Identity/email headers, service tokens and caller-selected URLs grant no access.
 `pta web configure` writes private `web/settings.json`, whose additive `access`
 configuration contains issuer, audience, account and dedicated GitHub IdP ID.
 Legacy settings remain readable for inspection; a portal cannot start without
-Access. `pta web users add/bind/unbind/revoke/disable/enable/list` manages private
+Access. `pta web users add/authorize/bind/unbind/revoke/disable/enable/list` manages private
 `web/accounts.json` under the existing operator-local lock. `bind` takes the
 operator's verified Access identity JSON on stdin. Its binding is the issuer,
 GitHub IdP ID and provider subject (`id` from get-identity). GitHub's positive
@@ -168,7 +177,7 @@ profile; the existing desktop profile and Keychain identifiers remain unchanged
 when it is absent. New web profiles use DeepSeek, with their own key, by default.
 The portal and CLI scrub inherited app/provider credentials when launching isolated
 hosts, preserve proxy/CA configuration, and use private credential files on all OSes.
-These are application profiles under one trusted operator's OS account, not OS-level tenants. Only that installation's pinned owner can use any of them; the portal is not a multi-tenant service.
+These are application profiles under one trusted operator's OS account, not OS isolation. Admitted ordinary accounts use only their own API configuration and file credentials, never inherited environment values/mounts or the operator's keychain. Their data/map/repository paths are confined and rechecked for native CLI/MCP as well as browser calls. Provider probes, CLI sign-in, Git subprocesses, local coding and request/child creation on the shared OS identity fail closed; personal trusted machines remain the coding path. Provider catalogs for ordinary accounts are static API catalogs and never probe installed commands.
 
 One account may instead use `pta web users add USER --current-profile` followed by a local identity association to operate
 the existing GUI/headless host and its actual data without a copy or re-login.
@@ -208,7 +217,7 @@ also bypasses, because WebKit fetches a page's icons without cookies);
 Graph forwarding and its existing batch authentication stay unchanged. The current
 profile's separate desktop Graph hostname/tunnel remains unchanged. See the [web operating guide](../desktop/skills/personal-teams-assistant/references/web-access.md).
 
-### Account and invocation authority (0.9.10)
+### Account and invocation authority (0.9.11)
 
 The host derives its account binding from the canonical profile and the operator's
 account registry. Each invocation carries that scope and its authenticated
@@ -235,15 +244,27 @@ existing running state; this private retirement path cannot perform other action
 or forward portal requests. Native GUI, CLI and MCP use the same dispatcher.
 The native bearer and portal administration remain trusted local OS operations.
 
-Additional portal accounts remain disabled in this slice. Even a legacy ordinary
-profile started directly cannot invoke shared-host operations or provider/coding
-processes. Background activity and execution paths recheck their bound scope;
-without verified OS isolation, rejection directs the user to a personal trusted
-machine. Private profile directories, provider homes, working-directory limits and
-tool-less prompts are not an OS security boundary. Different people sharing a
-computer need distinct OS security contexts: switching app accounts cannot protect
-against someone controlling the same OS account. No container sandbox or new
-variable consumer is introduced here; neither is silently assumed to exist.
+Explicitly admitted accounts can use the shared GUI, CLI and MCP with their own API
+assistant, notes/index, sources, activity records/schedules, Microsoft/GitHub API sessions
+and machine coordination. `shared_accounts_support` is mandatory before a host receives
+ordinary-account requests or account-schema edits; no fallback to an older host exists.
+The snapshot exposes only the current account identity and its local-execution capability.
+The GUI translates account failures and explains personal-machine requirements.
+
+Disable, revoke, unbind and rebind change the account version. Every checked browser,
+machine and host request rejects stale authority. Graph callback forwarding checks the
+host's exact binding too. OAuth completion rechecks authority before exchanging and
+persisting tokens and before saving identity; GitHub device login also checks before
+persistence. Daily snapshots and asynchronous results recheck before storing. Reconciliation
+stops only tracked app-managed hosts whose account is disabled, removed or changed;
+unrelated desktop/operator hosts are preserved. A new host is required after reassociation.
+
+Without verified OS isolation, provider/coding rejection directs the user to a personal
+trusted machine. Private profile directories, provider homes, working-directory limits and
+tool-less prompts are not an OS security boundary. Different people sharing a computer
+need distinct OS security contexts: switching app accounts cannot protect against someone
+controlling the same OS account. No container sandbox or new variable manager/consumer
+is introduced here; neither is silently assumed to exist.
 
 ### Headless host (Linux and servers)
 
@@ -590,6 +611,13 @@ To add an operation: a method in `control::operate` (window or browser only thro
 
 ## 15. Known limits
 
+Ordinary shared accounts support API-backed assistant operations. SQL sources that could
+use OS-integrated authentication require a personal trusted machine. Their embeddings
+requests reuse public-source DNS/IP pinning and reject operator-local destinations.
+Request/child creation, Git clone/sync and configurable CLI providers on the shared
+server remain unavailable to ordinary accounts. Profile folders are not OS isolation.
+
+
 - Initial execution-machine pairing uses the operator-local CLI and a private single-use file; the GUI can manage paired machines but its URL-only Connect action cannot authorize a new one. The portal supports one owner per installation. Profiles and provider working-directory permissions are not OS/container isolation and must not be offered to unrelated tenants.
 - Tauri's Linux GTK 3 dependencies retain RustSec maintenance/GLib Variant notices; the app does not directly use that Variant API, and the deployed headless server excludes the GUI stack. Dependency audits keep the notices visible; see [the security policy](../SECURITY.md). The SQL Server adapter uses Tiberius 0.13 with patched Rustls, and Access tests use a public synthetic DER signing fixture instead of the vulnerable RSA test dependency.
 
@@ -641,7 +669,7 @@ All GUI directory choices use the same modal directory sheet (a bottom sheet on 
 
 `llm/implementation.rs` is separate from the tool-less answer transports. Planning uses a closed JSON interface in its own persistent, tool-less CLI session; coding runs the selected CLI in the first directory with additional directories passed through provider controls. Prompts travel on stdin, the inherited environment is restricted to the existing CLI/login/proxy allowlist, output is bounded and redacted, and no assistant Graph/ADO credentials enter the child environment. Codex uses workspace-write, Claude uses acceptEdits, and OpenCode V2 uses a dedicated agent with explicit directory permissions/policies. A provider can refuse permissions; Claude permission denials produce needs_attention. The CLI's own login and permission system remain in force. Relevant command references: [Codex](https://developers.openai.com/codex/cli/reference/), [Claude Code](https://code.claude.com/docs/en/cli-reference), [OpenCode V2 permissions](https://opencode.ai/v2/docs/permissions/).
 
-The portal's exact POST `/api/machines` endpoint is separate from authenticated browser control. Enrollment requires a single-use, ten-minute, machine-bound pairing credential authorized locally on that installation with `pta web machines authorize MACHINE_ID --output PRIVATE_FILE`. The command writes a 0600 JSON file for `machine_connect` on stdin and persists only a hash under the private portal directory. Consumption is locked and persisted before contacting the host, and checks owner, account version, expiry and machine ID. GitHub tokens never authorize enrollment and are never sent to a coordinator. No account is created. Enrollment issues a random machine credential and stores only its hash, bound to the account version. All subsequent calls are authenticated with it; re-association, disabling an account or disconnecting the machine revokes access. Browser Origin requests, cookies without a machine credential and other methods/paths do not authorize machine operations. `configure-web-access.py` installs one exact Access bypass for this machine protocol; the backend still authenticates every request, and `/api/control` remains Access/session/CSRF-protected. Workers poll outbound, so the Mac needs no listener reachable from the Internet.
+The portal's exact POST `/api/machines` endpoint is separate from authenticated browser control. Enrollment requires a single-use, ten-minute, machine-bound pairing credential authorized locally on that installation with `pta web machines authorize MACHINE_ID [USER] --output PRIVATE_FILE`. The command writes a 0600 JSON file for `machine_connect` on stdin and persists only a hash under the private portal directory. Consumption is locked and persisted before contacting the host, and checks explicit account admission, account version, expiry and machine ID. GitHub tokens never authorize enrollment and are never sent to a coordinator. No account is created. Enrollment issues a random machine credential and stores only its hash, bound to the account version. All subsequent calls are authenticated with it; re-association, disabling an account or disconnecting the machine revokes access. Browser Origin requests, cookies without a machine credential and other methods/paths do not authorize machine operations. `configure-web-access.py` installs one exact Access bypass for this machine protocol; the backend still authenticates every request, and `/api/control` remains Access/session/CSRF-protected. Workers poll outbound, so the Mac needs no listener reachable from the Internet.
 
 A coordinator defaults to itself as the Teams machine. Every service start requires a lease for the selected machine; renewal runs separately from implementation polling every ten seconds. Handover blocks the new machine until the old 120-second lease expires. An existing service stops if it loses renewal or is deselected. The updater also checks implementation runs and child sends before restarting a host. This coordination covers enrolled hosts of the same account; an independent, unconnected installation is not discoverable.
 

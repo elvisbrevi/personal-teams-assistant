@@ -4,6 +4,14 @@
 const UI_LANGUAGES = ['es', 'en'];
 
 const UI_CATALOG = { es: {
+  "SQL sources require a personal trusted machine.": "Las fuentes SQL requieren una máquina de confianza personal.",
+  "Personal machine required": "Se necesita una máquina personal",
+  "CLI sessions belong on your personal trusted machine.": "Las sesiones CLI deben estar en tu máquina de confianza personal.",
+  "Account access unavailable": "Acceso a la cuenta no disponible",
+  "Your GitHub identity has no enabled local account. Contact the portal operator.": "Tu identidad de GitHub no tiene una cuenta local habilitada. Contacta con el operador del portal.",
+  "This assistant account is unavailable or its authorization changed. Sign in again or contact the portal operator.": "Esta cuenta del asistente no está disponible o su autorización ha cambiado. Inicia sesión de nuevo o contacta con el operador del portal.",
+  "Assistant account: {name}": "Cuenta del asistente: {name}",
+  "This shared portal supports your own API assistant configuration. Run coding agents and CLI providers on your personal trusted machine.": "Este portal compartido permite usar el asistente con tu propia configuración API. Ejecuta los agentes de programación y los proveedores CLI en tu máquina de confianza personal.",
   "Shared-host execution requires a verified OS security boundary. Use your personal trusted machine; a working directory or tool-less prompt is not an OS sandbox.": "La ejecución en un servidor compartido requiere un aislamiento verificado del sistema operativo. Usa tu máquina de confianza personal; una carpeta de trabajo o instrucciones sin herramientas no aíslan el sistema operativo.",
   "Codex Remote Control could not connect. Update Codex and check its ChatGPT login and workspace access on the execution machine.": "No se pudo conectar Codex Remote Control. Actualiza Codex y revisa su sesión de ChatGPT y el acceso al espacio de trabajo en la máquina de ejecución.",
   "Codex Remote Control is not connected. Check its ChatGPT login and workspace access on the execution machine.": "Codex Remote Control no está conectado. Revisa su sesión de ChatGPT y el acceso al espacio de trabajo en la máquina de ejecución.",

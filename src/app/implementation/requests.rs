@@ -70,7 +70,14 @@ fn validate(request: &Request) -> Result<()> {
     Ok(())
 }
 pub(super) async fn operate(host: &Arc<Host>, method: &str, args: &Value) -> Result<Value> {
-    authority::require_execution(&host.state)?;
+    if matches!(
+        method,
+        "implementation_request_catalog" | "implementation_request_start"
+    ) {
+        authority::require_execution(&host.state)?;
+    } else {
+        authority::require_account(&host.state)?;
+    }
     let state = &host.state.implementation;
     match method {
         "implementation_request_catalog" => {

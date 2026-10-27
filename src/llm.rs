@@ -8,7 +8,7 @@ mod agent;
 mod deepseek;
 pub(crate) mod implementation;
 pub mod prompts;
-pub use agent::{Catalog, ClaudeCli, CodexCli, OpenCodeCli, catalog};
+pub use agent::{Catalog, ClaudeCli, CodexCli, OpenCodeCli, api_catalog, catalog};
 pub(crate) use agent::{child_env, locate};
 pub use deepseek::DeepSeek;
 

@@ -16,13 +16,24 @@ use subtle::ConstantTimeEq;
 static KEYRING_PROFILE: OnceLock<RwLock<Option<String>>> = OnceLock::new();
 static FILE_STORE: OnceLock<RwLock<Option<PathBuf>>> = OnceLock::new();
 static PREFER_FILE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static ACCOUNT_ONLY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Ordinary shared accounts resolve only their selected file store, even when
+/// the operator launches a host directly with inherited environment credentials.
+pub(crate) fn account_only_credentials(value: bool) {
+    ACCOUNT_ONLY.store(value, std::sync::atomic::Ordering::Relaxed);
+}
+pub(crate) fn account_only() -> bool {
+    ACCOUNT_ONLY.load(std::sync::atomic::Ordering::Relaxed)
+}
 
 /// Isolated web profiles must not fall back to the desktop account's OS keychain.
 pub fn prefer_file_credentials(prefer: bool) {
     PREFER_FILE.store(prefer, std::sync::atomic::Ordering::Relaxed);
 }
 fn prefers_files() -> bool {
-    !cfg!(any(target_os = "macos", target_os = "windows"))
+    account_only()
+        || !cfg!(any(target_os = "macos", target_os = "windows"))
         || PREFER_FILE.load(std::sync::atomic::Ordering::Relaxed)
 }
 
@@ -181,10 +192,10 @@ fn validate_secret(name: &str, value: &str) -> Result<()> {
 
 pub fn secret_source(name: &str) -> Result<Option<&'static str>> {
     validate_name(name)?;
-    if std::env::var_os(format!("{name}_FILE")).is_some() {
+    if !account_only() && std::env::var_os(format!("{name}_FILE")).is_some() {
         return Ok(Some("file"));
     }
-    if std::env::var_os(name).is_some() {
+    if !account_only() && std::env::var_os(name).is_some() {
         return Ok(Some("environment"));
     }
     if prefers_files() {
@@ -234,12 +245,18 @@ pub fn secret_source(name: &str) -> Result<Option<&'static str>> {
 
 pub fn secret(name: &str) -> Result<String> {
     validate_name(name)?;
-    let value = if let Ok(file) = std::env::var(format!("{name}_FILE")) {
+    let value = if let Some(file) = (!account_only())
+        .then(|| std::env::var(format!("{name}_FILE")).ok())
+        .flatten()
+    {
         std::fs::read_to_string(file)
             .context("cannot read secret mount")?
             .trim_end()
             .to_owned()
-    } else if let Ok(value) = std::env::var(name) {
+    } else if let Some(value) = (!account_only())
+        .then(|| std::env::var(name).ok())
+        .flatten()
+    {
         value
     } else {
         if prefers_files() {

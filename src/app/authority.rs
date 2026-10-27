@@ -3,6 +3,7 @@ use super::*;
 use serde_json::Value;
 
 pub(super) const EXECUTION_DENIED: &str = "Shared-host execution requires a verified OS security boundary. Use your personal trusted machine; a working directory or tool-less prompt is not an OS sandbox.";
+pub(super) const ACCOUNT_UNAVAILABLE: &str = "This assistant account is unavailable or its authorization changed. Sign in again or contact the portal operator.";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -17,6 +18,7 @@ pub(super) struct Scope {
     pub account: Option<AccountBinding>,
     pub owner: bool,
     pub shared: bool,
+    pub admitted: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -54,6 +56,10 @@ pub(super) fn invocation(state: &DesktopState) -> Result<Invocation> {
         transport: Transport::Local,
     });
     ensure!(invocation.scope == scope, "Account binding mismatch.");
+    ensure!(
+        scope.admitted,
+        "This assistant account is unavailable. Contact the portal operator."
+    );
     Ok(invocation)
 }
 
@@ -82,7 +88,21 @@ pub(super) fn reject_authority_arguments(args: &Value) -> Result<()> {
 pub(super) fn authorize(state: &DesktopState, request: &control::Request) -> Result<Invocation> {
     let invocation = invocation(state)?;
     reject_authority_arguments(&request.args)?;
-    ensure!(invocation.scope.owner, "{EXECUTION_DENIED}");
+    // Ordinary native/agent calls have the same account/path limits as the browser.
+    if !invocation.scope.owner
+        && !(invocation.transport == Transport::Local && request.method == "app_quit")
+    {
+        if invocation.transport != Transport::Machine {
+            web::check_bound_request(&invocation.scope, request)?;
+        }
+        check_shared_operation(request)?;
+        if matches!(
+            request.method.as_str(),
+            "chat" | "test_providers" | "start_assistant" | "restart" | "answer_refine"
+        ) {
+            require_api_config(&read_config(&state.config_path)?)?;
+        }
+    }
     match invocation.transport {
         Transport::Local => {}
         Transport::Browser => web::check_bound_request(&invocation.scope, request)?,
@@ -103,6 +123,49 @@ pub(super) fn authorize(state: &DesktopState, request: &control::Request) -> Res
         ),
     }
     Ok(invocation)
+}
+
+pub(super) fn check_shared_operation(request: &control::Request) -> Result<()> {
+    ensure!(
+        !matches!(
+            request.method.as_str(),
+            "azure_cli_status"
+                | "github_cli_status"
+                | "begin_azure_cli_login"
+                | "open_azure_cli_login"
+                | "finish_azure_cli_login"
+                | "cancel_azure_cli_login"
+                | "clone_github_repository"
+                | "update_github_repository"
+                | "implementation_request_catalog"
+                | "implementation_request_start"
+                | "implementation_open_session"
+                | "implementation_create"
+                | "machine_connect"
+        ),
+        "{EXECUTION_DENIED}"
+    );
+    Ok(())
+}
+
+pub(super) fn require_api_config(config: &Config) -> Result<()> {
+    ensure!(
+        config
+            .llm
+            .active()
+            .iter()
+            .all(|choice| choice.provider == "deepseek"),
+        "{EXECUTION_DENIED}"
+    );
+    ensure!(
+        !config.server.cloudflare_tunnel,
+        "The portal operator manages the public URL, listener and tunnel."
+    );
+    Ok(())
+}
+
+pub(super) fn require_account(state: &DesktopState) -> Result<()> {
+    invocation(state).map(|_| ())
 }
 
 /// Also used by background/forwarded paths, before probing or starting any provider.

@@ -835,6 +835,27 @@ fn codex_models(catalog: &str) -> Vec<ModelInfo> {
         .collect()
 }
 
+pub fn api_catalog() -> Catalog {
+    Catalog {
+        providers: vec![api_provider()],
+    }
+}
+
+fn api_provider() -> ProviderInfo {
+    ProviderInfo {
+        id: "deepseek",
+        transport: "api",
+        available: true,
+        version: None,
+        credential: Some("DEEPSEEK_API_KEY"),
+        efforts: efforts("deepseek").iter().map(|e| e.to_string()).collect(),
+        models: vec![
+            model("deepseek-flash", "DeepSeek Flash", "deepseek", "max"),
+            model("deepseek-v4-pro", "DeepSeek V4 Pro", "deepseek", "max"),
+        ],
+    }
+}
+
 pub async fn catalog() -> Catalog {
     let codex = locate("codex");
     let claude = locate("claude");
@@ -902,18 +923,7 @@ pub async fn catalog() -> Catalog {
                 efforts: efforts("opencode").iter().map(|e| e.to_string()).collect(),
                 models: opencode_models,
             },
-            ProviderInfo {
-                id: "deepseek",
-                transport: "api",
-                available: true,
-                version: None,
-                credential: Some("DEEPSEEK_API_KEY"),
-                efforts: efforts("deepseek").iter().map(|e| e.to_string()).collect(),
-                models: vec![
-                    model("deepseek-flash", "DeepSeek Flash", "deepseek", "max"),
-                    model("deepseek-v4-pro", "DeepSeek V4 Pro", "deepseek", "max"),
-                ],
-            },
+            api_provider(),
         ],
     }
 }

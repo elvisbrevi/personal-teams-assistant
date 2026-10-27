@@ -242,7 +242,7 @@ fn leased(data: &mut Registry, id: &str) -> bool {
 }
 pub(in crate::app) async fn teams_allowed(state: &DesktopState) -> Result<bool> {
     ensure!(
-        authority::invocation(state)?.scope.owner,
+        authority::invocation(state)?.scope.admitted,
         "Account binding changed."
     );
     let own = state.implementation.registry.lock().await.id.clone();
@@ -384,6 +384,7 @@ pub(super) async fn call(
     method: &str,
     args: Value,
 ) -> Result<Value> {
+    authority::require_account(&host.state)?;
     ensure!(
         [
             "machine_assistant",
@@ -434,6 +435,7 @@ pub(super) async fn call(
         160
     } {
         tokio::time::sleep(Duration::from_millis(250)).await;
+        authority::require_account(&host.state)?;
         let mut calls = state.calls.lock().await;
         if let Some(index) = calls.iter().position(|c| c.id == id && c.result.is_some()) {
             let call = calls.remove(index);

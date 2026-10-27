@@ -512,7 +512,7 @@ async fn local(host: &Arc<Host>, method: &str, args: &Value) -> Result<Value> {
         authority::require_execution(&host.state)?;
     } else {
         ensure!(
-            authority::invocation(&host.state)?.scope.owner,
+            authority::invocation(&host.state)?.scope.admitted,
             "Account binding changed."
         );
     }

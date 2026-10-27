@@ -49,6 +49,38 @@ pub(super) fn account_scope(profile: &Path) -> Result<authority::Scope> {
 
     let shared = isolated.is_some();
     let owner = !shared || entry.is_some_and(|a| settings(&root).is_ok_and(|s| s.owns(a)));
+    let admitted = !shared || entry.is_some_and(|a| settings(&root).is_ok_and(|s| s.admits(a)));
+    if shared
+        && !owner
+        && let Some(entry) = entry
+    {
+        let config = read_config(&profile.join("config.toml"))?;
+        ensure!(
+            config.server.data_dir.canonicalize()? == profile.join("data").canonicalize()?
+                && config.knowledge_map.canonicalize()?
+                    == profile.join("knowledge-map.toml").canonicalize()?
+                && config.server.webhook_prefix == format!("/webhooks/{}", entry.id)
+                && profiles::confined(&config.server.data_dir, &profile)
+                && profiles::confined(&config.knowledge_map, &profile),
+            "The portal operator manages profile and data paths."
+        );
+        let map = KnowledgeMap::load(&config.knowledge_map)?;
+        ensure!(
+            !map.resources.iter().any(|r| matches!(
+                r.access,
+                Access::Tool {
+                    tool: crate::tools::ToolSpec::SqlServer { .. }
+                }
+            )),
+            "SQL sources require a personal trusted machine."
+        );
+        ensure!(
+            map.repositories
+                .values()
+                .all(|path| profiles::confined(path, &config.server.data_dir.join("repositories"))),
+            "Repository paths must be inside your profile's data/repositories directory."
+        );
+    }
     Ok(authority::Scope {
         profile,
         account: entry.map(|a| authority::AccountBinding {
@@ -58,6 +90,7 @@ pub(super) fn account_scope(profile: &Path) -> Result<authority::Scope> {
         // The standard profile is always the local operator's installation. Browser
         // sessions still require the enabled owner association at both ends of IPC.
         owner,
+        admitted,
         shared,
     })
 }
@@ -81,6 +114,30 @@ pub(super) fn check_bound_request(
         .find(|a| profile_dir(&root, a).canonicalize().ok().as_ref() == Some(&scope.profile))
         .context("Unknown browser account.")?;
     Portal::new(root, PathBuf::new())?.check_request(&account, request)
+}
+
+pub(super) fn account_identity(scope: &authority::Scope) -> Result<Value> {
+    let Some(binding) = &scope.account else {
+        return Ok(Value::Null);
+    };
+    let root = if scope.shared {
+        scope
+            .profile
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .to_path_buf()
+    } else {
+        scope.profile.join("web")
+    };
+    let account = accounts(&root)?
+        .into_iter()
+        .find(|a| a.id == binding.id)
+        .context("Unknown account.")?;
+    Ok(
+        json!({"id":account.id,"username":account.username,"shared":scope.shared,"local_execution":scope.owner}),
+    )
 }
 
 /// Apply the same identity guard when an operator starts a profile from the CLI or
@@ -188,6 +245,18 @@ impl Settings {
                 self.owner_github_id
                     .is_some_and(|id| binding.provider_user_id == id.to_string())
             })
+    }
+    fn admits(&self, account: &Account) -> bool {
+        self.owns(account)
+            || (self.owner_github_id.is_some()
+                && account.enabled
+                && account.authorized
+                && !account.current_profile
+                && account.access_binding.as_ref().is_some_and(|binding| {
+                    self.access.as_ref().is_some_and(|config| {
+                        binding.issuer == config.issuer && binding.idp_id == config.github_idp_id
+                    })
+                }))
     }
     fn origin(&self) -> String {
         url::Url::parse(&self.public_url)
@@ -311,15 +380,18 @@ impl Portal {
             .get(&key)
             .cloned()
             .ok_or(StatusCode::UNAUTHORIZED)?;
-        if session.expires <= Instant::now() || session.identity != *identity {
+        if session.expires <= Instant::now() {
             self.sessions.lock().await.remove(&key);
+            return Err(StatusCode::UNAUTHORIZED);
+        }
+        if session.identity != *identity {
             return Err(StatusCode::UNAUTHORIZED);
         }
         let entry = accounts(&self.root)
             .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
             .into_iter()
             .find(|e| {
-                self.settings.owns(e)
+                self.settings.admits(e)
                     && e.id == session.account_id
                     && e.version == session.version
                     && e.access_binding.as_ref() == Some(&identity.binding)
@@ -546,14 +618,9 @@ async fn app_js(
         include_str!("../../desktop/ui/app.js"),
     )
 }
-async fn i18n_js(
-    State(portal): State<Arc<Portal>>,
-    Extension(identity): Extension<access::Verified>,
-    headers: HeaderMap,
-) -> Response {
-    if let Err(status) = portal.authenticate(&headers, &identity, false).await {
-        return status.into_response();
-    }
+async fn i18n_js() -> Response {
+    // Also translates the denied-login page. The outer Access verifier still runs;
+    // this static catalog contains no account data.
     asset(
         "text/javascript; charset=utf-8",
         include_str!("../../desktop/ui/i18n.js"),
@@ -581,7 +648,7 @@ async fn login(
 ) -> Response {
     let entry = match accounts(&portal.root) {
         Ok(entries) => entries.into_iter().find(|e| {
-            portal.settings.owns(e)
+            portal.settings.admits(e)
                 && e.access_binding.as_ref() == Some(&identity.binding)
                 && identity.issued_at >= e.access_valid_after
         }),
@@ -590,7 +657,7 @@ async fn login(
     let Some(account) = entry else {
         return (
             StatusCode::FORBIDDEN,
-            "Your GitHub identity has no enabled local account. Contact the portal operator.",
+            asset("text/html; charset=utf-8", "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Personal Teams Assistant</title><link rel=\"stylesheet\" href=\"/style.css\"><script src=\"/i18n.js\" defer></script></head><body><main class=\"panel\"><h1>Account access unavailable</h1><p role=\"alert\">Your GitHub identity has no enabled local account. Contact the portal operator.</p><a href=\"/cdn-cgi/access/logout\">Sign out</a></main></body></html>"),
         )
             .into_response();
     };
@@ -688,7 +755,8 @@ async fn command(
                     || message.starts_with("Repository paths")
                     || message.starts_with("Import files")
                     || message.starts_with("This Teams account")
-                    || message.starts_with("Operation is unavailable") =>
+                    || message.starts_with("Operation is unavailable")
+                    || message.starts_with("Shared-host execution") =>
             {
                 error.to_string()
             }
@@ -812,7 +880,7 @@ async fn machine_command(
         let id = args["id"].as_str().unwrap_or_default();
         entries
             .into_iter()
-            .filter(|a| portal.settings.owns(a))
+            .filter(|a| portal.settings.admits(a))
             .find(|a| {
                 fs::read(profile_dir(&portal.root, a).join("implementation/registry.json"))
                     .ok()
@@ -881,12 +949,12 @@ async fn webhook(
     let Some(account) = accounts(&portal.root).ok().and_then(|entries| {
         entries
             .into_iter()
-            .find(|e| portal.settings.owns(e) && !e.current_profile && e.id == id)
+            .find(|e| portal.settings.admits(e) && !e.current_profile && e.id == id)
     }) else {
         return StatusCode::NOT_FOUND.into_response();
     };
     let dir = profile_dir(&portal.root, &account);
-    if control::existing_host_at(&dir).is_err() {
+    if control::require_account_host_at(&dir, &account.id, &account.version).is_err() {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     }
     let Ok(config) = read_config(&dir.join("config.toml")) else {
@@ -964,7 +1032,7 @@ pub(super) fn run() -> Result<()> {
         let mut serving = tokio::spawn(axum::serve(listener, router(portal.clone()))
             .with_graceful_shutdown(async { let _ = stopped.await; }).into_future());
         let warm = { let portal = portal.clone(); tokio::spawn(async move {
-            for account in entries.into_iter().filter(|entry| portal.settings.owns(entry)) {
+            for account in entries.into_iter().filter(|entry| portal.settings.admits(entry)) {
                 if let Ok(dir) = portal.worker(&account).await
                     && fs::read_to_string(portal.root.join("resume").join(&account.id)).is_ok_and(|value| value == "1") {
                     let _guard = portal.identities.lock().await;
