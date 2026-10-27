@@ -1028,9 +1028,14 @@ function renderTeamsMachines(fleet) {
     }));
   }
 }
+let loadedCoordinator = '';
 async function loadMachines() {
   const [settings, fleet] = await Promise.all([invoke('machine_settings'), invoke('machine_list')]);
-  field('#machine-name', settings.name); field('#machine-coordinator', settings.coordinator || settings.coordinator_origin || '');
+  const coordinator = settings.coordinator || settings.coordinator_origin || '';
+  // Refreshing after another action must not discard an address the user has typed but not yet connected.
+  if ($('#machine-coordinator').value === loadedCoordinator) field('#machine-coordinator', coordinator);
+  loadedCoordinator = coordinator;
+  field('#machine-name', settings.name);
   machineRoots = settings.roots;
   $('#machine-roots-choose').disabled = Boolean(live?.config.server.webhook_prefix);
   renderMachineRoots();
