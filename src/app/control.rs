@@ -411,7 +411,9 @@ async fn client_with_transport(
             match transport {
                 authority::Transport::Browser => &endpoint.browser_token,
                 authority::Transport::Machine => &endpoint.machine_token,
-                authority::Transport::Local => anyhow::bail!("Invalid scoped transport."),
+                authority::Transport::Local | authority::Transport::Window => {
+                    anyhow::bail!("Invalid scoped transport.")
+                }
             }
         } else {
             &endpoint.token

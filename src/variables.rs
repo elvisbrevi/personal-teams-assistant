@@ -24,6 +24,8 @@ pub const MAX_NAME: usize = 128;
 pub const MAX_DESCRIPTION: usize = 500;
 pub const MAX_VALUE: usize = 16 * 1024;
 pub const MAX_VARIABLES: usize = 500;
+/// Audit events kept per account.
+const AUDIT_KEPT: i64 = 5000;
 
 const RECORD_DOMAIN: &[u8] = b"personal-teams-assistant/variable-record/v1";
 const WRAP_DOMAIN: &[u8] = b"personal-teams-assistant/variable-key-wrap/v1";
@@ -124,6 +126,32 @@ pub struct Created {
     pub variable: Metadata,
     /// The same entry already existed with identical content: nothing was written.
     pub replayed: bool,
+}
+
+#[derive(Debug)]
+pub struct Updated {
+    pub variable: Metadata,
+    /// The same change was already applied: nothing was written.
+    pub replayed: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct Deleted {
+    pub id: String,
+    pub name: String,
+    /// The version recorded by the deletion; any later write based on an earlier one is stale.
+    pub version: u64,
+    pub replayed: bool,
+}
+
+/// One security-relevant action on the variables of an account. Never holds a value.
+#[derive(Debug, Serialize)]
+pub struct AuditEvent {
+    pub at: i64,
+    pub account: String,
+    pub action: String,
+    pub entry: Option<String>,
+    pub outcome: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -493,6 +521,9 @@ impl Store {
                 replayed: true,
             });
         }
+        if tombstone(&tx, &self.account, &id)?.is_some() {
+            return Err(deleted());
+        }
         let taken: Option<String> = tx
             .query_row(
                 "SELECT name FROM variables WHERE account=?1 AND name_key=?2",
@@ -551,33 +582,209 @@ impl Store {
     /// a caller that could pass it to a model.
     pub fn resolve(&self, name: &str) -> Result<Secret> {
         let db = self.lock();
-        let row = db
-            .query_row(
-                "SELECT id,name,revision,dek_version,ciphertext FROM variables WHERE account=?1 AND name_key=?2",
-                params![self.account, name_key(name)],
-                |r| {
-                    Ok((
-                        r.get::<_, String>(0)?,
-                        r.get::<_, String>(1)?,
-                        r.get::<_, i64>(2)? as u64,
-                        r.get::<_, i64>(3)? as u32,
-                        r.get::<_, Vec<u8>>(4)?,
-                    ))
-                },
-            )
-            .optional()?
-            .ok_or_else(|| input("There is no stored variable with that name."))?;
-        let (id, name, revision, data_key, ciphertext) = row;
-        let key = self.unwrap_data_key(&db, data_key)?;
+        let row = fetch(
+            &db,
+            "SELECT id,name,description,revision,dek_version,ciphertext,created_at,updated_at FROM variables WHERE account=?1 AND name_key=?2",
+            params![self.account, name_key(name)],
+        )?
+        .ok_or_else(|| input("There is no stored variable with that name."))?;
+        self.plaintext(&db, &row)
+    }
+
+    /// One entry of this account by ID with its value, for a human's explicit reveal or copy.
+    /// An ID of another account, or one never issued, is simply absent; a deleted one says so.
+    pub fn reveal(&self, id: &str) -> Result<(Metadata, Secret)> {
+        let id = entry_id(id)?;
+        let db = self.lock();
+        let Some(row) = fetch(
+            &db,
+            "SELECT id,name,description,revision,dek_version,ciphertext,created_at,updated_at FROM variables WHERE account=?1 AND id=?2",
+            params![self.account, id],
+        )?
+        else {
+            return Err(missing(&db, &self.account, &id)?);
+        };
+        let value = self.plaintext(&db, &row)?;
+        Ok((row.metadata(), value))
+    }
+
+    /// Change the description, the value or both of one entry. `expected` is the version the
+    /// caller saw: another change in between is a conflict, never an overwrite. The ID, name and
+    /// description survive a rotation, so existing references keep working.
+    pub fn update(
+        &self,
+        id: &str,
+        expected: u64,
+        description: Option<&str>,
+        value: Option<&Secret>,
+    ) -> Result<Updated> {
+        let id = entry_id(id)?;
+        if description.is_none() && value.is_none() {
+            return Err(input("Give a new description, a new value or both."));
+        }
+        if let Some(description) = description {
+            validate_description(description)?;
+        }
+        if let Some(value) = value {
+            validate_value(value.expose())?;
+        }
+        let mut db = self.lock();
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let Some(row) = fetch(
+            &tx,
+            "SELECT id,name,description,revision,dek_version,ciphertext,created_at,updated_at FROM variables WHERE account=?1 AND id=?2",
+            params![self.account, id],
+        )?
+        else {
+            return Err(missing(&tx, &self.account, &id)?);
+        };
+        let current = self.plaintext(&tx, &row)?;
+        let same_description = description.is_none_or(|d| d == row.description);
+        let same_value =
+            value.is_none_or(|v| crate::security::constant_eq(v.expose(), current.expose()));
+        if row.revision != expected {
+            // The caller's earlier attempt may have succeeded before its reply was lost.
+            if row.revision == expected + 1 && same_description && same_value {
+                return Ok(Updated {
+                    variable: row.metadata(),
+                    replayed: true,
+                });
+            }
+            return Err(Error::Conflict(format!(
+                "{} changed since it was loaded (it is now version {}). Inspect it before editing again.",
+                row.name, row.revision
+            )));
+        }
+        if same_description && same_value {
+            return Err(input(
+                "Nothing would change: the description and value match.",
+            ));
+        }
+        let (data_key, key) = self.active_data_key(&tx)?;
+        let revision = row.revision + 1;
+        let at = now();
+        let description = description.unwrap_or(&row.description);
+        let sealed = seal(
+            &key,
+            &record_aad(&self.account, &id, &row.name, revision, data_key),
+            value.unwrap_or(&current).expose().as_bytes(),
+        )?;
+        tx.execute(
+            "UPDATE variables SET description=?3, revision=?4, dek_version=?5, ciphertext=?6, updated_at=?7 WHERE account=?1 AND id=?2",
+            params![self.account, id, description, revision as i64, data_key, sealed, at],
+        )?;
+        tx.commit()?;
+        Ok(Updated {
+            variable: Metadata {
+                id,
+                name: row.name,
+                description: description.to_owned(),
+                version: revision,
+                created_at: row.created_at,
+                updated_at: at,
+            },
+            replayed: false,
+        })
+    }
+
+    /// Delete one entry. The deletion keeps a tombstone so a stale write, a replay of the
+    /// creation or a later synchronization cannot bring the entry back. It cannot retract a
+    /// value already given to a program, nor revoke the credential at its provider.
+    pub fn delete(&self, id: &str, expected: u64) -> Result<Deleted> {
+        let id = entry_id(id)?;
+        let mut db = self.lock();
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let Some(row) = fetch(
+            &tx,
+            "SELECT id,name,description,revision,dek_version,ciphertext,created_at,updated_at FROM variables WHERE account=?1 AND id=?2",
+            params![self.account, id],
+        )?
+        else {
+            return match tombstone(&tx, &self.account, &id)? {
+                Some((name, version)) if version == expected + 1 => Ok(Deleted {
+                    id,
+                    name,
+                    version,
+                    replayed: true,
+                }),
+                Some(_) => Err(deleted()),
+                None => Err(missing(&tx, &self.account, &id)?),
+            };
+        };
+        if row.revision != expected {
+            return Err(Error::Conflict(format!(
+                "{} changed since it was loaded (it is now version {}). Inspect it before deleting.",
+                row.name, row.revision
+            )));
+        }
+        let version = row.revision + 1;
+        tx.execute(
+            "INSERT INTO tombstones(account,id,name,revision,deleted_at) VALUES (?1,?2,?3,?4,?5)",
+            params![self.account, id, row.name, version as i64, now()],
+        )?;
+        tx.execute(
+            "DELETE FROM variables WHERE account=?1 AND id=?2",
+            params![self.account, id],
+        )?;
+        tx.commit()?;
+        Ok(Deleted {
+            id,
+            name: row.name,
+            version,
+            replayed: false,
+        })
+    }
+
+    /// Record an action without any value. Best effort: a full disk never blocks the action's
+    /// own result, but the caller records the outcome after it is known.
+    pub fn audit(&self, action: &str, entry: Option<&str>, outcome: &str) {
+        let db = self.lock();
+        let portal = meta_text(&db, "portal_account").ok().flatten();
+        let _ = db.execute(
+            "INSERT INTO variable_audit(account,portal_account,at,action,entry,outcome) VALUES (?1,?2,?3,?4,?5,?6)",
+            params![self.account, portal, now(), action, entry, outcome],
+        );
+        let _ = db.execute(
+            "DELETE FROM variable_audit WHERE account=?1 AND seq <= (SELECT MAX(seq) FROM variable_audit WHERE account=?1) - ?2",
+            params![self.account, AUDIT_KEPT],
+        );
+    }
+
+    /// The newest audit events of this account, newest first.
+    pub fn audit_events(&self, limit: usize) -> Result<Vec<AuditEvent>> {
+        let db = self.lock();
+        let mut statement = db.prepare(
+            "SELECT at,COALESCE(portal_account,account),action,entry,outcome FROM variable_audit WHERE account=?1 ORDER BY seq DESC LIMIT ?2",
+        )?;
+        let rows = statement.query_map(params![self.account, limit as i64], |r| {
+            Ok(AuditEvent {
+                at: r.get(0)?,
+                account: r.get(1)?,
+                action: r.get(2)?,
+                entry: r.get(3)?,
+                outcome: r.get(4)?,
+            })
+        })?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
+
+    fn plaintext(&self, db: &Connection, row: &Row) -> Result<Secret> {
+        let key = self.unwrap_data_key(db, row.dek_version)?;
         let plain = open(
             &key,
-            &record_aad(&self.account, &id, &name, revision, data_key),
-            &ciphertext,
+            &record_aad(
+                &self.account,
+                &row.id,
+                &row.name,
+                row.revision,
+                row.dek_version,
+            ),
+            &row.ciphertext,
         )
-        .ok_or_else(|| integrity(&name))?;
+        .ok_or_else(|| integrity(&row.name))?;
         String::from_utf8(plain)
             .map(Secret)
-            .map_err(|_| integrity(&name))
+            .map_err(|_| integrity(&row.name))
     }
 
     /// Check that every entry authenticates with the current keys, reporting names only.
@@ -884,12 +1091,83 @@ impl Store {
     }
 }
 
+/// One stored entry as read from the database.
+struct Row {
+    id: String,
+    name: String,
+    description: String,
+    revision: u64,
+    dek_version: u32,
+    ciphertext: Vec<u8>,
+    created_at: i64,
+    updated_at: i64,
+}
+impl Row {
+    fn metadata(&self) -> Metadata {
+        Metadata {
+            id: self.id.clone(),
+            name: self.name.clone(),
+            description: self.description.clone(),
+            version: self.revision,
+            created_at: self.created_at,
+            updated_at: self.updated_at,
+        }
+    }
+}
+fn fetch(db: &Connection, sql: &str, args: impl rusqlite::Params) -> Result<Option<Row>> {
+    Ok(db
+        .query_row(sql, args, |r| {
+            Ok(Row {
+                id: r.get(0)?,
+                name: r.get(1)?,
+                description: r.get(2)?,
+                revision: r.get::<_, i64>(3)? as u64,
+                dek_version: r.get::<_, i64>(4)? as u32,
+                ciphertext: r.get(5)?,
+                created_at: r.get(6)?,
+                updated_at: r.get(7)?,
+            })
+        })
+        .optional()?)
+}
+/// An entry ID is a UUID; anything else is malformed and never reaches the database.
+fn entry_id(id: &str) -> Result<String> {
+    Ok(uuid::Uuid::parse_str(id)
+        .map_err(|_| input("The entry ID must be a UUID."))?
+        .hyphenated()
+        .to_string())
+}
+/// The name and deletion version of a deleted entry.
+fn tombstone(db: &Connection, account: &str, id: &str) -> Result<Option<(String, u64)>> {
+    Ok(db
+        .query_row(
+            "SELECT name,revision FROM tombstones WHERE account=?1 AND id=?2",
+            params![account, id],
+            |r| Ok((r.get(0)?, r.get::<_, i64>(1)? as u64)),
+        )
+        .optional()?)
+}
+fn deleted() -> Error {
+    Error::Conflict(
+        "This variable was deleted. Refresh the list; create a new entry to store it again.".into(),
+    )
+}
+/// Why an entry is absent: deleted earlier, or never an entry of this account.
+fn missing(db: &Connection, account: &str, id: &str) -> Result<Error> {
+    Ok(if tombstone(db, account, id)?.is_some() {
+        deleted()
+    } else {
+        input("There is no stored variable with that entry ID in this account.")
+    })
+}
+
 fn connect(path: &Path) -> Result<Connection> {
     let db = Connection::open(path)?;
     crate::security::protect_file(path)?;
     db.busy_timeout(std::time::Duration::from_secs(5))?;
     db.execute_batch(
         "PRAGMA journal_mode=WAL;
+        PRAGMA secure_delete=ON;
         CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS account_keys (
             account TEXT NOT NULL, version INTEGER NOT NULL, master_version INTEGER NOT NULL,
@@ -899,9 +1177,20 @@ fn connect(path: &Path) -> Result<Connection> {
             account TEXT NOT NULL, id TEXT NOT NULL, name TEXT NOT NULL, name_key TEXT NOT NULL,
             description TEXT NOT NULL, revision INTEGER NOT NULL, dek_version INTEGER NOT NULL,
             ciphertext BLOB NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
-            PRIMARY KEY (account, id), UNIQUE (account, name_key));",
+            PRIMARY KEY (account, id), UNIQUE (account, name_key));
+        CREATE TABLE IF NOT EXISTS tombstones (
+            account TEXT NOT NULL, id TEXT NOT NULL, name TEXT NOT NULL, revision INTEGER NOT NULL,
+            deleted_at INTEGER NOT NULL, PRIMARY KEY (account, id));
+        CREATE TABLE IF NOT EXISTS variable_audit (
+            seq INTEGER PRIMARY KEY AUTOINCREMENT, account TEXT NOT NULL, portal_account TEXT,
+            at INTEGER NOT NULL, action TEXT NOT NULL, entry TEXT, outcome TEXT NOT NULL);",
     )?;
     Ok(db)
+}
+fn meta_text(db: &Connection, key: &str) -> Result<Option<String>> {
+    Ok(db
+        .query_row("SELECT value FROM meta WHERE key=?1", [key], |r| r.get(0))
+        .optional()?)
 }
 fn meta_number(db: &Connection, key: &str) -> Result<Option<u32>> {
     Ok(db

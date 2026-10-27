@@ -1,8 +1,10 @@
 //! Account variables for the GUI, CLI and MCP: one host operation per behavior.
 //!
 //! A value enters only through protected entry (the GUI's masked field or CLI standard input) and
-//! is never returned by any operation. An agent starts a protected-entry request by name and
-//! description and later reads only its state.
+//! is returned by exactly one operation, `variable_reveal`, which only a person at the GUI (the
+//! application window or an authenticated portal browser) can invoke: never the CLI, MCP, tools
+//! or machines. An agent starts a protected-entry request (to store or to replace a value) by
+//! name or ID and later reads only its state.
 use super::{authority, control::Reply, *};
 use crate::variables::{self as vault, KeyBackup, NewVariable, Secret, Store};
 use serde::de::DeserializeOwned;
@@ -24,6 +26,8 @@ struct Entry {
     expires: i64,
     state: &'static str,
     version: Option<u64>,
+    /// A replacement of an existing entry's value: its ID and the version the request saw.
+    replaces: Option<(String, u64)>,
 }
 
 impl State {
@@ -75,9 +79,41 @@ struct CreateArgs {
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct UpdateArgs {
+    id: String,
+    version: u64,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    value: Option<Secret>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DeleteArgs {
+    id: String,
+    version: u64,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RevealArgs {
+    id: String,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AuditArgs {
+    #[serde(default)]
+    limit: Option<usize>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct StartArgs {
     name: String,
     description: String,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RotateArgs {
+    id: String,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -124,6 +160,53 @@ pub(super) async fn operate(host: &Arc<Host>, request: &control::Request) -> Rep
     }
 }
 
+/// The audit outcome of a result: a short fixed word, never any text from the request.
+fn outcome<T>(result: &std::result::Result<T, vault::Error>, replayed: bool) -> &'static str {
+    match result {
+        Ok(_) if replayed => "replayed",
+        Ok(_) => "ok",
+        Err(vault::Error::Input(_)) => "rejected",
+        Err(vault::Error::Conflict(message)) if message.contains("was deleted") => "deleted",
+        Err(vault::Error::Conflict(_)) => "stale",
+        Err(_) => "failed",
+    }
+}
+
+/// The entry an audited request names, if it names a well-formed one.
+fn entry_of(args: &Value) -> Option<String> {
+    args.get("id")
+        .and_then(Value::as_str)
+        .and_then(|id| uuid::Uuid::parse_str(id).ok())
+        .map(|id| id.hyphenated().to_string())
+}
+
+/// Edit, delete and reveal one entry of the account.
+fn mutate(store: &Store, method: &str, args: &Value) -> std::result::Result<Value, vault::Error> {
+    match method {
+        "variable_update" => {
+            let update: UpdateArgs = parse(args)?;
+            let updated = store.update(
+                &update.id,
+                update.version,
+                update.description.as_deref(),
+                update.value.as_ref(),
+            )?;
+            Ok(json!({"variable":updated.variable,"replayed":updated.replayed}))
+        }
+        "variable_delete" => {
+            let delete: DeleteArgs = parse(args)?;
+            let deleted = store.delete(&delete.id, delete.version)?;
+            Ok(json!({"deleted":deleted,"replayed":deleted.replayed}))
+        }
+        _ => {
+            let RevealArgs { id } = parse(args)?;
+            let (variable, value) = store.reveal(&id)?;
+            // The one place a value leaves the store: to the person who asked at the GUI.
+            Ok(json!({"variable":variable,"value":value.expose()}))
+        }
+    }
+}
+
 fn run(host: &Host, method: &str, args: &Value) -> std::result::Result<Value, vault::Error> {
     let invocation = authority::invocation(&host.state)
         .map_err(|_| vault::Error::Conflict(authority::ACCOUNT_UNAVAILABLE.into()))?;
@@ -133,10 +216,20 @@ fn run(host: &Host, method: &str, args: &Value) -> std::result::Result<Value, va
     let allowed = match method {
         "variable_list"
         | "variable_create"
+        | "variable_update"
+        | "variable_delete"
         | "variable_entry_status"
         | "variable_entry_complete"
         | "variable_entry_cancel" => transport != authority::Transport::Machine,
+        // Only a person at the GUI reads a value back; the CLI, MCP and tools share the local
+        // channel with agents, so that channel can never reveal one.
+        "variable_reveal" => matches!(
+            transport,
+            authority::Transport::Window | authority::Transport::Browser
+        ),
         "variable_entry_start"
+        | "variable_rotation_start"
+        | "variable_audit"
         | "variable_verify"
         | "variable_key_backup"
         | "variable_key_restore"
@@ -144,6 +237,12 @@ fn run(host: &Host, method: &str, args: &Value) -> std::result::Result<Value, va
         _ => return Err(vault::Error::Input("Unknown variable operation.".into())),
     };
     if !allowed {
+        // A refused reveal is worth a trace; it never touches a value.
+        if method == "variable_reveal"
+            && let Ok(store) = host.state.variables.store(host)
+        {
+            store.audit("reveal", entry_of(args).as_deref(), "denied_client");
+        }
         return Err(vault::Error::Conflict(
             "This variable operation is not available from this client.".into(),
         ));
@@ -151,6 +250,19 @@ fn run(host: &Host, method: &str, args: &Value) -> std::result::Result<Value, va
     let state = &host.state.variables;
     let store = state.store(host)?;
     let now = chrono::Utc::now().timestamp();
+    // Reveal, edit and deletion leave an audit event naming action, entry and outcome.
+    if let Some(action) = match method {
+        "variable_reveal" => Some("reveal"),
+        "variable_update" => Some("update"),
+        "variable_delete" => Some("delete"),
+        _ => None,
+    } {
+        let result = mutate(&store, method, args);
+        let entry = entry_of(args);
+        let replayed = result.as_ref().is_ok_and(|data| data["replayed"] == true);
+        store.audit(action, entry.as_deref(), outcome(&result, replayed));
+        return result;
+    }
     match method {
         "variable_list" => {
             let list: ListArgs = parse(args)?;
@@ -162,7 +274,9 @@ fn run(host: &Host, method: &str, args: &Value) -> std::result::Result<Value, va
                 .iter()
                 .filter(|(_, e)| e.state == "pending" && e.expires > now)
                 .map(|(request, e)| {
-                    json!({"request":request,"name":e.name,"description":e.description,"expires_at":e.expires})
+                    json!({"request":request,"name":e.name,"description":e.description,"expires_at":e.expires,
+                        "action": if e.replaces.is_some() { "replace_value" } else { "create" },
+                        "id": e.replaces.as_ref().map(|(id, _)| id)})
                 })
                 .collect();
             Ok(json!({
@@ -220,6 +334,7 @@ fn run(host: &Host, method: &str, args: &Value) -> std::result::Result<Value, va
                     expires: now + ENTRY_SECONDS,
                     state: "pending",
                     version: None,
+                    replaces: None,
                 },
             );
             Ok(json!({
@@ -227,6 +342,59 @@ fn run(host: &Host, method: &str, args: &Value) -> std::result::Result<Value, va
                 "expires_at": now + ENTRY_SECONDS,
                 "next": "Ask the user to type the value in Settings > Credentials > Variables, or run pta variables entry complete REQUEST with the value on standard input. You never receive the value; check variable_entry_status afterwards.",
             }))
+        }
+        "variable_rotation_start" => {
+            let RotateArgs { id } = parse(args)?;
+            let id = uuid::Uuid::parse_str(&id)
+                .map_err(|_| vault::Error::Input("The entry ID must be a UUID.".into()))?
+                .hyphenated()
+                .to_string();
+            let target = store
+                .list(None)?
+                .into_iter()
+                .find(|v| v.id == id)
+                .ok_or_else(|| {
+                    vault::Error::Input(
+                        "There is no stored variable with that ID. Inspect it with variable_list."
+                            .into(),
+                    )
+                })?;
+            let mut entries = state.entries();
+            let open = |e: &Entry| e.state == "pending" && e.expires > now;
+            if entries
+                .values()
+                .any(|e| open(e) && e.name.eq_ignore_ascii_case(&target.name))
+            {
+                return Err(vault::Error::Conflict(
+                    "A protected entry for that variable is already waiting for the user.".into(),
+                ));
+            }
+            if entries.values().filter(|e| open(e)).count() >= MAX_PENDING {
+                return Err(vault::Error::Conflict(
+                    "Too many protected entries are waiting. Ask the user to finish or cancel some.".into(),
+                ));
+            }
+            let request = uuid::Uuid::new_v4().to_string();
+            entries.insert(
+                request.clone(),
+                Entry {
+                    name: target.name.clone(),
+                    description: target.description.clone(),
+                    expires: now + ENTRY_SECONDS,
+                    state: "pending",
+                    version: None,
+                    replaces: Some((target.id.clone(), target.version)),
+                },
+            );
+            Ok(json!({
+                "request": request, "state": "pending", "action": "replace_value", "id": target.id,
+                "name": target.name, "description": target.description, "expires_at": now + ENTRY_SECONDS,
+                "next": "Ask the user to type the new value in Settings > Credentials > Variables, or run pta variables entry complete REQUEST with the value on standard input. You never receive the value; check variable_entry_status afterwards. The request fails if the variable changes first.",
+            }))
+        }
+        "variable_audit" => {
+            let AuditArgs { limit } = parse(args)?;
+            Ok(json!({"events":store.audit_events(limit.unwrap_or(50).clamp(1, 500))?}))
         }
         "variable_entry_status" | "variable_entry_cancel" => {
             let RequestArgs { request } = parse(args)?;
@@ -243,12 +411,13 @@ fn run(host: &Host, method: &str, args: &Value) -> std::result::Result<Value, va
                 entry.state
             };
             Ok(
-                json!({"request":request,"state":shown,"name":entry.name,"description":entry.description,"version":entry.version}),
+                json!({"request":request,"state":shown,"name":entry.name,"description":entry.description,"version":entry.version,
+                    "action": if entry.replaces.is_some() { "replace_value" } else { "create" }}),
             )
         }
         "variable_entry_complete" => {
             let complete: CompleteArgs = parse(args)?;
-            let (name, description) = {
+            let (name, description, replaces) = {
                 let entries = state.entries();
                 let entry = entries.get(&complete.request).ok_or_else(|| {
                     vault::Error::Input("That protected entry is unknown or has expired.".into())
@@ -265,19 +434,37 @@ fn run(host: &Host, method: &str, args: &Value) -> std::result::Result<Value, va
                         }
                     )));
                 }
-                (entry.name.clone(), entry.description.clone())
+                (
+                    entry.name.clone(),
+                    entry.description.clone(),
+                    entry.replaces.clone(),
+                )
             };
-            let created = store.create(NewVariable {
-                id: complete.request.clone(),
-                name,
-                description,
-                value: complete.value,
-            })?;
+            let (variable, replayed) = if let Some((id, version)) = replaces {
+                // A replacement rotates the value of the entry the request saw: if it changed
+                // since, the typed value must not overwrite the newer state.
+                let result = store.update(&id, version, None, Some(&complete.value));
+                store.audit(
+                    "rotate",
+                    Some(&id),
+                    outcome(&result, result.as_ref().is_ok_and(|u| u.replayed)),
+                );
+                let updated = result?;
+                (updated.variable, updated.replayed)
+            } else {
+                let created = store.create(NewVariable {
+                    id: complete.request.clone(),
+                    name,
+                    description,
+                    value: complete.value,
+                })?;
+                (created.variable, created.replayed)
+            };
             if let Some(entry) = state.entries().get_mut(&complete.request) {
                 entry.state = "completed";
-                entry.version = Some(created.variable.version);
+                entry.version = Some(variable.version);
             }
-            Ok(json!({"variable":created.variable,"replayed":created.replayed}))
+            Ok(json!({"variable":variable,"replayed":replayed}))
         }
         "variable_verify" => {
             let report = store.verify()?;

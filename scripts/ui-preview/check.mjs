@@ -987,7 +987,9 @@ for (const [label, ctx] of [['variables-desktop', {}], ['variables-phone', { vie
   await page.evaluate(() => showTab('settings', 'panel-variables'));
   await page.locator('#variables .row').first().waitFor();
   check(`${label}: names and descriptions render as text`, await page.locator('#variables').innerText().then(text => text.includes('<b>not markup</b>')) && await page.locator('#variables b').count() === 0);
-  check(`${label}: the list has no reveal or copy control yet`, await page.locator('#variables button').count() === 0);
+  check(`${label}: every variable shows a masked value and no plaintext`, await page.locator('#variables .variable-mask').count() === await page.locator('#variables .row').count()
+    && await page.locator('#variables pre.variable-value').count() === 0
+    && await page.locator('#variables').innerText().then(text => !text.includes('release.example.test') && !text.includes('SYNTHETIC')));
   check(`${label}: an agent request waits for a protected value`, await page.locator('#variables-pending').innerText().then(text => text.includes('PARTNER_ENDPOINT')));
   const mask = () => page.locator('#variable-value').evaluate(node => getComputedStyle(node).webkitTextSecurity);
   check(`${label}: the value field is masked by default`, await mask() === 'disc');
@@ -1022,6 +1024,126 @@ for (const [label, ctx] of [['variables-desktop', {}], ['variables-phone', { vie
   await page.locator('#variables .row', { hasText: 'PARTNER_ENDPOINT' }).waitFor();
   check(`${label}: the agent's request completes through protected entry`, await pending.isHidden() && await page.evaluate(() => window.__ptaVariableCreates.at(-1).name === 'PARTNER_ENDPOINT'));
   check(`${label}: variables keep the phone boundary`, await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+
+  // Everyday management: reveal, copy, edit each field, cancel, conflict and deletion.
+  const row = name => page.locator('#variables .row', { hasText: name });
+  const button = (name, text) => row(name).locator('button', { hasText: new RegExp(`^${text}$`) });
+  const editor = name => row(name).locator('.variable-edit');
+  const notice = () => page.locator('#notice').innerText();
+  const clipboard = () => page.evaluate(() => navigator.clipboard.readText());
+  const DEPLOY = 'DEPLOY_ENDPOINT', KEY = 'signing_key';
+  const DEPLOY_ID = 'aaaaaaaa-0000-4000-8000-000000000001', KEY_ID = 'aaaaaaaa-0000-4000-8000-000000000002';
+  const KEY_VALUE = '-----BEGIN SYNTHETIC KEY-----\nline two  with  spaces\n\tand a tab\n-----END SYNTHETIC KEY-----\n';
+
+  await button(DEPLOY, 'Revelar').click();
+  await row(DEPLOY).locator('pre.variable-value').waitFor();
+  check(`${label}: Reveal fetches only the selected entry after the action`, await page.evaluate(id => window.__ptaVariableReveals.length === 1 && window.__ptaVariableReveals[0] === id, DEPLOY_ID));
+  check(`${label}: a revealed value is shown for that entry only`, await row(DEPLOY).locator('pre.variable-value').innerText() === 'https://release.example.test/v1' && await page.locator('#variables pre.variable-value').count() === 1);
+  await button(DEPLOY, 'Ocultar').click();
+  check(`${label}: Hide masks the value again`, await page.locator('#variables pre.variable-value').count() === 0 && await row(DEPLOY).locator('.variable-mask').count() === 1);
+  await button(DEPLOY, 'Revelar').click();
+  await row(DEPLOY).locator('pre.variable-value').waitFor();
+  await page.evaluate(() => showTab('overview'));
+  await page.evaluate(() => showTab('settings', 'panel-variables'));
+  check(`${label}: navigating away clears a revealed value`, await page.locator('#variables pre.variable-value').count() === 0);
+  await button(DEPLOY, 'Revelar').click();
+  await row(DEPLOY).locator('pre.variable-value').waitFor();
+  await page.evaluate(() => window.dispatchEvent(new Event('pagehide')));
+  check(`${label}: leaving the page clears a revealed value`, await page.locator('#variables pre.variable-value').count() === 0);
+  check(`${label}: a revealed value never reaches storage or the address`, await page.evaluate(() => !JSON.stringify([localStorage, sessionStorage, location.href]).includes('release.example.test')));
+
+  // Copy writes the exact value (line breaks, tabs and the final newline) and shows no value anywhere.
+  await context.grantPermissions(['clipboard-read', 'clipboard-write']);
+  await page.clock.install();
+  await button(KEY, 'Copiar valor').click();
+  await page.locator('#notice', { hasText: 'copiado' }).waitFor();
+  check(`${label}: Copy value writes the exact multiline value`, await clipboard() === KEY_VALUE);
+  check(`${label}: copying shows no value in a notice or on the page`, await notice().then(text => !text.includes('SYNTHETIC')) && await page.locator('#panel-variables').innerText().then(text => !text.includes('SYNTHETIC')));
+  await page.clock.fastForward(61_000);
+  await page.waitForFunction(() => navigator.clipboard.readText().then(text => text === ''));
+  check(`${label}: the clipboard is cleared when it still holds the copied value`, await clipboard() === '');
+  await button(KEY, 'Copiar valor').click();
+  await page.waitForFunction(() => window.__ptaVariableReveals.length === 5);
+  await page.evaluate(() => navigator.clipboard.writeText('unrelated clipboard text'));
+  await page.clock.fastForward(61_000);
+  await page.waitForTimeout(300);
+  check(`${label}: cleanup never overwrites unrelated clipboard contents`, await clipboard() === 'unrelated clipboard text');
+  check(`${label}: Copy fetched the value only on demand`, await page.evaluate(() => window.__ptaVariableReveals.length === 5));
+  await button(DEPLOY, 'Revelar').click();
+  await row(DEPLOY).locator('pre.variable-value').waitFor();
+  await page.clock.fastForward(31_000);
+  check(`${label}: a revealed value hides itself after a short time`, await page.locator('#variables pre.variable-value').count() === 0);
+
+  // A description edit is independent of the value, and Cancel discards everything typed.
+  await button(DEPLOY, 'Editar').click();
+  check(`${label}: saving a description needs a change`, await editor(DEPLOY).getByRole('button', { name: 'Guardar descripción' }).isDisabled());
+  check(`${label}: the replacement value field is masked`, await editor(DEPLOY).locator('textarea').evaluate(node => getComputedStyle(node).webkitTextSecurity) === 'disc');
+  await editor(DEPLOY).locator('input:not([type=checkbox])').fill('Discarded description');
+  await editor(DEPLOY).locator('textarea').fill('discarded-value');
+  const updatesBefore = await page.evaluate(() => window.__ptaVariableUpdates.length);
+  await editor(DEPLOY).getByRole('button', { name: 'Cancelar', exact: true }).click();
+  await button(DEPLOY, 'Editar').click();
+  check(`${label}: Cancel discards edits without calling the host`, await page.evaluate(n => window.__ptaVariableUpdates.length === n, updatesBefore)
+    && await editor(DEPLOY).locator('input:not([type=checkbox])').inputValue() === 'Base URL of the release service <b>not markup</b>' && await editor(DEPLOY).locator('textarea').inputValue() === '');
+  await editor(DEPLOY).locator('input:not([type=checkbox])').fill('Release service base URL');
+  await editor(DEPLOY).getByRole('button', { name: 'Guardar descripción' }).click();
+  await row(DEPLOY).getByText('Release service base URL', { exact: true }).waitFor();
+  check(`${label}: a description edit sends only the description and the seen version`, await page.evaluate(id => {
+    const last = window.__ptaVariableUpdates.at(-1);
+    return last.id === id && last.version === 1 && last.description === 'Release service base URL' && last.valueLength === undefined;
+  }, DEPLOY_ID));
+  check(`${label}: the edit advanced the version and closed the form`, await row(DEPLOY).innerText().then(text => text.includes('versión 2')) && await editor(DEPLOY).count() === 0);
+
+  // Rotation changes only the value and keeps the entry and its description.
+  await button(DEPLOY, 'Editar').click();
+  await editor(DEPLOY).locator('textarea').fill('rotated-synthetic\nsecond line');
+  await editor(DEPLOY).getByRole('button', { name: 'Reemplazar valor' }).click();
+  await row(DEPLOY).getByText('versión 3').waitFor();
+  check(`${label}: a rotation sends only the value and keeps the description`, await page.evaluate(id => {
+    const last = window.__ptaVariableUpdates.at(-1);
+    return last.id === id && last.version === 2 && last.description === undefined && last.valueLength === 'rotated-synthetic\nsecond line'.length;
+  }, DEPLOY_ID) && await row(DEPLOY).innerText().then(text => text.includes('Release service base URL')));
+  check(`${label}: the replaced value is not left on the page`, await page.locator('#panel-variables').innerText().then(text => !text.includes('rotated-synthetic')) && await page.locator('#panel-variables textarea').evaluateAll(fields => fields.every(field => !field.value.includes('rotated'))));
+  await button(DEPLOY, 'Revelar').click();
+  await row(DEPLOY).locator('pre.variable-value').waitFor();
+  check(`${label}: Reveal returns the rotated value`, await row(DEPLOY).locator('pre.variable-value').innerText() === 'rotated-synthetic\nsecond line');
+  await button(DEPLOY, 'Ocultar').click();
+
+  // Another client's newer change is reported, never overwritten, and the typed text survives.
+  await button(KEY, 'Editar').click();
+  await editor(KEY).locator('input:not([type=checkbox])').fill('My conflicting description');
+  await page.evaluate(id => window.__ptaVariableChangedElsewhere(id), KEY_ID);
+  await editor(KEY).getByRole('button', { name: 'Guardar descripción' }).click();
+  await page.locator('#notice', { hasText: 'cambió desde que se cargó' }).waitFor();
+  check(`${label}: a stale edit is reported as a conflict`, await notice().then(text => text.includes('cambió desde que se cargó')));
+  await row(KEY).getByText('(edited elsewhere)').waitFor();
+  check(`${label}: the conflict refreshed the list and kept the other client's change`, await row(KEY).innerText().then(text => text.includes('(edited elsewhere)') && text.includes('versión 3')));
+  check(`${label}: the conflict kept the typed description for another try`, await editor(KEY).locator('input:not([type=checkbox])').inputValue() === 'My conflicting description');
+  await editor(KEY).getByRole('button', { name: 'Cancelar', exact: true }).click();
+
+  // Axe sees an open editor and a revealed value, then deletion asks twice.
+  await button(DEPLOY, 'Editar').click();
+  await button(KEY, 'Revelar').click();
+  await row(KEY).locator('pre.variable-value').waitFor();
+  await page.evaluate(axeSource);
+  check(`${label}: variable actions and editor pass axe`, (await scan(page)).length === 0, JSON.stringify(await scan(page)));
+  await editor(DEPLOY).getByRole('button', { name: 'Cancelar', exact: true }).click();
+  await button(KEY, 'Ocultar').click();
+  const deletesBefore = await page.evaluate(() => window.__ptaVariableDeletes.length);
+  await button(KEY, 'Eliminar').click();
+  check(`${label}: Delete asks for a second tap before calling the host`, await button(KEY, 'Confirmar eliminación').count() === 1 && await page.evaluate(n => window.__ptaVariableDeletes.length === n, deletesBefore)
+    && await row(KEY).innerText().then(text => text.includes('No revoca la credencial')));
+  await row(KEY).locator('button', { hasText: /^Cancelar$/ }).click();
+  check(`${label}: cancelling the confirmation keeps the variable`, await button(KEY, 'Eliminar').count() === 1 && await page.evaluate(n => window.__ptaVariableDeletes.length === n, deletesBefore));
+  await button(KEY, 'Eliminar').click();
+  await button(KEY, 'Confirmar eliminación').click();
+  await page.locator('#variables .row', { hasText: KEY }).waitFor({ state: 'detached' });
+  check(`${label}: a confirmed deletion names the seen version and removes the entry`, await page.evaluate(([n, id]) => window.__ptaVariableDeletes.length === n + 1 && window.__ptaVariableDeletes.at(-1).id === id && window.__ptaVariableDeletes.at(-1).version === 3, [deletesBefore, KEY_ID]));
+  const listsBefore = await page.evaluate(() => window.__ptaCalls.filter(call => call === 'variable_list').length);
+  await page.locator('#variables-refresh').click();
+  await page.locator('#notice.ok').getByText('Variables actualizadas').waitFor();
+  check(`${label}: Refresh reloads the list on request`, await page.evaluate(n => window.__ptaCalls.filter(call => call === 'variable_list').length > n, listsBefore));
+  check(`${label}: variable management keeps the phone boundary`, await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
   await page.evaluate(axeSource);
   check(`${label}: variables pass axe`, (await scan(page)).length === 0, JSON.stringify(await scan(page)));
   check(`${label}: variables have no browser errors`, errors.length === 0, errors.join('; '));

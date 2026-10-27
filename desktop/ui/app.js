@@ -115,6 +115,7 @@ async function busy(button, task) {
 
 function showTab(name, anchor) {
   tab = name;
+  clearRevealedVariable();
   setNavOverflow(false);
   for (const section of ['overview', 'todo', 'implementation', 'create-request', 'agent-history', 'settings', 'messages', 'knowledge', 'chat', 'registration']) $('#' + section).hidden = section !== name;
   for (const button of document.querySelectorAll('nav button[data-tab]')) {
@@ -1095,6 +1096,7 @@ const dirtyGroups = new Set();
 
 /** Selects the tab `name` of a tab list and shows only its panel. */
 function selectTab(list, name, focus = false) {
+  clearRevealedVariable();
   for (const button of list.querySelectorAll('[role=tab]')) {
     const selected = button.dataset.group === name;
     button.setAttribute('aria-selected', String(selected));
@@ -1502,12 +1504,68 @@ function renderCredentials() {
 
 // ---------------------------------------------------------------- account variables
 
-/** Metadata only: the host never returns a value, and the form clears it as soon as it is stored. */
+/** Metadata only: lists never carry a value, and the forms clear it as soon as it is stored. */
 let variableState = { variables: [], pending: [], error: '' };
 /** One entry ID per attempt, so repeating an interrupted save cannot create a duplicate. */
 let variableAttempt = null;
+/**
+ * The one value on screen after an explicit Reveal. It lives only in this variable and the DOM
+ * (never in storage, a URL or history) and goes away on Hide, navigation, a hidden page, logout
+ * or after VALUE_SECONDS.
+ */
+let revealedVariable = null;
+const VALUE_SECONDS = 30;
+/** Entry being edited, armed for deletion, and the description typed so far (kept across a conflict). */
+let editingVariable = null;
+let deletingVariable = null;
+let variableDraft = null;
+let armTimer = null;
+let clipboardCleanup = null;
 const VARIABLE_NAME = /^[A-Za-z_][A-Za-z0-9_]{0,127}$/;
 const UNSAFE_TEXT = /[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/;
+
+function clearRevealedVariable(render = true) {
+  if (!revealedVariable) return;
+  clearTimeout(revealedVariable.timer);
+  revealedVariable = null;
+  if (render) renderVariables();
+}
+/** Pagehide and logout also drop what was typed but not yet saved. */
+function clearTypedVariableValues() {
+  clearRevealedVariable(false);
+  for (const field of document.querySelectorAll('#panel-variables textarea')) field.value = '';
+  editingVariable = deletingVariable = variableDraft = null;
+  renderVariables();
+}
+document.addEventListener('visibilitychange', () => { if (document.hidden) clearRevealedVariable(); });
+window.addEventListener('pagehide', clearTypedVariableValues);
+
+async function digest(text) {
+  const bytes = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
+  return Array.from(new Uint8Array(bytes), byte => byte.toString(16).padStart(2, '0')).join('');
+}
+/**
+ * Best effort: a minute after Copy value, clear the clipboard only if it still holds exactly what
+ * was copied. Only a fingerprint is kept, and unrelated clipboard contents are never touched.
+ */
+async function scheduleClipboardCleanup(value) {
+  clearTimeout(clipboardCleanup);
+  if (!crypto.subtle || !navigator.clipboard?.readText) return;
+  const fingerprint = await digest(value);
+  clipboardCleanup = setTimeout(async () => {
+    try { if (await digest(await navigator.clipboard.readText()) === fingerprint) await navigator.clipboard.writeText(''); } catch { /* left alone without permission or focus */ }
+  }, 60_000);
+}
+
+/** A change names the version the user saw; another client's newer change refreshes the list instead of being overwritten. */
+async function changeVariable(method, variable, extra = {}) {
+  try {
+    return await invoke(method, { id: variable.id, version: variable.version, ...extra });
+  } catch (error) {
+    await loadVariables();
+    throw error;
+  }
+}
 
 async function loadVariables() {
   try {
@@ -1536,12 +1594,117 @@ function renderVariables() {
   } else if (!shown.length) {
     list.append(el('p', { class: 'hint', textContent: t('No variable matches this search.') }));
   }
-  for (const variable of shown) {
-    const title = el('span', { class: 'cred-name', textContent: variable.name, translate: 'no' });
-    list.append(el('div', { class: 'row' }, rowText(title, variable.description, badge(t('Stored · version {n}', { n: variable.version }), 'ok'))));
-  }
+  for (const variable of shown) list.append(variableRow(variable));
   renderPendingVariables(pending);
   updateVariableForm();
+}
+
+function variableRow(variable) {
+  const { id, name } = variable;
+  const title = el('span', { class: 'cred-name', textContent: name, translate: 'no' });
+  const visible = revealedVariable?.id === id && revealedVariable.version === variable.version;
+  const value = visible
+    ? el('pre', { class: 'variable-value', textContent: revealedVariable.value, translate: 'no', tabIndex: 0, 'aria-label': t('Value of {name}', { name }) })
+    : el('span', { class: 'variable-mask', textContent: '••••••••••', role: 'img', 'aria-label': t('Value hidden') });
+  const reveal = el('button', { type: 'button', class: 'secondary', textContent: visible ? t('Hide') : t('Reveal'),
+    'aria-label': visible ? t('Hide the value of {name}', { name }) : t('Reveal the value of {name}', { name }) });
+  reveal.onclick = () => busy(reveal, async () => {
+    if (visible) return clearRevealedVariable();
+    const reply = await invoke('variable_reveal', { id });
+    clearRevealedVariable(false);
+    // The reply names the current version: show it against fresh metadata, never a stale row.
+    variableState.variables = variableState.variables.map(v => v.id === id ? reply.variable : v);
+    revealedVariable = { id, version: reply.variable.version, value: reply.value, timer: setTimeout(clearRevealedVariable, VALUE_SECONDS * 1000) };
+    renderVariables();
+  });
+  const copyValue = el('button', { type: 'button', class: 'secondary', textContent: t('Copy value'), 'aria-label': t('Copy value of {name}', { name }) });
+  copyValue.onclick = () => busy(copyValue, async () => {
+    const reply = await invoke('variable_reveal', { id });
+    // Only the clipboard receives it: no toast, notice or log carries the value.
+    if (!await copy(reply.value)) throw t('The value could not be copied. Reveal it and copy it by hand.');
+    await scheduleClipboardCleanup(reply.value);
+    done(t('Value of {name} copied. The clipboard is cleared in a minute if it is unchanged.', { name }));
+  });
+  const edit = el('button', { type: 'button', class: 'secondary', textContent: t('Edit'), 'aria-expanded': String(editingVariable === id), 'aria-label': t('Edit {name}', { name }) });
+  edit.onclick = () => {
+    editingVariable = editingVariable === id ? null : id;
+    variableDraft = null;
+    renderVariables();
+  };
+  const armed = deletingVariable === id;
+  const remove = el('button', { type: 'button', class: 'danger', textContent: armed ? t('Confirm deletion') : t('Delete'),
+    'aria-label': armed ? t('Confirm deletion of {name}', { name }) : t('Delete {name}', { name }) });
+  remove.onclick = () => busy(remove, async () => {
+    if (!armed) {
+      // An irreversible action asks for a second tap, and disarms itself.
+      deletingVariable = id;
+      clearTimeout(armTimer);
+      armTimer = setTimeout(() => { if (deletingVariable === id) { deletingVariable = null; renderVariables(); } }, 8000);
+      return renderVariables();
+    }
+    deletingVariable = null;
+    await changeVariable('variable_delete', variable);
+    if (revealedVariable?.id === id) clearRevealedVariable(false);
+    if (editingVariable === id) editingVariable = null;
+    await loadVariables();
+    done(t('{name} deleted.', { name }));
+  });
+  const actions = [reveal, copyValue, edit, remove];
+  if (armed) {
+    const keep = el('button', { type: 'button', class: 'secondary', textContent: t('Cancel'), 'aria-label': t('Cancel deletion of {name}', { name }) });
+    keep.onclick = () => { deletingVariable = null; renderVariables(); };
+    actions.push(keep);
+  }
+  return el('div', { class: 'row variable-row' },
+    rowText(title, variable.description, badge(t('Stored · version {n}', { n: variable.version }), 'ok')),
+    el('div', { class: 'variable-value-box' }, value),
+    el('div', { class: 'variable-actions' }, actions),
+    armed ? el('p', { class: 'hint variable-note', role: 'status', textContent: t('Deleting removes it for good and its value cannot be recovered. It does not revoke the credential at its provider.') }) : null,
+    editingVariable === id ? variableEditor(variable) : null);
+}
+
+/** Two independent edits of the same entry: description only, and a replacement value only. */
+function variableEditor(variable) {
+  const { id, name } = variable;
+  const description = el('input', { value: variableDraft?.id === id ? variableDraft.description : variable.description, maxLength: 500,
+    autocomplete: 'off', spellcheck: false, 'aria-label': t('Description of {name}', { name }) });
+  const saveDescription = el('button', { type: 'button', textContent: t('Save description') });
+  const sync = () => { saveDescription.disabled = !description.value.trim() || description.value.trim() === variable.description; };
+  description.oninput = () => { variableDraft = { id, description: description.value }; sync(); };
+  sync();
+  saveDescription.onclick = () => busy(saveDescription, async () => {
+    const text = description.value.trim();
+    if (!text || text.length > 500 || UNSAFE_TEXT.test(text)) throw t('A description is plain text on one line, up to 500 characters.');
+    await changeVariable('variable_update', variable, { description: text });
+    variableDraft = editingVariable = null;
+    await loadVariables();
+    done(t('Description of {name} updated.', { name }));
+  });
+
+  const input = el('textarea', { class: 'secret-entry', rows: 2, autocomplete: 'off', autocapitalize: 'off', spellcheck: false,
+    placeholder: t('Enter the new value'), 'aria-label': t('New value of {name}', { name }) });
+  const show = el('input', { type: 'checkbox' });
+  show.onchange = () => input.classList.toggle('shown', show.checked);
+  const replace = el('button', { type: 'button', textContent: t('Replace value'), disabled: true });
+  input.oninput = () => { replace.disabled = !input.value; };
+  replace.onclick = () => busy(replace, async () => {
+    checkVariableValue(input.value);
+    const next = input.value;
+    input.value = '';
+    await changeVariable('variable_update', variable, { value: next });
+    if (revealedVariable?.id === id) clearRevealedVariable(false);
+    variableDraft = editingVariable = null;
+    await loadVariables();
+    done(t('Value of {name} replaced. Its name and description are unchanged.', { name }));
+  });
+  const close = el('button', { type: 'button', class: 'secondary', textContent: t('Cancel') });
+  close.onclick = () => { input.value = ''; editingVariable = variableDraft = null; renderVariables(); };
+  return el('div', { class: 'variable-edit' },
+    el('label', {}, t('Description'), description),
+    el('div', { class: 'actions' }, saveDescription),
+    el('label', {}, t('New value'), el('small', { textContent: t('The name, description and references stay the same.') }), input),
+    el('label', { class: 'check' }, show, ` ${t('Show the value while I type')}`),
+    el('div', { class: 'actions' }, replace, close));
 }
 
 function renderPendingVariables(pending) {
@@ -1601,7 +1764,13 @@ $('#variable-create').onclick = event => busy(event.currentTarget, async () => {
   await loadVariables();
   done(reply.replayed ? t('{name} was already stored.', { name: form.name }) : t('{name} stored.', { name: form.name }));
 });
-setInterval(() => { if (tab === 'settings' && !$('#panel-variables').closest('[role=tabpanel]').hidden) loadVariables(); }, 10_000);
+$('#variables-refresh').onclick = event => busy(event.currentTarget, async () => {
+  await loadVariables();
+  done(t('Variables refreshed.'));
+});
+// The periodic refresh never rebuilds a form the user is typing in.
+const typingVariable = () => editingVariable || [...document.querySelectorAll('#variables-pending textarea')].some(field => field.value);
+setInterval(() => { if (tab === 'settings' && !$('#panel-variables').closest('[role=tabpanel]').hidden && !typingVariable()) loadVariables(); }, 10_000);
 
 const effortNames = { default: t('Model default'), none: t('No reasoning'), minimal: t('Minimal'), low: t('Low'), medium: t('Medium'), high: t('High'), xhigh: t('Very high'), max: t('Maximum') };
 let llmCatalog = { providers: [] };
@@ -3638,6 +3807,7 @@ if (window.ptaTransport.browser) {
     for (const id of ['#public-url', '#bind', '#tunnel-config', '#cloudflare-tunnel']) $(id).disabled = true;
     for (const button of [$('#web-logout'), $('#web-logout-settings')]) {
       button.onclick = () => busy(button, async () => {
+        clearTypedVariableValues();
         const result = await window.ptaTransport.request('/api/logout', {});
         window.location.replace(result.logout_url);
       });
