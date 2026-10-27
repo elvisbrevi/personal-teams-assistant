@@ -41,6 +41,7 @@ mod mcp;
 mod notes;
 mod portable;
 mod skill;
+mod standing;
 mod tools;
 mod variables;
 mod web;
@@ -115,6 +116,7 @@ pub(crate) struct DesktopState {
     implementation: implementation::State,
     variables: variables::State,
     portable: portable::State,
+    standing: standing::State,
 }
 
 #[derive(Serialize)]
@@ -514,6 +516,7 @@ pub(crate) fn init_state(config_dir: &Path, data_dir: &Path) -> Result<DesktopSt
         implementation: implementation::State::new(config_path.parent().unwrap())?,
         variables: variables::State::new(config_path.parent().unwrap()),
         portable: portable::State::new(config_path.parent().unwrap()),
+        standing: standing::State::default(),
         operations: Mutex::new(()),
         loaded_config: Mutex::new(None),
         config_path,
@@ -711,6 +714,7 @@ async fn start_service(state: &DesktopState) -> Result<()> {
         implementation::fleet::teams_allowed(state).await?,
         "This machine is not the selected Teams machine, or the previous machine still holds its lease."
     );
+    consumers::stage(state).await;
     let config = read_config(&state.config_path)?;
     web::validate_profile_identity(state.config_path.parent().unwrap(), &config)?;
     let map = KnowledgeMap::load(&state.map_path)?;
@@ -975,6 +979,7 @@ async fn chat(
     state: &DesktopState,
     input: SimulationRequest,
 ) -> std::result::Result<SimulationResult, String> {
+    consumers::stage(state).await;
     // Every provider call carries its own deadline; maximum-effort reasoning takes minutes.
     local_chat::chat(&state.config_path, input)
         .await

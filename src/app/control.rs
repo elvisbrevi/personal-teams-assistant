@@ -1201,6 +1201,7 @@ async fn operate(
         }
         "test_providers" => {
             let config = read_config(&state.config_path).map_err(fail)?;
+            consumers::stage(state).await;
             crate::diagnostics::providers(&config).await.map_err(fail)?
         }
         "test_connectivity" => {

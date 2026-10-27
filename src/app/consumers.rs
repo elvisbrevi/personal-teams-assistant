@@ -14,8 +14,15 @@ use crate::{
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 
+mod connected;
+pub(super) use connected::stage;
+
 pub(super) struct State {
     launchers: rules::Launchers,
+    /// What an installation signed in to a coordinator has bound; never a value.
+    bindings: connected::Bindings,
+    /// Values resolved online for the operation about to run (memory only, short-lived).
+    staged: std::sync::Mutex<BTreeMap<String, connected::Staged>>,
     /// One launcher runs at a time.
     busy: tokio::sync::Mutex<()>,
     /// Serializes read-modify-write of the launcher list.
@@ -29,6 +36,8 @@ impl State {
     pub(super) fn new(profile: &Path) -> Self {
         Self {
             launchers: rules::Launchers::new(profile),
+            bindings: connected::Bindings::new(profile),
+            staged: std::sync::Mutex::new(BTreeMap::new()),
             busy: tokio::sync::Mutex::new(()),
             edit: std::sync::Mutex::new(()),
             #[cfg(test)]
@@ -95,7 +104,13 @@ fn input(message: impl Into<String>) -> vault::Error {
 
 pub(super) async fn operate(host: &Arc<Host>, request: &control::Request) -> Reply {
     match run(host, &request.method, &request.args).await {
-        Ok(data) => Reply::success(data),
+        Ok(mut data) => {
+            if request.method == "variable_consumer_list" {
+                let link = implementation::link(&host.state).ok().flatten();
+                data["standing"] = host.state.standing.view(link.as_ref());
+            }
+            Reply::success(data)
+        }
         Err(error) => vars::failure(error),
     }
 }
@@ -165,6 +180,13 @@ async fn run(
             }
         }
         _ => return Err(input("Unknown variable operation.")),
+    }
+    // Signed in to a coordinator: the account's variables are not on this computer. Every
+    // choice and use goes through the coordinator and never falls back to a local store.
+    if let Some(link) = implementation::link(&host.state)
+        .map_err(|_| vault::Error::Storage("The coordinator connection is unreadable.".into()))?
+    {
+        return connected::run(host, &link, method, args, invocation.scope.owner && local).await;
     }
     let store = state.store(host)?;
     match method {
@@ -428,12 +450,12 @@ impl Resolver {
     }
     /// The live host's store, after the account authority check. `None` once the host is gone
     /// (process shutdown): nothing can be bound then, and nothing is read.
-    fn store(&self) -> anyhow::Result<Option<Arc<Store>>> {
+    fn live(&self) -> anyhow::Result<Option<Arc<Host>>> {
         let Some(host) = self.host.upgrade() else {
             return Ok(None);
         };
         authority::invocation(&host.state)?;
-        Ok(Some(host.state.variables.store(&host)?))
+        Ok(Some(host))
     }
 }
 
@@ -442,15 +464,36 @@ impl crate::security::AccountSecrets for Resolver {
         let Some(consumer) = rules::built_in_credential(name) else {
             return Ok(false);
         };
-        match self.store()? {
-            Some(store) => Ok(store.is_bound(consumer.id, consumer.slot)?),
-            None => Ok(false),
+        let Some(host) = self.live()? else {
+            return Ok(false);
+        };
+        if let Some(link) = implementation::link(&host.state)? {
+            return Ok(host.state.variables.consumers.bindings.has(
+                &link,
+                consumer.id,
+                consumer.slot,
+            ));
         }
+        Ok(host
+            .state
+            .variables
+            .store(&host)?
+            .is_bound(consumer.id, consumer.slot)?)
     }
     fn value(&self, name: &str) -> anyhow::Result<String> {
         let consumer =
             rules::built_in_credential(name).context("No consumer uses this credential.")?;
-        let store = self.store()?.context("The host is no longer running.")?;
+        let host = self.live()?.context("The host is no longer running.")?;
+        if implementation::link(&host.state)?.is_some() {
+            // Signed in: only a value the coordinator resolved for this operation (`stage`).
+            return host
+                .state
+                .variables
+                .consumers
+                .staged(consumer.credential)
+                .map_err(anyhow::Error::msg);
+        }
+        let store = host.state.variables.store(&host)?;
         let result = store.bound_value(consumer.id, consumer.slot);
         let outcome = match &result {
             Ok(Some(_)) => "ok",

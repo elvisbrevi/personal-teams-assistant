@@ -11,7 +11,7 @@ use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 
 mod sync;
-pub(super) use sync::{auto, machine_call};
+pub(super) use sync::{auto, cached, call_account, machine_call};
 
 /// A protected-entry request stays open this long (seconds).
 const ENTRY_SECONDS: i64 = 15 * 60;
@@ -51,6 +51,30 @@ impl State {
     /// Drop the synchronized catalog: the installation left or changed its account.
     pub(super) fn forget_catalog(&self) {
         self.catalog.forget();
+    }
+    /// Route the coordinator exchanges of an installation in tests.
+    #[cfg(test)]
+    pub(super) fn use_transport(
+        &self,
+        transport: impl Fn(
+            String,
+            Value,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = anyhow::Result<Value>> + Send>,
+        > + Send
+        + Sync
+        + 'static,
+    ) {
+        self.catalog.use_transport(Arc::new(transport));
+    }
+    /// Drop everything held in memory for the current account: requests waiting for a protected
+    /// value and values staged for a running operation. Stored data is not touched.
+    pub(super) fn withdraw(&self) {
+        self.entries
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+        self.consumers.unstage();
     }
     pub(super) fn store(&self, host: &Host) -> std::result::Result<Arc<Store>, vault::Error> {
         let mut slot = self.store.lock().unwrap_or_else(|e| e.into_inner());
@@ -190,7 +214,8 @@ pub(super) fn failure(error: vault::Error) -> Reply {
     let (code, exit) = match &error {
         vault::Error::Input(_) => ("invalid_input", 2),
         vault::Error::Conflict(_) => ("state_conflict", 6),
-        vault::Error::Key(_) => ("not_ready", 3),
+        vault::Error::Key(_) | vault::Error::Revoked(_) => ("not_ready", 3),
+        vault::Error::Offline(_) => ("dependency_or_network", 5),
         vault::Error::Integrity(_) | vault::Error::Storage(_) => ("operation_failed", 1),
     };
     Reply::error(code, exit, &error.to_string())

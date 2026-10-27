@@ -401,6 +401,9 @@ pub fn define(definition: Definition, now: i64) -> Result<Launcher> {
 /// this installation.
 pub struct Launchers {
     path: PathBuf,
+    /// The signed-in account these launchers belong to (an opaque qualifier); `None` for the
+    /// installation's own list.
+    owner: Option<String>,
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -408,19 +411,39 @@ pub struct Launchers {
 struct LauncherFile {
     #[serde(default)]
     launchers: Vec<Launcher>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    owner: Option<String>,
 }
 
 impl Launchers {
     pub fn new(profile: &Path) -> Self {
         Self {
             path: profile.join("launchers.json"),
+            owner: None,
+        }
+    }
+    /// The launchers of the account this installation is signed in to. They reference that
+    /// account's variables, so a list written for another account (or by an interrupted
+    /// sign-out) reads as empty and is replaced by the next change.
+    pub fn account(profile: &Path, owner: &str) -> Self {
+        Self {
+            path: profile.join("launchers-account.json"),
+            owner: Some(owner.into()),
         }
     }
     fn load(&self) -> Result<LauncherFile> {
         match std::fs::read(&self.path) {
-            Ok(bytes) => serde_json::from_slice(&bytes).map_err(|_| {
-                Error::Storage("The launcher list is unreadable; nothing was run.".into())
-            }),
+            Ok(bytes) => serde_json::from_slice::<LauncherFile>(&bytes)
+                .map_err(|_| {
+                    Error::Storage("The launcher list is unreadable; nothing was run.".into())
+                })
+                .map(|file| {
+                    if file.owner == self.owner {
+                        file
+                    } else {
+                        LauncherFile::default()
+                    }
+                }),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 Ok(LauncherFile::default())
             }
@@ -429,6 +452,10 @@ impl Launchers {
     }
     fn save(&self, file: &LauncherFile) -> Result<()> {
         use std::io::Write;
+        let file = &LauncherFile {
+            launchers: file.launchers.clone(),
+            owner: self.owner.clone(),
+        };
         let parent = self
             .path
             .parent()

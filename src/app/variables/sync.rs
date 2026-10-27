@@ -9,7 +9,10 @@
 //! variable back: the deleted ID stays a tombstone there and the mirror is only ever replaced
 //! by a newer, validated snapshot.
 use super::*;
-use crate::app::implementation::{self, Link};
+use crate::app::{
+    implementation::{self, Link},
+    standing,
+};
 use std::{collections::BTreeSet, time::Instant};
 #[cfg(test)]
 use std::{future::Future, pin::Pin};
@@ -167,6 +170,11 @@ const UNREACHABLE: Failure = Failure {
     exit: 5,
     message: "The coordinator could not be reached, or this installation is no longer connected to it. The last synchronized catalog is still shown; nothing was changed.",
 };
+const REVOKED: Failure = Failure {
+    code: "not_ready",
+    exit: 3,
+    message: standing::REVOKED,
+};
 const UNSUPPORTED: Failure = Failure {
     code: "not_ready",
     exit: 3,
@@ -215,26 +223,41 @@ struct Snapshot {
     entries: Vec<vault::Metadata>,
 }
 
-async fn call_coordinator(
+pub(in crate::app) async fn call_coordinator(
     host: &Arc<Host>,
+    method: &str,
+    args: &Value,
+) -> anyhow::Result<Option<Value>> {
+    call_account(&host.state, method, args).await
+}
+
+/// One account call to the coordinator, recorded in the installation's standing. `None` when
+/// the installation is not signed in to one.
+pub(in crate::app) async fn call_account(
+    state: &DesktopState,
     method: &str,
     args: &Value,
 ) -> anyhow::Result<Option<Value>> {
     #[cfg(test)]
     {
-        let transport = host
-            .state
-            .variables
-            .catalog
-            .transport
-            .lock()
-            .unwrap()
-            .clone();
+        let transport = state.variables.catalog.transport.lock().unwrap().clone();
         if let Some(transport) = transport {
-            return transport(method.into(), args.clone()).await.map(Some);
+            let result = transport(method.into(), args.clone()).await;
+            standing::note(state, &result);
+            return result.map(Some);
         }
     }
-    implementation::fleet::coordinator_reply(host, method, args).await
+    implementation::fleet::account_reply(state, method, args).await
+}
+
+/// The synchronized catalog of this installation's account, for choosing a variable offline.
+pub(in crate::app) fn cached(host: &Host, link: &Link) -> Vec<vault::Metadata> {
+    host.state
+        .variables
+        .catalog
+        .load(link)
+        .map(|c| c.entries)
+        .unwrap_or_default()
 }
 
 /// A message from the coordinator, without control characters and bounded in length.
@@ -253,7 +276,10 @@ async fn fetch_page(host: &Arc<Host>, offset: usize) -> std::result::Result<Page
         &json!({"offset":offset,"limit":PAGE}),
     )
     .await
-    .map_err(|_| UNREACHABLE)?
+    .map_err(|error| match standing::refusal(&error) {
+        Some(standing::Refusal::Rejected) => REVOKED,
+        _ => UNREACHABLE,
+    })?
     .ok_or(UNREACHABLE)?;
     if reply["ok"] != true {
         let unsupported = reply["message"]
@@ -444,7 +470,11 @@ async fn synchronize(host: &Arc<Host>, link: &Link, reset: bool, mode: Mode) -> 
                 status.conflict = None;
             }
             drop(status);
-            Reply::success(json!({"sync": mirror.describe(link), "changes": changes}))
+            Reply::success(json!({
+                "sync": mirror.describe(link),
+                "changes": changes,
+                "standing": host.state.standing.view(Some(link)),
+            }))
         }
         Err(failure) => {
             status.error = Some((failure.code, failure.message));
@@ -610,7 +640,10 @@ pub(super) async fn operate(host: &Arc<Host>, request: &control::Request) -> Opt
     let mirror = &state.catalog;
     let now = chrono::Utc::now().timestamp();
     Some(match method {
-        "variable_sync_status" => Reply::success(json!({"sync": mirror.describe(&link)})),
+        "variable_sync_status" => Reply::success(json!({
+            "sync": mirror.describe(&link),
+            "standing": host.state.standing.view(Some(&link)),
+        })),
         "variable_sync" => match parse::<SyncArgs>(&request.args) {
             Ok(args) => synchronize(host, &link, args.reset, Mode::Explicit).await,
             Err(error) => failure(error),
@@ -645,7 +678,9 @@ pub(super) async fn operate(host: &Arc<Host>, request: &control::Request) -> Opt
             variables.sort_by_key(|v| v.name.to_ascii_uppercase());
             let total = variables.len();
             variables.truncate(list.limit.unwrap_or(vault::MAX_VARIABLES).max(1));
-            Reply::success(listing(state, variables, total, mirror.describe(&link), now))
+            let mut listed = listing(state, variables, total, mirror.describe(&link), now);
+            listed["standing"] = host.state.standing.view(Some(&link));
+            Reply::success(listed)
         }
         "variable_reveal" => failure(vault::Error::Input(
             "This installation keeps no copy of account values. Reveal or copy the value from the portal or the coordinator.".into(),
@@ -720,6 +755,14 @@ pub(in crate::app) fn machine_call(
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct ResolveArgs {
+    id: String,
+    #[serde(default)]
+    version: Option<u64>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct CatalogArgs {
     #[serde(default)]
     offset: usize,
@@ -745,6 +788,14 @@ fn serve(
                 "offset": offset,
                 "items": page.items,
             }))
+        }
+        "variable_resolve" => {
+            // The one value a machine receives: for a use on that machine, never a reveal.
+            let ResolveArgs { id, version } = parse(args)?;
+            let result = store.use_entry(&id, version);
+            store.audit("use", entry_of(args).as_deref(), outcome(&result, false));
+            let (variable, value) = result?;
+            Ok(json!({"variable":variable,"value":value.expose()}))
         }
         "variable_create" => {
             let create: CreateArgs = parse(args)?;

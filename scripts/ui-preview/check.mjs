@@ -1049,6 +1049,49 @@ for (const [label, ctx] of [['account-config-desktop', {}], ['account-config-pho
   await context.close();
 }
 
+// Account standing: offline and revoked installations say so; an account switch leaves nothing behind.
+for (const [label, ctx] of [['standing-desktop', {}], ['standing-phone', { viewport: { width: 393, height: 852 }, isMobile: true }]]) {
+  const { context, page, errors } = await open({ axe: true, context: ctx });
+  await page.evaluate(() => {
+    window.__ptaStanding = { state: 'live', account_key: 'aaaa0000aaaa0000', coordinator: 'https://assistant.example.test', last_live_at: Math.floor(Date.now() / 1000) - 60, recovery: '' };
+    window.__ptaVariablesFor = { bbbb0000bbbb0000: [{ id: '00000000-0000-4000-8000-0000000000b1', name: 'BOB_ONLY', description: 'Belongs to the second account', version: 1, created_at: 1, updated_at: 1 }] };
+    showTab('settings', 'panel-variables');
+    return loadVariables();
+  });
+  await page.locator('#variables .row').first().waitFor();
+  check(`${label}: a live installation shows no warning`, await page.locator('#variables-standing').isHidden());
+  await page.evaluate(() => {
+    window.__ptaStanding = { ...window.__ptaStanding, state: 'offline', recovery: 'The coordinator cannot be reached right now, so account variables cannot be used. The synchronized configuration stays readable but may be out of date; try again when this computer is online.' };
+    return loadVariables();
+  });
+  await page.locator('#variables-standing').waitFor();
+  check(`${label}: offline is announced in Spanish with the last confirmation`, await page.locator('#variables-standing').innerText().then(text => text.includes('Sin conexión') && text.includes('No se puede contactar al coordinador') && text.includes('Última confirmación')));
+  check(`${label}: the cached list stays readable`, await page.locator('#variables .row').count() > 0);
+  check(`${label}: the warning is a status region`, await page.locator('#variables-standing').getAttribute('role') === 'status');
+  await page.evaluate(() => {
+    window.__ptaStanding = { ...window.__ptaStanding, state: 'revoked', recovery: 'The coordinator no longer accepts this installation (it was signed out or revoked, or its account changed). Nothing was used. Sign in again with Connect this machine or `pta auth machine login`.' };
+    return loadVariables();
+  });
+  check(`${label}: revoked is distinct and says how to sign in again`, await page.locator('#variables-standing').innerText().then(text => text.includes('Sesión cerrada o revocada') && text.includes('Vuelve a iniciar sesión')));
+  await page.evaluate(axeSource);
+  check(`${label}: passes axe`, (await scan(page)).length === 0, JSON.stringify(await scan(page)));
+  // Another account signs in: nothing typed or shown for the first one survives.
+  await page.locator('#variable-name').fill('TYPED_FOR_ALICE');
+  await page.locator('#variable-value').fill('synthetic-typed-value');
+  const stale = await page.evaluate(() => accountEpoch);
+  await page.evaluate(() => {
+    window.__ptaStanding = { state: 'live', account_key: 'bbbb0000bbbb0000', coordinator: 'https://assistant.example.test', last_live_at: Math.floor(Date.now() / 1000), recovery: '' };
+    return loadVariables();
+  });
+  await page.locator('#variables .row', { hasText: 'BOB_ONLY' }).waitFor();
+  check(`${label}: the new account's list replaces the former one`, await page.locator('#variables').innerText().then(text => text.includes('BOB_ONLY') && !text.includes('DEPLOY') ));
+  check(`${label}: typed values do not follow the switch and the warning is gone`, await page.locator('#variable-value').inputValue() === '' && await page.locator('#variables-standing').isHidden());
+  check(`${label}: a late reply for the former account is refused`, await page.evaluate(old => adoptAccount(old, { account_key: 'aaaa0000aaaa0000' }), stale) === false
+    && await page.locator('#variables').innerText().then(text => text.includes('BOB_ONLY')));
+  check(`${label}: has no browser errors`, errors.length === 0, errors.join('; '));
+  await context.close();
+}
+
 // Account variables: protected entry, metadata-only list and idempotent retries at both sizes.
 for (const [label, ctx] of [['variables-desktop', {}], ['variables-phone', { viewport: { width: 393, height: 852 }, isMobile: true }]]) {
   const { context, page, errors } = await open({ axe: true, context: ctx });

@@ -43,6 +43,10 @@ pub enum Error {
     Integrity(String),
     /// The local store could not be used.
     Storage(String),
+    /// The coordinator that owns the account could not be reached; nothing was used.
+    Offline(String),
+    /// The coordinator no longer accepts this installation; nothing was used.
+    Revoked(String),
 }
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -50,7 +54,9 @@ impl fmt::Display for Error {
         | Self::Conflict(m)
         | Self::Key(m)
         | Self::Integrity(m)
-        | Self::Storage(m)) = self;
+        | Self::Storage(m)
+        | Self::Offline(m)
+        | Self::Revoked(m)) = self;
         f.write_str(m)
     }
 }
