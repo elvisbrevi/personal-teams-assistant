@@ -7,7 +7,7 @@ existing dedicated Tunnel. Its HTTPS hostname and complete API must be protected
 by Cloudflare Access. GitHub owns the interactive sign-in; there is no second
 password form, public registration or password authentication endpoint.
 
-Installing the public crate never grants access to a maintainer's server. Each person supplies their own computer/VPS, HTTPS hostname, Cloudflare account/tunnel/Access application, dedicated GitHub OAuth app, Microsoft application and provider credentials. No production URL or login identity is a runtime default. Owner-only access remains the default. Additional accounts need explicit local operator authorization and their own private configuration; installing the crate never registers them.
+Installing the public crate never grants access to a maintainer's server. Each portal deployment supplies its own computer/VPS, HTTPS hostname, Cloudflare account/tunnel/Access application and dedicated GitHub OAuth app. Admitted accounts supply their own Microsoft application/session and provider credentials. No production URL or login identity is a runtime default. Owner-only access remains the default. Additional accounts need explicit local operator authorization and their own private configuration; installing the crate never registers them.
 
 Configure `owner_github_id` to your verified positive integer GitHub user ID. Existing portals with exactly one locally associated identity infer that owner for compatibility; ambiguous legacy associations cannot start until an owner is explicitly configured. Legacy non-owner accounts remain on disk but cannot authenticate, receive callbacks or start a portal-owned host until the operator explicitly authorizes them.
 
