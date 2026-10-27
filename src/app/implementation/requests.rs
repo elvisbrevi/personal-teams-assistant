@@ -133,7 +133,7 @@ pub(super) async fn operate(host: &Arc<Host>, method: &str, args: &Value) -> Res
                         || registry
                             .machines
                             .iter()
-                            .any(|m| run["machine"] == m.id && now() - m.seen < 35)
+                            .any(|m| run["machine"] == m.id && !m.revoked && now() - m.seen < 35)
                 );
                 run["machine_name"] = json!(if run["machine"] == registry.id {
                     registry.settings.name.as_str()

@@ -755,6 +755,7 @@ for (const [label, viewport] of [['desktop', { width: 1440, height: 900 }], ['ph
   await page.evaluate(() => { window.__ptaMachineLoginTrusted = true; });
   await page.waitForFunction(() => !document.querySelector('#machine-login-dialog').open && document.querySelector('#machine-connect').disabled);
   check(`${label}: a trusted sign-in connects this machine without another step`, !await page.isDisabled('#machine-disconnect') && (await page.textContent('#notice-text')).includes('ana'));
+  check(`${label}: enrollment leaves previous directory grants empty`, await page.locator('#machine-roots code').count() === 0);
   await page.click('#notice-close');
   await page.evaluate(() => {
     $('#machine-trust-name').textContent = 'Synthetic laptop'; $('#machine-trust-os').textContent = 'Windows';
@@ -934,6 +935,50 @@ if (flag !== '--axe-only') for (const [label, viewport] of [['desktop', { width:
   await page.click('#azure-cli-status');
   check(`${label}: a missing CLI explains installation without attempting sign-in`, !await page.isVisible('#azure-cli-dialog') && await page.evaluate(() => window.__ptaCalls.filter(method => method === 'begin_azure_cli_login').length) === logins);
   check(`${label}: request and history have no browser errors`, errors.length === 0, errors.join('; '));
+  await context.close();
+}
+
+// Account machine management reuses the same GUI and directory sheet at both sizes.
+for (const [label, ctx] of [['machine-desktop', {}], ['machine-phone', { viewport: { width: 393, height: 852 }, isMobile: true }]]) {
+  const { context, page, errors } = await open({ axe: true, context: ctx });
+  await page.evaluate(() => showTab('settings', 'panel-machines'));
+  await page.click('#settings-tab-models');
+  await page.getByRole('button', { name: 'Administrar máquina: Preview Mac', exact: true }).click();
+  const editor = page.getByRole('dialog', { name: 'Administrar máquina', exact: true });
+  await editor.waitFor();
+  await editor.getByLabel('Nombre de la máquina', { exact: true }).fill('Travel laptop');
+  await editor.getByRole('button', { name: 'Elegir directorios', exact: true }).click();
+  await page.getByRole('button', { name: 'Explorar el directorio /work', exact: true }).click();
+  await page.locator('dialog[open] .directory-picker-parent').waitFor();
+  check(`${label}: remote root sheet has parent navigation`, await page.locator('dialog[open] .directory-picker-parent').count() === 1);
+  await page.getByLabel('Seleccionar el directorio /work/application', { exact: true }).check();
+  await page.getByRole('button', { name: 'Usar los directorios seleccionados', exact: true }).click();
+  check(`${label}: directory confirmation stages roots in the machine editor`, await editor.locator('code').innerText() === '/work/application');
+  check(`${label}: editor and nested sheet preserve the phone boundary`, await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+  await page.evaluate(axeSource);
+  check(`${label}: machine editor passes axe`, (await scan(page)).length === 0, JSON.stringify(await scan(page)));
+  await page.evaluate(() => { window.__ptaMachineUpdateError = true; });
+  await editor.getByRole('button', { name: 'Guardar cambios', exact: true }).click();
+  await page.waitForFunction(() => {
+    const calls = window.__ptaCalls, edit = calls.lastIndexOf('machine_update');
+    return edit >= 0 && calls.slice(edit + 1).includes('machine_list');
+  });
+  check(`${label}: uncertain edits refresh authoritative state without replay`, await page.evaluate(() => window.__ptaCalls.filter(method => method === 'machine_update').length === 1));
+  await page.evaluate(() => { window.__ptaMachineUpdateError = false; });
+  await editor.getByRole('button', { name: 'Guardar cambios', exact: true }).click();
+  await page.waitForFunction(() => window.__ptaMachineUpdate?.name === 'Travel laptop' && !document.querySelector('dialog[aria-label="Administrar máquina"]'));
+
+  check(`${label}: remote roots and name share the host operation`, await page.evaluate(() => window.__ptaMachineUpdate.roots[0] === '/work/application' && !window.__ptaLastMachineAssistant));
+  await page.evaluate(() => { window.__ptaMachineOffline = true; loadMachines(); });
+  await page.getByRole('button', { name: 'Administrar máquina: Travel laptop', exact: true }).click();
+  await editor.waitFor();
+  check(`${label}: offline machine roots cannot be changed`, await editor.getByRole('button', { name: 'Elegir directorios', exact: true }).isDisabled());
+  await editor.getByRole('button', { name: 'Revocar máquina', exact: true }).click();
+  check(`${label}: revocation requires its explicit second tap`, !await page.evaluate(() => window.__ptaMachineRevoked));
+  await editor.getByRole('button', { name: 'Confirmar revocación', exact: true }).click();
+  await page.waitForFunction(() => window.__ptaMachineRevoked);
+  check(`${label}: revoked machine cannot be selected for Teams`, await page.locator('#machine-list input[value="22222222-2222-4222-8222-222222222222"]').isDisabled());
+  check(`${label}: machine workflow has no browser errors`, errors.length === 0, errors.join('; '));
   await context.close();
 }
 await browser.close();

@@ -338,6 +338,10 @@ pub(in crate::app) async fn finish_with(
         ensure!(account == expected, MISMATCH);
     }
     store(token)?;
+    {
+        let mut data = state.registry.lock().await;
+        state.reset_roots(&mut data)?;
+    }
     write_private(
         &state.root.join("connection.json"),
         &serde_json::to_string(&Connection {
@@ -347,8 +351,10 @@ pub(in crate::app) async fn finish_with(
         })?,
     )?;
     retain(&state.root, &current.origin)?;
-    Ok(json!({"connected":true,"coordinator":current.origin,
-        "username":reply["username"].as_str().unwrap_or_default()}))
+    Ok(
+        json!({"connected":true,"roots_reset":true,"coordinator":current.origin,
+        "username":reply["username"].as_str().unwrap_or_default()}),
+    )
 }
 
 pub(in crate::app) async fn cancel(host: &Arc<Host>) -> Result<Value> {

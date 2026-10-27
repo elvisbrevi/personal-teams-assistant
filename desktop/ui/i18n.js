@@ -4,6 +4,33 @@
 const UI_LANGUAGES = ['es', 'en'];
 
 const UI_CATALOG = { es: {
+  "A connected worker cannot serve coordinator requests.": "Una máquina conectada a otro coordinador no puede atender solicitudes como coordinador.",
+  "Update this execution machine before browsing or running implementations.": "Actualiza esta máquina de ejecución antes de explorar directorios o ejecutar implementaciones.",
+  "Manage your account's trusted machines here. Trust, allowed directories and Teams responsibility are separate choices.": "Administra aquí las máquinas de confianza de tu cuenta. La confianza, los directorios permitidos y la responsabilidad de Teams se eligen por separado.",
+  "Select at most sixteen allowed roots.": "Selecciona como máximo dieciséis raíces permitidas.",
+  "Allowed roots cannot contain symbolic links.": "Las raíces permitidas no pueden contener enlaces simbólicos.",
+  "Machine has been revoked. Sign in and trust it again before use.": "La máquina está revocada. Inicia sesión y vuelve a confirmar tu confianza antes de usarla.",
+  "The coordinator cannot revoke itself. Ask the portal operator to revoke the account instead.": "El coordinador no puede revocarse a sí mismo. Pide al operador del portal que revoque la cuenta.",
+  "Directory management requires an online compatible machine.": "Para administrar directorios necesitas una máquina compatible conectada.",
+  "Choose a name or allowed roots to change.": "Elige un nombre o las raíces permitidas que deseas cambiar.",
+  "Refresh machines: the assistant state is unknown or changing.": "Actualiza las máquinas: el estado del asistente es desconocido o está cambiando.",
+  "Select this machine for Teams before starting it.": "Selecciona esta máquina para Teams antes de iniciarla.",
+  "Machine has been revoked.": "La máquina está revocada.",
+  "Update the coordinator before managing account machines.": "Actualiza el coordinador antes de administrar las máquinas de la cuenta.",
+  "Incompatible machine management host: update the host and CLI together before managing machines.": "El host no es compatible con la administración de máquinas: actualiza el host y la CLI juntos antes de administrarlas.",
+  "Invalid machine roots.": "Las raíces de la máquina no son válidas.",
+  "The machine rejected these directories. Refresh the machine and choose existing allowed directories.": "La máquina rechazó estos directorios. Actualiza la máquina y elige directorios permitidos existentes.",
+  "The machine did not confirm the directory operation. Refresh its details before trying again.": "La máquina no confirmó la operación de directorios. Actualiza sus detalles antes de volver a intentarlo.",
+
+  "Manage machine": "Administrar máquina",
+  "Manage machine: {machine}": "Administrar máquina: {machine}",
+  "Revoke machine": "Revocar máquina",
+  "Confirm revocation": "Confirmar revocación",
+  "Machine revoked.": "Máquina revocada.",
+  "Revoked": "Revocada",
+  "Last seen: {time}": "Última conexión: {time}",
+  "Empty roots grant no execution access. Revocation denies future account access; a running program may retain information already received.": "Las raíces vacías no conceden acceso de ejecución. La revocación impide nuevos accesos a la cuenta; un programa en ejecución puede conservar información ya recibida.",
+
   "To add this computer, enter your portal's address and select Connect this machine: you sign in in the browser and choose Trust this machine once.": "Para agregar este equipo, indica la dirección de tu portal y selecciona Conectar esta máquina: inicias sesión en el navegador y eliges Confiar en esta máquina una sola vez.",
   "Add this computer to your account": "Agregar este equipo a tu cuenta",
   "Sign in on your portal and choose Trust this machine. Continue only if the page shows this code.": "Inicia sesión en tu portal y elige Confiar en esta máquina. Continúa solo si la página muestra este código.",

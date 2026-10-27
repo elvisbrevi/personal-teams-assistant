@@ -7,6 +7,7 @@ use std::time::Duration;
 
 pub(super) mod fleet;
 pub(super) mod login;
+mod management;
 mod requests;
 mod store;
 pub(super) use fleet::register;
@@ -41,6 +42,12 @@ struct Machine {
     /// Hash of the enrolled installation's identity key; empty for older pairings.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     installation: String,
+    #[serde(default)]
+    revoked: bool,
+    #[serde(default)]
+    roots: Vec<PathBuf>,
+    #[serde(default)]
+    management_support: bool,
 }
 #[derive(Clone, Serialize, Deserialize)]
 struct Connection {
@@ -215,6 +222,14 @@ impl State {
             &serde_json::to_string(data)?,
         )
     }
+    fn reset_roots(&self, data: &mut Registry) -> Result<()> {
+        let previous = std::mem::take(&mut data.settings.roots);
+        if let Err(error) = self.save(data) {
+            data.settings.roots = previous;
+            return Err(error);
+        }
+        Ok(())
+    }
     fn connection(&self) -> Result<Option<Connection>> {
         let path = self.root.join("connection.json");
         if path.exists() {
@@ -238,14 +253,7 @@ async fn roots(host: &Host) -> Result<Vec<PathBuf>> {
     if !config.server.webhook_prefix.is_empty() {
         return Ok(vec![config.server.data_dir.join("repositories")]);
     }
-    if !settings.roots.is_empty() {
-        return Ok(settings.roots);
-    }
-    Ok(std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"))
-        .map(PathBuf::from)
-        .into_iter()
-        .collect())
+    Ok(settings.roots)
 }
 fn confined(path: &Path, roots: &[PathBuf]) -> Result<PathBuf> {
     ensure!(path.is_absolute(), "Choose an absolute directory path.");
@@ -400,24 +408,7 @@ async fn operation(host: &Arc<Host>, method: &str, args: &Value) -> Result<Value
             }
             Ok(json!({"opened":true}))
         }
-        "machine_browse" => {
-            let config = read_config(&host.state.config_path)?;
-            let allowed = if !config.server.webhook_prefix.is_empty() {
-                vec![config.server.data_dir.join("repositories")]
-            } else {
-                let home = std::env::var_os("HOME")
-                    .or_else(|| std::env::var_os("USERPROFILE"))
-                    .map(PathBuf::from)
-                    .context("Home directory unavailable.")?;
-                vec![
-                    home.ancestors()
-                        .last()
-                        .context("Directory root unavailable.")?
-                        .to_path_buf(),
-                ]
-            };
-            browse_directories(args["path"].as_str(), &allowed)
-        }
+        "machine_browse" => browse_machine(host, args),
         "machine_register" => register(host, args).await,
         "machine_login" => login::begin(host, args).await,
         "machine_login_status" => login::status(host).await,
@@ -426,6 +417,9 @@ async fn operation(host: &Arc<Host>, method: &str, args: &Value) -> Result<Value
         "machine_list" | "machine_settings" | "machine_connect" | "machine_disconnect"
         | "machine_teams" | "machine_save" | "machine_protocol" => {
             fleet::operate(host, method, args).await
+        }
+        "machine_detail" | "machine_update" | "machine_revoke" | "machine_directories" => {
+            management::operate(host, method, args).await
         }
         "implementation_prepare" => {
             let selection: Selection = serde_json::from_value(args["item"].clone())?;
@@ -497,6 +491,25 @@ async fn operation(host: &Arc<Host>, method: &str, args: &Value) -> Result<Value
     }
 }
 
+fn browse_machine(host: &Host, args: &Value) -> Result<Value> {
+    let config = read_config(&host.state.config_path)?;
+    let allowed = if !config.server.webhook_prefix.is_empty() {
+        vec![config.server.data_dir.join("repositories")]
+    } else {
+        let home = std::env::var_os("HOME")
+            .or_else(|| std::env::var_os("USERPROFILE"))
+            .map(PathBuf::from)
+            .context("Home directory unavailable.")?;
+        vec![
+            home.ancestors()
+                .last()
+                .context("Directory root unavailable.")?
+                .to_path_buf(),
+        ]
+    };
+    browse_directories(args["path"].as_str(), &allowed)
+}
+
 fn browse_directories(path: Option<&str>, allowed: &[PathBuf]) -> Result<Value> {
     if path.is_none_or(str::is_empty) {
         return Ok(json!({"path":null,"parent":null,"directories":allowed,"roots":true}));
@@ -518,7 +531,10 @@ fn browse_directories(path: Option<&str>, allowed: &[PathBuf]) -> Result<Value> 
 }
 
 async fn local(host: &Arc<Host>, method: &str, args: &Value) -> Result<Value> {
-    if !matches!(method, "machine_assistant" | "implementation_runs") {
+    if !matches!(
+        method,
+        "machine_assistant" | "implementation_runs" | "machine_roots" | "machine_browse"
+    ) {
         authority::require_execution(&host.state)?;
     } else {
         ensure!(
@@ -529,6 +545,8 @@ async fn local(host: &Arc<Host>, method: &str, args: &Value) -> Result<Value> {
     authority::reject_authority_arguments(args)?;
     let state = &host.state.implementation;
     match method {
+        "machine_browse" => browse_machine(host, args),
+        "machine_roots" => management::save_roots(host, args).await,
         "implementation_mobile_session" => mobile_session(host, args).await,
         "machine_assistant" => {
             let method = match args["action"].as_str() {
@@ -1094,6 +1112,12 @@ mod tests {
         );
         assert_eq!(*host.state.phase.borrow(), AssistantPhase::Stopped);
 
+        fleet::protocol(
+            &host,
+            &json!({"id":worker,"token":token,"action":"poll","assistant_phase":"running"}),
+        )
+        .await
+        .unwrap();
         let caller = host.clone();
         let target = worker.clone();
         let call = tokio::spawn(async move {
@@ -1133,6 +1157,24 @@ mod tests {
         assert_eq!(call.await.unwrap().unwrap()["assistant_phase"], "stopped");
         let list = operation(&host, "machine_list", &json!({})).await.unwrap();
         assert_eq!(list["machines"][1]["assistant_phase"], "stopped");
+        // A compatible report is required again after a worker downgrade/restart.
+        fleet::protocol(&host, &json!({"id":worker,"token":token,"action":"poll"}))
+            .await
+            .unwrap();
+        let unknown = operation(&host, "machine_detail", &json!({"machine":worker}))
+            .await
+            .unwrap();
+        assert_eq!(unknown["presence"], "unknown");
+        assert_eq!(unknown["capabilities"]["management"], false);
+        assert!(
+            operation(
+                &host,
+                "machine_assistant",
+                &json!({"machine":worker,"action":"start"})
+            )
+            .await
+            .is_err()
+        );
     }
     #[tokio::test]
     async fn directory_configuration_browse_preserves_execution_and_profile_boundaries() {
@@ -1380,5 +1422,123 @@ mod tests {
         assert_eq!(submitted["state"], "uncertain");
         assert!(submitted.get("children").is_none());
         assert!(host.state.implementation.tasks.lock().await.is_empty());
+    }
+    #[tokio::test]
+    async fn allowed_roots_require_explicit_canonical_grants_and_remote_edits_run_once() {
+        let root = tempfile::tempdir().unwrap();
+        let host = host(root.path());
+        let own = host.state.implementation.registry.lock().await.id.clone();
+        let work = root.path().join("workspace");
+        fs::create_dir(&work).unwrap();
+        let work = work.canonicalize().unwrap();
+        assert!(
+            directories(&host, std::slice::from_ref(&work))
+                .await
+                .is_err()
+        );
+        let args = json!({"machine":own,"name":"Desk","roots":[work]});
+        assert!(operation(&host, "machine_update", &args).await.is_ok());
+        assert_eq!(
+            directories(&host, std::slice::from_ref(&work))
+                .await
+                .unwrap(),
+            vec![work.canonicalize().unwrap()]
+        );
+        assert!(
+            operation(
+                &host,
+                "machine_update",
+                &json!({"machine":own,"roots":["relative"]})
+            )
+            .await
+            .is_err()
+        );
+        #[cfg(unix)]
+        {
+            let alias = root.path().join("alias");
+            std::os::unix::fs::symlink(&work, &alias).unwrap();
+            assert!(
+                operation(
+                    &host,
+                    "machine_update",
+                    &json!({"machine":own,"roots":[alias]})
+                )
+                .await
+                .is_err()
+            );
+        }
+        let worker = uuid::Uuid::new_v4().to_string();
+        let registration =
+            fleet::register(&host, &json!({"id":worker,"name":"Remote","os":"windows"}))
+                .await
+                .unwrap();
+        assert!(
+            operation(&host, "implementation_browse", &json!({"machine":worker}))
+                .await
+                .is_err()
+        );
+        let poll = json!({"id":worker,"token":registration["token"],"action":"poll","assistant_phase":"stopped","management_support":true,"roots":[]});
+        fleet::protocol(&host, &poll).await.unwrap();
+        let caller = host.clone();
+        let target = worker.clone();
+        let selected = work.clone();
+        let edit = tokio::spawn(async move {
+            operation(
+                &caller,
+                "machine_update",
+                &json!({"machine":target,"name":"Remote desk","roots":[selected]}),
+            )
+            .await
+        });
+        let command = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let next = fleet::protocol(&host, &poll).await.unwrap();
+                if !next["command"].is_null() {
+                    break next["command"].clone();
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(command["method"], "machine_roots");
+        assert!(fleet::protocol(&host, &poll).await.unwrap()["command"].is_null());
+        fleet::protocol(&host, &json!({"id":worker,"token":registration["token"],"action":"poll","assistant_phase":"stopped","results":[{"id":command["id"],"result":{"ok":true,"data":{"roots":[work]}}}]})).await.unwrap();
+        assert!(edit.await.unwrap().is_ok());
+        let detail = operation(&host, "machine_detail", &json!({"machine":worker}))
+            .await
+            .unwrap();
+        assert_eq!(detail["roots"], json!([work]));
+        assert_eq!(detail["name"], "Remote desk");
+        assert!(
+            operation(&host, "machine_update", &json!({"machine":own,"roots":[]}))
+                .await
+                .is_ok()
+        );
+        assert!(directories(&host, &[work]).await.is_err());
+    }
+    #[tokio::test]
+    async fn old_machine_credentials_cannot_proxy_into_a_workers_new_account() {
+        let root = tempfile::tempdir().unwrap();
+        let host = host(root.path());
+        let worker = uuid::Uuid::new_v4().to_string();
+        let registration = fleet::register(
+            &host,
+            &json!({"id":worker,"name":"Previous account computer","os":"linux"}),
+        )
+        .await
+        .unwrap();
+        let own = host.state.implementation.registry.lock().await.id.clone();
+        write_private(
+            &host.state.implementation.root.join("connection.json"),
+            &json!({"id":own,"url":"https://another-account.example.com","account":1002})
+                .to_string(),
+        )
+        .unwrap();
+        let error = fleet::protocol(&host, &json!({"id":worker,"token":registration["token"],"action":"call","method":"machine_list","args":{}})).await.unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "A connected worker cannot serve coordinator requests."
+        );
     }
 }

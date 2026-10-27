@@ -57,46 +57,38 @@ pub(super) async fn operate(host: &Arc<Host>, method: &str, args: &Value) -> Res
                     json!({"action":"call","method":"machine_list","args":{}}),
                 )
                 .await?;
+                ensure!(
+                    result["authoritative"] == true,
+                    "Update the coordinator before managing account machines."
+                );
                 result["this_machine"] = json!(connection.id);
                 return Ok(result);
             }
-            let data = state.registry.lock().await;
-            let local = json!({"id":data.id,"name":data.settings.name,"os":std::env::consts::OS,"online":true,"local":true,"assistant_phase":*host.state.phase.borrow()});
-            let mut machines = vec![local];
-            machines.extend(data.machines.iter().map(|m| json!({"id":m.id,"name":m.name,"os":m.os,"online":now()-m.seen<35,"local":false,"assistant_phase":m.assistant_phase})));
-            Ok(
-                json!({"machines":machines,"teams_machine":data.teams_machine,"this_machine":data.id}),
-            )
+            super::management::list(host).await
         }
         "machine_settings" => {
             let data = state.registry.lock().await;
-            Ok(
-                json!({"id":data.id,"name":data.settings.name,"coordinator":state.connection()?.map(|c| c.url),"coordinator_origin":super::login::retained(&state.root),"roots":data.settings.roots,"teams_machine":data.teams_machine}),
-            )
+            let mut result = json!({"id":data.id,"name":data.settings.name,"coordinator":state.connection()?.map(|c| c.url),"coordinator_origin":super::login::retained(&state.root),"roots":data.settings.roots,"teams_machine":data.teams_machine});
+            let id = data.id.clone();
+            drop(data);
+            if let Some(connection) = state.connection()? {
+                let detail = remote(
+                    &connection,
+                    json!({"action":"call","method":"machine_detail","args":{"machine":id}}),
+                )
+                .await?;
+                result["name"] = detail["name"].clone();
+            }
+            Ok(result)
         }
         "machine_save" => {
-            let settings: Settings = serde_json::from_value(args.clone())?;
-            ensure!(
-                !settings.name.trim().is_empty()
-                    && settings.name.len() <= 100
-                    && !settings.name.chars().any(char::is_control),
-                "Choose a machine name."
-            );
-            let config = read_config(&host.state.config_path)?;
-            ensure!(
-                config.server.webhook_prefix.is_empty()
-                    || settings.roots == state.registry.lock().await.settings.roots,
-                "The portal operator manages this machine's allowed directories."
-            );
-            ensure!(
-                settings.roots.len() <= 16
-                    && settings.roots.iter().all(|p| p.is_absolute() && p.is_dir()),
-                "Allowed roots must be existing absolute directories."
-            );
-            let mut data = state.registry.lock().await;
-            data.settings = settings;
-            state.save(&data)?;
-            Ok(json!({"saved":true}))
+            let own = state.registry.lock().await.id.clone();
+            super::management::operate(
+                host,
+                "machine_update",
+                &json!({"machine":own,"name":args["name"],"roots":args["roots"]}),
+            )
+            .await
         }
         "machine_connect" => {
             ensure!(
@@ -111,7 +103,7 @@ pub(super) async fn operate(host: &Arc<Host>, method: &str, args: &Value) -> Res
             let url = endpoint(origin)?;
             let token = args["pairing_token"].as_str().filter(|v| v.len() == 44)
                 .context("Authorize this machine on your own coordinator with `pta web machines authorize`, then pass its private JSON file to `pta tools call machine_connect` on stdin.")?;
-            let data = state.registry.lock().await;
+            let mut data = state.registry.lock().await;
             let response=client()?.post(url).bearer_auth(token).json(&json!({"action":"register","id":data.id,"name":data.settings.name,"os":std::env::consts::OS,"installation":super::login::installation(&state.root)?})).send().await?;
             ensure!(
                 response.status().is_success(),
@@ -133,11 +125,12 @@ pub(super) async fn operate(host: &Arc<Host>, method: &str, args: &Value) -> Res
                     .context("Invalid machine account.")?,
                 id: data.id.clone(),
             };
+            state.reset_roots(&mut data)?;
             write_private(
                 &state.root.join("connection.json"),
                 &serde_json::to_string(&connection)?,
             )?;
-            Ok(json!({"connected":true}))
+            Ok(json!({"connected":true,"roots_reset":true}))
         }
         "machine_disconnect" => {
             ensure!(
@@ -165,13 +158,14 @@ pub(super) async fn operate(host: &Arc<Host>, method: &str, args: &Value) -> Res
                 .as_str()
                 .context("Choose the Teams machine.")?;
             uuid(id)?;
+            let version = super::management::version(host)?;
             let mut data = state.registry.lock().await;
             ensure!(
                 id == data.id
-                    || data
-                        .machines
-                        .iter()
-                        .any(|m| m.id == id && now() - m.seen < 35),
+                    || data.machines.iter().any(|m| m.id == id
+                        && !m.revoked
+                        && now() - m.seen < 35
+                        && m.account_version == version),
                 "Choose an online machine."
             );
             data.teams_machine = id.into();
@@ -247,6 +241,9 @@ pub(in crate::app) async fn register(host: &Arc<Host>, args: &Value) -> Result<V
         account_version,
         assistant_phase: None,
         installation: installation.into(),
+        revoked: false,
+        roots: Vec::new(),
+        management_support: false,
     });
     state.save(&data)?;
     Ok(json!({"token":token}))
@@ -285,6 +282,10 @@ pub(in crate::app) async fn protocol(host: &Arc<Host>, args: &Value) -> Result<V
     authority::reject_authority_arguments(args)?;
     let binding = authority::invocation(&host.state)?.scope.account;
     let state = &host.state.implementation;
+    ensure!(
+        state.connection()?.is_none(),
+        "A connected worker cannot serve coordinator requests."
+    );
     let id = args["id"].as_str().context("Invalid machine ID.")?;
     let token = args["token"]
         .as_str()
@@ -296,6 +297,7 @@ pub(in crate::app) async fn protocol(host: &Arc<Host>, args: &Value) -> Result<V
             .iter_mut()
             .find(|m| {
                 m.id == id
+                    && !m.revoked
                     && m.account_version
                         == binding
                             .as_ref()
@@ -305,23 +307,29 @@ pub(in crate::app) async fn protocol(host: &Arc<Host>, args: &Value) -> Result<V
             })
             .context("Machine is not registered.")?;
         machine.seen = now();
-        if args["action"] == "poll"
-            && let Some(phase) = args.get("assistant_phase")
-        {
-            let phase = Some(serde_json::from_value(phase.clone())?);
-            if machine.assistant_phase != phase {
-                machine.assistant_phase = phase;
-                state.save(&data)?;
-            }
+        if args["action"] == "poll" {
+            machine.management_support = args["management_support"] == true;
         }
+        if args["action"] == "poll" && machine.management_support {
+            let roots: Vec<PathBuf> = serde_json::from_value(args["roots"].clone())?;
+            ensure!(
+                roots.len() <= 16 && roots.iter().all(|p| p.as_os_str().len() <= 4096),
+                "Invalid machine roots."
+            );
+            machine.roots = roots;
+        }
+        if args["action"] == "poll" {
+            machine.assistant_phase = args
+                .get("assistant_phase")
+                .map(|phase| serde_json::from_value(phase.clone()))
+                .transpose()?;
+        }
+        state.save(&data)?;
     }
     match args["action"].as_str().unwrap_or_default() {
         "disconnect" => {
             let mut data = state.registry.lock().await;
-            data.machines.retain(|m| m.id != id);
-            if data.teams_machine == id {
-                data.teams_machine = data.id.clone();
-            }
+            super::management::revoke(&mut data, id)?;
             state.save(&data)?;
             Ok(json!({"disconnected":true}))
         }
@@ -352,6 +360,12 @@ pub(in crate::app) async fn protocol(host: &Arc<Host>, args: &Value) -> Result<V
         }
         "lease" => {
             let mut data = state.registry.lock().await;
+            ensure!(
+                data.machines.iter().any(|m| m.id == id
+                    && !m.revoked
+                    && security::constant_eq(&m.secret_hash, &digest(token))),
+                "Machine is not registered."
+            );
             let allowed = leased(&mut data, id);
             state.save(&data)?;
             Ok(json!({"allowed":allowed}))
@@ -360,6 +374,14 @@ pub(in crate::app) async fn protocol(host: &Arc<Host>, args: &Value) -> Result<V
             "implementation_sessions" => Box::pin(session_index(host, &args["args"])).await,
             "implementation_create" | "implementation_creation" => {
                 Box::pin(super::operation(
+                    host,
+                    args["method"].as_str().unwrap(),
+                    &args["args"],
+                ))
+                .await
+            }
+            "machine_detail" | "machine_update" | "machine_revoke" | "machine_directories" => {
+                Box::pin(super::management::operate(
                     host,
                     args["method"].as_str().unwrap(),
                     &args["args"],
@@ -413,6 +435,8 @@ pub(super) async fn call(
     ensure!(
         [
             "machine_assistant",
+            "machine_roots",
+            "machine_browse",
             "implementation_catalog",
             "implementation_browse",
             "implementation_launch",
@@ -431,6 +455,7 @@ pub(super) async fn call(
     if let Some(connection) = state.connection()? {
         return remote(&connection,json!({"action":"call","method":"forward","args":{"machine":machine,"method":method,"args":args}})).await;
     }
+    let version = super::management::version(host)?;
     ensure!(
         state
             .registry
@@ -438,9 +463,47 @@ pub(super) async fn call(
             .await
             .machines
             .iter()
-            .any(|m| m.id == machine && now() - m.seen < 35),
+            .any(|m| m.id == machine
+                && !m.revoked
+                && now() - m.seen < 35
+                && m.account_version == version),
         "Execution machine is offline."
     );
+    if matches!(
+        method,
+        "implementation_browse" | "implementation_launch" | "implementation_mobile_session"
+    ) {
+        ensure!(
+            state
+                .registry
+                .lock()
+                .await
+                .machines
+                .iter()
+                .any(|m| m.id == machine && m.management_support),
+            "Update this execution machine before browsing or running implementations."
+        );
+    }
+    if method == "machine_assistant" {
+        let data = state.registry.lock().await;
+        let target = data
+            .machines
+            .iter()
+            .find(|m| m.id == machine && !m.revoked)
+            .context("Machine is not registered.")?;
+        ensure!(
+            matches!(
+                target.assistant_phase,
+                Some(AssistantPhase::Running | AssistantPhase::Stopped)
+            ),
+            "Refresh machines: the assistant state is unknown or changing."
+        );
+        ensure!(
+            args["action"] == "stop"
+                || (args["action"] == "start" && data.teams_machine == machine),
+            "Select this machine for Teams before starting it."
+        );
+    }
     let id = uuid::Uuid::new_v4().to_string();
     {
         let mut calls = state.calls.lock().await;
@@ -461,6 +524,16 @@ pub(super) async fn call(
     } {
         tokio::time::sleep(Duration::from_millis(250)).await;
         authority::require_account(&host.state)?;
+        ensure!(
+            state
+                .registry
+                .lock()
+                .await
+                .machines
+                .iter()
+                .any(|m| m.id == machine && !m.revoked),
+            "Machine has been revoked."
+        );
         let mut calls = state.calls.lock().await;
         if let Some(index) = calls.iter().position(|c| c.id == id && c.result.is_some()) {
             let call = calls.remove(index);
@@ -470,6 +543,8 @@ pub(super) async fn call(
                 "{}",
                 if method == "machine_assistant" {
                     "The machine could not change the assistant state. Check its Teams selection, connection and settings."
+                } else if matches!(method, "machine_roots" | "machine_browse") {
+                    "The machine rejected these directories. Refresh the machine and choose existing allowed directories."
                 } else {
                     "The execution machine rejected the operation. Check its directories, installed CLI and running jobs."
                 }
@@ -481,6 +556,11 @@ pub(super) async fn call(
     if method == "machine_assistant" {
         anyhow::bail!(
             "The machine did not confirm the assistant state. Refresh machines before trying again."
+        );
+    }
+    if matches!(method, "machine_roots" | "machine_browse") {
+        anyhow::bail!(
+            "The machine did not confirm the directory operation. Refresh its details before trying again."
         );
     }
     anyhow::bail!("The machine did not reply. Inspect its runs before starting anything again.")
@@ -508,9 +588,10 @@ async fn poll(host: Arc<Host>) {
                 .changes(cursor)
                 .unwrap_or_else(|_| (cursor, Vec::new()));
             let assistant_phase = *host.state.phase.borrow();
+            let roots = state.registry.lock().await.settings.roots.clone();
             if let Ok(reply) = remote(
                 &connection,
-                json!({"action":"poll","id":own,"results":results,"sessions":sessions,"session_cursor":next,"assistant_phase":assistant_phase}),
+                json!({"action":"poll","id":own,"results":results,"sessions":sessions,"session_cursor":next,"assistant_phase":assistant_phase,"management_support":true,"roots":roots}),
             )
             .await
             {
@@ -597,7 +678,7 @@ pub(super) async fn session_index(host: &Arc<Host>, args: &Value) -> Result<Valu
                 || data
                     .machines
                     .iter()
-                    .any(|m| m.id == session.machine && now() - m.seen < 35);
+                    .any(|m| m.id == session.machine && !m.revoked && now() - m.seen < 35);
             let mut value = serde_json::to_value(session).unwrap_or(Value::Null);
             value["online"] = json!(online);
             value
@@ -649,5 +730,35 @@ mod tests {
         assert!(!leased(&mut data, &first));
         data.teams_lease = Some((first, now() - 1));
         assert!(leased(&mut data, "second"));
+    }
+    #[test]
+    fn revocation_keeps_the_lease_barrier_even_if_the_same_machine_is_trusted_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = State::new(dir.path()).unwrap();
+        let mut data = state.registry.try_lock().unwrap();
+        let own = data.id.clone();
+        let worker = uuid::Uuid::new_v4().to_string();
+        data.machines.push(Machine {
+            id: worker.clone(),
+            name: "Laptop".into(),
+            os: "windows".into(),
+            seen: now(),
+            secret_hash: "synthetic".into(),
+            account_version: String::new(),
+            assistant_phase: Some(AssistantPhase::Running),
+            installation: String::new(),
+            revoked: false,
+            roots: vec![],
+            management_support: true,
+        });
+        data.teams_machine = worker.clone();
+        assert!(leased(&mut data, &worker));
+        super::super::management::revoke(&mut data, &worker).unwrap();
+        assert!(!leased(&mut data, &own));
+        data.machines[0].revoked = false;
+        data.teams_machine = worker.clone();
+        assert!(!leased(&mut data, &worker));
+        data.teams_lease.as_mut().unwrap().1 = now() - 1;
+        assert!(leased(&mut data, &worker));
     }
 }

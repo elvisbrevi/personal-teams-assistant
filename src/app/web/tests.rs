@@ -496,7 +496,7 @@ async fn fake_host(portal: &Portal, account: &Account) -> (MockServer, fs::File)
         &dir.join("control.json"),
         &json!({"contract":1,"port":port,"token":"synthetic-ipc-token",
         "wiki_support":true,"activity_registration_support":true,"web_support":true,"web_access_support":true,"implementation_support":true,"machine_pairing_support":true,
-        "machine_login_support":true,"shared_accounts_support":true,"account_authority_support":true,"account_binding":{"id":account.id,"version":account.version},
+        "machine_login_support":true,"machine_management_support":true,"shared_accounts_support":true,"account_authority_support":true,"account_binding":{"id":account.id,"version":account.version},
         "browser_token":"synthetic-browser-token","machine_token":"synthetic-machine-token"})
         .to_string(),
     )
@@ -2049,6 +2049,18 @@ async fn machine_login_native_installation_finishes_only_after_trust_and_keeps_p
     });
     use super::implementation::login::{begin_at, cancel, finish_with, status};
 
+    // A new account enrollment must not inherit this installation's previous root grants.
+    let old_root = dir.path().join("previous-workspace");
+    fs::create_dir(&old_root).unwrap();
+    let old_root = old_root.canonicalize().unwrap();
+    let mut grant = control::Request::new("machine_save");
+    grant.args = json!({"name":"Native computer","roots":[old_root]});
+    assert!(control::dispatch(&native, grant).await.ok);
+    let mut browse = control::Request::new("implementation_browse");
+    let local = control::dispatch(&native, control::Request::new("machine_settings")).await;
+    let machine = local.data["id"].clone();
+    browse.args = json!({"machine":machine});
+
     let begun = begin_at(&native, &origin, endpoint.clone(), None, true)
         .await
         .unwrap();
@@ -2088,6 +2100,10 @@ async fn machine_login_native_installation_finishes_only_after_trust_and_keeps_p
     .unwrap();
     assert_eq!(pending["pending"], true);
     assert!(stored.is_none());
+    assert_eq!(
+        control::dispatch(&native, browse.clone()).await.data["directories"],
+        json!([old_root])
+    );
     enrollment::decide(&served.root, &entries[0], &transaction, true).unwrap();
     assert_eq!(status(&native).await.unwrap()["state"], "approved");
     let connected = finish_with(&native, |token| {
@@ -2098,6 +2114,11 @@ async fn machine_login_native_installation_finishes_only_after_trust_and_keeps_p
     .unwrap();
     assert_eq!(connected["connected"], true);
     assert_eq!(connected["username"], "alice");
+    assert_eq!(connected["roots_reset"], true);
+    assert_eq!(
+        control::dispatch(&native, browse).await.data["directories"],
+        json!([])
+    );
     assert_eq!(
         stored.as_deref(),
         Some("synthetic-machine-credential-0000000000000")
@@ -2157,4 +2178,272 @@ async fn machine_login_native_installation_finishes_only_after_trust_and_keeps_p
     assert!(finish_with(&native, |_| Ok(())).await.is_err());
     assert_eq!(fs::read(&connection_path).unwrap(), before);
     assert_eq!(account_host.received_requests().await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn account_machine_workflow_is_authoritative_isolated_and_revokes_offline_credentials() {
+    let (_dir, portal, entries, _issuer) = configured_fixture().await;
+    let hosts: Vec<_> = entries
+        .iter()
+        .map(|account| {
+            let profile = profile_dir(&portal.root, account);
+            Arc::new(Host {
+                state: init_state(&profile, &profile.join("data")).unwrap(),
+                shell: Box::new(NativeShell),
+            })
+        })
+        .collect();
+    async fn invoke(
+        host: &Arc<Host>,
+        transport: authority::Transport,
+        method: &str,
+        args: Value,
+    ) -> control::Reply {
+        let mut request = control::Request::new(method);
+        request.args = args;
+        authority::within(
+            authority::Invocation {
+                scope: host.state.authority.clone(),
+                transport,
+            },
+            control::dispatch(host, request),
+        )
+        .await
+    }
+    use authority::Transport::{Browser, Machine};
+    let first = uuid::Uuid::new_v4().to_string();
+    let second = uuid::Uuid::new_v4().to_string();
+    let alice = &hosts[0];
+    let bob = &hosts[1];
+    let mut tokens = Vec::new();
+    for (id, os) in [(&first, "windows"), (&second, "macos")] {
+        let registered = invoke(
+            alice,
+            Machine,
+            "machine_register",
+            json!({"id":id,"name":os,"os":os}),
+        )
+        .await;
+        assert!(registered.ok, "{:?}", registered.message);
+        tokens.push(registered.data["token"].clone());
+    }
+    let list = invoke(alice, Browser, "machine_list", json!({})).await;
+    assert!(list.ok);
+    assert_eq!(list.data["machines"].as_array().unwrap().len(), 3);
+    assert_eq!(list.data["machines"][1]["presence"], "unknown");
+    assert_eq!(list.data["machines"][1]["roots"], json!([]));
+    let from_machine = invoke(
+        alice,
+        Machine,
+        "machine_protocol",
+        json!({"id":first,"token":tokens[0],"action":"call","method":"machine_list","args":{}}),
+    )
+    .await;
+    assert!(from_machine.ok);
+    assert_eq!(from_machine.data["machines"][1], list.data["machines"][1]);
+    assert_eq!(from_machine.data["machines"][2], list.data["machines"][2]);
+    assert_eq!(
+        from_machine.data["teams_machine"],
+        list.data["teams_machine"]
+    );
+    let other = invoke(bob, Browser, "machine_list", json!({})).await;
+    assert!(other.ok);
+    assert_eq!(other.data["machines"].as_array().unwrap().len(), 1);
+    for method in [
+        "machine_detail",
+        "machine_update",
+        "machine_revoke",
+        "machine_directories",
+        "machine_teams",
+        "machine_assistant",
+    ] {
+        let args = json!({"machine":first,"name":"Impostor","action":"stop"});
+        assert!(!invoke(bob, Browser, method, args).await.ok, "{method}");
+    }
+    assert!(
+        !invoke(
+            bob,
+            Machine,
+            "machine_protocol",
+            json!({"id":first,"token":tokens[0],"action":"lease"})
+        )
+        .await
+        .ok
+    );
+    assert!(
+        !invoke(
+            alice,
+            Browser,
+            "machine_list",
+            json!({"account":entries[1].id})
+        )
+        .await
+        .ok
+    );
+    let poll = json!({"id":first,"token":tokens[0],"action":"poll","assistant_phase":"stopped","management_support":true,"roots":[]});
+    assert!(
+        invoke(alice, Machine, "machine_protocol", poll.clone())
+            .await
+            .ok
+    );
+    assert!(
+        invoke(alice, Browser, "machine_teams", json!({"machine":first}))
+            .await
+            .ok
+    );
+    let lease = json!({"id":first,"token":tokens[0],"action":"lease"});
+    assert_eq!(
+        invoke(alice, Machine, "machine_protocol", lease.clone())
+            .await
+            .data["allowed"],
+        true
+    );
+    // Presence expires without losing last-known state; metadata can still be edited.
+    let path = profile_dir(&portal.root, &entries[0]).join("implementation/registry.json");
+    let mut registry: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    registry["machines"][0]["seen"] = json!(0);
+    write_private(&path, &registry.to_string()).unwrap();
+    let profile = profile_dir(&portal.root, &entries[0]);
+    let alice = Arc::new(Host {
+        state: init_state(&profile, &profile.join("data")).unwrap(),
+        shell: Box::new(NativeShell),
+    });
+    let detail = invoke(&alice, Browser, "machine_detail", json!({"machine":first})).await;
+    assert_eq!(detail.data["presence"], "offline");
+    assert_eq!(detail.data["assistant_phase"], "stopped");
+    assert_eq!(detail.data["last_known"], true);
+    assert!(
+        invoke(
+            &alice,
+            Browser,
+            "machine_update",
+            json!({"machine":first,"name":"Travel laptop"})
+        )
+        .await
+        .ok
+    );
+    assert!(
+        !invoke(
+            &alice,
+            Browser,
+            "machine_update",
+            json!({"machine":first,"roots":["/outside"]})
+        )
+        .await
+        .ok
+    );
+    assert!(
+        !invoke(
+            &alice,
+            Browser,
+            "machine_assistant",
+            json!({"machine":first,"action":"start"})
+        )
+        .await
+        .ok
+    );
+    // Revocation is possible offline and deselects Teams, preserving the old lease expiry.
+    assert!(
+        invoke(&alice, Browser, "machine_revoke", json!({"machine":first}))
+            .await
+            .ok
+    );
+    for request in [
+        poll,
+        lease,
+        json!({"id":first,"token":tokens[0],"action":"register"}),
+        json!({"id":first,"token":tokens[0],"action":"call","method":"machine_list","args":{}}),
+    ] {
+        assert!(
+            !invoke(&alice, Machine, "machine_protocol", request.clone())
+                .await
+                .ok
+        );
+        assert_eq!(
+            machine_post(&portal, request, tokens[0].as_str())
+                .await
+                .status(),
+            StatusCode::FORBIDDEN
+        );
+    }
+    let revoked = invoke(&alice, Browser, "machine_detail", json!({"machine":first})).await;
+    assert_eq!(revoked.data["trust"], "revoked");
+    assert_eq!(revoked.data["name"], "Travel laptop");
+    assert!(
+        !invoke(&alice, Browser, "machine_teams", json!({"machine":first}))
+            .await
+            .ok
+    );
+    let second_poll =
+        json!({"id":second,"token":tokens[1],"action":"poll","assistant_phase":"stopped"});
+    assert!(
+        invoke(&alice, Machine, "machine_protocol", second_poll)
+            .await
+            .ok
+    );
+    assert!(
+        invoke(&alice, Browser, "machine_teams", json!({"machine":second}))
+            .await
+            .ok
+    );
+    assert_eq!(
+        invoke(
+            &alice,
+            Machine,
+            "machine_protocol",
+            json!({"id":second,"token":tokens[1],"action":"lease"})
+        )
+        .await
+        .data["allowed"],
+        false
+    );
+    let after = invoke(&alice, Browser, "machine_list", json!({})).await;
+    let public = serde_json::to_string(&after.data).unwrap();
+    for forbidden in [
+        tokens[0].as_str().unwrap(),
+        tokens[1].as_str().unwrap(),
+        &entries[1].id,
+        "secret_hash",
+        "control.json",
+        "installation",
+    ] {
+        assert!(
+            !public.contains(forbidden),
+            "Machine summary leaked a private field."
+        );
+    }
+    assert_eq!(*alice.state.phase.borrow(), AssistantPhase::Stopped);
+}
+
+#[tokio::test]
+async fn machine_management_refuses_older_hosts_before_forwarding() {
+    let (_dir, portal, entries, _issuer) = configured_fixture().await;
+    let (host, _lock) = fake_host(&portal, &entries[0]).await;
+    let dir = profile_dir(&portal.root, &entries[0]);
+    let path = dir.join("control.json");
+    let mut descriptor: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    descriptor
+        .as_object_mut()
+        .unwrap()
+        .remove("machine_management_support");
+    write_private(&path, &descriptor.to_string()).unwrap();
+    for method in [
+        "machine_detail",
+        "machine_update",
+        "machine_revoke",
+        "machine_directories",
+        "machine_save",
+        "machine_connect",
+        "machine_login_finish",
+        "implementation_start",
+        "implementation_browse",
+        "implementation_mobile_session",
+    ] {
+        let error = control::client_at(control::Request::new(method), &dir)
+            .await
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("machine management"));
+    }
+    assert!(host.received_requests().await.unwrap().is_empty());
 }

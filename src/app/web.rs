@@ -924,6 +924,7 @@ async fn machine_command(
                         r["machines"].as_array().is_some_and(|ms| {
                             ms.iter().any(|m| {
                                 m["id"] == id
+                                    && m["revoked"] != true
                                     && m["account_version"] == a.version
                                     && m["secret_hash"]
                                         .as_str()

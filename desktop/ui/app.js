@@ -916,7 +916,7 @@ function chooseDirectories({ trigger, title, selected = [], multiple = true, all
   };
   close.onclick = () => dialog.close();
   use.onclick = () => { apply([...selection]); dialog.close(); };
-  dialog.onclose = () => { ++request; document.body.classList.remove('directory-picker-open'); dialog.remove(); trigger?.focus({ preventScroll: true }); };
+  dialog.onclose = () => { ++request; dialog.remove(); document.body.classList.toggle('directory-picker-open', Boolean(document.querySelector('dialog[open]'))); trigger?.focus({ preventScroll: true }); };
   dialog.append(el('div', { class: 'directory-picker-head' }, back, el('h2', { textContent: title }), close), body,
     el('div', { class: 'directory-picker-footer' }, count, use));
   document.body.append(dialog);
@@ -994,7 +994,7 @@ function renderTeamsMachines(fleet) {
   for (const id of ['machine-list', 'teams-machine-list']) {
     const list = $('#' + id);
     list.replaceChildren(...fleet.machines.map(machine => {
-      const radio = el('input', { type: 'radio', name: id, value: machine.id, checked: machine.id === fleet.teams_machine, disabled: !machine.online && machine.id !== fleet.teams_machine });
+      const radio = el('input', { type: 'radio', name: id, value: machine.id, checked: machine.id === fleet.teams_machine, disabled: machine.trust === 'revoked' || (!machine.online && machine.id !== fleet.teams_machine) });
       radio.onchange = () => busy(null, async () => {
         const radios = [...document.querySelectorAll('.machine-choice input')];
         for (const input of radios) { input.disabled = true; input.checked = input.value === machine.id; }
@@ -1015,18 +1015,60 @@ function renderTeamsMachines(fleet) {
       const action = running ? 'stop' : 'start';
       const control = el('button', { type: 'button', class: 'secondary small', textContent: running ? t('Stop') : t('Start'),
         'aria-label': running ? t('Stop assistant on {machine}', { machine: machine.name }) : t('Start assistant on {machine}', { machine: machine.name }),
-        disabled: !machine.online || !known || ['starting', 'stopping'].includes(phase) || (!running && machine.id !== fleet.teams_machine) });
+        disabled: machine.trust === 'revoked' || !machine.online || !known || ['starting', 'stopping'].includes(phase) || (!running && machine.id !== fleet.teams_machine) });
       control.onclick = () => busy(control, async () => {
         for (const button of document.querySelectorAll('.machine-choice button')) button.disabled = true;
         try { await invoke('machine_assistant', { machine: machine.id, action }); }
         finally { renderTeamsMachines(await invoke('machine_list')); }
       });
+      const manage = el('button', { type: 'button', class: 'secondary small', textContent: t('Manage machine'), 'aria-label': t('Manage machine: {machine}', { machine: machine.name }), 'data-machine-manage': machine.id });
+      manage.onclick = () => busy(manage, () => editAccountMachine(machine, manage));
       return el('div', { class: 'machine-choice' },
         el('label', { class: 'check' }, radio, el('strong', { textContent: machine.name }), el('span', { textContent: machine.os })),
-        badge(machine.online ? t('Online') : t('Offline'), machine.online ? 'ok' : 'muted'),
-        el('span', { class: 'hint', textContent: machine.online ? phaseText : t('Last reported assistant state: {state}', { state: phaseText }) }), control);
+        badge(machine.trust === 'revoked' ? t('Revoked') : machine.presence === 'unknown' ? t('Status unknown') : machine.online ? t('Online') : t('Offline'), machine.online && machine.trust !== 'revoked' ? 'ok' : 'muted'),
+        el('span', { class: 'hint', textContent: machine.online ? phaseText : t('Last reported assistant state: {state}', { state: phaseText }) }), el('div', { class: 'machine-actions' }, control, manage));
     }));
   }
+}
+async function editAccountMachine(machine, trigger) {
+  const detail = await invoke('machine_detail', { machine: machine.id });
+  const dialog = el('dialog', { class: 'directory-picker', 'aria-label': t('Manage machine') });
+  const close = el('button', { type: 'button', class: 'secondary', textContent: t('Close') });
+  const name = el('input', { value: detail.name, maxLength: 100, disabled: detail.trust === 'revoked' });
+  const roots = el('div');
+  let selected = [...(detail.roots || [])], changedRoots = false;
+  const render = () => roots.replaceChildren(...selected.map(path => el('p', {}, el('code', { textContent: path }))));
+  render();
+  const choose = el('button', { type: 'button', class: 'secondary', textContent: t('Choose directories'),
+    disabled: !detail.online || !detail.capabilities?.directories || detail.trust === 'revoked' });
+  choose.onclick = () => chooseDirectories({ trigger: choose, title: t('Allowed directory roots'), selected, allowEmpty: true,
+    browse: path => invoke('machine_directories', { machine: machine.id, path }),
+    apply: paths => { selected = paths; changedRoots = true; render(); } });
+  const save = el('button', { type: 'button', textContent: t('Save changes'), disabled: detail.trust === 'revoked' });
+  const refresh = async () => renderTeamsMachines(await invoke('machine_list'));
+  save.onclick = () => busy(save, async () => {
+    try {
+      await invoke('machine_update', { machine: machine.id, name: name.value, ...(changedRoots ? { roots: selected } : {}) });
+      dialog.close(); done(t('Machine settings saved.'));
+    } finally { await refresh(); }
+  });
+  const revoke = el('button', { type: 'button', class: 'danger', textContent: t('Revoke machine'), disabled: detail.local || detail.trust === 'revoked' });
+  let confirmed = false;
+  revoke.onclick = () => busy(revoke, async () => {
+    if (!confirmed) { confirmed = true; revoke.textContent = t('Confirm revocation'); return; }
+    try { await invoke('machine_revoke', { machine: machine.id }); dialog.close(); done(t('Machine revoked.')); }
+    finally { await refresh(); }
+  });
+  close.onclick = () => dialog.close();
+  dialog.onclose = () => { dialog.remove(); document.body.classList.toggle('directory-picker-open', Boolean(document.querySelector('dialog[open]'))); const target = trigger?.isConnected ? trigger : document.querySelector(`#${trigger?.closest('[id]')?.id || 'machine-list'} [data-machine-manage="${machine.id}"]`); target?.focus({ preventScroll: true }); };
+  dialog.append(el('div', { class: 'directory-picker-head' }, el('h2', { textContent: t('Manage machine') }), close),
+    el('div', { class: 'directory-picker-body' },
+      el('p', { textContent: `${detail.os} · ${detail.presence === 'online' ? t('Online') : detail.presence === 'offline' ? t('Offline') : t('Status unknown')}` }),
+      el('p', { class: 'hint', textContent: detail.last_seen ? t('Last seen: {time}', { time: new Date(detail.last_seen * 1000).toLocaleString(uiLocale()) }) : t('Status unknown') }),
+      el('label', {}, t('Machine name'), name), el('h3', { textContent: t('Allowed directory roots') }), roots, choose,
+      el('p', { class: 'hint', textContent: t('Empty roots grant no execution access. Revocation denies future account access; a running program may retain information already received.') })),
+    el('div', { class: 'directory-picker-footer' }, revoke, save));
+  document.body.append(dialog); document.body.classList.add('directory-picker-open'); dialog.showModal(); close.focus();
 }
 let loadedCoordinator = '';
 async function loadMachines() {
