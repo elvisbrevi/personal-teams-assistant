@@ -981,6 +981,52 @@ for (const [label, ctx] of [['machine-desktop', {}], ['machine-phone', { viewpor
   check(`${label}: machine workflow has no browser errors`, errors.length === 0, errors.join('; '));
   await context.close();
 }
+// Account variables: protected entry, metadata-only list and idempotent retries at both sizes.
+for (const [label, ctx] of [['variables-desktop', {}], ['variables-phone', { viewport: { width: 393, height: 852 }, isMobile: true }]]) {
+  const { context, page, errors } = await open({ axe: true, context: ctx });
+  await page.evaluate(() => showTab('settings', 'panel-variables'));
+  await page.locator('#variables .row').first().waitFor();
+  check(`${label}: names and descriptions render as text`, await page.locator('#variables').innerText().then(text => text.includes('<b>not markup</b>')) && await page.locator('#variables b').count() === 0);
+  check(`${label}: the list has no reveal or copy control yet`, await page.locator('#variables button').count() === 0);
+  check(`${label}: an agent request waits for a protected value`, await page.locator('#variables-pending').innerText().then(text => text.includes('PARTNER_ENDPOINT')));
+  const mask = () => page.locator('#variable-value').evaluate(node => getComputedStyle(node).webkitTextSecurity);
+  check(`${label}: the value field is masked by default`, await mask() === 'disc');
+  await page.locator('#variable-show').check();
+  check(`${label}: showing the value is an explicit choice`, await mask() === 'none');
+  await page.locator('#variable-show').uncheck();
+  check(`${label}: adding stays disabled until the form is complete`, await page.locator('#variable-create').isDisabled());
+
+  const create = page.getByRole('button', { name: 'Agregar variable', exact: true });
+  await page.fill('#variable-name', '1BAD');
+  await page.fill('#variable-description', 'Synthetic description');
+  await page.fill('#variable-value', 'synthetic-secret-value');
+  await create.click();
+  await page.locator('#notice.error').waitFor();
+  check(`${label}: an invalid name is refused before the host`, await page.evaluate(() => window.__ptaVariableCreates.length === 0));
+  await page.fill('#variable-name', 'NEW_VARIABLE');
+  await page.evaluate(() => { window.__ptaVariableError = true; });
+  await create.click();
+  await page.waitForFunction(() => window.__ptaVariableCreates.length === 1);
+  check(`${label}: a failed save keeps the typed value for a retry`, await page.inputValue('#variable-value') === 'synthetic-secret-value');
+  await page.evaluate(() => { window.__ptaVariableError = false; });
+  await create.click();
+  await page.waitForFunction(() => window.__ptaVariableCreates.length === 2);
+  check(`${label}: a retry reuses the entry ID`, await page.evaluate(() => window.__ptaVariableCreates[0].id === window.__ptaVariableCreates[1].id));
+  await page.locator('#variables .row', { hasText: 'NEW_VARIABLE' }).waitFor();
+  check(`${label}: the value field is cleared after storing`, await page.inputValue('#variable-value') === '' && await page.inputValue('#variable-name') === '');
+  check(`${label}: nothing but metadata is rendered`, await page.locator('#panel-variables').innerText().then(text => !text.includes('synthetic-secret-value')));
+
+  const pending = page.locator('#variables-pending');
+  await pending.locator('textarea').fill('synthetic-partner-value');
+  await pending.getByRole('button', { name: 'Guardar', exact: true }).click();
+  await page.locator('#variables .row', { hasText: 'PARTNER_ENDPOINT' }).waitFor();
+  check(`${label}: the agent's request completes through protected entry`, await pending.isHidden() && await page.evaluate(() => window.__ptaVariableCreates.at(-1).name === 'PARTNER_ENDPOINT'));
+  check(`${label}: variables keep the phone boundary`, await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+  await page.evaluate(axeSource);
+  check(`${label}: variables pass axe`, (await scan(page)).length === 0, JSON.stringify(await scan(page)));
+  check(`${label}: variables have no browser errors`, errors.length === 0, errors.join('; '));
+  await context.close();
+}
 await browser.close();
 fs.writeFileSync(`${out}/flows.json`, JSON.stringify(results, null, 1));
 const failed = results.filter(r => !r.ok).length;

@@ -87,6 +87,21 @@ Accounts
                            and choose Trust this machine, then finish [--wait]. No credential is printed.
   github repos             Repositories authorized for the GitHub App.
 
+Account variables
+  variables list [--limit N]  Names, descriptions and versions of this account's stored variables; never values.
+  variables search TEXT       Variables whose name or description contains TEXT.
+  variables create NAME --description TEXT [--id UUID]
+                           Stores a variable; its value is read from a protected pipe on stdin (never an argument
+                           or a terminal). Names: letters, digits and _ (up to 128); descriptions are required (up to
+                           500 characters); values are up to 16 KiB of UTF-8 text with newlines. It never overwrites:
+                           after a timeout, inspect with list, or repeat with the printed --id.
+  variables entry start NAME --description TEXT  Asks for a value to be typed by the user (GUI or complete).
+  variables entry status|cancel|complete REQUEST  complete reads the value from stdin like create.
+  variables verify            Checks that every stored variable authenticates with the current keys.
+  variables key backup --output PRIVATE_FILE  Operator-local: writes the master keys (not values) to a new 0600 file.
+  variables key restore       Operator-local: master-key backup JSON on stdin; never replaces an existing key.
+  variables key rotate        Operator-local: new master and data keys; keeps older masters for older backups.
+
 Personal chat
   self-chat status|enable [CHAT_ID]|disable
   self-chat reconcile NONCE MESSAGE_ID  Resolves a pending output.
@@ -167,6 +182,133 @@ fn input() -> Result<Value> {
         .or_else(|_| toml::from_str::<toml::Value>(&text).map(|v| serde_json::to_value(v).unwrap()))
         .context("input must be JSON or TOML")
 }
+/// A value comes only from a protected pipe: never an argument, never a terminal. One final line
+/// break (added by `echo`) is not part of the value.
+fn protected_value() -> Result<String> {
+    ensure!(
+        !std::io::stdin().is_terminal(),
+        "the value must come from a protected pipe on stdin, never an argument or a terminal"
+    );
+    let mut value = stdin_text()?;
+    ensure!(value.len() <= 16_386, "value too long (at most 16 KiB)");
+    if value.ends_with('\n') {
+        value.pop();
+        if value.ends_with('\r') {
+            value.pop();
+        }
+    }
+    Ok(value)
+}
+/// The words of a command without its flags and their values.
+fn words(args: &[String]) -> Vec<&str> {
+    let mut words = Vec::new();
+    let mut skip = false;
+    for arg in args {
+        if skip {
+            skip = false;
+        } else if matches!(
+            arg.as_str(),
+            "--description"
+                | "--id"
+                | "--output"
+                | "--limit"
+                | "--context"
+                | "--source"
+                | "--redirect"
+        ) {
+            skip = true;
+        } else if !arg.starts_with("--") {
+            words.push(arg.as_str());
+        }
+    }
+    words
+}
+fn option<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
+    args.iter()
+        .position(|a| a == flag)
+        .and_then(|i| args.get(i + 1))
+        .map(String::as_str)
+}
+async fn variables_command(args: &[String]) -> Result<Reply> {
+    let words = words(args);
+    let word = |i: usize| -> Result<&str> {
+        words
+            .get(i)
+            .copied()
+            .context("missing argument; consult --help")
+    };
+    let description =
+        || -> Result<&str> { option(args, "--description").context("--description is required") };
+    match (word(1)?, words.get(2).copied()) {
+        ("list", _) => {
+            let limit = option(args, "--limit")
+                .map(|v| v.parse::<usize>().context("invalid limit"))
+                .transpose()?;
+            call("variable_list", json!({"limit":limit}), None, true).await
+        }
+        ("search", _) => call("variable_list", json!({"query":word(2)?}), None, true).await,
+        ("create", _) => {
+            let id = option(args, "--id")
+                .map(str::to_owned)
+                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+            let value = protected_value()?;
+            let body = json!({"id":id,"name":word(2)?,"description":description()?,"value":value});
+            call("variable_create", body, None, true).await.map_err(|error| {
+                // The host may have stored it before the timeout: inspect, then repeat only with this ID.
+                error.context(format!("The result is unknown. Inspect with `pta variables list`; if it is absent, repeat with --id {id}."))
+            })
+        }
+        ("entry", Some("start")) => {
+            call(
+                "variable_entry_start",
+                json!({"name":word(3)?,"description":description()?}),
+                None,
+                true,
+            )
+            .await
+        }
+        ("entry", Some("status")) => {
+            call(
+                "variable_entry_status",
+                json!({"request":word(3)?}),
+                None,
+                true,
+            )
+            .await
+        }
+        ("entry", Some("cancel")) => {
+            call(
+                "variable_entry_cancel",
+                json!({"request":word(3)?}),
+                None,
+                true,
+            )
+            .await
+        }
+        ("entry", Some("complete")) => {
+            let value = protected_value()?;
+            call(
+                "variable_entry_complete",
+                json!({"request":word(3)?,"value":value}),
+                None,
+                true,
+            )
+            .await
+        }
+        ("verify", _) => call("variable_verify", json!({}), None, true).await,
+        ("key", Some("backup")) => {
+            let output = option(args, "--output").context("--output is required")?;
+            call("variable_key_backup", json!({"output":output}), None, true).await
+        }
+        ("key", Some("restore")) => {
+            let backup: Value = serde_json::from_str(&stdin_text()?)
+                .context("input must be a variable key backup JSON")?;
+            call("variable_key_restore", json!({"backup":backup}), None, true).await
+        }
+        ("key", Some("rotate")) => call("variable_key_rotate", json!({}), None, true).await,
+        _ => anyhow::bail!("unknown command or invalid argument count"),
+    }
+}
 fn positional(args: &[String], index: usize) -> Result<&str> {
     args.get(index)
         .map(String::as_str)
@@ -230,6 +372,21 @@ fn validate_args(args: &[String]) -> Result<()> {
         match a {
             "--json" | "--non-interactive" | "--offline" | "--no-browser" | "--wait"
             | "--content" | "--current-profile" | "--context-stdin" => {}
+            "--description" => {
+                i += 1;
+                ensure!(
+                    args.get(i).is_some_and(|v| !v.is_empty()),
+                    "invalid description"
+                );
+            }
+            "--id" => {
+                i += 1;
+                ensure!(
+                    args.get(i)
+                        .is_some_and(|v| uuid::Uuid::parse_str(v).is_ok()),
+                    "invalid entry ID"
+                );
+            }
             "--context" => {
                 i += 1;
                 ensure!(
@@ -293,6 +450,15 @@ fn validate_args(args: &[String]) -> Result<()> {
             | ["mcp", "config"]
             | ["tools", "list"]
             | ["tools", "call", _]
+            | ["variables", "list" | "verify"]
+            | ["variables", "search" | "create", _]
+            | [
+                "variables",
+                "entry",
+                "start" | "status" | "cancel" | "complete",
+                _
+            ]
+            | ["variables", "key", "backup" | "restore" | "rotate"]
             | ["web", "status" | "configure" | "callbacks"]
             | ["web", "users", "list"]
             | ["web", "machines", "authorize", _]
@@ -386,9 +552,19 @@ fn validate_args(args: &[String]) -> Result<()> {
         ),
         (
             "--output",
-            p.as_slice().starts_with(&["web", "machines", "authorize"]),
+            p.as_slice().starts_with(&["web", "machines", "authorize"])
+                || p.as_slice() == ["variables", "key", "backup"],
         ),
-        ("--limit", ["audit", "logs", "notes"].contains(&p[0])),
+        (
+            "--description",
+            p.as_slice().starts_with(&["variables", "create"])
+                || p.as_slice().starts_with(&["variables", "entry", "start"]),
+        ),
+        ("--id", p.as_slice().starts_with(&["variables", "create"])),
+        (
+            "--limit",
+            ["audit", "logs", "notes", "variables"].contains(&p[0]),
+        ),
         (
             "--source",
             p.as_slice().starts_with(&["answer", "refine"])
@@ -455,6 +631,9 @@ async fn execute(mut args: Vec<String>) -> Result<Reply> {
     if !matches!(command, "capabilities" | "skill" | "tools") && !offline {
         retire_outdated_host(command, action, !non_interactive && !json_output).await?;
     }
+    if command == "variables" {
+        return variables_command(&args).await;
+    }
     match command {
         "tools" => {
             if action == "list" {
@@ -488,7 +667,7 @@ async fn execute(mut args: Vec<String>) -> Result<Reply> {
         }
         "capabilities" => {
             return Ok(Reply::success(
-                json!({"contract":control::CONTRACT,"commands":HELP,"skill_version":env!("CARGO_PKG_VERSION"),"activity_registration_support":true,"web_support":true,"web_access_support":true,"knowledge_index_support":true,"mcp_support":true,"tools_support":true,"todo_support":true,"implementation_support":true,"machine_pairing_support":true,"machine_login_support":true,"machine_management_support":true,"account_authority_support":true,"shared_accounts_support":true}),
+                json!({"contract":control::CONTRACT,"commands":HELP,"skill_version":env!("CARGO_PKG_VERSION"),"activity_registration_support":true,"web_support":true,"web_access_support":true,"knowledge_index_support":true,"mcp_support":true,"tools_support":true,"todo_support":true,"implementation_support":true,"machine_pairing_support":true,"machine_login_support":true,"machine_management_support":true,"account_variables_support":true,"account_authority_support":true,"shared_accounts_support":true}),
             ));
         }
         "skill" => return crate::app::skill::command(action, args.get(2).map(String::as_str)),

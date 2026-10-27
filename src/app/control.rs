@@ -80,6 +80,8 @@ struct Endpoint {
     #[serde(default)]
     machine_management_support: bool,
     #[serde(default)]
+    account_variables_support: bool,
+    #[serde(default)]
     implementation_support: bool,
     #[serde(default)]
     wiki_support: bool,
@@ -445,6 +447,10 @@ async fn client_with_transport(
             "Incompatible machine management host: update the host and CLI together before managing machines."
         );
         ensure!(
+            endpoint.account_variables_support || !variables::handles(&request.method),
+            "Incompatible account variables host: update the host and CLI together before managing variables."
+        );
+        ensure!(
             endpoint.implementation_support || !implementation::handles(&request.method),
             "Incompatible implementation host: update the host and CLI together."
         );
@@ -550,6 +556,7 @@ pub(crate) fn launch(
             machine_pairing_support: true,
             machine_login_support: true,
             machine_management_support: true,
+            account_variables_support: true,
             contract: CONTRACT,
             port: listener.local_addr()?.port(),
             token: token.clone(),
@@ -699,6 +706,10 @@ async fn dispatch_inner(host: &Arc<Host>, request: Request) -> Reply {
                 )
             }
         };
+    }
+    if variables::handles(&request.method) {
+        // Independent of profile edits: no operations lock, like the implementation operations.
+        return variables::operate(host, &request).await;
     }
     let _guard = state.operations.lock().await;
     if activity::active(state).await
@@ -1379,6 +1390,7 @@ mod tests {
                 machine_pairing_support: true,
                 machine_login_support: true,
                 machine_management_support: true,
+                account_variables_support: true,
                 account_authority_support: true,
                 shared_accounts_support: true,
                 account_binding: None,
@@ -1406,6 +1418,7 @@ mod tests {
                 machine_pairing_support: true,
                 machine_login_support: true,
                 machine_management_support: true,
+                account_variables_support: true,
                 account_authority_support: true,
                 shared_accounts_support: true,
                 account_binding: None,
@@ -1442,6 +1455,7 @@ mod tests {
                     machine_pairing_support: true,
                     machine_login_support: true,
                     machine_management_support: true,
+                    account_variables_support: true,
                     account_authority_support: true,
                     shared_accounts_support: true,
                     account_binding: None,

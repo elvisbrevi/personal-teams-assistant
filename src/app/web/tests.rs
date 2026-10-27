@@ -2447,3 +2447,164 @@ async fn machine_management_refuses_older_hosts_before_forwarding() {
     }
     assert!(host.received_requests().await.unwrap().is_empty());
 }
+
+#[tokio::test]
+async fn account_variables_are_private_to_each_account_and_never_leave_as_values() {
+    use authority::Transport::{Browser, Local, Machine};
+    const ALICE_SECRET: &str = "synthetic-alice-secret-5d1f0a93";
+    const BOB_SECRET: &str = "synthetic-bob-secret-c7e24b18";
+    let (_dir, portal, entries, _issuer) = configured_fixture().await;
+    let hosts: Vec<_> = entries
+        .iter()
+        .map(|account| {
+            let profile = profile_dir(&portal.root, account);
+            Arc::new(Host {
+                state: init_state(&profile, &profile.join("data")).unwrap(),
+                shell: Box::new(NativeShell),
+            })
+        })
+        .collect();
+    async fn invoke(
+        host: &Arc<Host>,
+        transport: authority::Transport,
+        method: &str,
+        args: Value,
+    ) -> control::Reply {
+        let mut request = control::Request::new(method);
+        request.args = args;
+        authority::within(
+            authority::Invocation {
+                scope: host.state.authority.clone(),
+                transport,
+            },
+            control::dispatch(host, request),
+        )
+        .await
+    }
+    let body = |name: &str, value: &str| json!({"id":uuid::Uuid::new_v4().to_string(),"name":name,"description":format!("Synthetic {name}"),"value":value});
+    let (alice, bob) = (&hosts[0], &hosts[1]);
+
+    for (host, name, secret) in [
+        (alice, "ALICE_ONLY", ALICE_SECRET),
+        (bob, "BOB_ONLY", BOB_SECRET),
+        (alice, "SHARED_NAME", ALICE_SECRET),
+        (bob, "SHARED_NAME", BOB_SECRET),
+    ] {
+        let created = invoke(host, Browser, "variable_create", body(name, secret)).await;
+        assert!(created.ok, "{name}: {:?}", created.message);
+        assert!(!serde_json::to_string(&created).unwrap().contains(secret));
+    }
+    let names = |reply: &control::Reply| -> Vec<String> {
+        reply.data["variables"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v["name"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    let alice_list = invoke(alice, Browser, "variable_list", json!({})).await;
+    let bob_list = invoke(bob, Browser, "variable_list", json!({})).await;
+    assert_eq!(names(&alice_list), ["ALICE_ONLY", "SHARED_NAME"]);
+    assert_eq!(names(&bob_list), ["BOB_ONLY", "SHARED_NAME"]);
+    for secret in [ALICE_SECRET, BOB_SECRET] {
+        for reply in [&alice_list, &bob_list] {
+            assert!(!serde_json::to_string(reply).unwrap().contains(secret));
+        }
+    }
+    // Search and local clients see the same account-private catalog.
+    let found = invoke(bob, Local, "variable_list", json!({"query":"alice"})).await;
+    assert!(names(&found).is_empty());
+
+    // A protected entry belongs to the account that requested it.
+    let started = invoke(
+        alice,
+        Local,
+        "variable_entry_start",
+        json!({"name":"ALICE_PENDING","description":"Waiting for Alice"}),
+    )
+    .await;
+    let request = started.data["request"].as_str().unwrap().to_owned();
+    assert!(
+        invoke(bob, Browser, "variable_list", json!({})).await.data["pending"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        !invoke(
+            bob,
+            Browser,
+            "variable_entry_complete",
+            json!({"request":request,"value":BOB_SECRET})
+        )
+        .await
+        .ok
+    );
+    assert_eq!(
+        invoke(
+            bob,
+            Local,
+            "variable_entry_status",
+            json!({"request":request})
+        )
+        .await
+        .data["state"],
+        "unknown"
+    );
+
+    // The browser runs the shared GUI workflow only; agents' requests, verification and key
+    // custody stay local, and machine credentials never reach variables.
+    for (method, args) in [
+        (
+            "variable_entry_start",
+            json!({"name":"FROM_BROWSER","description":"d"}),
+        ),
+        ("variable_verify", json!({})),
+        ("variable_key_rotate", json!({})),
+        (
+            "variable_key_backup",
+            json!({"output":"/tmp/never-written-keys.json"}),
+        ),
+        ("variable_key_restore", json!({"backup":{}})),
+    ] {
+        assert!(
+            !invoke(alice, Browser, method, args.clone()).await.ok,
+            "{method}"
+        );
+        assert!(!invoke(alice, Machine, method, args).await.ok, "{method}");
+    }
+    assert!(!invoke(alice, Machine, "variable_list", json!({})).await.ok);
+    assert!(!std::path::Path::new("/tmp/never-written-keys.json").exists());
+    // Account, profile and transport authority cannot be supplied as arguments.
+    for key in ["account", "account_id", "owner", "profile", "transport"] {
+        let mut forged = body("FORGED", ALICE_SECRET);
+        forged[key] = json!(entries[1].id);
+        assert!(
+            !invoke(alice, Browser, "variable_create", forged).await.ok,
+            "{key}"
+        );
+    }
+
+    // Separate stores and keys on disk; neither holds a value in clear or the other's names.
+    let stores: Vec<_> = entries
+        .iter()
+        .map(|a| profile_dir(&portal.root, a))
+        .collect();
+    assert_ne!(stores[0], stores[1]);
+    let read_all = |dir: &Path| -> Vec<u8> {
+        let mut all = Vec::new();
+        for entry in fs::read_dir(dir.join("variables")).unwrap() {
+            all.extend(fs::read(entry.unwrap().path()).unwrap());
+        }
+        all
+    };
+    let (a, b) = (read_all(&stores[0]), read_all(&stores[1]));
+    let has = |bytes: &[u8], text: &str| bytes.windows(text.len()).any(|w| w == text.as_bytes());
+    assert!(has(&a, "ALICE_ONLY") && !has(&a, "BOB_ONLY"));
+    assert!(has(&b, "BOB_ONLY") && !has(&b, "ALICE_ONLY"));
+    for secret in [ALICE_SECRET, BOB_SECRET] {
+        assert!(!has(&a, secret) && !has(&b, secret));
+    }
+    let master = |dir: &Path| fs::read(dir.join("keys").join("master-1.key")).unwrap();
+    assert_ne!(master(&stores[0]), master(&stores[1]));
+}

@@ -325,6 +325,21 @@
             <p class="hint">Their values are never shown. Type in a field only to store or replace a credential; it applies right away. Environment variables and secret files take priority.</p>
             <div id="credentials" class="list"></div>
           </div>
+          <div class="panel" id="panel-variables">
+            <div class="panel-head"><h2>Variables</h2><span id="variables-count" class="badge muted" hidden></span></div>
+            <p class="hint">Private to your assistant account. Each variable has a name, a description and a value: values are encrypted, stay hidden and are never given to your agents. Describe what each one is for so you and your agents can pick the right one.</p>
+            <div id="variables-pending" class="list" hidden></div>
+            <label id="variables-search-field" hidden>Search variables<input id="variables-search" type="search" autocomplete="off" spellcheck="false" placeholder="Name or description"></label>
+            <div id="variables" class="list"></div>
+            <h3>Add a variable</h3>
+            <div class="grid">
+              <label>Name <small>Letters, digits and _, up to 128; it cannot start with a digit.</small><input id="variable-name" translate="no" placeholder="DEPLOY_ENDPOINT" maxlength="128" autocomplete="off" autocapitalize="off" spellcheck="false"></label>
+              <label>Description <small>What it is for, so you and your agents can choose it.</small><input id="variable-description" maxlength="500" autocomplete="off" spellcheck="false"></label>
+            </div>
+            <label>Value <small>Hidden while you type; up to 16 KiB and line breaks are kept.</small><textarea id="variable-value" class="secret-entry" rows="3" autocomplete="off" autocapitalize="off" spellcheck="false"></textarea></label>
+            <label class="check"><input id="variable-show" type="checkbox"> Show the value while I type</label>
+            <div class="actions"><button id="variable-create" disabled>Add variable</button></div>
+          </div>
         </div>
 
         <div id="settings-advanced" class="settings-group" role="tabpanel" aria-labelledby="settings-tab-advanced" data-settings-group="advanced" hidden>
