@@ -49,6 +49,23 @@ struct Machine {
     #[serde(default)]
     management_support: bool,
 }
+/// The coordinator and account this installation signed in to. Anything synchronized from that
+/// account is qualified by it, so a different coordinator, account or machine never reuses it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct Link {
+    pub origin: String,
+    pub account: u64,
+    pub machine: String,
+}
+/// The coordinator connection of this installation, if it has one.
+pub(super) fn link(state: &DesktopState) -> Result<Option<Link>> {
+    Ok(state.implementation.connection()?.map(|c| Link {
+        origin: c.url,
+        account: c.account,
+        machine: c.id,
+    }))
+}
 #[derive(Clone, Serialize, Deserialize)]
 struct Connection {
     url: String,
@@ -343,7 +360,10 @@ pub(super) async fn operate(
     operation(host, method, args).await.map_err(|error| {
         if error.downcast_ref::<reqwest::Error>().is_some() { return "[network] The execution machine or provider could not be reached. Inspect its runs before trying again.".into(); }
         let redactor=security::Redactor::new(&[],Vec::new()).expect("built-in redaction patterns");
-        format!("[invalid_input] {}",redactor.redact(&error.to_string()))
+        let text = redactor.redact(&error.to_string());
+        // A stale or conflicting account change keeps its class so the caller can refresh.
+        if text.starts_with("[state_conflict] ") { return text; }
+        format!("[invalid_input] {text}")
     })
 }
 async fn operation(host: &Arc<Host>, method: &str, args: &Value) -> Result<Value> {

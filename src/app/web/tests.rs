@@ -2888,3 +2888,109 @@ async fn variable_reveal_edits_and_deletion_reach_only_the_signed_in_hosts_and_a
     assert_eq!(alice.received_requests().await.unwrap().len(), 3);
     assert!(bob.received_requests().await.unwrap().is_empty());
 }
+
+#[tokio::test]
+async fn variable_catalogs_are_served_per_account_to_that_accounts_machines_only() {
+    let (_dir, portal, entries, _issuer) = configured_fixture().await;
+    let hosts: Vec<_> = entries
+        .iter()
+        .map(|account| {
+            let profile = profile_dir(&portal.root, account);
+            Arc::new(Host {
+                state: init_state(&profile, &profile.join("data")).unwrap(),
+                shell: Box::new(NativeShell),
+            })
+        })
+        .collect();
+    async fn invoke(
+        host: &Arc<Host>,
+        transport: authority::Transport,
+        method: &str,
+        args: Value,
+    ) -> control::Reply {
+        let mut request = control::Request::new(method);
+        request.args = args;
+        authority::within(
+            authority::Invocation {
+                scope: host.state.authority.clone(),
+                transport,
+            },
+            control::dispatch(host, request),
+        )
+        .await
+    }
+    use authority::Transport::{Browser, Machine};
+    let (alice, bob) = (&hosts[0], &hosts[1]);
+    for (host, name) in [(alice, "ALICE_ENDPOINT"), (bob, "BOB_ENDPOINT")] {
+        let created = invoke(
+            host,
+            Browser,
+            "variable_create",
+            json!({"id":uuid::Uuid::new_v4().to_string(),"name":name,"description":"Synthetic","value":"synthetic-portal-secret-5k3j"}),
+        )
+        .await;
+        assert!(created.ok, "{:?}", created.message);
+    }
+    let machine = uuid::Uuid::new_v4().to_string();
+    let registered = invoke(
+        alice,
+        Machine,
+        "machine_register",
+        json!({"id":machine,"name":"Laptop","os":"linux"}),
+    )
+    .await;
+    let token = registered.data["token"].as_str().unwrap().to_owned();
+    let catalog = |host: &Arc<Host>, token: &str| {
+        let (host, token, machine) = (host.clone(), token.to_owned(), machine.clone());
+        async move {
+            invoke(
+                &host,
+                Machine,
+                "machine_protocol",
+                json!({"id":machine,"token":token,"action":"call","method":"variable_catalog","args":{}}),
+            )
+            .await
+        }
+    };
+    let own = catalog(alice, &token).await;
+    assert!(own.ok, "{:?}", own.message);
+    assert_eq!(own.data["items"].as_array().unwrap().len(), 1);
+    assert_eq!(own.data["items"][0]["name"], "ALICE_ENDPOINT");
+    // Alice's credential is not valid for Bob's account, and Bob's catalog never leaves Bob's host.
+    let foreign = catalog(bob, &token).await;
+    assert!(!foreign.ok);
+    assert!(
+        !serde_json::to_string(&foreign)
+            .unwrap()
+            .contains("BOB_ENDPOINT")
+    );
+    // The two accounts are distinguishable sources, so a client notices a switch.
+    let bob_machine = uuid::Uuid::new_v4().to_string();
+    let bob_token = invoke(
+        bob,
+        Machine,
+        "machine_register",
+        json!({"id":bob_machine,"name":"Desktop","os":"linux"}),
+    )
+    .await
+    .data["token"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let theirs = invoke(
+        bob,
+        Machine,
+        "machine_protocol",
+        json!({"id":bob_machine,"token":bob_token,"action":"call","method":"variable_catalog","args":{}}),
+    )
+    .await;
+    assert_eq!(theirs.data["items"][0]["name"], "BOB_ENDPOINT");
+    assert_ne!(theirs.data["source"], own.data["source"]);
+    for reply in [&own, &theirs] {
+        assert!(
+            !serde_json::to_string(reply)
+                .unwrap()
+                .contains("synthetic-portal-secret")
+        );
+    }
+}

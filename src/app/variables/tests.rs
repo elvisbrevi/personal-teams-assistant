@@ -1,7 +1,7 @@
 use super::*;
 use authority::Transport::{Local, Machine, Window};
 
-const SECRET: &str = "synthetic-secret-value-1a2b3c4d";
+pub(super) const SECRET: &str = "synthetic-secret-value-1a2b3c4d";
 const MULTILINE: &str = "-----BEGIN SYNTHETIC KEY-----\nabc123\n-----END SYNTHETIC KEY-----";
 
 struct TestShell;
@@ -20,13 +20,13 @@ impl Shell for TestShell {
     }
     fn exit(&self) {}
 }
-fn host(root: &Path) -> Arc<Host> {
+pub(super) fn host(root: &Path) -> Arc<Host> {
     Arc::new(Host {
         state: init_state(&root.join("profile"), &root.join("data")).unwrap(),
         shell: Box::new(TestShell),
     })
 }
-async fn call(
+pub(super) async fn call(
     host: &Arc<Host>,
     transport: authority::Transport,
     method: &str,
@@ -43,13 +43,13 @@ async fn call(
     )
     .await
 }
-fn text(reply: &Reply) -> String {
+pub(super) fn text(reply: &Reply) -> String {
     serde_json::to_string(reply).unwrap()
 }
-fn id() -> String {
+pub(super) fn id() -> String {
     uuid::Uuid::new_v4().to_string()
 }
-fn create(name: &str, value: &str) -> Value {
+pub(super) fn create(name: &str, value: &str) -> Value {
     json!({"id":id(),"name":name,"description":format!("Synthetic {name}"),"value":value})
 }
 
@@ -481,6 +481,8 @@ async fn agent_tools_never_accept_or_return_a_value() {
         [
             "variable_list",
             "variable_search",
+            "variable_sync",
+            "variable_sync_status",
             "variable_entry_request",
             "variable_entry_status",
             "variable_entry_cancel",

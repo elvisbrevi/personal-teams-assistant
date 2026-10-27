@@ -298,6 +298,8 @@ impl Portal {
             "logs",
             "get_github_issue",
             "variable_list",
+            "variable_sync",
+            "variable_sync_status",
             "variable_create",
             "variable_update",
             "variable_delete",

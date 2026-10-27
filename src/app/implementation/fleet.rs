@@ -21,7 +21,8 @@ pub(super) fn endpoint(origin: &str) -> Result<url::Url> {
     url.set_path("/api/machines");
     Ok(url)
 }
-async fn remote(connection: &Connection, mut body: Value) -> Result<Value> {
+/// One exchange with the coordinator: its whole reply, successful or not.
+async fn exchange(connection: &Connection, mut body: Value) -> Result<Value> {
     body["id"] = json!(connection.id);
     let response = client()?
         .post(endpoint(&connection.url)?)
@@ -40,7 +41,10 @@ async fn remote(connection: &Connection, mut body: Value) -> Result<Value> {
         response.status().is_success(),
         "Machine coordinator is unavailable or this machine was disconnected."
     );
-    let result: Value = crate::adapters::bounded_json(response, 1_000_000).await?;
+    crate::adapters::bounded_json(response, 1_000_000).await
+}
+async fn remote(connection: &Connection, body: Value) -> Result<Value> {
+    let result = exchange(connection, body).await?;
     ensure!(
         result["ok"] == true,
         "Machine operation failed. Check the selected machine and its configuration."
@@ -126,6 +130,7 @@ pub(super) async fn operate(host: &Arc<Host>, method: &str, args: &Value) -> Res
                 id: data.id.clone(),
             };
             state.reset_roots(&mut data)?;
+            host.state.variables.forget_catalog();
             write_private(
                 &state.root.join("connection.json"),
                 &serde_json::to_string(&connection)?,
@@ -144,6 +149,7 @@ pub(super) async fn operate(host: &Arc<Host>, method: &str, args: &Value) -> Res
                 fs::remove_file(state.root.join("connection.json"))?;
             }
             let _ = security::delete_desktop_secret("default", "PTA_MACHINE_TOKEN");
+            host.state.variables.forget_catalog();
             Ok(json!({"disconnected":true}))
         }
         "machine_teams" => {
@@ -388,6 +394,13 @@ pub(in crate::app) async fn protocol(host: &Arc<Host>, args: &Value) -> Result<V
                 ))
                 .await
             }
+            "variable_catalog" | "variable_create" | "variable_update" | "variable_delete" => {
+                variables::machine_call(
+                    host,
+                    args["method"].as_str().unwrap_or_default(),
+                    &args["args"],
+                )
+            }
             "machine_list" | "machine_teams" => {
                 Box::pin(operate(
                     host,
@@ -417,6 +430,23 @@ pub(super) async fn coordinator(
 ) -> Result<Option<Value>> {
     match host.state.implementation.connection()? {
         Some(connection) => remote(
+            &connection,
+            json!({"action":"call","method":method,"args":args}),
+        )
+        .await
+        .map(Some),
+        None => Ok(None),
+    }
+}
+/// An account call to the coordinator that keeps its refusal (`code`, `message`) for the caller,
+/// or `None` when this installation is not connected to one.
+pub(in crate::app) async fn coordinator_reply(
+    host: &Arc<Host>,
+    method: &str,
+    args: &Value,
+) -> Result<Option<Value>> {
+    match host.state.implementation.connection()? {
+        Some(connection) => exchange(
             &connection,
             json!({"action":"call","method":method,"args":args}),
         )
@@ -583,6 +613,8 @@ async fn poll(host: Arc<Host>) {
             && let Ok(Some(connection)) = state.connection()
         {
             let own = state.registry.lock().await.id.clone();
+            // The account's variable catalog follows this machine without delaying presence.
+            variables::auto(&host);
             let (next, sessions) = state
                 .db
                 .changes(cursor)

@@ -90,6 +90,10 @@ Accounts
 Account variables
   variables list [--limit N]  Names, descriptions and versions of this account's stored variables; never values.
   variables search TEXT       Variables whose name or description contains TEXT.
+  variables sync [--reset]    Brings this installation's copy of the account's catalog up to date with the coordinator (names,
+                           descriptions, versions; never values) and prints the revision. --reset discards the copy first,
+                           the only way to accept a coordinator that was restored to an older state.
+  variables status            Last synchronized revision and time, pending/error/conflict state; reads local state only.
   variables create NAME --description TEXT [--id UUID]
                            Stores a variable; its value is read from a protected pipe on stdin (never an argument
                            or a terminal). Names: letters, digits and _ (up to 128); descriptions are required (up to
@@ -313,6 +317,21 @@ async fn variables_command(args: &[String]) -> Result<Reply> {
             call("variable_list", json!({"limit":limit}), None, true).await
         }
         ("search", _) => call("variable_list", json!({"query":word(2)?}), None, true).await,
+        ("sync", _) => {
+            let reset = args.iter().any(|a| a == "--reset");
+            call(
+                "variable_sync",
+                if reset {
+                    json!({"reset":true})
+                } else {
+                    json!({})
+                },
+                None,
+                true,
+            )
+            .await
+        }
+        ("status", _) => call("variable_sync_status", json!({}), None, true).await,
         ("create", _) => {
             let id = option(args, "--id")
                 .map(str::to_owned)
@@ -583,8 +602,8 @@ fn validate_args(args: &[String]) -> Result<()> {
         let a = args[i].as_str();
         match a {
             "--json" | "--non-interactive" | "--offline" | "--no-browser" | "--wait"
-            | "--content" | "--current-profile" | "--context-stdin" | "--value" | "--confirmed" => {
-            }
+            | "--content" | "--current-profile" | "--context-stdin" | "--value" | "--confirmed"
+            | "--reset" => {}
             "--program" | "--directory" => {
                 i += 1;
                 ensure!(
@@ -700,7 +719,7 @@ fn validate_args(args: &[String]) -> Result<()> {
             | ["mcp", "config"]
             | ["tools", "list"]
             | ["tools", "call", _]
-            | ["variables", "list" | "verify" | "audit"]
+            | ["variables", "list" | "verify" | "audit" | "sync" | "status"]
             | ["variables", "search" | "create" | "update" | "delete", _]
             | ["variables", "consumers"]
             | ["variables", "unbind" | "check", _]
@@ -867,6 +886,7 @@ fn validate_args(args: &[String]) -> Result<()> {
             p.as_slice().starts_with(&["variables", "update"]),
         ),
         ("--id", p.as_slice().starts_with(&["variables", "create"])),
+        ("--reset", p.as_slice() == ["variables", "sync"]),
         (
             "--limit",
             ["audit", "logs", "notes", "variables"].contains(&p[0]),

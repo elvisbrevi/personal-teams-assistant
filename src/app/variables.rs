@@ -10,6 +10,9 @@ use crate::variables::{self as vault, KeyBackup, NewVariable, Secret, Store};
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 
+mod sync;
+pub(super) use sync::{auto, machine_call};
+
 /// A protected-entry request stays open this long (seconds).
 const ENTRY_SECONDS: i64 = 15 * 60;
 const MAX_PENDING: usize = 20;
@@ -19,7 +22,11 @@ pub(super) struct State {
     store: std::sync::Mutex<Option<Arc<Store>>>,
     entries: std::sync::Mutex<BTreeMap<String, Entry>>,
     pub(super) consumers: consumers::State,
+    catalog: sync::Mirror,
 }
+
+/// A pending protected entry: name, description and the entry (ID, seen version) it replaces.
+type OpenEntry = (String, String, Option<(String, u64)>);
 
 struct Entry {
     name: String,
@@ -38,7 +45,12 @@ impl State {
             store: std::sync::Mutex::new(None),
             entries: std::sync::Mutex::new(BTreeMap::new()),
             consumers: consumers::State::new(profile),
+            catalog: sync::Mirror::new(profile),
         }
+    }
+    /// Drop the synchronized catalog: the installation left or changed its account.
+    pub(super) fn forget_catalog(&self) {
+        self.catalog.forget();
     }
     pub(super) fn store(&self, host: &Host) -> std::result::Result<Arc<Store>, vault::Error> {
         let mut slot = self.store.lock().unwrap_or_else(|e| e.into_inner());
@@ -49,6 +61,35 @@ impl State {
         let store = Arc::new(Store::open_profile(&self.profile, account)?);
         *slot = Some(store.clone());
         Ok(store)
+    }
+    /// A protected-entry request that is still pending (or already completed, for a repeat):
+    /// its name, description and the entry it replaces.
+    fn open_entry(&self, request: &str, now: i64) -> std::result::Result<OpenEntry, vault::Error> {
+        let entries = self.entries();
+        let entry = entries.get(request).ok_or_else(|| {
+            vault::Error::Input("That protected entry is unknown or has expired.".into())
+        })?;
+        if !(entry.state == "completed" || (entry.state == "pending" && entry.expires > now)) {
+            return Err(vault::Error::Input(format!(
+                "That protected entry is {}.",
+                if entry.state == "pending" {
+                    "expired"
+                } else {
+                    entry.state
+                }
+            )));
+        }
+        Ok((
+            entry.name.clone(),
+            entry.description.clone(),
+            entry.replaces.clone(),
+        ))
+    }
+    fn settle_entry(&self, request: &str, version: u64) {
+        if let Some(entry) = self.entries().get_mut(request) {
+            entry.state = "completed";
+            entry.version = Some(version);
+        }
     }
     fn entries(&self) -> std::sync::MutexGuard<'_, BTreeMap<String, Entry>> {
         let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
@@ -159,10 +200,41 @@ pub(super) async fn operate(host: &Arc<Host>, request: &control::Request) -> Rep
     if consumers::handles(&request.method) {
         return consumers::operate(host, request).await;
     }
+    if let Some(reply) = sync::operate(host, request).await {
+        return reply;
+    }
     match run(host, &request.method, &request.args) {
         Ok(data) => Reply::success(data),
         Err(error) => failure(error),
     }
+}
+
+/// The reply of `variable_list`: metadata only, the requests waiting for the user and how the
+/// catalog was obtained (`sync`).
+fn listing(
+    state: &State,
+    variables: Vec<vault::Metadata>,
+    total: usize,
+    sync: Value,
+    now: i64,
+) -> Value {
+    let pending: Vec<Value> = state
+        .entries()
+        .iter()
+        .filter(|(_, e)| e.state == "pending" && e.expires > now)
+        .map(|(request, e)| {
+            json!({"request":request,"name":e.name,"description":e.description,"expires_at":e.expires,
+                "action": if e.replaces.is_some() { "replace_value" } else { "create" },
+                "id": e.replaces.as_ref().map(|(id, _)| id)})
+        })
+        .collect();
+    json!({
+        "variables": variables,
+        "total": total,
+        "pending": pending,
+        "sync": sync,
+        "limits": {"name":vault::MAX_NAME,"description":vault::MAX_DESCRIPTION,"value_bytes":vault::MAX_VALUE,"variables":vault::MAX_VARIABLES},
+    })
 }
 
 /// The audit outcome of a result: a short fixed word, never any text from the request.
@@ -274,22 +346,13 @@ fn run(host: &Host, method: &str, args: &Value) -> std::result::Result<Value, va
             let mut variables = store.list(list.query.as_deref())?;
             let total = variables.len();
             variables.truncate(list.limit.unwrap_or(vault::MAX_VARIABLES).max(1));
-            let pending: Vec<Value> = state
-                .entries()
-                .iter()
-                .filter(|(_, e)| e.state == "pending" && e.expires > now)
-                .map(|(request, e)| {
-                    json!({"request":request,"name":e.name,"description":e.description,"expires_at":e.expires,
-                        "action": if e.replaces.is_some() { "replace_value" } else { "create" },
-                        "id": e.replaces.as_ref().map(|(id, _)| id)})
-                })
-                .collect();
-            Ok(json!({
-                "variables": variables,
-                "total": total,
-                "pending": pending,
-                "limits": {"name":vault::MAX_NAME,"description":vault::MAX_DESCRIPTION,"value_bytes":vault::MAX_VALUE,"variables":vault::MAX_VARIABLES},
-            }))
+            Ok(listing(
+                state,
+                variables,
+                total,
+                sync::authoritative(&store)?,
+                now,
+            ))
         }
         "variable_create" => {
             let create: CreateArgs = parse(args)?;
@@ -305,8 +368,7 @@ fn run(host: &Host, method: &str, args: &Value) -> std::result::Result<Value, va
             let start: StartArgs = parse(args)?;
             vault::validate_name(&start.name)?;
             vault::validate_description(&start.description)?;
-            if store
-                .list(None)?
+            if sync::known(host, &store)?
                 .iter()
                 .any(|v| v.name.eq_ignore_ascii_case(&start.name))
             {
@@ -354,8 +416,7 @@ fn run(host: &Host, method: &str, args: &Value) -> std::result::Result<Value, va
                 .map_err(|_| vault::Error::Input("The entry ID must be a UUID.".into()))?
                 .hyphenated()
                 .to_string();
-            let target = store
-                .list(None)?
+            let target = sync::known(host, &store)?
                 .into_iter()
                 .find(|v| v.id == id)
                 .ok_or_else(|| {
@@ -422,29 +483,7 @@ fn run(host: &Host, method: &str, args: &Value) -> std::result::Result<Value, va
         }
         "variable_entry_complete" => {
             let complete: CompleteArgs = parse(args)?;
-            let (name, description, replaces) = {
-                let entries = state.entries();
-                let entry = entries.get(&complete.request).ok_or_else(|| {
-                    vault::Error::Input("That protected entry is unknown or has expired.".into())
-                })?;
-                if !(entry.state == "completed"
-                    || (entry.state == "pending" && entry.expires > now))
-                {
-                    return Err(vault::Error::Input(format!(
-                        "That protected entry is {}.",
-                        if entry.state == "pending" {
-                            "expired"
-                        } else {
-                            entry.state
-                        }
-                    )));
-                }
-                (
-                    entry.name.clone(),
-                    entry.description.clone(),
-                    entry.replaces.clone(),
-                )
-            };
+            let (name, description, replaces) = state.open_entry(&complete.request, now)?;
             let (variable, replayed) = if let Some((id, version)) = replaces {
                 // A replacement rotates the value of the entry the request saw: if it changed
                 // since, the typed value must not overwrite the newer state.
@@ -465,10 +504,7 @@ fn run(host: &Host, method: &str, args: &Value) -> std::result::Result<Value, va
                 })?;
                 (created.variable, created.replayed)
             };
-            if let Some(entry) = state.entries().get_mut(&complete.request) {
-                entry.state = "completed";
-                entry.version = Some(variable.version);
-            }
+            state.settle_entry(&complete.request, variable.version);
             Ok(json!({"variable":variable,"replayed":replayed}))
         }
         "variable_verify" => {
@@ -513,5 +549,7 @@ fn run(host: &Host, method: &str, args: &Value) -> std::result::Result<Value, va
     }
 }
 
+#[cfg(test)]
+mod sync_tests;
 #[cfg(test)]
 mod tests;
