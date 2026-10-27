@@ -103,7 +103,7 @@ impl fmt::Debug for Secret {
 }
 
 /// What can be shown about a variable: never its value or ciphertext.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Metadata {
     pub id: String,
     pub name: String,
@@ -112,6 +112,14 @@ pub struct Metadata {
     pub version: u64,
     pub created_at: i64,
     pub updated_at: i64,
+}
+
+/// A slice of the catalog and the revision it belongs to.
+#[derive(Debug, Serialize)]
+pub struct CatalogPage {
+    pub revision: u64,
+    pub total: usize,
+    pub items: Vec<Metadata>,
 }
 
 pub struct NewVariable {
@@ -452,6 +460,50 @@ impl Store {
             }
         }
         Ok(found)
+    }
+
+    /// One consistent page of the account's catalog for synchronization, ordered by entry ID.
+    /// `revision` counts every committed change (each create, edit and delete adds exactly one,
+    /// because a deletion replaces the entry's version with a tombstone one higher), so it only
+    /// grows and a smaller number than a client already holds means a restored or replayed
+    /// catalog. Values and ciphertext are never selected.
+    pub fn catalog_page(&self, offset: usize, limit: usize) -> Result<CatalogPage> {
+        let mut db = self.lock();
+        let tx = db.transaction_with_behavior(TransactionBehavior::Deferred)?;
+        let sum = |table: &str| -> Result<u64> {
+            Ok(tx.query_row(
+                &format!("SELECT COALESCE(SUM(revision),0) FROM {table} WHERE account=?1"),
+                [&self.account],
+                |r| r.get::<_, i64>(0),
+            )? as u64)
+        };
+        let revision = sum("variables")? + sum("tombstones")?;
+        let total: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM variables WHERE account=?1",
+            [&self.account],
+            |r| r.get(0),
+        )?;
+        let mut statement = tx.prepare(
+            "SELECT id,name,description,revision,created_at,updated_at FROM variables WHERE account=?1 ORDER BY id LIMIT ?2 OFFSET ?3",
+        )?;
+        let items = statement
+            .query_map(params![self.account, limit as i64, offset as i64], |r| {
+                Ok(Metadata {
+                    id: r.get(0)?,
+                    name: r.get(1)?,
+                    description: r.get(2)?,
+                    version: r.get::<_, i64>(3)? as u64,
+                    created_at: r.get(4)?,
+                    updated_at: r.get(5)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        drop(statement);
+        Ok(CatalogPage {
+            revision,
+            total: total as usize,
+            items,
+        })
     }
 
     /// Create an entry. Never overwrites: a retry with the same entry ID and content reports the

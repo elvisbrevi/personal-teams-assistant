@@ -990,3 +990,57 @@ fn the_public_fixtures_hold_no_synthetic_variable_values() {
     scan(Path::new(env!("CARGO_MANIFEST_DIR")), &mut hits);
     assert!(hits.is_empty(), "{hits:?}");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_cli_and_mcp_synchronize_and_report_the_loaded_revision_without_values() {
+    let f = fixture();
+    let (code, created) = f
+        .json(
+            &[
+                "variables",
+                "create",
+                "SYNC_CHECK",
+                "--description",
+                "Synthetic",
+            ],
+            Some(&format!("{SECRET}\n")),
+        )
+        .await;
+    assert_eq!(code, 0, "{created}");
+    // The installation holds its own catalog: synchronization reports its revision.
+    let (code, status) = f.json(&["variables", "status"], None).await;
+    assert_eq!(code, 0, "{status}");
+    assert_eq!(status["data"]["sync"]["mode"], "authoritative");
+    assert_eq!(status["data"]["sync"]["revision"], 1);
+    let (code, synced) = f.json(&["variables", "sync"], None).await;
+    assert_eq!(code, 0, "{synced}");
+    assert_eq!(synced["data"]["sync"]["revision"], 1);
+    let (code, list) = f.json(&["variables", "list"], None).await;
+    assert_eq!(code, 0);
+    assert_eq!(list["data"]["sync"]["revision"], 1);
+    // The flag belongs to sync only, and nothing else is accepted.
+    assert_ne!(f.pta(&["variables", "list", "--reset"], None).await.code, 0);
+    assert_ne!(f.pta(&["variables", "status", "extra"], None).await.code, 0);
+    let replies = f
+        .mcp(&[
+            ("variable_sync", json!({})),
+            ("variable_sync_status", json!({})),
+            ("variable_sync", json!({"value":SECRET})),
+        ])
+        .await;
+    assert_eq!(tool_json(&replies[0])["sync"]["revision"], 1);
+    assert_eq!(tool_json(&replies[1])["sync"]["mode"], "authoritative");
+    assert!(
+        replies[2]["error"].is_object() || replies[2]["result"]["isError"] == true,
+        "{}",
+        replies[2]
+    );
+    for output in [&created, &status, &synced, &list] {
+        assert!(!output.to_string().contains(SECRET));
+    }
+    assert!(
+        !f.disk()
+            .windows(SECRET.len())
+            .any(|w| w == SECRET.as_bytes())
+    );
+}

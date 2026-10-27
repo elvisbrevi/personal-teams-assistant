@@ -1505,7 +1505,7 @@ function renderCredentials() {
 // ---------------------------------------------------------------- account variables
 
 /** Metadata only: lists never carry a value, and the forms clear it as soon as it is stored. */
-let variableState = { variables: [], pending: [], error: '' };
+let variableState = { variables: [], pending: [], error: '', sync: null };
 /** One entry ID per attempt, so repeating an interrupted save cannot create a duplicate. */
 let variableAttempt = null;
 /**
@@ -1570,9 +1570,9 @@ async function changeVariable(method, variable, extra = {}) {
 async function loadVariables() {
   try {
     const reply = await invoke('variable_list');
-    variableState = { variables: reply.variables, pending: reply.pending, error: '' };
+    variableState = { variables: reply.variables, pending: reply.pending, error: '', sync: reply.sync ?? null };
   } catch (error) {
-    variableState = { variables: [], pending: [], error: String(error?.message ?? error) };
+    variableState = { variables: [], pending: [], error: String(error?.message ?? error), sync: null };
   }
   renderVariables();
   await loadConsumers();
@@ -1681,8 +1681,27 @@ function renderConsumers() {
 }
 
 /** Plain text only: names and descriptions are user data, never markup or instructions. */
+/** One line about where the catalog comes from and how current it is (metadata only, never a value). */
+function syncSummary(sync) {
+  if (!sync) return '';
+  if (sync.mode === 'authoritative') return t('This computer holds your variables itself, so they are always current. Revision {n}.', { n: sync.revision });
+  const loaded = sync.revision == null ? '' : t('Revision {n}, synchronized {when}.', { n: sync.revision, when: ago(sync.synced_at * 1000) });
+  switch (sync.state) {
+    case 'syncing': return t('Synchronizing…');
+    case 'synced': return t('Synchronized with your account. {loaded}', { loaded });
+    case 'conflict': return `${t('A change conflicted with a newer one. The list was refreshed: review it and try again.')} ${tx(sync.conflict ?? '')}`.trim();
+    case 'error': return `${t('Synchronization failed; the last synchronized catalog is shown.')} ${loaded} ${tx(sync.error?.message ?? '')}`.trim();
+    default: return t('Not synchronized yet.');
+  }
+}
+
 function renderVariables() {
-  const { variables, pending, error } = variableState;
+  const { variables, pending, error, sync } = variableState;
+  const mirror = sync?.mode === 'mirror';
+  const line = $('#variables-sync');
+  line.textContent = syncSummary(sync);
+  line.hidden = !line.textContent;
+  $('#variables-refresh').textContent = mirror ? t('Synchronize now') : t('Refresh');
   const query = $('#variables-search').value.trim().toLowerCase();
   const shown = variables.filter(v => !query || v.name.toLowerCase().includes(query) || v.description.toLowerCase().includes(query));
   const list = $('#variables');
@@ -1868,6 +1887,11 @@ $('#variable-create').onclick = event => busy(event.currentTarget, async () => {
   done(reply.replayed ? t('{name} was already stored.', { name: form.name }) : t('{name} stored.', { name: form.name }));
 });
 $('#variables-refresh').onclick = event => busy(event.currentTarget, async () => {
+  if (variableState.sync?.mode === 'mirror') {
+    // The coordinator is authoritative: ask it now, then show whatever this computer holds.
+    try { await invoke('variable_sync'); } finally { await loadVariables(); }
+    return done(t('Variables synchronized. Revision {n}.', { n: variableState.sync?.revision ?? '' }));
+  }
   await loadVariables();
   done(t('Variables refreshed.'));
 });

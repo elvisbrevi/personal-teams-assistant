@@ -380,7 +380,16 @@
     notes_remove: args => { notes.splice(notes.findIndex(n => n.id === args.id), 1); return { removed: args.id }; },
     // Account variables: the list is metadata only; only variable_reveal returns a (synthetic) value.
     variable_list: () => ({ variables: structuredClone(variables), total: variables.length, pending: structuredClone(pendingVariables),
+      sync: structuredClone(window.__ptaVariableSync || { mode: 'authoritative', state: 'authoritative', revision: 7 }),
       limits: { name: 128, description: 500, value_bytes: 16384, variables: 500 } }),
+    // A connected installation's mirror: Synchronize now asks the coordinator, which may be unreachable.
+    variable_sync: () => {
+      const sync = window.__ptaVariableSync;
+      if (!sync || sync.mode !== 'mirror') return { sync: { mode: 'authoritative', state: 'authoritative', revision: 7 } };
+      if (window.__ptaSyncFail) { sync.state = 'error'; sync.error = { code: 'dependency_or_network', message: 'The coordinator could not be reached, or this installation is no longer connected to it. The last synchronized catalog is still shown; nothing was changed.' }; throw new Error(sync.error.message); }
+      Object.assign(sync, { state: 'synced', error: null, conflict: null, revision: sync.revision + 1, synced_at: secs(NOW) });
+      return { sync: structuredClone(sync), changes: { added: 0, updated: 0, removed: 0 } };
+    },
     variable_create: args => {
       window.__ptaVariableCreates.push({ id: args.id, name: args.name, description: args.description, valueLength: args.value.length });
       if (window.__ptaVariableError) throw new Error('The result is unknown.');

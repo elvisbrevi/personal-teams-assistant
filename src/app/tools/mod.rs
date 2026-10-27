@@ -200,6 +200,25 @@ pub(super) const TOOLS: &[Tool] = &[
         },
     },
     Tool {
+        name: "variable_sync",
+        title: "Synchronize the variable catalog",
+        description: "Bring this installation's copy of the account's variable catalog up to date with the coordinator, which is authoritative, and return the loaded revision, time, state (synced, error, conflict) and what changed. Only names, descriptions and versions are synchronized, never values. On the coordinator itself this just reports its revision. Pass reset only after the user confirms the coordinator was restored to an older state. Compare `sync.revision` with variable_list afterwards to verify what is loaded.",
+        effect: Effect::Read,
+        schema: || {
+            object(
+                json!({"reset":{"type":"boolean","description":"Discard the local copy first; the only way to accept an older coordinator state."}}),
+                &[],
+            )
+        },
+    },
+    Tool {
+        name: "variable_sync_status",
+        title: "Variable catalog synchronization status",
+        description: "The loaded catalog revision, last successful synchronization time and any pending, error or conflict state, without contacting the coordinator. Safe to repeat. Messages are sanitized and never contain values or credentials.",
+        effect: Effect::Read,
+        schema: || object(json!({}), &[]),
+    },
+    Tool {
         name: "variable_entry_request",
         title: "Ask the user to store a variable",
         description: "Start a protected entry for a new stored variable from its name and description only. The user types the value in Settings > Credentials > Variables or pipes it to `pta variables entry complete`; you never receive it. Names are letters, digits and _ (up to 128), unique in the account; describe what the variable is for. Check variable_entry_status afterwards.",
@@ -1181,7 +1200,7 @@ pub(super) async fn run(name: &str, args: &Value) -> Result<Value, String> {
     match name {
         "list_azure_hus" | "list_azure_tasks" | "list_github_epics" | "list_github_issues" | "get_azure_hu" | "get_azure_task" | "get_github_epic" | "get_github_issue" | "open_work_item" => ipc(name, args.clone()).await,
         "azure_cli_status" | "github_cli_status" | "begin_azure_cli_login" | "cancel_azure_cli_login" => ipc(name, args.clone()).await,
-        "variable_list" | "variable_entry_status" | "variable_entry_cancel" => ipc(name, args.clone()).await,
+        "variable_list" | "variable_entry_status" | "variable_entry_cancel" | "variable_sync" | "variable_sync_status" => ipc(name, args.clone()).await,
         "variable_search" => ipc("variable_list", args.clone()).await,
         "variable_entry_request" => ipc("variable_entry_start", args.clone()).await,
         "variable_update" => ipc(name, args.clone()).await,

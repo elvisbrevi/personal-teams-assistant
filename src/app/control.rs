@@ -694,6 +694,8 @@ async fn dispatch_inner(host: &Arc<Host>, request: Request) -> Reply {
             Err(message) => {
                 let (code, exit) = if message.starts_with("[invalid_input]") {
                     ("invalid_input", 2)
+                } else if message.starts_with("[state_conflict]") {
+                    ("state_conflict", 6)
                 } else if message.starts_with("[network]") {
                     ("dependency_or_network", 5)
                 } else {

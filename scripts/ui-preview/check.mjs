@@ -981,6 +981,36 @@ for (const [label, ctx] of [['machine-desktop', {}], ['machine-phone', { viewpor
   check(`${label}: machine workflow has no browser errors`, errors.length === 0, errors.join('; '));
   await context.close();
 }
+// Catalog synchronization: a connected installation shows where its copy stands and can synchronize now.
+for (const [label, ctx] of [['variable-sync-desktop', {}], ['variable-sync-phone', { viewport: { width: 393, height: 852 }, isMobile: true }]]) {
+  const { context, page, errors } = await open({ axe: true, context: ctx });
+  await page.evaluate(() => showTab('settings', 'panel-variables'));
+  await page.locator('#variables .row').first().waitFor();
+  check(`${label}: a catalog that is its own authority says it is current`, await page.locator('#variables-sync').innerText().then(text => text.includes('siempre están al día') && text.includes('Revisión 7')));
+  check(`${label}: the button stays a plain refresh there`, await page.locator('#variables-refresh').innerText() === 'Actualizar');
+  await page.evaluate(() => { window.__ptaVariableSync = { mode: 'mirror', state: 'synced', coordinator: 'https://assistant.example.test', revision: 12, synced_at: Math.floor(Date.now() / 1000) - 120, entries: 2, error: null, conflict: null }; return loadVariables(); });
+  await page.locator('#variables-refresh').click();
+  await page.locator('#notice.ok').getByText('Variables sincronizadas. Revisión 13').waitFor();
+  check(`${label}: a mirror offers Synchronize now and reports the loaded revision`, await page.locator('#variables-refresh').innerText() === 'Sincronizar ahora'
+    && await page.locator('#variables-sync').innerText().then(text => text.includes('Sincronizado con tu cuenta') && text.includes('Revisión 13')));
+  check(`${label}: the status is a live region`, await page.locator('#variables-sync').getAttribute('role') === 'status');
+  await page.evaluate(() => { window.__ptaSyncFail = true; });
+  await page.locator('#variables-refresh').click();
+  await page.locator('#variables-sync', { hasText: 'Falló la sincronización' }).waitFor();
+  check(`${label}: an outage keeps the last catalog and says so in Spanish`, await page.locator('#variables .row').count() === 2
+    && await page.locator('#variables-sync').innerText().then(text => text.includes('Revisión 13') && text.includes('No se pudo contactar al coordinador')));
+  await page.evaluate(() => { window.__ptaSyncFail = false; window.__ptaVariableSync = { ...window.__ptaVariableSync, state: 'conflict', error: null, conflict: 'API changed since it was loaded (it is now version 4). Inspect it before editing again.' }; return loadVariables(); });
+  check(`${label}: a conflict is announced with advice`, await page.locator('#variables-sync').innerText().then(text => text.includes('chocó con otro más reciente') && text.includes('Revisa') === false && text.includes('revísala')));
+  await page.locator('#variables-refresh').click();
+  await page.locator('#variables-sync', { hasText: 'Sincronizado con tu cuenta' }).waitFor();
+  check(`${label}: an explicit synchronization clears a conflict`, await page.locator('#variables-sync').innerText().then(text => !text.includes('chocó')));
+  check(`${label}: synchronization keeps the phone boundary`, await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+  await page.evaluate(axeSource);
+  check(`${label}: synchronization state passes axe`, (await scan(page)).length === 0, JSON.stringify(await scan(page)));
+  check(`${label}: synchronization has no browser errors`, errors.length === 0, errors.join('; '));
+  await context.close();
+}
+
 // Account variables: protected entry, metadata-only list and idempotent retries at both sizes.
 for (const [label, ctx] of [['variables-desktop', {}], ['variables-phone', { viewport: { width: 393, height: 852 }, isMobile: true }]]) {
   const { context, page, errors } = await open({ axe: true, context: ctx });
