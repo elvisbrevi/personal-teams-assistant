@@ -1546,6 +1546,7 @@ fn pairing_for_an_additional_account_is_explicit_and_version_bound() {
 #[tokio::test]
 async fn reconciliation_stops_only_the_changed_app_managed_account_host() {
     let (_dir, portal, entries, _issuer) = configured_fixture().await;
+    let (replacement, _replacement_lock) = fake_host(&portal, &entries[1]).await;
     let mut pids = Vec::new();
     for account in &entries {
         let child = tokio::process::Command::new("/bin/sleep")
@@ -1574,6 +1575,7 @@ async fn reconciliation_stops_only_the_changed_app_managed_account_host() {
     })
     .unwrap();
     portal.reconcile().await;
+    assert!(replacement.received_requests().await.unwrap().is_empty());
     let mut workers = portal.workers.lock().await;
     assert!(
         workers
@@ -1591,4 +1593,24 @@ async fn reconciliation_stops_only_the_changed_app_managed_account_host() {
     drop(workers);
     owner.shutdown().await;
     unrelated.kill().await.unwrap();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn an_exited_managed_child_cannot_quit_a_replacement_host_for_the_same_profile() {
+    let (_dir, portal, entries, _issuer) = configured_fixture().await;
+    let (replacement, _lock) = fake_host(&portal, &entries[0]).await;
+    let mut child = tokio::process::Command::new("/bin/sh")
+        .args(["-c", "exit 0"])
+        .spawn()
+        .unwrap();
+    child.wait().await.unwrap();
+    Worker {
+        child,
+        profile: profile_dir(&portal.root, &entries[0]),
+        version: entries[0].version.clone(),
+    }
+    .shutdown()
+    .await;
+    assert!(replacement.received_requests().await.unwrap().is_empty());
 }

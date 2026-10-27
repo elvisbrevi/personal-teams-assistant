@@ -8,6 +8,11 @@ pub(super) struct Worker {
 }
 impl Worker {
     pub(super) async fn shutdown(mut self) {
+        // A separately started host may now own the same profile. Never send it
+        // a quit request after our own child has already exited.
+        if !matches!(self.child.try_wait(), Ok(None)) {
+            return;
+        }
         let stopped = tokio::time::timeout(std::time::Duration::from_secs(25), async {
             if !control::client_at(control::Request::new("app_quit"), &self.profile)
                 .await
@@ -232,8 +237,10 @@ impl Portal {
             .filter_map(|id| workers.remove(&id))
             .collect();
         drop(workers);
-        for worker in stale {
-            worker.shutdown().await;
+        for mut worker in stale {
+            // The revoked host cannot authorize graceful IPC. Stop only our child
+            // handle; a replacement operator host may already own this profile.
+            let _ = worker.child.kill().await;
         }
     }
 
