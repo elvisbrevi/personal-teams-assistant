@@ -50,6 +50,12 @@ const FILES: &[(&str, &str)] = &[
         include_str!("../../desktop/skills/personal-teams-assistant/references/variables.md"),
     ),
     (
+        "references/account-configuration.md",
+        include_str!(
+            "../../desktop/skills/personal-teams-assistant/references/account-configuration.md"
+        ),
+    ),
+    (
         "references/azure-wiki.md",
         include_str!("../../desktop/skills/personal-teams-assistant/references/azure-wiki.md"),
     ),

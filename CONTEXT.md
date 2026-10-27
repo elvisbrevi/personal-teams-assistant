@@ -68,6 +68,16 @@ _Avoid_: activity history (for the data), log
 A work item that can hold tasks: a user story, backlog item, Basic-process issue or a bug that is not closed.
 _Avoid_: story, parent
 
+### Accounts
+
+**Account configuration**:
+The preferences, model choices, sources with their audiences, contexts, questions and verified notes that follow an assistant account to every installation signed in to it. Folders, credentials, sign-ins and tunnels are never part of it.
+_Avoid_: profile (the profile is one computer's whole set of files), settings sync
+
+**Unavailable source**:
+A source of the account that this computer cannot read because its repository has no folder here; it keeps its meaning for the account and is never reinterpreted.
+_Avoid_: broken source, missing source
+
 ### Implementation
 
 **Execution machine**:

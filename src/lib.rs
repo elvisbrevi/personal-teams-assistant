@@ -12,6 +12,7 @@ pub mod knowledge;
 pub mod llm;
 pub mod local_chat;
 pub mod pipeline;
+pub mod portable;
 pub mod questions;
 pub mod runtime;
 pub mod security;

@@ -87,6 +87,15 @@ Accounts
                            and choose Trust this machine, then finish [--wait]. No credential is printed.
   github repos             Repositories authorized for the GitHub App.
 
+Account configuration
+  account status              Loaded and saved revisions of the account's portable configuration (preferences, model choices,
+                           sources and audiences, contexts, questions, verified notes), unsaved local changes, what is
+                           unavailable on this computer and the local setup still required. Reads local state only.
+  account sync [--reset]      Restores and refreshes that configuration from the coordinator, which is authoritative. Paths,
+                           repository folders, roots, tunnels, credentials and provider sessions are never synchronized and
+                           nothing is started. Unsaved local changes are kept: --reset replaces them (a private backup is kept).
+  account records status|history [DAY|FROM..TO]  Reads the coordinator's saved daily task record (read-only).
+
 Account variables
   variables list [--limit N]  Names, descriptions and versions of this account's stored variables; never values.
   variables search TEXT       Variables whose name or description contains TEXT.
@@ -299,6 +308,42 @@ fn pairs<T>(
     }
     Ok(map)
 }
+/// The account's portable configuration: synchronize it, see what is loaded, read retained records.
+async fn account_command(args: &[String]) -> Result<Reply> {
+    let words = words(args);
+    match (words.get(1).copied(), words.get(2).copied()) {
+        (Some("status"), _) => call("portable_status", json!({}), None, true).await,
+        (Some("sync"), _) => {
+            let reset = args.iter().any(|a| a == "--reset");
+            call(
+                "portable_sync",
+                if reset {
+                    json!({"reset":true})
+                } else {
+                    json!({})
+                },
+                None,
+                true,
+            )
+            .await
+        }
+        (Some("records"), Some(kind)) => {
+            let (kind, values) = match kind {
+                "status" => ("activity_status", json!({})),
+                _ => match words.get(3).and_then(|a| a.split_once("..")) {
+                    Some((from, to)) => ("activity_history", json!({"day":to,"from":from})),
+                    None => ("activity_history", json!({"day":words.get(3)})),
+                },
+            };
+            let mut body = json!({"kind":kind});
+            body["day"] = values["day"].clone();
+            body["from"] = values["from"].clone();
+            call("portable_records", body, None, true).await
+        }
+        _ => anyhow::bail!("missing argument; consult --help"),
+    }
+}
+
 async fn variables_command(args: &[String]) -> Result<Reply> {
     let words = words(args);
     let word = |i: usize| -> Result<&str> {
@@ -719,6 +764,9 @@ fn validate_args(args: &[String]) -> Result<()> {
             | ["mcp", "config"]
             | ["tools", "list"]
             | ["tools", "call", _]
+            | ["account", "status" | "sync"]
+            | ["account", "records", "status" | "history"]
+            | ["account", "records", "history", _]
             | ["variables", "list" | "verify" | "audit" | "sync" | "status"]
             | ["variables", "search" | "create" | "update" | "delete", _]
             | ["variables", "consumers"]
@@ -886,7 +934,10 @@ fn validate_args(args: &[String]) -> Result<()> {
             p.as_slice().starts_with(&["variables", "update"]),
         ),
         ("--id", p.as_slice().starts_with(&["variables", "create"])),
-        ("--reset", p.as_slice() == ["variables", "sync"]),
+        (
+            "--reset",
+            p.as_slice() == ["variables", "sync"] || p.as_slice() == ["account", "sync"],
+        ),
         (
             "--limit",
             ["audit", "logs", "notes", "variables"].contains(&p[0]),
@@ -960,6 +1011,9 @@ async fn execute(mut args: Vec<String>) -> Result<Reply> {
     if command == "variables" {
         return variables_command(&args).await;
     }
+    if command == "account" {
+        return account_command(&args).await;
+    }
     match command {
         "tools" => {
             if action == "list" {
@@ -993,7 +1047,7 @@ async fn execute(mut args: Vec<String>) -> Result<Reply> {
         }
         "capabilities" => {
             return Ok(Reply::success(
-                json!({"contract":control::CONTRACT,"commands":HELP,"skill_version":env!("CARGO_PKG_VERSION"),"activity_registration_support":true,"web_support":true,"web_access_support":true,"knowledge_index_support":true,"mcp_support":true,"tools_support":true,"todo_support":true,"implementation_support":true,"machine_pairing_support":true,"machine_login_support":true,"machine_management_support":true,"account_variables_support":true,"account_authority_support":true,"shared_accounts_support":true}),
+                json!({"contract":control::CONTRACT,"commands":HELP,"skill_version":env!("CARGO_PKG_VERSION"),"activity_registration_support":true,"web_support":true,"web_access_support":true,"knowledge_index_support":true,"mcp_support":true,"tools_support":true,"todo_support":true,"implementation_support":true,"machine_pairing_support":true,"machine_login_support":true,"machine_management_support":true,"account_variables_support":true,"account_portable_support":true,"account_authority_support":true,"shared_accounts_support":true}),
             ));
         }
         "skill" => return crate::app::skill::command(action, args.get(2).map(String::as_str)),

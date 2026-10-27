@@ -39,6 +39,7 @@ mod headless;
 mod implementation;
 mod mcp;
 mod notes;
+mod portable;
 mod skill;
 mod tools;
 mod variables;
@@ -113,6 +114,7 @@ pub(crate) struct DesktopState {
     activity_recovered: Mutex<Option<PathBuf>>,
     implementation: implementation::State,
     variables: variables::State,
+    portable: portable::State,
 }
 
 #[derive(Serialize)]
@@ -511,6 +513,7 @@ pub(crate) fn init_state(config_dir: &Path, data_dir: &Path) -> Result<DesktopSt
         authority: web::account_scope(&config_dir)?,
         implementation: implementation::State::new(config_path.parent().unwrap())?,
         variables: variables::State::new(config_path.parent().unwrap()),
+        portable: portable::State::new(config_path.parent().unwrap()),
         operations: Mutex::new(()),
         loaded_config: Mutex::new(None),
         config_path,
@@ -838,11 +841,17 @@ async fn save_settings(
     if !tunnel_config.trim().is_empty() {
         validate_tunnel(Path::new(tunnel_config.trim()), &config).map_err(fail)?;
     }
+    // An installation signed in to an account first sends the portable part of the change to the
+    // account's coordinator, which decides it under optimistic concurrency.
+    let previous_map = KnowledgeMap::load(&state.map_path).map_err(fail)?;
+    let forwarded =
+        portable::before_save(state, (&previous, &previous_map), (&config, &map)).await?;
     let was_running = state.running.lock().await.is_some();
     if was_running {
         stop(state).await.map_err(fail)?;
     }
     commit_settings(state, &config, &map, tunnel_config.trim()).map_err(fail)?;
+    portable::after_save(state, forwarded);
     forget_removed_sources(&config, &map);
     *state.activity_graph.lock().await = None;
     if was_running {

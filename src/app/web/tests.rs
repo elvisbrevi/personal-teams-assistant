@@ -496,7 +496,7 @@ async fn fake_host(portal: &Portal, account: &Account) -> (MockServer, fs::File)
         &dir.join("control.json"),
         &json!({"contract":1,"port":port,"token":"synthetic-ipc-token",
         "wiki_support":true,"activity_registration_support":true,"web_support":true,"web_access_support":true,"implementation_support":true,"machine_pairing_support":true,
-        "machine_login_support":true,"machine_management_support":true,"shared_accounts_support":true,"account_authority_support":true,"account_variables_support":true,"account_binding":{"id":account.id,"version":account.version},
+        "machine_login_support":true,"machine_management_support":true,"shared_accounts_support":true,"account_authority_support":true,"account_variables_support":true,"account_portable_support":true,"account_binding":{"id":account.id,"version":account.version},
         "browser_token":"synthetic-browser-token","machine_token":"synthetic-machine-token"})
         .to_string(),
     )

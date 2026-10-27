@@ -1011,6 +1011,44 @@ for (const [label, ctx] of [['variable-sync-desktop', {}], ['variable-sync-phone
   await context.close();
 }
 
+// Account configuration: a signed-in installation shows what it loaded and what is still local setup.
+for (const [label, ctx] of [['account-config-desktop', {}], ['account-config-phone', { viewport: { width: 393, height: 852 }, isMobile: true }]]) {
+  const { context, page, errors } = await open({ axe: true, context: ctx });
+  await page.evaluate(() => showTab('settings', 'panel-account-config'));
+  check(`${label}: a coordinator or standalone installation shows no panel`, await page.locator('#panel-account-config').isHidden());
+  await page.evaluate(() => {
+    window.__ptaAccountConfig = { mode: 'replica', state: 'stale', coordinator: 'https://assistant.example.test', loaded: { generation: 4, digest: 'abc' }, saved: { generation: 5, digest: 'abd' },
+      synced_at: Math.floor(Date.now() / 1000) - 300, error: null, conflict: null, local_changes: false,
+      unavailable: { sources: [{ id: 'handbook-docs', repository: 'handbook' }], questions: ['where-is-the-guide'], partial: [] },
+      local_setup: [{ id: 'repository:handbook', message: 'Connect the repository «handbook» on this computer; the sources that read it are unavailable until then.' },
+        { id: 'roots', message: 'No directory is selected for coding agents on this computer; registering it does not grant access.' }] };
+    return loadAccountConfig();
+  });
+  await page.locator('#panel-account-config').waitFor();
+  check(`${label}: loaded and account revisions are both shown`, await page.locator('#account-config-summary').innerText().then(text => text.includes('Revisión cargada 4') && text.includes('revisión de la cuenta 5')));
+  check(`${label}: local setup is separated from what was restored and translated`, await page.locator('#account-config-setup').innerText().then(text => text.includes('Aún se necesita en este computador') && text.includes('Conecta el repositorio «handbook»') && text.includes('2 elementos de tu cuenta no están disponibles')));
+  check(`${label}: the state is a text badge`, await page.locator('#account-config-state').innerText() === 'Hay una versión más nueva');
+  check(`${label}: replacing local settings is hidden unless there is something to resolve`, await page.locator('#account-config-reset').isHidden());
+  await page.locator('#account-config-sync').click();
+  await page.locator('#notice.ok').getByText('Configuración de la cuenta sincronizada').waitFor();
+  check(`${label}: Synchronize now reports the new state`, await page.locator('#account-config-state').innerText() === 'Sincronizado');
+  await page.evaluate(() => { window.__ptaAccountConfig = { ...window.__ptaAccountConfig, state: 'diverged', local_changes: true }; return loadAccountConfig(); });
+  check(`${label}: unsaved local changes are explained and offer an explicit replacement`, await page.locator('#account-config-problem').innerText().then(text => text.includes('nunca se guardaron en la cuenta')) && await page.locator('#account-config-reset').isVisible());
+  await page.locator('#account-config-reset').click();
+  check(`${label}: replacing needs a second tap`, await page.locator('#account-config-reset').innerText() === 'Toca otra vez para reemplazar' && await page.evaluate(() => (window.__ptaAccountSyncs || []).every(args => !args.reset)));
+  await page.locator('#account-config-reset').click();
+  await page.locator('#notice.ok').getByText('copia privada').waitFor();
+  check(`${label}: the second tap requests a reset`, await page.evaluate(() => window.__ptaAccountSyncs.at(-1).reset === true));
+  await page.evaluate(() => { window.__ptaAccountFail = true; });
+  await page.locator('#account-config-sync').click();
+  await page.locator('#account-config-problem', { hasText: 'No se pudo contactar al coordinador' }).waitFor();
+  check(`${label}: an outage is announced as status and keeps the page usable`, await page.locator('#account-config-problem').getAttribute('role') === 'status' && await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+  await page.evaluate(axeSource);
+  check(`${label}: passes axe`, (await scan(page)).length === 0, JSON.stringify(await scan(page)));
+  check(`${label}: has no browser errors`, errors.length === 0, errors.join('; '));
+  await context.close();
+}
+
 // Account variables: protected entry, metadata-only list and idempotent retries at both sizes.
 for (const [label, ctx] of [['variables-desktop', {}], ['variables-phone', { viewport: { width: 393, height: 852 }, isMobile: true }]]) {
   const { context, page, errors } = await open({ axe: true, context: ctx });

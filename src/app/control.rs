@@ -82,6 +82,8 @@ struct Endpoint {
     #[serde(default)]
     account_variables_support: bool,
     #[serde(default)]
+    account_portable_support: bool,
+    #[serde(default)]
     implementation_support: bool,
     #[serde(default)]
     wiki_support: bool,
@@ -453,6 +455,10 @@ async fn client_with_transport(
             "Incompatible account variables host: update the host and CLI together before managing variables."
         );
         ensure!(
+            endpoint.account_portable_support || !portable::handles(&request.method),
+            "Incompatible account configuration host: update the host and CLI together before synchronizing the account configuration."
+        );
+        ensure!(
             endpoint.implementation_support || !implementation::handles(&request.method),
             "Incompatible implementation host: update the host and CLI together."
         );
@@ -559,6 +565,7 @@ pub(crate) fn launch(
             machine_login_support: true,
             machine_management_support: true,
             account_variables_support: true,
+            account_portable_support: true,
             contract: CONTRACT,
             port: listener.local_addr()?.port(),
             token: token.clone(),
@@ -714,6 +721,10 @@ async fn dispatch_inner(host: &Arc<Host>, request: Request) -> Reply {
     if variables::handles(&request.method) {
         // Independent of profile edits: no operations lock, like the implementation operations.
         return variables::operate(host, &request).await;
+    }
+    if portable::handles(&request.method) {
+        // Takes the operations lock itself, only while it installs a configuration.
+        return portable::operate(host, &request).await;
     }
     let _guard = state.operations.lock().await;
     if activity::active(state).await
@@ -1255,8 +1266,8 @@ async fn operate(
         "question_associate" => super::notes::associate(state, args).await?,
         "answer_feedback" => super::notes::feedback(state, args)?,
         "notes_list" => super::notes::list(state, args)?,
-        "notes_save" => super::notes::save(state, args)?,
-        "notes_remove" => super::notes::remove(state, args)?,
+        "notes_save" => portable::note_save(state, args).await?,
+        "notes_remove" => portable::note_remove(state, args).await?,
         "knowledge_search" => super::notes::search(state, args)?,
         "index_status" => super::notes::status(state)?,
         "index_refresh" => super::notes::refresh(state, args).await?,
@@ -1395,6 +1406,7 @@ mod tests {
                 machine_login_support: true,
                 machine_management_support: true,
                 account_variables_support: true,
+                account_portable_support: true,
                 account_authority_support: true,
                 shared_accounts_support: true,
                 account_binding: None,
@@ -1423,6 +1435,7 @@ mod tests {
                 machine_login_support: true,
                 machine_management_support: true,
                 account_variables_support: true,
+                account_portable_support: true,
                 account_authority_support: true,
                 shared_accounts_support: true,
                 account_binding: None,
@@ -1460,6 +1473,7 @@ mod tests {
                     machine_login_support: true,
                     machine_management_support: true,
                     account_variables_support: true,
+                    account_portable_support: true,
                     account_authority_support: true,
                     shared_accounts_support: true,
                     account_binding: None,

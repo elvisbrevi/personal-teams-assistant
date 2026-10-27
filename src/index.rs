@@ -442,27 +442,50 @@ impl Index {
         }
         note.updated_at = now;
         let tx = db.transaction()?;
-        tx.execute(
-            "INSERT INTO notes(id,payload,updated_at) VALUES (?1,?2,?3) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload,updated_at=excluded.updated_at",
-            params![note.id, serde_json::to_string(&note)?, now],
-        )?;
-        // The keywords are searched with the text; the note is one document.
-        let body = if note.keywords.is_empty() {
-            note.text.clone()
-        } else {
-            format!("{}\n\n{}", note.text, note.keywords.join(", "))
-        };
-        write_document(
-            &tx,
-            NOTES,
-            &note.id,
-            &note.title,
-            &now.to_string(),
-            &serde_json::to_string(&note.contexts)?,
-            &body,
-        )?;
+        put_note(&tx, &note)?;
         tx.commit()?;
         Ok(note)
+    }
+
+    /// Store a note exactly as given, keeping its ID and timestamps (a note the account's
+    /// coordinator already saved).
+    pub fn put_note(&self, note: &Note) -> Result<()> {
+        let mut db = self.db.lock().unwrap();
+        let tx = db.transaction()?;
+        put_note(&tx, note)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Make the notes exactly these (a synchronized snapshot): changed ones are rewritten and
+    /// the others removed, in one transaction.
+    pub fn replace_notes(&self, notes: &[Note]) -> Result<()> {
+        let mut db = self.db.lock().unwrap();
+        let tx = db.transaction()?;
+        let held: Vec<(String, String)> = tx
+            .prepare("SELECT id,payload FROM notes")?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<std::result::Result<_, _>>()?;
+        let wanted: BTreeSet<&str> = notes.iter().map(|n| n.id.as_str()).collect();
+        for (id, _) in held.iter().filter(|(id, _)| !wanted.contains(id.as_str())) {
+            tx.execute("DELETE FROM notes WHERE id=?1", [id])?;
+            tx.execute(
+                "DELETE FROM documents WHERE source=?1 AND key=?2",
+                params![NOTES, id],
+            )?;
+        }
+        for note in notes {
+            let payload = serde_json::to_string(note)?;
+            if held
+                .iter()
+                .any(|(id, held)| id == &note.id && held == &payload)
+            {
+                continue;
+            }
+            put_note(&tx, note)?;
+        }
+        tx.commit()?;
+        Ok(())
     }
 
     pub fn note(&self, id: &str) -> Result<Option<Note>> {
@@ -805,6 +828,29 @@ impl Index {
 }
 
 /// Replace one document and its sections.
+/// Write a note row and its searchable document.
+fn put_note(tx: &rusqlite::Transaction, note: &Note) -> Result<()> {
+    tx.execute(
+        "INSERT INTO notes(id,payload,updated_at) VALUES (?1,?2,?3) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload,updated_at=excluded.updated_at",
+        params![note.id, serde_json::to_string(note)?, note.updated_at],
+    )?;
+    // The keywords are searched with the text; the note is one document.
+    let body = if note.keywords.is_empty() {
+        note.text.clone()
+    } else {
+        format!("{}\n\n{}", note.text, note.keywords.join(", "))
+    };
+    write_document(
+        tx,
+        NOTES,
+        &note.id,
+        &note.title,
+        &note.updated_at.to_string(),
+        &serde_json::to_string(&note.contexts)?,
+        &body,
+    )
+}
+
 fn write_document(
     tx: &rusqlite::Transaction,
     source: &str,
