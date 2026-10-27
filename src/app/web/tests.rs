@@ -29,6 +29,7 @@ fn fixture() -> (tempfile::TempDir, Arc<Portal>, Vec<Account>) {
             version: uuid::Uuid::new_v4().to_string(),
             enabled: true,
             current_profile: false,
+            authorized: false,
         })
         .collect();
     for entry in &accounts {
@@ -108,8 +109,13 @@ async fn machine_transport_rejects_browser_origins_cookies_and_missing_credentia
 }
 
 #[tokio::test]
-async fn only_the_local_owner_can_login_even_if_another_account_is_enabled_and_bound() {
+async fn legacy_non_owner_stays_closed_without_explicit_local_admission() {
     let (_dir, portal, entries, _server) = configured_fixture().await;
+    store::edit_accounts(&portal.root, |entries| {
+        entries[1].authorized = false;
+        Ok(())
+    })
+    .unwrap();
     let other = TestSession {
         cookie: String::new(),
         assertion: assertion(&entries[1]),
@@ -167,7 +173,7 @@ fn pairing_is_single_use_machine_bound_private_and_local_to_an_installation() {
     .unwrap();
     let machine = uuid::Uuid::new_v4().to_string();
     let file = dir.path().join("pairing.json");
-    let reply = store::authorize_machine(&portal.root, &machine, &file).unwrap();
+    let reply = store::authorize_machine(&portal.root, &machine, &file, None).unwrap();
     let payload: Value = serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
     let token = payload["pairing_token"].as_str().unwrap();
     assert!(!reply.to_string().contains(token));
@@ -184,7 +190,7 @@ fn pairing_is_single_use_machine_bound_private_and_local_to_an_installation() {
             0o600
         );
     }
-    assert!(store::authorize_machine(&portal.root, &machine, &file).is_err());
+    assert!(store::authorize_machine(&portal.root, &machine, &file, None).is_err());
     assert!(
         store::consume_pairing(
             &portal.root,
@@ -228,7 +234,7 @@ async fn machine_registration_accepts_only_a_locally_approved_pairing_and_never_
     .unwrap();
     let machine = uuid::Uuid::new_v4().to_string();
     let file = dir.path().join("pairing.json");
-    store::authorize_machine(&portal.root, &machine, &file).unwrap();
+    store::authorize_machine(&portal.root, &machine, &file, None).unwrap();
     let payload: Value = serde_json::from_slice(&fs::read(file).unwrap()).unwrap();
     let token = payload["pairing_token"].as_str().unwrap();
     for (credential, status) in [
@@ -295,7 +301,7 @@ fn expired_revoked_disabled_and_wrong_owner_pairings_are_rejected() {
         .unwrap();
         let machine = uuid::Uuid::new_v4().to_string();
         let file = dir.path().join("pairing.json");
-        store::authorize_machine(&portal.root, &machine, &file).unwrap();
+        store::authorize_machine(&portal.root, &machine, &file, None).unwrap();
         let payload: Value = serde_json::from_slice(&fs::read(file).unwrap()).unwrap();
         let token = payload["pairing_token"].as_str().unwrap();
         match rejection {
@@ -392,7 +398,27 @@ struct TestSession {
     assertion: String,
 }
 async fn configured_fixture() -> (tempfile::TempDir, Arc<Portal>, Vec<Account>, MockServer) {
-    let (dir, mut portal, entries) = fixture();
+    let (dir, portal, mut entries) = fixture();
+    for entry in &mut entries {
+        entry.authorized = true;
+    }
+    write_private(
+        &portal.root.join("accounts.json"),
+        &serde_json::to_string(&entries).unwrap(),
+    )
+    .unwrap();
+    write_private(
+        &portal.root.join("settings.json"),
+        &serde_json::to_string(&Settings {
+            owner_github_id: Some(1001),
+            public_url: "https://localhost:38656".into(),
+            access: Some(access::tests::config()),
+            ..Settings::default()
+        })
+        .unwrap(),
+    )
+    .unwrap();
+    let mut portal = Arc::new(Portal::new(portal.root.clone(), portal.binary.clone()).unwrap());
     let (verifier, server) = access::tests::mock_verifier().await;
     let bindings: HashMap<_, _> = entries
         .iter()
@@ -454,6 +480,9 @@ async fn session_cookie(portal: &Arc<Portal>, account: &Account) -> (TestSession
 async fn fake_host(portal: &Portal, account: &Account) -> (MockServer, fs::File) {
     let server = MockServer::start().await;
     let dir = profile_dir(&portal.root, account);
+    let mut config = read_config(&dir.join("config.toml")).unwrap();
+    config.server.public_url = portal.settings.public_url.clone();
+    write_private(&dir.join("config.toml"), &toml::to_string(&config).unwrap()).unwrap();
     let lock = fs::OpenOptions::new()
         .create(true)
         .truncate(false)
@@ -467,7 +496,7 @@ async fn fake_host(portal: &Portal, account: &Account) -> (MockServer, fs::File)
         &dir.join("control.json"),
         &json!({"contract":1,"port":port,"token":"synthetic-ipc-token",
         "wiki_support":true,"activity_registration_support":true,"web_support":true,"web_access_support":true,"implementation_support":true,"machine_pairing_support":true,
-        "account_authority_support":true,"account_binding":{"id":account.id,"version":account.version},
+        "shared_accounts_support":true,"account_authority_support":true,"account_binding":{"id":account.id,"version":account.version},
         "browser_token":"synthetic-browser-token","machine_token":"synthetic-machine-token"})
         .to_string(),
     )
@@ -553,7 +582,7 @@ async fn access_bootstraps_the_existing_profile_without_a_password_form() {
                 uri,
                 Some(&auth),
                 None,
-                Some("http://localhost:38656"),
+                Some("https://localhost:38656"),
                 json!({"password":"synthetic"})
             )
             .await
@@ -660,10 +689,10 @@ async fn commands_are_session_scoped_and_require_csrf_even_for_reads() {
     let (_alice, _alice_lock) = fake_host(&portal, &entries[0]).await;
     let (_bob, _bob_lock) = fake_host(&portal, &entries[1]).await;
     let request = serde_json::to_value(control::Request::new("snapshot")).unwrap();
-    for entry in entries.iter().take(1) {
+    for (entry, host) in entries.iter().zip([&_alice, &_bob]) {
         let (cookie, csrf) = session_cookie(&portal, entry).await;
         for (token, origin) in [
-            (None, Some("http://localhost:38656")),
+            (None, Some("https://localhost:38656")),
             (Some(csrf.as_str()), Some("https://evil.example")),
             (Some(csrf.as_str()), None),
         ] {
@@ -689,7 +718,7 @@ async fn commands_are_session_scoped_and_require_csrf_even_for_reads() {
                 "/api/control",
                 Some(&cookie),
                 Some(&csrf),
-                Some("http://localhost:38656"),
+                Some("https://localhost:38656"),
                 request.clone(),
             )
             .await,
@@ -706,7 +735,7 @@ async fn commands_are_session_scoped_and_require_csrf_even_for_reads() {
                 "/api/control",
                 Some(&cookie),
                 Some(&csrf),
-                Some("http://localhost:38656"),
+                Some("https://localhost:38656"),
                 forged,
             )
             .await,
@@ -714,13 +743,15 @@ async fn commands_are_session_scoped_and_require_csrf_even_for_reads() {
         .await;
         assert_eq!(data["ok"], false);
         assert_eq!(data["code"], "invalid_input");
-        let delivered = _alice.received_requests().await.unwrap();
+        let delivered = host.received_requests().await.unwrap();
         assert_eq!(delivered.len(), 1);
         assert_eq!(
             delivered[0].headers["authorization"],
             "Bearer synthetic-browser-token"
         );
-        assert!(_bob.received_requests().await.unwrap().is_empty());
+        if entry.id == entries[0].id {
+            assert!(_bob.received_requests().await.unwrap().is_empty());
+        }
     }
     assert_ne!(
         profile_dir(&portal.root, &entries[0]),
@@ -755,7 +786,7 @@ async fn logout_revokes_local_sessions_and_the_access_assertion_even_after_resta
             "/api/logout",
             Some(&cookie),
             None,
-            Some("http://localhost:38656"),
+            Some("https://localhost:38656"),
             json!({})
         )
         .await
@@ -768,7 +799,7 @@ async fn logout_revokes_local_sessions_and_the_access_assertion_even_after_resta
         "/api/logout",
         Some(&cookie),
         Some(&csrf),
-        Some("http://localhost:38656"),
+        Some("https://localhost:38656"),
         json!({}),
     )
     .await;
@@ -1118,11 +1149,6 @@ async fn callbacks_route_only_to_the_matching_enabled_profile_without_administra
             entry.id
         );
         let response = send(&portal, "POST", &url, None, None, None, json!({})).await;
-        if entry.id == entries[1].id {
-            assert_eq!(response.status(), StatusCode::NOT_FOUND);
-            assert!(server.received_requests().await.unwrap().is_empty());
-            continue;
-        }
         assert_eq!(response.status(), StatusCode::OK);
         let body = to_bytes(response.into_body(), 4096).await.unwrap();
         assert_eq!(body.as_ref(), entry.username.as_bytes());
@@ -1298,4 +1324,271 @@ async fn older_hosts_never_receive_a_machine_connection_or_its_credentials() {
             .contains("pairing")
     );
     assert!(host.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn admitted_accounts_sign_in_privately_and_rebinding_revokes_only_their_authority() {
+    let (_dir, portal, entries, _issuer) = configured_fixture().await;
+    let (_owner, _owner_lock) = fake_host(&portal, &entries[0]).await;
+    let (_other, _other_lock) = fake_host(&portal, &entries[1]).await;
+    let (owner, _) = session_cookie(&portal, &entries[0]).await;
+    let mut other = TestSession {
+        cookie: String::new(),
+        assertion: assertion(&entries[1]),
+    };
+    let login = send(
+        &portal,
+        "GET",
+        "/login",
+        Some(&other),
+        None,
+        None,
+        Value::Null,
+    )
+    .await;
+    assert_eq!(login.status(), StatusCode::OK);
+    other.cookie = login.headers()[header::SET_COOKIE]
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .into();
+    let session = json_body(
+        send(
+            &portal,
+            "GET",
+            "/api/session",
+            Some(&other),
+            None,
+            None,
+            Value::Null,
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(session["username"], "bob");
+    assert_eq!(
+        session["profile"],
+        profile_dir(&portal.root, &entries[1]).to_str().unwrap()
+    );
+    assert!(!session.to_string().contains(&entries[0].id));
+    // A cookie from one account is unusable with the other identity's verified assertion.
+    let crossed = TestSession {
+        cookie: owner.cookie.clone(),
+        assertion: other.assertion.clone(),
+    };
+    assert_eq!(
+        send(
+            &portal,
+            "GET",
+            "/api/session",
+            Some(&crossed),
+            None,
+            None,
+            Value::Null
+        )
+        .await
+        .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    let machine = uuid::Uuid::new_v4().to_string();
+    let token = security::random_secret();
+    write_private(&profile_dir(&portal.root, &entries[1]).join("implementation/registry.json"),
+        &json!({"machines":[{"id":machine,"account_version":entries[1].version,"secret_hash":format!("{:x}",Sha256::digest(token.as_bytes()))}]}).to_string()).unwrap();
+    store::edit_accounts(&portal.root, |entries| {
+        entries[1].version = uuid::Uuid::new_v4().to_string();
+        entries[1].access_binding.as_mut().unwrap().provider_user_id = "1003".into();
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(
+        send(
+            &portal,
+            "GET",
+            "/api/session",
+            Some(&other),
+            None,
+            None,
+            Value::Null
+        )
+        .await
+        .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        send(
+            &portal,
+            "GET",
+            "/api/session",
+            Some(&owner),
+            None,
+            None,
+            Value::Null
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
+    let machine_response = router(portal.clone())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/machines")
+                .header(header::HOST, "localhost:38656")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({"id":machine,"action":"poll"}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(machine_response.status(), StatusCode::FORBIDDEN);
+    assert_eq!(
+        send(
+            &portal,
+            "POST",
+            &format!("/webhooks/{}/graph/notifications", entries[1].id),
+            None,
+            None,
+            None,
+            json!({})
+        )
+        .await
+        .status(),
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+}
+
+#[tokio::test]
+async fn additional_accounts_require_new_hosts_before_any_request_is_sent() {
+    let (_dir, portal, entries, _issuer) = configured_fixture().await;
+    let (host, _lock) = fake_host(&portal, &entries[1]).await;
+    let dir = profile_dir(&portal.root, &entries[1]);
+    let file = dir.join("control.json");
+    let mut descriptor: Value = serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
+    descriptor
+        .as_object_mut()
+        .unwrap()
+        .remove("shared_accounts_support");
+    write_private(&file, &descriptor.to_string()).unwrap();
+    assert!(portal.worker(&entries[1]).await.is_err());
+    assert!(
+        control::client_scoped(
+            control::Request::new("snapshot"),
+            &dir,
+            &entries[1].id,
+            &entries[1].version,
+            authority::Transport::Browser
+        )
+        .await
+        .is_err()
+    );
+    assert!(host.received_requests().await.unwrap().is_empty());
+}
+
+#[test]
+fn pairing_for_an_additional_account_is_explicit_and_version_bound() {
+    let (dir, portal, mut entries) = fixture();
+    entries[1].authorized = true;
+    write_private(
+        &portal.root.join("accounts.json"),
+        &serde_json::to_string(&entries).unwrap(),
+    )
+    .unwrap();
+    let config = Settings {
+        owner_github_id: Some(1001),
+        public_url: "https://assistant.example.com".into(),
+        access: Some(access::tests::config()),
+        ..Settings::default()
+    };
+    write_private(
+        &portal.root.join("settings.json"),
+        &serde_json::to_string(&config).unwrap(),
+    )
+    .unwrap();
+    let machine = uuid::Uuid::new_v4().to_string();
+    let output = dir.path().join("second-account-pairing.json");
+    store::authorize_machine(&portal.root, &machine, &output, Some("bob")).unwrap();
+    let payload: Value = serde_json::from_slice(&fs::read(&output).unwrap()).unwrap();
+    let account = store::consume_pairing(
+        &portal.root,
+        &config,
+        payload["pairing_token"].as_str().unwrap(),
+        &machine,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(account.id, entries[1].id);
+    let output = dir.path().join("revoked-pairing.json");
+    store::authorize_machine(&portal.root, &machine, &output, Some("bob")).unwrap();
+    let payload: Value = serde_json::from_slice(&fs::read(&output).unwrap()).unwrap();
+    store::edit_accounts(&portal.root, |entries| {
+        entries[1].version = uuid::Uuid::new_v4().to_string();
+        Ok(())
+    })
+    .unwrap();
+    assert!(
+        store::consume_pairing(
+            &portal.root,
+            &config,
+            payload["pairing_token"].as_str().unwrap(),
+            &machine
+        )
+        .unwrap()
+        .is_none()
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn reconciliation_stops_only_the_changed_app_managed_account_host() {
+    let (_dir, portal, entries, _issuer) = configured_fixture().await;
+    let mut pids = Vec::new();
+    for account in &entries {
+        let child = tokio::process::Command::new("/bin/sleep")
+            .arg("60")
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        pids.push(child.id().unwrap());
+        portal.workers.lock().await.insert(
+            account.id.clone(),
+            Worker {
+                child,
+                profile: profile_dir(&portal.root, account),
+                version: account.version.clone(),
+            },
+        );
+    }
+    let mut unrelated = tokio::process::Command::new("/bin/sleep")
+        .arg("60")
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    store::edit_accounts(&portal.root, |entries| {
+        entries[1].version = uuid::Uuid::new_v4().to_string();
+        Ok(())
+    })
+    .unwrap();
+    portal.reconcile().await;
+    let mut workers = portal.workers.lock().await;
+    assert!(
+        workers
+            .get_mut(&entries[0].id)
+            .unwrap()
+            .child
+            .try_wait()
+            .unwrap()
+            .is_none()
+    );
+    assert!(!workers.contains_key(&entries[1].id));
+    assert!(!Path::new(&format!("/proc/{}", pids[1])).exists());
+    assert!(unrelated.try_wait().unwrap().is_none());
+    let owner = workers.remove(&entries[0].id).unwrap();
+    drop(workers);
+    owner.shutdown().await;
+    unrelated.kill().await.unwrap();
 }

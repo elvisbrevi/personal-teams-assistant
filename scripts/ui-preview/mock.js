@@ -3,12 +3,17 @@
 // Saves are recorded in window.__ptaLastSave and every method called in window.__ptaCalls.
 (() => {
   const params = new URLSearchParams(location.search);
-  const scenario = params.get('scenario') || 'full';
+  const sharedAccount = params.get('scenario') === 'account';
+  const scenario = sharedAccount ? 'fresh' : params.get('scenario') || 'full';
   const base = structuredClone(window.__PTA_FIXTURE__.snapshot);
   const DAY = '2026-10-14';
   const NOW = Date.parse('2026-10-14T16:20:00Z');
   const secs = ms => Math.floor(ms / 1000);
   let snapshot = base;
+  if (sharedAccount) {
+    snapshot.account = { id: '33333333-3333-4333-8333-333333333333', username: 'bob', shared: true, local_execution: false };
+    snapshot.config.llm.chain = [{ provider: 'deepseek', model: 'deepseek-flash', effort: 'max', enabled: true }];
+  }
   const org = 'https://dev.azure.com/contoso';
 
   if (scenario === 'full') {
@@ -258,7 +263,7 @@
     list_github_issues: args => handlers.list_github_epics(args),
     open_work_item: args => { window.__ptaOpenedWorkItem = args.url; return { url: args.url }; },
     snapshot: () => structuredClone(snapshot),
-    llm_providers: () => providers,
+    llm_providers: () => sharedAccount ? { providers: providers.providers.filter(p => p.transport === 'api') } : providers,
     audit: () => audit,
     self_chat_status: () => ({ diagnostics: { cursor: ['x', secs(ago(1))], unresolved_outputs: 0 } }),
     activity_history: args => ({ day: args.day || DAY, running: !!window.__ptaActivityRunning,

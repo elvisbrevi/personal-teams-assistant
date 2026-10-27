@@ -114,6 +114,7 @@ pub(crate) struct DesktopState {
 
 #[derive(Serialize)]
 struct Snapshot {
+    account: serde_json::Value,
     revision: String,
     loaded_config: Option<Config>,
     host_version: String,
@@ -445,6 +446,21 @@ pub(crate) fn configure_credentials(config_dir: &Path) -> Result<()> {
     security::keyring_profile(Some("default"))?;
     security::file_credential_store(Some(&config_dir.join("credentials")));
     security::prefer_file_credentials(control::isolated_profile_dir()?.is_some());
+    security::account_only_credentials(
+        web::account_scope(config_dir)
+            .map(|scope| scope.shared && !scope.owner)
+            .unwrap_or_else(|_| {
+                config_dir
+                    .canonicalize()
+                    .unwrap_or_else(|_| config_dir.to_path_buf())
+                    .parent()
+                    .is_some_and(|p| {
+                        p.file_name().is_some_and(|n| n == "profiles")
+                            && p.parent()
+                                .is_some_and(|p| p.file_name().is_some_and(|n| n == "web"))
+                    })
+            }),
+    );
     Ok(())
 }
 
@@ -580,6 +596,7 @@ async fn snapshot(host: &Host) -> std::result::Result<Snapshot, String> {
         let _ = finished.task.await;
     }
     Ok(Snapshot {
+        account: web::account_identity(&state.authority).map_err(fail)?,
         revision: control::revision(state).map_err(fail)?,
         loaded_config: state
             .loaded_config
@@ -634,7 +651,7 @@ async fn stop(state: &DesktopState) -> Result<()> {
 async fn start(state: &DesktopState) -> Result<()> {
     // Machine service controls retain their existing Teams lease; arbitrary execution does not.
     ensure!(
-        authority::invocation(state)?.scope.owner,
+        authority::invocation(state)?.scope.admitted,
         "{}",
         authority::EXECUTION_DENIED
     );
@@ -1022,6 +1039,7 @@ async fn update_github_repository(
 }
 
 struct LoginState {
+    host: Arc<Host>,
     oauth: Arc<OAuth>,
     csrf: String,
     result: Mutex<Option<oneshot::Sender<Option<String>>>>,
@@ -1038,7 +1056,11 @@ async fn desktop_callback(
         return (StatusCode::BAD_REQUEST, "Invalid response from Microsoft.");
     }
     let result = if let Some(code) = query.get("code") {
-        state.oauth.complete_desktop(csrf, code).await.ok()
+        state
+            .oauth
+            .complete_desktop_checked(csrf, code, || authority::require_account(&state.host.state))
+            .await
+            .ok()
     } else {
         None
     };
@@ -1118,6 +1140,7 @@ async fn begin_microsoft(host: &Arc<Host>, open: bool) -> std::result::Result<St
     let router = Router::new()
         .route("/", get(desktop_callback))
         .with_state(Arc::new(LoginState {
+            host: host.clone(),
             oauth,
             csrf,
             result: Mutex::new(Some(sender)),
@@ -1142,6 +1165,7 @@ async fn begin_microsoft(host: &Arc<Host>, open: bool) -> std::result::Result<St
         let state = &host.state;
         *state.microsoft_redirect.lock().await = None;
         let _guard = state.operations.lock().await;
+        authority::require_account(state).map_err(fail)?;
         let user = result
             .map_err(|_| "Microsoft authorization timed out.".to_string())?
             .map_err(fail)?

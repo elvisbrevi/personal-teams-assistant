@@ -46,6 +46,22 @@ async function open(options = {}, scenario = 'full') {
   await context.close();
 }
 
+// An admitted ordinary account sees its own identity and never probes host CLI sessions.
+{
+  const { context, page, errors } = await open({ axe: true, context: { viewport: { width: 393, height: 852 }, isMobile: true } }, 'account');
+  check('shared account Home explains personal execution', await page.locator('#azure-cli-status').innerText().then(text => text.includes('máquina personal')));
+  check('shared account does not probe operator CLI sessions', await page.evaluate(() => !window.__ptaCalls.some(call => ['azure_cli_status', 'github_cli_status'].includes(call.method))));
+  await page.evaluate(() => showTab('settings', 'panel-web-account'));
+  check('shared account shows its own identity', await page.locator('#account-identity').innerText().then(text => text.includes('bob')));
+  check('shared account explains API execution limits in Spanish', await page.locator('#account-execution-limit').isVisible() && await page.locator('#account-execution-limit').innerText().then(text => text.includes('configuración API')));
+  check('native account view omits browser sign out', !await page.locator('#web-logout-settings').isVisible());
+  await page.evaluate(axeSource);
+  const violations = await page.evaluate(async () => (await axe.run(document, { runOnly: { type: 'tag', values: ['wcag2a', 'wcag2aa', 'wcag21aa', 'wcag22aa'] } })).violations);
+  check('shared account phone settings pass axe', violations.length === 0, JSON.stringify(violations));
+  check('shared account has no client errors', errors.length === 0, errors.join('; '));
+  await context.close();
+}
+
 // ---------------------------------------------------------------- axe scans (both versions)
 const axeSummary = {};
 const scan = page => page.evaluate(async () => (await axe.run(document, { runOnly: { type: 'tag', values: ['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa', 'wcag22aa'] } })).violations

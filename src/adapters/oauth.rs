@@ -159,9 +159,16 @@ impl OAuth {
         super::bounded_json(response, 64_000).await
     }
     pub async fn complete_desktop(&self, state: &str, code: &str) -> Result<String> {
-        self.complete_pending(state, code).await
+        self.complete_desktop_checked(state, code, || Ok(())).await
     }
-    async fn complete_pending(&self, state: &str, code: &str) -> Result<String> {
+    /// Recheck the owning account before network work and before persisting tokens.
+    pub(crate) async fn complete_desktop_checked(
+        &self,
+        state: &str,
+        code: &str,
+        check: impl Fn() -> Result<()>,
+    ) -> Result<String> {
+        check()?;
         let pending = self
             .pending
             .lock()
@@ -206,6 +213,7 @@ impl OAuth {
             expires_at: chrono::Utc::now().timestamp() + response.expires_in,
         };
         let mut guard = self.tokens.lock().await;
+        check()?;
         self.store
             .put_token(&self.vault.seal(&serde_json::to_vec(&tokens)?)?)?;
         *guard = Some(tokens);
@@ -440,5 +448,63 @@ mod tests {
             .find(|r| r.url.path() == "/token")
             .unwrap();
         assert!(!String::from_utf8_lossy(&request.body).contains("client_secret"));
+    }
+    #[tokio::test]
+    async fn a_revoked_account_cannot_complete_or_persist_a_pending_oauth_login() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let server = MockServer::start().await;
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::open(&dir.path().join("tokens.db")).unwrap());
+        let mut config = (*config()).clone();
+        config.graph.user_id = uuid::Uuid::nil().to_string();
+        let mut oauth = OAuth::new(
+            Arc::new(config),
+            reqwest::Client::new(),
+            store.clone(),
+            Vault::new(&STANDARD.encode([9; 32])).unwrap(),
+        )
+        .unwrap();
+        oauth.token_endpoint = format!("{}/token", server.uri());
+        oauth.me_endpoint = format!("{}/me", server.uri());
+        Mock::given(method("POST")).and(path("/token")).respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "access_token":"synthetic-account-access", "refresh_token":"synthetic-account-refresh", "expires_in":3600
+        }))).expect(1).mount(&server).await;
+        Mock::given(method("GET"))
+            .and(path("/me"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"id":uuid::Uuid::new_v4().to_string()})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let (_, state) = oauth
+            .begin_desktop("http://localhost:34567/")
+            .await
+            .unwrap();
+        assert!(
+            oauth
+                .complete_desktop_checked(&state, "synthetic-code", || anyhow::bail!(
+                    "Account revoked"
+                ))
+                .await
+                .is_err()
+        );
+        assert!(server.received_requests().await.unwrap().is_empty());
+        let checks = AtomicUsize::new(0);
+        assert!(
+            oauth
+                .complete_desktop_checked(&state, "synthetic-code", || {
+                    ensure!(
+                        checks.fetch_add(1, Ordering::SeqCst) == 0,
+                        "Account revoked during login"
+                    );
+                    Ok(())
+                })
+                .await
+                .is_err()
+        );
+        assert_eq!(checks.load(Ordering::SeqCst), 2);
+        assert!(store.token().unwrap().is_none());
     }
 }

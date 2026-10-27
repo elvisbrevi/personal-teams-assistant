@@ -4,11 +4,17 @@ use serde_json::Value;
 pub(super) struct Worker {
     pub child: tokio::process::Child,
     pub profile: PathBuf,
+    pub version: String,
 }
 impl Worker {
     pub(super) async fn shutdown(mut self) {
         let stopped = tokio::time::timeout(std::time::Duration::from_secs(25), async {
-            let _ = control::client_at(control::Request::new("app_quit"), &self.profile).await;
+            if !control::client_at(control::Request::new("app_quit"), &self.profile)
+                .await
+                .is_ok_and(|reply| reply.ok)
+            {
+                let _ = self.child.start_kill();
+            }
             let _ = self.child.wait().await;
         })
         .await;
@@ -41,6 +47,7 @@ pub(super) fn create_profile(root: &Path, account: &Account) -> Result<()> {
         enabled: true,
     }];
     config.server.webhook_prefix = format!("/webhooks/{}", account.id);
+    config.server.cloudflare_tunnel = false;
     let portal = settings(root)?;
     if portal.https() {
         config.server.public_url = portal.public_url;
@@ -91,6 +98,8 @@ pub(super) fn worker_command(binary: &Path, dir: &Path) -> tokio::process::Comma
         .env("USERPROFILE", &home)
         .env("XDG_CONFIG_HOME", home.join(".config"))
         .env("XDG_DATA_HOME", home.join(".local/share"))
+        .env("XDG_CACHE_HOME", home.join(".cache"))
+        .env("XDG_STATE_HOME", home.join(".local/state"))
         .env("APPDATA", home.join("AppData/Roaming"))
         .env("LOCALAPPDATA", home.join("AppData/Local"))
         .env("PTA_PROFILE_DIR", dir)
@@ -105,14 +114,17 @@ pub(super) fn worker_command(binary: &Path, dir: &Path) -> tokio::process::Comma
 
 impl Portal {
     pub(super) async fn worker(&self, account: &Account) -> Result<PathBuf> {
+        let current = accounts(&self.root)?
+            .into_iter()
+            .find(|a| a.id == account.id);
         ensure!(
-            self.settings.owns(account),
-            "This account does not own this installation."
+            current.is_some_and(|a| a.version == account.version && self.settings.admits(&a)),
+            "This assistant account is unavailable. Contact the portal operator."
         );
         let dir = profile_dir(&self.root, account);
         let mut workers = self.workers.lock().await;
         if control::existing_host_at(&dir).is_ok() {
-            control::require_web_access_host_at(&dir)?;
+            control::require_account_host_at(&dir, &account.id, &account.version)?;
             if !account.current_profile {
                 let mut config = read_config(&dir.join("config.toml"))?;
                 let public_url = if self.settings.https() {
@@ -168,10 +180,12 @@ impl Portal {
             Worker {
                 child,
                 profile: dir.clone(),
+                version: account.version.clone(),
             },
         );
         for _ in 0..100 {
             if control::existing_host_at(&dir).is_ok() {
+                control::require_account_host_at(&dir, &account.id, &account.version)?;
                 return Ok(dir);
             }
             if workers
@@ -201,13 +215,25 @@ impl Portal {
         let Ok(entries) = accounts(&self.root) else {
             return;
         };
-        for entry in &entries {
-            if !self.settings.owns(entry) {
-                let worker = self.workers.lock().await.remove(&entry.id);
-                if let Some(worker) = worker {
-                    worker.shutdown().await;
-                }
-            }
+        let mut workers = self.workers.lock().await;
+        let stale: Vec<_> = workers
+            .iter()
+            .filter(|(id, worker)| {
+                !entries.iter().any(|entry| {
+                    entry.id == **id
+                        && entry.version == worker.version
+                        && self.settings.admits(entry)
+                })
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        let stale: Vec<_> = stale
+            .into_iter()
+            .filter_map(|id| workers.remove(&id))
+            .collect();
+        drop(workers);
+        for worker in stale {
+            worker.shutdown().await;
         }
     }
 
@@ -250,12 +276,19 @@ impl Portal {
         request: &control::Request,
     ) -> Result<()> {
         authority::reject_authority_arguments(&request.args)?;
+        let current = accounts(&self.root)?
+            .into_iter()
+            .find(|a| a.id == account.id);
         ensure!(
-            self.settings.owns(account),
+            current.is_some_and(|a| a.version == account.version && self.settings.admits(&a)),
             "Operation is unavailable for this installation."
         );
+        if !self.settings.owns(account) {
+            authority::check_shared_operation(request)?;
+        }
         const METHODS: &[&str] = &[
             "snapshot",
+            "logs",
             "get_github_issue",
             "machine_list",
             "machine_settings",
@@ -398,6 +431,18 @@ impl Portal {
                 && config.knowledge_map == saved.knowledge_map,
             "The portal operator manages profile and data paths."
         );
+        if !self.settings.owns(account) {
+            authority::require_api_config(config)?;
+            ensure!(
+                !map.resources.iter().any(|r| matches!(
+                    r.access,
+                    Access::Tool {
+                        tool: crate::tools::ToolSpec::SqlServer { .. }
+                    }
+                )),
+                "SQL sources require a personal trusted machine."
+            );
+        }
         ensure!(
             config.server.bind == saved.server.bind
                 && config.server.public_url == saved.server.public_url
@@ -426,7 +471,7 @@ impl Portal {
     }
 }
 
-fn confined(path: &Path, root: &Path) -> bool {
+pub(super) fn confined(path: &Path, root: &Path) -> bool {
     path.is_absolute()
         && !path
             .components()

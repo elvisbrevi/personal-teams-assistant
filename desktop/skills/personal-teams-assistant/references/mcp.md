@@ -29,3 +29,5 @@ MCP tools use the same authenticated host dispatcher as CLI and GUI; tool argume
 cannot select an account or acquire operator maintenance authority. Ordinary
 shared-host provider/coding processes are refused before launch; use a personal
 trusted machine. See [the authority boundary](web-access.md#account-and-execution-authority).
+
+Additional portal accounts require explicit local operator authorization (0.9.11+, `shared_accounts_support`). MCP retains the authenticated profile: it can operate that account's own API assistant, notes, sources and records, but cannot administer portal accounts or run provider/coding processes on the shared OS identity. Use the account owner's personal trusted machine for local execution.

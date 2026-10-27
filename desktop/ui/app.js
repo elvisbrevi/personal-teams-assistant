@@ -1144,6 +1144,7 @@ function tile(label, value, tone, detail, go, symbol) {
 let azureCliStatus = { state: 'checking', authenticated: false };
 let azureCliPending = null;
 function loadAzureCliStatus() {
+  if (live?.account?.local_execution === false) return Promise.resolve();
   if (azureCliPending) return azureCliPending;
   azureCliPending = invoke('azure_cli_status').then(result => { azureCliStatus = result; })
     .catch(() => { azureCliStatus = { state: 'unavailable', authenticated: false }; })
@@ -1151,6 +1152,7 @@ function loadAzureCliStatus() {
   return azureCliPending;
 }
 function azureCliTile() {
+  if (live?.account?.local_execution === false) return personalCliTile(t('Azure CLI'), 'azure-cli-status');
   const state = azureCliStatus;
   const value = { authenticated: t('Authenticated'), not_authenticated: t('Not authenticated'), not_installed: t('Not installed'), unavailable: t('Session unavailable'), checking: t('Checking…') }[state.state] || t('Session unavailable');
   const hint = state.authenticated ? t('Azure DevOps session is valid. Select to refresh.')
@@ -1169,6 +1171,7 @@ function azureCliTile() {
 let githubCliStatus = { state: 'checking', authenticated: false };
 let githubCliPending = null;
 function loadGithubCliStatus() {
+  if (live?.account?.local_execution === false) return Promise.resolve();
   if (githubCliPending) return githubCliPending;
   githubCliPending = invoke('github_cli_status').then(result => { githubCliStatus = result; })
     .catch(() => { githubCliStatus = { state: 'unavailable', authenticated: false }; })
@@ -1176,6 +1179,7 @@ function loadGithubCliStatus() {
   return githubCliPending;
 }
 function githubCliTile() {
+  if (live?.account?.local_execution === false) return personalCliTile(t('GitHub CLI'), 'github-cli-status');
   const state = githubCliStatus;
   const value = { authenticated: t('Authenticated'), not_authenticated: t('Not authenticated'), not_installed: t('Not installed'), unavailable: t('Session unavailable'), checking: t('Checking…') }[state.state] || t('Session unavailable');
   const hint = state.authenticated ? t('GitHub session is valid. Select to refresh.')
@@ -1189,6 +1193,11 @@ function githubCliTile() {
     await busy(row, loadGithubCliStatus);
     if (tab === 'overview') $('#github-cli-status')?.focus({ preventScroll: true });
   };
+  return row;
+}
+function personalCliTile(label, id) {
+  const row = tile(label, t('Personal machine required'), 'muted', t('CLI sessions belong on your personal trusted machine.'), ['settings', 'panel-web-account'], 'chip');
+  row.id = id;
   return row;
 }
 setInterval(() => { if (current && tab === 'overview') { loadAzureCliStatus(); loadGithubCliStatus(); } }, 60000);
@@ -1306,6 +1315,15 @@ function renderSteps(s) {
 function renderLive() {
   const s = live;
   if (!s) return;
+  if (s.account) {
+    $('#account-identity').hidden = false;
+    $('#account-identity').textContent = t('Assistant account: {name}', { name: s.account.username });
+    $('#account-execution-limit').hidden = s.account.local_execution !== false;
+    if (s.account.shared) {
+      $('#panel-web-account').hidden = false;
+      $('#web-logout-settings').hidden = !window.ptaTransport.browser;
+    }
+  }
   const state = transitions[transition] ?? assistantState(s);
   // A running assistant's dot pulses slowly; a starting or stopping one, faster.
   const motion = transition ? '' : s.running ? ' live' : '';

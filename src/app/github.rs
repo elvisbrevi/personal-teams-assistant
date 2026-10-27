@@ -237,7 +237,7 @@ fn save(tokens: &Tokens) -> Result<()> {
     security::put_desktop_secret(PROFILE, TOKEN_NAME, &serde_json::to_string(tokens)?)
 }
 
-pub async fn finish(pending: Pending) -> Result<()> {
+pub async fn finish(pending: Pending, check: impl Fn() -> Result<()>) -> Result<()> {
     let client = client()?;
     let mut interval = pending.interval;
     loop {
@@ -246,6 +246,7 @@ pub async fn finish(pending: Pending) -> Result<()> {
             "GitHub authorization expired"
         );
         tokio::time::sleep(Duration::from_secs(interval)).await;
+        check()?;
         let response = client
             .post("https://github.com/login/oauth/access_token")
             .header("Accept", "application/json")
@@ -258,6 +259,7 @@ pub async fn finish(pending: Pending) -> Result<()> {
             .await?;
         let token: TokenResponse = checked_json(response).await?;
         if let Some(access_token) = token.access_token {
+            check()?;
             ensure!(access_token.len() >= 20, "invalid GitHub token");
             save(&Tokens {
                 client_id: pending.client_id,

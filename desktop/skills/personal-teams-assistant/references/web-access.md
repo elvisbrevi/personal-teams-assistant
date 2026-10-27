@@ -7,9 +7,9 @@ existing dedicated Tunnel. Its HTTPS hostname and complete API must be protected
 by Cloudflare Access. GitHub owns the interactive sign-in; there is no second
 password form, public registration or password authentication endpoint.
 
-Installing the public crate never grants access to a maintainer's server. Each person supplies their own computer/VPS, HTTPS hostname, Cloudflare account/tunnel/Access application, dedicated GitHub OAuth app, Microsoft application and provider credentials. No production URL or login identity is a runtime default. One installation serves only its configured GitHub owner, not unrelated tenants.
+Installing the public crate never grants access to a maintainer's server. Each person supplies their own computer/VPS, HTTPS hostname, Cloudflare account/tunnel/Access application, dedicated GitHub OAuth app, Microsoft application and provider credentials. No production URL or login identity is a runtime default. Owner-only access remains the default. Additional accounts need explicit local operator authorization and their own private configuration; installing the crate never registers them.
 
-Configure `owner_github_id` to your verified positive integer GitHub user ID. Existing portals with exactly one locally associated identity infer that owner for compatibility; ambiguous legacy associations cannot start until an owner is explicitly configured. Other accounts remain on disk but cannot authenticate, receive callbacks or start a portal-owned host.
+Configure `owner_github_id` to your verified positive integer GitHub user ID. Existing portals with exactly one locally associated identity infer that owner for compatibility; ambiguous legacy associations cannot start until an owner is explicitly configured. Legacy non-owner accounts remain on disk but cannot authenticate, receive callbacks or start a portal-owned host until the operator explicitly authorizes them.
 
 ## Operator-local accounts and recovery
 
@@ -18,6 +18,10 @@ pta web status
 pta web users list
 pta web users add owner --current-profile
 pta web users bind owner < /private/path/verified-owner-identity.json
+pta web users add colleague
+pta web users authorize colleague
+pta web users bind colleague < /private/path/verified-colleague-identity.json
+pta web users enable colleague
 pta web users unbind owner
 pta web users revoke owner
 pta web users disable owner
@@ -27,7 +31,10 @@ pta --json web callbacks > /private/path/production-callbacks.json
 
 Create `owner --current-profile` only if it is absent. An existing `owner` account
 must keep its ID and current profile association. `add` takes no password and does
-not grant access until `bind`. No username/email similarity associates accounts.
+not grant access until `bind`. Additional accounts also require `authorize`, which is
+operator-local and unavailable in the GUI/MCP account tools. `enable` never implies
+admission; `--current-profile` can bind only the configured owner. No username/email
+similarity associates accounts.
 
 After authorizing the **dedicated login OAuth App**, obtain the identity response
 from `https://assistant.example.com/cdn-cgi/access/get-identity` in the signed-in
@@ -63,8 +70,7 @@ no audiences/external processing and DeepSeek as the default provider.
 
 Legacy account/settings JSON remains readable without deleting passwords,
 profiles or credentials. Retired hashes remain inert. Hosts must advertise
-`web_access_support` before the new account schema is written or the portal
-reuses them; transition an older host first. No portal starts without Access
+`shared_accounts_support` (0.9.11+) before the new account schema is written or an additional account host is reused; transition an older host first. No portal starts without Access
 configuration. Native local recovery does not expose an HTTP password backdoor.
 
 ## Cloudflare setup
@@ -129,7 +135,7 @@ IDs come from actual Cloudflare resources; never invent them. Configuration take
 effect when the portal restarts. Plain HTTP previews cannot authenticate Access.
 
 `pta web callbacks` exports only exact `/webhooks/<profile-id>/graph/notifications`
-and `/webhooks/<profile-id>/graph/lifecycle` paths for the enabled, bound owner only. For a fresh isolated owner, the first
+and `/webhooks/<profile-id>/graph/lifecycle` paths for enabled, bound, admitted accounts only. For a fresh isolated owner, the first
 export is empty while Access/binding are being configured. After binding the owner,
 export `pta --json web callbacks` again to the callbacks file and rerun the Access
 helper with that refreshed file before starting Teams. Repeat after any owner-profile
@@ -186,7 +192,7 @@ or provider logins. The portal remembers Assistant Start/Stop state and stops on
 hosts it owns on exit; a running desktop host remains owned by the desktop.
 
 Verify GitHub sign-in over HTTPS from the Mac and phone with no password form,
-owner access, blocked additional identities and
+owner and admitted second-account access, blocked unauthorized identities and
 disabled identities, JWT rejection, logout/replay/expiration, exact Graph callbacks,
 and native Tauri/CLI behavior. Use synthetic data and existing status reads; never
 send real Teams messages as a smoke test.
@@ -194,7 +200,7 @@ send real Teams messages as a smoke test.
 ## Authorize a computer you own
 
 1. On the computer to connect, call `machine_settings` through CLI/MCP and read its `id`. Stop its Teams assistant before pairing.
-2. On your own coordinator, run `pta web machines authorize MACHINE_ID --output /private/unused/pairing.json`. This operator-local command requires your enabled owner binding. It writes a 0600 JSON credential file; command output contains only its path and expiration. The server stores only a hash. Never paste the file or token in chat or command arguments.
+2. On your own coordinator, run `pta web machines authorize MACHINE_ID [USER] --output /private/unused/pairing.json`. This operator-local command requires an enabled admitted account. Omit USER for the owner, or supply the explicitly authorized account's local username. It writes a 0600 JSON credential file; command output contains only its path and expiration. The server stores only a hash. Never paste the file or token in chat or command arguments.
 3. Transfer that file securely to the intended computer. Run `pta tools call machine_connect < /private/path/pairing.json` there within ten minutes. Delete the file after use. It carries your coordinator URL; there is no default shared server.
 4. Confirm `machine_list` shows your computer. A pairing cannot be reused, used for a different machine or installation, or used after account revocation/reassociation. A failed registration needs a new local authorization; never retry an uncertain enrollment with the old file.
 
@@ -220,8 +226,24 @@ supply account, owner, transport or maintenance flags as tool arguments. After a
 account reassociation, restart its host before continuing. The existing owner,
 profile identifiers, Microsoft session and safe single-use pairing remain intact.
 
-Additional people cannot use this portal yet. An ordinary legacy profile cannot
-run providers, coding or generic variable consumers in the operator's OS context.
+Version 0.9.11 admits explicitly authorized additional accounts. Their GUI, CLI and MCP
+can use their own API assistant configuration, source/notes/index data, records,
+background daily snapshots and Microsoft/GitHub API sessions. Their provider catalog
+never probes installed CLIs. Active CLI model chains, local coding, CLI sign-in,
+Git clone/sync and request/child creation on the shared server are refused before spawn;
+these unsupported operations do not fall back to the operator's installed CLI. A stored
+CLI chain must be changed to an API chain before assistant operations can run.
+
+Ordinary accounts resolve credentials only from their private profile file store,
+ignoring inherited NAME/NAME_FILE values and OS keychains. Hosting, data/map paths and
+repository roots are operator-managed, including through native CLI/MCP. Disable,
+revoke, unbind and rebind invalidate sessions and machine credentials on the next checked
+request. Reconciliation stops only the affected app-managed host; an existing desktop
+host is not killed. Rebinding requires a new host, preserves the account's files and
+must be treated as an explicit operator transfer of that private account.
+
+An ordinary account cannot run configurable providers, coding or generic variable
+consumers in the operator's OS context.
 Use a personal trusted machine; selecting a working directory or removing tools
 from a prompt does not provide OS isolation. A paired machine cannot forward a
 coding/provider/directory operation into the coordinator's local context. Existing
@@ -232,3 +254,5 @@ Different people sharing one computer need separate OS security contexts. App
 account switching cannot protect against someone who controls the same OS account,
 including its private IPC descriptors and credential store. Portal administration
 is a local operator operation, unavailable from an isolated account profile.
+
+Ordinary shared accounts also refuse SQL sources that could use OS-integrated authentication. Their embeddings requests reuse the public-source DNS/IP pinning and reject operator-local destinations; API keys still resolve only from that account.

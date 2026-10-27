@@ -16,6 +16,9 @@ pub(super) struct Account {
     pub access_binding: Option<access::Binding>,
     #[serde(default)]
     pub access_valid_after: u64,
+    /// Explicit local admission; legacy non-owner profiles remain closed on upgrade.
+    #[serde(default)]
+    pub authorized: bool,
 }
 
 pub(super) fn username(value: &str) -> Result<String> {
@@ -130,7 +133,7 @@ fn callbacks(root: &Path) -> Result<Vec<String>> {
     let settings = settings(root)?;
     Ok(accounts(root)?
         .iter()
-        .filter(|e| settings.owns(e) && !e.current_profile)
+        .filter(|e| settings.admits(e) && !e.current_profile)
         .flat_map(|e| {
             [
                 format!("/webhooks/{}/graph/notifications", e.id),
@@ -163,7 +166,12 @@ fn save_pairings(root: &Path, entries: &HashMap<String, Pairing>) -> Result<()> 
         &serde_json::to_string(entries)?,
     )
 }
-pub(super) fn authorize_machine(root: &Path, machine_id: &str, output: &Path) -> Result<Value> {
+pub(super) fn authorize_machine(
+    root: &Path,
+    machine_id: &str,
+    output: &Path,
+    user: Option<&str>,
+) -> Result<Value> {
     ensure!(access::canonical_uuid(machine_id), "invalid machine ID");
     ensure!(output.is_absolute(), "use an absolute private output path");
     let config = settings(root)?;
@@ -173,7 +181,9 @@ pub(super) fn authorize_machine(root: &Path, machine_id: &str, output: &Path) ->
     );
     let account = accounts(root)?
         .into_iter()
-        .find(|a| config.owns(a))
+        .find(|a| {
+            config.admits(a) && user.map_or_else(|| config.owns(a), |user| a.username == user)
+        })
         .context("associate this installation's owner before authorizing machines")?;
     let _lock = file_lock(root, "machine-pairings.lock")?;
     let mut entries = pairings(root)?;
@@ -232,7 +242,7 @@ pub(super) fn consume_pairing(
     }
     let account = accounts(root)?
         .into_iter()
-        .find(|a| config.owns(a) && a.id == pairing.account_id && a.version == pairing.version);
+        .find(|a| config.admits(a) && a.id == pairing.account_id && a.version == pairing.version);
     // Consume before contacting a host: a lost registration response cannot replay approval.
     entries.remove(&hash);
     save_pairings(root, &entries)?;
@@ -248,7 +258,7 @@ pub(super) fn admin(args: &[String]) -> Result<control::Reply> {
     let public_account = |account: &Account| {
         json!({"id":account.id,"username":account.username,
         "enabled":account.enabled,"current_profile":account.current_profile,
-        "access_binding":account.access_binding,"profile":profile_dir(&root, account)})
+        "authorized":account.authorized,"access_binding":account.access_binding,"profile":profile_dir(&root, account)})
     };
     let data = match action {
         "status" => {
@@ -275,11 +285,16 @@ pub(super) fn admin(args: &[String]) -> Result<control::Reply> {
         "machines" => {
             ensure!(
                 args.get(2).map(String::as_str) == Some("authorize")
-                    && args.len() == 6
-                    && args[4] == "--output",
-                "use: pta web machines authorize MACHINE_ID --output PRIVATE_FILE"
+                    && matches!(args.len(), 6 | 7)
+                    && args[args.len() - 2] == "--output",
+                "use: pta web machines authorize MACHINE_ID [USER] --output PRIVATE_FILE"
             );
-            authorize_machine(&root, &args[3], Path::new(&args[5]))?
+            authorize_machine(
+                &root,
+                &args[3],
+                Path::new(&args[args.len() - 1]),
+                (args.len() == 7).then(|| args[4].as_str()),
+            )?
         }
         "users" => {
             let operation = args.get(2).map(String::as_str).unwrap_or("");
@@ -300,7 +315,7 @@ pub(super) fn admin(args: &[String]) -> Result<control::Reply> {
                 directories.push(root.parent().unwrap().to_path_buf());
                 for dir in directories {
                     if control::existing_host_at(&dir).is_ok() {
-                        control::require_web_access_host_at(&dir)?;
+                        control::require_shared_account_host_at(&dir)?;
                     }
                 }
                 let name = username(args.get(3).context("missing username")?)?;
@@ -311,12 +326,6 @@ pub(super) fn admin(args: &[String]) -> Result<control::Reply> {
                         .context("configure Access before associating an identity")?;
                     let identity: access::Identity = json_stdin()?;
                     let binding = identity.binding(&config)?;
-                    ensure!(
-                        settings
-                            .owner_github_id
-                            .is_some_and(|id| binding.provider_user_id == id.to_string()),
-                        "This private installation accepts only its configured GitHub owner."
-                    );
                     Some(binding)
                 } else {
                     None
@@ -342,6 +351,7 @@ pub(super) fn admin(args: &[String]) -> Result<control::Reply> {
                             current_profile,
                             access_binding: None,
                             access_valid_after: 0,
+                            authorized: false,
                         };
                         if !current_profile {
                             create_profile(&root, &entry)?;
@@ -361,7 +371,28 @@ pub(super) fn admin(args: &[String]) -> Result<control::Reply> {
                             .iter_mut()
                             .find(|e| e.username == name)
                             .context("unknown username")?;
+                        let settings = settings(&root)?;
+                        if operation == "authorize" {
+                            ensure!(
+                                !entry.current_profile,
+                                "Only the configured owner can use the current profile."
+                            );
+                            ensure!(
+                                settings.owner_github_id.is_some() && settings.access.is_some(),
+                                "Configure the owner and Access before authorizing another account."
+                            );
+                        }
+                        if let Some(binding) = &binding {
+                            let owner = settings
+                                .owner_github_id
+                                .is_some_and(|id| binding.provider_user_id == id.to_string());
+                            ensure!(
+                                owner || (entry.authorized && !entry.current_profile),
+                                "Authorize this account locally before binding another GitHub identity."
+                            );
+                        }
                         match operation {
+                            "authorize" => entry.authorized = true,
                             "bind" => entry.access_binding = binding,
                             "unbind" => entry.access_binding = None,
                             "disable" => entry.enabled = false,

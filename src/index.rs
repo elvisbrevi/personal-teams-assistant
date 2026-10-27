@@ -1081,6 +1081,15 @@ impl Embeddings {
         key: Option<&str>,
         texts: &[String],
     ) -> Result<Vec<Vec<f32>>> {
+        // Shared accounts cannot address operator-local services through HTTPS
+        // aliases or DNS rebinding. Reuse the public source client and IP pinning.
+        let public_client;
+        let client = if crate::security::account_only() {
+            public_client = crate::knowledge::public_client(&self.url).await?;
+            &public_client
+        } else {
+            client
+        };
         #[derive(Deserialize)]
         struct Item {
             index: usize,

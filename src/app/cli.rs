@@ -30,12 +30,13 @@ Web portal
   web configure           JSON on stdin: bind, public_url, session_hours, owner_github_id and access.
                            access: issuer, audience, account_id, github_idp_id from Cloudflare.
   web callbacks           Exact Graph callback paths for Cloudflare Access bypass applications.
-  web machines authorize MACHINE_ID --output PRIVATE_FILE
+  web machines authorize MACHINE_ID [USER] --output PRIVATE_FILE
                            Locally approve your machine for 10 minutes; writes a private single-use
                            pairing JSON file for `pta tools call machine_connect` on that machine's stdin.
   web users list          Lists web accounts and their isolated profile directories.
   web users add USER      Creates an isolated profile, blocked until an Access identity is associated locally.
                            --current-profile attaches it to the existing desktop profile; identity binding is still required.
+  web users authorize USER  Explicitly admits an additional isolated account; bind and enable separately.
   web users bind USER     Verified Access get-identity JSON on stdin; associates the GitHub provider subject.
   web users unbind|revoke USER  Removes the association or revokes all local sessions; preserves the profile.
   web users disable|enable USER  Revokes sessions and disables or enables web access; preserves data.
@@ -291,10 +292,11 @@ fn validate_args(args: &[String]) -> Result<()> {
             | ["web", "status" | "configure" | "callbacks"]
             | ["web", "users", "list"]
             | ["web", "machines", "authorize", _]
+            | ["web", "machines", "authorize", _, _]
             | [
                 "web",
                 "users",
-                "add" | "bind" | "unbind" | "revoke" | "disable" | "enable",
+                "add" | "authorize" | "bind" | "unbind" | "revoke" | "disable" | "enable",
                 _
             ]
             | ["skill", "show" | "path"]
@@ -480,7 +482,7 @@ async fn execute(mut args: Vec<String>) -> Result<Reply> {
         }
         "capabilities" => {
             return Ok(Reply::success(
-                json!({"contract":control::CONTRACT,"commands":HELP,"skill_version":env!("CARGO_PKG_VERSION"),"activity_registration_support":true,"web_support":true,"web_access_support":true,"knowledge_index_support":true,"mcp_support":true,"tools_support":true,"todo_support":true,"implementation_support":true,"machine_pairing_support":true,"account_authority_support":true}),
+                json!({"contract":control::CONTRACT,"commands":HELP,"skill_version":env!("CARGO_PKG_VERSION"),"activity_registration_support":true,"web_support":true,"web_access_support":true,"knowledge_index_support":true,"mcp_support":true,"tools_support":true,"todo_support":true,"implementation_support":true,"machine_pairing_support":true,"account_authority_support":true,"shared_accounts_support":true}),
             ));
         }
         "skill" => return crate::app::skill::command(action, args.get(2).map(String::as_str)),

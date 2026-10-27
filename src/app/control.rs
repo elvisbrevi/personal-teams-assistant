@@ -64,6 +64,8 @@ impl Reply {
 #[derive(Serialize, Deserialize)]
 struct Endpoint {
     #[serde(default)]
+    shared_accounts_support: bool,
+    #[serde(default)]
     account_authority_support: bool,
     #[serde(default)]
     account_binding: Option<authority::AccountBinding>,
@@ -225,6 +227,30 @@ pub(super) fn require_web_access_host_at(dir: &Path) -> Result<()> {
     );
     Ok(())
 }
+pub(super) fn require_shared_account_host_at(dir: &Path) -> Result<()> {
+    require_web_access_host_at(dir)?;
+    let endpoint: Endpoint = serde_json::from_slice(&fs::read(dir.join("control.json"))?)?;
+    ensure!(
+        endpoint.shared_accounts_support,
+        "Incompatible shared-account host: update the host and CLI together; no security downgrade is available."
+    );
+    Ok(())
+}
+pub(super) fn require_account_host_at(dir: &Path, id: &str, version: &str) -> Result<()> {
+    require_web_access_host_at(dir)?;
+    let endpoint: Endpoint = serde_json::from_slice(&fs::read(dir.join("control.json"))?)?;
+    ensure!(
+        endpoint
+            .account_binding
+            .as_ref()
+            .is_some_and(|binding| binding.id == id && binding.version == version),
+        "Account binding mismatch."
+    );
+    if !web::account_scope(dir)?.owner {
+        require_shared_account_host_at(dir)?;
+    }
+    Ok(())
+}
 /// Stop an outdated host (assistant and tunnel first) and wait until it releases the profile.
 /// Returns whether its assistant was running, so the caller can offer to keep it running.
 pub async fn retire_outdated_host() -> Result<bool> {
@@ -351,6 +377,10 @@ async fn client_with_transport(
     retirement: bool,
 ) -> Result<Reply> {
     existing_host_at(dir)?;
+    let scope = web::account_scope(dir)?;
+    if scope.shared && !scope.owner {
+        require_shared_account_host_at(dir)?;
+    }
     // Model-backed operations wait for the model without a deadline.
     let mut client = reqwest::Client::builder()
         .no_proxy()
@@ -479,6 +509,7 @@ pub(crate) fn launch(
         &dir.join("control.json"),
         &serde_json::to_string(&Endpoint {
             account_authority_support: true,
+            shared_accounts_support: true,
             account_binding: host.state.authority.account.clone(),
             browser_token: browser_token.clone(),
             machine_token: machine_token.clone(),
@@ -564,7 +595,17 @@ pub(crate) async fn dispatch(host: &Arc<Host>, request: Request) -> Reply {
     // newly rebound account's paths, even to record the rejection.
     let invocation = match authority::authorize(&host.state, &request) {
         Ok(value) => value,
-        Err(_) => return Reply::error("authority_denied", 6, authority::EXECUTION_DENIED),
+        Err(error) => {
+            return Reply::error(
+                "authority_denied",
+                6,
+                if error.to_string() == authority::EXECUTION_DENIED {
+                    authority::EXECUTION_DENIED
+                } else {
+                    authority::ACCOUNT_UNAVAILABLE
+                },
+            );
+        }
     };
     let method = request.method.clone();
     let started = std::time::Instant::now();
@@ -575,7 +616,7 @@ pub(crate) async fn dispatch(host: &Arc<Host>, request: Request) -> Reply {
     )
     .await;
     if authority::invocation(&host.state).is_err() {
-        return Reply::error("authority_denied", 6, authority::EXECUTION_DENIED);
+        return Reply::error("authority_denied", 6, authority::ACCOUNT_UNAVAILABLE);
     }
     if !reply.ok && reply.code != "authorization_pending" {
         diagnostics::record(&host.state, &method, &reply, started.elapsed(), causes);
@@ -994,8 +1035,11 @@ async fn operate(
                     .await
                     .take()
                     .ok_or_else(|| "Begin GitHub login first.".to_string())?;
+                let host = host.clone();
                 *task = Some(tokio::spawn(async move {
-                    github::finish(pending).await.map_err(fail)
+                    github::finish(pending, || authority::require_account(&host.state))
+                        .await
+                        .map_err(fail)
                 }));
             }
             if task.as_ref().is_some_and(|t| t.is_finished()) {
@@ -1082,7 +1126,12 @@ async fn operate(
         }
         "llm_providers" => {
             // Installed CLIs, their models and efforts; probes only local commands.
-            serde_json::to_value(crate::llm::catalog().await).map_err(fail)?
+            serde_json::to_value(if authority::invocation(state).map_err(fail)?.scope.owner {
+                crate::llm::catalog().await
+            } else {
+                crate::llm::api_catalog()
+            })
+            .map_err(fail)?
         }
         "test_providers" => {
             let config = read_config(&state.config_path).map_err(fail)?;
@@ -1289,6 +1338,7 @@ mod tests {
                 implementation_support: true,
                 machine_pairing_support: true,
                 account_authority_support: true,
+                shared_accounts_support: true,
                 account_binding: None,
                 browser_token: String::new(),
                 machine_token: String::new(),
@@ -1313,6 +1363,7 @@ mod tests {
                 implementation_support: true,
                 machine_pairing_support: true,
                 account_authority_support: true,
+                shared_accounts_support: true,
                 account_binding: None,
                 browser_token: String::new(),
                 machine_token: String::new(),
@@ -1346,6 +1397,7 @@ mod tests {
                     implementation_support: true,
                     machine_pairing_support: true,
                     account_authority_support: true,
+                    shared_accounts_support: true,
                     account_binding: None,
                     browser_token: String::new(),
                     machine_token: String::new(),
