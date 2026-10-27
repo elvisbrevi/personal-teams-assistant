@@ -436,6 +436,11 @@ async fn client_with_transport(
                         | "machine_revoke"
                         | "machine_directories"
                         | "machine_save"
+                        | "machine_connect"
+                        | "machine_login_finish"
+                        | "implementation_start"
+                        | "implementation_browse"
+                        | "implementation_mobile_session"
                 ),
             "Incompatible machine management host: update the host and CLI together before managing machines."
         );

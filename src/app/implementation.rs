@@ -222,6 +222,14 @@ impl State {
             &serde_json::to_string(data)?,
         )
     }
+    fn reset_roots(&self, data: &mut Registry) -> Result<()> {
+        let previous = std::mem::take(&mut data.settings.roots);
+        if let Err(error) = self.save(data) {
+            data.settings.roots = previous;
+            return Err(error);
+        }
+        Ok(())
+    }
     fn connection(&self) -> Result<Option<Connection>> {
         let path = self.root.join("connection.json");
         if path.exists() {
@@ -1464,6 +1472,11 @@ mod tests {
             fleet::register(&host, &json!({"id":worker,"name":"Remote","os":"windows"}))
                 .await
                 .unwrap();
+        assert!(
+            operation(&host, "implementation_browse", &json!({"machine":worker}))
+                .await
+                .is_err()
+        );
         let poll = json!({"id":worker,"token":registration["token"],"action":"poll","assistant_phase":"stopped","management_support":true,"roots":[]});
         fleet::protocol(&host, &poll).await.unwrap();
         let caller = host.clone();
@@ -1503,5 +1516,29 @@ mod tests {
                 .is_ok()
         );
         assert!(directories(&host, &[work]).await.is_err());
+    }
+    #[tokio::test]
+    async fn old_machine_credentials_cannot_proxy_into_a_workers_new_account() {
+        let root = tempfile::tempdir().unwrap();
+        let host = host(root.path());
+        let worker = uuid::Uuid::new_v4().to_string();
+        let registration = fleet::register(
+            &host,
+            &json!({"id":worker,"name":"Previous account computer","os":"linux"}),
+        )
+        .await
+        .unwrap();
+        let own = host.state.implementation.registry.lock().await.id.clone();
+        write_private(
+            &host.state.implementation.root.join("connection.json"),
+            &json!({"id":own,"url":"https://another-account.example.com","account":1002})
+                .to_string(),
+        )
+        .unwrap();
+        let error = fleet::protocol(&host, &json!({"id":worker,"token":registration["token"],"action":"call","method":"machine_list","args":{}})).await.unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "A connected worker cannot serve coordinator requests."
+        );
     }
 }

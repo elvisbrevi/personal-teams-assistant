@@ -103,7 +103,7 @@ pub(super) async fn operate(host: &Arc<Host>, method: &str, args: &Value) -> Res
             let url = endpoint(origin)?;
             let token = args["pairing_token"].as_str().filter(|v| v.len() == 44)
                 .context("Authorize this machine on your own coordinator with `pta web machines authorize`, then pass its private JSON file to `pta tools call machine_connect` on stdin.")?;
-            let data = state.registry.lock().await;
+            let mut data = state.registry.lock().await;
             let response=client()?.post(url).bearer_auth(token).json(&json!({"action":"register","id":data.id,"name":data.settings.name,"os":std::env::consts::OS,"installation":super::login::installation(&state.root)?})).send().await?;
             ensure!(
                 response.status().is_success(),
@@ -125,11 +125,12 @@ pub(super) async fn operate(host: &Arc<Host>, method: &str, args: &Value) -> Res
                     .context("Invalid machine account.")?,
                 id: data.id.clone(),
             };
+            state.reset_roots(&mut data)?;
             write_private(
                 &state.root.join("connection.json"),
                 &serde_json::to_string(&connection)?,
             )?;
-            Ok(json!({"connected":true}))
+            Ok(json!({"connected":true,"roots_reset":true}))
         }
         "machine_disconnect" => {
             ensure!(
@@ -281,6 +282,10 @@ pub(in crate::app) async fn protocol(host: &Arc<Host>, args: &Value) -> Result<V
     authority::reject_authority_arguments(args)?;
     let binding = authority::invocation(&host.state)?.scope.account;
     let state = &host.state.implementation;
+    ensure!(
+        state.connection()?.is_none(),
+        "A connected worker cannot serve coordinator requests."
+    );
     let id = args["id"].as_str().context("Invalid machine ID.")?;
     let token = args["token"]
         .as_str()
@@ -464,6 +469,21 @@ pub(super) async fn call(
                 && m.account_version == version),
         "Execution machine is offline."
     );
+    if matches!(
+        method,
+        "implementation_browse" | "implementation_launch" | "implementation_mobile_session"
+    ) {
+        ensure!(
+            state
+                .registry
+                .lock()
+                .await
+                .machines
+                .iter()
+                .any(|m| m.id == machine && m.management_support),
+            "Update this execution machine before browsing or running implementations."
+        );
+    }
     if method == "machine_assistant" {
         let data = state.registry.lock().await;
         let target = data

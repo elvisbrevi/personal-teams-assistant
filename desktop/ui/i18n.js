@@ -4,6 +4,8 @@
 const UI_LANGUAGES = ['es', 'en'];
 
 const UI_CATALOG = { es: {
+  "A connected worker cannot serve coordinator requests.": "Una máquina conectada a otro coordinador no puede atender solicitudes como coordinador.",
+  "Update this execution machine before browsing or running implementations.": "Actualiza esta máquina de ejecución antes de explorar directorios o ejecutar implementaciones.",
   "Manage your account's trusted machines here. Trust, allowed directories and Teams responsibility are separate choices.": "Administra aquí las máquinas de confianza de tu cuenta. La confianza, los directorios permitidos y la responsabilidad de Teams se eligen por separado.",
   "Select at most sixteen allowed roots.": "Selecciona como máximo dieciséis raíces permitidas.",
   "Allowed roots cannot contain symbolic links.": "Las raíces permitidas no pueden contener enlaces simbólicos.",

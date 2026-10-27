@@ -199,7 +199,7 @@
     },
     machine_revoke: args => { window.__ptaMachineRevoked = args.machine; remoteRevoked = true; if (teamsMachine === args.machine) teamsMachine = machineId; return { revoked: true }; },
     machine_save: args => { machineSettings = { ...machineSettings, ...structuredClone(args) }; window.__ptaMachineSettings = args; return { saved: true }; },
-    machine_connect: () => ({ connected: true }),
+    machine_connect: () => { machineSettings.roots = []; return { connected: true, roots_reset: true }; },
     machine_login: args => {
       window.__ptaMachineLogin = structuredClone(args);
       window.__ptaMachineLoginPending = true;
@@ -209,8 +209,8 @@
     machine_login_finish: () => {
       if (!window.__ptaMachineLoginTrusted) return { pending: true, state: 'pending' };
       window.__ptaMachineLoginPending = false;
-      machineSettings = { ...machineSettings, coordinator: 'https://assistant.example.com' };
-      return { connected: true, coordinator: 'https://assistant.example.com', username: 'ana' };
+      machineSettings = { ...machineSettings, coordinator: 'https://assistant.example.com', roots: [] };
+      return { connected: true, roots_reset: true, coordinator: 'https://assistant.example.com', username: 'ana' };
     },
     machine_login_cancel: () => { window.__ptaMachineLoginPending = false; return { cancelled: true }; },
     machine_disconnect: () => ({ disconnected: true }),

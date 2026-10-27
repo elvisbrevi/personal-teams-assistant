@@ -2049,6 +2049,18 @@ async fn machine_login_native_installation_finishes_only_after_trust_and_keeps_p
     });
     use super::implementation::login::{begin_at, cancel, finish_with, status};
 
+    // A new account enrollment must not inherit this installation's previous root grants.
+    let old_root = dir.path().join("previous-workspace");
+    fs::create_dir(&old_root).unwrap();
+    let old_root = old_root.canonicalize().unwrap();
+    let mut grant = control::Request::new("machine_save");
+    grant.args = json!({"name":"Native computer","roots":[old_root]});
+    assert!(control::dispatch(&native, grant).await.ok);
+    let mut browse = control::Request::new("implementation_browse");
+    let local = control::dispatch(&native, control::Request::new("machine_settings")).await;
+    let machine = local.data["id"].clone();
+    browse.args = json!({"machine":machine});
+
     let begun = begin_at(&native, &origin, endpoint.clone(), None, true)
         .await
         .unwrap();
@@ -2088,6 +2100,10 @@ async fn machine_login_native_installation_finishes_only_after_trust_and_keeps_p
     .unwrap();
     assert_eq!(pending["pending"], true);
     assert!(stored.is_none());
+    assert_eq!(
+        control::dispatch(&native, browse.clone()).await.data["directories"],
+        json!([old_root])
+    );
     enrollment::decide(&served.root, &entries[0], &transaction, true).unwrap();
     assert_eq!(status(&native).await.unwrap()["state"], "approved");
     let connected = finish_with(&native, |token| {
@@ -2098,6 +2114,11 @@ async fn machine_login_native_installation_finishes_only_after_trust_and_keeps_p
     .unwrap();
     assert_eq!(connected["connected"], true);
     assert_eq!(connected["username"], "alice");
+    assert_eq!(connected["roots_reset"], true);
+    assert_eq!(
+        control::dispatch(&native, browse).await.data["directories"],
+        json!([])
+    );
     assert_eq!(
         stored.as_deref(),
         Some("synthetic-machine-credential-0000000000000")
@@ -2412,6 +2433,11 @@ async fn machine_management_refuses_older_hosts_before_forwarding() {
         "machine_revoke",
         "machine_directories",
         "machine_save",
+        "machine_connect",
+        "machine_login_finish",
+        "implementation_start",
+        "implementation_browse",
+        "implementation_mobile_session",
     ] {
         let error = control::client_at(control::Request::new(method), &dir)
             .await

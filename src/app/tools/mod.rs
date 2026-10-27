@@ -264,7 +264,7 @@ pub(super) const TOOLS: &[Tool] = &[
     Tool {
         name: "machine_connect",
         title: "Connect an execution machine",
-        description: "Pair this machine with your own coordinator using a single-use private pairing file authorized locally there. Teams must be stopped first; GitHub tokens cannot enroll machines.",
+        description: "Pair this machine with your own coordinator using a single-use private pairing file authorized locally there. Teams must be stopped first; successful pairing clears previous local root grants. GitHub tokens cannot enroll machines.",
         effect: Effect::External,
         schema: || {
             object(
@@ -295,7 +295,7 @@ pub(super) const TOOLS: &[Tool] = &[
     Tool {
         name: "machine_login_finish",
         title: "Finish computer sign-in",
-        description: "Finish a sign-in the user approved in the browser: this computer stores its own revocable machine credential locally and connects to that account. Returns pending until approval. Denied, expired or mismatched sign-ins trust nothing and keep any previous connection. Grants no directories, Teams ownership or assistant start.",
+        description: "Finish a sign-in the user approved in the browser: this computer stores its own revocable machine credential locally and connects to that account. Returns pending until approval. Denied, expired or mismatched sign-ins trust nothing and keep any previous connection. Clears previous local root grants on success; select directories explicitly after enrollment. Grants no Teams ownership or assistant start.",
         effect: Effect::Local,
         schema: none,
     },

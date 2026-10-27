@@ -755,6 +755,7 @@ for (const [label, viewport] of [['desktop', { width: 1440, height: 900 }], ['ph
   await page.evaluate(() => { window.__ptaMachineLoginTrusted = true; });
   await page.waitForFunction(() => !document.querySelector('#machine-login-dialog').open && document.querySelector('#machine-connect').disabled);
   check(`${label}: a trusted sign-in connects this machine without another step`, !await page.isDisabled('#machine-disconnect') && (await page.textContent('#notice-text')).includes('ana'));
+  check(`${label}: enrollment leaves previous directory grants empty`, await page.locator('#machine-roots code').count() === 0);
   await page.click('#notice-close');
   await page.evaluate(() => {
     $('#machine-trust-name').textContent = 'Synthetic laptop'; $('#machine-trust-os').textContent = 'Windows';
