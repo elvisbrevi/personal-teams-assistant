@@ -78,6 +78,8 @@ struct Endpoint {
     #[serde(default)]
     machine_login_support: bool,
     #[serde(default)]
+    machine_management_support: bool,
+    #[serde(default)]
     implementation_support: bool,
     #[serde(default)]
     wiki_support: bool,
@@ -426,6 +428,18 @@ async fn client_with_transport(
             "Incompatible machine sign-in host: update the host and CLI together before signing in."
         );
         ensure!(
+            endpoint.machine_management_support
+                || !matches!(
+                    request.method.as_str(),
+                    "machine_detail"
+                        | "machine_update"
+                        | "machine_revoke"
+                        | "machine_directories"
+                        | "machine_save"
+                ),
+            "Incompatible machine management host: update the host and CLI together before managing machines."
+        );
+        ensure!(
             endpoint.implementation_support || !implementation::handles(&request.method),
             "Incompatible implementation host: update the host and CLI together."
         );
@@ -530,6 +544,7 @@ pub(crate) fn launch(
             implementation_support: true,
             machine_pairing_support: true,
             machine_login_support: true,
+            machine_management_support: true,
             contract: CONTRACT,
             port: listener.local_addr()?.port(),
             token: token.clone(),
@@ -1358,6 +1373,7 @@ mod tests {
                 implementation_support: true,
                 machine_pairing_support: true,
                 machine_login_support: true,
+                machine_management_support: true,
                 account_authority_support: true,
                 shared_accounts_support: true,
                 account_binding: None,
@@ -1384,6 +1400,7 @@ mod tests {
                 implementation_support: true,
                 machine_pairing_support: true,
                 machine_login_support: true,
+                machine_management_support: true,
                 account_authority_support: true,
                 shared_accounts_support: true,
                 account_binding: None,
@@ -1419,6 +1436,7 @@ mod tests {
                     implementation_support: true,
                     machine_pairing_support: true,
                     machine_login_support: true,
+                    machine_management_support: true,
                     account_authority_support: true,
                     shared_accounts_support: true,
                     account_binding: None,

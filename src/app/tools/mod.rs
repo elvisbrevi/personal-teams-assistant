@@ -178,9 +178,57 @@ pub(super) const TOOLS: &[Tool] = &[
     Tool {
         name: "machine_list",
         title: "Execution machines",
-        description: "Online machines connected to this account and the single selected Teams machine.",
+        description: "Authoritative trusted and revoked machines of this account, presence and last-known assistant state, capabilities, allowed roots and the single selected Teams machine.",
         effect: Effect::Read,
         schema: none,
+    },
+    Tool {
+        name: "machine_detail",
+        title: "Inspect an account machine",
+        description: "Authoritative account machine name, OS, trust, presence, last-known state, allowed roots and management capabilities. Never returns credentials. Offline state is last-known; unknown capabilities require a compatible host and a fresh poll.",
+        effect: Effect::Read,
+        schema: || {
+            object(
+                json!({"machine":string("Account machine ID from machine_list.")}),
+                &["machine"],
+            )
+        },
+    },
+    Tool {
+        name: "machine_directories",
+        title: "Browse an account machine",
+        description: "Browse the selected online machine to choose allowed roots, preserving its canonical directory checks and web confinement. Does not grant access.",
+        effect: Effect::Read,
+        schema: || {
+            object(
+                json!({"machine":string("Online compatible machine ID."),"path":string("Absolute directory; empty lists selectable roots.")}),
+                &["machine"],
+            )
+        },
+    },
+    Tool {
+        name: "machine_update",
+        title: "Edit an account machine",
+        description: "Edit an account machine name, even offline, or explicitly replace its allowed roots on an online compatible target. Empty roots grant no execution access. Refresh machine_detail after failure before any deliberate repeat; never replay automatically.",
+        effect: Effect::External,
+        schema: || {
+            object(
+                json!({"machine":string("Account machine ID."),"name":string("Machine name."),"roots":strings("Existing absolute allowed roots on the target; empty removes all grants."),"confirmed":confirmed()}),
+                &["machine"],
+            )
+        },
+    },
+    Tool {
+        name: "machine_revoke",
+        title: "Revoke an account machine",
+        description: "Revoke a remote account machine, including offline or selected machines. Invalidates its credential and future account access, clears root grants and deselects Teams without starting a successor. The previous lease expiry still gates handover. Fresh browser trust or operator pairing is required to enroll again.",
+        effect: Effect::External,
+        schema: || {
+            object(
+                json!({"machine":string("Remote account machine ID."),"confirmed":confirmed()}),
+                &["machine"],
+            )
+        },
     },
     Tool {
         name: "machine_settings",
@@ -1143,6 +1191,8 @@ pub(super) fn confirmation(name: &str, args: &Value) -> Option<String> {
             )
         }
         "machine_disconnect" => "Disconnect this machine from its coordinator?".into(),
+        "machine_update" => "Change this account machine's name or allowed roots?".into(),
+        "machine_revoke" => "Revoke this machine and deny its future account access?".into(),
         "machine_assistant" => format!(
             "{} the Teams assistant on machine {}?",
             args["action"].as_str().unwrap_or_default(),

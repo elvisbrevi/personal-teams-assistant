@@ -31,3 +31,5 @@ shared-host provider/coding processes are refused before launch; use a personal
 trusted machine. See [the authority boundary](web-access.md#account-and-execution-authority).
 
 Additional portal accounts require explicit local operator authorization (0.9.11+, `shared_accounts_support`). MCP retains the authenticated profile: it can operate that account's own API assistant, notes, sources and records, but cannot administer portal accounts or run provider/coding processes on the shared OS identity. Use the account owner's personal trusted machine for local execution.
+
+Account machines (0.9.13+): `machine_list`, `machine_detail` and `machine_directories` are reads. `machine_update` and `machine_revoke` require confirmation and use the account coordinator, just like the shared GUI and CLI. Inspect online/unknown/offline presence, trust, last-known state, allowed roots and capabilities before controlling a target. After a timeout, inspect authoritative state before any deliberate repeat; never automatically replay an action. No machine credentials or stored-variable values are returned.

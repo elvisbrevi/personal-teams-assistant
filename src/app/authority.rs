@@ -116,6 +116,10 @@ pub(super) fn authorize(state: &DesktopState, request: &control::Request) -> Res
                     | "implementation_sessions"
                     | "machine_list"
                     | "machine_teams"
+                    | "machine_detail"
+                    | "machine_update"
+                    | "machine_revoke"
+                    | "machine_directories"
                     | "start_assistant"
                     | "stop_assistant"
             ),

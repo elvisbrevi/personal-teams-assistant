@@ -160,6 +160,25 @@ children and run installed coding agents.
    profiles can browse only their own repositories. Browsing grants no execution access.
    Leave Connection portal empty on the coordinator; enter its HTTPS origin on another
    computer that you want to connect.
+   In 0.9.13+, the account list is authoritative from desktop, web, CLI and MCP. After
+   enrollment, verify the same machine ID from a second account client with `machine_list`;
+   use `machine_detail` (`machine`) for trust, presence, last-seen time, last-known assistant
+   state, roots and capabilities. An offline report is last-known, never proof that Teams
+   stopped. Missing/unknown capabilities require a compatible target and a fresh poll.
+   `machine_update` takes `machine`, optional `name` and/or `roots`: names can change offline,
+   roots require an online compatible machine and explicit canonical directories. Empty roots
+   grant no native execution access. `machine_directories` (`machine`, optional `path`) is
+   the remote directory-sheet read; it grants no roots. Both GUIs expose Manage machine
+   beside every row and use the shared sheet. Portal roots remain operator-controlled.
+   `machine_revoke` (`machine`) revokes even an offline/selected remote machine, invalidating
+   its credential and deselecting Teams without starting another assistant. The old lease
+   still delays a successor. Inspect list/detail to verify `trust: revoked`; another enrollment
+   requires fresh browser trust or operator-local pairing. The coordinator cannot revoke
+   itself this way. No operation returns credential values; variable use is a future feature
+   and must require the same live authorization. Revocation cannot retract data already
+   received by an external program. CLI/MCP edits and revocation require confirmation.
+   After any timeout/failure, refresh `machine_list` and `machine_detail` before a deliberate
+   repeat. Never automatically replay start, send, implementation or root edits.
 2. On another computer you own, stop its Teams assistant and sign in (0.9.12+, `machine_login_support`):
    Settings > Language models > Connect this machine with the coordinator's HTTPS origin, or
    `pta auth machine login URL [--no-browser]`, or the `machine_login` tool (`url`, optional

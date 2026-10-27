@@ -151,6 +151,8 @@
   const requestRuns = [];
   let teamsMachine = machineId;
   const machinePhases = { [machineId]: "stopped", [remoteMachineId]: "stopped" };
+  let remoteName = 'Preview Mac', remoteRoots = [], remoteRevoked = false;
+  const machineMetadata = (id, name, os, local) => ({ id, name, os, local, trust: !local && remoteRevoked ? 'revoked' : 'trusted', online: !(!local && (window.__ptaMachineOffline || remoteRevoked)), presence: !local && (window.__ptaMachineOffline || remoteRevoked) ? 'offline' : 'online', last_seen: Math.floor(Date.now() / 1000), roots: local ? machineSettings.roots : remoteRoots, capabilities: { management: true, directories: true, assistant: true }, assistant_phase: machinePhases[id] });
   let machineSettings = { id: machineId, name: 'Preview server', coordinator: null, roots: ['/work'] };
   const azureCli = () => {
     const state = window.__ptaAzureCliState || (scenario === 'fresh' ? 'not_authenticated' : 'authenticated');
@@ -183,9 +185,19 @@
     },
     machine_settings: () => structuredClone(machineSettings),
     machine_list: () => ({ this_machine: machineId, teams_machine: teamsMachine, machines: [
-      { id: machineId, name: 'Preview server', os: 'linux', online: true, assistant_phase: machinePhases[machineId] },
-      { id: remoteMachineId, name: 'Preview Mac', os: 'macos', online: true, assistant_phase: machinePhases[remoteMachineId] },
+      machineMetadata(machineId, machineSettings.name, 'linux', true),
+      machineMetadata(remoteMachineId, remoteName, 'macos', false),
     ] }),
+    machine_detail: args => handlers.machine_list().machines.find(m => m.id === args.machine),
+    machine_directories: args => handlers.machine_browse(args),
+    machine_update: args => {
+      window.__ptaMachineUpdate = structuredClone(args);
+      if (window.__ptaMachineUpdateError) throw new Error('Machine edit was not confirmed.');
+      if (args.machine === remoteMachineId) { remoteName = args.name || remoteName; if (args.roots) remoteRoots = args.roots; }
+      else { machineSettings = { ...machineSettings, ...args }; }
+      return { saved: true };
+    },
+    machine_revoke: args => { window.__ptaMachineRevoked = args.machine; remoteRevoked = true; if (teamsMachine === args.machine) teamsMachine = machineId; return { revoked: true }; },
     machine_save: args => { machineSettings = { ...machineSettings, ...structuredClone(args) }; window.__ptaMachineSettings = args; return { saved: true }; },
     machine_connect: () => ({ connected: true }),
     machine_login: args => {
