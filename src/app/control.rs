@@ -76,6 +76,8 @@ struct Endpoint {
     #[serde(default)]
     machine_pairing_support: bool,
     #[serde(default)]
+    machine_login_support: bool,
+    #[serde(default)]
     implementation_support: bool,
     #[serde(default)]
     wiki_support: bool,
@@ -415,6 +417,14 @@ async fn client_with_transport(
             endpoint.machine_pairing_support || request.method != "machine_connect",
             "Incompatible machine pairing host: update the host and CLI together before connecting a machine."
         );
+        // Older hosts would accept a sign-in registration without the installation proof.
+        ensure!(
+            endpoint.machine_login_support
+                || !(request.method.starts_with("machine_login")
+                    || (request.method == "machine_register"
+                        && request.args["enrollment"] == "login")),
+            "Incompatible machine sign-in host: update the host and CLI together before signing in."
+        );
         ensure!(
             endpoint.implementation_support || !implementation::handles(&request.method),
             "Incompatible implementation host: update the host and CLI together."
@@ -519,6 +529,7 @@ pub(crate) fn launch(
             web_access_support: true,
             implementation_support: true,
             machine_pairing_support: true,
+            machine_login_support: true,
             contract: CONTRACT,
             port: listener.local_addr()?.port(),
             token: token.clone(),
@@ -641,6 +652,15 @@ async fn dispatch_inner(host: &Arc<Host>, request: Request) -> Reply {
     }
     if implementation::handles(&request.method) {
         return match implementation::operate(host, &request.method, &request.args).await {
+            Ok(data) if data["pending"] == true => Reply {
+                ok: false,
+                code: "authorization_pending".into(),
+                exit_code: 4,
+                message: Some(
+                    "Approve this computer in the browser, then finish the sign-in again.".into(),
+                ),
+                ..Reply::success(data)
+            },
             Ok(data) => Reply::success(data),
             Err(message) => {
                 let (code, exit) = if message.starts_with("[invalid_input]") {
@@ -1337,6 +1357,7 @@ mod tests {
                 web_access_support: true,
                 implementation_support: true,
                 machine_pairing_support: true,
+                machine_login_support: true,
                 account_authority_support: true,
                 shared_accounts_support: true,
                 account_binding: None,
@@ -1362,6 +1383,7 @@ mod tests {
                 web_access_support: true,
                 implementation_support: true,
                 machine_pairing_support: true,
+                machine_login_support: true,
                 account_authority_support: true,
                 shared_accounts_support: true,
                 account_binding: None,
@@ -1396,6 +1418,7 @@ mod tests {
                     web_access_support: true,
                     implementation_support: true,
                     machine_pairing_support: true,
+                    machine_login_support: true,
                     account_authority_support: true,
                     shared_accounts_support: true,
                     account_binding: None,

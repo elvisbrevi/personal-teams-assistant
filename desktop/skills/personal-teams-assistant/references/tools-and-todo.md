@@ -160,7 +160,19 @@ children and run installed coding agents.
    profiles can browse only their own repositories. Browsing grants no execution access.
    Leave Connection portal empty on the coordinator; enter its HTTPS origin on another
    computer that you want to connect.
-2. On another computer you own, read its `machine_settings.id` and stop its Teams assistant. On your own coordinator run `pta web machines authorize MACHINE_ID --output PRIVATE_FILE`, then securely transfer the private pairing JSON file to that computer. Within ten minutes run `pta tools call machine_connect < PRIVATE_FILE` there. Delete the file after use. Approval is single-use and machine/installation-bound; GitHub login or an API token cannot enroll machines. Initial pairing uses the CLI; Settings manages already paired machines. Each installation needs its own coordinator URL and hosting credentials.
+2. On another computer you own, stop its Teams assistant and sign in (0.9.12+, `machine_login_support`):
+   Settings > Language models > Connect this machine with the coordinator's HTTPS origin, or
+   `pta auth machine login URL [--no-browser]`, or the `machine_login` tool (`url`, optional
+   `open`). Give the user only the returned approval URL and code; they sign in on any device
+   and choose Trust this machine. Then `pta auth machine finish --wait` or `machine_login_finish`
+   connects it (`machine_login_status` reads the state, `machine_login_cancel` withdraws it).
+   You never receive the credential; trust grants no roots, Teams ownership or start. The
+   origin is remembered (`machine_settings.coordinator_origin`). The operator-local pairing file
+   remains available: on your coordinator run `pta web machines authorize MACHINE_ID --output PRIVATE_FILE`,
+   securely transfer it and within ten minutes run `pta tools call machine_connect < PRIVATE_FILE`
+   on that computer, then delete it. Both are single-use and machine/installation-bound;
+   GitHub login or an API token cannot enroll machines. Each installation needs its own
+   coordinator URL and hosting credentials. Details: [web-access.md](web-access.md#add-a-computer-you-own-by-signing-in-0912).
 3. Select the single Teams machine in Settings > Microsoft Teams or `machine_teams`. The
    previous machine stops after losing its lease; handover waits up to 120 seconds before a
    new machine can start. Start the Teams assistant explicitly on the selected machine.
@@ -190,6 +202,8 @@ Examples use synthetic identifiers; obtain actual machine IDs and verified item 
 
 ```sh
 printf '%s\n' '{}' | pta --json tools call machine_list
+printf '%s\n' '{"url":"https://assistant.example.com"}' | pta --json tools call machine_login
+printf '%s\n' '{}' | pta --json tools call machine_login_finish
 pta --json tools call machine_connect < /private/path/pairing.json
 printf '%s\n' '{"item":{"provider":"azure","id":7,"project":"Payments","source":"azure","task":true}}' | pta --json tools call implementation_prepare
 printf '%s\n' '{"machine":"11111111-1111-4111-8111-111111111111","work_item_url":"https://dev.azure.com/example/Payments/_workitems/edit/7"}' | pta --json tools call implementation_runs

@@ -1028,12 +1028,19 @@ function renderTeamsMachines(fleet) {
     }));
   }
 }
+let loadedCoordinator = '';
 async function loadMachines() {
   const [settings, fleet] = await Promise.all([invoke('machine_settings'), invoke('machine_list')]);
-  field('#machine-name', settings.name); field('#machine-coordinator', settings.coordinator || '');
+  const coordinator = settings.coordinator || settings.coordinator_origin || '';
+  // Refreshing after another action must not discard an address the user has typed but not yet connected.
+  if ($('#machine-coordinator').value === loadedCoordinator) field('#machine-coordinator', coordinator);
+  loadedCoordinator = coordinator;
+  field('#machine-name', settings.name);
   machineRoots = settings.roots;
   $('#machine-roots-choose').disabled = Boolean(live?.config.server.webhook_prefix);
   renderMachineRoots();
+  // The portal is the coordinator itself: browsers approve other computers, never join.
+  $('#machine-connect').hidden = $('#machine-connect-hint').hidden = window.ptaTransport.browser;
   $('#machine-connect').disabled = Boolean(settings.coordinator);
   $('#machine-disconnect').disabled = !settings.coordinator;
   renderTeamsMachines(fleet);
@@ -2997,9 +3004,55 @@ $('#machine-roots-choose').onclick = () => chooseDirectories({ trigger: $('#mach
   browse: path => invoke('machine_browse', { path }), apply: paths => { machineRoots = paths; renderMachineRoots(); } });
 $('#repo-path-choose').onclick = () => chooseDirectories({ trigger: $('#repo-path-choose'), title: t('Checkout path'), selected: lines($('#repo-path').value), multiple: false,
   browse: path => invoke('machine_browse', { path }), apply: paths => { field('#repo-path', paths[0]); $('#repo-path-value').textContent = paths[0]; } });
-$('#machine-connect').onclick = () => busy($('#machine-connect'), async () => {
-  await invoke('machine_connect', { url: $('#machine-coordinator').value.trim() }); await loadMachines();
-});
+// The modal dialog shows progress; loadMachines then decides whether Connect stays available.
+$('#machine-connect').onclick = () => machineLogin().catch(fail);
+
+/** Browser-assisted sign-in: the host keeps the verifier; this dialog only sees the public link and code. */
+async function machineLogin() {
+  const dialog = $('#machine-login-dialog'), status = $('#machine-login-status'), link = $('#machine-login-link');
+  if (dialog.open) return;
+  let cancelled = false, connected = false;
+  $('#machine-login-code').textContent = '';
+  $('#machine-login-copy').disabled = true;
+  link.hidden = true; link.removeAttribute('href');
+  status.textContent = t('Starting sign-in…');
+  dialog.showModal();
+  const cancel = event => { event?.preventDefault(); cancelled = true; };
+  dialog.oncancel = cancel;
+  $('#machine-login-cancel').onclick = cancel;
+  try {
+    const login = await invoke('machine_login', { url: $('#machine-coordinator').value.trim(), open: true });
+    if (cancelled) return;
+    $('#machine-login-code').textContent = login.code;
+    link.href = login.approval_url; link.hidden = false;
+    link.onclick = event => { event.preventDefault(); invoke('machine_login', { url: login.coordinator, open: true }).catch(fail); };
+    $('#machine-login-copy').disabled = false;
+    $('#machine-login-copy').onclick = () => busy($('#machine-login-copy'), async () => {
+      if (await copy(login.approval_url)) done(t('Link copied.'));
+    });
+    status.textContent = login.opened
+      ? t('Waiting for you to trust this computer in the browser…')
+      : t('Open the link on any device, sign in and choose Trust this machine.');
+    link.focus();
+    while (!cancelled && Date.now() < login.expires_at * 1000) {
+      const result = await rawInvoke('command', { request: { method: 'machine_login_finish', args: {}, revision: null, contract: 1 } });
+      if (cancelled) return;
+      if (result.ok) {
+        connected = true;
+        done(result.data.username ? t('This computer is connected to {account}.', { account: result.data.username }) : t('This computer is connected to your account.'));
+        return;
+      }
+      if (result.code !== 'authorization_pending') throw new Error(tx(result.message || result.code));
+      await sleep(2000);
+    }
+    if (!cancelled) throw new Error(t('The sign-in expired. Nothing was trusted; select Connect this machine to try again.'));
+  } finally {
+    if (!connected) await rawInvoke('command', { request: { method: 'machine_login_cancel', args: {}, revision: null, contract: 1 } }).catch(() => {});
+    dialog.close();
+    link.removeAttribute('href'); $('#machine-login-code').textContent = '';
+    await loadMachines().catch(fail);
+  }
+}
 $('#machine-disconnect').onclick = () => busy($('#machine-disconnect'), async () => {
   await invoke('machine_disconnect'); await loadMachines();
 });
@@ -3398,8 +3451,43 @@ function browserMicrosoftLogin(url) {
   });
 }
 
+/** The one explicit trust decision for a computer's pending sign-in, in an authenticated browser session. */
+async function machineTrust(transaction) {
+  const dialog = $('#machine-trust-dialog'), status = $('#machine-trust-status');
+  const request = action => window.ptaTransport.request('/api/enrollment', { action, transaction });
+  history.replaceState(null, '', '/');
+  const detail = await request('inspect');
+  if (!detail.ok) throw new Error(tx(detail.message || detail.code));
+  const { machine, code, username } = detail.data;
+  $('#machine-trust-name').textContent = machine.name;
+  $('#machine-trust-os').textContent = { linux: 'Linux', macos: 'macOS', windows: 'Windows' }[machine.os] || machine.os;
+  $('#machine-trust-code').textContent = code;
+  $('#machine-trust-account').textContent = username;
+  status.textContent = '';
+  const approve = $('#machine-trust-approve'), deny = $('#machine-trust-deny'), close = $('#machine-trust-close');
+  approve.hidden = deny.hidden = false; close.hidden = true;
+  const decided = message => {
+    status.textContent = message;
+    approve.hidden = deny.hidden = true; close.hidden = false; close.focus();
+  };
+  const decide = (button, action) => busy(button, async () => {
+    const result = await request(action);
+    if (!result.ok) throw new Error(tx(result.message || result.code));
+    decided(action === 'trust'
+      ? t('Trusted. Return to {name}: it finishes connecting by itself.', { name: machine.name })
+      : t('Denied. That computer was not added to your account.'));
+  });
+  approve.onclick = () => decide(approve, 'trust');
+  deny.onclick = () => decide(deny, 'deny');
+  close.onclick = () => dialog.close();
+  dialog.showModal();
+  deny.focus();
+}
+
 if (window.ptaTransport.browser) {
   window.ptaTransport.ready.then(identity => {
+    const enroll = new URLSearchParams(window.location.search).get('enroll');
+    if (enroll) machineTrust(enroll).catch(fail);
     $('#web-account').hidden = $('#panel-web-account').hidden = $('#web-hosting-note').hidden = false;
     $('#web-username').textContent = identity.username;
     for (const id of ['#public-url', '#bind', '#tunnel-config', '#cloudflare-tunnel']) $(id).disabled = true;

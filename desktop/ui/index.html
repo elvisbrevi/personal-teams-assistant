@@ -259,9 +259,10 @@
           <div class="panel" id="panel-machines">
             <div class="panel-head"><h2>Execution machines</h2><button id="machines-refresh" class="secondary small">Refresh machines</button></div>
             <p class="hint">Connect each machine to this portal with the same GitHub account. Its installed coding agents and directories become available for implementation.</p>
+            <p id="machine-connect-hint" class="hint">To add this computer, enter your portal's address and select Connect this machine: you sign in in the browser and choose Trust this machine once.</p>
             <div class="grid">
               <label>Machine name<input id="machine-name" maxlength="100"></label>
-              <label>Connection portal<input id="machine-coordinator" type="url" spellcheck="false" placeholder="https://assistant.example.com" translate="no"><small>The HTTPS address of your main assistant portal. Set it on another computer to connect that computer; leave it empty on the coordinator.</small></label>
+              <label>Connection portal<input id="machine-coordinator" type="url" spellcheck="false" placeholder="https://assistant.example.com" translate="no"><small>The HTTPS address of your main assistant portal. Set it on another computer to connect that computer; leave it empty on the coordinator. It is remembered for the next sign-in.</small></label>
             </div>
             <fieldset><legend>Allowed directory roots</legend><div id="machine-roots" class="implementation-paths"></div><button id="machine-roots-choose" class="secondary" type="button">Choose directories</button></fieldset>
             <div class="actions"><button id="machine-save" class="secondary">Save machine</button><button id="machine-connect" class="secondary">Connect this machine</button><button id="machine-disconnect" class="secondary">Disconnect this machine</button></div>
@@ -584,6 +585,27 @@
     <p><a id="azure-cli-link" target="_blank" rel="noopener noreferrer" hidden>Open Microsoft sign-in</a></p>
     <p id="azure-cli-login-status" class="hint" role="status"></p>
     <div class="actions"><button id="azure-cli-copy" type="button" class="secondary" disabled>Copy code</button><button id="azure-cli-cancel" type="button" class="secondary">Cancel</button></div>
+  </dialog>
+  <dialog id="machine-login-dialog" aria-labelledby="machine-login-title">
+    <h2 id="machine-login-title">Add this computer to your account</h2>
+    <p>Sign in on your portal and choose Trust this machine. Continue only if the page shows this code.</p>
+    <p><strong id="machine-login-code" class="code" translate="no"></strong></p>
+    <p><a id="machine-login-link" target="_blank" rel="noopener noreferrer" hidden>Open the sign-in page</a></p>
+    <p id="machine-login-status" class="hint" role="status"></p>
+    <div class="actions"><button id="machine-login-copy" type="button" class="secondary" disabled>Copy link</button><button id="machine-login-cancel" type="button" class="secondary">Cancel</button></div>
+  </dialog>
+  <dialog id="machine-trust-dialog" aria-labelledby="machine-trust-title">
+    <h2 id="machine-trust-title">Trust this machine?</h2>
+    <p>A computer asked to join your assistant account. Trust it only if you just started this sign-in on that computer and it shows the same code.</p>
+    <dl class="facts">
+      <dt>Computer</dt><dd id="machine-trust-name" translate="no"></dd>
+      <dt>System</dt><dd id="machine-trust-os" translate="no"></dd>
+      <dt>Code</dt><dd><strong id="machine-trust-code" class="code" translate="no"></strong></dd>
+      <dt>Account</dt><dd id="machine-trust-account" translate="no"></dd>
+    </dl>
+    <p class="hint">It joins your machine list only. It gets no directories, does not answer Teams and starts nothing until you choose so.</p>
+    <p id="machine-trust-status" class="hint" role="status"></p>
+    <div class="actions"><button id="machine-trust-approve" type="button">Trust this machine</button><button id="machine-trust-deny" type="button" class="secondary">Deny</button><button id="machine-trust-close" type="button" class="secondary" hidden>Close</button></div>
   </dialog>
   <dialog id="web-microsoft-dialog" aria-labelledby="web-microsoft-title">
     <h2 id="web-microsoft-title">Connect your Microsoft account</h2>

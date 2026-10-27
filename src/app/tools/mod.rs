@@ -226,6 +226,39 @@ pub(super) const TOOLS: &[Tool] = &[
         },
     },
     Tool {
+        name: "machine_login",
+        title: "Sign in to add this computer",
+        description: "Start browser sign-in to add this computer to your account on your own coordinator (its HTTPS origin; omitted reuses the connected or remembered one). Returns only the coordinator, a public approval URL, a confirmation code and expiry, never credentials. The user signs in there and chooses Trust this machine; open: true opens the system browser on a desktop host. Teams must be stopped on a computer that is not connected yet. Grants nothing by itself.",
+        effect: Effect::Local,
+        schema: || {
+            object(
+                json!({"url":string("Your coordinator HTTPS origin."),"open":{"type":"boolean","description":"Open the approval page in this computer's browser."}}),
+                &[],
+            )
+        },
+    },
+    Tool {
+        name: "machine_login_status",
+        title: "Check computer sign-in",
+        description: "Read the pending sign-in state without finishing it: pending, approved, denied, expired or none, with the public approval URL and code. Never returns credentials.",
+        effect: Effect::Read,
+        schema: none,
+    },
+    Tool {
+        name: "machine_login_finish",
+        title: "Finish computer sign-in",
+        description: "Finish a sign-in the user approved in the browser: this computer stores its own revocable machine credential locally and connects to that account. Returns pending until approval. Denied, expired or mismatched sign-ins trust nothing and keep any previous connection. Grants no directories, Teams ownership or assistant start.",
+        effect: Effect::Local,
+        schema: none,
+    },
+    Tool {
+        name: "machine_login_cancel",
+        title: "Cancel computer sign-in",
+        description: "Cancel this computer's pending sign-in so it can no longer be approved. Does not disconnect an existing connection.",
+        effect: Effect::Local,
+        schema: none,
+    },
+    Tool {
         name: "machine_disconnect",
         title: "Disconnect this machine",
         description: "Disconnect this host from its coordinator after stopping Teams.",
@@ -898,6 +931,17 @@ fn text<'a>(args: &'a Value, name: &str) -> Result<&'a str, String> {
 /// What a tool does, run against the host.
 pub(super) async fn run(name: &str, args: &Value) -> Result<Value, String> {
     validate(name, args)?;
+    if name == "machine_login_finish" {
+        // Pending approval is a state to report, not a failure.
+        let reply = cli::call(name, json!({}), None, true)
+            .await
+            .map_err(|_| "The host could not be reached; check pta status.".to_string())?;
+        return if reply.code == "authorization_pending" {
+            Ok(reply.data)
+        } else {
+            data(Ok(reply))
+        };
+    }
     if super::implementation::handles(name) {
         let mut args = args.clone();
         if ![

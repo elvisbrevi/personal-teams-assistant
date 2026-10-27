@@ -59,7 +59,7 @@ pub(super) fn accounts(root: &Path) -> Result<Vec<Account>> {
     }
     Ok(entries)
 }
-fn file_lock(root: &Path, name: &str) -> Result<fs::File> {
+pub(super) fn file_lock(root: &Path, name: &str) -> Result<fs::File> {
     security::private_dir(root)?;
     let path = root.join(name);
     let lock = fs::OpenOptions::new()
