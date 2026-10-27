@@ -50,6 +50,7 @@ src/                          core: pipeline, Graph adapters, LLM, knowledge, to
   app/headless.rs             headless shell: foreground, SIGTERM/Ctrl-C, `--start`
   app/web.rs, app/web/         browser GUI, Access-bound sessions, isolated per-user host processes
   app/control.rs              profile paths, IPC channel (contract 1), single dispatcher, update
+  app/authority.rs            server-derived account/profile and authenticated invocation guards
   app/cli.rs                  `pta`: help, parsing, argument validation, translation to IPC methods
   app/github.rs               GitHub App with Device Flow, clone/sync without a token in URL/argv
   app/skill.rs                skill texts embedded with include_str!
@@ -206,6 +207,43 @@ GETs of the exact static icons and PWA manifest (`PUBLIC_ASSETS`, which the help
 also bypasses, because WebKit fetches a page's icons without cookies);
 Graph forwarding and its existing batch authentication stay unchanged. The current
 profile's separate desktop Graph hostname/tunnel remains unchanged. See the [web operating guide](../desktop/skills/personal-teams-assistant/references/web-access.md).
+
+### Account and invocation authority (0.9.10)
+
+The host derives its account binding from the canonical profile and the operator's
+account registry. Each invocation carries that scope and its authenticated
+transport inside Rust; JSON IDs, paths, owner flags and transport/maintenance
+fields never grant authority. The profile binding is rechecked before dispatch,
+including implementation operations that bypass the ordinary operations mutex.
+Reassociation requires a fresh host. Rejections happen before diagnostics can
+read or write data under a changed binding. Existing per-profile settings, sources,
+notes, indexes, activity records, implementation ledgers and asynchronous results
+retain their owning host; machine session summaries and call results retain their
+existing machine checks. Graph callbacks still select only the exact bound profile.
+
+IPC descriptors advertise additive `account_authority_support`, an account/version
+binding and separate random local, browser and machine credentials. The portal
+checks the expected binding before forwarding and uses only the appropriate
+scoped credential. The host repeats browser operation/path checks and limits
+machine authority to the existing coordinator protocol; nested calls retain their
+transport through a task-local invocation. A machine cannot forward coding,
+provider discovery or directory browsing into the coordinator's local OS context.
+The new CLI/portal refuse older hosts before transmitting an operation; there is
+no fallback to the operator bearer. A matched local installation upgrade may only
+inspect (`snapshot`) and stop (`app_quit`) its older owner host to preserve the
+existing running state; this private retirement path cannot perform other actions
+or forward portal requests. Native GUI, CLI and MCP use the same dispatcher.
+The native bearer and portal administration remain trusted local OS operations.
+
+Additional portal accounts remain disabled in this slice. Even a legacy ordinary
+profile started directly cannot invoke shared-host operations or provider/coding
+processes. Background activity and execution paths recheck their bound scope;
+without verified OS isolation, rejection directs the user to a personal trusted
+machine. Private profile directories, provider homes, working-directory limits and
+tool-less prompts are not an OS security boundary. Different people sharing a
+computer need distinct OS security contexts: switching app accounts cannot protect
+against someone controlling the same OS account. No container sandbox or new
+variable consumer is introduced here; neither is silently assumed to exist.
 
 ### Headless host (Linux and servers)
 

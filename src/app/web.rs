@@ -31,6 +31,58 @@ pub(super) fn profile_command(binary: &Path, dir: &Path) -> std::process::Comman
     profiles::worker_command(binary, dir).into_std()
 }
 
+/// Resolve only operator-owned on-disk bindings. No request field participates.
+pub(super) fn account_scope(profile: &Path) -> Result<authority::Scope> {
+    let profile = profile.canonicalize()?;
+    let isolated = profile
+        .parent()
+        .filter(|p| p.file_name().is_some_and(|n| n == "profiles"))
+        .and_then(Path::parent)
+        .filter(|p| p.file_name().is_some_and(|n| n == "web"));
+    let root = isolated
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| profile.join("web"));
+    let entries = accounts(&root)?;
+    let entry = entries
+        .iter()
+        .find(|a| profile_dir(&root, a).canonicalize().ok().as_ref() == Some(&profile));
+
+    let shared = isolated.is_some();
+    let owner = !shared || entry.is_some_and(|a| settings(&root).is_ok_and(|s| s.owns(a)));
+    Ok(authority::Scope {
+        profile,
+        account: entry.map(|a| authority::AccountBinding {
+            id: a.id.clone(),
+            version: a.version.clone(),
+        }),
+        // The standard profile is always the local operator's installation. Browser
+        // sessions still require the enabled owner association at both ends of IPC.
+        owner,
+        shared,
+    })
+}
+
+pub(super) fn check_bound_request(
+    scope: &authority::Scope,
+    request: &control::Request,
+) -> Result<()> {
+    let root = if scope.shared {
+        scope
+            .profile
+            .parent()
+            .and_then(Path::parent)
+            .context("Invalid account profile.")?
+            .to_path_buf()
+    } else {
+        scope.profile.join("web")
+    };
+    let account = accounts(&root)?
+        .into_iter()
+        .find(|a| profile_dir(&root, a).canonicalize().ok().as_ref() == Some(&scope.profile))
+        .context("Unknown browser account.")?;
+    Portal::new(root, PathBuf::new())?.check_request(&account, request)
+}
+
 /// Apply the same identity guard when an operator starts a profile from the CLI or
 /// desktop rather than from the portal. The default profile keeps its existing paths.
 pub(super) fn validate_profile_identity(dir: &Path, config: &Config) -> Result<()> {
@@ -679,7 +731,15 @@ async fn command(
         .into_response();
     }
     let method = request.method.clone();
-    let mut reply = match control::client_at(request, &dir).await {
+    let mut reply = match control::client_scoped(
+        request,
+        &dir,
+        &account.id,
+        &account.version,
+        authority::Transport::Browser,
+    )
+    .await
+    {
         Ok(reply) => reply,
         Err(_) => return StatusCode::BAD_GATEWAY.into_response(),
     };
@@ -729,6 +789,9 @@ async fn machine_command(
     else {
         return StatusCode::UNAUTHORIZED.into_response();
     };
+    if authority::reject_authority_arguments(&args).is_err() {
+        return StatusCode::FORBIDDEN.into_response();
+    }
     let registration = args["action"] == "register";
     let entries = match accounts(&portal.root) {
         Ok(entries) => entries,
@@ -779,14 +842,20 @@ async fn machine_command(
     } else {
         "machine_protocol"
     });
-    if registration {
-        args["account_version"] = json!(account.version);
-    }
+
     if !registration {
         args["token"] = json!(token);
     }
     request.args = args;
-    let mut reply = match control::client_at(request, &dir).await {
+    let mut reply = match control::client_scoped(
+        request,
+        &dir,
+        &account.id,
+        &account.version,
+        authority::Transport::Machine,
+    )
+    .await
+    {
         Ok(reply) => reply,
         Err(_) => return StatusCode::BAD_GATEWAY.into_response(),
     };
@@ -867,6 +936,7 @@ async fn webhook(
 }
 
 pub(super) fn run() -> Result<()> {
+    authority::require_operator(&control::profile_dir()?)?;
     let root = control::profile_dir()?.join("web");
     security::private_dir(&root)?;
     let lock = fs::OpenOptions::new()

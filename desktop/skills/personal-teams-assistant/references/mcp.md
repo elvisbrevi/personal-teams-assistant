@@ -23,3 +23,9 @@ Other clients take `{"mcpServers":{"personal-teams-assistant":{"command":"pta","
 - *Read daily tasks:* `list_azure_tasks` with day and optional user/source/project; `get_azure_task` with ID for full detail. `activity_run` saves the catalog user's existing tasks locally; `activity_history` lists recorded days and the selected day's tasks. Schedule snapshots with `activity_settings_update`. No task creation or Azure writes are available.
 
 Implementation tools and their confirmation requirements are described in [work item implementation](tools-and-todo.md#implement-work-items-and-inspect-agent-sessions). `implementation_runs` and `implementation_sessions` expose persistent native session IDs, work item associations, machine, state and start/finish times. Daily activity tools remain read-only.
+
+Account and invocation authority requires `account_authority_support` (0.9.10+).
+MCP tools use the same authenticated host dispatcher as CLI and GUI; tool arguments
+cannot select an account or acquire operator maintenance authority. Ordinary
+shared-host provider/coding processes are refused before launch; use a personal
+trusted machine. See [the authority boundary](web-access.md#account-and-execution-authority).

@@ -64,6 +64,14 @@ impl Reply {
 #[derive(Serialize, Deserialize)]
 struct Endpoint {
     #[serde(default)]
+    account_authority_support: bool,
+    #[serde(default)]
+    account_binding: Option<authority::AccountBinding>,
+    #[serde(default)]
+    browser_token: String,
+    #[serde(default)]
+    machine_token: String,
+    #[serde(default)]
     machine_pairing_support: bool,
     #[serde(default)]
     implementation_support: bool,
@@ -210,7 +218,9 @@ pub(super) fn require_web_access_host_at(dir: &Path) -> Result<()> {
     existing_host_at(dir)?;
     let endpoint: Endpoint = serde_json::from_slice(&fs::read(dir.join("control.json"))?)?;
     ensure!(
-        endpoint.web_access_support && endpoint.machine_pairing_support,
+        endpoint.web_access_support
+            && endpoint.machine_pairing_support
+            && endpoint.account_authority_support,
         "incompatible Access or machine pairing host: update the host and CLI together, preserving the assistant's running state"
     );
     Ok(())
@@ -218,12 +228,13 @@ pub(super) fn require_web_access_host_at(dir: &Path) -> Result<()> {
 /// Stop an outdated host (assistant and tunnel first) and wait until it releases the profile.
 /// Returns whether its assistant was running, so the caller can offer to keep it running.
 pub async fn retire_outdated_host() -> Result<bool> {
-    let was_running = client(Request::new("snapshot"), false)
+    let dir = profile_dir()?;
+    let was_running = retirement_request(Request::new("snapshot"), &dir)
         .await
         .map(|reply| reply.data["running"].as_bool() == Some(true))
         .unwrap_or(false);
     // The host exits right after replying; a lost reply is fine, the lock tells the outcome.
-    let _ = client(Request::new("app_quit"), false).await;
+    let _ = retirement_request(Request::new("app_quit"), &dir).await;
     for _ in 0..600 {
         if existing_host().is_err() {
             return Ok(was_running);
@@ -294,6 +305,51 @@ pub async fn client(request: Request, start_host: bool) -> Result<Reply> {
 }
 /// Select a profile from the authenticated session, never from browser input.
 pub(super) async fn client_at(request: Request, dir: &Path) -> Result<Reply> {
+    client_with_transport(request, dir, None, false).await
+}
+
+pub(super) async fn client_scoped(
+    request: Request,
+    dir: &Path,
+    account: &str,
+    version: &str,
+    transport: authority::Transport,
+) -> Result<Reply> {
+    client_with_transport(
+        request,
+        dir,
+        Some((
+            authority::AccountBinding {
+                id: account.into(),
+                version: version.into(),
+            },
+            transport,
+        )),
+        false,
+    )
+    .await
+}
+
+/// A matched installation upgrade can inspect/stop its old local host, even
+/// before that host supports account authority. No ordinary operation uses this path.
+async fn retirement_request(request: Request, dir: &Path) -> Result<Reply> {
+    ensure!(
+        matches!(request.method.as_str(), "snapshot" | "app_quit"),
+        "Invalid host retirement operation."
+    );
+    ensure!(
+        web::account_scope(dir)?.owner,
+        "Only the installation owner can retire a legacy host."
+    );
+    client_with_transport(request, dir, None, true).await
+}
+
+async fn client_with_transport(
+    request: Request,
+    dir: &Path,
+    scoped: Option<(authority::AccountBinding, authority::Transport)>,
+    retirement: bool,
+) -> Result<Reply> {
     existing_host_at(dir)?;
     // Model-backed operations wait for the model without a deadline.
     let mut client = reqwest::Client::builder()
@@ -307,6 +363,24 @@ pub(super) async fn client_at(request: Request, dir: &Path) -> Result<Reply> {
         // A newly claimed lock can precede descriptor replacement. Retry only
         // connection establishment failures, before any request was delivered.
         let endpoint: Endpoint = serde_json::from_slice(&fs::read(dir.join("control.json"))?)?;
+        ensure!(
+            endpoint.account_authority_support || (retirement && scoped.is_none()),
+            "Incompatible account authority host: update the host and CLI together; no security downgrade is available."
+        );
+        let token = if let Some((binding, transport)) = &scoped {
+            ensure!(
+                endpoint.account_binding.as_ref() == Some(binding),
+                "Account binding mismatch."
+            );
+            match transport {
+                authority::Transport::Browser => &endpoint.browser_token,
+                authority::Transport::Machine => &endpoint.machine_token,
+                authority::Transport::Local => anyhow::bail!("Invalid scoped transport."),
+            }
+        } else {
+            &endpoint.token
+        };
+        ensure!(!token.is_empty(), "Missing account authority credential.");
         ensure!(
             endpoint.machine_pairing_support || request.method != "machine_connect",
             "Incompatible machine pairing host: update the host and CLI together before connecting a machine."
@@ -337,7 +411,7 @@ pub(super) async fn client_at(request: Request, dir: &Path) -> Result<Reply> {
         );
         let response = client
             .post(format!("http://127.0.0.1:{}/control", endpoint.port))
-            .bearer_auth(endpoint.token)
+            .bearer_auth(token)
             .json(&request)
             .send()
             .await;
@@ -361,6 +435,8 @@ pub(super) async fn client_at(request: Request, dir: &Path) -> Result<Reply> {
 struct LocalState {
     host: Arc<Host>,
     token: String,
+    browser_token: String,
+    machine_token: String,
     _lock: fs::File,
 }
 pub fn claim() -> Result<fs::File> {
@@ -397,9 +473,15 @@ pub(crate) fn launch(
         &std::env::current_exe()?.to_string_lossy(),
     )?;
     let token = security::random_secret();
+    let browser_token = security::random_secret();
+    let machine_token = security::random_secret();
     write_private(
         &dir.join("control.json"),
         &serde_json::to_string(&Endpoint {
+            account_authority_support: true,
+            account_binding: host.state.authority.account.clone(),
+            browser_token: browser_token.clone(),
+            machine_token: machine_token.clone(),
             wiki_support: true,
             activity_registration_support: true,
             web_support: true,
@@ -418,6 +500,8 @@ pub(crate) fn launch(
         .with_state(Arc::new(LocalState {
             host: host.clone(),
             token,
+            browser_token,
+            machine_token,
             _lock: lock,
         }));
     Ok(async move {
@@ -436,10 +520,22 @@ async fn endpoint(
     Json(request): Json<Request>,
 ) -> std::result::Result<Json<Reply>, StatusCode> {
     // Browser requests have Origin. No CORS, cookie, GET, or unauthenticated administration.
-    if !authorized(&headers, &local.token) {
+    let transport = if authorized(&headers, &local.token) {
+        authority::Transport::Local
+    } else if authorized(&headers, &local.browser_token) {
+        authority::Transport::Browser
+    } else if authorized(&headers, &local.machine_token) {
+        authority::Transport::Machine
+    } else {
         return Err(StatusCode::FORBIDDEN);
-    }
-    Ok(Json(dispatch(&local.host, request).await))
+    };
+    let invocation = authority::Invocation {
+        scope: local.host.state.authority.clone(),
+        transport,
+    };
+    Ok(Json(
+        authority::within(invocation, Box::pin(dispatch(&local.host, request))).await,
+    ))
 }
 fn authorized(headers: &HeaderMap, token: &str) -> bool {
     !headers.contains_key("origin")
@@ -464,9 +560,23 @@ fn arg<T: serde::de::DeserializeOwned>(
         .map_err(|_| format!("invalid argument: {name}"))
 }
 pub(crate) async fn dispatch(host: &Arc<Host>, request: Request) -> Reply {
+    // Reject before diagnostics: a failed account check must not read or write a
+    // newly rebound account's paths, even to record the rejection.
+    let invocation = match authority::authorize(&host.state, &request) {
+        Ok(value) => value,
+        Err(_) => return Reply::error("authority_denied", 6, authority::EXECUTION_DENIED),
+    };
     let method = request.method.clone();
     let started = std::time::Instant::now();
-    let (reply, causes) = diagnostics::capture(dispatch_inner(host, request)).await;
+    // Keep the large operation future off the transport worker's stack.
+    let (reply, causes) = authority::within(
+        invocation,
+        diagnostics::capture(Box::pin(dispatch_inner(host, request))),
+    )
+    .await;
+    if authority::invocation(&host.state).is_err() {
+        return Reply::error("authority_denied", 6, authority::EXECUTION_DENIED);
+    }
     if !reply.ok && reply.code != "authorization_pending" {
         diagnostics::record(&host.state, &method, &reply, started.elapsed(), causes);
     }
@@ -1098,6 +1208,57 @@ async fn operate(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn legacy_upgrade_retirement_is_local_and_limited_to_inspection_and_shutdown() {
+        use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
+        let server = MockServer::start().await;
+        let dir = tempfile::tempdir().unwrap();
+        let _lock = claim_at(dir.path()).unwrap();
+        write_private(
+            &dir.path().join("control.json"),
+            &json!({
+                "contract":1,"port":url::Url::parse(&server.uri()).unwrap().port().unwrap(),
+                "token":"synthetic-legacy-token"
+            })
+            .to_string(),
+        )
+        .unwrap();
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(Reply::success(json!({"running":false}))),
+            )
+            .mount(&server)
+            .await;
+        assert!(
+            client_at(Request::new("snapshot"), dir.path())
+                .await
+                .is_err()
+        );
+        assert!(
+            retirement_request(Request::new("save_settings"), dir.path())
+                .await
+                .is_err()
+        );
+        assert!(server.received_requests().await.unwrap().is_empty());
+        for method in ["snapshot", "app_quit"] {
+            assert!(
+                retirement_request(Request::new(method), dir.path())
+                    .await
+                    .unwrap()
+                    .ok
+            );
+        }
+        let delivered = server.received_requests().await.unwrap();
+        assert_eq!(delivered.len(), 2);
+        assert_eq!(
+            delivered[0].body_json::<Value>().unwrap()["method"],
+            "snapshot"
+        );
+        assert_eq!(
+            delivered[1].body_json::<Value>().unwrap()["method"],
+            "app_quit"
+        );
+    }
     #[test]
     fn legacy_descriptor_does_not_advertise_wiki_schema_support() {
         let legacy: Endpoint =
@@ -1127,6 +1288,10 @@ mod tests {
                 web_access_support: true,
                 implementation_support: true,
                 machine_pairing_support: true,
+                account_authority_support: true,
+                account_binding: None,
+                browser_token: String::new(),
+                machine_token: String::new(),
             })
             .unwrap(),
         )
@@ -1147,6 +1312,10 @@ mod tests {
                 web_access_support: true,
                 implementation_support: true,
                 machine_pairing_support: true,
+                account_authority_support: true,
+                account_binding: None,
+                browser_token: String::new(),
+                machine_token: String::new(),
             })
             .unwrap(),
         )
@@ -1176,6 +1345,10 @@ mod tests {
                     web_access_support: true,
                     implementation_support: true,
                     machine_pairing_support: true,
+                    account_authority_support: true,
+                    account_binding: None,
+                    browser_token: String::new(),
+                    machine_token: String::new(),
                 })
                 .unwrap(),
             )

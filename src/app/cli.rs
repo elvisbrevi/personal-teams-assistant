@@ -480,7 +480,7 @@ async fn execute(mut args: Vec<String>) -> Result<Reply> {
         }
         "capabilities" => {
             return Ok(Reply::success(
-                json!({"contract":control::CONTRACT,"commands":HELP,"skill_version":env!("CARGO_PKG_VERSION"),"activity_registration_support":true,"web_support":true,"web_access_support":true,"knowledge_index_support":true,"mcp_support":true,"tools_support":true,"todo_support":true,"implementation_support":true,"machine_pairing_support":true}),
+                json!({"contract":control::CONTRACT,"commands":HELP,"skill_version":env!("CARGO_PKG_VERSION"),"activity_registration_support":true,"web_support":true,"web_access_support":true,"knowledge_index_support":true,"mcp_support":true,"tools_support":true,"todo_support":true,"implementation_support":true,"machine_pairing_support":true,"account_authority_support":true}),
             ));
         }
         "skill" => return crate::app::skill::command(action, args.get(2).map(String::as_str)),
@@ -1228,11 +1228,11 @@ pub async fn run() -> i32 {
         Err(error) => {
             // Never serialize dependency/provider error chains or user input (which may contain secrets).
             let input = error.to_string();
-            if input.starts_with("incompatible") {
+            if input.starts_with("incompatible") || input.starts_with("Incompatible") {
                 Reply::error(
                     "state_conflict",
                     6,
-                    "CLI/host incompatibles. Use a Wiki-capable host before applying the Wiki schema.",
+                    "Update the host and CLI together before continuing. Required security or schema capabilities are unavailable.",
                 )
             } else if [
                 "missing argument",

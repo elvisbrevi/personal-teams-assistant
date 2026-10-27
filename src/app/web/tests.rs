@@ -466,7 +466,9 @@ async fn fake_host(portal: &Portal, account: &Account) -> (MockServer, fs::File)
     write_private(
         &dir.join("control.json"),
         &json!({"contract":1,"port":port,"token":"synthetic-ipc-token",
-        "wiki_support":true,"activity_registration_support":true,"web_support":true,"web_access_support":true,"implementation_support":true,"machine_pairing_support":true})
+        "wiki_support":true,"activity_registration_support":true,"web_support":true,"web_access_support":true,"implementation_support":true,"machine_pairing_support":true,
+        "account_authority_support":true,"account_binding":{"id":account.id,"version":account.version},
+        "browser_token":"synthetic-browser-token","machine_token":"synthetic-machine-token"})
         .to_string(),
     )
     .unwrap();
@@ -710,7 +712,15 @@ async fn commands_are_session_scoped_and_require_csrf_even_for_reads() {
             .await,
         )
         .await;
-        assert_eq!(data["data"]["owner"], entry.username);
+        assert_eq!(data["ok"], false);
+        assert_eq!(data["code"], "invalid_input");
+        let delivered = _alice.received_requests().await.unwrap();
+        assert_eq!(delivered.len(), 1);
+        assert_eq!(
+            delivered[0].headers["authorization"],
+            "Bearer synthetic-browser-token"
+        );
+        assert!(_bob.received_requests().await.unwrap().is_empty());
     }
     assert_ne!(
         profile_dir(&portal.root, &entries[0]),
@@ -1228,6 +1238,40 @@ async fn the_portal_refuses_a_password_era_host_without_changing_its_profile() {
     let before = fs::read(dir.join("config.toml")).unwrap();
     assert!(portal.worker(&entries[0]).await.is_err());
     assert_eq!(fs::read(dir.join("config.toml")).unwrap(), before);
+}
+
+#[tokio::test]
+async fn account_authority_is_mandatory_and_scoped_forwarding_cannot_select_another_account() {
+    let (_dir, portal, entries, _server) = configured_fixture().await;
+    let (host, _lock) = fake_host(&portal, &entries[0]).await;
+    let dir = profile_dir(&portal.root, &entries[0]);
+    assert!(
+        control::client_scoped(
+            control::Request::new("snapshot"),
+            &dir,
+            &entries[1].id,
+            &entries[1].version,
+            authority::Transport::Browser,
+        )
+        .await
+        .is_err()
+    );
+    let path = dir.join("control.json");
+    let mut descriptor: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    descriptor
+        .as_object_mut()
+        .unwrap()
+        .remove("account_authority_support");
+    write_private(&path, &descriptor.to_string()).unwrap();
+    let before = fs::read(dir.join("config.toml")).unwrap();
+    assert!(portal.worker(&entries[0]).await.is_err());
+    assert!(
+        control::client_at(control::Request::new("snapshot"), &dir)
+            .await
+            .is_err()
+    );
+    assert_eq!(fs::read(dir.join("config.toml")).unwrap(), before);
+    assert!(host.received_requests().await.unwrap().is_empty());
 }
 
 #[tokio::test]

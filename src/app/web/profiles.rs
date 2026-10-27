@@ -249,6 +249,7 @@ impl Portal {
         account: &Account,
         request: &control::Request,
     ) -> Result<()> {
+        authority::reject_authority_arguments(&request.args)?;
         ensure!(
             self.settings.owns(account),
             "Operation is unavailable for this installation."

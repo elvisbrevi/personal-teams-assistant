@@ -333,6 +333,9 @@ pub(super) async fn operate(
     })
 }
 async fn operation(host: &Arc<Host>, method: &str, args: &Value) -> Result<Value> {
+    let mut request = control::Request::new(method);
+    request.args = args.clone();
+    authority::authorize(&host.state, &request)?;
     match method {
         "implementation_request_catalog"
         | "implementation_request_start"
@@ -505,6 +508,15 @@ fn browse_directories(path: Option<&str>, allowed: &[PathBuf]) -> Result<Value> 
 }
 
 async fn local(host: &Arc<Host>, method: &str, args: &Value) -> Result<Value> {
+    if !matches!(method, "machine_assistant" | "implementation_runs") {
+        authority::require_execution(&host.state)?;
+    } else {
+        ensure!(
+            authority::invocation(&host.state)?.scope.owner,
+            "Account binding changed."
+        );
+    }
+    authority::reject_authority_arguments(args)?;
     let state = &host.state.implementation;
     match method {
         "implementation_mobile_session" => mobile_session(host, args).await,
@@ -642,7 +654,10 @@ async fn local(host: &Arc<Host>, method: &str, args: &Value) -> Result<Value> {
 fn remote_observer(host: &Arc<Host>, id: &str) -> crate::llm::implementation::mobile::Observer {
     let host = host.clone();
     let id = id.to_owned();
-    Arc::new(move |access| host.state.implementation.db.remote(&id, access))
+    Arc::new(move |access| {
+        authority::require_execution(&host.state)?;
+        host.state.implementation.db.remote(&id, access)
+    })
 }
 
 async fn mobile_session(host: &Arc<Host>, args: &Value) -> Result<Value> {
@@ -756,10 +771,15 @@ async fn mobile_session(host: &Arc<Host>, args: &Value) -> Result<Value> {
 }
 
 async fn run(host: &Arc<Host>, launch: Launch) {
+    if authority::require_execution(&host.state).is_err() {
+        return;
+    }
     let request = &launch.request;
     let input = json!({"verified_item":launch.detail,"user_context":request.context,"working_directories":request.directories,"language":launch.language}).to_string();
-    let observer =
-        |session: Option<&str>| host.state.implementation.db.session(&launch.id, session);
+    let observer = |session: Option<&str>| {
+        authority::require_execution(&host.state)?;
+        host.state.implementation.db.session(&launch.id, session)
+    };
     let remote = remote_observer(host, &launch.id);
     let result = if launch.planning {
         async {
@@ -804,11 +824,13 @@ async fn run(host: &Arc<Host>, launch: Launch) {
         Ok((ok,output,plan))=>(if plan.is_some() { "plan_ready" } else if ok { "done" } else { "needs_attention" },output,plan),
         Err(_)=>("failed","The selected CLI did not complete. Check its login, permissions and model availability on the execution machine.".into(),None),
     };
-    let _ = host
-        .state
-        .implementation
-        .db
-        .finish(&launch.id, status, &output, plan);
+    if authority::invocation(&host.state).is_ok_and(|i| i.scope.owner) {
+        let _ = host
+            .state
+            .implementation
+            .db
+            .finish(&launch.id, status, &output, plan);
+    }
 }
 
 async fn create(host: &Arc<Host>, args: &Value) -> Result<Value> {
@@ -881,6 +903,9 @@ async fn create(host: &Arc<Host>, args: &Value) -> Result<Value> {
             .await
             .is_err()
         {
+            if !authority::invocation(&task_host.state).is_ok_and(|i| i.scope.owner) {
+                return;
+            }
             let state = &task_host.state.implementation;
             let mut data = state.registry.lock().await;
             if let Some(record) = data.creations.get_mut(&task_id) {
@@ -909,6 +934,10 @@ async fn send_children(
     let state = &host.state.implementation;
     let mut created = Vec::new();
     for child in &children {
+        ensure!(
+            authority::invocation(&host.state)?.scope.owner,
+            "Account binding changed."
+        );
         let result = tools::todo::create_child(
             &host.state,
             &selection.provider,
@@ -917,6 +946,10 @@ async fn send_children(
             child,
         )
         .await;
+        ensure!(
+            authority::invocation(&host.state)?.scope.owner,
+            "Account binding changed."
+        );
         let mut data = state.registry.lock().await;
         let record = data.creations.get_mut(id).unwrap();
         match result {

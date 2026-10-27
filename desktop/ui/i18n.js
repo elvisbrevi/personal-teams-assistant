@@ -4,6 +4,7 @@
 const UI_LANGUAGES = ['es', 'en'];
 
 const UI_CATALOG = { es: {
+  "Shared-host execution requires a verified OS security boundary. Use your personal trusted machine; a working directory or tool-less prompt is not an OS sandbox.": "La ejecución en un servidor compartido requiere un aislamiento verificado del sistema operativo. Usa tu máquina de confianza personal; una carpeta de trabajo o instrucciones sin herramientas no aíslan el sistema operativo.",
   "Codex Remote Control could not connect. Update Codex and check its ChatGPT login and workspace access on the execution machine.": "No se pudo conectar Codex Remote Control. Actualiza Codex y revisa su sesión de ChatGPT y el acceso al espacio de trabajo en la máquina de ejecución.",
   "Codex Remote Control is not connected. Check its ChatGPT login and workspace access on the execution machine.": "Codex Remote Control no está conectado. Revisa su sesión de ChatGPT y el acceso al espacio de trabajo en la máquina de ejecución.",
   "Claude Remote Control could not connect. Update Claude Code and check its subscription login and organization policy on the execution machine.": "No se pudo conectar Claude Remote Control. Actualiza Claude Code y revisa su sesión de suscripción y la política de la organización en la máquina de ejecución.",

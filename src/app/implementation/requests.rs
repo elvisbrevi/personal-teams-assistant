@@ -70,6 +70,7 @@ fn validate(request: &Request) -> Result<()> {
     Ok(())
 }
 pub(super) async fn operate(host: &Arc<Host>, method: &str, args: &Value) -> Result<Value> {
+    authority::require_execution(&host.state)?;
     let state = &host.state.implementation;
     match method {
         "implementation_request_catalog" => {
@@ -212,10 +213,12 @@ pub(super) async fn operate(host: &Arc<Host>, method: &str, args: &Value) -> Res
 async fn run(host: &Arc<Host>, request: Request, prepared: Value, directory: PathBuf) {
     let db = &host.state.implementation.db;
     let result = async {
+        authority::require_execution(&host.state)?;
         let language = read_config(&host.state.config_path)?.llm.language;
         let input =
             json!({"context":request.context,"kind":request.kind,"language":language}).to_string();
         let observer = |session: Option<&str>| {
+            authority::require_execution(&host.state)?;
             db.request_update(&request.id, |record| {
                 if let Some(session) = session {
                     ensure!(
@@ -242,6 +245,7 @@ async fn run(host: &Arc<Host>, request: Request, prepared: Value, directory: Pat
         )
         .await?;
         validate_child(&draft)?;
+        authority::require_execution(&host.state)?;
         // Recheck catalog membership after generation: a model cannot authorize a destination.
         let provider = request.target["provider"].as_str().unwrap();
         let available = targets(host, provider, request.target["source"].as_str()).await?;
@@ -272,6 +276,7 @@ async fn run(host: &Arc<Host>, request: Request, prepared: Value, directory: Pat
             )
             .await?
         };
+        authority::require_execution(&host.state)?;
         db.request_update(&request.id, |record| {
             record["state"] = item["state"].clone();
             record["item"] = item;
@@ -281,7 +286,7 @@ async fn run(host: &Arc<Host>, request: Request, prepared: Value, directory: Pat
         Ok::<_, anyhow::Error>(())
     }
     .await;
-    if result.is_err() {
+    if result.is_err() && authority::invocation(&host.state).is_ok_and(|i| i.scope.owner) {
         let _ = db.request_update(&request.id,|record| {
             record["state"] = json!(if record["state"] == "sending" { "uncertain" } else { "failed" });
             record["output"] = json!("Request creation did not complete. Check the agent login and destination access. Inspect the provider before starting another request.");

@@ -76,6 +76,11 @@ pub(super) async fn run(
     slot: Option<&str>,
     context: &str,
 ) -> Result<Value> {
+    ensure!(
+        authority::invocation(&host.state)?.scope.owner,
+        "{}",
+        authority::EXECUTION_DENIED
+    );
     recover(&host.state).await?;
     ensure!(
         context.trim().is_empty(),
@@ -128,6 +133,7 @@ pub(super) async fn run(
             let mut day = Day {day:date.to_string(),time_zone:config.activity_registration.time_zone.clone(),target_hours:config.activity_registration.daily_hours,..Default::default()};
             let mut seen = std::collections::BTreeSet::new();
             for source in selected {
+                ensure!(authority::invocation(&h.state)?.scope.owner, "Account binding changed.");
                 let value = tools::todo::read(&h.state, "list_azure_tasks", &json!({"day":date.to_string(),"source":source})).await.map_err(|_| anyhow::anyhow!("Existing Azure tasks could not be read. Check the selected sources and read credentials; the previous record was retained."))?;
                 let read: Day = serde_json::from_value(value)?;
                 for task in read.tasks {
@@ -135,9 +141,13 @@ pub(super) async fn run(
                 }
             }
             day.saved_at = Utc::now().timestamp();
+            ensure!(authority::invocation(&h.state)?.scope.owner, "Account binding changed.");
             db.save_day(&day)?;
             Ok(day)
         }.await;
+        if !authority::invocation(&h.state).is_ok_and(|i| i.scope.owner) {
+            return;
+        }
         let language = config.llm.language;
         let (summary, error, body) = match result {
             Ok(day) => {
@@ -186,7 +196,9 @@ pub(super) async fn shutdown(state: &DesktopState) {
         task.abort();
         let _ = task.await;
     }
-    if let Ok(db) = database(state) {
+    if authority::invocation(state).is_ok_and(|i| i.scope.owner)
+        && let Ok(db) = database(state)
+    {
         let _ = db.recover();
     }
 }
@@ -209,7 +221,8 @@ pub(super) async fn schedule(host: Arc<Host>) {
                     .await
                     .as_ref()
                     .is_none_or(|t| t.is_finished());
-            if no_login
+            if authority::invocation(&host.state).is_ok_and(|i| i.scope.owner)
+                && no_login
                 && !active(&host.state).await
                 && let Ok(config) = read_config(&host.state.config_path)
                 && let Ok(Some(slot)) = config.activity_registration.slot(Utc::now())

@@ -31,3 +31,10 @@ The RSA fixture in `src/app/web/access/synthetic-rsa.der` is deliberately public
 ### Upstream maintenance notices
 
 The security update removes the reported vulnerable TLS/crypto dependencies, updates Tokio and upgrades JWT validation to 10.3+ for [the GitHub JWT type-confusion advisory](https://github.com/advisories/GHSA-h395-gr6q-cpjc), which was not in the RustSec findings. Both advisory sources must be checked. RustSec still reports maintenance notices for transitive GUI/parser crates, plus [GLib's Variant type-confusion notice](https://rustsec.org/advisories/RUSTSEC-2024-0429.html) in Tauri's Linux GTK 3 stack. The app does not call the affected Variant API directly. This is an upstream desktop limitation, not a clean bill of health for that stack; the Linux server uses `--no-default-features` and does not include GTK/GLib. Keep the notices visible in dependency audits and reassess when upstream replacements are available.
+
+Application accounts and profile directories are not an operating-system sandbox.
+Different people sharing a computer need distinct OS security contexts; switching
+app accounts does not protect against an attacker controlling that same OS account.
+Additional portal users remain unavailable. Ordinary-account coding, configurable
+providers and generic variable consumers require a verified OS boundary before
+server execution; absent one, use the account owner's personal trusted machine.
