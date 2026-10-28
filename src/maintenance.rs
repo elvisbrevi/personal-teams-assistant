@@ -17,6 +17,8 @@ use std::{
 };
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 
+/// The profile directory that holds staged pairs, the update journal and its lock.
+pub const DIRECTORY: &str = "maintenance";
 pub const CRATE: &str = "personal-teams-assistant";
 pub const CLI: &str = "pta";
 /// The sparse index Cargo itself reads for crates.io.
@@ -617,11 +619,11 @@ pub struct Manifest {
     pub binaries: BTreeMap<String, Digest>,
 }
 
-fn exe_name(name: &str) -> String {
+pub(crate) fn exe_name(name: &str) -> String {
     format!("{name}{}", std::env::consts::EXE_SUFFIX)
 }
 
-fn digest(path: &Path) -> Result<Digest> {
+pub(crate) fn digest(path: &Path) -> Result<Digest> {
     let metadata = std::fs::symlink_metadata(path)?;
     ensure!(
         metadata.is_file() && metadata.len() > 0,
@@ -712,6 +714,8 @@ pub fn unchanged(root: &Path, manifest: &Manifest) -> bool {
         digest(&root.join("bin").join(exe_name(name))).is_ok_and(|d| &d == expected)
     })
 }
+
+pub mod apply;
 
 #[cfg(test)]
 mod tests;

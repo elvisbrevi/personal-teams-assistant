@@ -154,6 +154,13 @@ Updates (this computer only; the shared server's operator updates it separately)
                            Builds that exact release with Cargo (locked dependencies, same features and target as this
                            installation) in this profile's maintenance directory and verifies the application and pta
                            pair. It installs nothing and needs the owner of this computer. Progress: update status.
+  update apply VERSION --confirmed
+                           Installs the prepared version: waits for work in progress (it never interrupts an answer, a send,
+                           an implementation or a migration), then replaces the application and pta together, restarts the
+                           application the way it was running and restores the assistant. If the new version does not start
+                           and report healthy, the previous pair is put back. Success is reported only after the health
+                           check; poll update status (it reads the update journal while the application restarts).
+  update cancel            Cancels an apply request that is waiting for work to finish.
   update dismiss VERSION   Hides the notice for that release.
 
 Personal chat
@@ -342,8 +349,13 @@ async fn update_command(args: &[String]) -> Result<Reply> {
             .context("missing version; consult --help")
     };
     match words.get(1).copied() {
-        Some("status") => call("crate_update_status", json!({}), None, true).await,
+        // While an update is applied no host may be running: read its journal instead of starting one.
+        Some("status") => match applying_status() {
+            Some(reply) => Ok(reply),
+            None => call("crate_update_status", json!({}), None, true).await,
+        },
         Some("check") => call("crate_update_check", json!({}), None, true).await,
+        Some("cancel") => call("crate_update_cancel", json!({}), None, true).await,
         Some("dismiss") => {
             call(
                 "crate_update_dismiss",
@@ -365,8 +377,42 @@ async fn update_command(args: &[String]) -> Result<Reply> {
             }
             call("crate_update_stage", json!({"version":version}), None, true).await
         }
+        Some("apply") => {
+            let version = version()?;
+            if let Some(reply) = unconfirmed(
+                args,
+                format!(
+                    "Install the prepared version {version} now? The application and pta are replaced and restarted; the previous version is restored if the new one does not start."
+                ),
+            ) {
+                return Ok(reply);
+            }
+            call("crate_update_apply", json!({"version":version}), None, true).await
+        }
         _ => anyhow::bail!("unknown command or invalid argument count"),
     }
+}
+
+/// The state of an update that is being applied, from its journal. The host is stopped for part of
+/// it, so this never contacts or starts one.
+fn applying_status() -> Option<Reply> {
+    use crate::maintenance::apply as journal;
+    let dir = control::profile_dir()
+        .ok()?
+        .join(crate::maintenance::DIRECTORY);
+    let entry = journal::read(&dir).filter(|j| !j.phase.finished())?;
+    // A journal whose driver died is undone first, then the host answers as usual.
+    if !matches!(
+        journal::recover(&dir, journal::now()),
+        Ok(journal::Recovery::Active)
+    ) {
+        return None;
+    }
+    Some(Reply::success(json!({
+        "managed": "local", "state": "applying", "running": env!("CARGO_PKG_VERSION"),
+        "installed": entry.from, "available": entry.to, "can_stage": false, "can_apply": false,
+        "apply": journal::describe(&entry),
+    })))
 }
 
 async fn account_command(args: &[String]) -> Result<Reply> {
@@ -868,8 +914,8 @@ fn validate_args(args: &[String]) -> Result<()> {
             | ["mcp", "config"]
             | ["tools", "list"]
             | ["tools", "call", _]
-            | ["update", "status" | "check"]
-            | ["update", "stage" | "dismiss", _]
+            | ["update", "status" | "check" | "cancel"]
+            | ["update", "stage" | "apply" | "dismiss", _]
             | ["account", "status" | "sync"]
             | ["account", "records", "status" | "history"]
             | ["account", "records", "history", _]
@@ -1025,6 +1071,7 @@ fn validate_args(args: &[String]) -> Result<()> {
         (
             "--confirmed",
             p.as_slice().starts_with(&["update", "stage"])
+                || p.as_slice().starts_with(&["update", "apply"])
                 || p.as_slice().starts_with(&["variables", "migrate", "run"])
                 || p.as_slice().starts_with(&["variables", "bind"])
                 || p.as_slice().starts_with(&["variables", "check"])

@@ -13,12 +13,12 @@ use super::{
     control::{self, Reply},
     *,
 };
-use crate::maintenance::{self as core, Installation, Manifest, Version};
+use crate::maintenance::{self as core, Installation, Manifest, Version, apply as journal};
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, ffi::OsString, sync::Mutex as StdMutex, time::Duration};
 
 const SCHEMA: u32 = 1;
-const DIRECTORY: &str = "maintenance";
+const DIRECTORY: &str = core::DIRECTORY;
 const AUTO_AFTER: u64 = 90;
 const AUTO_EVERY: u64 = 6 * 60 * 60;
 const AUTO_DUE: i64 = 12 * 60 * 60;
@@ -30,6 +30,9 @@ pub(super) fn handles(method: &str) -> bool {
     method.starts_with("crate_update_")
 }
 
+/// The flag of the helper process that replaces the executables (see [`apply`]).
+pub(crate) const HELPER_FLAG: &str = apply::FLAG;
+
 /// What the host needs from its surroundings; tests replace it with synthetic ones.
 #[derive(Clone)]
 pub(super) struct Environment {
@@ -37,6 +40,10 @@ pub(super) struct Environment {
     pub exe: PathBuf,
     pub variables: Vec<(OsString, OsString)>,
     pub running: Version,
+    /// The flags this host was started with that a restart must repeat (`--headless`, `--host`).
+    pub launch: Vec<String>,
+    /// Tests drive the helper themselves: nothing is spawned.
+    pub manual: bool,
 }
 
 #[cfg(test)]
@@ -52,6 +59,11 @@ fn environment() -> Environment {
         exe: std::env::current_exe().unwrap_or_default(),
         variables: std::env::vars_os().collect(),
         running: Version::parse(env!("CARGO_PKG_VERSION")).expect("a stable package version"),
+        launch: std::env::args()
+            .skip(1)
+            .filter(|a| matches!(a.as_str(), "--headless" | "--host"))
+            .collect(),
+        manual: false,
     }
 }
 
@@ -68,6 +80,15 @@ struct Saved {
     check_error: Option<String>,
     dismissed: Option<String>,
     stage: Option<Stage>,
+    /// An apply request that waits for work in progress to end.
+    deferred: Option<Deferred>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct Deferred {
+    version: String,
+    at: i64,
+    reasons: Vec<String>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -163,7 +184,11 @@ fn staged(dir: &Path, saved: &Saved, wanted: Option<Version>) -> Option<Manifest
 /// The full local view: versions, installation, check and staging state.
 fn status(host: &Host, env: &Environment) -> Value {
     let dir = directory(host);
+    // An update whose driver died is undone before it is reported.
+    let _ = journal::recover(&dir, now());
     let saved = load(&dir);
+    let last = journal::read(&dir);
+    let applying = last.as_ref().is_some_and(|j| !j.phase.finished());
     let installation = core::inspect(&env.exe);
     let installed = installation.as_ref().ok().map(|i| i.version);
     let offer = available(saved.latest.as_deref(), env.running, installed);
@@ -187,11 +212,31 @@ fn status(host: &Host, env: &Environment) -> Value {
         &manifest,
         recorded.as_ref().map(|s| s.state.as_str()),
     ) {
+        _ if applying => "applying",
         (Some(_), ..) => "staging",
+        (None, Some(_), _) if saved.deferred.is_some() => "deferred",
         (None, Some(_), _) => "staged",
         (None, None, Some("failed")) => "failed",
         _ => "idle",
     };
+    // The last update's outcome stays visible: a success for a day, a rollback or failure until the
+    // release is dismissed. Completion is only ever what the journal says, never the installed version.
+    let result = last
+        .as_ref()
+        .filter(|j| {
+            !j.phase.finished()
+                || match j.phase {
+                    journal::Phase::Committed => now() - j.finished_at.unwrap_or(0) < 24 * 60 * 60,
+                    _ => saved.dismissed.as_deref() != Some(j.to.as_str()),
+                }
+        })
+        .map(journal::describe);
+    let unsupported = apply::unsupported(env);
+    let can_apply = installation.is_ok()
+        && manifest.is_some()
+        && !applying
+        && unsupported.is_none()
+        && matches!(state, "staged" | "deferred");
     let install = match &installation {
         Ok(i) => json!({"supported":true,"features":i.features,"all_features":i.all_features,
             "no_default_features":i.no_default_features,"target":i.target}),
@@ -211,7 +256,13 @@ fn status(host: &Host, env: &Environment) -> Value {
         "check_error": saved.check_error,
         "dismissed": offer.is_some_and(|o| saved.dismissed.as_deref() == Some(&o.to_string())),
         "install": install,
-        "can_stage": installation.is_ok() && offer.is_some() && state != "staging",
+        "can_stage": installation.is_ok() && offer.is_some() && !matches!(state, "staging" | "applying"),
+        "can_apply": can_apply,
+        "apply_unsupported": unsupported,
+        "apply": result,
+        "deferred": saved.deferred.as_ref().filter(|_| state == "deferred").map(|d| json!({
+            "version": d.version, "since": d.at, "reasons": d.reasons,
+        })),
         "stage": shown.as_ref().map(stage_json),
         "staged": manifest.map(|m| json!({
             "version": m.version, "staged_at": m.staged_at, "features": m.features,
@@ -263,6 +314,18 @@ pub(super) async fn operate(host: &Arc<Host>, request: &control::Request) -> Rep
                 2,
                 "Give the version to prepare, as returned by the update check.",
             ),
+        },
+        "crate_update_apply" => match serde_json::from_value::<VersionArgs>(request.args.clone()) {
+            Ok(args) => apply::request(host, &env, &args.version).await,
+            Err(_) => Reply::error(
+                "invalid_input",
+                2,
+                "Give the prepared version to install, as shown by the update status.",
+            ),
+        },
+        "crate_update_cancel" => match serde_json::from_value::<NoArgs>(request.args.clone()) {
+            Ok(_) => apply::cancel(host, &env),
+            Err(_) => Reply::error("invalid_input", 2, "This operation takes no arguments."),
         },
         "crate_update_dismiss" => match serde_json::from_value::<VersionArgs>(request.args.clone())
         {
@@ -360,6 +423,13 @@ async fn stage(host: &Host, env: &Environment, requested: &str) -> Reply {
         Err(diagnostic) => return Reply::error("not_ready", 3, &diagnostic),
     };
     let dir = directory(host);
+    if journal::read(&dir).is_some_and(|j| !j.phase.finished()) {
+        return Reply::error(
+            "state_conflict",
+            6,
+            "An update is being applied. Wait for it to finish.",
+        );
+    }
     let profile = dir.parent().unwrap().to_path_buf();
     let started = now();
     // One build at a time per profile.
@@ -572,7 +642,13 @@ pub(super) async fn schedule(host: Arc<Host>) {
     if !is_local_owner(&host.state.authority, Transport::Local) {
         return;
     }
+    tokio::join!(daily(host.clone()), apply::retry_deferred(host));
+}
+
+async fn daily(host: Arc<Host>) {
+    // After the first pause, so the helper of an update that just restarted this host has finished.
     tokio::time::sleep(Duration::from_secs(AUTO_AFTER)).await;
+    tidy(&host);
     loop {
         let env = environment();
         let due = load(&directory(&host))
@@ -581,9 +657,20 @@ pub(super) async fn schedule(host: Arc<Host>) {
         if due && core::inspect(&env.exe).is_ok() {
             let _ = refresh(&host, &env).await;
         }
+        tidy(&host);
         tokio::time::sleep(Duration::from_secs(AUTO_EVERY)).await;
     }
 }
+
+/// Removes what earlier updates left behind, unless one is running.
+fn tidy(host: &Host) {
+    if let Ok(installation) = core::inspect(&environment().exe) {
+        journal::sweep(&directory(host), &installation.root, installation.version);
+    }
+}
+
+mod apply;
+pub(crate) use apply::{HANDOVER, run_helper};
 
 #[cfg(test)]
 mod tests;

@@ -137,6 +137,8 @@ fn fixture(registry: &MockServer) -> Fixture {
         .map(|(k, v)| (OsString::from(k), OsString::from(v)))
         .to_vec(),
         running: RUNNING,
+        launch: vec!["--headless".into()],
+        manual: true,
     };
     *TEST.lock().unwrap() = Some(env.clone());
     Fixture {
@@ -438,6 +440,8 @@ async fn only_the_local_owner_can_check_or_stage_a_portal_session_machine_or_oth
             ("crate_update_check", json!({})),
             ("crate_update_stage", json!({"version":"0.9.14"})),
             ("crate_update_dismiss", json!({"version":"0.9.14"})),
+            ("crate_update_apply", json!({"version":"0.9.14"})),
+            ("crate_update_cancel", json!({})),
         ] {
             let reply = call(&f.host, transport, op, args).await;
             assert!(!reply.ok, "{name} {op}");
@@ -791,4 +795,608 @@ async fn saved_state_holds_no_installation_path_or_secret() {
     let saved = fs::read_to_string(directory(&f.host).join("status.json")).unwrap();
     assert!(saved.contains("0.9.14"));
     assert!(!saved.contains(&f.install.display().to_string()));
+}
+
+// ---------------------------------------------------------------------------------------------
+// Applying a prepared update.
+
+use crate::maintenance::apply::Health;
+use apply::{Outcome, Platform, Tune};
+use std::sync::Mutex;
+
+const OLD: &str = "host 0.9.13";
+const NEW: &str = "host 0.9.14";
+
+/// Puts version-bearing files where the installation and the prepared pair would be.
+fn with_pair(f: &Fixture) {
+    let dir = directory(&f.host);
+    for name in [core::CRATE, core::CLI] {
+        fs::write(
+            f.install.join("bin").join(core::exe_name(name)),
+            format!("{OLD} {name}"),
+        )
+        .unwrap();
+    }
+    let base = staged_dir(&dir, "0.9.14");
+    fs::create_dir_all(base.join("root/bin")).unwrap();
+    let mut binaries = BTreeMap::new();
+    for name in [core::CRATE, core::CLI] {
+        let path = base.join("root/bin").join(core::exe_name(name));
+        fs::write(&path, format!("{NEW} {name}")).unwrap();
+        binaries.insert(name.to_owned(), core::digest(&path).unwrap());
+    }
+    let record = json!({"bins":["personal-teams-assistant","pta"],"features":[],"all_features":false,
+        "no_default_features":true,"profile":"release"});
+    fs::write(
+        base.join("root/.crates2.json"),
+        json!({"installs":{format!("{} 0.9.14 (registry+https://github.com/rust-lang/crates.io-index)", core::CRATE): record}}).to_string(),
+    )
+    .unwrap();
+    let manifest = Manifest {
+        schema: 1,
+        version: "0.9.14".into(),
+        staged_at: 1,
+        features: Vec::new(),
+        all_features: false,
+        no_default_features: true,
+        target: None,
+        binaries,
+    };
+    fs::write(
+        base.join("manifest.json"),
+        serde_json::to_string(&manifest).unwrap(),
+    )
+    .unwrap();
+    save(&dir, |saved| {
+        saved.latest = Some("0.9.14".into());
+        saved.stage = Some(Stage {
+            version: "0.9.14".into(),
+            state: "staged".into(),
+            phase: "done".into(),
+            started_at: 1,
+            finished_at: Some(2),
+            crates: 1,
+            current: None,
+            error: None,
+            tail: Vec::new(),
+        });
+    })
+    .unwrap();
+}
+
+fn installed(f: &Fixture, name: &str) -> String {
+    fs::read_to_string(f.install.join("bin").join(core::exe_name(name))).unwrap()
+}
+
+/// A scripted machine: a started host reports the version of the executable on disk.
+#[derive(Default)]
+struct Fake {
+    install: PathBuf,
+    data: PathBuf,
+    state: Mutex<Option<Health>>,
+    log: Mutex<Vec<String>>,
+    quit_fails: bool,
+    new_never_starts: bool,
+    new_unhealthy: bool,
+    assistant_fails: bool,
+    /// The previous version starts only on the data copy.
+    previous_needs_data: bool,
+    nothing_starts: bool,
+}
+
+impl Fake {
+    fn new(f: &Fixture) -> Self {
+        Self {
+            install: f.install.clone(),
+            data: directory(&f.host).parent().unwrap().to_path_buf(),
+            ..Self::default()
+        }
+    }
+    fn log(&self, text: &str) {
+        self.log.lock().unwrap().push(text.to_owned());
+    }
+    fn logged(&self) -> Vec<String> {
+        self.log.lock().unwrap().clone()
+    }
+    fn on_disk(&self) -> String {
+        fs::read_to_string(self.install.join("bin").join(core::exe_name(core::CRATE))).unwrap()
+    }
+}
+
+impl Platform for Fake {
+    async fn quit(&self) -> bool {
+        self.log("quit");
+        if self.quit_fails {
+            return false;
+        }
+        *self.state.lock().unwrap() = None;
+        true
+    }
+    async fn start(&self, launch: &[String]) -> Result<()> {
+        let on_disk = self.on_disk();
+        self.log(&format!("start {} {}", on_disk, launch.join(",")));
+        ensure!(!self.nothing_starts, "cannot start");
+        let new = on_disk.starts_with(NEW);
+        ensure!(
+            !(new && self.new_never_starts),
+            "The application could not be started."
+        );
+        if !new && self.previous_needs_data && !self.data.join("data-restored").exists() {
+            // It starts but never answers.
+            return Ok(());
+        }
+        *self.state.lock().unwrap() = Some(Health {
+            version: if new { "0.9.14" } else { "0.9.13" }.into(),
+            assistant: false,
+            subscriptions: 0,
+            tunnel: false,
+        });
+        Ok(())
+    }
+    async fn health(&self) -> Option<Health> {
+        self.state.lock().unwrap().clone()
+    }
+    async fn start_assistant(&self) -> Result<()> {
+        self.log("start_assistant");
+        let new = self.on_disk().starts_with(NEW);
+        ensure!(
+            !(new && self.assistant_fails),
+            "the assistant did not start"
+        );
+        if let Some(health) = self.state.lock().unwrap().as_mut()
+            && !(new && self.new_unhealthy)
+        {
+            health.assistant = true;
+            health.subscriptions = 1;
+        }
+        Ok(())
+    }
+    fn follow_up(&self) -> Vec<String> {
+        vec!["Skills refreshed.".into()]
+    }
+}
+
+fn tune() -> Tune {
+    Tune {
+        health: Duration::from_millis(400),
+        poll: Duration::from_millis(10),
+    }
+}
+
+async fn requested(f: &Fixture) -> Reply {
+    call(
+        &f.host,
+        Local,
+        "crate_update_apply",
+        json!({"version":"0.9.14"}),
+    )
+    .await
+}
+
+#[tokio::test]
+async fn a_prepared_pair_is_installed_restarted_and_reported_only_after_the_health_check() {
+    let _serial = SERIAL.lock().await;
+    let server = registry(&[line("0.9.14", false)]).await;
+    let f = fixture(&server);
+    with_pair(&f);
+    let dir = directory(&f.host);
+    let before = call(&f.host, Local, "crate_update_status", json!({}))
+        .await
+        .data;
+    assert_eq!(before["state"], "staged");
+    assert_eq!(before["can_apply"], true);
+
+    let reply = requested(&f).await;
+    assert!(reply.ok, "{:?}", reply.message);
+    // Requested, not done: nothing is replaced until the helper runs, and nothing says "installed".
+    assert_eq!(reply.data["state"], "applying");
+    assert_eq!(reply.data["apply"]["state"], "applying");
+    assert_eq!(installed(&f, core::CRATE), format!("{OLD} {}", core::CRATE));
+    assert_eq!(reply.data["can_stage"], false);
+    let again = requested(&f).await;
+    assert_eq!(again.code, "state_conflict", "one update at a time");
+    let stage = call(
+        &f.host,
+        Local,
+        "crate_update_stage",
+        json!({"version":"0.9.14"}),
+    )
+    .await;
+    assert_eq!(stage.code, "state_conflict");
+
+    let fake = Fake::new(&f);
+    // The assistant was running before the update.
+    let mut entry = core::apply::read(&dir).unwrap();
+    entry.intent.assistant = true;
+    entry.intent.subscriptions = 1;
+    core::apply::write(&dir, &entry).unwrap();
+    assert!(matches!(
+        apply::drive(&dir, &fake, tune()).await,
+        Outcome::Committed
+    ));
+
+    assert_eq!(installed(&f, core::CRATE), format!("{NEW} {}", core::CRATE));
+    assert_eq!(installed(&f, core::CLI), format!("{NEW} {}", core::CLI));
+    let log = fake.logged();
+    assert_eq!(log[0], "quit");
+    assert_eq!(
+        log[1],
+        "start host 0.9.14 personal-teams-assistant --headless".replace(
+            "host 0.9.14 personal-teams-assistant",
+            &format!("{NEW} {}", core::CRATE)
+        )
+    );
+    assert!(
+        log.contains(&"start_assistant".to_owned()),
+        "the assistant is restored: {log:?}"
+    );
+    let after = call(&f.host, Local, "crate_update_status", json!({}))
+        .await
+        .data;
+    assert_eq!(after["apply"]["state"], "success");
+    assert_eq!(after["apply"]["notes"], json!(["Skills refreshed."]));
+    assert_eq!(after["installed"], "0.9.14");
+    assert_eq!(after["state"], "idle");
+    let text = after.to_string();
+    assert!(
+        !text.contains(&f.install.display().to_string()),
+        "no installation path: {text}"
+    );
+    // The Cargo record names the new version, so a later `cargo install` sees it.
+    assert!(
+        fs::read_to_string(f.install.join(".crates2.json"))
+            .unwrap()
+            .contains("0.9.14")
+    );
+}
+
+#[tokio::test]
+async fn an_unhealthy_or_unstartable_new_version_restores_the_previous_pair_and_its_state() {
+    let _serial = SERIAL.lock().await;
+    for (name, build) in [
+        (
+            "never starts",
+            (|f: &mut Fake| f.new_never_starts = true) as fn(&mut Fake),
+        ),
+        ("assistant fails", |f| f.assistant_fails = true),
+        ("unhealthy", |f| f.new_unhealthy = true),
+    ] {
+        let server = registry(&[line("0.9.14", false)]).await;
+        let f = fixture(&server);
+        with_pair(&f);
+        let dir = directory(&f.host);
+        let installed_before = f.installed();
+        assert!(requested(&f).await.ok);
+        let mut entry = core::apply::read(&dir).unwrap();
+        entry.intent.assistant = true;
+        entry.intent.subscriptions = 1;
+        core::apply::write(&dir, &entry).unwrap();
+        let mut fake = Fake::new(&f);
+        build(&mut fake);
+        assert!(
+            matches!(apply::drive(&dir, &fake, tune()).await, Outcome::RolledBack),
+            "{name}"
+        );
+        assert_eq!(
+            installed(&f, core::CRATE),
+            format!("{OLD} {}", core::CRATE),
+            "{name}"
+        );
+        assert_eq!(
+            installed(&f, core::CLI),
+            format!("{OLD} {}", core::CLI),
+            "{name}"
+        );
+        let records = fs::read_to_string(f.install.join(".crates2.json")).unwrap();
+        assert!(
+            records.contains("0.9.13") && !records.contains("0.9.14"),
+            "{name}: {records}"
+        );
+        let log = fake.logged();
+        // The previous host runs again with the same flags, and the assistant is back.
+        assert!(
+            log.iter().any(|l| l.starts_with("start host 0.9.13")),
+            "{name}: {log:?}"
+        );
+        assert!(
+            log.iter().filter(|l| *l == "start_assistant").count() >= 1,
+            "{name}: {log:?}"
+        );
+        let status = call(&f.host, Local, "crate_update_status", json!({}))
+            .await
+            .data;
+        assert_eq!(status["apply"]["state"], "rolled_back", "{name}");
+        assert!(
+            status["apply"]["error"]
+                .as_str()
+                .is_some_and(|e| !e.is_empty()),
+            "{name}"
+        );
+        assert_eq!(status["installed"], "0.9.13", "{name}");
+        let _ = installed_before;
+    }
+}
+
+#[tokio::test]
+async fn a_previous_version_that_cannot_read_the_new_data_gets_the_safety_copy_back() {
+    let _serial = SERIAL.lock().await;
+    let server = registry(&[line("0.9.14", false)]).await;
+    let f = fixture(&server);
+    with_pair(&f);
+    let dir = directory(&f.host);
+    // The data copied before the replacement is a settings file of the profile.
+    let config = dir.parent().unwrap().join("config.toml");
+    fs::write(&config, "before = true\n").unwrap();
+    assert!(requested(&f).await.ok);
+    let mut entry = core::apply::read(&dir).unwrap();
+    entry.intent.assistant = true;
+    core::apply::write(&dir, &entry).unwrap();
+    let mut fake = Fake::new(&f);
+    fake.new_unhealthy = true;
+    fake.previous_needs_data = true;
+    // The new version changed the settings; the previous one starts only on the copy.
+    struct Mutating(Fake, PathBuf);
+    impl Platform for Mutating {
+        async fn quit(&self) -> bool {
+            self.0.quit().await
+        }
+        async fn start(&self, launch: &[String]) -> Result<()> {
+            if self.0.on_disk().starts_with(NEW) {
+                fs::write(&self.1, "after = true\n").unwrap();
+            } else if fs::read_to_string(&self.1).unwrap().contains("before") {
+                fs::write(self.0.data.join("data-restored"), "").unwrap();
+            }
+            self.0.start(launch).await
+        }
+        async fn health(&self) -> Option<Health> {
+            self.0.health().await
+        }
+        async fn start_assistant(&self) -> Result<()> {
+            self.0.start_assistant().await
+        }
+        fn follow_up(&self) -> Vec<String> {
+            Vec::new()
+        }
+    }
+    let platform = Mutating(fake, config.clone());
+    assert!(matches!(
+        apply::drive(&dir, &platform, tune()).await,
+        Outcome::RolledBack
+    ));
+    assert_eq!(fs::read_to_string(&config).unwrap(), "before = true\n");
+    let status = call(&f.host, Local, "crate_update_status", json!({}))
+        .await
+        .data;
+    assert_eq!(status["apply"]["state"], "rolled_back");
+    assert_eq!(status["apply"]["data_restored"], true);
+}
+
+#[tokio::test]
+async fn when_nothing_can_be_started_the_outcome_is_failed_with_a_recovery_path() {
+    let _serial = SERIAL.lock().await;
+    let server = registry(&[line("0.9.14", false)]).await;
+    let f = fixture(&server);
+    with_pair(&f);
+    let dir = directory(&f.host);
+    assert!(requested(&f).await.ok);
+    let mut fake = Fake::new(&f);
+    fake.nothing_starts = true;
+    assert!(matches!(
+        apply::drive(&dir, &fake, tune()).await,
+        Outcome::Failed
+    ));
+    // Even then the previous executables are back and the data is untouched.
+    assert_eq!(installed(&f, core::CRATE), format!("{OLD} {}", core::CRATE));
+    let status = call(&f.host, Local, "crate_update_status", json!({}))
+        .await
+        .data;
+    assert_eq!(status["apply"]["state"], "failed");
+    assert!(
+        status["apply"]["recovery"]
+            .as_str()
+            .unwrap()
+            .contains("cargo install")
+    );
+    assert_ne!(status["apply"]["state"], "success");
+}
+
+#[tokio::test]
+async fn a_host_that_will_not_quit_changes_nothing() {
+    let _serial = SERIAL.lock().await;
+    let server = registry(&[line("0.9.14", false)]).await;
+    let f = fixture(&server);
+    with_pair(&f);
+    let dir = directory(&f.host);
+    assert!(requested(&f).await.ok);
+    let mut fake = Fake::new(&f);
+    fake.quit_fails = true;
+    assert!(matches!(
+        apply::drive(&dir, &fake, tune()).await,
+        Outcome::RolledBack
+    ));
+    assert_eq!(fake.logged(), ["quit"]);
+    assert_eq!(installed(&f, core::CRATE), format!("{OLD} {}", core::CRATE));
+    let status = call(&f.host, Local, "crate_update_status", json!({}))
+        .await
+        .data;
+    assert!(
+        status["apply"]["error"]
+            .as_str()
+            .unwrap()
+            .contains("nothing was changed")
+    );
+}
+
+fn jobs(data: &Path, status: &str) {
+    let db = rusqlite::Connection::open(data.join("assistant.db")).unwrap();
+    db.execute_batch(&format!(
+        "DROP TABLE IF EXISTS jobs; CREATE TABLE jobs (id INTEGER, status TEXT); INSERT INTO jobs VALUES (1, '{status}');"
+    ))
+    .unwrap();
+}
+
+#[tokio::test]
+async fn work_in_progress_defers_the_update_instead_of_stopping_it() {
+    let _serial = SERIAL.lock().await;
+    let server = registry(&[line("0.9.14", false)]).await;
+    let f = fixture(&server);
+    with_pair(&f);
+    let dir = directory(&f.host);
+    let data = profiles_of(&f).remove(0).data;
+    fs::create_dir_all(&data).unwrap();
+    jobs(&data, "processing");
+
+    let reply = requested(&f).await;
+    assert!(reply.ok, "{:?}", reply.message);
+    assert_eq!(reply.data["state"], "deferred");
+    assert_eq!(
+        reply.data["deferred"]["reasons"],
+        json!(["A Teams message is being answered or sent."])
+    );
+    assert_eq!(
+        reply.data["can_apply"], true,
+        "the request can be repeated or cancelled"
+    );
+    assert!(
+        core::apply::read(&dir).is_none(),
+        "no journal: nothing began"
+    );
+    assert_eq!(installed(&f, core::CRATE), format!("{OLD} {}", core::CRATE));
+
+    // Cancelling withdraws it.
+    let cancelled = call(&f.host, Local, "crate_update_cancel", json!({})).await;
+    assert!(cancelled.ok);
+    assert_eq!(cancelled.data["state"], "staged");
+
+    // Asking again once the work is done goes ahead.
+    jobs(&data, "processing");
+    assert_eq!(requested(&f).await.data["state"], "deferred");
+    jobs(&data, "done");
+    let go = requested(&f).await;
+    assert_eq!(go.data["state"], "applying", "{:?}", go.message);
+    assert_eq!(go.data["deferred"], Value::Null);
+
+    // The helper looks again right before it stops anything: work that began meanwhile wins.
+    jobs(&data, "sending");
+    let fake = Fake::new(&f);
+    assert!(matches!(
+        apply::drive(&dir, &fake, tune()).await,
+        Outcome::Deferred
+    ));
+    assert!(
+        fake.logged().is_empty(),
+        "nothing was stopped: {:?}",
+        fake.logged()
+    );
+    assert_eq!(installed(&f, core::CRATE), format!("{OLD} {}", core::CRATE));
+    let status = call(&f.host, Local, "crate_update_status", json!({}))
+        .await
+        .data;
+    assert_eq!(status["state"], "deferred");
+    assert!(core::apply::read(&dir).is_none());
+}
+
+fn profiles_of(f: &Fixture) -> Vec<core::apply::Profile> {
+    apply::profiles(&f.host)
+}
+
+#[tokio::test]
+async fn a_second_profile_of_a_portal_counts_too_and_an_open_protected_entry_waits() {
+    let _serial = SERIAL.lock().await;
+    let server = registry(&[line("0.9.14", false)]).await;
+    let f = fixture(&server);
+    with_pair(&f);
+    let profile = directory(&f.host).parent().unwrap().to_path_buf();
+    let child = profile.join("web/profiles/alice");
+    fs::create_dir_all(child.join("data")).unwrap();
+    assert_eq!(profiles_of(&f).len(), 2);
+    jobs(&child.join("data"), "refining");
+    assert_eq!(requested(&f).await.data["state"], "deferred");
+}
+
+#[tokio::test]
+async fn nothing_is_applied_without_a_verified_prepared_pair_or_under_a_service_manager() {
+    let _serial = SERIAL.lock().await;
+    let server = registry(&[line("0.9.14", false)]).await;
+    let f = fixture(&server);
+    // Nothing prepared.
+    assert_eq!(requested(&f).await.code, "state_conflict");
+    with_pair(&f);
+    // Another version, a malformed one and extra fields.
+    for args in [
+        json!({"version":"0.9.15"}),
+        json!({"version":"latest"}),
+        json!({"version":"0.9.14","path":"/tmp/x"}),
+        json!({}),
+    ] {
+        let reply = call(&f.host, Local, "crate_update_apply", args).await;
+        assert!(!reply.ok);
+        assert!(
+            ["state_conflict", "invalid_input"].contains(&reply.code.as_str()),
+            "{}",
+            reply.code
+        );
+    }
+    // A pair that changed after verification.
+    let base = directory(&f.host)
+        .join("staged/0.9.14/root/bin")
+        .join(core::exe_name(core::CLI));
+    let original = fs::read(&base).unwrap();
+    fs::write(&base, "tampered").unwrap();
+    assert_eq!(requested(&f).await.code, "state_conflict");
+    fs::write(&base, original).unwrap();
+    // A systemd unit would start a second copy.
+    let mut env = f.env.clone();
+    env.variables
+        .push((OsString::from("INVOCATION_ID"), OsString::from("abc")));
+    *TEST.lock().unwrap() = Some(env);
+    let reply = requested(&f).await;
+    assert_eq!(reply.code, "not_ready");
+    assert!(reply.message.unwrap().contains("service"));
+    let status = call(&f.host, Local, "crate_update_status", json!({}))
+        .await
+        .data;
+    assert_eq!(status["can_apply"], false);
+    assert!(status["apply_unsupported"].is_string());
+    assert!(core::apply::read(&directory(&f.host)).is_none());
+}
+
+#[tokio::test]
+async fn an_interrupted_update_is_undone_before_status_is_reported() {
+    let _serial = SERIAL.lock().await;
+    let server = registry(&[line("0.9.14", false)]).await;
+    let f = fixture(&server);
+    with_pair(&f);
+    let dir = directory(&f.host);
+    assert!(requested(&f).await.ok);
+    // The helper died after retiring the host: half of the pair is new.
+    let mut apply_state = core::apply::Apply::new(&dir, core::apply::read(&dir).unwrap())
+        .with_hook(|at| {
+            if at == "install:pta" {
+                Err(std::io::Error::other("died"))
+            } else {
+                Ok(())
+            }
+        });
+    apply_state.back_up().unwrap();
+    assert!(apply_state.replace().is_err());
+    let mut entry = core::apply::read(&dir).unwrap();
+    entry.updated_at -= core::apply::GRACE_SECONDS + 5;
+    core::apply::write(&dir, &entry).unwrap();
+    let status = call(&f.host, Local, "crate_update_status", json!({}))
+        .await
+        .data;
+    assert_eq!(status["apply"]["state"], "rolled_back");
+    assert!(
+        status["apply"]["error"]
+            .as_str()
+            .unwrap()
+            .contains("interrupted")
+    );
+    assert_eq!(installed(&f, core::CRATE), format!("{OLD} {}", core::CRATE));
+    assert_eq!(installed(&f, core::CLI), format!("{OLD} {}", core::CLI));
+    assert_eq!(
+        status["state"], "staged",
+        "the prepared pair can be applied again"
+    );
 }

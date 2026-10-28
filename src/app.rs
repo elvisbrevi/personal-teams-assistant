@@ -1455,6 +1455,11 @@ pub fn run() {
         println!("{} {}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
         return;
     }
+    // The update's helper process: replaces the executables while no host runs (see
+    // `maintenance::apply`). It is the same binary, so no separate updater exists.
+    if args.as_slice() == [maintenance::HELPER_FLAG] {
+        std::process::exit(maintenance::run_helper());
+    }
     if args.as_slice() == ["--web"] {
         if web::run().is_err() {
             eprintln!("Web portal stopped. Check pta web status and the listener configuration.");
@@ -1509,6 +1514,15 @@ pub fn run() {
             let _ = runtime.block_on(control::client(control::Request::new("app_open"), false));
         }
         return;
+    }
+    // Never start a host between the two halves of an update; undo one that was interrupted.
+    if std::env::var_os(maintenance::HANDOVER).is_none()
+        && let Ok(profile) = control::profile_dir()
+        && let Some(reason) =
+            crate::maintenance::apply::startup_block(&profile.join(crate::maintenance::DIRECTORY))
+    {
+        eprintln!("{reason}");
+        std::process::exit(1);
     }
     let host_lock = match control::claim() {
         Ok(lock) => lock,

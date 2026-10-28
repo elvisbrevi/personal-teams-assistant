@@ -48,6 +48,13 @@ impl State {
             catalog: sync::Mirror::new(profile),
         }
     }
+    /// Whether a protected entry is waiting for its value: a person is in the middle of it.
+    pub(super) fn waiting(&self) -> bool {
+        let now = chrono::Utc::now().timestamp();
+        self.entries()
+            .values()
+            .any(|entry| entry.state == "pending" && entry.expires > now)
+    }
     /// Drop the synchronized catalog: the installation left or changed its account.
     pub(super) fn forget_catalog(&self) {
         self.catalog.forget();

@@ -404,6 +404,25 @@ pub(super) const TOOLS: &[Tool] = &[
         },
     },
     Tool {
+        name: "update_apply",
+        title: "Install a prepared update",
+        description: "Install the prepared version (shown by update_status as staged): wait while an answer, a send, an implementation, a creation or a migration is in progress (it is never interrupted; update_status then reports `deferred` with the reasons), then replace the application and pta together, restart the application the way it was running, restore the assistant and check health. If the new version does not start and report healthy, the previous pair is restored automatically. The application restarts, so the tool returns while the update continues: poll update_status, which reads the update journal while the application is down. `apply.state` is `success` only after the health check; `rolled_back` and `failed` carry the reason. Needs the user's confirmation and the owner of this computer. Afterwards MCP clients must reconnect to read the new tool catalog.",
+        effect: Effect::External,
+        schema: || {
+            object(
+                json!({"version":string("The prepared version from update_status, MAJOR.MINOR.PATCH."),"confirmed":confirmed()}),
+                &["version"],
+            )
+        },
+    },
+    Tool {
+        name: "update_cancel",
+        title: "Cancel a waiting update",
+        description: "Cancel an update request that is deferred because work is in progress. An update that is already being applied cannot be cancelled.",
+        effect: Effect::Local,
+        schema: none,
+    },
+    Tool {
         name: "update_dismiss",
         title: "Dismiss an update notice",
         description: "Hide the update notice for one release; a newer release shows it again. Does not change what can be prepared.",
@@ -1315,6 +1334,12 @@ pub(super) async fn run(name: &str, args: &Value) -> Result<Value, String> {
         "update_status" => ipc("crate_update_status", args.clone()).await,
         "update_check" => ipc("crate_update_check", args.clone()).await,
         "update_dismiss" => ipc("crate_update_dismiss", args.clone()).await,
+        "update_cancel" => ipc("crate_update_cancel", args.clone()).await,
+        "update_apply" => {
+            let mut args = args.clone();
+            args.as_object_mut().unwrap().remove("confirmed");
+            ipc("crate_update_apply", args).await
+        }
         "update_stage" => {
             let mut args = args.clone();
             args.as_object_mut().unwrap().remove("confirmed");
@@ -1537,6 +1562,10 @@ pub(super) fn confirmation(name: &str, args: &Value) -> Option<String> {
         ),
         "update_stage" => format!(
             "Build version {} of this package with Cargo on this computer (nothing is installed)?",
+            args["version"].as_str().unwrap_or_default()
+        ),
+        "update_apply" => format!(
+            "Install the prepared version {} now? The application and pta are replaced and the application restarts; the previous version is restored if the new one is not healthy.",
             args["version"].as_str().unwrap_or_default()
         ),
         "migration_run" => format!(

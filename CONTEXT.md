@@ -86,6 +86,10 @@ _Avoid_: broken source, missing source
 A newer stable release of this package built next to the installed one and verified as a matched application and `pta` pair; it is not installed, and the installed version keeps running until the user applies it.
 _Avoid_: downloaded update, installed update
 
+**Applied update**:
+A prepared update that was installed, restarted and found healthy; only the update journal's `committed` outcome says so, never the installed version alone. An unhealthy or interrupted one is rolled back to the previous matched application and `pta` pair.
+_Avoid_: finished update, upgrade
+
 ### Implementation
 
 **Execution machine**:
