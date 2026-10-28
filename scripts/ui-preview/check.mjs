@@ -1304,6 +1304,48 @@ for (const [label, ctx] of [['variables-desktop', {}], ['variables-phone', { vie
   check(`${label}: variables have no browser errors`, errors.length === 0, errors.join('; '));
   await context.close();
 }
+// Updates: the owner is offered a prepared (not installed) update; a shared account only sees the managed notice.
+for (const [label, viewport] of [['desktop', { width: 1440, height: 900 }], ['phone', { width: 393, height: 852 }]]) {
+  const { context, page, errors } = await open({ axe: true, context: { viewport, ...(label === 'phone' ? { isMobile: true, hasTouch: true } : {}) } });
+  const offer = page.locator('#update-offer');
+  await offer.waitFor({ timeout: 5000 });
+  check(`${label}: Home offers the newer release without installing it`, await offer.innerText().then(text => text.includes('0.9.14') && text.includes('0.9.13') && text.includes('sin cambiar nada')) && await page.evaluate(() => window.__ptaUpdateCalls.length === 0));
+  await page.evaluate(axeSource);
+  check(`${label}: the update notice passes axe`, (await scan(page)).length === 0, JSON.stringify(await scan(page)));
+  await page.evaluate(() => showTab('settings', 'panel-updates'));
+  const panel = page.locator('#panel-updates');
+  await panel.waitFor();
+  check(`${label}: the panel lists running, installed and available versions separately`, await panel.locator('#update-versions').innerText().then(text => /En ejecución\s*0\.9\.13/.test(text) && /Instalada\s*0\.9\.13/.test(text) && /Disponible\s*0\.9\.14/.test(text)));
+  check(`${label}: preparing needs an explicit press`, await panel.locator('#update-stage').isEnabled() && await page.evaluate(() => window.__ptaUpdateCalls.length === 0));
+  await panel.locator('#update-stage').click();
+  await panel.locator('#update-progress').getByText('Compilando la versión 0.9.14').waitFor();
+  check(`${label}: preparing asks only for the version the check offered`, await page.evaluate(() => JSON.stringify(window.__ptaUpdateCalls) === '[{"method":"stage","version":"0.9.14"}]'));
+  check(`${label}: progress is shown and a second build cannot be started`, await panel.locator('#update-stage').isDisabled() && await panel.locator('#update-state').innerText() === 'Preparando');
+  await page.evaluate(() => { window.__ptaUpdateFinish(); return loadUpdates(); });
+  await panel.locator('#update-progress').getByText('Aún no está instalada').waitFor();
+  check(`${label}: a prepared update is never reported as installed`, await panel.locator('#update-versions').innerText().then(text => /Instalada\s*0\.9\.13/.test(text)) && await panel.locator('#update-state').innerText() === 'Preparada');
+  await page.evaluate(() => { window.__ptaUpdateFail(); return loadUpdates(); });
+  await panel.locator('#update-error').waitFor();
+  check(`${label}: a failure says what to fix and keeps the build output on request`, await panel.locator('#update-error').innerText().then(text => text.includes('compilador y enlazador de C')) && await panel.locator('#update-tail summary').innerText() === 'Última salida de la compilación');
+  await page.evaluate(axeSource);
+  check(`${label}: the updates panel passes axe`, (await scan(page)).length === 0, JSON.stringify(await scan(page)));
+  check(`${label}: the updates panel keeps the phone boundary`, await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+  await panel.locator('#update-dismiss').click();
+  await offer.waitFor({ state: 'hidden' });
+  check(`${label}: dismissing hides the notice for that release`, await page.evaluate(() => window.__ptaUpdateCalls.at(-1).method === 'dismiss' && window.__ptaUpdateCalls.at(-1).version === '0.9.14'));
+  check(`${label}: updates have no browser errors`, errors.length === 0, errors.join('; '));
+  await context.close();
+}
+{
+  const { context, page } = await open({ axe: true }, 'account');
+  await page.evaluate(() => showTab('settings', 'panel-updates'));
+  const panel = page.locator('#panel-updates');
+  await panel.waitFor();
+  check('shared account sees the managed-server notice instead of an install button', await panel.locator('#update-managed').innerText().then(text => text.includes('operador')) && await panel.locator('#update-stage').isHidden() && await panel.locator('#update-check').isHidden() && await page.locator('#update-offer').isHidden());
+  await page.evaluate(axeSource);
+  check('shared account updates panel passes axe', (await scan(page)).length === 0, JSON.stringify(await scan(page)));
+  await context.close();
+}
 await browser.close();
 fs.writeFileSync(`${out}/flows.json`, JSON.stringify(results, null, 1));
 const failed = results.filter(r => !r.ok).length;

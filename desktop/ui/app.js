@@ -12,7 +12,7 @@ async function invoke(method, args = {}) {
     return { visible: true };
   }
   let result = await rawInvoke('command', { request: {
-    method, args, revision: READS.includes(method) || /^(implementation_|machine_|variable_)/.test(method) ? null : current?.revision ?? null, contract: 1
+    method, args, revision: READS.includes(method) || /^(implementation_|machine_|variable_|crate_update_)/.test(method) ? null : current?.revision ?? null, contract: 1
   }});
   if (window.ptaTransport.browser && result.code === 'authorization_pending' && method === 'connect_microsoft') {
     result = await browserMicrosoftLogin(result.data.authorization_url);
@@ -27,7 +27,7 @@ async function invoke(method, args = {}) {
     }
   }
   if (result.revision) lastRevision = result.revision;
-  if (result.revision && current && !READS.includes(method) && !/^(implementation_|machine_|variable_)/.test(method)) current.revision = result.revision;
+  if (result.revision && current && !READS.includes(method) && !/^(implementation_|machine_|variable_|crate_update_)/.test(method)) current.revision = result.revision;
   if (!result.ok) throw result.message || result.code;
   return result.data;
 }
@@ -128,7 +128,7 @@ function showTab(name, anchor) {
   if (name === 'knowledge') loadKnowledge().catch(fail);
   if (name === 'todo') loadTodo();
   if (name === 'agent-history') loadAgentHistory();
-  if (name === 'settings') { loadMachines().catch(fail); loadVariables(); loadAccountConfig(); }
+  if (name === 'settings') { loadMachines().catch(fail); loadVariables(); loadAccountConfig(); loadUpdates(); }
   const target = anchor && document.getElementById(anchor);
   // A panel inside a tab (a Settings section, an Activities view) opens that tab first.
   const owner = target && document.querySelector(`[aria-controls="${target.closest('[role=tabpanel]')?.id}"]`);
@@ -1817,6 +1817,94 @@ async function runMigration() {
 $('#migration-refresh').onclick = e => busy(e.currentTarget, loadMigration);
 $('#migration-run').onclick = e => busy(e.currentTarget, runMigration);
 $('#migration-confirm').onchange = () => renderMigrationActions();
+
+// ---------------------------------------------------------------- updates
+
+/** The host's view of this installation's updates; null until the first answer. */
+let updates = null;
+
+async function loadUpdates() {
+  try { updates = await invoke('crate_update_status'); } catch { updates = null; }
+  renderUpdates();
+}
+
+/** A host message of several sentences, each translated on its own. */
+const sentences = text => text.split(/(?<=\.) /).map(tx).join(' ');
+
+const UPDATE_STATES = { idle: 'Up to date', staging: 'Preparing', staged: 'Prepared', failed: 'Failed' };
+
+function renderUpdates() {
+  const u = updates;
+  const managed = u?.managed === 'server';
+  const offered = Boolean(u?.available) && !managed;
+  $('#panel-updates').hidden = !u;
+  $('#update-check').hidden = managed;
+  $('#update-intro').hidden = managed;
+  $('#update-managed').hidden = !managed;
+  if (!u) { $('#update-offer').hidden = true; return; }
+  $('#update-managed').textContent = managed ? tx(u.message) : '';
+  const state = managed ? '' : offered && u.state === 'idle' ? t('Update available') : t(UPDATE_STATES[u.state] ?? u.state);
+  $('#update-state').textContent = state;
+  $('#update-state').className = `badge ${u.state === 'failed' ? 'warn' : offered || u.state === 'staged' ? 'ok' : 'muted'}`;
+  $('#update-state').hidden = !state;
+  const rows = [[t('Running'), u.running]];
+  if (!managed) rows.push([t('Installed'), u.installed ?? t('Unknown')], [t('Available'), u.available ?? t('Nothing newer')]);
+  $('#update-versions').replaceChildren(...rows.map(([label, value]) => el('div', { class: 'row' },
+    el('span', { textContent: label }), el('code', { translate: 'no', textContent: value }))));
+  const diagnostic = !managed && u.install && !u.install.supported ? u.install.diagnostic : u.check_error;
+  $('#update-diagnostic').hidden = !diagnostic;
+  $('#update-diagnostic').textContent = diagnostic ? sentences(diagnostic) : '';
+  const stage = u.stage;
+  const building = u.state === 'staging';
+  $('#update-progress').hidden = !(building || u.state === 'staged');
+  if (building) {
+    const crates = stage?.progress?.crates ?? 0;
+    $('#update-progress').textContent = stage?.phase === 'verifying'
+      ? t('Verifying the new application and pta pair…')
+      : t('Building version {version} ({n} packages compiled)…', { version: stage?.version ?? '', n: crates });
+  } else if (u.state === 'staged') {
+    $('#update-progress').textContent = t('Version {version} is built and verified. It is not installed yet: the installed version keeps running.', { version: u.staged.version });
+  }
+  const failed = u.state === 'failed' && stage?.error;
+  $('#update-error').hidden = !failed;
+  $('#update-error').textContent = failed ? sentences(stage.error) : '';
+  const tail = failed ? stage.tail ?? [] : [];
+  $('#update-tail').hidden = !tail.length;
+  $('#update-tail-text').textContent = tail.join('\n');
+  $('#update-stage').hidden = managed;
+  $('#update-stage').disabled = !u.can_stage;
+  $('#update-dismiss').hidden = !offered || u.dismissed;
+  const notice = offered && !u.dismissed && u.can_stage;
+  $('#update-offer').hidden = !notice;
+  if (notice) {
+    $('#update-offer-text').textContent = t('Version {available} is available; this computer runs {running}. Preparing it builds it next to the installed one without changing anything.', { available: u.available, running: u.running });
+  }
+  $('#update-offer-stage').disabled = !u.can_stage;
+}
+
+async function stageUpdate() {
+  if (!updates?.available) return;
+  await invoke('crate_update_stage', { version: updates.available });
+  await loadUpdates();
+}
+async function dismissUpdate() {
+  if (!updates?.available) return;
+  await invoke('crate_update_dismiss', { version: updates.available });
+  await loadUpdates();
+}
+// A busy button is re-enabled when its task ends; render again so the host's state decides.
+const updating = (e, task) => busy(e.currentTarget, task).then(renderUpdates);
+$('#update-check').onclick = e => updating(e, async () => {
+  await invoke('crate_update_check');
+  await loadUpdates();
+});
+$('#update-stage').onclick = e => updating(e, stageUpdate);
+$('#update-offer-stage').onclick = e => updating(e, stageUpdate);
+$('#update-dismiss').onclick = e => updating(e, dismissUpdate);
+$('#update-offer-dismiss').onclick = e => updating(e, dismissUpdate);
+setTimeout(loadUpdates, 1500);
+setInterval(() => { if (current) loadUpdates(); }, 5 * 60_000);
+setInterval(() => { if (updates?.state === 'staging') loadUpdates(); }, 3_000);
 
 // ---------------------------------------------------------------- account configuration
 

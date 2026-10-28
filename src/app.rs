@@ -37,6 +37,7 @@ mod github_cli;
 mod gui;
 mod headless;
 mod implementation;
+mod maintenance;
 mod mcp;
 mod migration;
 mod notes;
@@ -1449,6 +1450,11 @@ pub fn run() {
         return;
     }
     let args: Vec<String> = std::env::args().skip(1).collect();
+    // Lets an update verify a staged build without starting a host.
+    if args.as_slice() == ["--version"] {
+        println!("{} {}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
+        return;
+    }
     if args.as_slice() == ["--web"] {
         if web::run().is_err() {
             eprintln!("Web portal stopped. Check pta web status and the listener configuration.");

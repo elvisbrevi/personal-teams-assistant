@@ -297,6 +297,7 @@ impl Portal {
             "snapshot",
             "logs",
             "get_github_issue",
+            "crate_update_status",
             "variable_list",
             "variable_sync",
             "variable_sync_status",

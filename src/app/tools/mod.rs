@@ -378,6 +378,44 @@ pub(super) const TOOLS: &[Tool] = &[
         },
     },
     Tool {
+        name: "update_status",
+        title: "Installation update status",
+        description: "The installed, running and available versions of this package on this computer, how this installation was built (features and target; or why it cannot be updated from here), the last check and the state of any prepared update (staging, staged, failed) with build progress. On a shared server it only says the operator manages updates. Reads local state; makes no network call. A prepared update is not an installed one: the installed version keeps running unchanged.",
+        effect: Effect::Read,
+        schema: none,
+    },
+    Tool {
+        name: "update_check",
+        title: "Check for a newer release",
+        description: "Look up the newest stable, not yanked release of this package on the pinned public registry (crates.io). Read-only and bounded; installs and builds nothing. Needs the owner of this computer; a portal session, a machine credential or another account is refused.",
+        effect: Effect::Read,
+        schema: none,
+    },
+    Tool {
+        name: "update_stage",
+        title: "Prepare an update",
+        description: "Build the exact release `version` (the one update_check reported as available) with Cargo into this profile's maintenance directory, with locked dependencies and the same features and target as the installed copy, then verify the matched application and pta pair. Nothing is installed or replaced and the current version keeps running; poll update_status for progress. The registry, crate, directory and command are fixed: no argument can choose them, and a version that is not the registry's newest is refused. Needs the user's confirmation and the owner of this computer. The build runs without any account variable or credential.",
+        effect: Effect::External,
+        schema: || {
+            object(
+                json!({"version":string("The available version from update_check, MAJOR.MINOR.PATCH."),"confirmed":confirmed()}),
+                &["version"],
+            )
+        },
+    },
+    Tool {
+        name: "update_dismiss",
+        title: "Dismiss an update notice",
+        description: "Hide the update notice for one release; a newer release shows it again. Does not change what can be prepared.",
+        effect: Effect::Local,
+        schema: || {
+            object(
+                json!({"version":string("The version whose notice to hide.")}),
+                &["version"],
+            )
+        },
+    },
+    Tool {
         name: "consumer_unbind",
         title: "Stop using a variable for a consumer",
         description: "Remove the variable bound to a built-in consumer. The variable itself is kept.",
@@ -1274,6 +1312,14 @@ pub(super) async fn run(name: &str, args: &Value) -> Result<Value, String> {
         "variable_entry_request" => ipc("variable_entry_start", args.clone()).await,
         "variable_update" => ipc(name, args.clone()).await,
         "consumer_list" => ipc("variable_consumer_list", args.clone()).await,
+        "update_status" => ipc("crate_update_status", args.clone()).await,
+        "update_check" => ipc("crate_update_check", args.clone()).await,
+        "update_dismiss" => ipc("crate_update_dismiss", args.clone()).await,
+        "update_stage" => {
+            let mut args = args.clone();
+            args.as_object_mut().unwrap().remove("confirmed");
+            ipc("crate_update_stage", args).await
+        }
         "migration_inspect" => ipc("variable_migration_inspect", args.clone()).await,
         "migration_status" => ipc("variable_migration_status", args.clone()).await,
         "migration_run" => {
@@ -1488,6 +1534,10 @@ pub(super) fn confirmation(name: &str, args: &Value) -> Option<String> {
         "consumer_bind" => format!(
             "Use variable {} as the {} credential? It is sent only to that consumer's fixed destination.",
             args["variable"], args["consumer"]
+        ),
+        "update_stage" => format!(
+            "Build version {} of this package with Cargo on this computer (nothing is installed)?",
+            args["version"].as_str().unwrap_or_default()
         ),
         "migration_run" => format!(
             "Copy the application credentials {} into account {} (originals stay untouched)?",

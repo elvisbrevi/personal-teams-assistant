@@ -108,6 +108,8 @@ The server that runs the web portal (`personal-teams-assistant-web.service`, a s
 
 It opens no port and holds no token: it reads only public crates.io data. Everything it does goes to the journal (`journalctl --user -u personal-teams-assistant-update`) and one line per event to `~/.local/state/personal-teams-assistant-update/history.log`; `install.log` there keeps the last build's output. Exit status 1 means an update failed and was rolled back; 2 means the rollback failed too and the portal needs a person (`systemctl --user --failed` lists it).
 
+The updater is the **operator's** workflow and is independent of the update commands a person uses on their own computer (`pta update status|check|stage`, the desktop's Update notice; [architecture](architecture.md#installation-updates-discovery-and-staging)). Those only look at the registry and build a verified pair under the profile's `maintenance/` directory; they never replace the installed binaries, restart the service or touch this updater's backup, state or build cache. A portal session or an ordinary account cannot reach them: the portal shows only that the operator manages the server's updates.
+
 ### Install or update the updater
 
 From a checkout of `main` on the server:
