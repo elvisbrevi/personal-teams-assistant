@@ -351,6 +351,19 @@
             <label class="check"><input id="variable-show" type="checkbox"> Show the value while I type</label>
             <div class="actions"><button id="variable-create" disabled>Add variable</button></div>
           </div>
+          <div class="panel" id="panel-migration">
+            <div class="panel-head"><h2>Move existing credentials</h2><button id="migration-refresh" type="button" class="secondary">Review</button></div>
+            <p class="hint">Copy credentials this computer already uses into your assistant account. You choose each one and confirm the account; this computer reads the value itself, so it is never shown or given to your agents, and the originals are never changed or deleted.</p>
+            <p id="migration-standing" class="callout warn" role="status" hidden></p>
+            <p id="migration-destination" class="callout" role="status" hidden></p>
+            <div id="migration-list" class="list"></div>
+            <details id="migration-excluded" hidden><summary>Never moved</summary><div id="migration-excluded-list" class="list"></div></details>
+            <label id="migration-settings-field" class="check" hidden><input id="migration-settings" type="checkbox"> Also replace this computer's settings with the account's (a private backup is kept)</label>
+            <label id="migration-confirm-field" class="check" hidden><input id="migration-confirm" type="checkbox"> <span id="migration-confirm-text"></span></label>
+            <div class="actions"><button id="migration-run" type="button" disabled>Copy selected credentials</button></div>
+            <div id="migration-result" class="list" role="status" hidden></div>
+            <p id="migration-local" class="hint" hidden></p>
+          </div>
           <div class="panel" id="panel-consumers">
             <h2>Where variables are used</h2>
             <p class="hint">A variable does nothing until you choose where it is used. Your agents see only names and versions, never values; every use checks your account and the variable's current version again, and a deleted variable stops working instead of falling back to another credential.</p>

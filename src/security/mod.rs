@@ -216,6 +216,14 @@ pub fn secret_source(name: &str) -> Result<Option<&'static str>> {
     {
         return Ok(Some("variable"));
     }
+    legacy_source(name)
+}
+
+/// Where the installation's own stores hold a credential (`environment`, `file` or `system`),
+/// ignoring any account variable bound to the name. Metadata only: no value is read, so a
+/// migration can audit what exists even after a consumer switched to an account variable.
+pub fn legacy_source(name: &str) -> Result<Option<&'static str>> {
+    validate_name(name)?;
     if !account_only() && std::env::var_os(format!("{name}_FILE")).is_some() {
         return Ok(Some("file"));
     }
@@ -276,6 +284,13 @@ pub fn secret(name: &str) -> Result<String> {
         validate_secret(name, &value)?;
         return Ok(value);
     }
+    legacy_secret(name)
+}
+
+/// The value held by the installation's own stores, never an account variable. Only the
+/// migration reads it, to copy it into the signed-in account.
+pub fn legacy_secret(name: &str) -> Result<String> {
+    validate_name(name)?;
     let value = if let Some(file) = (!account_only())
         .then(|| std::env::var(format!("{name}_FILE")).ok())
         .flatten()
@@ -538,8 +553,15 @@ mod tests {
             secret("SYNTHETIC_BOUND_SHORT"),
             secret("SYNTHETIC_BOUND_GONE"),
             secret_source("SYNTHETIC_UNBOUND_NAME"),
+            // The installation's own stores are visible to a migration even while bound.
+            (
+                legacy_source("SYNTHETIC_BOUND_OK"),
+                legacy_secret("SYNTHETIC_BOUND_OK"),
+            ),
         );
         account_secrets(None);
+        assert_eq!(outcomes.5.0.unwrap(), None);
+        assert!(outcomes.5.1.is_err());
         assert_eq!(outcomes.0.unwrap(), "synthetic-variable-value-81c0");
         assert_eq!(outcomes.1.unwrap(), Some("variable"));
         // A bound credential that is too short or gone is an error, never another source.

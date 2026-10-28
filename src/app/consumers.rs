@@ -239,6 +239,23 @@ async fn run(
     }
 }
 
+/// The value of one entry of the current account, resolved now: from this installation's own
+/// store, or from the coordinator when signed in to one. For an operation that verifies or uses
+/// it internally; the value is never returned to a client.
+pub(in crate::app) async fn resolve_entry(
+    host: &Host,
+    entry: &str,
+    expected: Option<u64>,
+) -> std::result::Result<(vault::Metadata, Secret), vault::Error> {
+    if implementation::link(&host.state)
+        .map_err(|_| vault::Error::Storage("The coordinator connection is unreadable.".into()))?
+        .is_some()
+    {
+        return connected::resolve(&host.state, entry, expected).await;
+    }
+    host.state.variables.store(host)?.use_entry(entry, expected)
+}
+
 /// Whether a running assistant still holds the earlier credential (it reads it at start). A
 /// start or stop in progress holds the lock: the answer is then yes, without waiting for it.
 async fn restart_needed(host: &Host) -> bool {

@@ -38,6 +38,7 @@ mod gui;
 mod headless;
 mod implementation;
 mod mcp;
+mod migration;
 mod notes;
 mod portable;
 mod skill;

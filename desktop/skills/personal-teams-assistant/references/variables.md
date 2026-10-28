@@ -79,6 +79,18 @@ A variable does nothing until a **consumer** uses it by reference (its entry ID,
 - A launcher's standard output and error are not captured: its result is `succeeded`, `failed`, `timed_out` or `not_started` with the exit code and duration. Redaction does not make arbitrary program output safe, and nothing stops an approved program from keeping or forwarding what it receives; approve only programs the user trusts.
 - Launchers and generic process execution are denied to shared-portal accounts (no verified OS boundary), to browsers and to machine credentials; use the personal trusted machine.
 
+## Migrate existing credentials
+
+Moving what an installation already uses into the signed-in account is opt-in, selective and never touches the originals. The host reads each value from its own credential store, so you never see, pass or receive one; do not use `credentials set` or a pipe to simulate it.
+
+1. **Review.** `migration_inspect` (CLI: `pta variables migrate inspect`) lists only the credentials this installation is configured for, with names, a safe origin (`environment`, `file`, `system`), eligibility, the consumer that would use each, a variable of the same name already in the account (ID, version, description) and the **destination account** with its `key`. It does not scan the environment. Internal state-encryption, machine/control, webhook, hosting/tunnel and provider-session credentials appear as `excluded` and cannot be migrated.
+2. **Choose.** The user picks entries, confirms the destination account shown and writes each description (never invent one for them). A name that already exists in the account needs an explicit `existing` resolution at the version they saw: `use` (the existing value must match the original) or `replace` (rotate it), or a different `name`. Without it nothing is transferred.
+3. **Run.** `migration_run` (CLI: `pta variables migrate run CREDENTIAL --destination KEY --description TEXT [--name N] [--bind] [--existing use|replace --expected-version N] [--settings] --confirmed`; one credential per command) needs the user's confirmation of that exact action. The host creates the variable, reads it back from the account and compares it with the original, and only then, with `bind`, switches the consumer (`deepseek`). `settings: adopt_account` / `--settings` also replaces this computer's portable settings with the account's after a private backup (signed-in installations only).
+4. **Outcome.** The reply lists every item with its stage (`planned`, `writing`, `uncertain`, `written`, `verification_failed`, `verified`, `complete`) and error. Any other result than complete leaves the original setup usable and changes nothing you must undo: `migration_status` (CLI: `pta variables migrate status`) shows the durable outcome. After a timeout or an offline coordinator read `migration_status`, then repeat the **same** call to resume: completed items are only confirmed, an uncertain write is inspected first, and nothing is duplicated. `verification_failed` means the account value differs from the original; choose `replace` or another name. Offline is `dependency_or_network`, revoked is `not_ready` (sign in again).
+5. **Roll back.** The original credentials are never deleted or changed. `consumer_unbind` (CLI: `pta variables unbind deepseek`) returns a consumer to its original credential; the migrated variable stays until the user deletes it. Restart the assistant after switching (`restart_required`).
+
+Credentials that no consumer uses yet (for example tokens of a `[secrets]` reference) are copied as account variables for safekeeping but nothing switches to them; their originals keep serving the tool. Microsoft sign-in, coding-provider and GitHub/Azure CLI sessions, repository folders and allowed directories are never migrated: they stay local and each computer authenticates its own (`inspect` lists them under `remains_local`). GUI: Settings › Credentials › Move existing credentials, in the application and in the portal.
+
 ## Operator custody (local CLI only, not available to MCP, browsers or machines)
 
 - `pta variables verify` checks that every value authenticates with the current keys and reports names only.
@@ -87,4 +99,4 @@ A variable does nothing until a **consumer** uses it by reference (its entry ID,
 - `pta variables key rotate` makes a new master key and a new data key, re-encrypts everything in one transaction and keeps earlier master keys so older database backups stay readable.
 - A missing or wrong key fails closed with code `not_ready` (exit 3): nothing is regenerated and nothing changes. Restore the backup instead of creating variables again.
 
-Select an isolated portal account's store with `PTA_PROFILE_DIR`. Migration of existing credentials is a separate, later capability: do not simulate it with `credentials set`.
+Select an isolated portal account's store with `PTA_PROFILE_DIR`.
