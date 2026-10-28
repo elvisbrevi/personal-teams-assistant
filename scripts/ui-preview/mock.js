@@ -181,17 +181,21 @@
   // Updates: a local owner is offered 0.9.14 over the running 0.9.13; a shared account only sees the managed notice.
   let updateState = 'idle';
   let updateDismissed = false;
+  // The host's journal of an installation in progress or finished; null before any.
+  let updateApply = null;
   const updateView = () => {
     if (sharedAccount) return { managed: 'server', running: '0.9.13', can_stage: false, message: 'Updates for this server are applied by its operator; there is nothing to install from here.' };
     const failed = updateState === 'failed';
     return {
       managed: 'local', state: updateState, running: '0.9.13', installed: '0.9.13', available: '0.9.14', restart_required: false,
       checked_at: 1760000000, check_error: null, dismissed: updateDismissed, install: { supported: true, features: ['gui'], no_default_features: false, target: null },
-      can_stage: updateState !== 'staging',
+      can_stage: !['staging', 'applying'].includes(updateState),
+      can_apply: ['staged', 'deferred'].includes(updateState), apply_unsupported: null, apply: structuredClone(updateApply),
+      deferred: updateState === 'deferred' ? { version: '0.9.14', since: 1, reasons: ['A Teams message is being answered or sent.', 'A migration is running.'] } : null,
       stage: updateState === 'idle' ? null : { version: '0.9.14', state: updateState, phase: 'building', started_at: 1, finished_at: null, progress: { crates: 12, current: 'tokio' },
         error: failed ? 'Cargo could not build this release. Install a C compiler and linker (for example `build-essential` on Debian and Ubuntu, or Xcode\'s command line tools on macOS) and try again.' : null,
         tail: failed ? ['error: linker `cc` not found'] : [] },
-      staged: updateState === 'staged' ? { version: '0.9.14', staged_at: 2, features: ['gui'], no_default_features: false, target: null, binaries: ['personal-teams-assistant', 'pta'] } : null,
+      staged: ['staged', 'deferred'].includes(updateState) ? { version: '0.9.14', staged_at: 2, features: ['gui'], no_default_features: false, target: null, binaries: ['personal-teams-assistant', 'pta'] } : null,
     };
   };
   const launchers = [{ id: 'release-tool', description: 'Publishes the release <b>not markup</b>', program: '/usr/local/bin/release', args: ['--fixed'], directory: '/home/user/work', timeout_seconds: 60,
@@ -415,6 +419,18 @@
       updateState = 'staging';
       return structuredClone(updateView());
     },
+    crate_update_apply: args => {
+      window.__ptaUpdateCalls.push({ method: 'apply', ...args });
+      if (window.__ptaApplyDefers) { updateState = 'deferred'; return structuredClone(updateView()); }
+      updateState = 'applying';
+      updateApply = { state: 'applying', phase: 'applying', from: '0.9.13', to: '0.9.14', started_at: 1, finished_at: null, error: null, data_restored: false, notes: [] };
+      return structuredClone(updateView());
+    },
+    crate_update_cancel: () => {
+      window.__ptaUpdateCalls.push({ method: 'cancel' });
+      updateState = 'staged';
+      return structuredClone(updateView());
+    },
     crate_update_dismiss: args => {
       window.__ptaUpdateCalls.push({ method: 'dismiss', ...args });
       updateDismissed = true;
@@ -522,8 +538,10 @@
   };
   window.__ptaCalls = [];
   window.__ptaUpdateCalls = [];
-  window.__ptaUpdateFinish = () => { updateState = 'staged'; };
-  window.__ptaUpdateFail = () => { updateState = 'failed'; };
+  window.__ptaUpdateFinish = () => { updateState = 'staged'; updateApply = null; };
+  // `apply` is the journal's description; the top-level state is the host's.
+  window.__ptaUpdateSet = (state, apply) => { updateState = state; updateApply = apply ? { from: '0.9.13', to: '0.9.14', started_at: 1, finished_at: 2, error: null, data_restored: false, notes: [], ...apply } : null; };
+  window.__ptaUpdateFail = () => { updateState = 'failed'; updateApply = null; };
   window.__ptaVariableCreates = [];
   window.__ptaConsumerCalls = [];
   window.__ptaMigrationCalls = [];

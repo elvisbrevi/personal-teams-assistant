@@ -21,6 +21,13 @@ use sha2::{Digest, Sha256};
 static BUSY: std::sync::Mutex<std::collections::BTreeSet<PathBuf>> =
     std::sync::Mutex::new(std::collections::BTreeSet::new());
 
+/// Whether a migration is running in this profile now.
+pub(super) fn active(profile: &Path) -> bool {
+    BUSY.lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .contains(profile)
+}
+
 struct Running(PathBuf);
 impl Running {
     fn start(host: &Host) -> Option<Self> {

@@ -84,7 +84,7 @@
       <div id="update-offer" class="panel offer" role="status" aria-labelledby="update-offer-title" hidden>
         <h2 id="update-offer-title">A new version is available</h2>
         <p id="update-offer-text"></p>
-        <div class="actions"><button id="update-offer-stage" type="button">Prepare update</button><button id="update-offer-dismiss" type="button" class="secondary">Dismiss</button></div>
+        <div class="actions"><button id="update-offer-stage" type="button">Prepare update</button><button id="update-offer-apply" type="button" hidden>Install update</button><button id="update-offer-dismiss" type="button" class="secondary">Dismiss</button></div>
       </div>
 
       <section id="overview">
@@ -386,14 +386,16 @@
         <div id="settings-advanced" class="settings-group" role="tabpanel" aria-labelledby="settings-tab-advanced" data-settings-group="advanced" hidden>
           <div class="panel" id="panel-updates">
             <div class="panel-head"><h2>Updates</h2><span id="update-state" class="badge muted"></span><button id="update-check" type="button" class="secondary">Check now</button></div>
-            <p id="update-intro" class="hint">Checks the public package registry for a newer stable release. Preparing an update builds it with Cargo next to the installed one and verifies it; nothing is installed or replaced, and the installed version keeps running.</p>
+            <p id="update-intro" class="hint">Checks the public package registry for a newer stable release. Preparing an update builds it with Cargo next to the installed one and verifies it; nothing is installed or replaced, and the installed version keeps running. Installing a prepared update waits for work in progress, replaces the application and pta together, restarts the application and restores the previous version if the new one is not healthy.</p>
             <p id="update-managed" class="callout" role="status" hidden></p>
             <p id="update-diagnostic" class="callout warn" role="status" hidden></p>
             <div id="update-versions" class="list"></div>
             <p id="update-progress" class="hint" role="status" hidden></p>
+            <div id="update-deferred" class="callout" role="status" hidden><div><p id="update-deferred-text"></p><ul id="update-deferred-reasons"></ul></div></div>
             <p id="update-error" class="callout warn" role="status" hidden></p>
             <details id="update-tail" hidden><summary>Last build output</summary><pre id="update-tail-text" translate="no"></pre></details>
-            <div class="actions"><button id="update-stage" type="button" disabled>Prepare update</button><button id="update-dismiss" type="button" class="secondary" hidden>Dismiss notice</button></div>
+            <div id="update-result" class="callout" role="status" hidden><div><p id="update-result-text"></p><p id="update-result-error" hidden></p><ul id="update-result-notes"></ul></div></div>
+            <div class="actions"><button id="update-stage" type="button" disabled>Prepare update</button><button id="update-apply" type="button" hidden>Install update</button><button id="update-cancel" type="button" class="secondary" hidden>Cancel the wait</button><button id="update-dismiss" type="button" class="secondary" hidden>Dismiss notice</button></div>
           </div>
           <div class="panel" id="panel-embeddings">
             <h2>Semantic search</h2>

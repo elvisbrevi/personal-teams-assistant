@@ -305,6 +305,12 @@ fn host_executable() -> Result<PathBuf> {
 pub async fn client(request: Request, start_host: bool) -> Result<Reply> {
     if existing_host().is_err() {
         ensure!(start_host, "host is stopped");
+        // Never start a host between two halves of an update.
+        if let Some(reason) = crate::maintenance::apply::startup_block(
+            &profile_dir()?.join(crate::maintenance::DIRECTORY),
+        ) {
+            anyhow::bail!(reason);
+        }
         let binary = host_executable()?;
         let mut command = if let Some(dir) = isolated_profile_dir()? {
             security::private_dir(&dir)?;
@@ -366,7 +372,7 @@ pub(super) async fn client_scoped(
 
 /// A matched installation upgrade can inspect/stop its old local host, even
 /// before that host supports account authority. No ordinary operation uses this path.
-async fn retirement_request(request: Request, dir: &Path) -> Result<Reply> {
+pub(super) async fn retirement_request(request: Request, dir: &Path) -> Result<Reply> {
     ensure!(
         matches!(request.method.as_str(), "snapshot" | "app_quit"),
         "Invalid host retirement operation."
