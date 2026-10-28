@@ -89,6 +89,10 @@ const FILES: &[(&str, &str)] = &[
         ),
     ),
     (
+        "references/setup.md",
+        include_str!("../../desktop/skills/personal-teams-assistant/references/setup.md"),
+    ),
+    (
         "references/azure-wiki.md",
         include_str!("../../desktop/skills/personal-teams-assistant/references/azure-wiki.md"),
     ),

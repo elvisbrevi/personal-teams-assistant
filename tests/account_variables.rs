@@ -1145,3 +1145,110 @@ async fn migration_copies_a_selected_credential_through_the_real_cli_and_mcp_wit
     assert!(refused(&replies[4]), "internal keys are excluded");
     assert!(!replies.iter().any(|r| r.to_string().contains(MIGRATED)));
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_fresh_session_agent_finishes_setup_from_readiness_alone_without_a_secret_in_chat() {
+    let f = fixture();
+    // The agent starts from the report and nothing else.
+    let (code, first) = f
+        .json(&["setup", "status", "--expect", "PARTNER_ENDPOINT"], None)
+        .await;
+    assert_eq!(code, 0, "{first}");
+    let report = &first["data"];
+    assert_eq!(report["mode"], "standalone");
+    assert_eq!(report["ready"], false);
+    assert_eq!(report["next"]["step"], "variables");
+    let ids: Vec<&str> = report["steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        ids,
+        [
+            "coordinator",
+            "connection",
+            "machine",
+            "configuration",
+            "variables",
+            "migration",
+            "providers",
+            "roots",
+            "teams",
+            "versions"
+        ]
+    );
+    // The documented entry request is offered with the name; the agent asks for it over MCP.
+    let replies = f
+        .mcp(&[
+            ("setup_status", json!({"expect":["PARTNER_ENDPOINT"]})),
+            (
+                "variable_entry_request",
+                json!({"name":"PARTNER_ENDPOINT","description":"Partner base URL"}),
+            ),
+            ("setup_status", json!({"expect":["PARTNER_ENDPOINT"]})),
+        ])
+        .await;
+    let mcp = tool_json(&replies[0]);
+    assert_eq!(mcp["steps"], report["steps"]);
+    let request = tool_json(&replies[1])["request"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let waiting = tool_json(&replies[2]);
+    let variables = waiting["steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["id"] == "variables")
+        .unwrap();
+    assert_eq!(variables["state"], "waiting");
+    assert_eq!(variables["facts"]["expected"][0]["state"], "waiting");
+    assert_eq!(variables["facts"]["expected"][0]["request"], request);
+    // The catalog advertises the tool, read-only, with no way to carry a value.
+    let tools = replies.last().unwrap()["result"]["tools"]
+        .as_array()
+        .unwrap();
+    let tool = tools.iter().find(|t| t["name"] == "setup_status").unwrap();
+    assert!(tool["inputSchema"]["properties"].get("value").is_none());
+    assert_eq!(tool["annotations"]["readOnlyHint"], true);
+
+    // The user types the value on their own channel; the agent verifies by metadata.
+    let (code, done) = f
+        .json(
+            &["variables", "entry", "complete", &request],
+            Some(&format!("{SECRET}\n")),
+        )
+        .await;
+    assert_eq!(code, 0, "{done}");
+    let (code, after) = f
+        .json(&["setup", "status", "--expect", "PARTNER_ENDPOINT"], None)
+        .await;
+    assert_eq!(code, 0, "{after}");
+    assert_eq!(after["data"]["ready"], true);
+    let variables = after["data"]["steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["id"] == "variables")
+        .unwrap();
+    assert_eq!(variables["state"], "done");
+    assert_eq!(variables["facts"]["expected"][0]["state"], "present");
+    // Unsafe or malformed forms are refused before the host.
+    for args in [
+        &["setup", "status", "--expect"][..],
+        &["setup", "status", "--expect", "--json"][..],
+        &["setup", "status", "extra"][..],
+        &["setup", "sync"][..],
+        &["account", "status", "--expect", "X"][..],
+    ] {
+        let output = f.pta(args, None).await;
+        assert_ne!(output.code, 0, "{args:?}");
+    }
+    assert!(
+        !f.disk()
+            .windows(SECRET.len())
+            .any(|w| w == SECRET.as_bytes())
+    );
+}

@@ -303,6 +303,7 @@ impl Portal {
             "variable_sync_status",
             "portable_sync",
             "portable_status",
+            "setup_readiness",
             "variable_create",
             "variable_update",
             "variable_delete",

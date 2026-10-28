@@ -37,6 +37,8 @@ const $ = (selector) => document.querySelector(selector);
 let current;
 /** Latest persisted snapshot: drives status, overview and the test chat (which reads the saved map). */
 let live;
+/** How far this installation is from being a working member of the account (metadata only). */
+let readiness = null;
 let tab = 'overview';
 let dirty = false;
 let session = crypto.randomUUID();
@@ -1340,8 +1342,10 @@ function renderSteps(s) {
     { done: urlReady(config), title: t('Public URL and tunnel'), text: t('A stable HTTPS URL that reaches the local port.'), go: ['settings', 'panel-server'] },
     { done: readySources(s.map).length > 0, title: t('Authorized sources'), text: t('At least one source enabled, with external processing and an audience.'), go: ['knowledge'] },
     { done: s.running, title: t('Start the assistant'), text: t('It starts receiving Teams messages.'), start: true },
+    { done: readiness?.mode !== 'standalone', optional: true, hidden: !readiness, title: t('Add this computer to your account'), text: t('Sign in once to restore your configuration and variables here.'), go: ['settings', 'panel-machines'] },
     { done: !config.policy.dry_run, optional: true, title: t('Turn sending on'), text: t('Review the proposals in Messages and turn observation mode off.'), go: ['settings', 'panel-behavior'] },
   ];
+  steps.splice(0, steps.length, ...steps.filter(step => !step.hidden));
   const required = steps.filter(step => !step.optional);
   const completed = required.filter(step => step.done).length;
   $('#setup-progress').textContent = t('{ready} of {total} ready', { ready: completed, total: required.length });
@@ -1529,11 +1533,13 @@ function leaveAccount() {
   for (const key of Object.keys(consumerNote)) delete consumerNote[key];
   accountConfig = null;
   accountStanding = null;
+  readiness = null;
   renderStanding();
   renderVariables();
   renderConsumers();
   renderMigration();
   renderAccountConfig();
+  renderReadiness();
 }
 
 /**
@@ -2045,6 +2051,115 @@ $('#account-config-reset').onclick = event => {
   });
 };
 setInterval(() => { if (tab === 'settings' && !$('#panel-account-config').hidden) loadAccountConfig(); }, 10_000);
+
+// ---------------------------------------------------------------- account readiness
+
+const READINESS_STEPS = {
+  coordinator: ['panel-machines', () => t('Coordinator and sign-in')],
+  connection: ['panel-machines', () => t('Coordinator accepts this computer')],
+  machine: ['panel-machines', () => t('Listed on your account')],
+  configuration: ['panel-account-config', () => t('Account configuration')],
+  variables: ['panel-variables', () => t('Variables')],
+  migration: ['panel-migration', () => t('Existing credentials')],
+  providers: ['panel-llm', () => t('Model providers')],
+  roots: ['panel-machines', () => t('Directories for coding agents')],
+  teams: ['panel-teams', () => t('Microsoft Teams')],
+  versions: ['panel-updates', () => t('Versions')],
+};
+const READINESS_STATES = {
+  done: ['Done', 'ok'], todo: ['To do', 'warn'], waiting: ['Waiting', 'info'], attention: ['Needs attention', 'warn'],
+  unknown: ['Not checked', 'muted'], optional: ['Optional', 'muted'],
+};
+
+async function loadReadiness() {
+  const epoch = accountEpoch;
+  try {
+    const report = await invoke('setup_readiness');
+    if (epoch !== accountEpoch) return;
+    readiness = report;
+  } catch {
+    if (epoch !== accountEpoch) return;
+    readiness = null;
+  }
+  renderReadiness();
+  if (live) renderSteps(live);
+}
+
+/** The facts worth a line under a step, in the interface language. */
+function readinessFacts(step) {
+  const f = step.facts ?? {};
+  const when = at => ago(at * 1000);
+  switch (step.id) {
+    case 'connection':
+      return f.checked_at ? t('Checked {when}.', { when: when(f.checked_at) }) : '';
+    case 'machine':
+      return f.machines ? tn(f.machines, '{n} machine on your account; {online} online.', '{n} machines on your account; {online} online.', { online: f.online }) : '';
+    case 'configuration':
+      return f.loaded ? t('Loaded revision {loaded}; account revision {saved}.', { loaded: f.loaded.generation, saved: (f.saved ?? f.loaded).generation }) : '';
+    case 'variables':
+      return tn(f.count ?? 0, '{n} variable stored.', '{n} variables stored.');
+    case 'providers':
+      return f.providers?.length ? f.providers.join(', ') : '';
+    case 'roots':
+      return tn(f.count ?? 0, '{n} directory selected.', '{n} directories selected.');
+    case 'teams':
+      return [
+        f.microsoft_signed_in ? t('Signed in to Microsoft.') : t('Not signed in to Microsoft.'),
+        f.running ? t('The assistant is running.') : t('The assistant is stopped.'),
+        t('{received} received · {sent} sent.', { received: f.received, sent: f.sent }),
+        f.last_received_at ? t('Last message received {when}.', { when: when(f.last_received_at) }) : t('No Teams message has been received yet.'),
+      ].join(' ');
+    case 'versions':
+      return t('Running {running} · installed {installed} · available {available}.', { running: f.running ?? '—', installed: f.installed ?? '—', available: f.available ?? '—' });
+    default:
+      return '';
+  }
+}
+
+function expectedRow(item) {
+  const text = item.state === 'present' ? t('{name}: stored, version {n}', { name: item.name, n: item.version })
+    : item.state === 'waiting' ? t('{name}: waiting for you to type the value', { name: item.name })
+      : t('{name}: not stored yet', { name: item.name });
+  return el('li', { textContent: text, translate: 'no' });
+}
+
+function renderReadiness() {
+  const panel = $('#account-setup-panel');
+  const report = readiness;
+  const coordinator = report?.steps.find(step => step.id === 'coordinator');
+  // A computer that works on its own and was never offered an account has nothing to guide.
+  panel.hidden = !report || (report.mode === 'standalone' && coordinator?.state === 'optional');
+  if (panel.hidden) return;
+  const state = $('#account-setup-state');
+  state.textContent = report.ready ? t('Ready') : t('Needs attention');
+  state.className = `badge ${report.ready ? 'ok' : 'warn'}`;
+  const next = $('#account-setup-next');
+  next.textContent = report.next ? tx(report.next.detail) : '';
+  next.hidden = !report.next || report.ready;
+  const shown = report.steps.filter(step => step.state !== 'not_applicable');
+  $('#account-setup-steps').replaceChildren(...shown.map((step, index) => {
+    const [panelId, title] = READINESS_STEPS[step.id] ?? ['panel-machines', () => step.id];
+    const [label, tone] = READINESS_STATES[step.state] ?? READINESS_STATES.unknown;
+    const mark = el('span', { class: 'step-mark' }, step.state === 'done' ? icon('check') : String(index + 1));
+    const scope = badge(step.scope === 'coordinator' ? t('Account') : t('This computer'), 'muted');
+    const expected = (step.facts?.expected ?? []).map(expectedRow);
+    const facts = readinessFacts(step);
+    const body = el('div', {}, el('strong', {}, title(), ' ', badge(t(label), tone), ' ', scope),
+      el('p', { textContent: tx(step.detail) }),
+      facts ? el('p', { class: 'hint', textContent: facts }) : null,
+      expected.length ? el('ul', { class: 'hint' }, expected) : null);
+    let action = null;
+    if (step.state !== 'done') {
+      action = el('button', { class: 'secondary small', textContent: t('Set up') });
+      action.onclick = () => showTab('settings', panelId);
+    }
+    return el('li', { class: `step${step.state === 'done' ? ' done' : ''}` }, mark, body, action);
+  }));
+}
+
+$('#account-setup-refresh').onclick = event => busy(event.currentTarget, loadReadiness);
+setTimeout(loadReadiness, 1200);
+setInterval(() => { if (current && tab === 'overview') loadReadiness(); }, 30_000);
 
 // ---------------------------------------------------------------- variable consumers
 

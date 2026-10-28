@@ -42,6 +42,7 @@ mod mcp;
 mod migration;
 mod notes;
 mod portable;
+mod readiness;
 mod skill;
 mod standing;
 mod tools;

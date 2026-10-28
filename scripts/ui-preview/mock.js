@@ -436,6 +436,11 @@
       updateDismissed = true;
       return structuredClone(updateView());
     },
+    // Account readiness: the ordered steps of a fresh installation; a check overrides the report.
+    setup_readiness: () => structuredClone(window.__ptaReadiness || {
+      ready: true, mode: 'standalone', client: 'window', local_owner: true, coordinator: null, next: null,
+      steps: [{ id: 'coordinator', scope: 'coordinator', required: false, state: 'optional', detail: 'This installation works on its own. To use it with your assistant account, choose your coordinator and sign in once.', facts: {}, actions: [] }],
+      agent: { skill_version: '0.9.13' } }),
     portable_status: () => ({ standing: window.__ptaStanding ? structuredClone(window.__ptaStanding) : undefined, sync: structuredClone(window.__ptaAccountConfig || { mode: 'authoritative', state: 'authoritative', revision: { generation: 3, digest: 'abcdef012345' } }) }),
     portable_sync: args => {
       const sync = window.__ptaAccountConfig;
