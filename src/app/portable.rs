@@ -875,7 +875,7 @@ fn provider_ready(choice: &crate::config::LlmChoice) -> bool {
 
 /// What the account configuration still needs from this computer, as opposed to what it
 /// restored: repository bindings, providers and sign-ins stay local setup.
-async fn local_setup(host: &Host, unavailable: &Unavailable) -> Vec<Value> {
+pub(super) async fn local_setup(host: &Host, unavailable: &Unavailable) -> Vec<Value> {
     let mut items = Vec::new();
     let aliases: BTreeSet<&str> = unavailable
         .sources

@@ -461,7 +461,8 @@ async fn client_with_transport(
             "Incompatible account variables host: update the host and CLI together before managing variables."
         );
         ensure!(
-            endpoint.account_portable_support || !portable::handles(&request.method),
+            endpoint.account_portable_support
+                || !(portable::handles(&request.method) || readiness::handles(&request.method)),
             "Incompatible account configuration host: update the host and CLI together before synchronizing the account configuration."
         );
         ensure!(
@@ -737,6 +738,10 @@ async fn dispatch_inner(host: &Arc<Host>, request: Request) -> Reply {
     if portable::handles(&request.method) {
         // Takes the operations lock itself, only while it installs a configuration.
         return portable::operate(host, &request).await;
+    }
+    if readiness::handles(&request.method) {
+        // Only reads, through the operations it reports on; independent of profile edits.
+        return readiness::operate(host, &request).await;
     }
     let _guard = state.operations.lock().await;
     if activity::active(state).await

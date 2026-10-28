@@ -110,3 +110,11 @@ test('activity names stored in English read in the interface language', () => {
   };
   for (const [english, spanish] of Object.entries(cases)) assert.equal(es.tx(english), spanish);
 });
+
+test('every readiness text the host sends has a Spanish translation', () => {
+  const source = fs.readFileSync(path.join(__dirname, '../src/app/readiness.rs'), 'utf8');
+  const texts = [...source.matchAll(/^const [A-Z_]+: &str =\s*"((?:\\.|[^"\\])*)";$/gm)].map(m => unescape(m[1]));
+  assert.ok(texts.length > 40, `only ${texts.length} texts found; the extraction broke`);
+  const spanish = load('es').catalog.es;
+  assert.deepEqual(texts.filter(text => !(text in spanish)), []);
+});

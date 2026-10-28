@@ -78,6 +78,10 @@ _Avoid_: profile (the profile is one computer's whole set of files), settings sy
 Whether an installation signed in to an account may still act for it, from its latest exchange with the coordinator: live, offline, signed out or revoked. Cached configuration stays readable in every state; a new use of an account variable needs a live answer.
 _Avoid_: connection status, login state
 
+**Readiness**:
+How far an installation is from being a working member of its account, told step by step, each step belonging to the account or to this computer alone, and separating what is configured from what is running, received or sent. It only reports; the person or the owning operation performs each step.
+_Avoid_: setup wizard, health check, status (the assistant's status is the host's)
+
 **Unavailable source**:
 A source of the account that this computer cannot read because its repository has no folder here; it keeps its meaning for the account and is never reinterpreted.
 _Avoid_: broken source, missing source

@@ -112,6 +112,12 @@
         <div id="activity-notice" class="banner" role="status" hidden><svg class="icon" aria-hidden="true"><use href="#i-check"/></svg><span id="activity-notice-text"></span><button id="activity-notice-open" class="secondary small">Open activities</button></div>
         <!-- Phones read it top to bottom: what is left to set up, what happened, then each part's state. -->
         <div class="home-grid">
+          <div class="panel" id="account-setup-panel" hidden>
+            <div class="panel-head"><h2>Your account on this computer</h2><span id="account-setup-state" class="badge muted"></span><button id="account-setup-refresh" type="button" class="secondary small">Check again</button></div>
+            <p class="hint">Rows marked Account are kept by your coordinator and follow you to every computer. Rows marked This computer apply only here. Checking never signs in, trusts, grants access or starts anything.</p>
+            <p id="account-setup-next" class="callout info" role="status" hidden></p>
+            <ol id="account-setup-steps" class="steps" aria-live="polite"></ol>
+          </div>
           <div class="panel" id="setup-panel">
             <div class="panel-head"><h2>Setup</h2><span id="setup-progress" class="hint"></span></div>
             <div class="progress" aria-hidden="true"><span id="setup-bar"></span></div>

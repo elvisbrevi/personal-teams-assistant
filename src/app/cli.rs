@@ -87,6 +87,14 @@ Accounts
                            and choose Trust this machine, then finish [--wait]. No credential is printed.
   github repos             Repositories authorized for the GitHub App.
 
+Setup
+  setup status [--expect NAME]...  Readiness of this installation for your assistant account, as ordered steps: coordinator and
+                           sign-in, whether the coordinator accepts this computer and lists it, restored configuration, variables,
+                           optional credential migration, model-provider sign-in, permitted directories, Teams (selected, running,
+                           received, sent) and installed/running/available versions, each with the exact next action. --expect
+                           names the variables a task needs: present, waiting or missing (a missing one is typed by you through
+                           the protected entry, never in chat). Only reads; it signs in, trusts, grants and starts nothing.
+
 Account configuration
   account status              Loaded and saved revisions of the account's portable configuration (preferences, model choices,
                            sources and audiences, contexts, questions, verified notes), unsaved local changes, what is
@@ -276,6 +284,7 @@ fn words(args: &[String]) -> Vec<&str> {
                 | "--limit"
                 | "--context"
                 | "--source"
+                | "--expect"
                 | "--redirect"
                 | "--program"
                 | "--directory"
@@ -851,6 +860,14 @@ fn validate_args(args: &[String]) -> Result<()> {
                     "invalid entry ID"
                 );
             }
+            "--expect" => {
+                i += 1;
+                ensure!(
+                    args.get(i)
+                        .is_some_and(|v| !v.is_empty() && !v.starts_with("--")),
+                    "invalid variable name"
+                );
+            }
             "--context" => {
                 i += 1;
                 ensure!(
@@ -916,6 +933,7 @@ fn validate_args(args: &[String]) -> Result<()> {
             | ["tools", "call", _]
             | ["update", "status" | "check" | "cancel"]
             | ["update", "stage" | "apply" | "dismiss", _]
+            | ["setup", "status"]
             | ["account", "status" | "sync"]
             | ["account", "records", "status" | "history"]
             | ["account", "records", "history", _]
@@ -1127,6 +1145,7 @@ fn validate_args(args: &[String]) -> Result<()> {
                 || p.as_slice().starts_with(&["knowledge", "search"]),
         ),
         ("--context", ["notes", "knowledge"].contains(&p[0])),
+        ("--expect", p.as_slice() == ["setup", "status"]),
     ] {
         ensure!(
             !args.iter().any(|a| a == flag) || allowed,
@@ -1192,6 +1211,15 @@ async fn execute(mut args: Vec<String>) -> Result<Reply> {
     }
     if command == "account" {
         return account_command(&args).await;
+    }
+    if command == "setup" {
+        return call(
+            "setup_readiness",
+            json!({"expect":options(&args, "--expect")}),
+            None,
+            true,
+        )
+        .await;
     }
     if command == "update" {
         return update_command(&args).await;
@@ -2242,6 +2270,8 @@ mod help_tests {
             &["knowledge", "search", "conciliación"],
             &["index", "status"],
             &["index", "refresh", "handbook"],
+            &["setup", "status"],
+            &["setup", "status", "--expect", "DEPLOY_ENDPOINT"],
         ];
         for command in commands {
             let args: Vec<String> = command.iter().map(|a| a.to_string()).collect();

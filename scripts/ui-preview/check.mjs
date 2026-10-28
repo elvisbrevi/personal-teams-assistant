@@ -1011,6 +1011,63 @@ for (const [label, ctx] of [['variable-sync-desktop', {}], ['variable-sync-phone
   await context.close();
 }
 
+// Account readiness: the ordered steps of a signed-in installation, each marked Account or This
+// computer, with facts that keep configured, running, received and sent apart.
+for (const [label, ctx] of [['readiness-desktop', {}], ['readiness-phone', { viewport: { width: 393, height: 852 }, isMobile: true }]]) {
+  const { context, page, errors } = await open({ axe: true, context: ctx });
+  await page.waitForFunction(() => readiness !== null);
+  await page.evaluate(() => renderSteps(live));
+  check(`${label}: a computer that works on its own shows no account guidance`, await page.locator('#account-setup-panel').isHidden());
+  check(`${label}: the first-run checklist offers adding the computer as an optional step`, await page.locator('#setup-steps').innerText().then(text => text.includes('Agregar este equipo a tu cuenta') && text.includes('opcional')));
+  await page.evaluate(() => {
+    const step = (id, scope, state, detail, facts = {}, required = true) => ({ id, scope, required, state, detail, facts, actions: [] });
+    window.__ptaReadiness = {
+      ready: false, mode: 'signed_in', client: 'window', local_owner: true, coordinator: 'https://assistant.example.test',
+      next: { step: 'variables', state: 'todo', detail: 'Some variables you need are not stored yet. Type each value in the protected entry (Settings > Credentials > Variables, or `pta variables entry complete`); it never goes through chat.', actions: [] },
+      steps: [
+        step('coordinator', 'coordinator', 'done', 'This computer is signed in to your account\'s coordinator.'),
+        step('connection', 'coordinator', 'done', 'The coordinator answered and accepts this computer.', { standing: 'live', checked_at: Math.floor(Date.now() / 1000) - 60 }),
+        step('machine', 'coordinator', 'done', 'This computer is on your account\'s machine list, which every signed-in client shows.', { machines: 3, online: 2 }),
+        step('configuration', 'coordinator', 'done', 'Your account configuration is restored and up to date on this computer.', { loaded: { generation: 5 }, saved: { generation: 5 } }),
+        step('variables', 'coordinator', 'todo', 'Some variables you need are not stored yet. Type each value in the protected entry (Settings > Credentials > Variables, or `pta variables entry complete`); it never goes through chat.',
+          { count: 2, expected: [{ name: 'DEPLOY_ENDPOINT', state: 'present', version: 3 }, { name: 'PARTNER_TOKEN', state: 'waiting' }, { name: 'SIGNING_KEY', state: 'missing' }] }),
+        step('migration', 'this_machine', 'optional', 'Optional: review which existing credentials of this installation to move into your account. Nothing is moved until you confirm each one.', {}, false),
+        step('providers', 'this_machine', 'attention', 'A model provider in the configuration is not installed or signed in on this computer. Nothing is installed or used in its place; install it and sign in yourself, then check again.', { providers: ['codex'] }, false),
+        step('roots', 'this_machine', 'optional', 'No directory is selected for coding agents on this computer. Registration never grants access; choose the folders yourself with the directory selector.', { count: 0 }, false),
+        step('teams', 'this_machine', 'todo', 'Teams is configured here but the assistant is stopped. Start it yourself when you are ready; nothing starts automatically.', { microsoft_signed_in: true, running: false, received: 4, sent: 1, last_received_at: Math.floor(Date.now() / 1000) - 3600 }, false),
+        step('versions', 'this_machine', 'optional', 'A newer release is available. Updating is a separate, confirmed action.', { running: '0.9.13', installed: '0.9.13', available: '0.9.14' }, false),
+      ] };
+    return loadReadiness();
+  });
+  const panel = page.locator('#account-setup-panel');
+  await panel.waitFor();
+  const rows = panel.locator('#account-setup-steps > li');
+  check(`${label}: every step of the guided path is listed in order`, await rows.count() === 10 && await rows.nth(0).innerText().then(text => text.includes('Coordinador e inicio de sesión')) && await rows.nth(9).innerText().then(text => text.includes('Versiones')));
+  check(`${label}: account scope and this-computer scope are both labelled`, await panel.locator('#account-setup-steps .badge', { hasText: 'Cuenta' }).count() === 5 && await panel.locator('#account-setup-steps .badge', { hasText: 'Este computador' }).count() === 5);
+  check(`${label}: the next action is announced and translated`, await panel.locator('#account-setup-next').innerText().then(text => text.includes('Faltan algunas variables')) && await panel.locator('#account-setup-state').innerText() === 'Requiere atención');
+  const variables = rows.nth(4);
+  check(`${label}: expected variables show present, waiting and missing without any value`, await variables.innerText().then(text => text.includes('DEPLOY_ENDPOINT: guardada, versión 3') && text.includes('PARTNER_TOKEN: esperando que escribas el valor') && text.includes('SIGNING_KEY: aún no está guardada')));
+  const teams = await rows.nth(8).innerText();
+  check(`${label}: Teams keeps signed in, running, received and sent apart`, teams.includes('Sesión de Microsoft iniciada.') && teams.includes('El asistente está detenido.') && teams.includes('4 recibidos · 1 enviados.') && teams.includes('Último mensaje recibido'));
+  check(`${label}: versions show running, installed and available separately`, await rows.nth(9).innerText().then(text => text.includes('En ejecución 0.9.13 · instalada 0.9.13 · disponible 0.9.14.')));
+  check(`${label}: finished steps have no button and open steps lead to their settings`, await rows.nth(0).locator('button').count() === 0 && await rows.nth(4).locator('button').count() === 1);
+  check(`${label}: every row is text, never only color`, await panel.locator('#account-setup-steps .badge', { hasText: 'Pendiente' }).count() === 2);
+  await rows.nth(4).locator('button').click();
+  check(`${label}: a step opens the settings panel that fixes it`, await page.locator('#panel-variables').isVisible());
+  await page.evaluate(() => showTab('overview'));
+  check(`${label}: the panel keeps the phone boundary`, await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+  await page.evaluate(axeSource);
+  check(`${label}: the readiness panel passes axe`, (await scan(page)).length === 0, JSON.stringify(await scan(page)));
+  // Becoming ready folds the guidance into a single confirmation.
+  await page.evaluate(() => { window.__ptaReadiness = { ...window.__ptaReadiness, ready: true, next: null }; return loadReadiness(); });
+  check(`${label}: a ready installation says so and shows no next action`, await panel.locator('#account-setup-state').innerText() === 'Lista' && await panel.locator('#account-setup-next').isHidden());
+  // Leaving the account forgets the report.
+  await page.evaluate(() => { leaveAccount(); });
+  check(`${label}: leaving the account clears the report`, await panel.isHidden());
+  check(`${label}: has no browser errors`, errors.length === 0, errors.join('; '));
+  await context.close();
+}
+
 // Account configuration: a signed-in installation shows what it loaded and what is still local setup.
 for (const [label, ctx] of [['account-config-desktop', {}], ['account-config-phone', { viewport: { width: 393, height: 852 }, isMobile: true }]]) {
   const { context, page, errors } = await open({ axe: true, context: ctx });
