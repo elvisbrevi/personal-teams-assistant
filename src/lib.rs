@@ -11,6 +11,7 @@ pub mod index;
 pub mod knowledge;
 pub mod llm;
 pub mod local_chat;
+pub mod maintenance;
 pub mod pipeline;
 pub mod portable;
 pub mod questions;

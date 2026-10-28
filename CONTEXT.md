@@ -82,6 +82,10 @@ _Avoid_: connection status, login state
 A source of the account that this computer cannot read because its repository has no folder here; it keeps its meaning for the account and is never reinterpreted.
 _Avoid_: broken source, missing source
 
+**Prepared update**:
+A newer stable release of this package built next to the installed one and verified as a matched application and `pta` pair; it is not installed, and the installed version keeps running until the user applies it.
+_Avoid_: downloaded update, installed update
+
 ### Implementation
 
 **Execution machine**:

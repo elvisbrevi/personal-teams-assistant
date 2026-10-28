@@ -145,6 +145,17 @@ Account variables
   variables key restore       Operator-local: master-key backup JSON on stdin; never replaces an existing key.
   variables key rotate        Operator-local: new master and data keys; keeps older masters for older backups.
 
+Updates (this computer only; the shared server's operator updates it separately)
+  update status            Installed, running and available versions, how this installation was built and the state of any
+                           prepared update; reads local state only. Staging is not installation: the installed version
+                           keeps running unchanged.
+  update check             Looks up the newest stable, not yanked release of this package on crates.io (read-only).
+  update stage VERSION --confirmed
+                           Builds that exact release with Cargo (locked dependencies, same features and target as this
+                           installation) in this profile's maintenance directory and verifies the application and pta
+                           pair. It installs nothing and needs the owner of this computer. Progress: update status.
+  update dismiss VERSION   Hides the notice for that release.
+
 Personal chat
   self-chat status|enable [CHAT_ID]|disable
   self-chat reconcile NONCE MESSAGE_ID  Resolves a pending output.
@@ -322,6 +333,42 @@ fn pairs<T>(
     Ok(map)
 }
 /// The account's portable configuration: synchronize it, see what is loaded, read retained records.
+async fn update_command(args: &[String]) -> Result<Reply> {
+    let words = words(args);
+    let version = || -> Result<&str> {
+        words
+            .get(2)
+            .copied()
+            .context("missing version; consult --help")
+    };
+    match words.get(1).copied() {
+        Some("status") => call("crate_update_status", json!({}), None, true).await,
+        Some("check") => call("crate_update_check", json!({}), None, true).await,
+        Some("dismiss") => {
+            call(
+                "crate_update_dismiss",
+                json!({"version":version()?}),
+                None,
+                true,
+            )
+            .await
+        }
+        Some("stage") => {
+            let version = version()?;
+            if let Some(reply) = unconfirmed(
+                args,
+                format!(
+                    "Build version {version} of this package with Cargo (it is not installed)?"
+                ),
+            ) {
+                return Ok(reply);
+            }
+            call("crate_update_stage", json!({"version":version}), None, true).await
+        }
+        _ => anyhow::bail!("unknown command or invalid argument count"),
+    }
+}
+
 async fn account_command(args: &[String]) -> Result<Reply> {
     let words = words(args);
     match (words.get(1).copied(), words.get(2).copied()) {
@@ -821,6 +868,8 @@ fn validate_args(args: &[String]) -> Result<()> {
             | ["mcp", "config"]
             | ["tools", "list"]
             | ["tools", "call", _]
+            | ["update", "status" | "check"]
+            | ["update", "stage" | "dismiss", _]
             | ["account", "status" | "sync"]
             | ["account", "records", "status" | "history"]
             | ["account", "records", "history", _]
@@ -975,7 +1024,8 @@ fn validate_args(args: &[String]) -> Result<()> {
         ),
         (
             "--confirmed",
-            p.as_slice().starts_with(&["variables", "migrate", "run"])
+            p.as_slice().starts_with(&["update", "stage"])
+                || p.as_slice().starts_with(&["variables", "migrate", "run"])
                 || p.as_slice().starts_with(&["variables", "bind"])
                 || p.as_slice().starts_with(&["variables", "check"])
                 || p.as_slice()
@@ -1095,6 +1145,9 @@ async fn execute(mut args: Vec<String>) -> Result<Reply> {
     }
     if command == "account" {
         return account_command(&args).await;
+    }
+    if command == "update" {
+        return update_command(&args).await;
     }
     match command {
         "tools" => {

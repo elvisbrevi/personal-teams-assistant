@@ -584,11 +584,13 @@ pub(crate) fn launch(
         }));
     Ok(async move {
         let machines = tokio::spawn(implementation::fleet::schedule(host.clone()));
+        let updates = tokio::spawn(maintenance::schedule(host.clone()));
         let scheduler = tokio::spawn(activity::schedule(host));
         if let Ok(listener) = tokio::net::TcpListener::from_std(listener) {
             let _ = axum::serve(listener, router).await;
         }
         scheduler.abort();
+        updates.abort();
         machines.abort();
     })
 }
@@ -717,6 +719,10 @@ async fn dispatch_inner(host: &Arc<Host>, request: Request) -> Reply {
                 )
             }
         };
+    }
+    if maintenance::handles(&request.method) {
+        // Independent of profile edits: a build can take many minutes.
+        return maintenance::operate(host, &request).await;
     }
     if variables::handles(&request.method) {
         // Independent of profile edits: no operations lock, like the implementation operations.

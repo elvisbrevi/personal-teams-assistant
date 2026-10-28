@@ -178,6 +178,22 @@
   const touch = variable => { variable.version += 1; variable.updated_at = secs(NOW); };
   // Consumers: the one built-in registry entry (as the host reports it) and one approved launcher.
   let consumerBinding = null;
+  // Updates: a local owner is offered 0.9.14 over the running 0.9.13; a shared account only sees the managed notice.
+  let updateState = 'idle';
+  let updateDismissed = false;
+  const updateView = () => {
+    if (sharedAccount) return { managed: 'server', running: '0.9.13', can_stage: false, message: 'Updates for this server are applied by its operator; there is nothing to install from here.' };
+    const failed = updateState === 'failed';
+    return {
+      managed: 'local', state: updateState, running: '0.9.13', installed: '0.9.13', available: '0.9.14', restart_required: false,
+      checked_at: 1760000000, check_error: null, dismissed: updateDismissed, install: { supported: true, features: ['gui'], no_default_features: false, target: null },
+      can_stage: updateState !== 'staging',
+      stage: updateState === 'idle' ? null : { version: '0.9.14', state: updateState, phase: 'building', started_at: 1, finished_at: null, progress: { crates: 12, current: 'tokio' },
+        error: failed ? 'Cargo could not build this release. Install a C compiler and linker (for example `build-essential` on Debian and Ubuntu, or Xcode\'s command line tools on macOS) and try again.' : null,
+        tail: failed ? ['error: linker `cc` not found'] : [] },
+      staged: updateState === 'staged' ? { version: '0.9.14', staged_at: 2, features: ['gui'], no_default_features: false, target: null, binaries: ['personal-teams-assistant', 'pta'] } : null,
+    };
+  };
   const launchers = [{ id: 'release-tool', description: 'Publishes the release <b>not markup</b>', program: '/usr/local/bin/release', args: ['--fixed'], directory: '/home/user/work', timeout_seconds: 60,
     variables: [{ env: 'RELEASE_URL', id: 'aaaaaaaa-0000-4000-8000-000000000001', state: 'ok', variable: { name: 'DEPLOY_ENDPOINT', version: 1 } }] }];
   const bindingView = () => {
@@ -392,6 +408,18 @@
       return { sync: structuredClone(sync), changes: { added: 0, updated: 0, removed: 0 } };
     },
     // An installation signed in to an account: the account configuration it loaded, and Synchronize now.
+    crate_update_status: () => structuredClone(updateView()),
+    crate_update_check: () => structuredClone(updateView()),
+    crate_update_stage: args => {
+      window.__ptaUpdateCalls.push({ method: 'stage', ...args });
+      updateState = 'staging';
+      return structuredClone(updateView());
+    },
+    crate_update_dismiss: args => {
+      window.__ptaUpdateCalls.push({ method: 'dismiss', ...args });
+      updateDismissed = true;
+      return structuredClone(updateView());
+    },
     portable_status: () => ({ standing: window.__ptaStanding ? structuredClone(window.__ptaStanding) : undefined, sync: structuredClone(window.__ptaAccountConfig || { mode: 'authoritative', state: 'authoritative', revision: { generation: 3, digest: 'abcdef012345' } }) }),
     portable_sync: args => {
       const sync = window.__ptaAccountConfig;
@@ -493,6 +521,9 @@
     delete_credential: args => { snapshot.credentials[args.name] = 'missing'; return {}; },
   };
   window.__ptaCalls = [];
+  window.__ptaUpdateCalls = [];
+  window.__ptaUpdateFinish = () => { updateState = 'staged'; };
+  window.__ptaUpdateFail = () => { updateState = 'failed'; };
   window.__ptaVariableCreates = [];
   window.__ptaConsumerCalls = [];
   window.__ptaMigrationCalls = [];
