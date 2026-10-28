@@ -222,6 +222,9 @@ pub(super) fn failure(error: vault::Error) -> Reply {
 }
 
 pub(super) async fn operate(host: &Arc<Host>, request: &control::Request) -> Reply {
+    if super::migration::handles(&request.method) {
+        return super::migration::operate(host, request).await;
+    }
     if consumers::handles(&request.method) {
         return consumers::operate(host, request).await;
     }
@@ -575,6 +578,6 @@ fn run(host: &Host, method: &str, args: &Value) -> std::result::Result<Value, va
 }
 
 #[cfg(test)]
-mod sync_tests;
+pub(in crate::app) mod sync_tests;
 #[cfg(test)]
-mod tests;
+pub(in crate::app) mod tests;

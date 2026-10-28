@@ -1278,6 +1278,26 @@ for (const [label, ctx] of [['variables-desktop', {}], ['variables-phone', { vie
   await page.locator('#launcher-list').getByRole('button', { name: /^Eliminar/ }).click();
   await page.locator('#launchers').waitFor({ state: 'hidden' });
   check(`${label}: stopping and removing call only their own operations`, JSON.stringify(await consumerCalls()) === '["bind","check","unbind","remove"]');
+  // Migration: choose entries, write descriptions and confirm the account; no value is ever involved.
+  const migration = page.locator('#panel-migration');
+  await migration.getByText('Cuenta de destino').waitFor();
+  check(`${label}: migration names the destination account, lists eligible rows and hides excluded ones`, await migration.innerText().then(text => text.includes('Account 1001 on https://portal.example.test') && text.includes('DEEPSEEK_API_KEY') && text.includes('Nunca se mueven')) && await migration.locator('#migration-excluded-list').isHidden());
+  check(`${label}: nothing is copied before a choice and the account is confirmed`, await migration.locator('#migration-run').isDisabled());
+  await migration.getByRole('checkbox', { name: 'Mover DEEPSEEK_API_KEY' }).check();
+  check(`${label}: a chosen row asks for its description and offers the switch`, await migration.getByLabel('Descripción').count() === 1 && await migration.getByText('Cambiar DeepSeek API a la variable de la cuenta').count() === 1);
+  check(`${label}: confirming the destination is still required`, await migration.locator('#migration-run').isDisabled());
+  await migration.locator('#migration-confirm').check();
+  check(`${label}: choosing, describing and confirming enables the copy`, await migration.locator('#migration-run').isEnabled());
+  await page.evaluate(axeSource);
+  check(`${label}: migration passes axe`, (await scan(page)).length === 0, JSON.stringify(await scan(page)));
+  check(`${label}: migration keeps the phone boundary`, await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+  await migration.locator('#migration-run').click();
+  await migration.locator('#migration-result').getByText('Hecho').first().waitFor();
+  check(`${label}: the copy names the destination key, the credential and the switch, never a value`, await page.evaluate(() => {
+    const call = window.__ptaMigrationCalls.at(-1);
+    return call.destination === 'a1b2c3d4e5f60718293a4b5c6d7e8f90' && call.items.length === 1 && call.items[0].credential === 'DEEPSEEK_API_KEY'
+      && call.items[0].bind === true && !JSON.stringify(call).includes('value') && !call.settings;
+  }) && await migration.locator('#migration-result').innerText().then(text => text.includes('no se modificaron')));
   check(`${label}: variable management keeps the phone boundary`, await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
   await page.evaluate(axeSource);
   check(`${label}: variables pass axe`, (await scan(page)).length === 0, JSON.stringify(await scan(page)));

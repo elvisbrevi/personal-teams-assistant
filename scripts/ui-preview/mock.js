@@ -469,6 +469,25 @@
       const binding = bindingView();
       return { consumer: args.consumer, operation: 'check', reference: { id: binding.id, name: binding.variable.name, version: binding.variable.version }, result: { status: 'ok', http_status: 200 } };
     },
+    variable_migration_inspect: () => ({
+      destination: { key: 'a1b2c3d4e5f60718293a4b5c6d7e8f90', mode: 'connected', coordinator: 'https://portal.example.test', account: 'Account 1001 on https://portal.example.test', standing: window.__ptaStanding ? structuredClone(window.__ptaStanding) : undefined },
+      credentials: [
+        { credential: 'DEEPSEEK_API_KEY', origin: 'system', status: 'eligible', excluded: null, reason: null, account_bound: false, consumer: { id: 'deepseek', title: 'DeepSeek API', destination: 'https://api.deepseek.com' },
+          suggested: { name: 'DEEPSEEK_API_KEY', description: 'DeepSeek API migrated from this installation' }, entry_id: '5b0b6f3e-7f35-4f0e-9a39-0d1f4b3a2c11', existing: null, migration: null },
+        { credential: 'SVC_TOKEN', origin: 'environment', status: 'eligible', excluded: null, reason: null, account_bound: false, consumer: null,
+          suggested: { name: 'SVC_TOKEN', description: 'Credential SVC_TOKEN migrated from this installation' }, entry_id: '8c1d2e3f-4a5b-4c6d-8e7f-9a0b1c2d3e4f', existing: null, migration: null },
+        { credential: 'STATE_ENCRYPTION_KEY', origin: 'system', status: 'excluded', excluded: 'internal', reason: 'Internal application key: it protects local state and never leaves this installation.', account_bound: false, consumer: null, entry_id: '00000000-0000-4000-8000-000000000001', existing: null, migration: null },
+      ],
+      variables: structuredClone(variables),
+      settings: { mode: 'replica', state: 'synced', local_changes: false },
+      remains_local: ['Microsoft Teams sign-in', 'Coding-provider sign-ins (Codex, Claude Code, OpenCode)', 'GitHub and Azure CLI sessions', 'Repository folders and allowed directories of this computer'],
+      limits: { items: 8 },
+    }),
+    variable_migration_run: args => {
+      window.__ptaMigrationCalls.push(structuredClone(args));
+      return { destination: {}, items: args.items.map(i => ({ credential: i.credential, name: i.name, id: 'x', stage: 'complete', complete: true, error: null })), settings: args.settings ? { stage: 'complete', error: null } : null, complete: true, restart_required: args.items.some(i => i.bind) };
+    },
+    variable_migration_status: () => ({ items: [], settings: null, complete: false }),
     variable_launcher_remove: args => { window.__ptaConsumerCalls.push({ method: 'remove', ...args }); launchers.splice(0); return { launcher: args.id, removed: true }; },
     set_credential: args => { snapshot.credentials[args.name] = 'system'; return {}; },
     delete_credential: args => { snapshot.credentials[args.name] = 'missing'; return {}; },
@@ -476,6 +495,7 @@
   window.__ptaCalls = [];
   window.__ptaVariableCreates = [];
   window.__ptaConsumerCalls = [];
+  window.__ptaMigrationCalls = [];
   window.__ptaVariableReveals = [];
   window.__ptaVariableUpdates = [];
   window.__ptaVariableDeletes = [];

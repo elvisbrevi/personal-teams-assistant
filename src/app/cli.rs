@@ -121,6 +121,16 @@ Account variables
   variables unbind CONSUMER   Stops that use; the variable is kept.
   variables check CONSUMER [--expected-version N] --confirmed
                            Uses the bound variable once against the consumer's fixed destination; prints status only.
+  variables migrate inspect   Audits the configured application credentials (names, origins and eligibility only, never values),
+                           the destination account to confirm and the account settings state.
+  variables migrate run CREDENTIAL --destination KEY --description TEXT [--name NAME] [--bind]
+                           [--existing use|replace --expected-version N] [--settings] --confirmed
+                           Copies one credential read by the host from this installation's own store into the confirmed
+                           account (the value never passes through the CLI), reads it back and, with --bind, switches
+                           its consumer. A name already in the account needs --existing at the reviewed version.
+                           --settings also replaces this computer's portable settings with the account's (backed up).
+                           Repeat the same command to resume an interrupted migration; originals are never changed.
+  variables migrate status    The durable outcome of the migration for the signed-in account.
   variables launcher list     Approved local launchers (owner's trusted machine only).
   variables launcher define NAME --description TEXT --program PATH --directory DIR --env ENV=ID [--env ...]
                            [--arg ARG ...] [--timeout SECONDS] --confirmed
@@ -255,6 +265,9 @@ fn words(args: &[String]) -> Vec<&str> {
                 | "--arg"
                 | "--timeout"
                 | "--pin"
+                | "--destination"
+                | "--name"
+                | "--existing"
         ) {
             skip = true;
         } else if !arg.starts_with("--") {
@@ -476,6 +489,42 @@ async fn variables_command(args: &[String]) -> Result<Reply> {
             .await
         }
         ("consumers", _) => call("variable_consumer_list", json!({}), None, true).await,
+        ("migrate", Some("inspect")) => {
+            call("variable_migration_inspect", json!({}), None, true).await
+        }
+        ("migrate", Some("status")) => {
+            call("variable_migration_status", json!({}), None, true).await
+        }
+        ("migrate", Some("run")) => {
+            let credential = word(3)?;
+            let destination = option(args, "--destination").context("--destination is required")?;
+            if let Some(reply) = unconfirmed(
+                args,
+                format!(
+                    "Copy the application credential {credential} into account {destination} (the original stays untouched)?"
+                ),
+            ) {
+                return Ok(reply);
+            }
+            let mut item = json!({"credential":credential,"description":description()?,"bind":args.iter().any(|a| a == "--bind")});
+            if let Some(name) = option(args, "--name") {
+                item["name"] = json!(name);
+            }
+            if let Some(action) = option(args, "--existing") {
+                let version = option(args, "--expected-version")
+                    .context("--expected-version is required with --existing")?
+                    .parse::<u64>()
+                    .context("invalid version")?;
+                item["existing"] = json!({"action":action,"version":version});
+            }
+            let mut body = json!({"destination":destination,"items":[item]});
+            if args.iter().any(|a| a == "--settings") {
+                body["settings"] = json!("adopt_account");
+            }
+            call("variable_migration_run", body, None, true).await.map_err(|error| {
+                error.context("The result is unknown. Inspect with `pta variables migrate status`; repeating the same command resumes safely.")
+            })
+        }
         ("bind", _) | ("check", _) => {
             let consumer = word(2)?;
             let version = option(args, "--expected-version")
@@ -648,7 +697,15 @@ fn validate_args(args: &[String]) -> Result<()> {
         match a {
             "--json" | "--non-interactive" | "--offline" | "--no-browser" | "--wait"
             | "--content" | "--current-profile" | "--context-stdin" | "--value" | "--confirmed"
-            | "--reset" => {}
+            | "--reset" | "--bind" | "--settings" => {}
+            "--destination" | "--name" | "--existing" => {
+                i += 1;
+                ensure!(
+                    args.get(i)
+                        .is_some_and(|v| !v.is_empty() && !v.starts_with("--")),
+                    "invalid value for this flag"
+                );
+            }
             "--program" | "--directory" => {
                 i += 1;
                 ensure!(
@@ -770,6 +827,8 @@ fn validate_args(args: &[String]) -> Result<()> {
             | ["variables", "list" | "verify" | "audit" | "sync" | "status"]
             | ["variables", "search" | "create" | "update" | "delete", _]
             | ["variables", "consumers"]
+            | ["variables", "migrate", "inspect" | "status"]
+            | ["variables", "migrate", "run", _]
             | ["variables", "unbind" | "check", _]
             | ["variables", "bind", _, _]
             | ["variables", "launcher", "list"]
@@ -882,19 +941,42 @@ fn validate_args(args: &[String]) -> Result<()> {
             p.as_slice().starts_with(&["variables", "create"])
                 || p.as_slice().starts_with(&["variables", "update"])
                 || p.as_slice().starts_with(&["variables", "entry", "start"])
+                || p.as_slice().starts_with(&["variables", "migrate", "run"])
                 || p.as_slice()
                     .starts_with(&["variables", "launcher", "define"]),
+        ),
+        (
+            "--destination",
+            p.as_slice().starts_with(&["variables", "migrate", "run"]),
+        ),
+        (
+            "--name",
+            p.as_slice().starts_with(&["variables", "migrate", "run"]),
+        ),
+        (
+            "--existing",
+            p.as_slice().starts_with(&["variables", "migrate", "run"]),
+        ),
+        (
+            "--bind",
+            p.as_slice().starts_with(&["variables", "migrate", "run"]),
+        ),
+        (
+            "--settings",
+            p.as_slice().starts_with(&["variables", "migrate", "run"]),
         ),
         (
             "--expected-version",
             p.as_slice().starts_with(&["variables", "update"])
                 || p.as_slice().starts_with(&["variables", "delete"])
                 || p.as_slice().starts_with(&["variables", "bind"])
+                || p.as_slice().starts_with(&["variables", "migrate", "run"])
                 || p.as_slice().starts_with(&["variables", "check"]),
         ),
         (
             "--confirmed",
-            p.as_slice().starts_with(&["variables", "bind"])
+            p.as_slice().starts_with(&["variables", "migrate", "run"])
+                || p.as_slice().starts_with(&["variables", "bind"])
                 || p.as_slice().starts_with(&["variables", "check"])
                 || p.as_slice()
                     .starts_with(&["variables", "launcher", "define"])

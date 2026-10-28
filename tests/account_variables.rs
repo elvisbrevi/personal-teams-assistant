@@ -1044,3 +1044,104 @@ async fn the_cli_and_mcp_synchronize_and_report_the_loaded_revision_without_valu
             .any(|w| w == SECRET.as_bytes())
     );
 }
+
+const MIGRATED: &str = "synthetic-migrated-key-3f6a91c2";
+
+#[tokio::test(flavor = "multi_thread")]
+async fn migration_copies_a_selected_credential_through_the_real_cli_and_mcp_without_exposing_it() {
+    let f = fixture();
+    let originals = f.profile.join("credentials/default");
+    fs::write(originals.join("DEEPSEEK_API_KEY"), MIGRATED).unwrap();
+    let state_key = fs::read_to_string(originals.join("STATE_ENCRYPTION_KEY")).unwrap();
+
+    let (code, review) = f.json(&["variables", "migrate", "inspect"], None).await;
+    assert_eq!(code, 0, "{review}");
+    let text = review.to_string();
+    assert!(!text.contains(MIGRATED) && !text.contains(state_key.trim()));
+    let rows = review["data"]["credentials"].as_array().unwrap();
+    let row = |name: &str| rows.iter().find(|r| r["credential"] == name).unwrap();
+    assert_eq!(row("DEEPSEEK_API_KEY")["status"], "eligible");
+    assert_eq!(row("DEEPSEEK_API_KEY")["origin"], "system");
+    assert_eq!(row("STATE_ENCRYPTION_KEY")["status"], "excluded");
+    let destination = review["data"]["destination"]["key"].as_str().unwrap();
+
+    // The destination must be confirmed and the user must approve the exact action.
+    let run = |extra: Vec<&'static str>, destination: String| {
+        let f = &f;
+        async move {
+            let mut args = vec![
+                "variables",
+                "migrate",
+                "run",
+                "DEEPSEEK_API_KEY",
+                "--description",
+                "DeepSeek key for the assistant",
+                "--bind",
+            ];
+            args.extend(extra);
+            args.extend(["--destination", &destination]);
+            f.json(&args, None).await
+        }
+    };
+    let (code, unconfirmed) = run(vec![], destination.to_owned()).await;
+    assert_eq!(code, 2, "{unconfirmed}");
+    let (code, wrong) = run(vec!["--confirmed"], "0".repeat(32)).await;
+    assert_eq!(code, 6, "{wrong}");
+    let (_, listed) = f.json(&["variables", "list"], None).await;
+    assert_eq!(listed["data"]["total"], 0);
+
+    let (code, migrated) = run(vec!["--confirmed"], destination.to_owned()).await;
+    assert_eq!(code, 0, "{migrated}");
+    assert_eq!(migrated["data"]["complete"], true);
+    assert!(!migrated.to_string().contains(MIGRATED));
+    let (_, listed) = f.json(&["variables", "consumers"], None).await;
+    assert_eq!(
+        listed["data"]["consumers"][0]["binding"]["variable"]["name"],
+        "DEEPSEEK_API_KEY"
+    );
+    let (_, credentials) = f.json(&["credentials", "list"], None).await;
+    assert_eq!(credentials["data"]["DEEPSEEK_API_KEY"], "variable");
+    // The original stays exactly as it was, and no other file of the profile holds the value.
+    assert_eq!(
+        fs::read_to_string(originals.join("DEEPSEEK_API_KEY")).unwrap(),
+        MIGRATED
+    );
+    let (code, again) = run(vec!["--confirmed"], destination.to_owned()).await;
+    assert_eq!(code, 0, "{again}");
+    assert_eq!(again["data"]["items"][0]["version"], 1);
+    let (_, status) = f.json(&["variables", "migrate", "status"], None).await;
+    assert_eq!(status["data"]["complete"], true);
+    let journal = fs::read_to_string(
+        f.profile
+            .join("migration")
+            .join(format!("{destination}.json")),
+    )
+    .unwrap();
+    assert!(!journal.contains(MIGRATED));
+
+    // An agent can inspect and run it, but no argument takes a value and the action is confirmed.
+    let replies = f
+        .mcp(&[
+            ("migration_inspect", json!({})),
+            ("migration_status", json!({})),
+            (
+                "migration_run",
+                json!({"destination":destination,"items":[{"credential":"DEEPSEEK_API_KEY","description":"d"}]}),
+            ),
+            (
+                "migration_run",
+                json!({"destination":destination,"items":[{"credential":"DEEPSEEK_API_KEY","description":"d","value":MIGRATED}],"confirmed":true}),
+            ),
+            (
+                "migration_run",
+                json!({"destination":destination,"items":[{"credential":"STATE_ENCRYPTION_KEY","description":"d"}],"confirmed":true}),
+            ),
+        ])
+        .await;
+    let refused = |reply: &Value| reply["error"].is_object() || reply["result"]["isError"] == true;
+    assert!(!refused(&replies[0]) && !refused(&replies[1]));
+    assert!(refused(&replies[2]), "the action needs confirmation");
+    assert!(refused(&replies[3]), "no tool accepts a value");
+    assert!(refused(&replies[4]), "internal keys are excluded");
+    assert!(!replies.iter().any(|r| r.to_string().contains(MIGRATED)));
+}

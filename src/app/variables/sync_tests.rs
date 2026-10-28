@@ -7,18 +7,18 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 type Tweak = Arc<dyn Fn(&str, &mut Value) + Send + Sync>;
 
-struct Pair {
-    coordinator: Arc<Host>,
-    native: Arc<Host>,
-    machine: String,
-    token: String,
-    profile: PathBuf,
+pub(in crate::app) struct Pair {
+    pub(in crate::app) coordinator: Arc<Host>,
+    pub(in crate::app) native: Arc<Host>,
+    pub(in crate::app) machine: String,
+    pub(in crate::app) token: String,
+    pub(in crate::app) profile: PathBuf,
 }
 
 fn link_file(profile: &Path) -> PathBuf {
     profile.join("implementation").join("connection.json")
 }
-fn connect(profile: &Path, account: u64, machine: &str) {
+pub(in crate::app) fn connect(profile: &Path, account: u64, machine: &str) {
     fs::create_dir_all(profile.join("implementation")).unwrap();
     fs::write(
         link_file(profile),
@@ -29,7 +29,7 @@ fn connect(profile: &Path, account: u64, machine: &str) {
 
 /// A coordinator and an installation connected to it; calls travel through the real
 /// `machine_protocol` of the coordinator, optionally altered on the way back.
-async fn pair(root: &Path, tweak: Option<Tweak>) -> Pair {
+pub(in crate::app) async fn pair(root: &Path, tweak: Option<Tweak>) -> Pair {
     let coordinator = host(&root.join("coordinator"));
     let native = host(&root.join("native"));
     let machine = id();

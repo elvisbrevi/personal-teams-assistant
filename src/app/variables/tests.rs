@@ -1,7 +1,7 @@
 use super::*;
 use authority::Transport::{Local, Machine, Window};
 
-pub(super) const SECRET: &str = "synthetic-secret-value-1a2b3c4d";
+pub(in crate::app) const SECRET: &str = "synthetic-secret-value-1a2b3c4d";
 const MULTILINE: &str = "-----BEGIN SYNTHETIC KEY-----\nabc123\n-----END SYNTHETIC KEY-----";
 
 struct TestShell;
@@ -20,13 +20,13 @@ impl Shell for TestShell {
     }
     fn exit(&self) {}
 }
-pub(super) fn host(root: &Path) -> Arc<Host> {
+pub(in crate::app) fn host(root: &Path) -> Arc<Host> {
     Arc::new(Host {
         state: init_state(&root.join("profile"), &root.join("data")).unwrap(),
         shell: Box::new(TestShell),
     })
 }
-pub(super) async fn call(
+pub(in crate::app) async fn call(
     host: &Arc<Host>,
     transport: authority::Transport,
     method: &str,
@@ -43,13 +43,13 @@ pub(super) async fn call(
     )
     .await
 }
-pub(super) fn text(reply: &Reply) -> String {
+pub(in crate::app) fn text(reply: &Reply) -> String {
     serde_json::to_string(reply).unwrap()
 }
-pub(super) fn id() -> String {
+pub(in crate::app) fn id() -> String {
     uuid::Uuid::new_v4().to_string()
 }
-pub(super) fn create(name: &str, value: &str) -> Value {
+pub(in crate::app) fn create(name: &str, value: &str) -> Value {
     json!({"id":id(),"name":name,"description":format!("Synthetic {name}"),"value":value})
 }
 
