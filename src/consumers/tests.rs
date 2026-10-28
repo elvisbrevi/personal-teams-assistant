@@ -178,6 +178,7 @@ fn launchers_are_kept_privately_and_never_overwritten() {
 }
 
 /// A definition as the user approved it in the window.
+#[cfg(unix)]
 fn approved(definition: Definition) -> Launcher {
     Launcher {
         approved_at: Some(8),
