@@ -224,6 +224,10 @@ jobs:
           cargo test --locked --no-default-features --lib machine_login
           cargo test --locked --no-default-features --lib account_machine_workflow
           cargo test --locked --no-default-features --lib allowed_roots_require
+      - name: Account variables, synchronization, migration, updates and readiness on Windows
+        run: |
+          cargo test --locked --no-default-features --lib -- variables consumers portable standing migration maintenance readiness
+          cargo test --locked --no-default-features --test account_variables
 
   security:
     name: Security
