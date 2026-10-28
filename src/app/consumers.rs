@@ -345,6 +345,7 @@ fn list(host: &Host, store: &Store, launchers: bool) -> std::result::Result<Valu
                 "summary":consumer.summary,
                 "destination":consumer.destination,
                 "slot":consumer.slot,
+                "credential":consumer.credential,
                 "operations":consumer.operations,
                 "binding":binding.map(binding_view),
             })
@@ -528,50 +529,98 @@ impl Resolver {
 
 impl crate::security::AccountSecrets for Resolver {
     fn bound(&self, name: &str) -> anyhow::Result<bool> {
-        let Some(consumer) = rules::built_in_credential(name) else {
-            return Ok(false);
-        };
         let Some(host) = self.live()? else {
             return Ok(false);
         };
-        if let Some(link) = implementation::link(&host.state)? {
-            return Ok(host.state.variables.consumers.bindings.has(
-                &link,
-                consumer.id,
-                consumer.slot,
-            ));
-        }
-        Ok(host
-            .state
-            .variables
-            .store(&host)?
-            .is_bound(consumer.id, consumer.slot)?)
+        let config = read_config(&host.state.config_path)?;
+        Ok(vars::credentials::managed(&config, name))
     }
-    fn value(&self, name: &str) -> anyhow::Result<String> {
-        let consumer =
-            rules::built_in_credential(name).context("No consumer uses this credential.")?;
+    fn present(&self, name: &str) -> anyhow::Result<bool> {
         let host = self.live()?.context("The host is no longer running.")?;
-        if implementation::link(&host.state)?.is_some() {
-            // Signed in: only a value the coordinator resolved for this operation (`stage`).
-            return host
-                .state
-                .variables
-                .consumers
-                .staged(consumer.credential)
-                .map_err(anyhow::Error::msg);
+        if let Some(link) = implementation::link(&host.state)? {
+            if let Some(consumer) = rules::built_in_credential(name)
+                && host
+                    .state
+                    .variables
+                    .consumers
+                    .bindings
+                    .has(&link, consumer.id, consumer.slot)
+            {
+                return Ok(true);
+            }
+            return Ok(vars::cached(&host, &link)
+                .iter()
+                .any(|v| v.name.eq_ignore_ascii_case(name)));
         }
         let store = host.state.variables.store(&host)?;
-        let result = store.bound_value(consumer.id, consumer.slot);
-        let outcome = match &result {
-            Ok(Some(_)) => "ok",
-            Ok(None) => "rejected",
-            Err(vault::Error::Conflict(message)) if message.contains("was deleted") => "deleted",
-            Err(_) => "failed",
-        };
-        store.audit("use", None, outcome);
-        let (_, value) = result?.context("The binding was removed.")?;
-        rules::validate_value(consumer, value.expose())?;
-        Ok(value.expose().to_owned())
+        vars::credentials::migrate(&host, &store)?;
+        if let Some(consumer) = rules::built_in_credential(name)
+            && let Some(binding) = store.binding(consumer.id, consumer.slot)?
+        {
+            return Ok(binding.state == "ok");
+        }
+        Ok(store
+            .list(None)?
+            .iter()
+            .any(|v| v.name.eq_ignore_ascii_case(name)))
+    }
+    fn value(&self, name: &str) -> anyhow::Result<String> {
+        let host = self.live()?.context("The host is no longer running.")?;
+        if let Some(link) = implementation::link(&host.state)? {
+            if let Some(consumer) = rules::built_in_credential(name)
+                && host
+                    .state
+                    .variables
+                    .consumers
+                    .bindings
+                    .has(&link, consumer.id, consumer.slot)
+            {
+                return host
+                    .state
+                    .variables
+                    .consumers
+                    .staged(name)
+                    .map_err(anyhow::Error::msg);
+            }
+            let entry = vars::cached(&host, &link).into_iter()
+                .find(|v| v.name.eq_ignore_ascii_case(name))
+                .context("The application variable is missing. Synchronize the catalog and add it in Variables.")?;
+            // The core's credential contract is synchronous, including reads by running tools.
+            // A separate thread avoids blocking a Tokio worker on its own runtime and performs
+            // a fresh authorization for every use; no account value is cached on this machine.
+            return std::thread::spawn(move || -> anyhow::Result<String> {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()?;
+                if implementation::link(&host.state)?.as_ref() != Some(&link) {
+                    anyhow::bail!("The signed-in account changed. Resolve the variable again.");
+                }
+                let (_, value) =
+                    runtime.block_on(connected::resolve(&host.state, &entry.id, None))?;
+                if implementation::link(&host.state)?.as_ref() != Some(&link) {
+                    anyhow::bail!("The signed-in account changed. Resolve the variable again.");
+                }
+                Ok(value.expose().to_owned())
+            })
+            .join()
+            .map_err(|_| anyhow::anyhow!("The account variable could not be resolved."))?;
+        }
+        let store = host.state.variables.store(&host)?;
+        vars::credentials::migrate(&host, &store)?;
+        let result = (|| -> std::result::Result<_, vault::Error> {
+            if let Some(consumer) = rules::built_in_credential(name)
+                && store.is_bound(consumer.id, consumer.slot)?
+            {
+                let (_, value) = store
+                    .bound_value(consumer.id, consumer.slot)?
+                    .ok_or_else(|| input("The binding was removed."))?;
+                rules::validate_value(consumer, value.expose())?;
+                return Ok(value);
+            }
+            store.resolve(name)
+        })();
+        audit_result(&store, "use", None, &result);
+        Ok(result?.expose().to_owned())
     }
 }
 

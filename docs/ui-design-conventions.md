@@ -34,7 +34,7 @@ The standard every change to `desktop/ui/` follows, so the native window, the we
 | Footer | Settings, then the status pill and the web account |
 
 - A new feature joins the section of the task it serves; it does not get a navigation item of its own unless it is a separate daily task. The sidebar holds at most eight items. The phone keeps five destinations: Home, To-Do, Messages, Activities and More (Agent history, Knowledge and Test chat). More is a keyboard-accessible disclosure, closes after selection or Escape, and preserves the floating bar's shape and touch targets.
-- Settings is one category at a time: **General** (how the assistant answers, and this device's theme), **Microsoft Teams** (identity, reception, personal chat, public URL), **Language models**, **Activity registration** (daily record and schedule), **Credentials** (application credentials and the account's stored variables, in two panels), **Advanced** (rare or migration operations). A new field goes in the category of the user's goal; a category reaches seven panels before it is split, and a seventh category needs an IA review.
+- Settings is one category at a time: **General** (how the assistant answers, and this device's theme), **Microsoft Teams** (identity, reception, personal chat, public URL), **Language models**, **Activity registration** (daily record and schedule), **Variables** (application credentials and other stored variables in one list), **Advanced** (rare or migration operations). A new field goes in the category of the user's goal; a category reaches seven panels before it is split, and a seventh category needs an IA review.
 - Deep links use `showTab(section, panelId)`: when the panel is in Settings it opens its category first. Home's status rows and setup steps always link to where the thing is changed.
 - Attention is shown once where it can be acted on (a running daily snapshot is shown on Home and at its save control).
 
@@ -114,3 +114,5 @@ node scripts/ui-preview/shoot.mjs 4173 /tmp/ui-shots                 # screensho
 ```
 
 `check.mjs` fails on any failed interaction check or axe violation; CI runs it on every change to the GUI or its scripts. `PTA_UI_CHROMIUM` points at a Chromium executable when Playwright's own browsers are not installed. To compare with a previous version, export it (`git show REV:desktop/ui/FILE`) into a directory, serve it on another port and run `check.mjs PORT OUT --axe-only`. The mock (`scripts/ui-preview/mock.js`) only knows the IPC methods the screens read and the safe writes; extend it when a screen needs a new one, with synthetic data only.
+
+Stored variables use an eye icon with Reveal/Hide text and an accessible pressed state. Values stay hidden until an explicit action and clear on navigation, a hidden page and after 30 seconds. Existing application credentials migrate before use; there is no separate Credentials editor. Cross-account credential migration remains under Advanced.

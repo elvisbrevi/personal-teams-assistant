@@ -1075,8 +1075,12 @@ async fn migration_copies_a_selected_credential_through_the_real_cli_and_mcp_wit
                 "run",
                 "DEEPSEEK_API_KEY",
                 "--description",
-                "DeepSeek key for the assistant",
+                "Application variable migrated from DEEPSEEK_API_KEY.",
                 "--bind",
+                "--existing",
+                "use",
+                "--expected-version",
+                "1",
             ];
             args.extend(extra);
             args.extend(["--destination", &destination]);
@@ -1088,7 +1092,10 @@ async fn migration_copies_a_selected_credential_through_the_real_cli_and_mcp_wit
     let (code, wrong) = run(vec!["--confirmed"], "0".repeat(32)).await;
     assert_eq!(code, 6, "{wrong}");
     let (_, listed) = f.json(&["variables", "list"], None).await;
-    assert_eq!(listed["data"]["total"], 0);
+    // Local credentials now import automatically; the failed confirmation still binds nothing.
+    assert_eq!(listed["data"]["total"], 1);
+    let (_, consumers) = f.json(&["variables", "consumers"], None).await;
+    assert!(consumers["data"]["consumers"][0]["binding"].is_null());
 
     let (code, migrated) = run(vec!["--confirmed"], destination.to_owned()).await;
     assert_eq!(code, 0, "{migrated}");
@@ -1251,4 +1258,36 @@ async fn a_fresh_session_agent_finishes_setup_from_readiness_alone_without_a_sec
             .windows(SECRET.len())
             .any(|w| w == SECRET.as_bytes())
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn legacy_application_credentials_migrate_before_use_and_cli_edits_share_the_variable() {
+    let f = fixture();
+    let original = f.profile.join("credentials/default/DEEPSEEK_API_KEY");
+    fs::write(&original, MIGRATED).unwrap();
+    let (_, credentials) = f.json(&["credentials", "list"], None).await;
+    assert_eq!(credentials["data"]["DEEPSEEK_API_KEY"], "variable");
+    let (_, listed) = f.json(&["variables", "list"], None).await;
+    assert_eq!(listed["data"]["total"], 1);
+    assert!(!listed.to_string().contains(MIGRATED));
+    let entry = listed["data"]["variables"][0]["id"].clone();
+    let (code, saved) = f
+        .json(&["credentials", "set", "DEEPSEEK_API_KEY"], Some(SECRET))
+        .await;
+    assert_eq!(code, 0, "{saved}");
+    let store = personal_teams_assistant::variables::Store::open_profile(&f.profile, None).unwrap();
+    assert_eq!(store.resolve("DEEPSEEK_API_KEY").unwrap().expose(), SECRET);
+    let (_, listed) = f.json(&["variables", "list"], None).await;
+    assert_eq!(listed["data"]["variables"][0]["id"], entry);
+    assert_eq!(listed["data"]["variables"][0]["version"], 2);
+    let (code, removed) = f
+        .json(&["credentials", "delete", "DEEPSEEK_API_KEY"], None)
+        .await;
+    assert_eq!(code, 0, "{removed}");
+    let (_, listed) = f.json(&["variables", "list"], None).await;
+    assert_eq!(listed["data"]["total"], 0);
+    let (_, credentials) = f.json(&["credentials", "list"], None).await;
+    assert_ne!(credentials["data"]["DEEPSEEK_API_KEY"], "variable");
+    assert!(store.resolve("DEEPSEEK_API_KEY").is_err());
+    assert_eq!(fs::read_to_string(original).unwrap(), MIGRATED);
 }

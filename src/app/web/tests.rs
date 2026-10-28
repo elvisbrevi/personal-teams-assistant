@@ -2797,7 +2797,9 @@ async fn consumer_bindings_are_private_per_account_and_shared_accounts_run_no_pr
         alice_credentials.value("DEEPSEEK_API_KEY").unwrap(),
         ALICE_KEY
     );
-    assert!(!bob_credentials.bound("DEEPSEEK_API_KEY").unwrap());
+    assert!(bob_credentials.bound("DEEPSEEK_API_KEY").unwrap());
+    assert!(!bob_credentials.present("DEEPSEEK_API_KEY").unwrap());
+    assert!(bob_credentials.value("DEEPSEEK_API_KEY").is_err());
 
     // No process execution for ordinary accounts, from any client; machines never reach it.
     assert!(hosts.iter().any(|host| !host.state.authority.owner));

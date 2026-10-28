@@ -945,13 +945,17 @@ async fn ensure_stopped(state: &DesktopState) -> Result<()> {
 }
 
 async fn set_credential(
-    state: &DesktopState,
+    host: &Arc<Host>,
     name: String,
     value: String,
 ) -> std::result::Result<(), String> {
+    let state = &host.state;
     let config = read_config(&state.config_path).map_err(fail)?;
     if !credential_names(&config).contains(&name) {
         return Err("[invalid_input] Credential name not allowed".into());
+    }
+    if variables::credentials::managed(&config, &name) {
+        return variables::credentials::set(host, name, value).await;
     }
     if name == "STATE_ENCRYPTION_KEY" {
         validate_state_key(&config, &value).map_err(|_| {
@@ -964,8 +968,29 @@ async fn set_credential(
     security::put_desktop_secret("default", &name, &value).map_err(fail)
 }
 
-async fn delete_credential(state: &DesktopState, name: String) -> std::result::Result<(), String> {
+async fn delete_credential(host: &Arc<Host>, name: String) -> std::result::Result<(), String> {
+    let state = &host.state;
     let config = read_config(&state.config_path).map_err(fail)?;
+    if variables::credentials::managed(&config, &name) {
+        let entry = if let Some(link) = implementation::link(state).map_err(fail)? {
+            variables::cached(host, &link)
+        } else {
+            let store = state.variables.store(host).map_err(fail)?;
+            variables::credentials::migrate(host, &store).map_err(fail)?;
+            store.list(None).map_err(fail)?
+        }
+        .into_iter()
+        .find(|v| v.name.eq_ignore_ascii_case(&name))
+        .ok_or_else(|| "[invalid_input] There is no stored variable with that name.".to_owned())?;
+        let mut request = control::Request::new("variable_delete");
+        request.args = serde_json::json!({"id":entry.id,"version":entry.version});
+        let reply = variables::operate(host, &request).await;
+        return if reply.ok {
+            Ok(())
+        } else {
+            Err(reply.message.unwrap_or_default())
+        };
+    }
     if !credential_names(&config).contains(&name) && !RETIRED_CREDENTIALS.contains(&name.as_str()) {
         return Err("[invalid_input] Credential name not allowed".into());
     }

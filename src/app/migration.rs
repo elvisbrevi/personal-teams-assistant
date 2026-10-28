@@ -62,7 +62,7 @@ const RETIRED: &str = "Retired credential that nothing reads any more.";
 const RESERVED: &str = "Protected runtime setting: it cannot be set from a variable.";
 
 /// Why a configured credential is never migrated, or `None` when it may be.
-fn excluded(name: &str) -> Option<(&'static str, &'static str)> {
+pub(super) fn excluded(name: &str) -> Option<(&'static str, &'static str)> {
     let upper = name.to_ascii_uppercase();
     let has = |part: &str| upper.contains(part);
     if has("ENCRYPTION") {
@@ -695,7 +695,7 @@ async fn run(host: &Arc<Host>, args: RunArgs) -> Reply {
         "settings": settings,
         "complete": complete,
         "restart_required": restart,
-        "originals": "The original credentials were not modified. To return a consumer to its original credential, unbind it (`pta consumers unbind CONSUMER`).",
+        "originals": "Original credentials remain recovery copies. Application credentials are managed in Variables; unbinding returns a consumer to its configured named variable.",
     });
     if complete {
         return Reply::success(data);
@@ -713,7 +713,7 @@ async fn run(host: &Arc<Host>, args: RunArgs) -> Reply {
     let mut reply = Reply::error(
         code,
         exit,
-        "The migration is incomplete at the stage shown for each item. The original setup is unchanged and usable; fix the cause and run the same migration again to resume safely.",
+        "The migration is incomplete at the stage shown for each item. Original credential copies were preserved; fix the cause and run the same migration again to resume safely.",
     );
     reply.data = data;
     reply

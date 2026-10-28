@@ -58,8 +58,8 @@ const CONFIG_OWN: &str = "This installation holds the account configuration itse
 const VARIABLES_OK: &str = "The account's variables are available by name.";
 const VARIABLES_NONE: &str = "No variable has been stored yet. Add one when something needs it; the value is typed by you, never by the agent.";
 const VARIABLES_ERROR: &str = "The variable catalog could not be read or synchronized. Synchronize again; no value was needed for this check.";
-const VARIABLES_MISSING: &str = "Some variables you need are not stored yet. Type each value in the protected entry (Settings > Credentials > Variables, or `pta variables entry complete`); it never goes through chat.";
-const VARIABLES_WAITING: &str = "A protected entry is waiting for you to type the value. Finish it in Settings > Credentials > Variables or with `pta variables entry complete`.";
+const VARIABLES_MISSING: &str = "Some variables you need are not stored yet. Type each value in the protected entry (Settings > Variables, or `pta variables entry complete`); it never goes through chat.";
+const VARIABLES_WAITING: &str = "A protected entry is waiting for you to type the value. Finish it in Settings > Variables or with `pta variables entry complete`.";
 const VARIABLES_BROKEN: &str =
     "A consumer uses a variable that no longer exists. Choose another variable for it.";
 const MIGRATION_DONE: &str = "The credentials you chose were moved to your account and verified.";
@@ -510,7 +510,7 @@ async fn variables(host: &Arc<Host>, expect: &[String]) -> Step {
                     "variable_entry_request",
                     json!({"name":item["name"],"description":"<what the variable is for>"}),
                 ))
-                .act(gui("Settings > Credentials > Variables"));
+                .act(gui("Settings > Variables"));
             break;
         }
     }

@@ -25,6 +25,10 @@ static ACCOUNT_ONLY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBo
 pub(crate) trait AccountSecrets: Send + Sync {
     /// Whether this credential currently resolves from an account variable.
     fn bound(&self, name: &str) -> Result<bool>;
+    /// Presence only: a managed but missing variable must never fall back to legacy storage.
+    fn present(&self, _name: &str) -> Result<bool> {
+        Ok(true)
+    }
     /// The value of a bound credential, checked against live account authority.
     fn value(&self, name: &str) -> Result<String>;
 }
@@ -214,7 +218,7 @@ pub fn secret_source(name: &str) -> Result<Option<&'static str>> {
     if let Some(source) = account_source()
         && source.bound(name)?
     {
-        return Ok(Some("variable"));
+        return Ok(source.present(name)?.then_some("variable"));
     }
     legacy_source(name)
 }

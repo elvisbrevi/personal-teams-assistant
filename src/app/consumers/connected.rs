@@ -224,6 +224,7 @@ fn list(host: &Host, link: &Link, launchers: bool) -> std::result::Result<Value,
                 "summary":consumer.summary,
                 "destination":consumer.destination,
                 "slot":consumer.slot,
+                "credential":consumer.credential,
                 "operations":consumer.operations,
                 "binding":binding,
             })

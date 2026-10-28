@@ -1042,11 +1042,11 @@ async fn operate(
             json!({"imported":true})
         }
         "set_credential" => {
-            set_credential(state, arg(args, "name")?, arg(args, "value")?).await?;
+            set_credential(host, arg(args, "name")?, arg(args, "value")?).await?;
             json!({"stored":true})
         }
         "delete_credential" => {
-            delete_credential(state, arg(args, "name")?).await?;
+            delete_credential(host, arg(args, "name")?).await?;
             json!({"deleted":true})
         }
         "azure_wiki" => {

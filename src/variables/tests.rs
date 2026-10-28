@@ -859,3 +859,68 @@ fn bindings_belong_to_one_account_and_fail_closed_when_the_entry_is_gone() {
         assert!(!contains(&file, SECRET));
     }
 }
+
+#[test]
+fn credential_import_is_verified_and_never_resurrects_old_values() {
+    let f = fixture();
+    let store = account(&f, "alice");
+    let import = || Ok(Some(Secret::new(SECRET)));
+    store
+        .import_credential("AZURE_DEVOPS_TOKEN", "Azure read access", import)
+        .unwrap();
+    let entry = store.list(None).unwrap().remove(0);
+    assert_eq!(
+        store.resolve("AZURE_DEVOPS_TOKEN").unwrap().expose(),
+        SECRET
+    );
+    store
+        .update(&entry.id, entry.version, None, Some(&Secret::new(OTHER)))
+        .unwrap();
+    drop(store);
+    let store = account(&f, "alice");
+    store
+        .import_credential("AZURE_DEVOPS_TOKEN", "Azure read access", || {
+            panic!("original must not be read again")
+        })
+        .unwrap();
+    assert_eq!(store.resolve("AZURE_DEVOPS_TOKEN").unwrap().expose(), OTHER);
+    store.delete(&entry.id, 2).unwrap();
+    store
+        .import_credential("AZURE_DEVOPS_TOKEN", "Azure read access", || {
+            panic!("deleted values must not come back")
+        })
+        .unwrap();
+    assert!(store.resolve("AZURE_DEVOPS_TOKEN").is_err());
+    assert!(store.list(None).unwrap().is_empty());
+    // Another account never inherits a migration marker or a value.
+    assert!(account(&f, "bob").list(None).unwrap().is_empty());
+}
+
+#[test]
+fn credential_import_preserves_conflicts_and_retries_missing_sources() {
+    let f = fixture();
+    let store = account(&f, "alice");
+    store
+        .import_credential("LATER", "Not configured yet", || Ok(None))
+        .unwrap();
+    store
+        .import_credential("LATER", "Now configured", || Ok(Some(Secret::new(SECRET))))
+        .unwrap();
+    assert_eq!(store.resolve("LATER").unwrap().expose(), SECRET);
+    let entry = store.create(new("EXISTING", OTHER)).unwrap().variable;
+    let error = store
+        .import_credential("EXISTING", "Original credential", || {
+            Ok(Some(Secret::new(SECRET)))
+        })
+        .unwrap_err();
+    assert!(matches!(error, Error::Conflict(_)));
+    assert!(!error.to_string().contains(SECRET));
+    assert_eq!(store.reveal(&entry.id).unwrap().1.expose(), OTHER);
+    // Equal existing entries keep their identity and description.
+    store
+        .import_credential("EXISTING", "Do not replace its description", || {
+            Ok(Some(Secret::new(OTHER)))
+        })
+        .unwrap();
+    assert_eq!(store.reveal(&entry.id).unwrap().0, entry);
+}
