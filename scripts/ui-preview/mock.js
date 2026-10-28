@@ -519,7 +519,7 @@
       return { consumer: args.consumer, operation: 'check', reference: { id: binding.id, name: binding.variable.name, version: binding.variable.version }, result: { status: 'ok', http_status: 200 } };
     },
     variable_migration_inspect: () => ({
-      destination: { key: 'a1b2c3d4e5f60718293a4b5c6d7e8f90', mode: 'connected', coordinator: 'https://portal.example.test', account: 'Account 1001 on https://portal.example.test', standing: window.__ptaStanding ? structuredClone(window.__ptaStanding) : undefined },
+      destination: { key: 'dest-1001', mode: 'connected', coordinator: 'https://portal.example.test', account: 'Account 1001 on https://portal.example.test', standing: window.__ptaStanding ? structuredClone(window.__ptaStanding) : undefined },
       credentials: [
         { credential: 'DEEPSEEK_API_KEY', origin: 'system', status: 'eligible', excluded: null, reason: null, account_bound: false, consumer: { id: 'deepseek', title: 'DeepSeek API', destination: 'https://api.deepseek.com' },
           suggested: { name: 'DEEPSEEK_API_KEY', description: 'DeepSeek API migrated from this installation' }, entry_id: '5b0b6f3e-7f35-4f0e-9a39-0d1f4b3a2c11', existing: null, migration: null },

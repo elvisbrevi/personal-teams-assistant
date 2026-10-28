@@ -1352,7 +1352,7 @@ for (const [label, ctx] of [['variables-desktop', {}], ['variables-phone', { vie
   await migration.locator('#migration-result').getByText('Hecho').first().waitFor();
   check(`${label}: the copy names the destination key, the credential and the switch, never a value`, await page.evaluate(() => {
     const call = window.__ptaMigrationCalls.at(-1);
-    return call.destination === 'a1b2c3d4e5f60718293a4b5c6d7e8f90' && call.items.length === 1 && call.items[0].credential === 'DEEPSEEK_API_KEY'
+    return call.destination === 'dest-1001' && call.items.length === 1 && call.items[0].credential === 'DEEPSEEK_API_KEY'
       && call.items[0].bind === true && !JSON.stringify(call).includes('value') && !call.settings;
   }) && await migration.locator('#migration-result').innerText().then(text => text.includes('no se modificaron')));
   check(`${label}: variable management keeps the phone boundary`, await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
