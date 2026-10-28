@@ -377,7 +377,7 @@ async fn the_credential_lookup_uses_only_a_value_resolved_for_the_operation() {
             .ok
     );
     assert!(resolver.value("DEEPSEEK_API_KEY").is_err());
-    // Unbinding is a local decision: the credential is then no longer an account variable's.
+    // Unbinding returns to the configured named variable, never a legacy credential.
     call(
         &rig.native,
         Local,
@@ -385,7 +385,9 @@ async fn the_credential_lookup_uses_only_a_value_resolved_for_the_operation() {
         json!({"consumer":"deepseek"}),
     )
     .await;
-    assert!(!resolver.bound("DEEPSEEK_API_KEY").unwrap());
+    // Removing a binding keeps the name managed by Variables, with no legacy fallback.
+    assert!(resolver.bound("DEEPSEEK_API_KEY").unwrap());
+    assert!(resolver.value("DEEPSEEK_API_KEY").is_err());
 }
 
 #[tokio::test]
@@ -472,7 +474,9 @@ async fn a_switch_during_an_exchange_never_fills_the_next_account() {
     *rig.switch_on.lock().unwrap() = Some("variable_resolve".into());
     consumers::stage(&rig.native.state).await;
     assert!(resolver.value("DEEPSEEK_API_KEY").is_err());
-    assert!(!resolver.bound("DEEPSEEK_API_KEY").unwrap());
+    // Removing a binding keeps the name managed by Variables, with no legacy fallback.
+    assert!(resolver.bound("DEEPSEEK_API_KEY").unwrap());
+    assert!(resolver.value("DEEPSEEK_API_KEY").is_err());
 
     // So does a catalog read that was in flight.
     connect(
@@ -644,4 +648,36 @@ fn the_standing_distinguishes_signed_out_unknown_live_offline_and_revoked() {
     assert_eq!(state.view(Some(&other))["state"], "unknown");
     state.reset();
     assert_eq!(state.view(Some(&link))["state"], "unknown");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn named_application_variables_resolve_live_without_a_binding_or_legacy_fallback() {
+    let rig = rig().await;
+    let entry = store(&rig.coordinator, "DEEPSEEK_API_KEY", KEY).await;
+    assert!(
+        call(&rig.native, Local, "variable_sync", json!({}))
+            .await
+            .ok
+    );
+    let resolver = consumers::Resolver::new(&rig.native);
+    assert!(resolver.bound("DEEPSEEK_API_KEY").unwrap());
+    assert_eq!(resolver.value("DEEPSEEK_API_KEY").unwrap(), KEY);
+    let store = rig
+        .coordinator
+        .state
+        .variables
+        .store(&rig.coordinator)
+        .unwrap();
+    store
+        .update(&entry, 1, None, Some(&vault::Secret::new(OTHER)))
+        .unwrap();
+    // Names come from the synchronized catalog; values are resolved anew even after rotation.
+    assert_eq!(resolver.value("DEEPSEEK_API_KEY").unwrap(), OTHER);
+    rig.set(DOWN);
+    assert!(resolver.value("DEEPSEEK_API_KEY").is_err());
+    rig.set(REJECTED);
+    assert!(resolver.value("DEEPSEEK_API_KEY").is_err());
+    rig.set(UP);
+    *rig.switch_on.lock().unwrap() = Some("variable_resolve".into());
+    assert!(resolver.value("DEEPSEEK_API_KEY").is_err());
 }

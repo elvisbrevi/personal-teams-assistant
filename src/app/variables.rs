@@ -10,6 +10,7 @@ use crate::variables::{self as vault, KeyBackup, NewVariable, Secret, Store};
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 
+pub(super) mod credentials;
 mod sync;
 pub(super) use sync::{auto, cached, call_account, machine_call};
 
@@ -378,16 +379,16 @@ fn run(host: &Host, method: &str, args: &Value) -> std::result::Result<Value, va
     match method {
         "variable_list" => {
             let list: ListArgs = parse(args)?;
+            // A conflict must leave the catalog accessible so the user can resolve it.
+            let migration_error = credentials::migrate(host, &store)
+                .err()
+                .map(|e| e.to_string());
             let mut variables = store.list(list.query.as_deref())?;
             let total = variables.len();
             variables.truncate(list.limit.unwrap_or(vault::MAX_VARIABLES).max(1));
-            Ok(listing(
-                state,
-                variables,
-                total,
-                sync::authoritative(&store)?,
-                now,
-            ))
+            let mut result = listing(state, variables, total, sync::authoritative(&store)?, now);
+            result["migration_error"] = json!(migration_error);
+            Ok(result)
         }
         "variable_create" => {
             let create: CreateArgs = parse(args)?;
@@ -442,7 +443,7 @@ fn run(host: &Host, method: &str, args: &Value) -> std::result::Result<Value, va
             Ok(json!({
                 "request": request, "state": "pending", "name": start.name, "description": start.description,
                 "expires_at": now + ENTRY_SECONDS,
-                "next": "Ask the user to type the value in Settings > Credentials > Variables, or run pta variables entry complete REQUEST with the value on standard input. You never receive the value; check variable_entry_status afterwards.",
+                "next": "Ask the user to type the value in Settings > Variables, or run pta variables entry complete REQUEST with the value on standard input. You never receive the value; check variable_entry_status afterwards.",
             }))
         }
         "variable_rotation_start" => {
@@ -490,7 +491,7 @@ fn run(host: &Host, method: &str, args: &Value) -> std::result::Result<Value, va
             Ok(json!({
                 "request": request, "state": "pending", "action": "replace_value", "id": target.id,
                 "name": target.name, "description": target.description, "expires_at": now + ENTRY_SECONDS,
-                "next": "Ask the user to type the new value in Settings > Credentials > Variables, or run pta variables entry complete REQUEST with the value on standard input. You never receive the value; check variable_entry_status afterwards. The request fails if the variable changes first.",
+                "next": "Ask the user to type the new value in Settings > Variables, or run pta variables entry complete REQUEST with the value on standard input. You never receive the value; check variable_entry_status afterwards. The request fails if the variable changes first.",
             }))
         }
         "variable_audit" => {

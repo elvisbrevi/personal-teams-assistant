@@ -26,6 +26,65 @@ pub struct BoundVariable {
 }
 
 impl Store {
+    /// Import an installation credential once. Originals remain recovery copies; the durable
+    /// marker prevents a later restart from resurrecting a deleted or replaced value.
+    pub(crate) fn import_credential(
+        &self,
+        name: &str,
+        description: &str,
+        read: impl FnOnce() -> Result<Option<Secret>>,
+    ) -> Result<()> {
+        validate_name(name)?;
+        validate_description(description)?;
+        let marker = format!("credential-import/{}/{name}", self.account);
+        let mut db = self.lock();
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if meta_text(&tx, &marker)?.is_some() {
+            return Ok(());
+        }
+        let Some(value) = read()? else {
+            return Ok(());
+        };
+        validate_value(value.expose())?;
+        let query = "SELECT id,name,description,revision,dek_version,ciphertext,created_at,updated_at FROM variables WHERE account=?1 AND name_key=?2";
+        if fetch(&tx, query, params![self.account, name_key(name)])?.is_none() {
+            let count: usize = tx.query_row(
+                "SELECT COUNT(*) FROM variables WHERE account=?1",
+                [&self.account],
+                |r| r.get(0),
+            )?;
+            if count >= MAX_VARIABLES {
+                return Err(input("This account holds the maximum of 500 variables."));
+            }
+            let id = uuid::Uuid::new_v4().to_string();
+            let (version, key) = self.active_data_key(&tx)?;
+            let ciphertext = seal(
+                &key,
+                &record_aad(&self.account, &id, name, 1, version),
+                value.expose().as_bytes(),
+            )?;
+            let at = now();
+            tx.execute("INSERT INTO variables(account,id,name,name_key,description,revision,dek_version,ciphertext,created_at,updated_at) VALUES (?1,?2,?3,?4,?5,1,?6,?7,?8,?8)",
+                params![self.account,id,name,name_key(name),description,version,ciphertext,at])?;
+        }
+        let row = fetch(&tx, query, params![self.account, name_key(name)])?
+            .ok_or_else(|| input("The migrated variable is missing."))?;
+        let copied = self.plaintext(&tx, &row)?;
+        if !crate::security::constant_eq(copied.expose(), value.expose()) {
+            return Err(Error::Conflict(format!(
+                "The variable {name} differs from the existing credential. Review it in Variables before migrating; the original was preserved."
+            )));
+        }
+        tx.execute(
+            "INSERT INTO meta(key,value) VALUES (?1,?2)",
+            params![marker, row.id],
+        )?;
+        tx.commit()?;
+        drop(db);
+        self.audit("credential_import", Some(&row.id), "verified");
+        Ok(())
+    }
+
     /// Point a consumer slot at one entry of this account, replacing an earlier binding.
     pub fn bind(&self, consumer: &str, slot: &str, entry: &str) -> Result<Binding> {
         let entry = entry_id(entry)?;

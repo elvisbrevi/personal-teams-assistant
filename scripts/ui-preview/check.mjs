@@ -543,8 +543,8 @@ check('axe: no WCAG 2.2 AA violations in any scan', !Object.keys(totals).length,
   check('fresh: setup checklist visible', await page.isVisible('#setup-panel'));
   await page.click('#setup-steps li:first-child button');
   await page.waitForTimeout(300);
-  check('fresh: setup step opens Settings › Credentials', await page.getAttribute('#settings-tab-credentials', 'aria-selected') === 'true' && await page.isVisible('#panel-credentials'));
-  check('fresh: credentials and Teams flagged', await page.isVisible('#settings-tab-credentials .flag.warn') && await page.isVisible('#settings-tab-teams .flag.warn'));
+  check('fresh: setup step opens Settings › Variables', await page.getAttribute('#settings-tab-variables', 'aria-selected') === 'true' && await page.isVisible('#panel-variables'));
+  check('fresh: credentials and Teams flagged', await page.isVisible('#settings-tab-variables .flag.warn') && await page.isVisible('#settings-tab-teams .flag.warn'));
   await context.close();
 }
 {
@@ -627,7 +627,7 @@ check('axe: no WCAG 2.2 AA violations in any scan', !Object.keys(totals).length,
   await page.screenshot({ path: `${out}/phone-messages-answer.png`, fullPage: true });
   await page.click('nav [data-tab="registration"]');
   check('phone: recorded day list remains available', await page.isVisible('#activity-master'));
-  for (const g of ['general', 'teams', 'models', 'activity', 'credentials', 'advanced']) {
+  for (const g of ['general', 'teams', 'models', 'activity', 'variables', 'advanced']) {
     await page.evaluate(x => selectTab($('#settings-tabs'), x), g);
     await page.waitForTimeout(150);
     await page.screenshot({ path: `${out}/phone-settings-${g}.png`, fullPage: true });
@@ -637,7 +637,7 @@ check('axe: no WCAG 2.2 AA violations in any scan', !Object.keys(totals).length,
 {
   const { context, page } = await open();
   await page.click('nav [data-tab="settings"]');
-  for (const g of ['general', 'teams', 'models', 'activity', 'credentials', 'advanced']) {
+  for (const g of ['general', 'teams', 'models', 'activity', 'variables', 'advanced']) {
     await page.click(`#settings-tab-${g}`);
     await page.waitForTimeout(150);
     await page.screenshot({ path: `${out}/desktop-settings-${g}.png`, fullPage: true });
@@ -1023,13 +1023,13 @@ for (const [label, ctx] of [['readiness-desktop', {}], ['readiness-phone', { vie
     const step = (id, scope, state, detail, facts = {}, required = true) => ({ id, scope, required, state, detail, facts, actions: [] });
     window.__ptaReadiness = {
       ready: false, mode: 'signed_in', client: 'window', local_owner: true, coordinator: 'https://assistant.example.test',
-      next: { step: 'variables', state: 'todo', detail: 'Some variables you need are not stored yet. Type each value in the protected entry (Settings > Credentials > Variables, or `pta variables entry complete`); it never goes through chat.', actions: [] },
+      next: { step: 'variables', state: 'todo', detail: 'Some variables you need are not stored yet. Type each value in the protected entry (Settings > Variables, or `pta variables entry complete`); it never goes through chat.', actions: [] },
       steps: [
         step('coordinator', 'coordinator', 'done', 'This computer is signed in to your account\'s coordinator.'),
         step('connection', 'coordinator', 'done', 'The coordinator answered and accepts this computer.', { standing: 'live', checked_at: Math.floor(Date.now() / 1000) - 60 }),
         step('machine', 'coordinator', 'done', 'This computer is on your account\'s machine list, which every signed-in client shows.', { machines: 3, online: 2 }),
         step('configuration', 'coordinator', 'done', 'Your account configuration is restored and up to date on this computer.', { loaded: { generation: 5 }, saved: { generation: 5 } }),
-        step('variables', 'coordinator', 'todo', 'Some variables you need are not stored yet. Type each value in the protected entry (Settings > Credentials > Variables, or `pta variables entry complete`); it never goes through chat.',
+        step('variables', 'coordinator', 'todo', 'Some variables you need are not stored yet. Type each value in the protected entry (Settings > Variables, or `pta variables entry complete`); it never goes through chat.',
           { count: 2, expected: [{ name: 'DEPLOY_ENDPOINT', state: 'present', version: 3 }, { name: 'PARTNER_TOKEN', state: 'waiting' }, { name: 'SIGNING_KEY', state: 'missing' }] }),
         step('migration', 'this_machine', 'optional', 'Optional: review which existing credentials of this installation to move into your account. Nothing is moved until you confirm each one.', {}, false),
         step('providers', 'this_machine', 'attention', 'A model provider in the configuration is not installed or signed in on this computer. Nothing is installed or used in its place; install it and sign in yourself, then check again.', { providers: ['codex'] }, false),
@@ -1203,9 +1203,12 @@ for (const [label, ctx] of [['variables-desktop', {}], ['variables-phone', { vie
   const DEPLOY_ID = 'aaaaaaaa-0000-4000-8000-000000000001', KEY_ID = 'aaaaaaaa-0000-4000-8000-000000000002';
   const KEY_VALUE = '-----BEGIN SYNTHETIC KEY-----\nline two  with  spaces\n\tand a tab\n-----END SYNTHETIC KEY-----\n';
 
+  check(`${label}: Variables replaces the separate credentials editor`, await page.locator('#settings-tab-variables').isVisible() && await page.locator('#panel-credentials').count() === 0);
+  check(`${label}: Reveal has an eye icon and starts hidden`, await button(DEPLOY, 'Revelar').locator('use').getAttribute('href') === '#i-eye' && await button(DEPLOY, 'Revelar').getAttribute('aria-pressed') === 'false');
   await button(DEPLOY, 'Revelar').click();
   await row(DEPLOY).locator('pre.variable-value').waitFor();
   check(`${label}: Reveal fetches only the selected entry after the action`, await page.evaluate(id => window.__ptaVariableReveals.length === 1 && window.__ptaVariableReveals[0] === id, DEPLOY_ID));
+  check(`${label}: the revealed eye control announces its pressed state`, await button(DEPLOY, 'Ocultar').getAttribute('aria-pressed') === 'true' && await button(DEPLOY, 'Ocultar').locator('use').getAttribute('href') === '#i-eye-off');
   check(`${label}: a revealed value is shown for that entry only`, await row(DEPLOY).locator('pre.variable-value').innerText() === 'https://release.example.test/v1' && await page.locator('#variables pre.variable-value').count() === 1);
   await button(DEPLOY, 'Ocultar').click();
   check(`${label}: Hide masks the value again`, await page.locator('#variables pre.variable-value').count() === 0 && await row(DEPLOY).locator('.variable-mask').count() === 1);
@@ -1342,6 +1345,7 @@ for (const [label, ctx] of [['variables-desktop', {}], ['variables-phone', { vie
   await page.locator('#launchers').waitFor({ state: 'hidden' });
   check(`${label}: approving, stopping and removing call only their own operations`, JSON.stringify(await consumerCalls()) === '["bind","check","approve","unbind","remove"]');
   // Migration: choose entries, write descriptions and confirm the account; no value is ever involved.
+  await page.evaluate(() => showTab('settings', 'panel-migration'));
   const migration = page.locator('#panel-migration');
   await migration.getByText('Cuenta de destino').waitFor();
   check(`${label}: migration names the destination account, lists eligible rows and hides excluded ones`, await migration.innerText().then(text => text.includes('Account 1001 on https://portal.example.test') && text.includes('DEEPSEEK_API_KEY') && text.includes('Nunca se mueven')) && await migration.locator('#migration-excluded-list').isHidden());
@@ -1360,7 +1364,7 @@ for (const [label, ctx] of [['variables-desktop', {}], ['variables-phone', { vie
     const call = window.__ptaMigrationCalls.at(-1);
     return call.destination === 'dest-1001' && call.items.length === 1 && call.items[0].credential === 'DEEPSEEK_API_KEY'
       && call.items[0].bind === true && !JSON.stringify(call).includes('value') && !call.settings;
-  }) && await migration.locator('#migration-result').innerText().then(text => text.includes('no se modificaron')));
+  }) && await migration.locator('#migration-result').innerText().then(text => text.includes('se conservaron como copias')));
   check(`${label}: variable management keeps the phone boundary`, await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
   await page.evaluate(axeSource);
   check(`${label}: variables pass axe`, (await scan(page)).length === 0, JSON.stringify(await scan(page)));

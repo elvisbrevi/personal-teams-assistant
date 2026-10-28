@@ -1335,7 +1335,7 @@ function renderSteps(s) {
   const config = s.config;
   const missing = missingCredentials(s.credentials);
   const steps = [
-    { done: !missing.length, title: t('Credentials'), text: missing.length ? t('Missing: {names}.', { names: missing.join(', ') }) : t('The required credentials are stored.'), go: ['settings', 'panel-credentials'] },
+    { done: !missing.length, title: t('Variables'), text: missing.length ? t('Missing: {names}.', { names: missing.join(', ') }) : t('The required variables are stored.'), go: ['settings', 'panel-variables'] },
     { done: enabledChain(config).length > 0, title: t('Language model'), text: t('Turn on and order Codex, Claude Code, OpenCode or DeepSeek.'), go: ['settings', 'panel-llm'] },
     { done: entraReady(config), title: t('Entra registration'), text: t('Tenant and client ID of your existing registration.'), go: ['settings', 'panel-teams'] },
     { done: s.microsoft_connected, title: t('Microsoft account'), text: t('Sign in to read and answer as you.'), go: ['settings', 'panel-teams'] },
@@ -1409,7 +1409,7 @@ function renderLive() {
   renderTiles(s);
   renderSteps(s);
   renderSettingsFlags({
-    credentials: missingCredentials(s.credentials).length > 0,
+    variables: missingCredentials(s.credentials).length > 0,
     teams: !s.microsoft_connected || !entraReady(s.config) || !urlReady(s.config),
     models: !enabledChain(s.config).length,
   });
@@ -1420,7 +1420,6 @@ async function refreshLive() {
   live = await invoke('snapshot');
   if (current) { current.credentials = live.credentials; current.github_connected = live.github_connected; }
   renderLive();
-  renderCredentials();
   renderChatSources();
 }
 
@@ -1447,7 +1446,7 @@ async function reload() {
   dirtyGroups.clear();
   renderSavebar();
   renderLive();
-  renderCredentials(); renderRepositories(); renderResources(); renderContexts(); renderQuestions(); renderPeople(); renderNoteContexts(); renderChatSources();
+  renderRepositories(); renderResources(); renderContexts(); renderQuestions(); renderPeople(); renderNoteContexts(); renderChatSources();
   loadAzureCliStatus(); loadGithubCliStatus();
   await Promise.all([loadChain(), loadSelfChat()]);
 }
@@ -1465,47 +1464,6 @@ function renderChatList() { $('#allowed-chats-field').hidden = $('#discover-chat
 
 function rowText(primary, secondary, extra) {
   return el('div', {}, el('strong', {}, primary, extra), el('small', { textContent: secondary }));
-}
-
-function renderCredentials() {
-  const container = $('#credentials');
-  container.replaceChildren();
-  const origins = { system: t('System store'), environment: t('Environment variable'), file: t('Private file') };
-  for (const [name, source] of Object.entries(live.credentials)) {
-    const generated = source === 'missing' && GENERATED.includes(name);
-    const retired = source === 'retired';
-    const empty = source === 'missing' || source === 'unused';
-    const state = generated ? badge(t('Generated on start'), 'info')
-      : source === 'missing' ? badge(t('Missing'), 'warn')
-      : source === 'unused' ? badge(t('Unused'), 'muted')
-      : retired ? badge(t('No longer used'), 'muted')
-      : badge(t('Set'), 'ok');
-    const detail = generated ? t('The assistant creates it on its first start.')
-      : source === 'unused' ? t('The current model chain does not use it.')
-      : retired ? t('An earlier version needed it; nothing reads it now. You can remove it.')
-      : empty ? t('Needed to start the assistant.')
-      : origins[source] || t('Set');
-    const title = el('span', { class: 'cred-name', textContent: name });
-    const input = el('input', { type: 'password', autocomplete: 'new-password', spellcheck: false, hidden: retired,
-      placeholder: empty ? t('Enter the credential') : t('Type only to replace it'), 'aria-label': t('New value of {name}', { name }) });
-    // Storing a missing credential is the next step; replacing a stored one is not.
-    const save = el('button', { class: empty ? null : 'secondary', textContent: empty ? t('Save') : t('Replace'), disabled: true, hidden: retired });
-    input.oninput = () => { save.disabled = !input.value.trim(); };
-    input.onkeydown = event => { if (event.key === 'Enter' && !save.disabled) save.click(); };
-    save.onclick = () => busy(save, async () => {
-      await invoke('set_credential', { name, value: input.value });
-      input.value = '';
-      await refreshLive();
-      done(t('{name} stored in the system.', { name }));
-    });
-    const remove = el('button', { class: 'danger', textContent: t('Remove'), disabled: empty, 'aria-label': t('Remove {name}', { name }) });
-    remove.onclick = () => busy(remove, async () => {
-      await invoke('delete_credential', { name });
-      await refreshLive();
-      done(t('{name} removed.', { name }));
-    });
-    container.append(el('div', { class: 'row' }, rowText(title, detail, state), input, save, remove));
-  }
 }
 
 // ---------------------------------------------------------------- account standing
@@ -1586,6 +1544,7 @@ let variableAttempt = null;
  * or after VALUE_SECONDS.
  */
 let revealedVariable = null;
+let revealEpoch = 0;
 const VALUE_SECONDS = 30;
 /** Entry being edited, armed for deletion, and the description typed so far (kept across a conflict). */
 let editingVariable = null;
@@ -1597,6 +1556,7 @@ const VARIABLE_NAME = /^[A-Za-z_][A-Za-z0-9_]{0,127}$/;
 const UNSAFE_TEXT = /[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/;
 
 function clearRevealedVariable(render = true) {
+  revealEpoch += 1;
   if (!revealedVariable) return;
   clearTimeout(revealedVariable.timer);
   revealedVariable = null;
@@ -1644,7 +1604,7 @@ async function loadVariables() {
   try {
     const reply = await invoke('variable_list');
     if (!adoptAccount(epoch, reply.standing)) return;
-    variableState = { variables: reply.variables, pending: reply.pending, error: '', sync: reply.sync ?? null };
+    variableState = { variables: reply.variables, pending: reply.pending, error: reply.migration_error ?? '', sync: reply.sync ?? null };
   } catch (error) {
     if (epoch !== accountEpoch) return;
     variableState = { variables: [], pending: [], error: String(error?.message ?? error), sync: null };
@@ -1774,7 +1734,7 @@ function renderMigrationResult() {
     box.append(el('p', { class: 'callout warn', textContent: `${problem.credential}: ${tx(problem.problem)}` }));
   }
   if (result.settings) box.append(el('p', { class: 'hint', textContent: result.settings.stage === 'complete' ? t('This computer now uses the account settings.') : tx(result.settings.error ?? '') }));
-  if (result.complete) box.append(el('p', { class: 'hint', textContent: t('The original credentials were not changed. “Stop using” in Where variables are used returns a consumer to its original.') + (result.restart_required ? ' ' + t('Restart the assistant to apply this change.') : '') }));
+  if (result.complete) box.append(el('p', { class: 'hint', textContent: t('The original credentials were preserved as recovery copies. Application credentials are managed in Variables.') + (result.restart_required ? ' ' + t('Restart the assistant to apply this change.') : '') }));
 }
 
 function renderMigration() {
@@ -2194,7 +2154,8 @@ function consumerRow(consumer) {
   const { id, binding } = consumer;
   const title = el('span', { class: 'cred-name', textContent: tx(consumer.title), translate: 'no' });
   const usable = binding?.state === 'ok';
-  const status = !binding ? badge(t('No variable chosen'), 'muted')
+  const configured = variableState.variables.find(v => v.name.toUpperCase() === consumer.credential);
+  const status = !binding ? (configured ? badge(t('Using {name} · version {n}', { name: configured.name, n: configured.version }), 'ok') : badge(t('No variable chosen'), 'muted'))
     : usable ? badge(t('Using {name} · version {n}', { name: binding.variable.name, n: binding.variable.version }), 'ok')
     : badge(binding.state === 'deleted' ? t('Variable deleted') : t('Variable missing'), 'warn');
   const chosen = consumerChoice[id] ?? binding?.id ?? '';
@@ -2225,7 +2186,7 @@ function consumerRow(consumer) {
     stop.onclick = () => busy(stop, async () => {
       const reply = await invoke('variable_consumer_unbind', { consumer: id });
       delete consumerChoice[id];
-      consumerNote[id] = t('{consumer} no longer uses a variable.', { consumer: consumer.title }) + (reply.restart_required ? ' ' + t('Restart the assistant to apply this change.') : '');
+      consumerNote[id] = t('{consumer} now uses its configured variable.', { consumer: consumer.title }) + (reply.restart_required ? ' ' + t('Restart the assistant to apply this change.') : '');
       await loadConsumers();
     });
     actions.push(test, stop);
@@ -2328,11 +2289,14 @@ function variableRow(variable) {
   const value = visible
     ? el('pre', { class: 'variable-value', textContent: revealedVariable.value, translate: 'no', tabIndex: 0, 'aria-label': t('Value of {name}', { name }) })
     : el('span', { class: 'variable-mask', textContent: '••••••••••', role: 'img', 'aria-label': t('Value hidden') });
-  const reveal = el('button', { type: 'button', class: 'secondary', textContent: visible ? t('Hide') : t('Reveal'),
-    'aria-label': visible ? t('Hide the value of {name}', { name }) : t('Reveal the value of {name}', { name }) });
+  const reveal = el('button', { type: 'button', class: 'secondary', 'aria-pressed': String(visible),
+    'aria-label': visible ? t('Hide the value of {name}', { name }) : t('Reveal the value of {name}', { name }) },
+    icon(visible ? 'eye-off' : 'eye'), visible ? t('Hide') : t('Reveal'));
   reveal.onclick = () => busy(reveal, async () => {
     if (visible) return clearRevealedVariable();
+    const epoch = accountEpoch, view = revealEpoch;
     const reply = await invoke('variable_reveal', { id });
+    if (epoch !== accountEpoch || view !== revealEpoch || document.hidden) return;
     clearRevealedVariable(false);
     // The reply names the current version: show it against fresh metadata, never a stale row.
     variableState.variables = variableState.variables.map(v => v.id === id ? reply.variable : v);
@@ -2341,7 +2305,9 @@ function variableRow(variable) {
   });
   const copyValue = el('button', { type: 'button', class: 'secondary', textContent: t('Copy value'), 'aria-label': t('Copy value of {name}', { name }) });
   copyValue.onclick = () => busy(copyValue, async () => {
+    const epoch = accountEpoch, view = revealEpoch;
     const reply = await invoke('variable_reveal', { id });
+    if (epoch !== accountEpoch || view !== revealEpoch || document.hidden) return;
     // Only the clipboard receives it: no toast, notice or log carries the value.
     if (!await copy(reply.value)) throw t('The value could not be copied. Reveal it and copy it by hand.');
     await scheduleClipboardCleanup(reply.value);
@@ -2425,7 +2391,7 @@ function variableEditor(variable) {
     el('label', {}, t('Description'), description),
     el('div', { class: 'actions' }, saveDescription),
     el('label', {}, t('New value'), el('small', { textContent: t('The name, description and references stay the same.') }), input),
-    el('label', { class: 'check' }, show, ` ${t('Show the value while I type')}`),
+    el('label', { class: 'check' }, show, icon('eye'), ` ${t('Show the value while I type')}`),
     el('div', { class: 'actions' }, replace, close));
 }
 
@@ -2514,7 +2480,7 @@ function providerStatus(info) {
   if (!info) return t('Provider not available in this version');
   if (info.transport === 'cli') return info.available ? `${t('CLI installed')}${info.version ? ' · ' + info.version : ''}` : t('CLI not installed on this computer');
   const source = live.credentials[info.credential];
-  return source && source !== 'missing' && source !== 'unused' ? t('API · {name} set', { name: info.credential }) : t('API · {name} missing in Credentials', { name: info.credential });
+  return source && source !== 'missing' && source !== 'unused' ? t('API · {name} set', { name: info.credential }) : t('API · {name} missing in Variables', { name: info.credential });
 }
 
 function select(caption, label, options, value) {

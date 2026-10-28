@@ -171,7 +171,9 @@ async fn a_bound_variable_is_used_by_the_consumer_and_only_status_leaves() {
     )
     .await;
     assert_eq!(unbound.data["unbound"], true);
-    assert!(!resolver.bound("DEEPSEEK_API_KEY").unwrap());
+    // Removing a binding keeps the name managed by Variables, with no legacy fallback.
+    assert!(resolver.bound("DEEPSEEK_API_KEY").unwrap());
+    assert!(resolver.value("DEEPSEEK_API_KEY").is_err());
 }
 
 #[tokio::test]
