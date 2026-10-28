@@ -563,6 +563,16 @@ async fn a_launcher_resolves_its_values_online_for_every_run() {
     )
     .await;
     assert!(defined.ok, "{:?}", defined.message);
+    let listed = call(&rig.native, Window, "variable_consumer_list", json!({})).await;
+    let digest = listed.data["launchers"][0]["digest"].clone();
+    let approved = call(
+        &rig.native,
+        Window,
+        "variable_launcher_approve",
+        json!({"id":"deploy","digest":digest}),
+    )
+    .await;
+    assert!(approved.ok, "{:?}", approved.message);
     let run = call(
         &rig.native,
         Window,

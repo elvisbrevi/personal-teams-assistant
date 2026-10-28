@@ -161,11 +161,12 @@ pub(super) fn note<T>(state: &DesktopState, result: &anyhow::Result<T>) {
 /// The installation left its account, signed in to one, or lost it: nothing observed, mirrored
 /// or staged for the former account may be shown or used for the next. Stored data on the
 /// coordinator is not touched.
-pub(super) fn forget_account(state: &DesktopState) {
+/// Callers hold `state.portable.hold()` across the whole switch.
+pub(super) async fn forget_account(state: &DesktopState) {
     state.standing.reset();
     state.variables.forget_catalog();
     state.variables.withdraw();
-    state.portable.forget();
+    super::portable::leave(state).await;
 }
 
 /// The failure of a use that needs the coordinator, from the typed cause of an exchange.

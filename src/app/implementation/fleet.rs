@@ -123,6 +123,7 @@ pub(super) async fn operate(host: &Arc<Host>, method: &str, args: &Value) -> Res
             );
             let value: Value = crate::adapters::bounded_json(response, 16_000).await?;
             ensure!(value["ok"] == true, "The coordinator refused this machine.");
+            let _switch = host.state.portable.hold().await;
             security::put_desktop_secret(
                 "default",
                 "PTA_MACHINE_TOKEN",
@@ -138,7 +139,8 @@ pub(super) async fn operate(host: &Arc<Host>, method: &str, args: &Value) -> Res
                 id: data.id.clone(),
             };
             state.reset_roots(&mut data)?;
-            standing::forget_account(&host.state);
+            drop(data);
+            standing::forget_account(&host.state).await;
             write_private(
                 &state.root.join("connection.json"),
                 &serde_json::to_string(&connection)?,
@@ -162,11 +164,12 @@ pub(super) async fn operate(host: &Arc<Host>, method: &str, args: &Value) -> Res
                     Err(_) => notified = false,
                 }
             }
+            let _switch = host.state.portable.hold().await;
             if state.root.join("connection.json").exists() {
                 fs::remove_file(state.root.join("connection.json"))?;
             }
             let _ = security::delete_desktop_secret("default", "PTA_MACHINE_TOKEN");
-            standing::forget_account(&host.state);
+            standing::forget_account(&host.state).await;
             Ok(json!({"disconnected":true,"coordinator_notified":notified}))
         }
         "machine_teams" => {

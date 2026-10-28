@@ -2248,11 +2248,25 @@ function launcherRow(launcher) {
     await loadConsumers();
     done(t('Launcher {name} removed.', { name: launcher.id }));
   });
+  const status = launcher.approved ? badge(t('Approved'), 'ok') : badge(t('Waiting for your approval'), 'warn');
+  const actions = [remove];
+  if (!launcher.approved) {
+    // Only a person at this window approves; the digest names the definition shown here.
+    const approve = el('button', { type: 'button', textContent: t('Approve'), 'aria-label': t('Approve launcher {name}', { name: launcher.id }) });
+    approve.onclick = () => busy(approve, async () => {
+      await invoke('variable_launcher_approve', { id: launcher.id, digest: launcher.digest });
+      await loadConsumers();
+      done(t('Launcher {name} approved.', { name: launcher.id }));
+    });
+    actions.unshift(approve);
+  }
+  const command = [launcher.program, ...(launcher.args ?? [])].join(' ');
   return el('div', { class: 'row variable-row' },
-    rowText(title, launcher.description),
-    el('p', { class: 'hint variable-note', textContent: `${launcher.program} · ${launcher.directory}`, translate: 'no' }),
+    rowText(title, launcher.description, status),
+    el('p', { class: 'hint variable-note', textContent: command, translate: 'no' }),
+    el('p', { class: 'hint variable-note', textContent: launcher.directory, translate: 'no' }),
     el('p', { class: 'hint variable-note', textContent: uses, translate: 'no' }),
-    el('div', { class: 'variable-actions' }, remove));
+    el('div', { class: 'variable-actions' }, actions));
 }
 
 /** Plain text only: summaries come from the host's fixed registry; names and paths are user data. */

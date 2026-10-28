@@ -87,6 +87,37 @@ struct DefineArgs {
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+pub(super) struct ApproveArgs {
+    pub id: String,
+    /// The program digest the user was shown.
+    pub digest: String,
+}
+
+pub(super) fn approve(
+    launchers: &rules::Launchers,
+    a: &ApproveArgs,
+) -> std::result::Result<Value, vault::Error> {
+    let launcher = launchers.approve(&a.id, &a.digest, chrono::Utc::now().timestamp())?;
+    Ok(json!({"launcher":launcher.id,"approved_at":launcher.approved_at}))
+}
+
+/// What a person reviews before approving a launcher; the digest identifies that definition.
+pub(super) fn launcher_view(launcher: &rules::Launcher, variables: Vec<Value>) -> Value {
+    json!({
+        "id":launcher.id,
+        "description":launcher.description,
+        "program":launcher.program,
+        "digest":launcher.digest,
+        "args":launcher.args,
+        "directory":launcher.directory,
+        "timeout_seconds":launcher.timeout_seconds,
+        "approved":launcher.approved_at.is_some(),
+        "variables":variables,
+    })
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct LauncherArgs {
     id: String,
     /// Environment name to the variable version the caller expects.
@@ -179,6 +210,21 @@ async fn run(
                 ));
             }
         }
+        "variable_launcher_approve" => {
+            // A person at this machine's window approves what an agent may only propose.
+            if !invocation.scope.owner {
+                return Err(vault::Error::Conflict(authority::EXECUTION_DENIED.into()));
+            }
+            if transport != authority::Transport::Window {
+                if let Ok(store) = state.store(host) {
+                    store.audit("launcher_approve", None, "denied_client");
+                }
+                return Err(vault::Error::Conflict(
+                    "Only the user approves a launcher, in this machine's application window."
+                        .into(),
+                ));
+            }
+        }
         _ => return Err(input("Unknown variable operation.")),
     }
     // Signed in to a coordinator: the account's variables are not on this computer. Every
@@ -229,6 +275,17 @@ async fn run(
             let removed = state.consumers.launchers.remove(&a.id)?;
             store.audit("launcher_remove", None, audit_word(removed));
             Ok(json!({"launcher":a.id,"removed":removed}))
+        }
+        "variable_launcher_approve" => {
+            let a: ApproveArgs = parse(args)?;
+            let _edit = state
+                .consumers
+                .edit
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            let result = approve(&state.consumers.launchers, &a);
+            audit_result(&store, "launcher_approve", None, &result);
+            result
         }
         _ => {
             let a: LauncherArgs = parse(args)?;
@@ -303,15 +360,7 @@ fn list(host: &Host, store: &Store, launchers: bool) -> std::result::Result<Valu
                 let (state, variable) = store.reference(entry)?;
                 variables.push(json!({"env":env,"id":entry,"state":state,"variable":variable}));
             }
-            views.push(json!({
-                "id":launcher.id,
-                "description":launcher.description,
-                "program":launcher.program,
-                "args":launcher.args,
-                "directory":launcher.directory,
-                "timeout_seconds":launcher.timeout_seconds,
-                "variables":variables,
-            }));
+            views.push(launcher_view(&launcher, variables));
         }
         result["launchers"] = json!(views);
     }
@@ -416,6 +465,7 @@ async fn launch(
         .try_lock()
         .map_err(|_| vault::Error::Conflict("A launcher is already running.".into()))?;
     let launcher = consumers.launchers.get(&a.id)?;
+    rules::ensure_approved(&launcher)?;
     if let Some(unknown) = a
         .versions
         .keys()

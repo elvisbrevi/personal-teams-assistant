@@ -2806,11 +2806,15 @@ async fn consumer_bindings_are_private_per_account_and_shared_accounts_run_no_pr
             "variable_launcher_define",
             "variable_launcher_remove",
             "variable_launcher_run",
+            "variable_launcher_approve",
         ] {
             for transport in [Browser, Local, Machine] {
                 let denied = invoke(host, transport, method, json!({"id":"deploy"})).await;
                 // The installation owner's own local channel is the one place a launcher runs.
-                if host.state.authority.owner && transport == Local {
+                if host.state.authority.owner
+                    && transport == Local
+                    && method != "variable_launcher_approve"
+                {
                     continue;
                 }
                 assert!(!denied.ok, "{method} {transport:?}");

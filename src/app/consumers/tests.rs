@@ -419,6 +419,25 @@ mod launchers {
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
         path.canonicalize().unwrap()
     }
+    /// The user approves, in the window, the definition the list shows them.
+    async fn approve(machine: &Machine, id: &str) {
+        let listed = call(&machine.host, Window, "variable_consumer_list", json!({})).await;
+        let launcher = listed.data["launchers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|l| l["id"] == id)
+            .unwrap()
+            .clone();
+        let approved = call(
+            &machine.host,
+            Window,
+            "variable_launcher_approve",
+            json!({"id":id,"digest":launcher["digest"]}),
+        )
+        .await;
+        assert!(approved.ok, "{:?}", approved.message);
+    }
     fn define(machine: &Machine, program: &Path, entry: &str) -> Value {
         json!({"id":"deploy","description":"Synthetic deploy","program":program,
             "args":["--fixed"],"directory":machine.work,"env":{"DEPLOY_TOKEN":entry}})
@@ -500,8 +519,53 @@ mod launchers {
             "state_conflict"
         );
 
+        // An agent can propose a launcher, never approve or run it before the user does.
+        let pending = call(
+            &m.host,
+            Local,
+            "variable_launcher_run",
+            json!({"id":"deploy"}),
+        )
+        .await;
+        assert_eq!(pending.code, "state_conflict");
+        assert!(text(&pending).contains("approval"));
+        assert!(!seen.exists(), "an unapproved launcher never starts");
+        let shown = call(&m.host, Local, "variable_consumer_list", json!({})).await;
+        assert_eq!(shown.data["launchers"][0]["approved"], false);
+        let digest = shown.data["launchers"][0]["digest"].clone();
+        for transport in [Local, Machine] {
+            let refused = call(
+                &m.host,
+                transport,
+                "variable_launcher_approve",
+                json!({"id":"deploy","digest":digest}),
+            )
+            .await;
+            assert!(!refused.ok, "{transport:?}");
+        }
+        let stale = call(
+            &m.host,
+            Window,
+            "variable_launcher_approve",
+            json!({"id":"deploy","digest":"0".repeat(64)}),
+        )
+        .await;
+        assert_eq!(stale.code, "state_conflict");
+        assert!(
+            !call(
+                &m.host,
+                Local,
+                "variable_launcher_run",
+                json!({"id":"deploy"})
+            )
+            .await
+            .ok
+        );
+        approve(&m, "deploy").await;
+
         let listed = call(&m.host, Local, "variable_consumer_list", json!({})).await;
         assert_eq!(listed.data["launchers_available"], true);
+        assert_eq!(listed.data["launchers"][0]["approved"], true);
         assert_eq!(
             listed.data["launchers"][0]["variables"][0]["variable"]["name"],
             "DEPLOY_SECRET"
@@ -640,6 +704,7 @@ mod launchers {
         )
         .await;
         assert!(defined.ok, "{:?}", defined.message);
+        approve(&m, "deploy").await;
         let leak = m.work.join("leak");
         std::fs::write(
             &tool,
@@ -677,6 +742,7 @@ mod launchers {
             .await
             .ok
         );
+        approve(&m, "deploy").await;
         assert!(
             call(
                 &m.host,

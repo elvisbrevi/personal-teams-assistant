@@ -243,15 +243,7 @@ fn list(host: &Host, link: &Link, launchers: bool) -> std::result::Result<Value,
                         "variable": found.map(|v| json!({"name":v.name,"version":v.version}))})
                 })
                 .collect();
-            views.push(json!({
-                "id":launcher.id,
-                "description":launcher.description,
-                "program":launcher.program,
-                "args":launcher.args,
-                "directory":launcher.directory,
-                "timeout_seconds":launcher.timeout_seconds,
-                "variables":variables,
-            }));
+            views.push(super::launcher_view(&launcher, variables));
         }
         result["launchers"] = json!(views);
     }
@@ -355,6 +347,11 @@ pub(super) async fn run(
             let removed = state.launchers_of(host, link).remove(&a.id)?;
             Ok(json!({"launcher":a.id,"removed":removed}))
         }
+        "variable_launcher_approve" => {
+            let a: super::ApproveArgs = parse(args)?;
+            let _edit = state.edit.lock().unwrap_or_else(|e| e.into_inner());
+            super::approve(&state.launchers_of(host, link), &a)
+        }
         _ => {
             let a: LauncherArgs = parse(args)?;
             let _busy = state
@@ -362,6 +359,7 @@ pub(super) async fn run(
                 .try_lock()
                 .map_err(|_| vault::Error::Conflict("A launcher is already running.".into()))?;
             let launcher = state.launchers_of(host, link).get(&a.id)?;
+            rules::ensure_approved(&launcher)?;
             if let Some(unknown) = a
                 .versions
                 .keys()

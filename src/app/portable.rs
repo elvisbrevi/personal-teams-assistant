@@ -106,11 +106,20 @@ impl State {
     fn replica_path(&self) -> PathBuf {
         self.dir.join("replica.json")
     }
-    /// The installation left or changed its account: forget what was loaded from it. The
-    /// restored configuration itself stays (it is the user's profile now).
-    pub(super) fn forget(&self) {
+    /// Present while this profile holds configuration or notes installed from an account, even
+    /// after the record of which revision was loaded is discarded.
+    fn holding_path(&self) -> PathBuf {
+        self.dir.join("account-content")
+    }
+    /// Forget what was loaded from an account and the state reported about it.
+    fn forget(&self) {
         let _ = fs::remove_file(self.replica_path());
         *self.status() = Status::default();
+    }
+    /// Held while this installation signs in, signs out or changes account, so a
+    /// synchronization never installs one account's state after the switch to another.
+    pub(super) async fn hold(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.gate.lock().await
     }
     /// The remembered state, only if it was produced for exactly this coordinator, account and
     /// machine; anything else is discarded rather than reused.
@@ -676,6 +685,43 @@ fn failure_reply(failure: &Failure) -> Reply {
     Reply::error(failure.code, failure.exit, failure.message)
 }
 
+/// The installation left or changed its account: forget what was loaded from it and take that
+/// account's portable configuration and notes out of this profile, keeping a private copy, so
+/// the next account never inherits them. A profile that never loaded an account's state (an
+/// owner's own configuration, kept by a conflict) is left as it is. Local identities (paths,
+/// repository folders, sessions, Microsoft sign-in) are not portable and stay.
+pub(super) async fn leave(state: &DesktopState) {
+    let loaded = state.portable.replica_path().exists() || state.portable.holding_path().exists();
+    state.portable.forget();
+    if !loaded {
+        return;
+    }
+    let _operations = state.operations.lock().await;
+    match clear(state) {
+        Ok(()) => {
+            let _ = fs::remove_file(state.portable.holding_path());
+        }
+        // The marker stays, so the next sign-out or switch tries again.
+        Err(_) => tracing::warn!(event = "portable_clear_failed"),
+    }
+}
+
+fn clear(state: &DesktopState) -> anyhow::Result<()> {
+    let (config, map, notes) = local(state)?;
+    back_up(state, &config, &map, &notes);
+    let mut empty = KnowledgeMap::parse("")?;
+    empty.initialize_questions();
+    let pristine = Document::project(&Config::desktop_template()?, &empty);
+    let (next_config, next_map, _) = pristine.install(&config, &map, |_| true);
+    validate_local(&next_config, &next_map)?;
+    let index = Index::open(&next_config.server.data_dir.join(crate::index::FILE))?;
+    let tunnel = fs::read_to_string(&state.tunnel_path).unwrap_or_default();
+    commit_settings(state, &next_config, &next_map, &tunnel)?;
+    index.replace_notes(&[])?;
+    forget_removed_sources(&next_config, &next_map);
+    Ok(())
+}
+
 /// Keep the portable parts being replaced in a private file, so `reset` never destroys the only
 /// copy of something the user configured here.
 fn back_up(state: &DesktopState, config: &Config, map: &KnowledgeMap, notes: &[Note]) {
@@ -794,6 +840,10 @@ async fn synchronize(host: &Arc<Host>, link: &Link, reset: bool, mode: Mode) -> 
         let index = Index::open(&next_config.server.data_dir.join(crate::index::FILE))
             .map_err(|_| CANNOT_APPLY)?;
         let tunnel = fs::read_to_string(&state.tunnel_path).unwrap_or_default();
+        // Marked before anything changes, so an interrupted install is still cleared on leaving.
+        security::private_dir(&portable.dir)
+            .and_then(|_| write_private(&portable.holding_path(), ""))
+            .map_err(|_| CANNOT_APPLY)?;
         commit_settings(state, &next_config, &next_map, &tunnel).map_err(|_| CANNOT_APPLY)?;
         index
             .replace_notes(&fetched.notes)
@@ -1173,9 +1223,17 @@ fn settle(state: &DesktopState, forwarded: &Forwarded) {
     let Some(mut replica) = state.portable.load(&link) else {
         return;
     };
-    // Only when nothing else happened at the coordinator in between; otherwise the next
-    // synchronization finds out.
+    // Something else happened at the coordinator in between: the change is there, so this
+    // profile holds nothing unforwarded; the next synchronization installs the newer revision
+    // instead of reporting local changes forever.
     if replica.loaded.digest != forwarded.previous.digest {
+        if let Ok(applied) = local_digest(state) {
+            replica.saved = forwarded.revision.clone();
+            replica.saved_at = now();
+            replica.applied = applied;
+            let _ = state.portable.save(&replica);
+            state.portable.status().local_changes = false;
+        }
         return;
     }
     if let Ok(applied) = local_digest(state) {

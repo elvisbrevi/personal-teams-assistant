@@ -337,12 +337,13 @@ pub(in crate::app) async fn finish_with(
     if let Some(expected) = current.expected_account {
         ensure!(account == expected, MISMATCH);
     }
+    let _switch = host.state.portable.hold().await;
     store(token)?;
     {
         let mut data = state.registry.lock().await;
         state.reset_roots(&mut data)?;
     }
-    standing::forget_account(&host.state);
+    standing::forget_account(&host.state).await;
     write_private(
         &state.root.join("connection.json"),
         &serde_json::to_string(&Connection {

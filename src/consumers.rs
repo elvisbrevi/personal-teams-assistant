@@ -203,6 +203,31 @@ const RESERVED_ENV: &[&str] = &[
     "GOROOT",
     "GOPROXY",
     "GOBIN",
+    "OPENSSL_CONF",
+    "SSLKEYLOGFILE",
+    "GCONV_PATH",
+    "LOCPATH",
+    "NLSPATH",
+    "HOSTALIASES",
+    "RESOLV_HOST_CONF",
+    "GLIBC_TUNABLES",
+    "PSMODULEPATH",
+    "PHPRC",
+    "PHP_INI_SCAN_DIR",
+    "TCL_LIBRARY",
+    "TCLLIBPATH",
+    "R_PROFILE",
+    "R_PROFILE_USER",
+    "R_ENVIRON",
+    "R_ENVIRON_USER",
+    "EDITOR",
+    "VISUAL",
+    "PAGER",
+    "BROWSER",
+    "TERMINFO",
+    "CURL_HOME",
+    "WGETRC",
+    "NETRC",
 ];
 const RESERVED_PREFIXES: &[&str] = &[
     "LD_",
@@ -225,6 +250,13 @@ const RESERVED_PREFIXES: &[&str] = &[
     "DENO_",
     "CARGO_",
     "RUSTUP_",
+    "OPENSSL_",
+    "MALLOC_",
+    "COR_",
+    "CORECLR_",
+    "DOTNET_",
+    "LUA_",
+    "ELECTRON_",
 ];
 
 /// Whether an environment name is protected from variable injection.
@@ -284,6 +316,20 @@ pub struct Launcher {
     pub env: BTreeMap<String, String>,
     pub timeout_seconds: u64,
     pub created_at: i64,
+    /// When a person approved this exact definition in the application window. A definition
+    /// (which an agent can propose) never runs before that.
+    #[serde(default)]
+    pub approved_at: Option<i64>,
+}
+
+const AWAITING_APPROVAL: &str = "This launcher waits for the user's approval in the application window (Settings › Credentials › Variables); nothing was run.";
+
+/// Refuses a launcher no person approved yet, before any value is resolved for it.
+pub fn ensure_approved(launcher: &Launcher) -> Result<()> {
+    if launcher.approved_at.is_none() {
+        return Err(Error::Conflict(AWAITING_APPROVAL.into()));
+    }
+    Ok(())
 }
 
 fn digest(path: &Path) -> Result<String> {
@@ -394,6 +440,7 @@ pub fn define(definition: Definition, now: i64) -> Result<Launcher> {
             .collect(),
         timeout_seconds,
         created_at: now,
+        approved_at: None,
     })
 }
 
@@ -512,6 +559,26 @@ impl Launchers {
         file.launchers.push(launcher);
         self.save(&file)
     }
+    /// Records a person's approval of the definition they saw, identified by its program digest;
+    /// a definition that changed since is not approved.
+    pub fn approve(&self, id: &str, digest: &str, now: i64) -> Result<Launcher> {
+        let mut file = self.load()?;
+        let launcher = file
+            .launchers
+            .iter_mut()
+            .find(|l| l.id == id)
+            .ok_or_else(|| input("There is no launcher with that name on this machine."))?;
+        if launcher.digest != digest {
+            return Err(Error::Conflict(
+                "This launcher changed since it was shown. Review it again before approving."
+                    .into(),
+            ));
+        }
+        launcher.approved_at.get_or_insert(now);
+        let approved = launcher.clone();
+        self.save(&file)?;
+        Ok(approved)
+    }
     pub fn remove(&self, id: &str) -> Result<bool> {
         let mut file = self.load()?;
         let before = file.launchers.len();
@@ -536,6 +603,7 @@ pub struct RunResult {
 /// Run the launcher's program with exactly the selected values. The program and its digest are
 /// checked again here; the environment is the vetted minimal one plus the selected variables.
 pub async fn run(launcher: &Launcher, values: Vec<(String, Secret)>) -> Result<RunResult> {
+    ensure_approved(launcher)?;
     let program = launcher
         .program
         .canonicalize()

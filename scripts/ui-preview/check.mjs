@@ -1326,15 +1326,21 @@ for (const [label, ctx] of [['variables-desktop', {}], ['variables-phone', { vie
   await consumers.getByRole('button', { name: /^Probar clave/ }).click();
   await consumers.getByText('aceptó la clave').waitFor();
   check(`${label}: a test shows only a status sentence`, JSON.stringify(await consumerCalls()) === '["bind","check"]' && await consumers.innerText().then(text => !text.includes('rotated-synthetic') && !text.includes('release.example.test')));
-  check(`${label}: the approved launcher is listed as text with its variables`, await page.locator('#launchers').innerText().then(text => text.includes('release-tool') && text.includes('RELEASE_URL desde DEPLOY_ENDPOINT') && text.includes('<b>not markup</b>')) && await page.locator('#launcher-list b').count() === 0);
+  check(`${label}: a proposed launcher is listed as text with its command, folder and variables, waiting for approval`, await page.locator('#launchers').innerText().then(text => text.includes('release-tool') && text.includes('/usr/local/bin/release --fixed') && text.includes('/home/user/work') && text.includes('RELEASE_URL desde DEPLOY_ENDPOINT') && text.includes('<b>not markup</b>') && text.includes('Esperando tu aprobación')) && await page.locator('#launcher-list b').count() === 0);
   await page.evaluate(axeSource);
   check(`${label}: consumers pass axe`, (await scan(page)).length === 0, JSON.stringify(await scan(page)));
   check(`${label}: consumers keep the phone boundary`, await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+  await page.locator('#launcher-list').getByRole('button', { name: 'Aprobar el lanzador release-tool' }).click();
+  await page.locator('#launcher-list .badge', { hasText: 'Aprobado' }).waitFor();
+  check(`${label}: approving sends the digest of the definition shown and hides the button`, await page.evaluate(() => {
+    const call = window.__ptaConsumerCalls.at(-1);
+    return call.method === 'approve' && call.id === 'release-tool' && call.digest === 'd'.repeat(64);
+  }) && await page.locator('#launcher-list').getByRole('button', { name: /^Aprobar/ }).count() === 0);
   await consumers.getByRole('button', { name: 'Dejar de usar' }).click();
   await consumers.locator('.badge', { hasText: 'Ninguna variable elegida' }).waitFor();
   await page.locator('#launcher-list').getByRole('button', { name: /^Eliminar/ }).click();
   await page.locator('#launchers').waitFor({ state: 'hidden' });
-  check(`${label}: stopping and removing call only their own operations`, JSON.stringify(await consumerCalls()) === '["bind","check","unbind","remove"]');
+  check(`${label}: approving, stopping and removing call only their own operations`, JSON.stringify(await consumerCalls()) === '["bind","check","approve","unbind","remove"]');
   // Migration: choose entries, write descriptions and confirm the account; no value is ever involved.
   const migration = page.locator('#panel-migration');
   await migration.getByText('Cuenta de destino').waitFor();

@@ -714,6 +714,39 @@ async fn sources_bound_to_a_missing_repository_are_unavailable_and_survive_edits
 }
 
 #[tokio::test]
+async fn a_note_saved_while_another_client_changed_the_account_never_leaves_this_profile_stuck() {
+    let root = tempfile::tempdir().unwrap();
+    let pair = pair(root.path(), None).await;
+    configure(&pair.coordinator);
+    assert!(sync(&pair.native, json!({})).await.ok);
+    // Another client changes the account; this installation has not synchronized since.
+    let other = call(
+        &pair.coordinator,
+        Window,
+        "notes_save",
+        json!({"note":{"title":"Holidays","text":"The office closes in August.","contexts":["billing"]}}),
+    )
+    .await;
+    assert!(other.ok, "{:?}", other.message);
+    // A new note saved here is accepted by the coordinator (per-note check)...
+    let saved = call(
+        &pair.native,
+        Window,
+        "notes_save",
+        json!({"note":{"title":"Payment day","text":"Payments go out on Fridays.","contexts":["billing"]}}),
+    )
+    .await;
+    assert!(saved.ok, "{:?}", saved.message);
+    // ...and is not an unforwarded local change: the next synchronization installs everything.
+    let next = sync(&pair.native, json!({})).await;
+    assert!(next.ok, "{:?}", next.message);
+    let texts: Vec<String> = notes_of(&pair.native).into_iter().map(|n| n.text).collect();
+    assert!(texts.iter().any(|t| t.contains("August")), "{texts:?}");
+    assert!(texts.iter().any(|t| t.contains("Fridays")), "{texts:?}");
+    assert_eq!(status(&pair.native).await["state"], "synced");
+}
+
+#[tokio::test]
 async fn notes_follow_the_account_and_a_deleted_note_stays_deleted() {
     let root = tempfile::tempdir().unwrap();
     let pair = pair(root.path(), None).await;
@@ -858,10 +891,56 @@ async fn a_different_account_or_an_older_state_never_replaces_the_loaded_configu
         &pair.machine,
     );
 
-    // Leaving the account forgets what was loaded from it; restored settings stay as a profile.
-    pair.native.state.portable.forget();
+    // Leaving the account forgets what was loaded from it and takes its configuration and notes
+    // out of this profile (a private copy is kept), so the next account never sees them.
+    leave(&pair.native.state).await;
     assert_eq!(status(&pair.native).await["state"], "never");
-    assert_eq!(config_of(&pair.native).llm.style, loaded);
+    assert_ne!(config_of(&pair.native).llm.style, loaded);
+    assert_eq!(local_digest(&pair.native.state).unwrap(), pristine_digest());
+    assert!(
+        fs::read_dir(pair.native.state.portable.dir.join("backups"))
+            .unwrap()
+            .next()
+            .is_some()
+    );
+    // Leaving twice is safe and changes nothing more.
+    leave(&pair.native.state).await;
+    assert_eq!(local_digest(&pair.native.state).unwrap(), pristine_digest());
+    // The next account restores into the cleared profile, with nothing of the former one.
+    connect(
+        &root.path().join("native").join("profile"),
+        2002,
+        &pair.machine,
+    );
+    let bob = sync(&pair.native, json!({})).await;
+    assert!(bob.ok, "{:?}", bob.message);
+    assert_eq!(config_of(&pair.native).llm.style, "Bob's style");
+}
+
+#[tokio::test]
+async fn a_synchronization_racing_an_account_switch_installs_nothing_for_the_next_account() {
+    let root = tempfile::tempdir().unwrap();
+    let pair = pair(root.path(), None).await;
+    configure(&pair.coordinator);
+    // A sign-in, sign-out or switch holds this while it changes the account.
+    let switch = pair.native.state.portable.hold().await;
+    let native = pair.native.clone();
+    let pending = tokio::spawn(async move { sync(&native, json!({})).await });
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    assert!(
+        !pending.is_finished(),
+        "a synchronization waits for the switch"
+    );
+    connect(
+        &root.path().join("native").join("profile"),
+        2002,
+        &pair.machine,
+    );
+    leave(&pair.native.state).await;
+    drop(switch);
+    let raced = pending.await.unwrap();
+    assert!(!raced.ok, "read for the former account, installed for none");
+    assert_eq!(local_digest(&pair.native.state).unwrap(), pristine_digest());
 }
 
 #[tokio::test]

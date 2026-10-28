@@ -142,8 +142,9 @@ Account variables
   variables launcher list     Approved local launchers (owner's trusted machine only).
   variables launcher define NAME --description TEXT --program PATH --directory DIR --env ENV=ID [--env ...]
                            [--arg ARG ...] [--timeout SECONDS] --confirmed
-                           Approves a program to receive the named variables as environment variables of that one
-                           process (never arguments). Protected settings such as PATH or LD_* are refused.
+                           Proposes a program to receive the named variables as environment variables of that one
+                           process (never arguments). Protected settings such as PATH or LD_* are refused. It runs
+                           nothing until the user approves it in the application window (Settings › Credentials).
   variables launcher run NAME [--pin ENV=VERSION ...] --confirmed
                            Runs it with the values resolved now; prints status and references, never output or values.
   variables launcher remove NAME  Removes an approved launcher.

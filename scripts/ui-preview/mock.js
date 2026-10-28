@@ -176,7 +176,7 @@
     'aaaaaaaa-0000-4000-8000-000000000002': '-----BEGIN SYNTHETIC KEY-----\nline two  with  spaces\n\tand a tab\n-----END SYNTHETIC KEY-----\n',
   };
   const touch = variable => { variable.version += 1; variable.updated_at = secs(NOW); };
-  // Consumers: the one built-in registry entry (as the host reports it) and one approved launcher.
+  // Consumers: the one built-in registry entry (as the host reports it) and one launcher an agent proposed.
   let consumerBinding = null;
   // Updates: a local owner is offered 0.9.14 over the running 0.9.13; a shared account only sees the managed notice.
   let updateState = 'idle';
@@ -198,7 +198,7 @@
       staged: ['staged', 'deferred'].includes(updateState) ? { version: '0.9.14', staged_at: 2, features: ['gui'], no_default_features: false, target: null, binaries: ['personal-teams-assistant', 'pta'] } : null,
     };
   };
-  const launchers = [{ id: 'release-tool', description: 'Publishes the release <b>not markup</b>', program: '/usr/local/bin/release', args: ['--fixed'], directory: '/home/user/work', timeout_seconds: 60,
+  const launchers = [{ id: 'release-tool', description: 'Publishes the release <b>not markup</b>', program: '/usr/local/bin/release', args: ['--fixed'], directory: '/home/user/work', timeout_seconds: 60, digest: 'd'.repeat(64), approved: false,
     variables: [{ env: 'RELEASE_URL', id: 'aaaaaaaa-0000-4000-8000-000000000001', state: 'ok', variable: { name: 'DEPLOY_ENDPOINT', version: 1 } }] }];
   const bindingView = () => {
     if (!consumerBinding) return null;
@@ -537,6 +537,13 @@
       return { destination: {}, items: args.items.map(i => ({ credential: i.credential, name: i.name, id: 'x', stage: 'complete', complete: true, error: null })), settings: args.settings ? { stage: 'complete', error: null } : null, complete: true, restart_required: args.items.some(i => i.bind) };
     },
     variable_migration_status: () => ({ items: [], settings: null, complete: false }),
+    variable_launcher_approve: args => {
+      window.__ptaConsumerCalls.push({ method: 'approve', ...args });
+      const launcher = launchers.find(l => l.id === args.id);
+      if (!launcher || launcher.digest !== args.digest) throw new Error('This launcher changed since it was shown. Review it again before approving.');
+      launcher.approved = true;
+      return { launcher: args.id, approved_at: 1 };
+    },
     variable_launcher_remove: args => { window.__ptaConsumerCalls.push({ method: 'remove', ...args }); launchers.splice(0); return { launcher: args.id, removed: true }; },
     set_credential: args => { snapshot.credentials[args.name] = 'system'; return {}; },
     delete_credential: args => { snapshot.credentials[args.name] = 'missing'; return {}; },
