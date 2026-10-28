@@ -28,6 +28,7 @@ mod activity;
 mod authority;
 mod azure_cli;
 pub mod cli;
+mod consumers;
 pub mod control;
 mod diagnostics;
 mod github;
@@ -36,10 +37,16 @@ mod github_cli;
 mod gui;
 mod headless;
 mod implementation;
+mod maintenance;
 mod mcp;
+mod migration;
 mod notes;
+mod portable;
+mod readiness;
 mod skill;
+mod standing;
 mod tools;
+mod variables;
 mod web;
 
 /// What the process owning the host can do beyond operations: a Tauri window, or nothing.
@@ -110,6 +117,9 @@ pub(crate) struct DesktopState {
     activity_graph: Mutex<Option<Arc<crate::adapters::graph::Graph>>>,
     activity_recovered: Mutex<Option<PathBuf>>,
     implementation: implementation::State,
+    variables: variables::State,
+    portable: portable::State,
+    standing: standing::State,
 }
 
 #[derive(Serialize)]
@@ -507,6 +517,9 @@ pub(crate) fn init_state(config_dir: &Path, data_dir: &Path) -> Result<DesktopSt
     Ok(DesktopState {
         authority: web::account_scope(&config_dir)?,
         implementation: implementation::State::new(config_path.parent().unwrap())?,
+        variables: variables::State::new(config_path.parent().unwrap()),
+        portable: portable::State::new(config_path.parent().unwrap()),
+        standing: standing::State::default(),
         operations: Mutex::new(()),
         loaded_config: Mutex::new(None),
         config_path,
@@ -704,6 +717,7 @@ async fn start_service(state: &DesktopState) -> Result<()> {
         implementation::fleet::teams_allowed(state).await?,
         "This machine is not the selected Teams machine, or the previous machine still holds its lease."
     );
+    consumers::stage(state).await;
     let config = read_config(&state.config_path)?;
     web::validate_profile_identity(state.config_path.parent().unwrap(), &config)?;
     let map = KnowledgeMap::load(&state.map_path)?;
@@ -834,11 +848,17 @@ async fn save_settings(
     if !tunnel_config.trim().is_empty() {
         validate_tunnel(Path::new(tunnel_config.trim()), &config).map_err(fail)?;
     }
+    // An installation signed in to an account first sends the portable part of the change to the
+    // account's coordinator, which decides it under optimistic concurrency.
+    let previous_map = KnowledgeMap::load(&state.map_path).map_err(fail)?;
+    let forwarded =
+        portable::before_save(state, (&previous, &previous_map), (&config, &map)).await?;
     let was_running = state.running.lock().await.is_some();
     if was_running {
         stop(state).await.map_err(fail)?;
     }
     commit_settings(state, &config, &map, tunnel_config.trim()).map_err(fail)?;
+    portable::after_save(state, forwarded);
     forget_removed_sources(&config, &map);
     *state.activity_graph.lock().await = None;
     if was_running {
@@ -962,6 +982,7 @@ async fn chat(
     state: &DesktopState,
     input: SimulationRequest,
 ) -> std::result::Result<SimulationResult, String> {
+    consumers::stage(state).await;
     // Every provider call carries its own deadline; maximum-effort reasoning takes minutes.
     local_chat::chat(&state.config_path, input)
         .await
@@ -1430,6 +1451,16 @@ pub fn run() {
         return;
     }
     let args: Vec<String> = std::env::args().skip(1).collect();
+    // Lets an update verify a staged build without starting a host.
+    if args.as_slice() == ["--version"] {
+        println!("{} {}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
+        return;
+    }
+    // The update's helper process: replaces the executables while no host runs (see
+    // `maintenance::apply`). It is the same binary, so no separate updater exists.
+    if args.as_slice() == [maintenance::HELPER_FLAG] {
+        std::process::exit(maintenance::run_helper());
+    }
     if args.as_slice() == ["--web"] {
         if web::run().is_err() {
             eprintln!("Web portal stopped. Check pta web status and the listener configuration.");
@@ -1484,6 +1515,15 @@ pub fn run() {
             let _ = runtime.block_on(control::client(control::Request::new("app_open"), false));
         }
         return;
+    }
+    // Never start a host between the two halves of an update; undo one that was interrupted.
+    if std::env::var_os(maintenance::HANDOVER).is_none()
+        && let Ok(profile) = control::profile_dir()
+        && let Some(reason) =
+            crate::maintenance::apply::startup_block(&profile.join(crate::maintenance::DIRECTORY))
+    {
+        eprintln!("{reason}");
+        std::process::exit(1);
     }
     let host_lock = match control::claim() {
         Ok(lock) => lock,

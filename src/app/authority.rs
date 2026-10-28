@@ -23,7 +23,10 @@ pub(super) struct Scope {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Transport {
+    /// The control endpoint's local token: the CLI, MCP and anything an agent can run.
     Local,
+    /// The application's own window, reaching the host in process.
+    Window,
     Browser,
     Machine,
 }
@@ -43,6 +46,25 @@ pub(super) async fn within<T>(
     operation: impl std::future::Future<Output = T>,
 ) -> T {
     CURRENT.scope(invocation, operation).await
+}
+
+/// Marks a call from the application's own window, the only in-process caller treated as a person
+/// at the GUI. Anything that runs without a marked invocation counts as the local channel.
+#[cfg_attr(not(feature = "gui"), allow(dead_code))]
+pub(super) async fn from_window<T>(
+    state: &DesktopState,
+    operation: impl std::future::Future<Output = T>,
+) -> T {
+    match web::account_scope(state.config_path.parent().unwrap()) {
+        Ok(scope) => {
+            let window = Invocation {
+                scope,
+                transport: Transport::Window,
+            };
+            within(window, operation).await
+        }
+        Err(_) => operation.await,
+    }
 }
 
 pub(super) fn invocation(state: &DesktopState) -> Result<Invocation> {
@@ -90,7 +112,8 @@ pub(super) fn authorize(state: &DesktopState, request: &control::Request) -> Res
     reject_authority_arguments(&request.args)?;
     // Ordinary native/agent calls have the same account/path limits as the browser.
     if !invocation.scope.owner
-        && !(invocation.transport == Transport::Local && request.method == "app_quit")
+        && !(matches!(invocation.transport, Transport::Local | Transport::Window)
+            && request.method == "app_quit")
     {
         if invocation.transport != Transport::Machine {
             web::check_bound_request(&invocation.scope, request)?;
@@ -104,7 +127,7 @@ pub(super) fn authorize(state: &DesktopState, request: &control::Request) -> Res
         }
     }
     match invocation.transport {
-        Transport::Local => {}
+        Transport::Local | Transport::Window => {}
         Transport::Browser => web::check_bound_request(&invocation.scope, request)?,
         Transport::Machine => ensure!(
             matches!(
@@ -150,6 +173,10 @@ pub(super) fn check_shared_operation(request: &control::Request) -> Result<()> {
                 | "machine_login_status"
                 | "machine_login_finish"
                 | "machine_login_cancel"
+                | "variable_launcher_define"
+                | "variable_launcher_remove"
+                | "variable_launcher_run"
+                | "variable_launcher_approve"
         ),
         "{EXECUTION_DENIED}"
     );

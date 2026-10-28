@@ -65,6 +65,10 @@ personal-teams-assistant --headless --start    # foreground; fits a systemd serv
 
 Its credentials are stored with `pta credentials set` in private profile files or come from `NAME`/`NAME_FILE` variables. The Microsoft login is completed from any device with `pta auth microsoft finish --redirect 'URL'`. Details in the [architecture](docs/architecture.md#headless-host-linux-and-servers). Never keep two instances of the same account active.
 
+Each assistant account can also keep **stored variables** (a name, a description and an encrypted value) for its own use: add, edit, reveal, copy and delete them in Settings > Credentials > Variables (reveal and copy are human-only) or with `pta variables create NAME --description TEXT` / `pta variables update ID --expected-version N` (value on a protected stdin pipe), and let an agent discover them by name and description without ever seeing a value (`pta variables list|search`, MCP `variable_*`). A computer signed in to the account keeps a metadata-only copy of the catalog in step with the coordinator (`pta variables sync|status`, Synchronize now in the GUI); values are never copied. Operators back up and rotate their keys with `pta variables key backup|restore|rotate`; see the [architecture](docs/architecture.md#account-variables) and the [skill reference](desktop/skills/personal-teams-assistant/references/variables.md).
+
+The account's **configuration** (preferences, model choices, sources with their audiences, contexts, questions and verified notes) also follows the account: a freshly installed computer that signs in restores it, and `pta account status|sync` shows which revision is loaded. Folders, credentials, sign-ins and tunnels stay on each computer, restoring starts nothing, and new sources still start disabled.
+
 GUI and CLI share the same profile, Keychain/Credential Manager credentials and service. Reinstalling does not ask for credentials again: the `dev.personalteams.assistant` profile, the data directory and the connected Microsoft account are kept.
 
 ### Web and phone access
