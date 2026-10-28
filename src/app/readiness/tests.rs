@@ -519,7 +519,7 @@ async fn configured_providers_and_roots_are_reported_without_changing_them() {
         &host,
         Window,
         "machine_save",
-        json!({"name":"Laptop","roots":[chosen.path()]}),
+        json!({"name":"Laptop","roots":[chosen.path().canonicalize().unwrap()]}),
     )
     .await;
     assert!(saved.ok, "{:?}", saved.message);

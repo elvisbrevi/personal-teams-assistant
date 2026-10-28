@@ -48,6 +48,25 @@ pub(super) async fn within<T>(
     CURRENT.scope(invocation, operation).await
 }
 
+/// Marks a call from the application's own window, the only in-process caller treated as a person
+/// at the GUI. Anything that runs without a marked invocation counts as the local channel.
+#[cfg_attr(not(feature = "gui"), allow(dead_code))]
+pub(super) async fn from_window<T>(
+    state: &DesktopState,
+    operation: impl std::future::Future<Output = T>,
+) -> T {
+    match web::account_scope(state.config_path.parent().unwrap()) {
+        Ok(scope) => {
+            let window = Invocation {
+                scope,
+                transport: Transport::Window,
+            };
+            within(window, operation).await
+        }
+        Err(_) => operation.await,
+    }
+}
+
 pub(super) fn invocation(state: &DesktopState) -> Result<Invocation> {
     let scope = web::account_scope(state.config_path.parent().unwrap())?;
     ensure!(
@@ -56,7 +75,7 @@ pub(super) fn invocation(state: &DesktopState) -> Result<Invocation> {
     );
     let invocation = CURRENT.try_with(Clone::clone).unwrap_or(Invocation {
         scope: scope.clone(),
-        transport: Transport::Window,
+        transport: Transport::Local,
     });
     ensure!(invocation.scope == scope, "Account binding mismatch.");
     ensure!(

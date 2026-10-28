@@ -1172,6 +1172,40 @@ async fn a_previous_version_that_cannot_read_the_new_data_gets_the_safety_copy_b
 }
 
 #[tokio::test]
+async fn a_rollback_waits_for_the_installed_version_even_when_an_older_one_was_running() {
+    let _serial = SERIAL.lock().await;
+    let server = registry(&[line("0.9.14", false)]).await;
+    let f = fixture(&server);
+    // 0.9.13 is installed but the host still runs 0.9.12 (restart_required).
+    let mut env = f.env.clone();
+    env.running = Version(0, 9, 12);
+    *TEST.lock().unwrap() = Some(env);
+    with_pair(&f);
+    let dir = directory(&f.host);
+    let config = dir.parent().unwrap().join("config.toml");
+    fs::write(&config, "before = true\n").unwrap();
+    assert!(requested(&f).await.ok);
+    assert_eq!(core::apply::read(&dir).unwrap().from, "0.9.13");
+    let mut fake = Fake::new(&f);
+    fake.new_unhealthy = true;
+    let mut entry = core::apply::read(&dir).unwrap();
+    entry.intent.assistant = true;
+    core::apply::write(&dir, &entry).unwrap();
+    // Work done after the safety copy must survive: the restored 0.9.13 starts and is healthy.
+    fs::write(&config, "later = true\n").unwrap();
+    assert!(matches!(
+        apply::drive(&dir, &fake, tune()).await,
+        Outcome::RolledBack
+    ));
+    assert_eq!(fs::read_to_string(&config).unwrap(), "later = true\n");
+    let status = call(&f.host, Local, "crate_update_status", json!({}))
+        .await
+        .data;
+    assert_eq!(status["apply"]["state"], "rolled_back");
+    assert_ne!(status["apply"]["data_restored"], true);
+}
+
+#[tokio::test]
 async fn when_nothing_can_be_started_the_outcome_is_failed_with_a_recovery_path() {
     let _serial = SERIAL.lock().await;
     let server = registry(&[line("0.9.14", false)]).await;

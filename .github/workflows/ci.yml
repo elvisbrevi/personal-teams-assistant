@@ -224,10 +224,10 @@ jobs:
           cargo test --locked --no-default-features --lib machine_login
           cargo test --locked --no-default-features --lib account_machine_workflow
           cargo test --locked --no-default-features --lib allowed_roots_require
+      # The real-host integration tests (tests/account_variables.rs) are Unix-only; these run the
+      # platform-neutral and Windows-specific unit tests of the same workflows.
       - name: Account variables, synchronization, migration, updates and readiness on Windows
-        run: |
-          cargo test --locked --no-default-features --lib -- variables consumers portable standing migration maintenance readiness
-          cargo test --locked --no-default-features --test account_variables
+        run: cargo test --locked --no-default-features --lib -- variables consumers portable standing migration maintenance readiness
 
   security:
     name: Security

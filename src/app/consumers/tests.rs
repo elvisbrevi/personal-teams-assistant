@@ -596,7 +596,7 @@ mod launchers {
 
         // Narrowing the allowed roots stops it too.
         let elsewhere = tempfile::tempdir().unwrap();
-        allow(&m, elsewhere.path()).await;
+        allow(&m, &elsewhere.path().canonicalize().unwrap()).await;
         let confined = call(
             &m.host,
             Local,

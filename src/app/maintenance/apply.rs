@@ -227,9 +227,11 @@ pub(super) async fn request(host: &Arc<Host>, env: &Environment, requested: &str
         )
     };
     let id = uuid::Uuid::new_v4().simple().to_string()[..12].to_owned();
+    // The pair being replaced is the installed one; a rollback restores and waits for exactly it,
+    // even when the host still runs an older version (restart_required).
     let entry = Journal::new(
         &id,
-        &env.running.to_string(),
+        &installation.version.to_string(),
         manifest,
         &installation.root,
         &base,

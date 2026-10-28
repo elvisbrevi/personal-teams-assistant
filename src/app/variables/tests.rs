@@ -581,6 +581,17 @@ async fn reveal_is_human_only_and_never_reaches_agents_or_machines() {
     assert!(!local.ok);
     assert_eq!(local.code, "state_conflict");
     assert!(!text(&local).contains("last line"));
+    // Work that runs without a marked invocation (a spawned task, a scheduler) is not the window.
+    let mut request = control::Request::new("variable_reveal");
+    request.args = json!({"id":entry});
+    let unmarked = control::dispatch(&host, request).await;
+    assert!(!unmarked.ok);
+    assert!(!text(&unmarked).contains("last line"));
+    let mut request = control::Request::new("variable_reveal");
+    request.args = json!({"id":entry});
+    let window = authority::from_window(&host.state, control::dispatch(&host, request)).await;
+    assert!(window.ok, "{:?}", window.message);
+    assert_eq!(window.data["value"], EXACT);
     // Machine credentials are stopped earlier, by the account authority, before any variable code.
     let machine = call(&host, Machine, "variable_reveal", json!({"id":entry})).await;
     assert!(!machine.ok);
@@ -617,8 +628,9 @@ async fn reveal_is_human_only_and_never_reaches_agents_or_machines() {
             })
             .count()
     };
-    assert_eq!(reveals("ok"), 1);
-    assert_eq!(reveals("denied_client"), 1);
+    // The window's two reveals; the local token's and the unmarked call's refusals.
+    assert_eq!(reveals("ok"), 2);
+    assert_eq!(reveals("denied_client"), 2);
     let forged = trail
         .iter()
         .filter(|(action, who, _)| {

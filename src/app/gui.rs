@@ -111,7 +111,8 @@ fn language(app: &tauri::AppHandle) -> crate::config::Language {
 /// The WebView reaches the host only through this command, with the same contract as `pta`.
 #[tauri::command]
 async fn command(app: tauri::AppHandle, request: control::Request) -> control::Reply {
-    control::dispatch(&host(&app), request).await
+    let host = host(&app);
+    super::authority::from_window(&host.state, Box::pin(control::dispatch(&host, request))).await
 }
 
 fn spawn_operation(app: &tauri::AppHandle, method: &'static str) {

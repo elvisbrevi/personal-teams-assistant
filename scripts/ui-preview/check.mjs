@@ -1431,6 +1431,7 @@ for (const [label, viewport] of [['desktop', { width: 1440, height: 900 }], ['ph
   await page.evaluate(() => showTab('settings', 'panel-updates'));
   const panel = page.locator('#panel-updates');
   await panel.waitFor();
+  await panel.locator('#update-managed', { hasText: 'operador' }).waitFor({ timeout: 5000 }).catch(() => {});
   check('shared account sees the managed-server notice instead of an install button', await panel.locator('#update-managed').innerText().then(text => text.includes('operador')) && await panel.locator('#update-stage').isHidden() && await panel.locator('#update-check').isHidden() && await page.locator('#update-offer').isHidden());
   await page.evaluate(axeSource);
   check('shared account updates panel passes axe', (await scan(page)).length === 0, JSON.stringify(await scan(page)));
