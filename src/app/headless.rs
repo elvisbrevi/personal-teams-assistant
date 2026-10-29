@@ -33,6 +33,7 @@ pub(crate) fn run(host_lock: fs::File, start_service: bool) -> Result<()> {
             state: init_state(&config_dir, &control::default_data_dir()?)?,
             shell: Box::new(HeadlessShell(quit)),
         });
+        consumers::install(&host);
         tokio::spawn(control::launch(host.clone(), host_lock)?);
         tracing::info!(event = "headless_host_ready");
         if start_service {

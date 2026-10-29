@@ -80,6 +80,10 @@ struct Endpoint {
     #[serde(default)]
     machine_management_support: bool,
     #[serde(default)]
+    account_variables_support: bool,
+    #[serde(default)]
+    account_portable_support: bool,
+    #[serde(default)]
     implementation_support: bool,
     #[serde(default)]
     wiki_support: bool,
@@ -301,6 +305,12 @@ fn host_executable() -> Result<PathBuf> {
 pub async fn client(request: Request, start_host: bool) -> Result<Reply> {
     if existing_host().is_err() {
         ensure!(start_host, "host is stopped");
+        // Never start a host between two halves of an update.
+        if let Some(reason) = crate::maintenance::apply::startup_block(
+            &profile_dir()?.join(crate::maintenance::DIRECTORY),
+        ) {
+            anyhow::bail!(reason);
+        }
         let binary = host_executable()?;
         let mut command = if let Some(dir) = isolated_profile_dir()? {
             security::private_dir(&dir)?;
@@ -362,7 +372,7 @@ pub(super) async fn client_scoped(
 
 /// A matched installation upgrade can inspect/stop its old local host, even
 /// before that host supports account authority. No ordinary operation uses this path.
-async fn retirement_request(request: Request, dir: &Path) -> Result<Reply> {
+pub(super) async fn retirement_request(request: Request, dir: &Path) -> Result<Reply> {
     ensure!(
         matches!(request.method.as_str(), "snapshot" | "app_quit"),
         "Invalid host retirement operation."
@@ -409,7 +419,9 @@ async fn client_with_transport(
             match transport {
                 authority::Transport::Browser => &endpoint.browser_token,
                 authority::Transport::Machine => &endpoint.machine_token,
-                authority::Transport::Local => anyhow::bail!("Invalid scoped transport."),
+                authority::Transport::Local | authority::Transport::Window => {
+                    anyhow::bail!("Invalid scoped transport.")
+                }
             }
         } else {
             &endpoint.token
@@ -443,6 +455,15 @@ async fn client_with_transport(
                         | "implementation_mobile_session"
                 ),
             "Incompatible machine management host: update the host and CLI together before managing machines."
+        );
+        ensure!(
+            endpoint.account_variables_support || !variables::handles(&request.method),
+            "Incompatible account variables host: update the host and CLI together before managing variables."
+        );
+        ensure!(
+            endpoint.account_portable_support
+                || !(portable::handles(&request.method) || readiness::handles(&request.method)),
+            "Incompatible account configuration host: update the host and CLI together before synchronizing the account configuration."
         );
         ensure!(
             endpoint.implementation_support || !implementation::handles(&request.method),
@@ -550,6 +571,8 @@ pub(crate) fn launch(
             machine_pairing_support: true,
             machine_login_support: true,
             machine_management_support: true,
+            account_variables_support: true,
+            account_portable_support: true,
             contract: CONTRACT,
             port: listener.local_addr()?.port(),
             token: token.clone(),
@@ -568,11 +591,13 @@ pub(crate) fn launch(
         }));
     Ok(async move {
         let machines = tokio::spawn(implementation::fleet::schedule(host.clone()));
+        let updates = tokio::spawn(maintenance::schedule(host.clone()));
         let scheduler = tokio::spawn(activity::schedule(host));
         if let Ok(listener) = tokio::net::TcpListener::from_std(listener) {
             let _ = axum::serve(listener, router).await;
         }
         scheduler.abort();
+        updates.abort();
         machines.abort();
     })
 }
@@ -685,6 +710,8 @@ async fn dispatch_inner(host: &Arc<Host>, request: Request) -> Reply {
             Err(message) => {
                 let (code, exit) = if message.starts_with("[invalid_input]") {
                     ("invalid_input", 2)
+                } else if message.starts_with("[state_conflict]") {
+                    ("state_conflict", 6)
                 } else if message.starts_with("[network]") {
                     ("dependency_or_network", 5)
                 } else {
@@ -699,6 +726,22 @@ async fn dispatch_inner(host: &Arc<Host>, request: Request) -> Reply {
                 )
             }
         };
+    }
+    if maintenance::handles(&request.method) {
+        // Independent of profile edits: a build can take many minutes.
+        return maintenance::operate(host, &request).await;
+    }
+    if variables::handles(&request.method) {
+        // Independent of profile edits: no operations lock, like the implementation operations.
+        return variables::operate(host, &request).await;
+    }
+    if portable::handles(&request.method) {
+        // Takes the operations lock itself, only while it installs a configuration.
+        return portable::operate(host, &request).await;
+    }
+    if readiness::handles(&request.method) {
+        // Only reads, through the operations it reports on; independent of profile edits.
+        return readiness::operate(host, &request).await;
     }
     let _guard = state.operations.lock().await;
     if activity::active(state).await
@@ -897,6 +940,12 @@ async fn operate(
     args: &Value,
 ) -> std::result::Result<Value, String> {
     let state = &host.state;
+    if matches!(
+        method,
+        "start_assistant" | "restart" | "begin_azure_cli_login"
+    ) {
+        variables::identity::restore(host).await?;
+    }
     let value = match method {
         "snapshot" => serde_json::to_value(snapshot(host).await?).map_err(fail)?,
         "list_azure_hus" | "list_azure_tasks" | "list_github_epics" | "list_github_issues"
@@ -969,7 +1018,7 @@ async fn operate(
         }
         "save_settings" => {
             save_settings(
-                state,
+                host,
                 arg(args, "config")?,
                 arg(args, "map")?,
                 arg(args, "tunnel_config").or_else(|_| arg(args, "tunnelConfig"))?,
@@ -999,11 +1048,11 @@ async fn operate(
             json!({"imported":true})
         }
         "set_credential" => {
-            set_credential(state, arg(args, "name")?, arg(args, "value")?).await?;
+            set_credential(host, arg(args, "name")?, arg(args, "value")?).await?;
             json!({"stored":true})
         }
         "delete_credential" => {
-            delete_credential(state, arg(args, "name")?).await?;
+            delete_credential(host, arg(args, "name")?).await?;
             json!({"deleted":true})
         }
         "azure_wiki" => {
@@ -1175,6 +1224,7 @@ async fn operate(
         }
         "test_providers" => {
             let config = read_config(&state.config_path).map_err(fail)?;
+            consumers::stage(state).await;
             crate::diagnostics::providers(&config).await.map_err(fail)?
         }
         "test_connectivity" => {
@@ -1234,14 +1284,14 @@ async fn operate(
             config.graph.self_chat = None;
             let map = KnowledgeMap::load(&state.map_path).map_err(fail)?;
             let tunnel = fs::read_to_string(&state.tunnel_path).unwrap_or_default();
-            save_settings(state, config, map, tunnel).await?;
+            save_settings(host, config, map, tunnel).await?;
             json!({"enabled":false})
         }
-        "question_associate" => super::notes::associate(state, args).await?,
+        "question_associate" => super::notes::associate(host, args).await?,
         "answer_feedback" => super::notes::feedback(state, args)?,
         "notes_list" => super::notes::list(state, args)?,
-        "notes_save" => super::notes::save(state, args)?,
-        "notes_remove" => super::notes::remove(state, args)?,
+        "notes_save" => portable::note_save(state, args).await?,
+        "notes_remove" => portable::note_remove(state, args).await?,
         "knowledge_search" => super::notes::search(state, args)?,
         "index_status" => super::notes::status(state)?,
         "index_refresh" => super::notes::refresh(state, args).await?,
@@ -1381,6 +1431,8 @@ mod tests {
                 machine_pairing_support: true,
                 machine_login_support: true,
                 machine_management_support: true,
+                account_variables_support: true,
+                account_portable_support: true,
                 account_authority_support: true,
                 shared_accounts_support: true,
                 account_binding: None,
@@ -1408,6 +1460,8 @@ mod tests {
                 machine_pairing_support: true,
                 machine_login_support: true,
                 machine_management_support: true,
+                account_variables_support: true,
+                account_portable_support: true,
                 account_authority_support: true,
                 shared_accounts_support: true,
                 account_binding: None,
@@ -1444,6 +1498,8 @@ mod tests {
                     machine_pairing_support: true,
                     machine_login_support: true,
                     machine_management_support: true,
+                    account_variables_support: true,
+                    account_portable_support: true,
                     account_authority_support: true,
                     shared_accounts_support: true,
                     account_binding: None,

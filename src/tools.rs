@@ -9,7 +9,7 @@ use tokio_util::compat::TokioAsyncWriteCompatExt;
 pub mod tasks;
 pub mod todo;
 
-#[derive(Clone, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ToolSpec {
     SqlServer {
@@ -96,7 +96,7 @@ pub fn catalog_text(catalog: &[CatalogSource]) -> Result<String> {
     }
     Ok(toml::to_string(&Catalog { sources: catalog })?)
 }
-#[derive(Clone, Copy, Deserialize, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SqlOperation {
     GetPaymentStatus,

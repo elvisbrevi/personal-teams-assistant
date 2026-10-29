@@ -2,6 +2,7 @@
 //! remove notes, search what the assistant would read, and see or refresh what each indexed
 //! source holds. Notes are data, not profile: saving one needs no revision and no restart.
 
+use super::Host;
 use super::{DesktopState, fail, read_config};
 use crate::{
     index::{Index, NOTES, Note},
@@ -9,6 +10,7 @@ use crate::{
 };
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
+use std::sync::Arc;
 
 type Reply = std::result::Result<Value, String>;
 
@@ -349,7 +351,8 @@ fn message_database(config: &crate::config::Config, resource: &str) -> std::path
 
 /// Associate an unanswered message with a question, or create one, and keep the owner's
 /// example in the same settings map shown by the Questions editor. Never sends a reply.
-pub(super) async fn associate(state: &DesktopState, args: &Value) -> Reply {
+pub(super) async fn associate(host: &Arc<Host>, args: &Value) -> Reply {
+    let state = &host.state;
     let resource = rating_resource(args)?;
     let (config, mut map, _) = open(state)?;
     let db = message_database(&config, &resource);
@@ -417,7 +420,7 @@ pub(super) async fn associate(state: &DesktopState, args: &Value) -> Reply {
         text: q.text.clone(),
     };
     let tunnel = std::fs::read_to_string(&state.tunnel_path).unwrap_or_default();
-    super::save_settings(state, config, map, tunnel).await?;
+    super::save_settings(host, config, map, tunnel).await?;
     crate::state::Store::associate_question(&db, &resource, &identified).map_err(fail)?;
     Ok(json!({"resource":resource,"question":identified}))
 }
@@ -429,9 +432,9 @@ mod tests {
     #[tokio::test]
     async fn review_associates_creates_and_rates_questions_in_the_shared_profile() {
         let dir = tempfile::tempdir().unwrap();
-        let state = super::super::init_state(&dir.path().join("profile"), &dir.path().join("data"))
-            .unwrap();
-        let (config, map, _) = open(&state).unwrap();
+        let host = super::super::variables::tests::host(dir.path());
+        let state = &host.state;
+        let (config, map, _) = open(state).unwrap();
         let source = map.questions.as_ref().unwrap()[0].sources[0].clone();
         let db = config.server.data_dir.join("desktop-chat.db");
         let store = crate::state::Store::open(&db).unwrap();
@@ -449,12 +452,12 @@ mod tests {
             )
             .unwrap();
         associate(
-            &state,
+            &host,
             &json!({"resource":resource,"question_id":"daily-activities","sources":[source]}),
         )
         .await
         .unwrap();
-        let (_, saved, _) = open(&state).unwrap();
+        let (_, saved, _) = open(state).unwrap();
         assert_eq!(saved.questions.as_ref().unwrap().len(), 1);
         assert_eq!(
             saved.questions.as_ref().unwrap()[0].examples,
@@ -472,8 +475,8 @@ mod tests {
         );
         assert!(store.audit(resource).unwrap().unwrap().sent.is_none());
         // Re-association creates a question and removes the former association.
-        let result = associate(&state, &json!({"resource":resource,"text":"What work was completed on Tuesday?","sources":[source]})).await.unwrap();
-        let (_, saved, index) = open(&state).unwrap();
+        let result = associate(&host, &json!({"resource":resource,"text":"What work was completed on Tuesday?","sources":[source]})).await.unwrap();
+        let (_, saved, index) = open(state).unwrap();
         assert_eq!(saved.questions.as_ref().unwrap().len(), 2);
         assert!(saved.questions.as_ref().unwrap()[0].examples.is_empty());
         let identified = serde_json::from_value(result["question"].clone()).unwrap();
@@ -491,7 +494,7 @@ mod tests {
             )
             .unwrap();
         feedback(
-            &state,
+            state,
             &json!({"resource":resource,"rating":"bad","comment":"List the tasks and their hours"}),
         )
         .unwrap();
@@ -503,7 +506,7 @@ mod tests {
                 .rating,
             "bad"
         );
-        feedback(&state, &json!({"resource":resource,"rating":null})).unwrap();
+        feedback(state, &json!({"resource":resource,"rating":null})).unwrap();
         assert!(
             index
                 .evaluations(id, "status", None, &[source])

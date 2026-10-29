@@ -12,7 +12,7 @@ async function invoke(method, args = {}) {
     return { visible: true };
   }
   let result = await rawInvoke('command', { request: {
-    method, args, revision: READS.includes(method) || /^(implementation_|machine_)/.test(method) ? null : current?.revision ?? null, contract: 1
+    method, args, revision: READS.includes(method) || /^(implementation_|machine_|variable_|crate_update_)/.test(method) ? null : current?.revision ?? null, contract: 1
   }});
   if (window.ptaTransport.browser && result.code === 'authorization_pending' && method === 'connect_microsoft') {
     result = await browserMicrosoftLogin(result.data.authorization_url);
@@ -27,7 +27,7 @@ async function invoke(method, args = {}) {
     }
   }
   if (result.revision) lastRevision = result.revision;
-  if (result.revision && current && !READS.includes(method) && !/^(implementation_|machine_)/.test(method)) current.revision = result.revision;
+  if (result.revision && current && !READS.includes(method) && !/^(implementation_|machine_|variable_|crate_update_)/.test(method)) current.revision = result.revision;
   if (!result.ok) throw result.message || result.code;
   return result.data;
 }
@@ -37,6 +37,8 @@ const $ = (selector) => document.querySelector(selector);
 let current;
 /** Latest persisted snapshot: drives status, overview and the test chat (which reads the saved map). */
 let live;
+/** How far this installation is from being a working member of the account (metadata only). */
+let readiness = null;
 let tab = 'overview';
 let dirty = false;
 let session = crypto.randomUUID();
@@ -115,6 +117,7 @@ async function busy(button, task) {
 
 function showTab(name, anchor) {
   tab = name;
+  clearRevealedVariable();
   setNavOverflow(false);
   for (const section of ['overview', 'todo', 'implementation', 'create-request', 'agent-history', 'settings', 'messages', 'knowledge', 'chat', 'registration']) $('#' + section).hidden = section !== name;
   for (const button of document.querySelectorAll('nav button[data-tab]')) {
@@ -127,7 +130,7 @@ function showTab(name, anchor) {
   if (name === 'knowledge') loadKnowledge().catch(fail);
   if (name === 'todo') loadTodo();
   if (name === 'agent-history') loadAgentHistory();
-  if (name === 'settings') loadMachines().catch(fail);
+  if (name === 'settings') { loadMachines().catch(fail); loadVariables(); loadAccountConfig(); loadUpdates(); }
   const target = anchor && document.getElementById(anchor);
   // A panel inside a tab (a Settings section, an Activities view) opens that tab first.
   const owner = target && document.querySelector(`[aria-controls="${target.closest('[role=tabpanel]')?.id}"]`);
@@ -1072,7 +1075,9 @@ async function editAccountMachine(machine, trigger) {
 }
 let loadedCoordinator = '';
 async function loadMachines() {
+  const epoch = accountEpoch;
   const [settings, fleet] = await Promise.all([invoke('machine_settings'), invoke('machine_list')]);
+  if (epoch !== accountEpoch) return;
   const coordinator = settings.coordinator || settings.coordinator_origin || '';
   // Refreshing after another action must not discard an address the user has typed but not yet connected.
   if ($('#machine-coordinator').value === loadedCoordinator) field('#machine-coordinator', coordinator);
@@ -1095,6 +1100,7 @@ const dirtyGroups = new Set();
 
 /** Selects the tab `name` of a tab list and shows only its panel. */
 function selectTab(list, name, focus = false) {
+  clearRevealedVariable();
   for (const button of list.querySelectorAll('[role=tab]')) {
     const selected = button.dataset.group === name;
     button.setAttribute('aria-selected', String(selected));
@@ -1329,15 +1335,17 @@ function renderSteps(s) {
   const config = s.config;
   const missing = missingCredentials(s.credentials);
   const steps = [
-    { done: !missing.length, title: t('Credentials'), text: missing.length ? t('Missing: {names}.', { names: missing.join(', ') }) : t('The required credentials are stored.'), go: ['settings', 'panel-credentials'] },
+    { done: !missing.length, title: t('Variables'), text: missing.length ? t('Missing: {names}.', { names: missing.join(', ') }) : t('The required variables are stored.'), go: ['settings', missing.length ? 'panel-consumers' : 'panel-variables'] },
     { done: enabledChain(config).length > 0, title: t('Language model'), text: t('Turn on and order Codex, Claude Code, OpenCode or DeepSeek.'), go: ['settings', 'panel-llm'] },
     { done: entraReady(config), title: t('Entra registration'), text: t('Tenant and client ID of your existing registration.'), go: ['settings', 'panel-teams'] },
     { done: s.microsoft_connected, title: t('Microsoft account'), text: t('Sign in to read and answer as you.'), go: ['settings', 'panel-teams'] },
     { done: urlReady(config), title: t('Public URL and tunnel'), text: t('A stable HTTPS URL that reaches the local port.'), go: ['settings', 'panel-server'] },
     { done: readySources(s.map).length > 0, title: t('Authorized sources'), text: t('At least one source enabled, with external processing and an audience.'), go: ['knowledge'] },
     { done: s.running, title: t('Start the assistant'), text: t('It starts receiving Teams messages.'), start: true },
+    { done: readiness?.mode !== 'standalone', optional: true, hidden: !readiness, title: t('Add this computer to your account'), text: t('Sign in once to restore your configuration and variables here.'), go: ['settings', 'panel-machines'] },
     { done: !config.policy.dry_run, optional: true, title: t('Turn sending on'), text: t('Review the proposals in Messages and turn observation mode off.'), go: ['settings', 'panel-behavior'] },
   ];
+  steps.splice(0, steps.length, ...steps.filter(step => !step.hidden));
   const required = steps.filter(step => !step.optional);
   const completed = required.filter(step => step.done).length;
   $('#setup-progress').textContent = t('{ready} of {total} ready', { ready: completed, total: required.length });
@@ -1388,6 +1396,8 @@ function renderLive() {
   $('#start').hidden = s.running;
   $('#restart').hidden = $('#stop').hidden = !s.running;
   for (const button of [$('#start'), $('#restart'), $('#stop')]) button.disabled = Boolean(transition) || button.classList.contains('busy');
+  $('#teams-identity-error').hidden = !s.teams_identity_error;
+  $('#teams-identity-error').textContent = s.teams_identity_error ? tx(s.teams_identity_error) : '';
   $('#microsoft-state').className = `badge ${s.microsoft_connected ? 'ok' : 'warn'}`;
   $('#microsoft-state').textContent = s.microsoft_connected ? t('Account connected') : t('Account not connected');
   $('#teams-login').textContent = s.microsoft_connected ? t('Reconnect the account') : t('Connect Microsoft account');
@@ -1401,7 +1411,7 @@ function renderLive() {
   renderTiles(s);
   renderSteps(s);
   renderSettingsFlags({
-    credentials: missingCredentials(s.credentials).length > 0,
+    variables: missingCredentials(s.credentials).length > 0,
     teams: !s.microsoft_connected || !entraReady(s.config) || !urlReady(s.config),
     models: !enabledChain(s.config).length,
   });
@@ -1410,9 +1420,16 @@ function renderLive() {
 /** Refreshes persisted state without touching unsaved form edits. */
 async function refreshLive() {
   live = await invoke('snapshot');
-  if (current) { current.credentials = live.credentials; current.github_connected = live.github_connected; }
+  if (current) {
+    current.credentials = live.credentials; current.github_connected = live.github_connected;
+    // Refresh restored setup without overwriting any unsaved form edits.
+    if (!dirty && ['tenant_id', 'client_id', 'user_id'].some(key => current.config.graph[key] !== live.config.graph[key])) {
+      // Reload the whole revision so a later save cannot overwrite another synchronized field.
+      await reload();
+      return;
+    }
+  }
   renderLive();
-  renderCredentials();
   renderChatSources();
 }
 
@@ -1439,7 +1456,7 @@ async function reload() {
   dirtyGroups.clear();
   renderSavebar();
   renderLive();
-  renderCredentials(); renderRepositories(); renderResources(); renderContexts(); renderQuestions(); renderPeople(); renderNoteContexts(); renderChatSources();
+  renderRepositories(); renderResources(); renderContexts(); renderQuestions(); renderPeople(); renderNoteContexts(); renderChatSources();
   loadAzureCliStatus(); loadGithubCliStatus();
   await Promise.all([loadChain(), loadSelfChat()]);
 }
@@ -1459,46 +1476,1050 @@ function rowText(primary, secondary, extra) {
   return el('div', {}, el('strong', {}, primary, extra), el('small', { textContent: secondary }));
 }
 
-function renderCredentials() {
-  const container = $('#credentials');
-  container.replaceChildren();
-  const origins = { system: t('System store'), environment: t('Environment variable'), file: t('Private file') };
-  for (const [name, source] of Object.entries(live.credentials)) {
-    const generated = source === 'missing' && GENERATED.includes(name);
-    const retired = source === 'retired';
-    const empty = source === 'missing' || source === 'unused';
-    const state = generated ? badge(t('Generated on start'), 'info')
-      : source === 'missing' ? badge(t('Missing'), 'warn')
-      : source === 'unused' ? badge(t('Unused'), 'muted')
-      : retired ? badge(t('No longer used'), 'muted')
-      : badge(t('Set'), 'ok');
-    const detail = generated ? t('The assistant creates it on its first start.')
-      : source === 'unused' ? t('The current model chain does not use it.')
-      : retired ? t('An earlier version needed it; nothing reads it now. You can remove it.')
-      : empty ? t('Needed to start the assistant.')
-      : origins[source] || t('Set');
-    const title = el('span', { class: 'cred-name', textContent: name });
-    const input = el('input', { type: 'password', autocomplete: 'new-password', spellcheck: false, hidden: retired,
-      placeholder: empty ? t('Enter the credential') : t('Type only to replace it'), 'aria-label': t('New value of {name}', { name }) });
-    // Storing a missing credential is the next step; replacing a stored one is not.
-    const save = el('button', { class: empty ? null : 'secondary', textContent: empty ? t('Save') : t('Replace'), disabled: true, hidden: retired });
-    input.oninput = () => { save.disabled = !input.value.trim(); };
-    input.onkeydown = event => { if (event.key === 'Enter' && !save.disabled) save.click(); };
-    save.onclick = () => busy(save, async () => {
-      await invoke('set_credential', { name, value: input.value });
-      input.value = '';
-      await refreshLive();
-      done(t('{name} stored in the system.', { name }));
-    });
-    const remove = el('button', { class: 'danger', textContent: t('Remove'), disabled: empty, 'aria-label': t('Remove {name}', { name }) });
-    remove.onclick = () => busy(remove, async () => {
-      await invoke('delete_credential', { name });
-      await refreshLive();
-      done(t('{name} removed.', { name }));
-    });
-    container.append(el('div', { class: 'row' }, rowText(title, detail, state), input, save, remove));
+// ---------------------------------------------------------------- account standing
+
+/**
+ * The opaque identity of the account on screen (from the host's standing), and a counter that
+ * moves whenever the screen leaves an account. A reply requested before the move is dropped, so a
+ * late answer for the former account can never fill the next one's screen.
+ */
+let accountKey = null;
+let accountEpoch = 0;
+/** Whether the coordinator answered, did not, or refused this installation (offline, revoked…). */
+let accountStanding = null;
+
+/** Forget everything shown for the former account: lists, drafts, a revealed value and results. */
+function leaveAccount() {
+  accountEpoch += 1;
+  accountKey = null;
+  clearTypedVariableValues();
+  variableState = { variables: [], pending: [], error: '', sync: null };
+  variableAttempt = null;
+  consumerState = { consumers: [], launchers: [], error: '' };
+  migrationState = { review: null, error: '', choices: {}, result: null };
+  for (const key of Object.keys(consumerChoice)) delete consumerChoice[key];
+  for (const key of Object.keys(consumerNote)) delete consumerNote[key];
+  accountConfig = null;
+  accountStanding = null;
+  readiness = null;
+  renderStanding();
+  renderVariables();
+  renderConsumers();
+  renderMigration();
+  renderAccountConfig();
+  renderReadiness();
+}
+
+/**
+ * Take a reply requested at `epoch`. False when the screen left that account meanwhile; a reply
+ * for another account than the one shown (requested after the last move) switches the screen.
+ */
+function adoptAccount(epoch, standing) {
+  if (epoch !== accountEpoch) return false;
+  const key = standing?.account_key ?? '';
+  const switched = accountKey !== null && key !== accountKey;
+  if (switched) leaveAccount();
+  accountKey = key;
+  accountStanding = standing ?? null;
+  renderStanding();
+  // Other requests of the former screen are dropped; ask again for the account now shown.
+  if (switched) setTimeout(() => { loadVariables().catch(() => {}); loadAccountConfig().catch(() => {}); }, 0);
+  return true;
+}
+
+function renderStanding() {
+  const standing = accountStanding;
+  const problem = standing && ['offline', 'revoked'].includes(standing.state);
+  const text = !problem ? '' : [
+    standing.state === 'offline' ? t('Offline') : t('Signed out or revoked'),
+    tx(standing.recovery),
+    standing.last_live_at ? t('Last confirmed {when}.', { when: ago(standing.last_live_at * 1000) }) : '',
+  ].filter(Boolean).join(' ');
+  for (const id of ['#account-standing', '#variables-standing', '#consumers-standing', '#migration-standing']) {
+    const line = $(id);
+    line.textContent = text;
+    line.hidden = !text;
   }
 }
+
+// ---------------------------------------------------------------- account variables
+
+/** Metadata only: lists never carry a value, and the forms clear it as soon as it is stored. */
+let variableState = { variables: [], pending: [], error: '', sync: null };
+/** One entry ID per attempt, so repeating an interrupted save cannot create a duplicate. */
+let variableAttempt = null;
+/**
+ * The one value on screen after an explicit Reveal. It lives only in this variable and the DOM
+ * (never in storage, a URL or history) and goes away on Hide, navigation, a hidden page, logout
+ * or after VALUE_SECONDS.
+ */
+let revealedVariable = null;
+let revealEpoch = 0;
+const VALUE_SECONDS = 30;
+/** Entry being edited, armed for deletion, and the description typed so far (kept across a conflict). */
+let editingVariable = null;
+let deletingVariable = null;
+let variableDraft = null;
+let armTimer = null;
+let clipboardCleanup = null;
+const VARIABLE_NAME = /^[A-Za-z_][A-Za-z0-9_]{0,127}$/;
+const UNSAFE_TEXT = /[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/;
+
+function clearRevealedVariable(render = true) {
+  revealEpoch += 1;
+  if (!revealedVariable) return;
+  clearTimeout(revealedVariable.timer);
+  revealedVariable = null;
+  if (render) renderVariables();
+}
+/** Pagehide and logout also drop what was typed but not yet saved. */
+function clearTypedVariableValues() {
+  clearRevealedVariable(false);
+  for (const field of document.querySelectorAll('#panel-variables textarea')) field.value = '';
+  editingVariable = deletingVariable = variableDraft = null;
+  renderVariables();
+}
+document.addEventListener('visibilitychange', () => { if (document.hidden) clearRevealedVariable(); });
+window.addEventListener('pagehide', clearTypedVariableValues);
+
+async function digest(text) {
+  const bytes = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
+  return Array.from(new Uint8Array(bytes), byte => byte.toString(16).padStart(2, '0')).join('');
+}
+/**
+ * Best effort: a minute after Copy value, clear the clipboard only if it still holds exactly what
+ * was copied. Only a fingerprint is kept, and unrelated clipboard contents are never touched.
+ */
+async function scheduleClipboardCleanup(value) {
+  clearTimeout(clipboardCleanup);
+  if (!crypto.subtle || !navigator.clipboard?.readText) return;
+  const fingerprint = await digest(value);
+  clipboardCleanup = setTimeout(async () => {
+    try { if (await digest(await navigator.clipboard.readText()) === fingerprint) await navigator.clipboard.writeText(''); } catch { /* left alone without permission or focus */ }
+  }, 60_000);
+}
+
+/** A change names the version the user saw; another client's newer change refreshes the list instead of being overwritten. */
+async function changeVariable(method, variable, extra = {}) {
+  try {
+    return await invoke(method, { id: variable.id, version: variable.version, ...extra });
+  } catch (error) {
+    await loadVariables();
+    throw error;
+  }
+}
+
+async function loadVariables() {
+  const epoch = accountEpoch;
+  try {
+    const reply = await invoke('variable_list');
+    if (!adoptAccount(epoch, reply.standing)) return;
+    variableState = { variables: reply.variables, pending: reply.pending, error: reply.migration_error ?? '', sync: reply.sync ?? null };
+  } catch (error) {
+    if (epoch !== accountEpoch) return;
+    variableState = { variables: [], pending: [], error: String(error?.message ?? error), sync: null };
+  }
+  renderVariables();
+  await loadConsumers();
+  await loadMigration();
+}
+
+// ---------------------------------------------------------------- credential migration
+
+/** The last review from the host (names, origins and metadata only) and the user's choices. */
+let migrationState = { review: null, error: '', choices: {}, result: null };
+
+const MIGRATION_STAGES = {
+  planned: 'Not copied yet',
+  writing: 'Copying',
+  uncertain: 'Outcome unknown: review again, then repeat to resume',
+  written: 'Copied, not verified yet',
+  verification_failed: 'The account value does not match',
+  verified: 'Verified',
+  complete: 'Done',
+};
+
+async function loadMigration() {
+  const epoch = accountEpoch;
+  try {
+    const review = await invoke('variable_migration_inspect');
+    if (!adoptAccount(epoch, review.destination?.standing)) return;
+    const stale = migrationState.review?.destination?.key !== review.destination.key;
+    migrationState = { review, error: '', choices: stale ? {} : migrationState.choices, result: stale ? null : migrationState.result };
+  } catch (error) {
+    if (epoch !== accountEpoch) return;
+    migrationState = { review: null, error: String(error?.message ?? error), choices: {}, result: null };
+  }
+  renderMigration();
+}
+
+function migrationChoice(row) {
+  return migrationState.choices[row.credential] ??= {
+    picked: false,
+    name: row.suggested.name,
+    description: row.suggested.description,
+    existing: '',
+    bind: !!row.consumer && !row.account_bound,
+  };
+}
+
+/** The account variable that already has this name, unless it is the entry a migration made itself. */
+function takenName(name) {
+  const own = new Set((migrationState.review?.credentials ?? []).map(c => c.entry_id));
+  return (migrationState.review?.variables ?? []).find(v => v.name.toLowerCase() === name.trim().toLowerCase() && !own.has(v.id));
+}
+
+function migrationItems() {
+  const { review, choices } = migrationState;
+  const items = [];
+  for (const row of review?.credentials ?? []) {
+    const choice = choices[row.credential];
+    if (!choice?.picked || row.status !== 'eligible') continue;
+    const item = { credential: row.credential, name: choice.name.trim(), description: choice.description.trim(), bind: choice.bind && !!row.consumer };
+    const found = (review.variables ?? []).find(v => v.name.toLowerCase() === item.name.toLowerCase());
+    if (found && ['use', 'replace'].includes(choice.existing)) item.existing = { action: choice.existing, version: found.version };
+    items.push(item);
+  }
+  return items;
+}
+
+function migrationRow(row) {
+  const choice = migrationChoice(row);
+  const pick = el('input', { type: 'checkbox', checked: choice.picked, 'aria-label': t('Move {name}', { name: row.credential }) });
+  pick.onchange = () => { choice.picked = pick.checked; renderMigration(); };
+  const origin = { configuration: t('Settings'), system: t('System store'), environment: t('Environment variable'), file: t('Private file') }[row.origin] ?? row.origin;
+  const head = el('label', { class: 'check' }, pick, el('span', { class: 'cred-name', textContent: row.credential, translate: 'no' }), ' ', badge(origin, 'muted'),
+    row.consumer ? badge(t('Used by {consumer}', { consumer: row.consumer.title }), 'info') : badge(t('No consumer uses it yet'), 'muted'),
+    row.account_bound ? badge(t('Already uses an account variable'), 'ok') : null);
+  const parts = [head];
+  if (choice.picked) {
+    const name = el('input', { value: choice.name, maxLength: 128, translate: 'no', autocomplete: 'off', spellcheck: false });
+    name.oninput = () => { choice.name = name.value; renderMigrationActions(); };
+    name.onchange = () => renderMigration();
+    const description = el('input', { value: choice.description, maxLength: 500, autocomplete: 'off', spellcheck: false });
+    description.oninput = () => { choice.description = description.value; renderMigrationActions(); };
+    parts.push(el('div', { class: 'grid' },
+      el('label', {}, t('Variable name'), name),
+      el('label', {}, t('Description'), el('small', {}, t('What it is for, so you and your agents can choose it.')), description)));
+    const found = takenName(choice.name);
+    if (found) {
+      const how = el('select', { 'aria-label': t('A variable named {name} already exists', { name: found.name }) },
+        el('option', { value: '', textContent: t('A variable with this name exists: choose what to do') }),
+        el('option', { value: 'use', selected: choice.existing === 'use', textContent: t('Use the existing variable (version {n}) if its value matches', { n: found.version }) }),
+        el('option', { value: 'replace', selected: choice.existing === 'replace', textContent: t('Replace its value (version {n})', { n: found.version }) }));
+      how.onchange = () => { choice.existing = how.value; renderMigrationActions(); };
+      parts.push(el('label', {}, t('Name already in your account'), how),
+        el('p', { class: 'hint variable-note', textContent: tx(found.description), translate: 'no' }));
+    }
+    if (row.consumer) {
+      const bind = el('input', { type: 'checkbox', checked: choice.bind });
+      bind.onchange = () => { choice.bind = bind.checked; };
+      parts.push(el('label', { class: 'check' }, bind, t('Switch {consumer} to the account variable once it is verified', { consumer: row.consumer.title })));
+    }
+  }
+  if (row.migration) parts.push(el('p', { class: 'hint variable-note', textContent: t(MIGRATION_STAGES[row.migration.stage] ?? row.migration.stage) }));
+  return el('div', { class: 'row variable-row' }, parts);
+}
+
+function renderMigrationActions() {
+  const items = migrationItems();
+  const collision = items.some(item => !item.existing && (takenName(item.name) || (migrationState.review.variables ?? []).some(v => v.name.toLowerCase() === item.name.toLowerCase() && v.description !== item.description)));
+  $('#migration-run').disabled = !items.length || items.some(i => !i.description) || collision || !$('#migration-confirm').checked;
+}
+
+function renderMigrationResult() {
+  const box = $('#migration-result');
+  const result = migrationState.result;
+  box.hidden = !result;
+  box.replaceChildren();
+  if (!result) return;
+  if (result.message) box.append(el('p', { class: result.complete ? 'hint' : 'callout warn', textContent: tx(result.message) }));
+  for (const item of result.items ?? []) {
+    box.append(el('div', { class: 'row variable-row' },
+      rowText(el('span', { class: 'cred-name', textContent: item.name, translate: 'no' }), t(MIGRATION_STAGES[item.stage] ?? item.stage),
+        badge(item.complete ? t('Done') : t('Incomplete'), item.complete ? 'ok' : 'warn')),
+      item.error ? el('p', { class: 'hint variable-note', textContent: tx(item.error) }) : null));
+  }
+  for (const problem of result.problems ?? []) {
+    box.append(el('p', { class: 'callout warn', textContent: `${problem.credential}: ${tx(problem.problem)}` }));
+  }
+  if (result.settings) box.append(el('p', { class: 'hint', textContent: result.settings.stage === 'complete' ? t('This computer now uses the account settings.') : tx(result.settings.error ?? '') }));
+  if (result.complete) box.append(el('p', { class: 'hint', textContent: t('The original credentials were preserved as recovery copies. Application credentials are managed in Variables.') + (result.restart_required ? ' ' + t('Restart the assistant to apply this change.') : '') }));
+}
+
+function renderMigration() {
+  const { review, error } = migrationState;
+  const list = $('#migration-list');
+  list.replaceChildren();
+  $('#migration-destination').hidden = !review;
+  $('#migration-excluded').hidden = true;
+  $('#migration-settings-field').hidden = true;
+  $('#migration-confirm-field').hidden = true;
+  $('#migration-local').hidden = true;
+  if (error) { list.append(el('p', { class: 'hint', role: 'status', textContent: tx(error) })); $('#migration-run').disabled = true; renderMigrationResult(); return; }
+  if (!review) { $('#migration-run').disabled = true; renderMigrationResult(); return; }
+  const account = tx(review.destination.account);
+  $('#migration-destination').textContent = t('Destination account: {account}', { account });
+  const eligible = review.credentials.filter(c => c.status === 'eligible');
+  if (!eligible.length) list.append(el('p', { class: 'hint', textContent: t('No configured credential is waiting to be moved.') }));
+  for (const row of eligible) list.append(migrationRow(row));
+  const excluded = review.credentials.filter(c => c.status === 'excluded' || c.status === 'unavailable');
+  $('#migration-excluded').hidden = !excluded.length;
+  $('#migration-excluded-list').replaceChildren(...excluded.map(c => el('div', { class: 'row variable-row' },
+    rowText(el('span', { class: 'cred-name', textContent: c.credential, translate: 'no' }), tx(c.reason ?? '')))));
+  const replica = review.settings?.mode === 'replica';
+  $('#migration-settings-field').hidden = !replica;
+  $('#migration-confirm-field').hidden = !eligible.length && !replica;
+  $('#migration-confirm-text').textContent = t('Copy into {account}', { account });
+  $('#migration-local').hidden = false;
+  $('#migration-local').textContent = t('Still done on each computer: {list}.', { list: review.remains_local.map(tx).join('; ') });
+  renderMigrationActions();
+  renderMigrationResult();
+}
+
+async function runMigration() {
+  const { review } = migrationState;
+  const body = { destination: review.destination.key, items: migrationItems() };
+  if ($('#migration-settings').checked && review.settings?.mode === 'replica') body.settings = 'adopt_account';
+  // A partly done migration reports its per-item outcome together with the error, so the reply is read whole.
+  const reply = await rawInvoke('command', { request: { method: 'variable_migration_run', args: body, revision: null, contract: 1 } });
+  const result = { ...(reply.data ?? {}), complete: reply.ok && reply.data?.complete === true, message: reply.ok ? '' : String(reply.message ?? reply.code) };
+  migrationState.result = result;
+  $('#migration-confirm').checked = false;
+  await loadMigration();
+  if (result.complete) done(t('Selected credentials were copied and verified.'));
+}
+
+$('#migration-refresh').onclick = e => busy(e.currentTarget, loadMigration);
+$('#migration-run').onclick = e => busy(e.currentTarget, runMigration);
+$('#migration-confirm').onchange = () => renderMigrationActions();
+
+// ---------------------------------------------------------------- updates
+
+/** The host's view of this installation's updates; null until the first answer. */
+let updates = null;
+
+async function loadUpdates() {
+  try { updates = await invoke('crate_update_status'); } catch { updates = null; }
+  renderUpdates();
+}
+
+/** A host message of several sentences, each translated on its own. */
+const sentences = text => text.split(/(?<=\.) /).map(tx).join(' ');
+
+const UPDATE_STATES = { idle: 'Up to date', staging: 'Preparing', staged: 'Prepared', failed: 'Failed', deferred: 'Waiting for work to finish', applying: 'Installing' };
+const APPLY_PROGRESS = {
+  applying: 'Installing version {version}: replacing the application and pta…',
+  restarting: 'Restarting the application…',
+  verifying: 'Checking that version {version} is healthy…',
+  rolling_back: 'Restoring the previous version…',
+};
+/** Armed after one press: installing restarts the application, so it takes a second, deliberate press. */
+let updateInstallArmed = false;
+
+function renderUpdates() {
+  const u = updates;
+  const managed = u?.managed === 'server';
+  const offered = Boolean(u?.available) && !managed;
+  const apply = u?.apply;
+  const working = ['applying', 'restarting', 'verifying', 'rolling_back'].includes(apply?.state);
+  $('#panel-updates').hidden = !u;
+  $('#update-check').hidden = managed;
+  $('#update-intro').hidden = managed;
+  $('#update-managed').hidden = !managed;
+  if (!u) { $('#update-offer').hidden = true; return; }
+  $('#update-managed').textContent = managed ? tx(u.message) : '';
+  const state = managed ? '' : working ? t(UPDATE_STATES.applying) : offered && u.state === 'idle' ? t('Update available') : t(UPDATE_STATES[u.state] ?? u.state);
+  $('#update-state').textContent = state;
+  $('#update-state').className = `badge ${u.state === 'failed' || apply?.state === 'failed' ? 'warn' : offered || u.state === 'staged' ? 'ok' : 'muted'}`;
+  $('#update-state').hidden = !state;
+  const rows = [[t('Running'), u.running]];
+  if (!managed) rows.push([t('Installed'), u.installed ?? t('Unknown')], [t('Available'), u.available ?? t('Nothing newer')]);
+  $('#update-versions').replaceChildren(...rows.map(([label, value]) => el('div', { class: 'row' },
+    el('span', { textContent: label }), el('code', { translate: 'no', textContent: value }))));
+  const diagnostic = !managed && u.install && !u.install.supported ? u.install.diagnostic : u.check_error ?? (!managed && !working ? u.apply_unsupported : null);
+  $('#update-diagnostic').hidden = !diagnostic;
+  $('#update-diagnostic').textContent = diagnostic ? sentences(diagnostic) : '';
+  const stage = u.stage;
+  const building = u.state === 'staging';
+  $('#update-progress').hidden = !(building || u.state === 'staged' || u.state === 'deferred' || working);
+  if (working) {
+    $('#update-progress').textContent = t(APPLY_PROGRESS[apply.state], { version: apply.to });
+  } else if (building) {
+    const crates = stage?.progress?.crates ?? 0;
+    $('#update-progress').textContent = stage?.phase === 'verifying'
+      ? t('Verifying the new application and pta pair…')
+      : t('Building version {version} ({n} packages compiled)…', { version: stage?.version ?? '', n: crates });
+  } else if (u.state === 'staged' || u.state === 'deferred') {
+    $('#update-progress').textContent = t('Version {version} is built and verified. It is not installed yet: the installed version keeps running.', { version: u.staged.version });
+  }
+  const deferred = u.state === 'deferred' ? u.deferred : null;
+  $('#update-deferred').hidden = !deferred;
+  if (deferred) {
+    $('#update-deferred-text').textContent = t('Version {version} will be installed as soon as this work finishes. Nothing is interrupted:', { version: deferred.version });
+    $('#update-deferred-reasons').replaceChildren(...deferred.reasons.map(reason => el('li', { textContent: tx(reason) })));
+  }
+  const failed = u.state === 'failed' && stage?.error;
+  $('#update-error').hidden = !failed;
+  $('#update-error').textContent = failed ? sentences(stage.error) : '';
+  const tail = failed ? stage.tail ?? [] : [];
+  $('#update-tail').hidden = !tail.length;
+  $('#update-tail-text').textContent = tail.join('\n');
+  // What happened to the last installation, only ever from the host's journal.
+  const outcome = !working && ['success', 'rolled_back', 'failed'].includes(apply?.state) ? apply : null;
+  $('#update-result').hidden = !outcome;
+  $('#update-result').className = `callout${outcome && outcome.state !== 'success' ? ' warn' : ''}`;
+  if (outcome) {
+    $('#update-result-text').textContent = outcome.state === 'success'
+      ? t('Version {version} is installed and healthy.', { version: outcome.to })
+      : outcome.state === 'rolled_back'
+        ? t('Version {to} was not kept and version {from} is running again.', { to: outcome.to, from: outcome.from })
+        : t('The update did not finish and needs your attention.');
+    const reason = outcome.state === 'success' ? '' : [outcome.error, outcome.recovery].filter(Boolean).map(sentences).join(' ');
+    $('#update-result-error').hidden = !reason;
+    $('#update-result-error').textContent = reason;
+    $('#update-result-notes').replaceChildren(...(outcome.notes ?? []).map(note => el('li', { textContent: sentences(note) })));
+  }
+  $('#update-stage').hidden = managed;
+  $('#update-stage').disabled = !u.can_stage;
+  const canApply = Boolean(u.can_apply) && !deferred;
+  $('#update-apply').hidden = !canApply;
+  $('#update-apply').textContent = updateInstallArmed ? t('Tap again to install and restart') : t('Install update');
+  $('#update-cancel').hidden = !deferred;
+  $('#update-dismiss').hidden = !offered || u.dismissed;
+  const notice = offered && !u.dismissed && !working && (u.can_stage || canApply) && !outcome?.error;
+  $('#update-offer').hidden = !notice;
+  if (notice) {
+    const prepared = canApply || u.state === 'staged';
+    $('#update-offer-title').textContent = prepared ? t('A new version is prepared') : t('A new version is available');
+    $('#update-offer-text').textContent = prepared
+      ? t('Version {available} is prepared and verified. Installing it replaces the application and pta and restarts the application; if the new version is not healthy, the previous one is restored.', { available: u.available })
+      : t('Version {available} is available; this computer runs {running}. Preparing it builds it next to the installed one without changing anything.', { available: u.available, running: u.running });
+    $('#update-offer-stage').hidden = prepared;
+    $('#update-offer-apply').hidden = !canApply;
+    $('#update-offer-apply').textContent = updateInstallArmed ? t('Tap again to install and restart') : t('Install update');
+  }
+  $('#update-offer-stage').disabled = !u.can_stage;
+}
+
+async function stageUpdate() {
+  if (!updates?.available) return;
+  await invoke('crate_update_stage', { version: updates.available });
+  await loadUpdates();
+}
+async function dismissUpdate() {
+  if (!updates?.available) return;
+  await invoke('crate_update_dismiss', { version: updates.available });
+  await loadUpdates();
+}
+async function installUpdate(event) {
+  if (!updates?.can_apply) return;
+  if (!updateInstallArmed) {
+    updateInstallArmed = true;
+    renderUpdates();
+    setTimeout(() => { updateInstallArmed = false; renderUpdates(); }, 6000);
+    return;
+  }
+  updateInstallArmed = false;
+  await busy(event.currentTarget, async () => {
+    // The application restarts when the update starts: the reply may be the last thing this window sees.
+    await invoke('crate_update_apply', { version: updates.staged?.version ?? updates.available });
+    await loadUpdates();
+  });
+  renderUpdates();
+}
+async function cancelUpdate() {
+  await invoke('crate_update_cancel');
+  await loadUpdates();
+}
+// A busy button is re-enabled when its task ends; render again so the host's state decides.
+const updating = (e, task) => busy(e.currentTarget, task).then(renderUpdates);
+$('#update-check').onclick = e => updating(e, async () => {
+  await invoke('crate_update_check');
+  await loadUpdates();
+});
+$('#update-stage').onclick = e => updating(e, stageUpdate);
+$('#update-offer-stage').onclick = e => updating(e, stageUpdate);
+$('#update-apply').onclick = installUpdate;
+$('#update-offer-apply').onclick = installUpdate;
+$('#update-cancel').onclick = e => updating(e, cancelUpdate);
+$('#update-dismiss').onclick = e => updating(e, dismissUpdate);
+$('#update-offer-dismiss').onclick = e => updating(e, dismissUpdate);
+setTimeout(loadUpdates, 1500);
+setInterval(() => { if (current) loadUpdates(); }, 5 * 60_000);
+setInterval(() => { if (['staging', 'applying', 'deferred'].includes(updates?.state)) loadUpdates(); }, 3_000);
+
+// ---------------------------------------------------------------- account configuration
+
+/** What this installation knows about the account's configuration (paths and credentials never). */
+let accountConfig = null;
+let accountResetArmed = false;
+
+async function loadAccountConfig() {
+  const epoch = accountEpoch;
+  try {
+    const reply = await invoke('portable_status');
+    if (!adoptAccount(epoch, reply.standing)) return;
+    accountConfig = reply.sync;
+  } catch {
+    if (epoch !== accountEpoch) return;
+    accountConfig = null;
+  }
+  renderAccountConfig();
+}
+
+const ACCOUNT_STATES = {
+  synced: ['Synchronized', 'ok'], stale: ['Newer version available', 'warn'], diverged: ['Unsaved changes', 'warn'],
+  conflict: ['Conflict', 'warn'], error: ['Failed', 'warn'], never: ['Not loaded yet', 'muted'], syncing: ['Synchronizing…', 'muted'],
+};
+
+function renderAccountConfig() {
+  const panel = $('#panel-account-config');
+  const sync = accountConfig;
+  panel.hidden = sync?.mode !== 'replica';
+  if (panel.hidden) return;
+  const [label, tone] = ACCOUNT_STATES[sync.state] ?? ACCOUNT_STATES.never;
+  const badge = $('#account-config-state');
+  badge.textContent = t(label);
+  badge.className = `badge ${tone}`;
+  const loaded = sync.loaded ? t('Loaded revision {loaded}; account revision {saved}.', { loaded: sync.loaded.generation, saved: (sync.saved ?? sync.loaded).generation }) : '';
+  const when = sync.synced_at ? t('Synchronized {when}.', { when: ago(sync.synced_at * 1000) }) : t('Not synchronized yet.');
+  $('#account-config-summary').textContent = `${loaded} ${when}`.trim();
+  const problem = $('#account-config-problem');
+  const message = sync.conflict ? `${t('A change conflicted with a newer one. Synchronize, review the result and try again.')} ${tx(sync.conflict)}`
+    : sync.state === 'diverged' ? t('This computer has configuration changes that were never saved to the account. Nothing was replaced.')
+    : sync.error ? tx(sync.error.message) : '';
+  problem.textContent = message.trim();
+  problem.hidden = !problem.textContent;
+  const setup = $('#account-config-setup');
+  setup.replaceChildren();
+  const items = [...(sync.local_setup ?? [])];
+  if (items.length) setup.append(el('h3', { textContent: t('Still needed on this computer') }));
+  for (const item of items) setup.append(el('p', { class: 'hint', textContent: tx(item.message) }));
+  const hidden = (sync.unavailable?.sources?.length ?? 0) + (sync.unavailable?.questions?.length ?? 0);
+  if (hidden) setup.append(el('p', { class: 'hint', textContent: tn(hidden, '{n} item from your account is unavailable on this computer.', '{n} items from your account are unavailable on this computer.') }));
+  const reset = $('#account-config-reset');
+  reset.hidden = !['diverged', 'conflict', 'error'].includes(sync.state) && !(sync.state === 'never' && sync.error);
+  reset.textContent = accountResetArmed ? t('Tap again to replace') : t("Replace this computer's settings with the account's");
+}
+
+$('#account-config-sync').onclick = event => busy(event.currentTarget, async () => {
+  try { await invoke('portable_sync'); } finally { await loadAccountConfig(); }
+  done(t('Account configuration synchronized.'));
+});
+$('#account-config-reset').onclick = event => {
+  if (!accountResetArmed) {
+    accountResetArmed = true;
+    renderAccountConfig();
+    setTimeout(() => { accountResetArmed = false; renderAccountConfig(); }, 4000);
+    return;
+  }
+  accountResetArmed = false;
+  busy(event.currentTarget, async () => {
+    try { await invoke('portable_sync', { reset: true }); } finally { await loadAccountConfig(); }
+    done(t('This computer now uses the account configuration. The previous settings are kept in a private backup.'));
+  });
+};
+setInterval(() => { if (tab === 'settings' && !$('#panel-account-config').hidden) loadAccountConfig(); }, 10_000);
+
+// ---------------------------------------------------------------- account readiness
+
+const READINESS_STEPS = {
+  coordinator: ['panel-machines', () => t('Coordinator and sign-in')],
+  connection: ['panel-machines', () => t('Coordinator accepts this computer')],
+  machine: ['panel-machines', () => t('Listed on your account')],
+  configuration: ['panel-account-config', () => t('Account configuration')],
+  variables: ['panel-variables', () => t('Variables')],
+  migration: ['panel-migration', () => t('Existing credentials')],
+  providers: ['panel-llm', () => t('Model providers')],
+  roots: ['panel-machines', () => t('Directories for coding agents')],
+  teams: ['panel-teams', () => t('Microsoft Teams')],
+  versions: ['panel-updates', () => t('Versions')],
+};
+const READINESS_STATES = {
+  done: ['Done', 'ok'], todo: ['To do', 'warn'], waiting: ['Waiting', 'info'], attention: ['Needs attention', 'warn'],
+  unknown: ['Not checked', 'muted'], optional: ['Optional', 'muted'],
+};
+
+async function loadReadiness() {
+  const epoch = accountEpoch;
+  try {
+    const report = await invoke('setup_readiness');
+    if (epoch !== accountEpoch) return;
+    readiness = report;
+  } catch {
+    if (epoch !== accountEpoch) return;
+    readiness = null;
+  }
+  renderReadiness();
+  if (live) renderSteps(live);
+}
+
+/** The facts worth a line under a step, in the interface language. */
+function readinessFacts(step) {
+  const f = step.facts ?? {};
+  const when = at => ago(at * 1000);
+  switch (step.id) {
+    case 'connection':
+      return f.checked_at ? t('Checked {when}.', { when: when(f.checked_at) }) : '';
+    case 'machine':
+      return f.machines ? tn(f.machines, '{n} machine on your account; {online} online.', '{n} machines on your account; {online} online.', { online: f.online }) : '';
+    case 'configuration':
+      return f.loaded ? t('Loaded revision {loaded}; account revision {saved}.', { loaded: f.loaded.generation, saved: (f.saved ?? f.loaded).generation }) : '';
+    case 'variables':
+      return tn(f.count ?? 0, '{n} variable stored.', '{n} variables stored.');
+    case 'providers':
+      return f.providers?.length ? f.providers.join(', ') : '';
+    case 'roots':
+      return tn(f.count ?? 0, '{n} directory selected.', '{n} directories selected.');
+    case 'teams':
+      return [
+        f.microsoft_signed_in ? t('Signed in to Microsoft.') : t('Not signed in to Microsoft.'),
+        f.running ? t('The assistant is running.') : t('The assistant is stopped.'),
+        t('{received} received · {sent} sent.', { received: f.received, sent: f.sent }),
+        f.last_received_at ? t('Last message received {when}.', { when: when(f.last_received_at) }) : t('No Teams message has been received yet.'),
+      ].join(' ');
+    case 'versions':
+      return t('Running {running} · installed {installed} · available {available}.', { running: f.running ?? '—', installed: f.installed ?? '—', available: f.available ?? '—' });
+    default:
+      return '';
+  }
+}
+
+function expectedRow(item) {
+  const text = item.state === 'present' ? t('{name}: stored, version {n}', { name: item.name, n: item.version })
+    : item.state === 'waiting' ? t('{name}: waiting for you to type the value', { name: item.name })
+      : t('{name}: not stored yet', { name: item.name });
+  return el('li', { textContent: text, translate: 'no' });
+}
+
+function renderReadiness() {
+  const panel = $('#account-setup-panel');
+  const report = readiness;
+  const coordinator = report?.steps.find(step => step.id === 'coordinator');
+  // A computer that works on its own and was never offered an account has nothing to guide.
+  panel.hidden = !report || (report.mode === 'standalone' && coordinator?.state === 'optional');
+  if (panel.hidden) return;
+  const state = $('#account-setup-state');
+  state.textContent = report.ready ? t('Ready') : t('Needs attention');
+  state.className = `badge ${report.ready ? 'ok' : 'warn'}`;
+  const next = $('#account-setup-next');
+  next.textContent = report.next ? tx(report.next.detail) : '';
+  next.hidden = !report.next || report.ready;
+  const shown = report.steps.filter(step => step.state !== 'not_applicable');
+  $('#account-setup-steps').replaceChildren(...shown.map((step, index) => {
+    const [panelId, title] = READINESS_STEPS[step.id] ?? ['panel-machines', () => step.id];
+    const [label, tone] = READINESS_STATES[step.state] ?? READINESS_STATES.unknown;
+    const mark = el('span', { class: 'step-mark' }, step.state === 'done' ? icon('check') : String(index + 1));
+    const scope = badge(step.scope === 'coordinator' ? t('Account') : t('This computer'), 'muted');
+    const expected = (step.facts?.expected ?? []).map(expectedRow);
+    const facts = readinessFacts(step);
+    const body = el('div', {}, el('strong', {}, title(), ' ', badge(t(label), tone), ' ', scope),
+      el('p', { textContent: tx(step.detail) }),
+      facts ? el('p', { class: 'hint', textContent: facts }) : null,
+      expected.length ? el('ul', { class: 'hint' }, expected) : null);
+    let action = null;
+    if (step.state !== 'done') {
+      action = el('button', { class: 'secondary small', textContent: t('Set up') });
+      action.onclick = () => showTab('settings', panelId);
+    }
+    return el('li', { class: `step${step.state === 'done' ? ' done' : ''}` }, mark, body, action);
+  }));
+}
+
+$('#account-setup-refresh').onclick = event => busy(event.currentTarget, loadReadiness);
+setTimeout(loadReadiness, 1200);
+setInterval(() => { if (current && tab === 'overview') loadReadiness(); }, 30_000);
+
+// ---------------------------------------------------------------- variable consumers
+
+/** Which variable each consumer uses (name and version only) and the approved local launchers. */
+let consumerState = { consumers: [], launchers: [], error: '' };
+/** The variable picked in each selector, kept across refreshes until it is applied. */
+const consumerChoice = {};
+/** The last result shown under each consumer: a status sentence, never a value. */
+const consumerNote = {};
+
+async function loadConsumers() {
+  const epoch = accountEpoch;
+  try {
+    const reply = await invoke('variable_consumer_list');
+    if (!adoptAccount(epoch, reply.standing)) return;
+    consumerState = { consumers: reply.consumers, launchers: reply.launchers ?? [], error: '' };
+  } catch (error) {
+    if (epoch !== accountEpoch) return;
+    consumerState = { consumers: [], launchers: [], error: String(error?.message ?? error) };
+  }
+  renderConsumers();
+}
+
+const CHECK_RESULTS = {
+  ok: '{destination} accepted the key.',
+  rejected: '{destination} rejected the key.',
+  failed: '{destination} answered with an unexpected error.',
+  unreachable: 'Could not reach {destination}.',
+};
+
+function consumerRow(consumer) {
+  const { id, binding } = consumer;
+  const title = el('span', { class: 'cred-name', textContent: tx(consumer.title), translate: 'no' });
+  const usable = binding?.state === 'ok';
+  const configured = variableState.variables.find(v => v.name.toUpperCase() === consumer.credential);
+  const status = !binding ? (configured ? badge(t('Using {name} · version {n}', { name: configured.name, n: configured.version }), 'ok') : badge(t('No variable chosen'), 'muted'))
+    : usable ? badge(t('Using {name} · version {n}', { name: binding.variable.name, n: binding.variable.version }), 'ok')
+    : badge(binding.state === 'deleted' ? t('Variable deleted') : t('Variable missing'), 'warn');
+  const chosen = consumerChoice[id] ?? binding?.id ?? '';
+  const select = el('select', { 'aria-label': t('Variable for {consumer}', { consumer: consumer.title }) },
+    el('option', { value: '', textContent: t('Choose a variable') }),
+    variableState.variables.map(v => el('option', { value: v.id, textContent: `${v.name} · v${v.version}`, selected: v.id === chosen, translate: 'no' })));
+  const use = el('button', { type: 'button', textContent: t('Use this variable') });
+  const sync = () => { use.disabled = !select.value || (usable && select.value === binding.id); };
+  select.onchange = () => { consumerChoice[id] = select.value; sync(); };
+  sync();
+  use.onclick = () => busy(use, async () => {
+    const variable = variableState.variables.find(v => v.id === select.value);
+    const reply = await invoke('variable_consumer_bind', { consumer: id, variable: select.value, version: variable?.version });
+    delete consumerChoice[id];
+    consumerNote[id] = t('{consumer} now uses {name}.', { consumer: consumer.title, name: reply.binding.variable.name }) + (reply.restart_required ? ' ' + t('Restart the assistant to apply this change.') : '');
+    await loadConsumers();
+  });
+  const actions = [select, use];
+  if (binding) {
+    const test = el('button', { type: 'button', class: 'secondary', textContent: t('Test key'), disabled: !usable,
+      'aria-label': t('Test key with {destination}', { destination: consumer.destination }) });
+    test.onclick = () => busy(test, async () => {
+      const reply = await invoke('variable_consumer_check', { consumer: id });
+      consumerNote[id] = t(CHECK_RESULTS[reply.result.status] ?? CHECK_RESULTS.failed, { destination: consumer.destination });
+      await loadConsumers();
+    });
+    const stop = el('button', { type: 'button', class: 'secondary', textContent: t('Stop using') });
+    stop.onclick = () => busy(stop, async () => {
+      const reply = await invoke('variable_consumer_unbind', { consumer: id });
+      delete consumerChoice[id];
+      consumerNote[id] = t('{consumer} now uses its configured variable.', { consumer: consumer.title }) + (reply.restart_required ? ' ' + t('Restart the assistant to apply this change.') : '');
+      await loadConsumers();
+    });
+    actions.push(test, stop);
+  }
+  return el('div', { class: 'row variable-row' },
+    rowText(title, tx(consumer.summary), status),
+    el('p', { class: 'hint variable-note', textContent: t('Sent only to {destination}. The value is never shown here.', { destination: consumer.destination }) }),
+    el('div', { class: 'variable-actions' }, actions),
+    consumerNote[id] ? el('p', { class: 'hint variable-note', role: 'status', textContent: consumerNote[id] }) : null);
+}
+
+function launcherRow(launcher) {
+  const title = el('span', { class: 'cred-name', textContent: launcher.id, translate: 'no' });
+  const uses = launcher.variables.map(v => v.state === 'ok'
+    ? t('{env} from {name}', { env: v.env, name: v.variable.name })
+    : t('{env}: variable deleted or missing', { env: v.env })).join(', ');
+  const remove = el('button', { type: 'button', class: 'danger', textContent: t('Remove'), 'aria-label': t('Remove launcher {name}', { name: launcher.id }) });
+  remove.onclick = () => busy(remove, async () => {
+    await invoke('variable_launcher_remove', { id: launcher.id });
+    await loadConsumers();
+    done(t('Launcher {name} removed.', { name: launcher.id }));
+  });
+  const status = launcher.approved ? badge(t('Approved'), 'ok') : badge(t('Waiting for your approval'), 'warn');
+  const actions = [remove];
+  if (!launcher.approved) {
+    // Only a person at this window approves; the digest names the definition shown here.
+    const approve = el('button', { type: 'button', textContent: t('Approve'), 'aria-label': t('Approve launcher {name}', { name: launcher.id }) });
+    approve.onclick = () => busy(approve, async () => {
+      await invoke('variable_launcher_approve', { id: launcher.id, digest: launcher.digest });
+      await loadConsumers();
+      done(t('Launcher {name} approved.', { name: launcher.id }));
+    });
+    actions.unshift(approve);
+  }
+  const command = [launcher.program, ...(launcher.args ?? [])].join(' ');
+  return el('div', { class: 'row variable-row' },
+    rowText(title, launcher.description, status),
+    el('p', { class: 'hint variable-note', textContent: command, translate: 'no' }),
+    el('p', { class: 'hint variable-note', textContent: launcher.directory, translate: 'no' }),
+    el('p', { class: 'hint variable-note', textContent: uses, translate: 'no' }),
+    el('div', { class: 'variable-actions' }, actions));
+}
+
+/** What reads a `[secrets]` reference: the sources and settings that name it. */
+function referenceUses(reference) {
+  const uses = [];
+  for (const resource of current?.map?.resources ?? []) {
+    const tool = resource.tool;
+    if (!tool) continue;
+    const kind = toolNames[tool.type] ?? tool.type;
+    if (tool.secret_ref === reference) uses.push(t('{kind} source {id}', { kind, id: resource.id }));
+    if (tool.link_secret_ref === reference) uses.push(t('linking work to work items in {id}', { id: resource.id }));
+  }
+  if (current?.config?.knowledge_index?.embeddings?.secret_ref === reference) uses.push(t('semantic search'));
+  return uses;
+}
+
+/** One configured credential reference: which variable it uses by name, and a choice of another. */
+function referenceRow(reference, name) {
+  const key = `ref:${reference}`;
+  const uses = referenceUses(reference);
+  const title = el('span', { class: 'cred-name', textContent: reference, translate: 'no' });
+  const using = variableState.variables.find(v => v.name.toUpperCase() === name.toUpperCase());
+  const status = using ? badge(t('Using {name} · version {n}', { name: using.name, n: using.version }), 'ok')
+    : badge(t('Missing {name}', { name }), 'warn');
+  const summary = uses.length ? t('Used by {uses}.', { uses: uses.join(', ') }) : t('Not used by any source.');
+  const chosen = consumerChoice[key] ?? using?.name ?? '';
+  const select = el('select', { 'aria-label': t('Variable for {consumer}', { consumer: reference }) },
+    el('option', { value: '', textContent: t('Choose a variable') }),
+    variableState.variables.map(v => el('option', { value: v.name, textContent: `${v.name} · v${v.version}`, selected: v.name === chosen, translate: 'no' })));
+  const use = el('button', { type: 'button', textContent: t('Use this variable') });
+  const sync = () => { use.disabled = !select.value || select.value === name; };
+  select.onchange = () => { consumerChoice[key] = select.value; sync(); };
+  sync();
+  use.onclick = () => busy(use, async () => {
+    const chosenName = select.value;
+    current.config.secrets[reference] = chosenName;
+    try { await save(); } catch (error) { await reload(); throw error; }
+    delete consumerChoice[key];
+    consumerNote[key] = t('{consumer} now uses {name}.', { consumer: reference, name: chosenName });
+    renderConsumers();
+  });
+  return el('div', { class: 'row variable-row' },
+    rowText(title, summary, status),
+    el('div', { class: 'variable-actions' }, [select, use]),
+    consumerNote[key] ? el('p', { class: 'hint variable-note', role: 'status', textContent: consumerNote[key] }) : null);
+}
+
+/** Plain text only: summaries come from the host's fixed registry; names and paths are user data. */
+function renderConsumers() {
+  const { consumers, launchers, error } = consumerState;
+  const list = $('#consumers');
+  list.replaceChildren();
+  if (error) list.append(el('p', { class: 'hint', role: 'status', textContent: tx(error) }));
+  for (const consumer of consumers) list.append(consumerRow(consumer));
+  for (const [reference, name] of Object.entries(current?.config?.secrets ?? {})) list.append(referenceRow(reference, name));
+  $('#launchers').hidden = !launchers.length;
+  $('#launcher-list').replaceChildren(...launchers.map(launcherRow));
+}
+
+/** Plain text only: names and descriptions are user data, never markup or instructions. */
+/** One line about where the catalog comes from and how current it is (metadata only, never a value). */
+function syncSummary(sync) {
+  if (!sync) return '';
+  if (sync.mode === 'authoritative') return t('This computer holds your variables itself, so they are always current. Revision {n}.', { n: sync.revision });
+  const loaded = sync.revision == null ? '' : t('Revision {n}, synchronized {when}.', { n: sync.revision, when: ago(sync.synced_at * 1000) });
+  switch (sync.state) {
+    case 'syncing': return t('Synchronizing…');
+    case 'synced': return t('Synchronized with your account. {loaded}', { loaded });
+    case 'conflict': return `${t('A change conflicted with a newer one. The list was refreshed: review it and try again.')} ${tx(sync.conflict ?? '')}`.trim();
+    case 'error': return `${t('Synchronization failed; the last synchronized catalog is shown.')} ${loaded} ${tx(sync.error?.message ?? '')}`.trim();
+    default: return t('Not synchronized yet.');
+  }
+}
+
+function renderVariables() {
+  const { variables, pending, error, sync } = variableState;
+  const mirror = sync?.mode === 'mirror';
+  const line = $('#variables-sync');
+  line.textContent = syncSummary(sync);
+  line.hidden = !line.textContent;
+  $('#variables-refresh').textContent = mirror ? t('Synchronize now') : t('Refresh');
+  const query = $('#variables-search').value.trim().toLowerCase();
+  const shown = variables.filter(v => !query || v.name.toLowerCase().includes(query) || v.description.toLowerCase().includes(query));
+  const list = $('#variables');
+  list.replaceChildren();
+  $('#variables-count').hidden = !variables.length;
+  $('#variables-count').textContent = tn(variables.length, '{n} variable', '{n} variables');
+  $('#variables-search-field').hidden = variables.length < 6;
+  if (error) {
+    list.append(el('p', { class: 'hint', role: 'status', textContent: tx(error) }));
+  } else if (!variables.length) {
+    list.append(el('p', { class: 'hint', textContent: t('No variables yet. Add one below, or ask your agent to request one.') }));
+  } else if (!shown.length) {
+    list.append(el('p', { class: 'hint', textContent: t('No variable matches this search.') }));
+  }
+  for (const variable of shown) list.append(variableRow(variable));
+  renderPendingVariables(pending);
+  updateVariableForm();
+}
+
+function variableRow(variable) {
+  const { id, name } = variable;
+  const title = el('span', { class: 'cred-name', textContent: name, translate: 'no' });
+  const visible = revealedVariable?.id === id && revealedVariable.version === variable.version;
+  const value = visible
+    ? el('pre', { class: 'variable-value', textContent: revealedVariable.value, translate: 'no', tabIndex: 0, 'aria-label': t('Value of {name}', { name }) })
+    : el('span', { class: 'variable-mask', textContent: '••••••••••', role: 'img', 'aria-label': t('Value hidden') });
+  const reveal = el('button', { type: 'button', class: 'secondary', 'aria-pressed': String(visible),
+    'aria-label': visible ? t('Hide the value of {name}', { name }) : t('Reveal the value of {name}', { name }) },
+    icon(visible ? 'eye-off' : 'eye'), visible ? t('Hide') : t('Reveal'));
+  reveal.onclick = () => busy(reveal, async () => {
+    if (visible) return clearRevealedVariable();
+    const epoch = accountEpoch, view = revealEpoch;
+    const reply = await invoke('variable_reveal', { id });
+    if (epoch !== accountEpoch || view !== revealEpoch || document.hidden) return;
+    clearRevealedVariable(false);
+    // The reply names the current version: show it against fresh metadata, never a stale row.
+    variableState.variables = variableState.variables.map(v => v.id === id ? reply.variable : v);
+    revealedVariable = { id, version: reply.variable.version, value: reply.value, timer: setTimeout(clearRevealedVariable, VALUE_SECONDS * 1000) };
+    renderVariables();
+  });
+  const copyValue = el('button', { type: 'button', class: 'secondary', textContent: t('Copy value'), 'aria-label': t('Copy value of {name}', { name }) });
+  copyValue.onclick = () => busy(copyValue, async () => {
+    const epoch = accountEpoch, view = revealEpoch;
+    const reply = await invoke('variable_reveal', { id });
+    if (epoch !== accountEpoch || view !== revealEpoch || document.hidden) return;
+    // Only the clipboard receives it: no toast, notice or log carries the value.
+    if (!await copy(reply.value)) throw t('The value could not be copied. Reveal it and copy it by hand.');
+    await scheduleClipboardCleanup(reply.value);
+    done(t('Value of {name} copied. The clipboard is cleared in a minute if it is unchanged.', { name }));
+  });
+  const edit = el('button', { type: 'button', class: 'secondary', textContent: t('Edit'), 'aria-expanded': String(editingVariable === id), 'aria-label': t('Edit {name}', { name }) });
+  edit.onclick = () => {
+    editingVariable = editingVariable === id ? null : id;
+    variableDraft = null;
+    renderVariables();
+  };
+  const armed = deletingVariable === id;
+  const remove = el('button', { type: 'button', class: 'danger', textContent: armed ? t('Confirm deletion') : t('Delete'),
+    'aria-label': armed ? t('Confirm deletion of {name}', { name }) : t('Delete {name}', { name }) });
+  remove.onclick = () => busy(remove, async () => {
+    if (!armed) {
+      // An irreversible action asks for a second tap, and disarms itself.
+      deletingVariable = id;
+      clearTimeout(armTimer);
+      armTimer = setTimeout(() => { if (deletingVariable === id) { deletingVariable = null; renderVariables(); } }, 8000);
+      return renderVariables();
+    }
+    deletingVariable = null;
+    await changeVariable('variable_delete', variable);
+    if (revealedVariable?.id === id) clearRevealedVariable(false);
+    if (editingVariable === id) editingVariable = null;
+    await loadVariables();
+    done(t('{name} deleted.', { name }));
+  });
+  const actions = [reveal, copyValue, edit, remove];
+  if (armed) {
+    const keep = el('button', { type: 'button', class: 'secondary', textContent: t('Cancel'), 'aria-label': t('Cancel deletion of {name}', { name }) });
+    keep.onclick = () => { deletingVariable = null; renderVariables(); };
+    actions.push(keep);
+  }
+  return el('div', { class: 'row variable-row' },
+    rowText(title, variable.description, badge(t('Stored · version {n}', { n: variable.version }), 'ok')),
+    el('div', { class: 'variable-value-box' }, value),
+    el('div', { class: 'variable-actions' }, actions),
+    armed ? el('p', { class: 'hint variable-note', role: 'status', textContent: t('Deleting removes it for good and its value cannot be recovered. It does not revoke the credential at its provider.') }) : null,
+    editingVariable === id ? variableEditor(variable) : null);
+}
+
+/** Two independent edits of the same entry: description only, and a replacement value only. */
+function variableEditor(variable) {
+  const { id, name } = variable;
+  const description = el('input', { value: variableDraft?.id === id ? variableDraft.description : variable.description, maxLength: 500,
+    autocomplete: 'off', spellcheck: false, 'aria-label': t('Description of {name}', { name }) });
+  const saveDescription = el('button', { type: 'button', textContent: t('Save description') });
+  const sync = () => { saveDescription.disabled = !description.value.trim() || description.value.trim() === variable.description; };
+  description.oninput = () => { variableDraft = { id, description: description.value }; sync(); };
+  sync();
+  saveDescription.onclick = () => busy(saveDescription, async () => {
+    const text = description.value.trim();
+    if (!text || text.length > 500 || UNSAFE_TEXT.test(text)) throw t('A description is plain text on one line, up to 500 characters.');
+    await changeVariable('variable_update', variable, { description: text });
+    variableDraft = editingVariable = null;
+    await loadVariables();
+    done(t('Description of {name} updated.', { name }));
+  });
+
+  const input = el('textarea', { class: 'secret-entry', rows: 2, autocomplete: 'off', autocapitalize: 'off', spellcheck: false,
+    placeholder: t('Enter the new value'), 'aria-label': t('New value of {name}', { name }) });
+  const show = el('input', { type: 'checkbox' });
+  show.onchange = () => input.classList.toggle('shown', show.checked);
+  const replace = el('button', { type: 'button', textContent: t('Replace value'), disabled: true });
+  input.oninput = () => { replace.disabled = !input.value; };
+  replace.onclick = () => busy(replace, async () => {
+    checkVariableValue(input.value);
+    const next = input.value;
+    input.value = '';
+    await changeVariable('variable_update', variable, { value: next });
+    if (revealedVariable?.id === id) clearRevealedVariable(false);
+    variableDraft = editingVariable = null;
+    await loadVariables();
+    done(t('Value of {name} replaced. Its name and description are unchanged.', { name }));
+  });
+  const close = el('button', { type: 'button', class: 'secondary', textContent: t('Cancel') });
+  close.onclick = () => { input.value = ''; editingVariable = variableDraft = null; renderVariables(); };
+  return el('div', { class: 'variable-edit' },
+    el('label', {}, t('Description'), description),
+    el('div', { class: 'actions' }, saveDescription),
+    el('label', {}, t('New value'), el('small', { textContent: t('The name, description and references stay the same.') }), input),
+    el('label', { class: 'check' }, show, icon('eye'), ` ${t('Show the value while I type')}`),
+    el('div', { class: 'actions' }, replace, close));
+}
+
+function renderPendingVariables(pending) {
+  const box = $('#variables-pending');
+  box.hidden = !pending.length;
+  box.replaceChildren();
+  if (!pending.length) return;
+  box.append(el('p', { class: 'hint', textContent: t('Your agent asked you to store these. Type each value here: the agent never sees it.') }));
+  for (const entry of pending) {
+    const title = el('span', { class: 'cred-name', textContent: entry.name, translate: 'no' });
+    const input = el('textarea', { class: 'secret-entry', rows: 1, autocomplete: 'off', autocapitalize: 'off', spellcheck: false,
+      placeholder: t('Enter the value'), 'aria-label': t('Value of {name}', { name: entry.name }) });
+    const save = el('button', { textContent: t('Save'), disabled: true });
+    const cancel = el('button', { class: 'secondary', textContent: t('Cancel'), 'aria-label': t('Cancel request for {name}', { name: entry.name }) });
+    input.oninput = () => { save.disabled = !input.value; };
+    save.onclick = () => busy(save, async () => {
+      checkVariableValue(input.value);
+      await invoke('variable_entry_complete', { request: entry.request, value: input.value });
+      input.value = '';
+      await loadVariables();
+      done(t('{name} stored.', { name: entry.name }));
+    });
+    cancel.onclick = () => busy(cancel, async () => {
+      await invoke('variable_entry_cancel', { request: entry.request });
+      await loadVariables();
+      done(t('Request for {name} cancelled.', { name: entry.name }));
+    });
+    box.append(el('div', { class: 'row' }, rowText(title, entry.description, badge(t('Waiting for you'), 'warn')), input, save, cancel));
+  }
+}
+
+function checkVariableValue(value) {
+  if (!value || value.includes('\u0000') || new TextEncoder().encode(value).length > 16384) throw t('A value has 1 byte to 16 KiB of text without NUL characters.');
+}
+
+function variableForm() {
+  return { name: $('#variable-name').value.trim(), description: $('#variable-description').value.trim(), value: $('#variable-value').value };
+}
+function updateVariableForm() {
+  const form = variableForm();
+  $('#variable-create').disabled = !form.name || !form.description || !form.value;
+}
+
+$('#variables-search').oninput = renderVariables;
+for (const id of ['#variable-name', '#variable-description', '#variable-value']) $(id).oninput = updateVariableForm;
+$('#variable-show').onchange = event => $('#variable-value').classList.toggle('shown', event.target.checked);
+$('#variable-create').onclick = event => busy(event.currentTarget, async () => {
+  const form = variableForm();
+  if (!VARIABLE_NAME.test(form.name)) throw t('A variable name uses letters, digits and _, cannot start with a digit and has at most 128 characters.');
+  if (form.description.length > 500 || UNSAFE_TEXT.test(form.description)) throw t('A description is plain text on one line, up to 500 characters.');
+  checkVariableValue(form.value);
+  const fingerprint = JSON.stringify([form.name, form.description, form.value]);
+  if (variableAttempt?.fingerprint !== fingerprint) variableAttempt = { id: crypto.randomUUID(), fingerprint };
+  const reply = await invoke('variable_create', { id: variableAttempt.id, ...form });
+  variableAttempt = null;
+  for (const id of ['#variable-name', '#variable-description', '#variable-value']) $(id).value = '';
+  await loadVariables();
+  done(reply.replayed ? t('{name} was already stored.', { name: form.name }) : t('{name} stored.', { name: form.name }));
+});
+$('#variables-refresh').onclick = event => busy(event.currentTarget, async () => {
+  if (variableState.sync?.mode === 'mirror') {
+    // The coordinator is authoritative: ask it now, then show whatever this computer holds.
+    try { await invoke('variable_sync'); } finally { await loadVariables(); }
+    return done(t('Variables synchronized. Revision {n}.', { n: variableState.sync?.revision ?? '' }));
+  }
+  await loadVariables();
+  done(t('Variables refreshed.'));
+});
+// The periodic refresh never rebuilds a form the user is typing in.
+const typingVariable = () => editingVariable || document.activeElement?.closest?.('#consumers') || [...document.querySelectorAll('#variables-pending textarea')].some(field => field.value);
+setInterval(() => { if (tab === 'settings' && !$('#panel-variables').closest('[role=tabpanel]').hidden && !typingVariable()) loadVariables(); }, 10_000);
 
 const effortNames = { default: t('Model default'), none: t('No reasoning'), minimal: t('Minimal'), low: t('Low'), medium: t('Medium'), high: t('High'), xhigh: t('Very high'), max: t('Maximum') };
 let llmCatalog = { providers: [] };
@@ -1515,7 +2536,7 @@ function providerStatus(info) {
   if (!info) return t('Provider not available in this version');
   if (info.transport === 'cli') return info.available ? `${t('CLI installed')}${info.version ? ' · ' + info.version : ''}` : t('CLI not installed on this computer');
   const source = live.credentials[info.credential];
-  return source && source !== 'missing' && source !== 'unused' ? t('API · {name} set', { name: info.credential }) : t('API · {name} missing in Credentials', { name: info.credential });
+  return source && source !== 'missing' && source !== 'unused' ? t('API · {name} set', { name: info.credential }) : t('API · {name} missing in Variables', { name: info.credential });
 }
 
 function select(caption, label, options, value) {
@@ -3093,10 +4114,14 @@ async function machineLogin() {
     dialog.close();
     link.removeAttribute('href'); $('#machine-login-code').textContent = '';
     await loadMachines().catch(fail);
+    if (connected) { leaveAccount(); await Promise.all([loadVariables(), loadAccountConfig()]).catch(fail); }
   }
 }
 $('#machine-disconnect').onclick = () => busy($('#machine-disconnect'), async () => {
-  await invoke('machine_disconnect'); await loadMachines();
+  await invoke('machine_disconnect');
+  leaveAccount();
+  await loadMachines();
+  await Promise.all([loadVariables(), loadAccountConfig()]);
 });
 $('#todo-provider').onchange = () => {
   $('#todo-state').replaceChildren(el('option', { value: '', textContent: t('All states') }));
@@ -3535,6 +4560,7 @@ if (window.ptaTransport.browser) {
     for (const id of ['#public-url', '#bind', '#tunnel-config', '#cloudflare-tunnel']) $(id).disabled = true;
     for (const button of [$('#web-logout'), $('#web-logout-settings')]) {
       button.onclick = () => busy(button, async () => {
+        leaveAccount();
         const result = await window.ptaTransport.request('/api/logout', {});
         window.location.replace(result.logout_url);
       });

@@ -28,6 +28,27 @@ async function open(options = {}, scenario = 'full') {
   return { context, page, errors };
 }
 
+// Restored public Microsoft identifiers appear without overwriting unsaved setup edits.
+{
+  const { context, page, errors } = await open();
+  await page.click('nav [data-tab="settings"]');
+  await page.click('#settings-tab-teams');
+  await page.evaluate(async () => {
+    window.__ptaSetMicrosoftSetup({ tenant_id: '11111111-1111-4111-8111-111111111111' });
+    await refreshLive();
+  });
+  check('restored Microsoft setup appears in its field', await page.inputValue('#tenant-id') === '11111111-1111-4111-8111-111111111111');
+  await page.fill('#client-id', '22222222-2222-4222-8222-222222222222');
+  await page.evaluate(async () => {
+    window.__ptaSetMicrosoftSetup({ client_id: '33333333-3333-4333-8333-333333333333' }, 'A Microsoft setup variable is invalid. Enter a real UUID in Variables.');
+    await refreshLive();
+  });
+  check('Microsoft setup refresh preserves unsaved edits', await page.inputValue('#client-id') === '22222222-2222-4222-8222-222222222222');
+  check('Microsoft setup conflicts are translated and visible', await page.locator('#teams-identity-error').isVisible() && await page.locator('#teams-identity-error').innerText().then(text => text.includes('UUID real')));
+  check('Microsoft setup has no client errors', errors.length === 0, errors.join('; '));
+  await context.close();
+}
+
 // Native date/time controls must fit their label, including an empty end date.
 {
   const { context, page } = await open({ context: { viewport: { width: 320, height: 780 }, isMobile: true, hasTouch: true } });
@@ -543,8 +564,8 @@ check('axe: no WCAG 2.2 AA violations in any scan', !Object.keys(totals).length,
   check('fresh: setup checklist visible', await page.isVisible('#setup-panel'));
   await page.click('#setup-steps li:first-child button');
   await page.waitForTimeout(300);
-  check('fresh: setup step opens Settings › Credentials', await page.getAttribute('#settings-tab-credentials', 'aria-selected') === 'true' && await page.isVisible('#panel-credentials'));
-  check('fresh: credentials and Teams flagged', await page.isVisible('#settings-tab-credentials .flag.warn') && await page.isVisible('#settings-tab-teams .flag.warn'));
+  check('fresh: setup step opens Settings › Variables', await page.getAttribute('#settings-tab-variables', 'aria-selected') === 'true' && await page.isVisible('#panel-variables'));
+  check('fresh: credentials and Teams flagged', await page.isVisible('#settings-tab-variables .flag.warn') && await page.isVisible('#settings-tab-teams .flag.warn'));
   await context.close();
 }
 {
@@ -627,7 +648,7 @@ check('axe: no WCAG 2.2 AA violations in any scan', !Object.keys(totals).length,
   await page.screenshot({ path: `${out}/phone-messages-answer.png`, fullPage: true });
   await page.click('nav [data-tab="registration"]');
   check('phone: recorded day list remains available', await page.isVisible('#activity-master'));
-  for (const g of ['general', 'teams', 'models', 'activity', 'credentials', 'advanced']) {
+  for (const g of ['general', 'teams', 'models', 'activity', 'variables', 'advanced']) {
     await page.evaluate(x => selectTab($('#settings-tabs'), x), g);
     await page.waitForTimeout(150);
     await page.screenshot({ path: `${out}/phone-settings-${g}.png`, fullPage: true });
@@ -637,7 +658,7 @@ check('axe: no WCAG 2.2 AA violations in any scan', !Object.keys(totals).length,
 {
   const { context, page } = await open();
   await page.click('nav [data-tab="settings"]');
-  for (const g of ['general', 'teams', 'models', 'activity', 'credentials', 'advanced']) {
+  for (const g of ['general', 'teams', 'models', 'activity', 'variables', 'advanced']) {
     await page.click(`#settings-tab-${g}`);
     await page.waitForTimeout(150);
     await page.screenshot({ path: `${out}/desktop-settings-${g}.png`, fullPage: true });
@@ -979,6 +1000,472 @@ for (const [label, ctx] of [['machine-desktop', {}], ['machine-phone', { viewpor
   await page.waitForFunction(() => window.__ptaMachineRevoked);
   check(`${label}: revoked machine cannot be selected for Teams`, await page.locator('#machine-list input[value="22222222-2222-4222-8222-222222222222"]').isDisabled());
   check(`${label}: machine workflow has no browser errors`, errors.length === 0, errors.join('; '));
+  await context.close();
+}
+// Catalog synchronization: a connected installation shows where its copy stands and can synchronize now.
+for (const [label, ctx] of [['variable-sync-desktop', {}], ['variable-sync-phone', { viewport: { width: 393, height: 852 }, isMobile: true }]]) {
+  const { context, page, errors } = await open({ axe: true, context: ctx });
+  await page.evaluate(() => showTab('settings', 'panel-variables'));
+  await page.locator('#variables .row').first().waitFor();
+  check(`${label}: a catalog that is its own authority says it is current`, await page.locator('#variables-sync').innerText().then(text => text.includes('siempre están al día') && text.includes('Revisión 7')));
+  check(`${label}: the button stays a plain refresh there`, await page.locator('#variables-refresh').innerText() === 'Actualizar');
+  await page.evaluate(() => { window.__ptaVariableSync = { mode: 'mirror', state: 'synced', coordinator: 'https://assistant.example.test', revision: 12, synced_at: Math.floor(Date.now() / 1000) - 120, entries: 2, error: null, conflict: null }; return loadVariables(); });
+  await page.locator('#variables-refresh').click();
+  await page.locator('#notice.ok').getByText('Variables sincronizadas. Revisión 13').waitFor();
+  check(`${label}: a mirror offers Synchronize now and reports the loaded revision`, await page.locator('#variables-refresh').innerText() === 'Sincronizar ahora'
+    && await page.locator('#variables-sync').innerText().then(text => text.includes('Sincronizado con tu cuenta') && text.includes('Revisión 13')));
+  check(`${label}: the status is a live region`, await page.locator('#variables-sync').getAttribute('role') === 'status');
+  await page.evaluate(() => { window.__ptaSyncFail = true; });
+  await page.locator('#variables-refresh').click();
+  await page.locator('#variables-sync', { hasText: 'Falló la sincronización' }).waitFor();
+  check(`${label}: an outage keeps the last catalog and says so in Spanish`, await page.locator('#variables .row').count() === 2
+    && await page.locator('#variables-sync').innerText().then(text => text.includes('Revisión 13') && text.includes('No se pudo contactar al coordinador')));
+  await page.evaluate(() => { window.__ptaSyncFail = false; window.__ptaVariableSync = { ...window.__ptaVariableSync, state: 'conflict', error: null, conflict: 'API changed since it was loaded (it is now version 4). Inspect it before editing again.' }; return loadVariables(); });
+  check(`${label}: a conflict is announced with advice`, await page.locator('#variables-sync').innerText().then(text => text.includes('chocó con otro más reciente') && text.includes('Revisa') === false && text.includes('revísala')));
+  await page.locator('#variables-refresh').click();
+  await page.locator('#variables-sync', { hasText: 'Sincronizado con tu cuenta' }).waitFor();
+  check(`${label}: an explicit synchronization clears a conflict`, await page.locator('#variables-sync').innerText().then(text => !text.includes('chocó')));
+  check(`${label}: synchronization keeps the phone boundary`, await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+  await page.evaluate(axeSource);
+  check(`${label}: synchronization state passes axe`, (await scan(page)).length === 0, JSON.stringify(await scan(page)));
+  check(`${label}: synchronization has no browser errors`, errors.length === 0, errors.join('; '));
+  await context.close();
+}
+
+// Account readiness: the ordered steps of a signed-in installation, each marked Account or This
+// computer, with facts that keep configured, running, received and sent apart.
+for (const [label, ctx] of [['readiness-desktop', {}], ['readiness-phone', { viewport: { width: 393, height: 852 }, isMobile: true }]]) {
+  const { context, page, errors } = await open({ axe: true, context: ctx });
+  await page.waitForFunction(() => readiness !== null);
+  await page.evaluate(() => renderSteps(live));
+  check(`${label}: a computer that works on its own shows no account guidance`, await page.locator('#account-setup-panel').isHidden());
+  check(`${label}: the first-run checklist offers adding the computer as an optional step`, await page.locator('#setup-steps').innerText().then(text => text.includes('Agregar este equipo a tu cuenta') && text.includes('opcional')));
+  await page.evaluate(() => {
+    const step = (id, scope, state, detail, facts = {}, required = true) => ({ id, scope, required, state, detail, facts, actions: [] });
+    window.__ptaReadiness = {
+      ready: false, mode: 'signed_in', client: 'window', local_owner: true, coordinator: 'https://assistant.example.test',
+      next: { step: 'variables', state: 'todo', detail: 'Some variables you need are not stored yet. Type each value in the protected entry (Settings > Variables, or `pta variables entry complete`); it never goes through chat.', actions: [] },
+      steps: [
+        step('coordinator', 'coordinator', 'done', 'This computer is signed in to your account\'s coordinator.'),
+        step('connection', 'coordinator', 'done', 'The coordinator answered and accepts this computer.', { standing: 'live', checked_at: Math.floor(Date.now() / 1000) - 60 }),
+        step('machine', 'coordinator', 'done', 'This computer is on your account\'s machine list, which every signed-in client shows.', { machines: 3, online: 2 }),
+        step('configuration', 'coordinator', 'done', 'Your account configuration is restored and up to date on this computer.', { loaded: { generation: 5 }, saved: { generation: 5 } }),
+        step('variables', 'coordinator', 'todo', 'Some variables you need are not stored yet. Type each value in the protected entry (Settings > Variables, or `pta variables entry complete`); it never goes through chat.',
+          { count: 2, expected: [{ name: 'DEPLOY_ENDPOINT', state: 'present', version: 3 }, { name: 'PARTNER_TOKEN', state: 'waiting' }, { name: 'SIGNING_KEY', state: 'missing' }] }),
+        step('migration', 'this_machine', 'optional', 'Optional: review which existing credentials of this installation to move into your account. Nothing is moved until you confirm each one.', {}, false),
+        step('providers', 'this_machine', 'attention', 'A model provider in the configuration is not installed or signed in on this computer. Nothing is installed or used in its place; install it and sign in yourself, then check again.', { providers: ['codex'] }, false),
+        step('roots', 'this_machine', 'optional', 'No directory is selected for coding agents on this computer. Registration never grants access; choose the folders yourself with the directory selector.', { count: 0 }, false),
+        step('teams', 'this_machine', 'todo', 'Teams is configured here but the assistant is stopped. Start it yourself when you are ready; nothing starts automatically.', { microsoft_signed_in: true, running: false, received: 4, sent: 1, last_received_at: Math.floor(Date.now() / 1000) - 3600 }, false),
+        step('versions', 'this_machine', 'optional', 'A newer release is available. Updating is a separate, confirmed action.', { running: '0.9.13', installed: '0.9.13', available: '0.9.14' }, false),
+      ] };
+    return loadReadiness();
+  });
+  const panel = page.locator('#account-setup-panel');
+  await panel.waitFor();
+  const rows = panel.locator('#account-setup-steps > li');
+  check(`${label}: every step of the guided path is listed in order`, await rows.count() === 10 && await rows.nth(0).innerText().then(text => text.includes('Coordinador e inicio de sesión')) && await rows.nth(9).innerText().then(text => text.includes('Versiones')));
+  check(`${label}: account scope and this-computer scope are both labelled`, await panel.locator('#account-setup-steps .badge', { hasText: 'Cuenta' }).count() === 5 && await panel.locator('#account-setup-steps .badge', { hasText: 'Este computador' }).count() === 5);
+  check(`${label}: the next action is announced and translated`, await panel.locator('#account-setup-next').innerText().then(text => text.includes('Faltan algunas variables')) && await panel.locator('#account-setup-state').innerText() === 'Requiere atención');
+  const variables = rows.nth(4);
+  check(`${label}: expected variables show present, waiting and missing without any value`, await variables.innerText().then(text => text.includes('DEPLOY_ENDPOINT: guardada, versión 3') && text.includes('PARTNER_TOKEN: esperando que escribas el valor') && text.includes('SIGNING_KEY: aún no está guardada')));
+  const teams = await rows.nth(8).innerText();
+  check(`${label}: Teams keeps signed in, running, received and sent apart`, teams.includes('Sesión de Microsoft iniciada.') && teams.includes('El asistente está detenido.') && teams.includes('4 recibidos · 1 enviados.') && teams.includes('Último mensaje recibido'));
+  check(`${label}: versions show running, installed and available separately`, await rows.nth(9).innerText().then(text => text.includes('En ejecución 0.9.13 · instalada 0.9.13 · disponible 0.9.14.')));
+  check(`${label}: finished steps have no button and open steps lead to their settings`, await rows.nth(0).locator('button').count() === 0 && await rows.nth(4).locator('button').count() === 1);
+  check(`${label}: every row is text, never only color`, await panel.locator('#account-setup-steps .badge', { hasText: 'Pendiente' }).count() === 2);
+  await rows.nth(4).locator('button').click();
+  check(`${label}: a step opens the settings panel that fixes it`, await page.locator('#panel-variables').isVisible());
+  await page.evaluate(() => showTab('overview'));
+  check(`${label}: the panel keeps the phone boundary`, await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+  await page.evaluate(axeSource);
+  check(`${label}: the readiness panel passes axe`, (await scan(page)).length === 0, JSON.stringify(await scan(page)));
+  // Becoming ready folds the guidance into a single confirmation.
+  await page.evaluate(() => { window.__ptaReadiness = { ...window.__ptaReadiness, ready: true, next: null }; return loadReadiness(); });
+  check(`${label}: a ready installation says so and shows no next action`, await panel.locator('#account-setup-state').innerText() === 'Lista' && await panel.locator('#account-setup-next').isHidden());
+  // Leaving the account forgets the report.
+  await page.evaluate(() => { leaveAccount(); });
+  check(`${label}: leaving the account clears the report`, await panel.isHidden());
+  check(`${label}: has no browser errors`, errors.length === 0, errors.join('; '));
+  await context.close();
+}
+
+// Account configuration: a signed-in installation shows what it loaded and what is still local setup.
+for (const [label, ctx] of [['account-config-desktop', {}], ['account-config-phone', { viewport: { width: 393, height: 852 }, isMobile: true }]]) {
+  const { context, page, errors } = await open({ axe: true, context: ctx });
+  await page.evaluate(() => showTab('settings', 'panel-account-config'));
+  check(`${label}: a coordinator or standalone installation shows no panel`, await page.locator('#panel-account-config').isHidden());
+  await page.evaluate(() => {
+    window.__ptaAccountConfig = { mode: 'replica', state: 'stale', coordinator: 'https://assistant.example.test', loaded: { generation: 4, digest: 'abc' }, saved: { generation: 5, digest: 'abd' },
+      synced_at: Math.floor(Date.now() / 1000) - 300, error: null, conflict: null, local_changes: false,
+      unavailable: { sources: [{ id: 'handbook-docs', repository: 'handbook' }], questions: ['where-is-the-guide'], partial: [] },
+      local_setup: [{ id: 'repository:handbook', message: 'Connect the repository «handbook» on this computer; the sources that read it are unavailable until then.' },
+        { id: 'roots', message: 'No directory is selected for coding agents on this computer; registering it does not grant access.' }] };
+    return loadAccountConfig();
+  });
+  await page.locator('#panel-account-config').waitFor();
+  check(`${label}: loaded and account revisions are both shown`, await page.locator('#account-config-summary').innerText().then(text => text.includes('Revisión cargada 4') && text.includes('revisión de la cuenta 5')));
+  check(`${label}: local setup is separated from what was restored and translated`, await page.locator('#account-config-setup').innerText().then(text => text.includes('Aún se necesita en este computador') && text.includes('Conecta el repositorio «handbook»') && text.includes('2 elementos de tu cuenta no están disponibles')));
+  check(`${label}: the state is a text badge`, await page.locator('#account-config-state').innerText() === 'Hay una versión más nueva');
+  check(`${label}: replacing local settings is hidden unless there is something to resolve`, await page.locator('#account-config-reset').isHidden());
+  await page.locator('#account-config-sync').click();
+  await page.locator('#notice.ok').getByText('Configuración de la cuenta sincronizada').waitFor();
+  check(`${label}: Synchronize now reports the new state`, await page.locator('#account-config-state').innerText() === 'Sincronizado');
+  await page.evaluate(() => { window.__ptaAccountConfig = { ...window.__ptaAccountConfig, state: 'diverged', local_changes: true }; return loadAccountConfig(); });
+  check(`${label}: unsaved local changes are explained and offer an explicit replacement`, await page.locator('#account-config-problem').innerText().then(text => text.includes('nunca se guardaron en la cuenta')) && await page.locator('#account-config-reset').isVisible());
+  await page.locator('#account-config-reset').click();
+  check(`${label}: replacing needs a second tap`, await page.locator('#account-config-reset').innerText() === 'Toca otra vez para reemplazar' && await page.evaluate(() => (window.__ptaAccountSyncs || []).every(args => !args.reset)));
+  await page.locator('#account-config-reset').click();
+  await page.locator('#notice.ok').getByText('copia privada').waitFor();
+  check(`${label}: the second tap requests a reset`, await page.evaluate(() => window.__ptaAccountSyncs.at(-1).reset === true));
+  await page.evaluate(() => { window.__ptaAccountFail = true; });
+  await page.locator('#account-config-sync').click();
+  await page.locator('#account-config-problem', { hasText: 'No se pudo contactar al coordinador' }).waitFor();
+  check(`${label}: an outage is announced as status and keeps the page usable`, await page.locator('#account-config-problem').getAttribute('role') === 'status' && await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+  await page.evaluate(axeSource);
+  check(`${label}: passes axe`, (await scan(page)).length === 0, JSON.stringify(await scan(page)));
+  check(`${label}: has no browser errors`, errors.length === 0, errors.join('; '));
+  await context.close();
+}
+
+// Account standing: offline and revoked installations say so; an account switch leaves nothing behind.
+for (const [label, ctx] of [['standing-desktop', {}], ['standing-phone', { viewport: { width: 393, height: 852 }, isMobile: true }]]) {
+  const { context, page, errors } = await open({ axe: true, context: ctx });
+  await page.evaluate(() => {
+    window.__ptaStanding = { state: 'live', account_key: 'aaaa0000aaaa0000', coordinator: 'https://assistant.example.test', last_live_at: Math.floor(Date.now() / 1000) - 60, recovery: '' };
+    window.__ptaVariablesFor = { bbbb0000bbbb0000: [{ id: '00000000-0000-4000-8000-0000000000b1', name: 'BOB_ONLY', description: 'Belongs to the second account', version: 1, created_at: 1, updated_at: 1 }] };
+    showTab('settings', 'panel-variables');
+    return loadVariables();
+  });
+  await page.locator('#variables .row').first().waitFor();
+  check(`${label}: a live installation shows no warning`, await page.locator('#variables-standing').isHidden());
+  await page.evaluate(() => {
+    window.__ptaStanding = { ...window.__ptaStanding, state: 'offline', recovery: 'The coordinator cannot be reached right now, so account variables cannot be used. The synchronized configuration stays readable but may be out of date; try again when this computer is online.' };
+    return loadVariables();
+  });
+  await page.locator('#variables-standing').waitFor();
+  check(`${label}: offline is announced in Spanish with the last confirmation`, await page.locator('#variables-standing').innerText().then(text => text.includes('Sin conexión') && text.includes('No se puede contactar al coordinador') && text.includes('Última confirmación')));
+  check(`${label}: the cached list stays readable`, await page.locator('#variables .row').count() > 0);
+  check(`${label}: the warning is a status region`, await page.locator('#variables-standing').getAttribute('role') === 'status');
+  await page.evaluate(() => {
+    window.__ptaStanding = { ...window.__ptaStanding, state: 'revoked', recovery: 'The coordinator no longer accepts this installation (it was signed out or revoked, or its account changed). Nothing was used. Sign in again with Connect this machine or `pta auth machine login`.' };
+    return loadVariables();
+  });
+  check(`${label}: revoked is distinct and says how to sign in again`, await page.locator('#variables-standing').innerText().then(text => text.includes('Sesión cerrada o revocada') && text.includes('Vuelve a iniciar sesión')));
+  await page.evaluate(axeSource);
+  check(`${label}: passes axe`, (await scan(page)).length === 0, JSON.stringify(await scan(page)));
+  // Another account signs in: nothing typed or shown for the first one survives.
+  await page.locator('#variable-name').fill('TYPED_FOR_ALICE');
+  await page.locator('#variable-value').fill('synthetic-typed-value');
+  const stale = await page.evaluate(() => accountEpoch);
+  await page.evaluate(() => {
+    window.__ptaStanding = { state: 'live', account_key: 'bbbb0000bbbb0000', coordinator: 'https://assistant.example.test', last_live_at: Math.floor(Date.now() / 1000), recovery: '' };
+    return loadVariables();
+  });
+  await page.locator('#variables .row', { hasText: 'BOB_ONLY' }).waitFor();
+  check(`${label}: the new account's list replaces the former one`, await page.locator('#variables').innerText().then(text => text.includes('BOB_ONLY') && !text.includes('DEPLOY') ));
+  check(`${label}: typed values do not follow the switch and the warning is gone`, await page.locator('#variable-value').inputValue() === '' && await page.locator('#variables-standing').isHidden());
+  check(`${label}: a late reply for the former account is refused`, await page.evaluate(old => adoptAccount(old, { account_key: 'aaaa0000aaaa0000' }), stale) === false
+    && await page.locator('#variables').innerText().then(text => text.includes('BOB_ONLY')));
+  check(`${label}: has no browser errors`, errors.length === 0, errors.join('; '));
+  await context.close();
+}
+
+// Account variables: protected entry, metadata-only list and idempotent retries at both sizes.
+for (const [label, ctx] of [['variables-desktop', {}], ['variables-phone', { viewport: { width: 393, height: 852 }, isMobile: true }]]) {
+  const { context, page, errors } = await open({ axe: true, context: ctx });
+  await page.evaluate(() => showTab('settings', 'panel-variables'));
+  await page.locator('#variables .row').first().waitFor();
+  check(`${label}: names and descriptions render as text`, await page.locator('#variables').innerText().then(text => text.includes('<b>not markup</b>')) && await page.locator('#variables b').count() === 0);
+  check(`${label}: every variable shows a masked value and no plaintext`, await page.locator('#variables .variable-mask').count() === await page.locator('#variables .row').count()
+    && await page.locator('#variables pre.variable-value').count() === 0
+    && await page.locator('#variables').innerText().then(text => !text.includes('release.example.test') && !text.includes('SYNTHETIC')));
+  check(`${label}: an agent request waits for a protected value`, await page.locator('#variables-pending').innerText().then(text => text.includes('PARTNER_ENDPOINT')));
+  const mask = () => page.locator('#variable-value').evaluate(node => getComputedStyle(node).webkitTextSecurity);
+  check(`${label}: the value field is masked by default`, await mask() === 'disc');
+  await page.locator('#variable-show').check();
+  check(`${label}: showing the value is an explicit choice`, await mask() === 'none');
+  await page.locator('#variable-show').uncheck();
+  check(`${label}: adding stays disabled until the form is complete`, await page.locator('#variable-create').isDisabled());
+
+  const create = page.getByRole('button', { name: 'Agregar variable', exact: true });
+  await page.fill('#variable-name', '1BAD');
+  await page.fill('#variable-description', 'Synthetic description');
+  await page.fill('#variable-value', 'synthetic-secret-value');
+  await create.click();
+  await page.locator('#notice.error').waitFor();
+  check(`${label}: an invalid name is refused before the host`, await page.evaluate(() => window.__ptaVariableCreates.length === 0));
+  await page.fill('#variable-name', 'NEW_VARIABLE');
+  await page.evaluate(() => { window.__ptaVariableError = true; });
+  await create.click();
+  await page.waitForFunction(() => window.__ptaVariableCreates.length === 1);
+  check(`${label}: a failed save keeps the typed value for a retry`, await page.inputValue('#variable-value') === 'synthetic-secret-value');
+  await page.evaluate(() => { window.__ptaVariableError = false; });
+  await create.click();
+  await page.waitForFunction(() => window.__ptaVariableCreates.length === 2);
+  check(`${label}: a retry reuses the entry ID`, await page.evaluate(() => window.__ptaVariableCreates[0].id === window.__ptaVariableCreates[1].id));
+  await page.locator('#variables .row', { hasText: 'NEW_VARIABLE' }).waitFor();
+  check(`${label}: the value field is cleared after storing`, await page.inputValue('#variable-value') === '' && await page.inputValue('#variable-name') === '');
+  check(`${label}: nothing but metadata is rendered`, await page.locator('#panel-variables').innerText().then(text => !text.includes('synthetic-secret-value')));
+
+  const pending = page.locator('#variables-pending');
+  await pending.locator('textarea').fill('synthetic-partner-value');
+  await pending.getByRole('button', { name: 'Guardar', exact: true }).click();
+  await page.locator('#variables .row', { hasText: 'PARTNER_ENDPOINT' }).waitFor();
+  check(`${label}: the agent's request completes through protected entry`, await pending.isHidden() && await page.evaluate(() => window.__ptaVariableCreates.at(-1).name === 'PARTNER_ENDPOINT'));
+  check(`${label}: variables keep the phone boundary`, await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+
+  // Everyday management: reveal, copy, edit each field, cancel, conflict and deletion.
+  const row = name => page.locator('#variables .row', { hasText: name });
+  const button = (name, text) => row(name).locator('button', { hasText: new RegExp(`^${text}$`) });
+  const editor = name => row(name).locator('.variable-edit');
+  const notice = () => page.locator('#notice').innerText();
+  const clipboard = () => page.evaluate(() => navigator.clipboard.readText());
+  const DEPLOY = 'DEPLOY_ENDPOINT', KEY = 'signing_key';
+  const DEPLOY_ID = 'aaaaaaaa-0000-4000-8000-000000000001', KEY_ID = 'aaaaaaaa-0000-4000-8000-000000000002';
+  const KEY_VALUE = '-----BEGIN SYNTHETIC KEY-----\nline two  with  spaces\n\tand a tab\n-----END SYNTHETIC KEY-----\n';
+
+  check(`${label}: Variables replaces the separate credentials editor`, await page.locator('#settings-tab-variables').isVisible() && await page.locator('#panel-credentials').count() === 0);
+  check(`${label}: Reveal has an eye icon and starts hidden`, await button(DEPLOY, 'Revelar').locator('use').getAttribute('href') === '#i-eye' && await button(DEPLOY, 'Revelar').getAttribute('aria-pressed') === 'false');
+  await button(DEPLOY, 'Revelar').click();
+  await row(DEPLOY).locator('pre.variable-value').waitFor();
+  check(`${label}: Reveal fetches only the selected entry after the action`, await page.evaluate(id => window.__ptaVariableReveals.length === 1 && window.__ptaVariableReveals[0] === id, DEPLOY_ID));
+  check(`${label}: the revealed eye control announces its pressed state`, await button(DEPLOY, 'Ocultar').getAttribute('aria-pressed') === 'true' && await button(DEPLOY, 'Ocultar').locator('use').getAttribute('href') === '#i-eye-off');
+  check(`${label}: a revealed value is shown for that entry only`, await row(DEPLOY).locator('pre.variable-value').innerText() === 'https://release.example.test/v1' && await page.locator('#variables pre.variable-value').count() === 1);
+  await button(DEPLOY, 'Ocultar').click();
+  check(`${label}: Hide masks the value again`, await page.locator('#variables pre.variable-value').count() === 0 && await row(DEPLOY).locator('.variable-mask').count() === 1);
+  await button(DEPLOY, 'Revelar').click();
+  await row(DEPLOY).locator('pre.variable-value').waitFor();
+  await page.evaluate(() => showTab('overview'));
+  await page.evaluate(() => showTab('settings', 'panel-variables'));
+  check(`${label}: navigating away clears a revealed value`, await page.locator('#variables pre.variable-value').count() === 0);
+  await button(DEPLOY, 'Revelar').click();
+  await row(DEPLOY).locator('pre.variable-value').waitFor();
+  await page.evaluate(() => window.dispatchEvent(new Event('pagehide')));
+  check(`${label}: leaving the page clears a revealed value`, await page.locator('#variables pre.variable-value').count() === 0);
+  check(`${label}: a revealed value never reaches storage or the address`, await page.evaluate(() => !JSON.stringify([localStorage, sessionStorage, location.href]).includes('release.example.test')));
+
+  // Copy writes the exact value (line breaks, tabs and the final newline) and shows no value anywhere.
+  await context.grantPermissions(['clipboard-read', 'clipboard-write']);
+  await page.clock.install();
+  await button(KEY, 'Copiar valor').click();
+  await page.locator('#notice', { hasText: 'copiado' }).waitFor();
+  check(`${label}: Copy value writes the exact multiline value`, await clipboard() === KEY_VALUE);
+  check(`${label}: copying shows no value in a notice or on the page`, await notice().then(text => !text.includes('SYNTHETIC')) && await page.locator('#panel-variables').innerText().then(text => !text.includes('SYNTHETIC')));
+  await page.clock.fastForward(61_000);
+  await page.waitForFunction(() => navigator.clipboard.readText().then(text => text === ''));
+  check(`${label}: the clipboard is cleared when it still holds the copied value`, await clipboard() === '');
+  await button(KEY, 'Copiar valor').click();
+  await page.waitForFunction(() => window.__ptaVariableReveals.length === 5);
+  await page.evaluate(() => navigator.clipboard.writeText('unrelated clipboard text'));
+  await page.clock.fastForward(61_000);
+  await page.waitForTimeout(300);
+  check(`${label}: cleanup never overwrites unrelated clipboard contents`, await clipboard() === 'unrelated clipboard text');
+  check(`${label}: Copy fetched the value only on demand`, await page.evaluate(() => window.__ptaVariableReveals.length === 5));
+  await button(DEPLOY, 'Revelar').click();
+  await row(DEPLOY).locator('pre.variable-value').waitFor();
+  await page.clock.fastForward(31_000);
+  check(`${label}: a revealed value hides itself after a short time`, await page.locator('#variables pre.variable-value').count() === 0);
+
+  // A description edit is independent of the value, and Cancel discards everything typed.
+  await button(DEPLOY, 'Editar').click();
+  check(`${label}: saving a description needs a change`, await editor(DEPLOY).getByRole('button', { name: 'Guardar descripción' }).isDisabled());
+  check(`${label}: the replacement value field is masked`, await editor(DEPLOY).locator('textarea').evaluate(node => getComputedStyle(node).webkitTextSecurity) === 'disc');
+  await editor(DEPLOY).locator('input:not([type=checkbox])').fill('Discarded description');
+  await editor(DEPLOY).locator('textarea').fill('discarded-value');
+  const updatesBefore = await page.evaluate(() => window.__ptaVariableUpdates.length);
+  await editor(DEPLOY).getByRole('button', { name: 'Cancelar', exact: true }).click();
+  await button(DEPLOY, 'Editar').click();
+  check(`${label}: Cancel discards edits without calling the host`, await page.evaluate(n => window.__ptaVariableUpdates.length === n, updatesBefore)
+    && await editor(DEPLOY).locator('input:not([type=checkbox])').inputValue() === 'Base URL of the release service <b>not markup</b>' && await editor(DEPLOY).locator('textarea').inputValue() === '');
+  await editor(DEPLOY).locator('input:not([type=checkbox])').fill('Release service base URL');
+  await editor(DEPLOY).getByRole('button', { name: 'Guardar descripción' }).click();
+  await row(DEPLOY).getByText('Release service base URL', { exact: true }).waitFor();
+  check(`${label}: a description edit sends only the description and the seen version`, await page.evaluate(id => {
+    const last = window.__ptaVariableUpdates.at(-1);
+    return last.id === id && last.version === 1 && last.description === 'Release service base URL' && last.valueLength === undefined;
+  }, DEPLOY_ID));
+  check(`${label}: the edit advanced the version and closed the form`, await row(DEPLOY).innerText().then(text => text.includes('versión 2')) && await editor(DEPLOY).count() === 0);
+
+  // Rotation changes only the value and keeps the entry and its description.
+  await button(DEPLOY, 'Editar').click();
+  await editor(DEPLOY).locator('textarea').fill('rotated-synthetic\nsecond line');
+  await editor(DEPLOY).getByRole('button', { name: 'Reemplazar valor' }).click();
+  await row(DEPLOY).getByText('versión 3').waitFor();
+  check(`${label}: a rotation sends only the value and keeps the description`, await page.evaluate(id => {
+    const last = window.__ptaVariableUpdates.at(-1);
+    return last.id === id && last.version === 2 && last.description === undefined && last.valueLength === 'rotated-synthetic\nsecond line'.length;
+  }, DEPLOY_ID) && await row(DEPLOY).innerText().then(text => text.includes('Release service base URL')));
+  check(`${label}: the replaced value is not left on the page`, await page.locator('#panel-variables').innerText().then(text => !text.includes('rotated-synthetic')) && await page.locator('#panel-variables textarea').evaluateAll(fields => fields.every(field => !field.value.includes('rotated'))));
+  await button(DEPLOY, 'Revelar').click();
+  await row(DEPLOY).locator('pre.variable-value').waitFor();
+  check(`${label}: Reveal returns the rotated value`, await row(DEPLOY).locator('pre.variable-value').innerText() === 'rotated-synthetic\nsecond line');
+  await button(DEPLOY, 'Ocultar').click();
+
+  // Another client's newer change is reported, never overwritten, and the typed text survives.
+  await button(KEY, 'Editar').click();
+  await editor(KEY).locator('input:not([type=checkbox])').fill('My conflicting description');
+  await page.evaluate(id => window.__ptaVariableChangedElsewhere(id), KEY_ID);
+  await editor(KEY).getByRole('button', { name: 'Guardar descripción' }).click();
+  await page.locator('#notice', { hasText: 'cambió desde que se cargó' }).waitFor();
+  check(`${label}: a stale edit is reported as a conflict`, await notice().then(text => text.includes('cambió desde que se cargó')));
+  await row(KEY).getByText('(edited elsewhere)').waitFor();
+  check(`${label}: the conflict refreshed the list and kept the other client's change`, await row(KEY).innerText().then(text => text.includes('(edited elsewhere)') && text.includes('versión 3')));
+  check(`${label}: the conflict kept the typed description for another try`, await editor(KEY).locator('input:not([type=checkbox])').inputValue() === 'My conflicting description');
+  await editor(KEY).getByRole('button', { name: 'Cancelar', exact: true }).click();
+
+  // Axe sees an open editor and a revealed value, then deletion asks twice.
+  await button(DEPLOY, 'Editar').click();
+  await button(KEY, 'Revelar').click();
+  await row(KEY).locator('pre.variable-value').waitFor();
+  await page.evaluate(axeSource);
+  check(`${label}: variable actions and editor pass axe`, (await scan(page)).length === 0, JSON.stringify(await scan(page)));
+  await editor(DEPLOY).getByRole('button', { name: 'Cancelar', exact: true }).click();
+  await button(KEY, 'Ocultar').click();
+  const deletesBefore = await page.evaluate(() => window.__ptaVariableDeletes.length);
+  await button(KEY, 'Eliminar').click();
+  check(`${label}: Delete asks for a second tap before calling the host`, await button(KEY, 'Confirmar eliminación').count() === 1 && await page.evaluate(n => window.__ptaVariableDeletes.length === n, deletesBefore)
+    && await row(KEY).innerText().then(text => text.includes('No revoca la credencial')));
+  await row(KEY).locator('button', { hasText: /^Cancelar$/ }).click();
+  check(`${label}: cancelling the confirmation keeps the variable`, await button(KEY, 'Eliminar').count() === 1 && await page.evaluate(n => window.__ptaVariableDeletes.length === n, deletesBefore));
+  await button(KEY, 'Eliminar').click();
+  await button(KEY, 'Confirmar eliminación').click();
+  await page.locator('#variables .row', { hasText: KEY }).waitFor({ state: 'detached' });
+  check(`${label}: a confirmed deletion names the seen version and removes the entry`, await page.evaluate(([n, id]) => window.__ptaVariableDeletes.length === n + 1 && window.__ptaVariableDeletes.at(-1).id === id && window.__ptaVariableDeletes.at(-1).version === 3, [deletesBefore, KEY_ID]));
+  const listsBefore = await page.evaluate(() => window.__ptaCalls.filter(call => call === 'variable_list').length);
+  await page.locator('#variables-refresh').click();
+  await page.locator('#notice.ok').getByText('Variables actualizadas').waitFor();
+  check(`${label}: Refresh reloads the list on request`, await page.evaluate(n => window.__ptaCalls.filter(call => call === 'variable_list').length > n, listsBefore));
+  // Consumers: pick a variable by name, test it and stop; only references and status move.
+  const consumers = page.locator('#consumers .row').first();
+  const consumerCalls = () => page.evaluate(() => window.__ptaConsumerCalls.map(call => call.method));
+  check(`${label}: the consumer states its fixed destination and shows no value`, await consumers.innerText().then(text => text.includes('https://api.deepseek.com') && text.includes('Ninguna variable elegida') && !text.includes('release.example.test')));
+  check(`${label}: choosing a variable is required before using it`, await consumers.getByRole('button', { name: 'Usar esta variable' }).isDisabled());
+  await consumers.getByRole('combobox').selectOption(DEPLOY_ID);
+  await consumers.getByRole('button', { name: 'Usar esta variable' }).click();
+  await consumers.locator('.badge', { hasText: 'Usa DEPLOY_ENDPOINT' }).waitFor();
+  check(`${label}: binding names the variable by ID and the seen version, then asks to restart`, await page.evaluate(id => {
+    const call = window.__ptaConsumerCalls.at(-1);
+    return call.method === 'bind' && call.variable === id && call.version === 3 && call.consumer === 'deepseek';
+  }, DEPLOY_ID) && await consumers.innerText().then(text => text.includes('Reinicia el asistente')));
+  await consumers.getByRole('button', { name: /^Probar clave/ }).click();
+  await consumers.getByText('aceptó la clave').waitFor();
+  check(`${label}: a test shows only a status sentence`, JSON.stringify(await consumerCalls()) === '["bind","check"]' && await consumers.innerText().then(text => !text.includes('rotated-synthetic') && !text.includes('release.example.test')));
+  check(`${label}: a proposed launcher is listed as text with its command, folder and variables, waiting for approval`, await page.locator('#launchers').innerText().then(text => text.includes('release-tool') && text.includes('/usr/local/bin/release --fixed') && text.includes('/home/user/work') && text.includes('RELEASE_URL desde DEPLOY_ENDPOINT') && text.includes('<b>not markup</b>') && text.includes('Esperando tu aprobación')) && await page.locator('#launcher-list b').count() === 0);
+  await page.evaluate(axeSource);
+  check(`${label}: consumers pass axe`, (await scan(page)).length === 0, JSON.stringify(await scan(page)));
+  check(`${label}: consumers keep the phone boundary`, await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+  await page.locator('#launcher-list').getByRole('button', { name: 'Aprobar el lanzador release-tool' }).click();
+  await page.locator('#launcher-list .badge', { hasText: 'Aprobado' }).waitFor();
+  check(`${label}: approving sends the digest of the definition shown and hides the button`, await page.evaluate(() => {
+    const call = window.__ptaConsumerCalls.at(-1);
+    return call.method === 'approve' && call.id === 'release-tool' && call.digest === 'd'.repeat(64);
+  }) && await page.locator('#launcher-list').getByRole('button', { name: /^Aprobar/ }).count() === 0);
+  await consumers.getByRole('button', { name: 'Dejar de usar' }).click();
+  await consumers.locator('.badge', { hasText: 'Ninguna variable elegida' }).waitFor();
+  await page.locator('#launcher-list').getByRole('button', { name: /^Eliminar/ }).click();
+  await page.locator('#launchers').waitFor({ state: 'hidden' });
+  check(`${label}: approving, stopping and removing call only their own operations`, JSON.stringify(await consumerCalls()) === '["bind","check","approve","unbind","remove"]');
+  // Migration: choose entries, write descriptions and confirm the account; no value is ever involved.
+  await page.evaluate(() => showTab('settings', 'panel-migration'));
+  const migration = page.locator('#panel-migration');
+  await migration.getByText('Cuenta de destino').waitFor();
+  check(`${label}: migration names the destination account, lists eligible rows and hides excluded ones`, await migration.innerText().then(text => text.includes('Account 1001 on https://portal.example.test') && text.includes('DEEPSEEK_API_KEY') && text.includes('Nunca se mueven')) && await migration.locator('#migration-excluded-list').isHidden());
+  check(`${label}: nothing is copied before a choice and the account is confirmed`, await migration.locator('#migration-run').isDisabled());
+  await migration.getByRole('checkbox', { name: 'Mover DEEPSEEK_API_KEY' }).check();
+  check(`${label}: a chosen row asks for its description and offers the switch`, await migration.getByLabel('Descripción').count() === 1 && await migration.getByText('Cambiar DeepSeek API a la variable de la cuenta').count() === 1);
+  check(`${label}: confirming the destination is still required`, await migration.locator('#migration-run').isDisabled());
+  await migration.locator('#migration-confirm').check();
+  check(`${label}: choosing, describing and confirming enables the copy`, await migration.locator('#migration-run').isEnabled());
+  await page.evaluate(axeSource);
+  check(`${label}: migration passes axe`, (await scan(page)).length === 0, JSON.stringify(await scan(page)));
+  check(`${label}: migration keeps the phone boundary`, await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+  await migration.locator('#migration-run').click();
+  await migration.locator('#migration-result').getByText('Hecho').first().waitFor();
+  check(`${label}: the copy names the destination key, the credential and the switch, never a value`, await page.evaluate(() => {
+    const call = window.__ptaMigrationCalls.at(-1);
+    return call.destination === 'dest-1001' && call.items.length === 1 && call.items[0].credential === 'DEEPSEEK_API_KEY'
+      && call.items[0].bind === true && !JSON.stringify(call).includes('value') && !call.settings;
+  }) && await migration.locator('#migration-result').innerText().then(text => text.includes('se conservaron como copias')));
+  check(`${label}: variable management keeps the phone boundary`, await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+  await page.evaluate(axeSource);
+  check(`${label}: variables pass axe`, (await scan(page)).length === 0, JSON.stringify(await scan(page)));
+  check(`${label}: variables have no browser errors`, errors.length === 0, errors.join('; '));
+  await context.close();
+}
+// Updates: the owner is offered a prepared (not installed) update; a shared account only sees the managed notice.
+for (const [label, viewport] of [['desktop', { width: 1440, height: 900 }], ['phone', { width: 393, height: 852 }]]) {
+  const { context, page, errors } = await open({ axe: true, context: { viewport, ...(label === 'phone' ? { isMobile: true, hasTouch: true } : {}) } });
+  const offer = page.locator('#update-offer');
+  await offer.waitFor({ timeout: 5000 });
+  check(`${label}: Home offers the newer release without installing it`, await offer.innerText().then(text => text.includes('0.9.14') && text.includes('0.9.13') && text.includes('sin cambiar nada')) && await page.evaluate(() => window.__ptaUpdateCalls.length === 0));
+  await page.evaluate(axeSource);
+  check(`${label}: the update notice passes axe`, (await scan(page)).length === 0, JSON.stringify(await scan(page)));
+  await page.evaluate(() => showTab('settings', 'panel-updates'));
+  const panel = page.locator('#panel-updates');
+  await panel.waitFor();
+  check(`${label}: the panel lists running, installed and available versions separately`, await panel.locator('#update-versions').innerText().then(text => /En ejecución\s*0\.9\.13/.test(text) && /Instalada\s*0\.9\.13/.test(text) && /Disponible\s*0\.9\.14/.test(text)));
+  check(`${label}: preparing needs an explicit press`, await panel.locator('#update-stage').isEnabled() && await page.evaluate(() => window.__ptaUpdateCalls.length === 0));
+  await panel.locator('#update-stage').click();
+  await panel.locator('#update-progress').getByText('Compilando la versión 0.9.14').waitFor();
+  check(`${label}: preparing asks only for the version the check offered`, await page.evaluate(() => JSON.stringify(window.__ptaUpdateCalls) === '[{"method":"stage","version":"0.9.14"}]'));
+  check(`${label}: progress is shown and a second build cannot be started`, await panel.locator('#update-stage').isDisabled() && await panel.locator('#update-state').innerText() === 'Preparando');
+  await page.evaluate(() => { window.__ptaUpdateFinish(); return loadUpdates(); });
+  await panel.locator('#update-progress').getByText('Aún no está instalada').waitFor();
+  check(`${label}: a prepared update is never reported as installed`, await panel.locator('#update-versions').innerText().then(text => /Instalada\s*0\.9\.13/.test(text)) && await panel.locator('#update-state').innerText() === 'Preparada');
+  // Installing: one press arms, the second sends the exact prepared version; progress follows the host's journal.
+  check(`${label}: a prepared update offers Install both on Home and in the panel`, await offer.locator('#update-offer-apply').isVisible() && await offer.locator('#update-offer-stage').isHidden() && await panel.locator('#update-apply').isVisible());
+  await page.evaluate(axeSource);
+  check(`${label}: the install notice passes axe`, (await scan(page)).length === 0, JSON.stringify(await scan(page)));
+  await panel.locator('#update-apply').click();
+  check(`${label}: the first press only asks to press again`, await panel.locator('#update-apply').innerText() === 'Toca de nuevo para instalar y reiniciar' && await page.evaluate(() => !window.__ptaUpdateCalls.some(c => c.method === 'apply')));
+  await panel.locator('#update-apply').click();
+  await panel.locator('#update-progress').getByText('Instalando la versión 0.9.14').waitFor();
+  check(`${label}: installing asks only for the prepared version`, await page.evaluate(() => JSON.stringify(window.__ptaUpdateCalls.filter(c => c.method === 'apply')) === '[{"method":"apply","version":"0.9.14"}]'));
+  check(`${label}: installing hides the other actions and is labelled`, await panel.locator('#update-state').innerText() === 'Instalando' && await panel.locator('#update-stage').isDisabled() && await panel.locator('#update-apply').isHidden() && await offer.isHidden());
+  await page.evaluate(() => { window.__ptaUpdateSet('applying', { state: 'restarting', phase: 'restarting' }); return loadUpdates(); });
+  await panel.locator('#update-progress').getByText('Reiniciando la aplicación').waitFor();
+  await page.evaluate(() => { window.__ptaUpdateSet('applying', { state: 'verifying', phase: 'verifying' }); return loadUpdates(); });
+  await panel.locator('#update-progress').getByText('Comprobando que la versión 0.9.14 funciona bien').waitFor();
+  check(`${label}: the installed version is not shown as the new one until the host says success`, await panel.locator('#update-versions').innerText().then(text => /Instalada\s*0\.9\.13/.test(text)) && await panel.locator('#update-result').isHidden());
+  await page.evaluate(() => { window.__ptaUpdateSet('idle', { state: 'success', phase: 'success', notes: ['Refreshed 1 installed skill copy to version 0.9.14.', 'Agents that keep `pta mcp` running still use the previous tool catalog: reconnect or restart their MCP server so they read version 0.9.14.'] }); return loadUpdates(); });
+  await panel.locator('#update-result').waitFor();
+  check(`${label}: success is reported from the journal with the reconnect instruction`, await panel.locator('#update-result').innerText().then(text => text.includes('La versión 0.9.14 está instalada y funciona bien') && text.includes('Se actualizó 1 copia instalada') && text.includes('reconecta o reinicia su servidor MCP')));
+  await page.evaluate(() => { window.__ptaUpdateSet('staged', { state: 'rolled_back', phase: 'rolled_back', error: 'Version 0.9.14 did not become healthy in time.' }); return loadUpdates(); });
+  check(`${label}: a rollback says the previous version runs again and why`, await panel.locator('#update-result').innerText().then(text => text.includes('La versión 0.9.14 no se conservó y la versión 0.9.13 funciona de nuevo') && text.includes('0.9.14')) && await panel.locator('#update-result').getAttribute('class').then(c => c.includes('warn')));
+  await page.evaluate(() => { window.__ptaUpdateSet('idle', { state: 'failed', phase: 'failed', error: 'The previous version 0.9.13 does not start.', recovery: 'Reinstall the exact version with `cargo install personal-teams-assistant --version X.Y.Z --locked --force` (add --no-default-features for a headless installation), then start the application.' }); return loadUpdates(); });
+  check(`${label}: a failed update gives the recovery path`, await panel.locator('#update-result-error').innerText().then(text => text.includes('cargo install')) && await panel.locator('#update-result-text').innerText().then(text => text.includes('necesita tu atención')));
+  await page.evaluate(axeSource);
+  check(`${label}: update outcomes pass axe`, (await scan(page)).length === 0, JSON.stringify(await scan(page)));
+  // Work in progress defers instead of interrupting; the wait can be cancelled.
+  await page.evaluate(() => { window.__ptaUpdateSet('deferred', null); return loadUpdates(); });
+  await panel.locator('#update-deferred').waitFor();
+  check(`${label}: a deferred update lists the work it waits for and offers to cancel`, await panel.locator('#update-deferred').innerText().then(text => text.includes('Se está respondiendo o enviando un mensaje de Teams') && text.includes('Hay una migración en curso')) && await panel.locator('#update-cancel').isVisible() && await panel.locator('#update-apply').isHidden() && await panel.locator('#update-state').innerText() === 'Esperando a que termine el trabajo');
+  await page.evaluate(axeSource);
+  check(`${label}: the deferred update passes axe`, (await scan(page)).length === 0, JSON.stringify(await scan(page)));
+  await panel.locator('#update-cancel').click();
+  await panel.locator('#update-deferred').waitFor({ state: 'hidden' });
+  check(`${label}: cancelling the wait goes back to a prepared update`, await panel.locator('#update-apply').isVisible() && await page.evaluate(() => window.__ptaUpdateCalls.at(-1).method === 'cancel'));
+  await page.evaluate(() => { window.__ptaUpdateFail(); return loadUpdates(); });
+  await panel.locator('#update-error').waitFor();
+  check(`${label}: a failure says what to fix and keeps the build output on request`, await panel.locator('#update-error').innerText().then(text => text.includes('compilador y enlazador de C')) && await panel.locator('#update-tail summary').innerText() === 'Última salida de la compilación');
+  await page.evaluate(axeSource);
+  check(`${label}: the updates panel passes axe`, (await scan(page)).length === 0, JSON.stringify(await scan(page)));
+  check(`${label}: the updates panel keeps the phone boundary`, await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+  await panel.locator('#update-dismiss').click();
+  await offer.waitFor({ state: 'hidden' });
+  check(`${label}: dismissing hides the notice for that release`, await page.evaluate(() => window.__ptaUpdateCalls.at(-1).method === 'dismiss' && window.__ptaUpdateCalls.at(-1).version === '0.9.14'));
+  check(`${label}: updates have no browser errors`, errors.length === 0, errors.join('; '));
+  await context.close();
+}
+{
+  const { context, page } = await open({ axe: true }, 'account');
+  await page.evaluate(() => showTab('settings', 'panel-updates'));
+  const panel = page.locator('#panel-updates');
+  await panel.waitFor();
+  await panel.locator('#update-managed', { hasText: 'operador' }).waitFor({ timeout: 5000 }).catch(() => {});
+  check('shared account sees the managed-server notice instead of an install button', await panel.locator('#update-managed').innerText().then(text => text.includes('operador')) && await panel.locator('#update-stage').isHidden() && await panel.locator('#update-check').isHidden() && await page.locator('#update-offer').isHidden());
+  await page.evaluate(axeSource);
+  check('shared account updates panel passes axe', (await scan(page)).length === 0, JSON.stringify(await scan(page)));
   await context.close();
 }
 await browser.close();

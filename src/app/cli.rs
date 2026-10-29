@@ -90,6 +90,91 @@ Accounts
                            and choose Trust this machine, then finish [--wait]. No credential is printed.
   github repos             Repositories authorized for the GitHub App.
 
+Setup
+  setup status [--expect NAME]...  Readiness of this installation for your assistant account, as ordered steps: coordinator and
+                           sign-in, whether the coordinator accepts this computer and lists it, restored configuration, variables,
+                           optional credential migration, model-provider sign-in, permitted directories, Teams (selected, running,
+                           received, sent) and installed/running/available versions, each with the exact next action. --expect
+                           names the variables a task needs: present, waiting or missing (a missing one is typed by you through
+                           the protected entry, never in chat). Only reads; it signs in, trusts, grants and starts nothing.
+
+Account configuration
+  account status              Loaded and saved revisions of the account's portable configuration (preferences, model choices,
+                           sources and audiences, contexts, questions, verified notes), unsaved local changes, what is
+                           unavailable on this computer and the local setup still required. Reads local state only.
+  account sync [--reset]      Restores and refreshes that configuration from the coordinator, which is authoritative. Paths,
+                           repository folders, roots, tunnels, credentials and provider sessions are never synchronized and
+                           nothing is started. Unsaved local changes are kept: --reset replaces them (a private backup is kept).
+  account records status|history [DAY|FROM..TO]  Reads the coordinator's saved daily task record (read-only).
+
+Account variables
+  variables list [--limit N]  Names, descriptions and versions of this account's stored variables; never values.
+  variables search TEXT       Variables whose name or description contains TEXT.
+  variables sync [--reset]    Brings this installation's copy of the account's catalog up to date with the coordinator (names,
+                           descriptions, versions; never values) and prints the revision. --reset discards the copy first,
+                           the only way to accept a coordinator that was restored to an older state.
+  variables status            Last synchronized revision and time, pending/error/conflict state; reads local state only.
+  variables create NAME --description TEXT [--id UUID]
+                           Stores a variable; its value is read from a protected pipe on stdin (never an argument
+                           or a terminal). Names: letters, digits and _ (up to 128); descriptions are required (up to
+                           500 characters); values are up to 16 KiB of UTF-8 text with newlines. It never overwrites:
+                           after a timeout, inspect with list, or repeat with the printed --id.
+  variables update ID --expected-version N [--description TEXT] [--value]
+                           Edits a description and/or replaces the value (read from a protected pipe on stdin when
+                           --value is given). ID and version come from list; a changed variable is a conflict.
+  variables delete ID --expected-version N  Deletes a variable; its value cannot be recovered (the provider's credential is not revoked).
+  variables entry start NAME --description TEXT  Asks for a value to be typed by the user (GUI or complete).
+  variables entry replace ID  Asks for a replacement value to be typed by the user (GUI or complete).
+  variables entry status|cancel|complete REQUEST  complete reads the value from stdin like create.
+  variables consumers         Built-in consumers, the variable each uses (name and version only) and approved launchers.
+  variables bind CONSUMER ID [--expected-version N] --confirmed
+                           Makes a built-in consumer (deepseek) use the variable; its value is checked, never shown.
+  variables unbind CONSUMER   Stops that use; the variable is kept.
+  variables check CONSUMER [--expected-version N] --confirmed
+                           Uses the bound variable once against the consumer's fixed destination; prints status only.
+  variables migrate inspect   Audits the configured application credentials (names, origins and eligibility only, never values),
+                           the destination account to confirm and the account settings state.
+  variables migrate run CREDENTIAL --destination KEY --description TEXT [--name NAME] [--bind]
+                           [--existing use|replace --expected-version N] [--settings] --confirmed
+                           Copies one credential read by the host from this installation's own store into the confirmed
+                           account (the value never passes through the CLI), reads it back and, with --bind, switches
+                           its consumer. A name already in the account needs --existing at the reviewed version.
+                           --settings also replaces this computer's portable settings with the account's (backed up).
+                           Repeat the same command to resume an interrupted migration; originals are never changed.
+  variables migrate status    The durable outcome of the migration for the signed-in account.
+  variables launcher list     Approved local launchers (owner's trusted machine only).
+  variables launcher define NAME --description TEXT --program PATH --directory DIR --env ENV=ID [--env ...]
+                           [--arg ARG ...] [--timeout SECONDS] --confirmed
+                           Proposes a program to receive the named variables as environment variables of that one
+                           process (never arguments). Protected settings such as PATH or LD_* are refused. It runs
+                           nothing until the user approves it in the application window (Settings › Credentials).
+  variables launcher run NAME [--pin ENV=VERSION ...] --confirmed
+                           Runs it with the values resolved now; prints status and references, never output or values.
+  variables launcher remove NAME  Removes an approved launcher.
+  variables audit [--limit N]  Operator-local: recent variable edits, deletions and reveals (never values).
+  variables verify            Checks that every stored variable authenticates with the current keys.
+  variables key backup --output PRIVATE_FILE  Operator-local: writes the master keys (not values) to a new 0600 file.
+  variables key restore       Operator-local: master-key backup JSON on stdin; never replaces an existing key.
+  variables key rotate        Operator-local: new master and data keys; keeps older masters for older backups.
+
+Updates (this computer only; the shared server's operator updates it separately)
+  update status            Installed, running and available versions, how this installation was built and the state of any
+                           prepared update; reads local state only. Staging is not installation: the installed version
+                           keeps running unchanged.
+  update check             Looks up the newest stable, not yanked release of this package on crates.io (read-only).
+  update stage VERSION --confirmed
+                           Builds that exact release with Cargo (locked dependencies, same features and target as this
+                           installation) in this profile's maintenance directory and verifies the application and pta
+                           pair. It installs nothing and needs the owner of this computer. Progress: update status.
+  update apply VERSION --confirmed
+                           Installs the prepared version: waits for work in progress (it never interrupts an answer, a send,
+                           an implementation or a migration), then replaces the application and pta together, restarts the
+                           application the way it was running and restores the assistant. If the new version does not start
+                           and report healthy, the previous pair is put back. Success is reported only after the health
+                           check; poll update status (it reads the update journal while the application restarts).
+  update cancel            Cancels an apply request that is waiting for work to finish.
+  update dismiss VERSION   Hides the notice for that release.
+
 Personal chat
   self-chat status|enable [CHAT_ID]|disable
   self-chat reconcile NONCE MESSAGE_ID  Resolves a pending output.
@@ -170,6 +255,491 @@ fn input() -> Result<Value> {
         .or_else(|_| toml::from_str::<toml::Value>(&text).map(|v| serde_json::to_value(v).unwrap()))
         .context("input must be JSON or TOML")
 }
+/// A value comes only from a protected pipe: never an argument, never a terminal. One final line
+/// break (added by `echo`) is not part of the value.
+fn protected_value() -> Result<String> {
+    ensure!(
+        !std::io::stdin().is_terminal(),
+        "the value must come from a protected pipe on stdin, never an argument or a terminal"
+    );
+    let mut value = stdin_text()?;
+    ensure!(value.len() <= 16_386, "value too long (at most 16 KiB)");
+    if value.ends_with('\n') {
+        value.pop();
+        if value.ends_with('\r') {
+            value.pop();
+        }
+    }
+    Ok(value)
+}
+/// The words of a command without its flags and their values.
+fn words(args: &[String]) -> Vec<&str> {
+    let mut words = Vec::new();
+    let mut skip = false;
+    for arg in args {
+        if skip {
+            skip = false;
+        } else if matches!(
+            arg.as_str(),
+            "--description"
+                | "--id"
+                | "--expected-version"
+                | "--output"
+                | "--limit"
+                | "--context"
+                | "--source"
+                | "--expect"
+                | "--redirect"
+                | "--program"
+                | "--directory"
+                | "--env"
+                | "--arg"
+                | "--timeout"
+                | "--pin"
+                | "--destination"
+                | "--name"
+                | "--existing"
+        ) {
+            skip = true;
+        } else if !arg.starts_with("--") {
+            words.push(arg.as_str());
+        }
+    }
+    words
+}
+fn option<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
+    args.iter()
+        .position(|a| a == flag)
+        .and_then(|i| args.get(i + 1))
+        .map(String::as_str)
+}
+/// Every value of a repeatable flag, in order.
+fn options<'a>(args: &'a [String], flag: &str) -> Vec<&'a str> {
+    args.iter()
+        .enumerate()
+        .filter(|(_, a)| *a == flag)
+        .filter_map(|(i, _)| args.get(i + 1))
+        .map(String::as_str)
+        .collect()
+}
+/// Access-granting steps need the user's confirmation, like `tools call ... confirmed:true`.
+fn unconfirmed(args: &[String], question: String) -> Option<Reply> {
+    (!args.iter().any(|a| a == "--confirmed")).then(|| {
+        Reply::error(
+            "invalid_input",
+            2,
+            &format!(
+                "Confirm this exact action with the user, then repeat with --confirmed: {question}"
+            ),
+        )
+    })
+}
+fn pairs<T>(
+    values: Vec<&str>,
+    parse: impl Fn(&str) -> Option<T>,
+    what: &str,
+) -> Result<std::collections::BTreeMap<String, T>> {
+    let mut map = std::collections::BTreeMap::new();
+    for value in values {
+        let (name, rest) = value
+            .split_once('=')
+            .with_context(|| format!("{what} must look like NAME=VALUE"))?;
+        let parsed = parse(rest).with_context(|| format!("invalid {what}"))?;
+        ensure!(
+            map.insert(name.to_owned(), parsed).is_none(),
+            "{what} repeats {name}"
+        );
+    }
+    Ok(map)
+}
+/// The account's portable configuration: synchronize it, see what is loaded, read retained records.
+async fn update_command(args: &[String]) -> Result<Reply> {
+    let words = words(args);
+    let version = || -> Result<&str> {
+        words
+            .get(2)
+            .copied()
+            .context("missing version; consult --help")
+    };
+    match words.get(1).copied() {
+        // While an update is applied no host may be running: read its journal instead of starting one.
+        Some("status") => match applying_status() {
+            Some(reply) => Ok(reply),
+            None => call("crate_update_status", json!({}), None, true).await,
+        },
+        Some("check") => call("crate_update_check", json!({}), None, true).await,
+        Some("cancel") => call("crate_update_cancel", json!({}), None, true).await,
+        Some("dismiss") => {
+            call(
+                "crate_update_dismiss",
+                json!({"version":version()?}),
+                None,
+                true,
+            )
+            .await
+        }
+        Some("stage") => {
+            let version = version()?;
+            if let Some(reply) = unconfirmed(
+                args,
+                format!(
+                    "Build version {version} of this package with Cargo (it is not installed)?"
+                ),
+            ) {
+                return Ok(reply);
+            }
+            call("crate_update_stage", json!({"version":version}), None, true).await
+        }
+        Some("apply") => {
+            let version = version()?;
+            if let Some(reply) = unconfirmed(
+                args,
+                format!(
+                    "Install the prepared version {version} now? The application and pta are replaced and restarted; the previous version is restored if the new one does not start."
+                ),
+            ) {
+                return Ok(reply);
+            }
+            call("crate_update_apply", json!({"version":version}), None, true).await
+        }
+        _ => anyhow::bail!("unknown command or invalid argument count"),
+    }
+}
+
+/// The state of an update that is being applied, from its journal. The host is stopped for part of
+/// it, so this never contacts or starts one.
+fn applying_status() -> Option<Reply> {
+    use crate::maintenance::apply as journal;
+    let dir = control::profile_dir()
+        .ok()?
+        .join(crate::maintenance::DIRECTORY);
+    let entry = journal::read(&dir).filter(|j| !j.phase.finished())?;
+    // A journal whose driver died is undone first, then the host answers as usual.
+    if !matches!(
+        journal::recover(&dir, journal::now()),
+        Ok(journal::Recovery::Active)
+    ) {
+        return None;
+    }
+    Some(Reply::success(json!({
+        "managed": "local", "state": "applying", "running": env!("CARGO_PKG_VERSION"),
+        "installed": entry.from, "available": entry.to, "can_stage": false, "can_apply": false,
+        "apply": journal::describe(&entry),
+    })))
+}
+
+async fn account_command(args: &[String]) -> Result<Reply> {
+    let words = words(args);
+    match (words.get(1).copied(), words.get(2).copied()) {
+        (Some("status"), _) => call("portable_status", json!({}), None, true).await,
+        (Some("sync"), _) => {
+            let reset = args.iter().any(|a| a == "--reset");
+            call(
+                "portable_sync",
+                if reset {
+                    json!({"reset":true})
+                } else {
+                    json!({})
+                },
+                None,
+                true,
+            )
+            .await
+        }
+        (Some("records"), Some(kind)) => {
+            let (kind, values) = match kind {
+                "status" => ("activity_status", json!({})),
+                _ => match words.get(3).and_then(|a| a.split_once("..")) {
+                    Some((from, to)) => ("activity_history", json!({"day":to,"from":from})),
+                    None => ("activity_history", json!({"day":words.get(3)})),
+                },
+            };
+            let mut body = json!({"kind":kind});
+            body["day"] = values["day"].clone();
+            body["from"] = values["from"].clone();
+            call("portable_records", body, None, true).await
+        }
+        _ => anyhow::bail!("missing argument; consult --help"),
+    }
+}
+
+async fn variables_command(args: &[String]) -> Result<Reply> {
+    let words = words(args);
+    let word = |i: usize| -> Result<&str> {
+        words
+            .get(i)
+            .copied()
+            .context("missing argument; consult --help")
+    };
+    let description =
+        || -> Result<&str> { option(args, "--description").context("--description is required") };
+    match (word(1)?, words.get(2).copied()) {
+        ("list", _) => {
+            let limit = option(args, "--limit")
+                .map(|v| v.parse::<usize>().context("invalid limit"))
+                .transpose()?;
+            call("variable_list", json!({"limit":limit}), None, true).await
+        }
+        ("search", _) => call("variable_list", json!({"query":word(2)?}), None, true).await,
+        ("sync", _) => {
+            let reset = args.iter().any(|a| a == "--reset");
+            call(
+                "variable_sync",
+                if reset {
+                    json!({"reset":true})
+                } else {
+                    json!({})
+                },
+                None,
+                true,
+            )
+            .await
+        }
+        ("status", _) => call("variable_sync_status", json!({}), None, true).await,
+        ("create", _) => {
+            let id = option(args, "--id")
+                .map(str::to_owned)
+                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+            let value = protected_value()?;
+            let body = json!({"id":id,"name":word(2)?,"description":description()?,"value":value});
+            call("variable_create", body, None, true).await.map_err(|error| {
+                // The host may have stored it before the timeout: inspect, then repeat only with this ID.
+                error.context(format!("The result is unknown. Inspect with `pta variables list`; if it is absent, repeat with --id {id}."))
+            })
+        }
+        ("update", _) => {
+            let version = option(args, "--expected-version")
+                .context("--expected-version is required")?
+                .parse::<u64>()
+                .context("invalid version")?;
+            let description = option(args, "--description");
+            let replace_value = args.iter().any(|a| a == "--value");
+            ensure!(
+                description.is_some() || replace_value,
+                "give --description, --value or both"
+            );
+            let mut body = json!({"id":word(2)?,"version":version});
+            if let Some(description) = description {
+                body["description"] = json!(description);
+            }
+            if replace_value {
+                body["value"] = json!(protected_value()?);
+            }
+            call("variable_update", body, None, true).await.map_err(|error| {
+                error.context("The result is unknown. Inspect with `pta variables list` before repeating.")
+            })
+        }
+        ("delete", _) => {
+            let version = option(args, "--expected-version")
+                .context("--expected-version is required")?
+                .parse::<u64>()
+                .context("invalid version")?;
+            call(
+                "variable_delete",
+                json!({"id":word(2)?,"version":version}),
+                None,
+                true,
+            )
+            .await
+        }
+        ("audit", _) => {
+            let limit = option(args, "--limit")
+                .map(|v| v.parse::<usize>().context("invalid limit"))
+                .transpose()?;
+            call("variable_audit", json!({"limit":limit}), None, true).await
+        }
+        ("entry", Some("replace")) => {
+            call(
+                "variable_rotation_start",
+                json!({"id":word(3)?}),
+                None,
+                true,
+            )
+            .await
+        }
+        ("entry", Some("start")) => {
+            call(
+                "variable_entry_start",
+                json!({"name":word(3)?,"description":description()?}),
+                None,
+                true,
+            )
+            .await
+        }
+        ("entry", Some("status")) => {
+            call(
+                "variable_entry_status",
+                json!({"request":word(3)?}),
+                None,
+                true,
+            )
+            .await
+        }
+        ("entry", Some("cancel")) => {
+            call(
+                "variable_entry_cancel",
+                json!({"request":word(3)?}),
+                None,
+                true,
+            )
+            .await
+        }
+        ("entry", Some("complete")) => {
+            let value = protected_value()?;
+            call(
+                "variable_entry_complete",
+                json!({"request":word(3)?,"value":value}),
+                None,
+                true,
+            )
+            .await
+        }
+        ("consumers", _) => call("variable_consumer_list", json!({}), None, true).await,
+        ("migrate", Some("inspect")) => {
+            call("variable_migration_inspect", json!({}), None, true).await
+        }
+        ("migrate", Some("status")) => {
+            call("variable_migration_status", json!({}), None, true).await
+        }
+        ("migrate", Some("run")) => {
+            let credential = word(3)?;
+            let destination = option(args, "--destination").context("--destination is required")?;
+            if let Some(reply) = unconfirmed(
+                args,
+                format!(
+                    "Copy the application credential {credential} into account {destination} (the original stays untouched)?"
+                ),
+            ) {
+                return Ok(reply);
+            }
+            let mut item = json!({"credential":credential,"description":description()?,"bind":args.iter().any(|a| a == "--bind")});
+            if let Some(name) = option(args, "--name") {
+                item["name"] = json!(name);
+            }
+            if let Some(action) = option(args, "--existing") {
+                let version = option(args, "--expected-version")
+                    .context("--expected-version is required with --existing")?
+                    .parse::<u64>()
+                    .context("invalid version")?;
+                item["existing"] = json!({"action":action,"version":version});
+            }
+            let mut body = json!({"destination":destination,"items":[item]});
+            if args.iter().any(|a| a == "--settings") {
+                body["settings"] = json!("adopt_account");
+            }
+            call("variable_migration_run", body, None, true).await.map_err(|error| {
+                error.context("The result is unknown. Inspect with `pta variables migrate status`; repeating the same command resumes safely.")
+            })
+        }
+        ("bind", _) | ("check", _) => {
+            let consumer = word(2)?;
+            let version = option(args, "--expected-version")
+                .map(|v| v.parse::<u64>().context("invalid version"))
+                .transpose()?;
+            if word(1)? == "bind" {
+                let variable = word(3)?;
+                if let Some(reply) = unconfirmed(
+                    args,
+                    format!("Use variable {variable} as the {consumer} credential?"),
+                ) {
+                    return Ok(reply);
+                }
+                let mut body = json!({"consumer":consumer,"variable":variable});
+                if let Some(version) = version {
+                    body["version"] = json!(version);
+                }
+                call("variable_consumer_bind", body, None, true).await
+            } else {
+                if let Some(reply) = unconfirmed(
+                    args,
+                    format!(
+                        "Send the variable bound to {consumer} to its fixed destination to test it?"
+                    ),
+                ) {
+                    return Ok(reply);
+                }
+                call(
+                    "variable_consumer_check",
+                    json!({"consumer":consumer,"version":version}),
+                    None,
+                    true,
+                )
+                .await
+            }
+        }
+        ("unbind", _) => {
+            call(
+                "variable_consumer_unbind",
+                json!({"consumer":word(2)?}),
+                None,
+                true,
+            )
+            .await
+        }
+        ("launcher", Some("list")) => call("variable_consumer_list", json!({}), None, true).await,
+        ("launcher", Some("remove")) => {
+            call(
+                "variable_launcher_remove",
+                json!({"id":word(3)?}),
+                None,
+                true,
+            )
+            .await
+        }
+        ("launcher", Some("define")) => {
+            let env = pairs(options(args, "--env"), |v| Some(v.to_owned()), "--env")?;
+            let program = option(args, "--program").context("--program is required")?;
+            let directory = option(args, "--directory").context("--directory is required")?;
+            if let Some(reply) = unconfirmed(
+                args,
+                format!(
+                    "Allow program {program} in {directory} to receive the variables {} as environment variables?",
+                    serde_json::to_string(&env)?
+                ),
+            ) {
+                return Ok(reply);
+            }
+            let mut body = json!({"id":word(3)?,"description":description()?,"program":program,
+                "args":options(args, "--arg"),"directory":directory,"env":env});
+            if let Some(timeout) = option(args, "--timeout") {
+                body["timeout_seconds"] = json!(timeout.parse::<u64>().context("invalid timeout")?);
+            }
+            call("variable_launcher_define", body, None, true).await
+        }
+        ("launcher", Some("run")) => {
+            let name = word(3)?;
+            let versions = pairs(options(args, "--pin"), |v| v.parse::<u64>().ok(), "--pin")?;
+            if let Some(reply) = unconfirmed(
+                args,
+                format!("Run launcher {name} now, giving its program the variables it names?"),
+            ) {
+                return Ok(reply);
+            }
+            call(
+                "variable_launcher_run",
+                json!({"id":name,"versions":versions}),
+                None,
+                true,
+            )
+            .await
+            .map_err(|error| {
+                error.context("The result is unknown. The program may have run; inspect its effects before repeating.")
+            })
+        }
+        ("verify", _) => call("variable_verify", json!({}), None, true).await,
+        ("key", Some("backup")) => {
+            let output = option(args, "--output").context("--output is required")?;
+            call("variable_key_backup", json!({"output":output}), None, true).await
+        }
+        ("key", Some("restore")) => {
+            let backup: Value = serde_json::from_str(&stdin_text()?)
+                .context("input must be a variable key backup JSON")?;
+            call("variable_key_restore", json!({"backup":backup}), None, true).await
+        }
+        ("key", Some("rotate")) => call("variable_key_rotate", json!({}), None, true).await,
+        _ => anyhow::bail!("unknown command or invalid argument count"),
+    }
+}
 fn positional(args: &[String], index: usize) -> Result<&str> {
     args.get(index)
         .map(String::as_str)
@@ -232,7 +802,76 @@ fn validate_args(args: &[String]) -> Result<()> {
         let a = args[i].as_str();
         match a {
             "--json" | "--non-interactive" | "--offline" | "--no-browser" | "--wait"
-            | "--content" | "--current-profile" | "--context-stdin" => {}
+            | "--content" | "--current-profile" | "--context-stdin" | "--value" | "--confirmed"
+            | "--reset" | "--bind" | "--settings" => {}
+            "--destination" | "--name" | "--existing" => {
+                i += 1;
+                ensure!(
+                    args.get(i)
+                        .is_some_and(|v| !v.is_empty() && !v.starts_with("--")),
+                    "invalid value for this flag"
+                );
+            }
+            "--program" | "--directory" => {
+                i += 1;
+                ensure!(
+                    args.get(i)
+                        .is_some_and(|v| std::path::Path::new(v).is_absolute()),
+                    "invalid absolute path"
+                );
+            }
+            "--env" | "--pin" => {
+                i += 1;
+                ensure!(
+                    args.get(i).is_some_and(|v| v
+                        .split_once('=')
+                        .is_some_and(|(name, rest)| !name.is_empty() && !rest.is_empty())),
+                    "invalid NAME=VALUE pair"
+                );
+            }
+            "--arg" => {
+                // A fixed argument may itself look like a flag (`--check`); it is never a value.
+                i += 1;
+                ensure!(args.get(i).is_some(), "invalid argument");
+            }
+            "--timeout" => {
+                i += 1;
+                ensure!(
+                    args.get(i).is_some_and(|v| v.parse::<u64>().is_ok()),
+                    "invalid timeout"
+                );
+            }
+            "--expected-version" => {
+                i += 1;
+                ensure!(
+                    args.get(i)
+                        .is_some_and(|v| v.parse::<u64>().is_ok_and(|n| n > 0)),
+                    "invalid version"
+                );
+            }
+            "--description" => {
+                i += 1;
+                ensure!(
+                    args.get(i).is_some_and(|v| !v.is_empty()),
+                    "invalid description"
+                );
+            }
+            "--id" => {
+                i += 1;
+                ensure!(
+                    args.get(i)
+                        .is_some_and(|v| uuid::Uuid::parse_str(v).is_ok()),
+                    "invalid entry ID"
+                );
+            }
+            "--expect" => {
+                i += 1;
+                ensure!(
+                    args.get(i)
+                        .is_some_and(|v| !v.is_empty() && !v.starts_with("--")),
+                    "invalid variable name"
+                );
+            }
             "--context" => {
                 i += 1;
                 ensure!(
@@ -296,6 +935,28 @@ fn validate_args(args: &[String]) -> Result<()> {
             | ["mcp", "config"]
             | ["tools", "list"]
             | ["tools", "call", _]
+            | ["update", "status" | "check" | "cancel"]
+            | ["update", "stage" | "apply" | "dismiss", _]
+            | ["setup", "status"]
+            | ["account", "status" | "sync"]
+            | ["account", "records", "status" | "history"]
+            | ["account", "records", "history", _]
+            | ["variables", "list" | "verify" | "audit" | "sync" | "status"]
+            | ["variables", "search" | "create" | "update" | "delete", _]
+            | ["variables", "consumers"]
+            | ["variables", "migrate", "inspect" | "status"]
+            | ["variables", "migrate", "run", _]
+            | ["variables", "unbind" | "check", _]
+            | ["variables", "bind", _, _]
+            | ["variables", "launcher", "list"]
+            | ["variables", "launcher", "define" | "remove" | "run", _]
+            | [
+                "variables",
+                "entry",
+                "start" | "status" | "cancel" | "complete" | "replace",
+                _
+            ]
+            | ["variables", "key", "backup" | "restore" | "rotate"]
             | ["web", "status" | "configure" | "callbacks"]
             | ["web", "users", "list"]
             | ["web", "machines", "authorize", _]
@@ -391,15 +1052,106 @@ fn validate_args(args: &[String]) -> Result<()> {
         ),
         (
             "--output",
-            p.as_slice().starts_with(&["web", "machines", "authorize"]),
+            p.as_slice().starts_with(&["web", "machines", "authorize"])
+                || p.as_slice() == ["variables", "key", "backup"],
         ),
-        ("--limit", ["audit", "logs", "notes"].contains(&p[0])),
+        (
+            "--description",
+            p.as_slice().starts_with(&["variables", "create"])
+                || p.as_slice().starts_with(&["variables", "update"])
+                || p.as_slice().starts_with(&["variables", "entry", "start"])
+                || p.as_slice().starts_with(&["variables", "migrate", "run"])
+                || p.as_slice()
+                    .starts_with(&["variables", "launcher", "define"]),
+        ),
+        (
+            "--destination",
+            p.as_slice().starts_with(&["variables", "migrate", "run"]),
+        ),
+        (
+            "--name",
+            p.as_slice().starts_with(&["variables", "migrate", "run"]),
+        ),
+        (
+            "--existing",
+            p.as_slice().starts_with(&["variables", "migrate", "run"]),
+        ),
+        (
+            "--bind",
+            p.as_slice().starts_with(&["variables", "migrate", "run"]),
+        ),
+        (
+            "--settings",
+            p.as_slice().starts_with(&["variables", "migrate", "run"]),
+        ),
+        (
+            "--expected-version",
+            p.as_slice().starts_with(&["variables", "update"])
+                || p.as_slice().starts_with(&["variables", "delete"])
+                || p.as_slice().starts_with(&["variables", "bind"])
+                || p.as_slice().starts_with(&["variables", "migrate", "run"])
+                || p.as_slice().starts_with(&["variables", "check"]),
+        ),
+        (
+            "--confirmed",
+            p.as_slice().starts_with(&["update", "stage"])
+                || p.as_slice().starts_with(&["update", "apply"])
+                || p.as_slice().starts_with(&["variables", "migrate", "run"])
+                || p.as_slice().starts_with(&["variables", "bind"])
+                || p.as_slice().starts_with(&["variables", "check"])
+                || p.as_slice()
+                    .starts_with(&["variables", "launcher", "define"])
+                || p.as_slice().starts_with(&["variables", "launcher", "run"]),
+        ),
+        (
+            "--program",
+            p.as_slice()
+                .starts_with(&["variables", "launcher", "define"]),
+        ),
+        (
+            "--directory",
+            p.as_slice()
+                .starts_with(&["variables", "launcher", "define"]),
+        ),
+        (
+            "--env",
+            p.as_slice()
+                .starts_with(&["variables", "launcher", "define"]),
+        ),
+        (
+            "--arg",
+            p.as_slice()
+                .starts_with(&["variables", "launcher", "define"]),
+        ),
+        (
+            "--timeout",
+            p.as_slice()
+                .starts_with(&["variables", "launcher", "define"]),
+        ),
+        (
+            "--pin",
+            p.as_slice().starts_with(&["variables", "launcher", "run"]),
+        ),
+        (
+            "--value",
+            p.as_slice().starts_with(&["variables", "update"]),
+        ),
+        ("--id", p.as_slice().starts_with(&["variables", "create"])),
+        (
+            "--reset",
+            p.as_slice() == ["variables", "sync"] || p.as_slice() == ["account", "sync"],
+        ),
+        (
+            "--limit",
+            ["audit", "logs", "notes", "variables"].contains(&p[0]),
+        ),
         (
             "--source",
             p.as_slice().starts_with(&["answer", "refine"])
                 || p.as_slice().starts_with(&["knowledge", "search"]),
         ),
         ("--context", ["notes", "knowledge"].contains(&p[0])),
+        ("--expect", p.as_slice() == ["setup", "status"]),
     ] {
         ensure!(
             !args.iter().any(|a| a == flag) || allowed,
@@ -460,6 +1212,24 @@ async fn execute(mut args: Vec<String>) -> Result<Reply> {
     if !matches!(command, "capabilities" | "skill" | "tools") && !offline {
         retire_outdated_host(command, action, !non_interactive && !json_output).await?;
     }
+    if command == "variables" {
+        return variables_command(&args).await;
+    }
+    if command == "account" {
+        return account_command(&args).await;
+    }
+    if command == "setup" {
+        return call(
+            "setup_readiness",
+            json!({"expect":options(&args, "--expect")}),
+            None,
+            true,
+        )
+        .await;
+    }
+    if command == "update" {
+        return update_command(&args).await;
+    }
     match command {
         "tools" => {
             if action == "list" {
@@ -493,7 +1263,7 @@ async fn execute(mut args: Vec<String>) -> Result<Reply> {
         }
         "capabilities" => {
             return Ok(Reply::success(
-                json!({"contract":control::CONTRACT,"commands":HELP,"skill_version":env!("CARGO_PKG_VERSION"),"activity_registration_support":true,"web_support":true,"web_access_support":true,"knowledge_index_support":true,"mcp_support":true,"tools_support":true,"todo_support":true,"implementation_support":true,"machine_pairing_support":true,"machine_login_support":true,"machine_management_support":true,"account_authority_support":true,"shared_accounts_support":true}),
+                json!({"contract":control::CONTRACT,"commands":HELP,"skill_version":env!("CARGO_PKG_VERSION"),"activity_registration_support":true,"web_support":true,"web_access_support":true,"knowledge_index_support":true,"mcp_support":true,"tools_support":true,"todo_support":true,"implementation_support":true,"machine_pairing_support":true,"machine_login_support":true,"machine_management_support":true,"account_variables_support":true,"account_portable_support":true,"account_authority_support":true,"shared_accounts_support":true}),
             ));
         }
         "skill" => return crate::app::skill::command(action, args.get(2).map(String::as_str)),
@@ -1234,7 +2004,7 @@ pub async fn run() -> i32 {
         }
         return 0;
     }
-    if args.iter().any(|a| a == "--version") {
+    if args.iter().any(|a| a == "--version") && !args.iter().any(|a| a == "variables") {
         if args.iter().any(|a| a == "--json") {
             println!(
                 "{}",
@@ -1524,6 +2294,8 @@ mod help_tests {
             &["knowledge", "search", "conciliación"],
             &["index", "status"],
             &["index", "refresh", "handbook"],
+            &["setup", "status"],
+            &["setup", "status", "--expect", "DEPLOY_ENDPOINT"],
         ];
         for command in commands {
             let args: Vec<String> = command.iter().map(|a| a.to_string()).collect();

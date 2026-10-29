@@ -33,6 +33,7 @@
     <symbol id="i-spark" viewBox="0 0 24 24"><path d="M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8z"/><path d="M19 16l.8 2.2L22 19l-2.2.8L19 22l-.8-2.2L16 19l2.2-.8z"/></symbol>
     <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5"/><path d="m16 16 4.5 4.5"/></symbol>
     <symbol id="i-user" viewBox="0 0 24 24"><circle cx="12" cy="8" r="4"/><path d="M4 21c1.5-4 4.5-6 8-6s6.5 2 8 6"/></symbol>
+    <symbol id="i-eye-off" viewBox="0 0 24 24"><path d="m3 3 18 18M10 5.2A11 11 0 0 1 12 5c6.4 0 10 7 10 7a19 19 0 0 1-3 3.8M6 6.7A20 20 0 0 0 2 12s3.6 7 10 7a11 11 0 0 0 5.3-1.4M10 10a3 3 0 0 0 4 4"/></symbol>
     <symbol id="i-eye" viewBox="0 0 24 24"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></symbol>
     <symbol id="i-globe" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/></symbol>
     <symbol id="i-chip" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2.5"/><path d="M9 2.5V6M15 2.5V6M9 18v3.5M15 18v3.5M2.5 9H6M2.5 15H6M18 9h3.5M18 15h3.5"/></symbol>
@@ -81,6 +82,12 @@
         <div class="actions"><button id="offer-start">Keep running</button><button id="offer-dismiss" class="secondary">Leave it stopped</button></div>
       </div>
 
+      <div id="update-offer" class="panel offer" role="status" aria-labelledby="update-offer-title" hidden>
+        <h2 id="update-offer-title">A new version is available</h2>
+        <p id="update-offer-text"></p>
+        <div class="actions"><button id="update-offer-stage" type="button">Prepare update</button><button id="update-offer-apply" type="button" hidden>Install update</button><button id="update-offer-dismiss" type="button" class="secondary">Dismiss</button></div>
+      </div>
+
       <section id="overview">
         <header class="page-head"><span class="page-tile" aria-hidden="true"><svg class="icon"><use href="#i-home"/></svg></span><div class="page-title">
           <h1>Home</h1>
@@ -106,6 +113,12 @@
         <div id="activity-notice" class="banner" role="status" hidden><svg class="icon" aria-hidden="true"><use href="#i-check"/></svg><span id="activity-notice-text"></span><button id="activity-notice-open" class="secondary small">Open activities</button></div>
         <!-- Phones read it top to bottom: what is left to set up, what happened, then each part's state. -->
         <div class="home-grid">
+          <div class="panel" id="account-setup-panel" hidden>
+            <div class="panel-head"><h2>Your account on this computer</h2><span id="account-setup-state" class="badge muted"></span><button id="account-setup-refresh" type="button" class="secondary small">Check again</button></div>
+            <p class="hint">Rows marked Account are kept by your coordinator and follow you to every computer. Rows marked This computer apply only here. Checking never signs in, trusts, grants access or starts anything.</p>
+            <p id="account-setup-next" class="callout info" role="status" hidden></p>
+            <ol id="account-setup-steps" class="steps" aria-live="polite"></ol>
+          </div>
           <div class="panel" id="setup-panel">
             <div class="panel-head"><h2>Setup</h2><span id="setup-progress" class="hint"></span></div>
             <div class="progress" aria-hidden="true"><span id="setup-bar"></span></div>
@@ -186,7 +199,7 @@
           <button role="tab" id="settings-tab-teams" data-group="teams" aria-controls="settings-teams" aria-selected="false" tabindex="-1"><svg class="icon" aria-hidden="true"><use href="#i-antenna"/></svg>Microsoft Teams<span class="flag warn" hidden><span class="sr-only">Needs attention</span></span><span class="flag edited" hidden><span class="sr-only">Unsaved changes</span></span></button>
           <button role="tab" id="settings-tab-models" data-group="models" aria-controls="settings-models" aria-selected="false" tabindex="-1"><svg class="icon" aria-hidden="true"><use href="#i-chip"/></svg>Language models<span class="flag warn" hidden><span class="sr-only">Needs attention</span></span><span class="flag edited" hidden><span class="sr-only">Unsaved changes</span></span></button>
           <button role="tab" id="settings-tab-activity" data-group="activity" aria-controls="settings-activity" aria-selected="false" tabindex="-1"><svg class="icon" aria-hidden="true"><use href="#i-check"/></svg>Daily task record<span class="flag edited" hidden><span class="sr-only">Unsaved changes</span></span></button>
-          <button role="tab" id="settings-tab-credentials" data-group="credentials" aria-controls="settings-credentials" aria-selected="false" tabindex="-1"><svg class="icon" aria-hidden="true"><use href="#i-key"/></svg>Credentials<span class="flag warn" hidden><span class="sr-only">Needs attention</span></span></button>
+          <button role="tab" id="settings-tab-variables" data-group="variables" aria-controls="settings-variables" aria-selected="false" tabindex="-1"><svg class="icon" aria-hidden="true"><use href="#i-key"/></svg>Variables<span class="flag warn" hidden><span class="sr-only">Needs attention</span></span></button>
           <button role="tab" id="settings-tab-advanced" data-group="advanced" aria-controls="settings-advanced" aria-selected="false" tabindex="-1"><svg class="icon" aria-hidden="true"><use href="#i-wrench"/></svg>Advanced</button>
         </div>
 
@@ -209,6 +222,15 @@
               <button type="button" data-theme-choice="dark" aria-pressed="false">Dark</button>
             </div>
           </div>
+          <div id="panel-account-config" class="panel" hidden>
+            <div class="panel-head"><h2>Account configuration</h2><span id="account-config-state" class="badge muted"></span><button id="account-config-sync" type="button" class="secondary">Synchronize now</button></div>
+            <p class="hint">Your preferences, model choices, sources and their audiences, contexts, questions and verified notes follow your account. Folders, credentials, sign-ins and tunnels stay on each computer.</p>
+            <p id="account-standing" class="callout warn" role="status" hidden></p>
+            <p id="account-config-summary" class="hint" role="status"></p>
+            <p id="account-config-problem" class="callout warn" role="status" hidden></p>
+            <div id="account-config-setup" class="account-config-setup"></div>
+            <div class="actions"><button id="account-config-reset" type="button" class="secondary" hidden>Replace this computer's settings with the account's</button></div>
+          </div>
           <div id="panel-web-account" class="panel" hidden>
             <div class="panel-head"><h2>Your web account</h2><button id="web-logout-settings" class="secondary small">Sign out</button></div>
             <p class="hint">You signed in with GitHub. Your configuration, Teams account, credentials and history belong to your profile. Contact the portal operator to recover access.</p>
@@ -226,6 +248,8 @@
           <div class="panel" id="panel-teams">
             <div class="panel-head"><h2>Microsoft Teams and Entra</h2><span id="microsoft-state" class="badge muted"></span></div>
             <p class="hint">Use your existing Entra registration (<em>Mobile and desktop</em> platform with <code>http://localhost</code> and delegated permissions). The user ID is filled in when you connect the account.</p>
+            <p class="hint">Your Entra tenant, client ID and Teams user ID are saved in account Variables and restored when you sign in on another computer. Each computer still connects to Microsoft separately.</p>
+            <p id="teams-identity-error" class="callout warn" role="status" hidden></p>
             <div class="grid">
               <label>Entra tenant ID<input id="tenant-id" class="cfg" spellcheck="false"></label>
               <label>Entra client ID<input id="client-id" class="cfg" spellcheck="false"></label>
@@ -245,7 +269,7 @@
           <div class="panel" id="panel-server">
             <h2>Public URL and tunnel</h2>
             <p id="web-hosting-note" class="hint" hidden>The portal operator manages this profile's address and tunnel. Your assistant uses its own Teams callbacks through the same public address.</p>
-            <p class="hint">Microsoft Graph delivers messages to a public HTTPS URL that must reach the local port. For a tunnel managed in Cloudflare, turn on the option, store <code>CLOUDFLARE_TUNNEL_TOKEN</code> in Credentials and leave the local file empty; you can also use a local file with a final 404 rule. If another supervisor runs the tunnel, leave both off.</p>
+            <p class="hint">Microsoft Graph delivers messages to a public HTTPS URL that must reach the local port. For a tunnel managed in Cloudflare, turn on the option, store <code>CLOUDFLARE_TUNNEL_TOKEN</code> through <code>pta credentials set</code> on this computer and leave the local file empty; you can also use a local file with a final 404 rule. If another supervisor runs the tunnel, leave both off.</p>
             <div class="grid">
               <label>Public HTTPS URL<input id="public-url" class="cfg" translate="no" placeholder="https://assistant.example.com" spellcheck="false"></label>
               <label>Local port<input id="bind" class="cfg" placeholder="127.0.0.1:38655" spellcheck="false"></label>
@@ -319,22 +343,71 @@
           </div>
         </div>
 
-        <div id="settings-credentials" class="settings-group" role="tabpanel" aria-labelledby="settings-tab-credentials" data-settings-group="credentials" hidden>
-          <div class="panel" id="panel-credentials">
-            <h2>Credentials</h2>
-            <p class="hint">Their values are never shown. Type in a field only to store or replace a credential; it applies right away. Environment variables and secret files take priority.</p>
-            <div id="credentials" class="list"></div>
+        <div id="settings-variables" class="settings-group" role="tabpanel" aria-labelledby="settings-tab-variables" data-settings-group="variables" hidden>
+          <div class="panel" id="panel-variables">
+            <div class="panel-head"><h2>Variables</h2><span id="variables-count" class="badge muted" hidden></span><button id="variables-refresh" type="button" class="secondary">Refresh</button></div>
+            <p class="hint">Private to your assistant account. Each variable has a name, a description and a value: values are encrypted, stay hidden and are never given to your agents. Describe what each one is for so you and your agents can pick the right one.</p>
+            <p id="variables-standing" class="callout warn" role="status" hidden></p>
+            <p id="variables-sync" class="hint" role="status" hidden></p>
+            <div id="variables-pending" class="list" hidden></div>
+            <label id="variables-search-field" hidden>Search variables<input id="variables-search" type="search" autocomplete="off" spellcheck="false" placeholder="Name or description"></label>
+            <div id="variables" class="list"></div>
+            <h3>Add a variable</h3>
+            <div class="grid">
+              <label>Name <small>Letters, digits and _, up to 128; it cannot start with a digit.</small><input id="variable-name" translate="no" placeholder="DEPLOY_ENDPOINT" maxlength="128" autocomplete="off" autocapitalize="off" spellcheck="false"></label>
+              <label>Description <small>What it is for, so you and your agents can choose it.</small><input id="variable-description" maxlength="500" autocomplete="off" spellcheck="false"></label>
+            </div>
+            <label>Value <small>Hidden while you type; up to 16 KiB and line breaks are kept.</small><textarea id="variable-value" class="secret-entry" rows="3" autocomplete="off" autocapitalize="off" spellcheck="false"></textarea></label>
+            <label class="check"><input id="variable-show" type="checkbox"><svg class="icon" aria-hidden="true"><use href="#i-eye"/></svg> Show the value while I type</label>
+            <div class="actions"><button id="variable-create" disabled>Add variable</button></div>
+          </div>
+          <div class="panel" id="panel-consumers">
+            <h2>Where variables are used</h2>
+            <p class="hint">Each use below names the variable it takes; choose another one to point it there, so several uses can share one variable. Your agents see only names and versions, never values; every use checks your account and the variable's current version again, and a deleted variable stops working instead of falling back to another credential.</p>
+            <p id="consumers-standing" class="callout warn" role="status" hidden></p>
+            <div id="consumers" class="list"></div>
+            <div id="launchers" hidden>
+              <h3>Local programs</h3>
+              <p class="hint">Programs that receive named variables as environment variables of that one process. Your agent or the CLI can propose one, but it receives nothing until you check its program, arguments, folder and variables and approve it here. Their output is never shown.</p>
+              <div id="launcher-list" class="list"></div>
+            </div>
           </div>
         </div>
 
         <div id="settings-advanced" class="settings-group" role="tabpanel" aria-labelledby="settings-tab-advanced" data-settings-group="advanced" hidden>
+          <div class="panel" id="panel-migration">
+            <div class="panel-head"><h2>Move existing credentials</h2><button id="migration-refresh" type="button" class="secondary">Review</button></div>
+            <p class="hint">Copy credentials this computer already uses into your assistant account. You choose each one and confirm the account; this computer reads the value itself, so it is never shown or given to your agents, and the originals are never changed or deleted.</p>
+            <p id="migration-standing" class="callout warn" role="status" hidden></p>
+            <p id="migration-destination" class="callout" role="status" hidden></p>
+            <div id="migration-list" class="list"></div>
+            <details id="migration-excluded" hidden><summary>Never moved</summary><div id="migration-excluded-list" class="list"></div></details>
+            <label id="migration-settings-field" class="check" hidden><input id="migration-settings" type="checkbox"> Also replace this computer's settings with the account's (a private backup is kept)</label>
+            <label id="migration-confirm-field" class="check" hidden><input id="migration-confirm" type="checkbox"> <span id="migration-confirm-text"></span></label>
+            <div class="actions"><button id="migration-run" type="button" disabled>Copy selected credentials</button></div>
+            <div id="migration-result" class="list" role="status" hidden></div>
+            <p id="migration-local" class="hint" hidden></p>
+          </div>
+          <div class="panel" id="panel-updates">
+            <div class="panel-head"><h2>Updates</h2><span id="update-state" class="badge muted"></span><button id="update-check" type="button" class="secondary">Check now</button></div>
+            <p id="update-intro" class="hint">Checks the public package registry for a newer stable release. Preparing an update builds it with Cargo next to the installed one and verifies it; nothing is installed or replaced, and the installed version keeps running. Installing a prepared update waits for work in progress, replaces the application and pta together, restarts the application and restores the previous version if the new one is not healthy.</p>
+            <p id="update-managed" class="callout" role="status" hidden></p>
+            <p id="update-diagnostic" class="callout warn" role="status" hidden></p>
+            <div id="update-versions" class="list"></div>
+            <p id="update-progress" class="hint" role="status" hidden></p>
+            <div id="update-deferred" class="callout" role="status" hidden><div><p id="update-deferred-text"></p><ul id="update-deferred-reasons"></ul></div></div>
+            <p id="update-error" class="callout warn" role="status" hidden></p>
+            <details id="update-tail" hidden><summary>Last build output</summary><pre id="update-tail-text" translate="no"></pre></details>
+            <div id="update-result" class="callout" role="status" hidden><div><p id="update-result-text"></p><p id="update-result-error" hidden></p><ul id="update-result-notes"></ul></div></div>
+            <div class="actions"><button id="update-stage" type="button" disabled>Prepare update</button><button id="update-apply" type="button" hidden>Install update</button><button id="update-cancel" type="button" class="secondary" hidden>Cancel the wait</button><button id="update-dismiss" type="button" class="secondary" hidden>Dismiss notice</button></div>
+          </div>
           <div class="panel" id="panel-embeddings">
             <h2>Semantic search</h2>
             <p class="hint">Repositories and notes use text search. Optional embeddings add semantic retrieval for them, configured questions and evaluated requests; these texts are sent to the endpoint, while equivalent questions can still be recognized by the language model without embeddings.</p>
             <div class="grid">
               <label>Endpoint URL<input id="embeddings-url" class="cfg" translate="no" placeholder="https://api.openai.com/v1" spellcheck="false"></label>
               <label>Model<input id="embeddings-model" class="cfg" translate="no" placeholder="text-embedding-3-small" spellcheck="false"></label>
-              <label>Credential name <small>Store its value in Credentials; leave it empty for a server on this computer.</small><input id="embeddings-credential" class="cfg" translate="no" placeholder="OPENAI_API_KEY" spellcheck="false"></label>
+              <label>Credential name <small>Store its value in Variables; leave it empty for a server on this computer.</small><input id="embeddings-credential" class="cfg" translate="no" placeholder="OPENAI_API_KEY" spellcheck="false"></label>
             </div>
           </div>
           <div class="panel" id="panel-import">

@@ -66,7 +66,7 @@ pub struct Context {
     #[serde(default)]
     pub instructions: String,
 }
-#[derive(Clone, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Resource {
     pub id: String,
     pub description: String,
@@ -79,7 +79,7 @@ pub struct Resource {
     #[serde(flatten)]
     pub access: Access,
 }
-#[derive(Clone, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Access {
     File {

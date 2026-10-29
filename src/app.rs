@@ -28,6 +28,7 @@ mod activity;
 mod authority;
 mod azure_cli;
 pub mod cli;
+mod consumers;
 pub mod control;
 mod diagnostics;
 mod github;
@@ -36,10 +37,16 @@ mod github_cli;
 mod gui;
 mod headless;
 mod implementation;
+mod maintenance;
 mod mcp;
+mod migration;
 mod notes;
+mod portable;
+mod readiness;
 mod skill;
+mod standing;
 mod tools;
+mod variables;
 mod web;
 
 /// What the process owning the host can do beyond operations: a Tauri window, or nothing.
@@ -110,6 +117,9 @@ pub(crate) struct DesktopState {
     activity_graph: Mutex<Option<Arc<crate::adapters::graph::Graph>>>,
     activity_recovered: Mutex<Option<PathBuf>>,
     implementation: implementation::State,
+    variables: variables::State,
+    portable: portable::State,
+    standing: standing::State,
 }
 
 #[derive(Serialize)]
@@ -123,6 +133,7 @@ struct Snapshot {
     profile: PathBuf,
     tunnel_running: bool,
     microsoft_connected: bool,
+    teams_identity_error: Option<String>,
     config: Config,
     map: KnowledgeMap,
     credentials: BTreeMap<String, String>,
@@ -561,6 +572,9 @@ pub(crate) fn init_state(config_dir: &Path, data_dir: &Path) -> Result<DesktopSt
     Ok(DesktopState {
         authority: web::account_scope(&config_dir)?,
         implementation: implementation::State::new(config_path.parent().unwrap())?,
+        variables: variables::State::new(config_path.parent().unwrap()),
+        portable: portable::State::new(config_path.parent().unwrap()),
+        standing: standing::State::default(),
         operations: Mutex::new(()),
         loaded_config: Mutex::new(None),
         config_path,
@@ -613,6 +627,7 @@ fn required_credentials(config: &Config) -> Vec<String> {
 }
 
 async fn snapshot(host: &Host) -> std::result::Result<Snapshot, String> {
+    let teams_identity_error = variables::identity::restore(host).await.err();
     let state = &host.state;
     let config = read_config(&state.config_path).map_err(fail)?;
     let map = KnowledgeMap::load(&state.map_path).map_err(fail)?;
@@ -650,6 +665,7 @@ async fn snapshot(host: &Host) -> std::result::Result<Snapshot, String> {
         let _ = finished.task.await;
     }
     Ok(Snapshot {
+        teams_identity_error,
         account: web::account_identity(&state.authority).map_err(fail)?,
         revision: control::revision(state).map_err(fail)?,
         loaded_config: state
@@ -758,6 +774,7 @@ async fn start_service(state: &DesktopState) -> Result<()> {
         implementation::fleet::teams_allowed(state).await?,
         "This machine is not the selected Teams machine, or the previous machine still holds its lease."
     );
+    consumers::stage(state).await;
     let config = read_config(&state.config_path)?;
     web::validate_profile_identity(state.config_path.parent().unwrap(), &config)?;
     let map = KnowledgeMap::load(&state.map_path)?;
@@ -864,11 +881,12 @@ async fn start_service(state: &DesktopState) -> Result<()> {
 }
 
 async fn save_settings(
-    state: &DesktopState,
+    host: &Arc<Host>,
     mut config: Config,
     map: KnowledgeMap,
     tunnel_config: String,
 ) -> std::result::Result<(), String> {
+    let state = &host.state;
     let previous = read_config(&state.config_path).map_err(fail)?;
     config.knowledge_map = state.map_path.clone();
     // The map's own rules say what to fix (a duplicate context, an unknown source); they never
@@ -888,11 +906,18 @@ async fn save_settings(
     if !tunnel_config.trim().is_empty() {
         validate_tunnel(Path::new(tunnel_config.trim()), &config).map_err(fail)?;
     }
+    // An installation signed in to an account first sends the portable part of the change to the
+    // account's coordinator, which decides it under optimistic concurrency.
+    let previous_map = KnowledgeMap::load(&state.map_path).map_err(fail)?;
+    let forwarded =
+        portable::before_save(state, (&previous, &previous_map), (&config, &map)).await?;
+    variables::identity::save(host, &previous, &config).await?;
     let was_running = state.running.lock().await.is_some();
     if was_running {
         stop(state).await.map_err(fail)?;
     }
     commit_settings(state, &config, &map, tunnel_config.trim()).map_err(fail)?;
+    portable::after_save(state, forwarded);
     forget_removed_sources(&config, &map);
     *state.activity_graph.lock().await = None;
     if was_running {
@@ -979,13 +1004,17 @@ async fn ensure_stopped(state: &DesktopState) -> Result<()> {
 }
 
 async fn set_credential(
-    state: &DesktopState,
+    host: &Arc<Host>,
     name: String,
     value: String,
 ) -> std::result::Result<(), String> {
+    let state = &host.state;
     let config = read_config(&state.config_path).map_err(fail)?;
     if !credential_names(&config).contains(&name) {
         return Err("[invalid_input] Credential name not allowed".into());
+    }
+    if variables::credentials::managed(&config, &name) {
+        return variables::credentials::set(host, name, value).await;
     }
     if name == "STATE_ENCRYPTION_KEY" {
         validate_state_key(&config, &value).map_err(|_| {
@@ -998,8 +1027,29 @@ async fn set_credential(
     security::put_desktop_secret("default", &name, &value).map_err(fail)
 }
 
-async fn delete_credential(state: &DesktopState, name: String) -> std::result::Result<(), String> {
+async fn delete_credential(host: &Arc<Host>, name: String) -> std::result::Result<(), String> {
+    let state = &host.state;
     let config = read_config(&state.config_path).map_err(fail)?;
+    if variables::credentials::managed(&config, &name) {
+        let entry = if let Some(link) = implementation::link(state).map_err(fail)? {
+            variables::cached(host, &link)
+        } else {
+            let store = state.variables.store(host).map_err(fail)?;
+            variables::credentials::migrate(host, &store).map_err(fail)?;
+            store.list(None).map_err(fail)?
+        }
+        .into_iter()
+        .find(|v| v.name.eq_ignore_ascii_case(&name))
+        .ok_or_else(|| "[invalid_input] There is no stored variable with that name.".to_owned())?;
+        let mut request = control::Request::new("variable_delete");
+        request.args = serde_json::json!({"id":entry.id,"version":entry.version});
+        let reply = variables::operate(host, &request).await;
+        return if reply.ok {
+            Ok(())
+        } else {
+            Err(reply.message.unwrap_or_default())
+        };
+    }
     if !credential_names(&config).contains(&name) && !RETIRED_CREDENTIALS.contains(&name.as_str()) {
         return Err("[invalid_input] Credential name not allowed".into());
     }
@@ -1016,6 +1066,7 @@ async fn chat(
     state: &DesktopState,
     input: SimulationRequest,
 ) -> std::result::Result<SimulationResult, String> {
+    consumers::stage(state).await;
     // Every provider call carries its own deadline; maximum-effort reasoning takes minutes.
     local_chat::chat(&state.config_path, input)
         .await
@@ -1136,6 +1187,7 @@ async fn desktop_callback(
 }
 
 async fn begin_microsoft(host: &Arc<Host>, open: bool) -> std::result::Result<String, String> {
+    variables::identity::restore(host).await?;
     let state = &host.state;
     if state
         .microsoft_login
@@ -1224,8 +1276,10 @@ async fn begin_microsoft(host: &Arc<Host>, open: bool) -> std::result::Result<St
             .map_err(|_| "Microsoft authorization timed out.".to_string())?
             .map_err(fail)?
             .ok_or_else(|| "Microsoft authorization failed.".to_string())?;
-        let mut next = read_config(&state.config_path).map_err(fail)?;
+        let before = read_config(&state.config_path).map_err(fail)?;
+        let mut next = before.clone();
         next.graph.user_id = user;
+        variables::identity::save(&host, &before, &next).await?;
         write_private(
             &state.config_path,
             &toml::to_string_pretty(&next).map_err(fail)?,
@@ -1484,6 +1538,16 @@ pub fn run() {
         return;
     }
     let args: Vec<String> = std::env::args().skip(1).collect();
+    // Lets an update verify a staged build without starting a host.
+    if args.as_slice() == ["--version"] {
+        println!("{} {}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
+        return;
+    }
+    // The update's helper process: replaces the executables while no host runs (see
+    // `maintenance::apply`). It is the same binary, so no separate updater exists.
+    if args.as_slice() == [maintenance::HELPER_FLAG] {
+        std::process::exit(maintenance::run_helper());
+    }
     if args.as_slice() == ["--web"] {
         if web::run().is_err() {
             eprintln!("Web portal stopped. Check pta web status and the listener configuration.");
@@ -1538,6 +1602,15 @@ pub fn run() {
             let _ = runtime.block_on(control::client(control::Request::new("app_open"), false));
         }
         return;
+    }
+    // Never start a host between the two halves of an update; undo one that was interrupted.
+    if std::env::var_os(maintenance::HANDOVER).is_none()
+        && let Ok(profile) = control::profile_dir()
+        && let Some(reason) =
+            crate::maintenance::apply::startup_block(&profile.join(crate::maintenance::DIRECTORY))
+    {
+        eprintln!("{reason}");
+        std::process::exit(1);
     }
     let host_lock = match control::claim() {
         Ok(lock) => lock,
