@@ -1121,7 +1121,7 @@ async fn an_unhealthy_or_unstartable_new_version_restores_the_previous_pair_and_
 async fn a_previous_version_that_cannot_read_the_new_data_gets_the_safety_copy_back() {
     let _serial = SERIAL.lock().await;
     let server = registry(&[line("0.9.14", false)]).await;
-    let f = fixture(&server);
+    let mut f = fixture(&server);
     with_pair(&f);
     let dir = directory(&f.host);
     // The data copied before the replacement is a settings file of the profile.
@@ -1159,11 +1159,16 @@ async fn a_previous_version_that_cannot_read_the_new_data_gets_the_safety_copy_b
         }
     }
     let platform = Mutating(fake, config.clone());
+    // The host has quit, as it has before a real update: its open databases would keep Windows
+    // from putting the copies back over them. One outside the profile stands in meanwhile.
+    f.host = host(&f._root.path().join("stopped"));
     assert!(matches!(
         apply::drive(&dir, &platform, tune()).await,
         Outcome::RolledBack
     ));
     assert_eq!(fs::read_to_string(&config).unwrap(), "before = true\n");
+    // The previous version runs again on the restored data.
+    f.host = host(f._root.path());
     let status = call(&f.host, Local, "crate_update_status", json!({}))
         .await
         .data;
