@@ -36,6 +36,8 @@ Read [the architecture](docs/architecture.md) first: it explains components, pip
 
 ## Delivering
 
+Before starting work on a branch or creating a branch or worktree from `main`, update it from the remote first: `git fetch origin` and base the new branch or worktree on `origin/main` (or fast-forward local `main` with `git pull --ff-only` when it is checked out and clean). A branch cut from a stale `main` conflicts on the version files and its pull request gets no CI run until the conflict is resolved.
+
 GitHub Actions is the gate and the delivery ([delivery](docs/delivery.md)). Develop, open a pull request, wait for its **CI result** check to pass and merge it: `gh pr merge --auto --merge --delete-branch` waits for CI. Never bypass the check (`--admin`) or merge with CI failing.
 
 Merging delivers: a version bump (`Cargo.toml`, `Cargo.lock`, `desktop/tauri.conf.json`) is published to crates.io by `release.yml` once CI passed on `main`, with its tag and GitHub release; the server's updater installs it within minutes; a change under `site/` is published by Cloudflare. Do not publish, tag or install on the server by hand; do it only as the fallback in [delivery](docs/delivery.md#when-the-automatic-path-fails), when the automatic path itself failed.

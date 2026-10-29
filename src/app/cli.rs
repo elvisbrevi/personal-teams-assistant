@@ -69,6 +69,9 @@ Messages and diagnostics
   answer send RESOURCE     Sends an unsent answer once, after your review (never retried).
   answer feedback RESOURCE JSON on stdin: rating good|bad (null clears), comment, example (a good answer
                            guides later answers to similar requests, by structure and tone) and context.
+  teams chats [QUERY]      Chats you belong to (topic, members, ID); QUERY filters by topic or member name.
+  teams send CHAT          Posts the Markdown text on stdin as you in a chat (ID from `teams chats`, or
+                           `self`); @[Display Name] mentions a chat member. Sent once, never retried.
   logs [--limit N]         Host events.
   chat | test simulate     Real pipeline with a SimulationRequest JSON on stdin; never sends to Teams.
   test connectivity        Reads the connected Microsoft account (without sending).
@@ -1012,6 +1015,8 @@ fn validate_args(args: &[String]) -> Result<()> {
             | ["audit", "list"]
             | ["audit", "show", _]
             | ["answer", "refine" | "send" | "feedback", _]
+            | ["teams", "chats"]
+            | ["teams", "chats" | "send", _]
             | ["people", "list" | "add"]
             | ["people", "show" | "edit" | "remove", _]
             | ["questions", "list" | "add"]
@@ -1306,6 +1311,21 @@ async fn execute(mut args: Vec<String>) -> Result<Reply> {
         ensure!(value.is_object(), "association is a JSON object");
         value["resource"] = json!(positional(&args, 2)?);
         return call("question_associate", value, None, true).await;
+    }
+    if command == "teams" {
+        return match action {
+            "chats" => call("teams_chats", json!({"query": args.get(2)}), None, true).await,
+            _ => {
+                let text = stdin_text()?;
+                call(
+                    "teams_post",
+                    json!({"chat": positional(&args, 2)?, "text": text}),
+                    None,
+                    true,
+                )
+                .await
+            }
+        };
     }
     if command == "answer" {
         let resource = positional(&args, 2)?;
@@ -2253,6 +2273,9 @@ mod help_tests {
             &["audit", "list"],
             &["answer", "refine", "resource"],
             &["answer", "send", "resource"],
+            &["teams", "chats"],
+            &["teams", "chats", "ana"],
+            &["teams", "send", "self"],
             &["answer", "feedback", "resource"],
             &["people", "list"],
             &["people", "edit", "ana"],

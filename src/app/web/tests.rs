@@ -2240,8 +2240,18 @@ async fn account_machine_workflow_is_authoritative_isolated_and_revokes_offline_
     )
     .await;
     assert!(from_machine.ok);
-    assert_eq!(from_machine.data["machines"][1], list.data["machines"][1]);
-    assert_eq!(from_machine.data["machines"][2], list.data["machines"][2]);
+    // The calling machine's own call refreshes its `last_seen`, which may cross a second.
+    let seen = |machine: &Value| {
+        let mut machine = machine.clone();
+        machine.as_object_mut().unwrap().remove("last_seen");
+        machine
+    };
+    for index in [1, 2] {
+        assert_eq!(
+            seen(&from_machine.data["machines"][index]),
+            seen(&list.data["machines"][index])
+        );
+    }
     assert_eq!(
         from_machine.data["teams_machine"],
         list.data["teams_machine"]

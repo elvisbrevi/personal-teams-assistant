@@ -117,7 +117,12 @@ impl Fixture {
             .unwrap();
         let mut pipe = child.stdin.take().unwrap();
         if let Some(input) = stdin {
-            pipe.write_all(input.as_bytes()).await.unwrap();
+            // A command that refuses before reading closes its stdin: its exit code and
+            // output are what the test checks, not the write.
+            match pipe.write_all(input.as_bytes()).await {
+                Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => {}
+                result => result.unwrap(),
+            }
         }
         drop(pipe);
         let output = child.wait_with_output().await.unwrap();

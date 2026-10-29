@@ -961,7 +961,9 @@ impl Graph {
         anyhow::bail!("Graph retries exhausted")
     }
     async fn list_collection(&self, path: &str) -> Result<Vec<Value>> {
-        let mut url = self.url(path)?;
+        self.list_collection_at(self.url(path)?).await
+    }
+    async fn list_collection_at(&self, mut url: url::Url) -> Result<Vec<Value>> {
         let origin = url.origin();
         let expected_path = url.path().to_owned();
         let mut values = Vec::new();
@@ -989,6 +991,173 @@ impl Graph {
             }
         }
         anyhow::bail!("Graph pagination limit reached")
+    }
+    /// The chats the user belongs to with their members' names, for choosing where to post.
+    /// `query` keeps those whose topic or a member name contains it (case-insensitive).
+    pub async fn chat_directory(&self, query: Option<&str>) -> Result<Vec<Value>> {
+        let mut url = self.url("me/chats")?;
+        url.query_pairs_mut()
+            .append_pair("$expand", "members")
+            .append_pair("$top", "50");
+        let query = query.map(str::to_lowercase).filter(|q| !q.is_empty());
+        let mut found = Vec::new();
+        for chat in self.list_collection_at(url).await? {
+            let Some(id) = chat["id"].as_str() else {
+                continue;
+            };
+            if teams::canonical_resource(&format!("chats/{id}/messages/0")).is_err() {
+                continue;
+            }
+            let members: Vec<&str> = chat["members"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|m| m["userId"].as_str() != Some(&self.config.graph.user_id))
+                .filter_map(|m| m["displayName"].as_str())
+                .collect();
+            let topic = chat["topic"]
+                .as_str()
+                .filter(|t| !t.is_empty())
+                .map(str::to_owned)
+                .unwrap_or_else(|| members.join(", "));
+            if let Some(q) = &query
+                && !topic.to_lowercase().contains(q)
+                && !members.iter().any(|m| m.to_lowercase().contains(q))
+            {
+                continue;
+            }
+            found.push(
+                json!({"id":id,"type":chat["chatType"],"topic":topic,"members":members,
+                "last_updated":chat["lastUpdatedDateTime"]}),
+            );
+        }
+        Ok(found)
+    }
+    /// Post a new message, as the user, in a chat they belong to (`self` is their personal chat).
+    /// `markdown` is rendered like the assistant's answers; `@[Name]` mentions a chat member.
+    /// Like every send it happens at most once: a result that may have reached Teams is
+    /// reported as uncertain and never retried.
+    pub async fn post_chat(&self, chat: &str, markdown: &str) -> Result<Value> {
+        let own_chat = self.config.graph.self_chat.as_ref().map(|c| c.id.as_str());
+        let id = if chat == "self" {
+            own_chat.unwrap_or("48:notes")
+        } else {
+            chat
+        };
+        teams::canonical_resource(&format!("chats/{id}/messages/0"))?;
+        let me = self.request(Method::GET, "me", None, true).await?;
+        ensure!(
+            me["id"].as_str() == Some(&self.config.graph.user_id),
+            "connected Graph account differs"
+        );
+        let notes = id == "48:notes";
+        // The reserved notes thread has no members API; any other chat must list the user.
+        let members = if notes {
+            Vec::new()
+        } else {
+            let members = self.list_collection(&format!("chats/{id}/members")).await?;
+            ensure!(
+                members
+                    .iter()
+                    .any(|m| m["userId"].as_str() == Some(&self.config.graph.user_id)),
+                "you are not a member of this chat"
+            );
+            members
+        };
+        let marker = regex::Regex::new(r"@\[([^\]\n]{1,100})\]")?;
+        let mut mentioned: Vec<(String, String)> = Vec::new();
+        let mut failure = None;
+        let text = markdown.replace(['\u{e000}', '\u{e001}'], "");
+        let text = marker.replace_all(&text, |c: &regex::Captures| {
+            let name = c[1].trim();
+            match mention_target(&members, name) {
+                Ok((user, shown)) => {
+                    let at = mentioned
+                        .iter()
+                        .position(|(u, _)| *u == user)
+                        .unwrap_or_else(|| {
+                            mentioned.push((user, shown));
+                            mentioned.len() - 1
+                        });
+                    format!("\u{e000}{at}\u{e001}")
+                }
+                Err(error) => {
+                    failure.get_or_insert(error);
+                    String::new()
+                }
+            }
+        });
+        if let Some(error) = failure {
+            return Err(error);
+        }
+        let mut content = teams::html(&text);
+        for (at, (_, shown)) in mentioned.iter().enumerate() {
+            content = content.replace(
+                &format!("\u{e000}{at}\u{e001}"),
+                &format!("<at id=\"{at}\">{}</at>", teams::escape_text(shown)),
+            );
+        }
+        let own = notes || own_chat == Some(id);
+        let conversation = format!("chats/{id}");
+        let nonce = if own {
+            Some(self.store.begin_output(&conversation)?)
+        } else {
+            None
+        };
+        if let Some(nonce) = &nonce {
+            content = format!(
+                "{content}<p><a href=\"https://personalteams.invalid/output/{nonce}\">PTA</a></p>"
+            );
+        }
+        ensure!(
+            content.len() <= 27_800,
+            "message exceeds the Teams size limit"
+        );
+        let mut body = json!({"body":{"contentType":"html","content":content}});
+        if !mentioned.is_empty() {
+            body["mentions"] = mentioned
+                .iter()
+                .enumerate()
+                .map(|(at, (user, shown))| {
+                    json!({"id":at,"mentionText":shown,
+                        "mentioned":{"user":{"id":user,"displayName":shown,"userIdentityType":"aadUser"}}})
+                })
+                .collect();
+        }
+        // Never retry a send: Graph provides no idempotency guarantee for this endpoint.
+        let result = self
+            .request(
+                Method::POST,
+                &format!("chats/{id}/messages"),
+                Some(body),
+                false,
+            )
+            .await;
+        let message = match result {
+            Ok(message) => message,
+            Err(error) => {
+                let refused = error
+                    .downcast_ref::<GraphHttpError>()
+                    .is_some_and(|e| (400..500).contains(&e.0));
+                self.store
+                    .event("teams_post", if refused { "refused" } else { "uncertain" })?;
+                if refused {
+                    return Err(error.context("Teams refused the message; nothing was sent"));
+                }
+                anyhow::bail!(
+                    "[uncertain] the result is unknown; check Teams by hand (never retried)"
+                );
+            }
+        };
+        let sent = message["id"]
+            .as_str()
+            .context("Graph send has no message ID")?;
+        if let Some(nonce) = nonce {
+            self.store.finish_output(&nonce, sent)?;
+        }
+        self.store.event("teams_post", "sent")?;
+        Ok(json!({"status":"sent","chat":id,"message_id":sent,
+            "mentions":mentioned.iter().map(|(_, n)| n).collect::<Vec<_>>()}))
     }
     async fn list_chats(&self) -> Result<Vec<String>> {
         let mut chats = Vec::new();
@@ -1383,6 +1552,38 @@ impl MessageAdapter for Graph {
             self.store.finish_output(&nonce, id)?;
         }
         Ok(id.into())
+    }
+}
+
+/// The chat member a `@[name]` mention names: an exact display name, else the only one containing it.
+fn mention_target(members: &[Value], name: &str) -> Result<(String, String)> {
+    let named = |m: &Value| {
+        Some((
+            m["userId"].as_str()?.to_owned(),
+            m["displayName"].as_str()?.to_owned(),
+        ))
+    };
+    let all: Vec<(String, String)> = members.iter().filter_map(named).collect();
+    ensure!(!all.is_empty(), "mentions need a chat with listed members");
+    let wanted = name.to_lowercase();
+    let exact: Vec<_> = all
+        .iter()
+        .filter(|(_, n)| n.to_lowercase() == wanted)
+        .collect();
+    let partial: Vec<_> = all
+        .iter()
+        .filter(|(_, n)| n.to_lowercase().contains(&wanted))
+        .collect();
+    match (exact.as_slice(), partial.as_slice()) {
+        ([one], _) | ([], [one]) => Ok((*one).clone()),
+        ([], []) => anyhow::bail!(
+            "nobody in this chat is called «{name}»; members: {}",
+            all.iter()
+                .map(|(_, n)| n.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        _ => anyhow::bail!("«{name}» matches several members; write the full display name"),
     }
 }
 

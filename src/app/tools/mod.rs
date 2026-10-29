@@ -1087,6 +1087,30 @@ pub(super) const TOOLS: &[Tool] = &[
         },
     },
     Tool {
+        name: "teams_chats",
+        title: "Find a Teams chat",
+        description: "Chats the user belongs to (1:1, group, meeting) with topic and member names, newest first; query filters by topic or member name. Use it to find the chat ID for teams_post. Channels are not available.",
+        effect: Effect::Read,
+        schema: || {
+            object(
+                json!({"query": string("Part of a chat topic or a member's name.")}),
+                &[],
+            )
+        },
+    },
+    Tool {
+        name: "teams_post",
+        title: "Post a message in Teams",
+        description: "Posts a new message, as the user, in a chat they belong to (an ID from teams_chats, or self for their personal chat). Text is Markdown (bold, italics, code, lists, tables, links) and @[Display Name] mentions a member of that chat. Sent once, never retried. Needs the user's confirmation of the exact chat and text.",
+        effect: Effect::External,
+        schema: || {
+            object(
+                json!({"chat": string("Chat ID from teams_chats, or self."), "text": string("The message in Markdown; @[Name] mentions a chat member."), "confirmed": confirmed()}),
+                &["chat", "text"],
+            )
+        },
+    },
+    Tool {
         name: "activity_run",
         title: "Save a day's tasks",
         description: "Reads existing Azure tasks for the catalog user and saves the daily task record locally. No model, proposals or Azure writes. The hours target is only a warning.",
@@ -1488,6 +1512,8 @@ pub(super) async fn run(name: &str, args: &Value) -> Result<Value, String> {
             "sources": args.get("sources").cloned().unwrap_or(json!([]))})).await,
         "index_refresh" => ipc("index_refresh", json!({"source": args.get("source")})).await,
         "answer_send" => ipc("answer_send", json!({"resource": text(args, "resource")?})).await,
+        "teams_chats" => ipc("teams_chats", json!({"query": args.get("query")})).await,
+        "teams_post" => ipc("teams_post", json!({"chat": text(args, "chat")?, "text": text(args, "text")?})).await,
         "activity_run" => ipc("activity_run", json!({"day": args.get("day")})).await,
         "activity_settings_update" => {
             let changes = args.get("changes").and_then(Value::as_object).ok_or("changes must be an object.")?.clone();
@@ -1618,6 +1644,11 @@ pub(super) fn confirmation(name: &str, args: &Value) -> Option<String> {
         "answer_send" => format!(
             "Send the written answer of {} to Teams, as you?",
             args["resource"].as_str().unwrap_or("this message")
+        ),
+        "teams_post" => format!(
+            "Post this message in the Teams chat {}, as you?\n\n{}",
+            args["chat"].as_str().unwrap_or("?"),
+            args["text"].as_str().unwrap_or("")
         ),
         "source_authorize" => format!(
             "Change who may read the source {}: {}?",

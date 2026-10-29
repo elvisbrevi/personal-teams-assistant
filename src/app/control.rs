@@ -1297,6 +1297,8 @@ async fn operate(
         "index_refresh" => super::notes::refresh(state, args).await?,
         "answer_refine" => refine_answer(state, args).await?,
         "answer_send" => send_answer(state, args).await?,
+        "teams_chats" => teams_chats(state, args).await?,
+        "teams_post" => teams_post(state, args).await?,
         "audit" | "logs" => {
             let config = read_config(&state.config_path).map_err(fail)?;
             let limit = args.get("limit").and_then(Value::as_u64).unwrap_or(50) as usize;
@@ -1471,6 +1473,12 @@ mod tests {
         .unwrap();
         assert!(existing_host_at(dir.path()).is_ok());
         drop(lease);
+        // A child another test is spawning holds a copy of the lock descriptor until its exec,
+        // so the released lock can look held for an instant.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while existing_host_at(dir.path()).is_ok() && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
         assert!(existing_host_at(dir.path()).is_err());
     }
     #[test]
