@@ -274,6 +274,60 @@ async fn send_answer(
     Ok(serde_json::json!({"status": status}))
 }
 
+/// The Graph session to read or post in Teams: the running service's, else the profile's own
+/// (which needs the assistant stopped, so two sessions never share the dataset).
+enum TeamsGraph {
+    Service(Arc<crate::adapters::graph::Graph>),
+    Profile(ProfileGraph),
+}
+impl std::ops::Deref for TeamsGraph {
+    type Target = crate::adapters::graph::Graph;
+    fn deref(&self) -> &Self::Target {
+        match self {
+            Self::Service(graph) => graph,
+            Self::Profile(graph) => graph,
+        }
+    }
+}
+async fn teams_graph(state: &DesktopState) -> Result<TeamsGraph> {
+    if let Some(graph) = state.activity_graph.lock().await.clone() {
+        return Ok(TeamsGraph::Service(graph));
+    }
+    Ok(TeamsGraph::Profile(profile_graph(state).await?))
+}
+
+/// The chats the user can post in, optionally filtered by a topic or member name.
+async fn teams_chats(
+    state: &DesktopState,
+    args: &serde_json::Value,
+) -> std::result::Result<serde_json::Value, String> {
+    let query = args.get("query").and_then(serde_json::Value::as_str);
+    let graph = teams_graph(state).await.map_err(fail)?;
+    let chats = graph.chat_directory(query).await.map_err(fail)?;
+    Ok(serde_json::json!({"chats": chats.into_iter().take(25).collect::<Vec<_>>()}))
+}
+
+/// Post a message the user wrote, once, in a chat they belong to.
+async fn teams_post(
+    state: &DesktopState,
+    args: &serde_json::Value,
+) -> std::result::Result<serde_json::Value, String> {
+    let text = |key| {
+        args.get(key)
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+    };
+    let (chat, message) = (text("chat").trim(), text("text").trim());
+    if chat.is_empty() || chat.len() > 512 || chat.chars().any(char::is_control) {
+        return Err("[invalid_input] Name the chat: an ID from teams_chats, or self.".into());
+    }
+    if message.is_empty() || message.chars().count() > 20_000 {
+        return Err("[invalid_input] The message is empty or too long.".into());
+    }
+    let graph = teams_graph(state).await.map_err(fail)?;
+    graph.post_chat(chat, message).await.map_err(fail)
+}
+
 fn validate_teams_setup(config: &Config) -> Result<()> {
     ensure!(
         !config.server.public_url.contains("example.com"),

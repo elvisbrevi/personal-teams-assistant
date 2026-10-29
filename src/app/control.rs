@@ -1247,6 +1247,8 @@ async fn operate(
         "index_refresh" => super::notes::refresh(state, args).await?,
         "answer_refine" => refine_answer(state, args).await?,
         "answer_send" => send_answer(state, args).await?,
+        "teams_chats" => teams_chats(state, args).await?,
+        "teams_post" => teams_post(state, args).await?,
         "audit" | "logs" => {
             let config = read_config(&state.config_path).map_err(fail)?;
             let limit = args.get("limit").and_then(Value::as_u64).unwrap_or(50) as usize;

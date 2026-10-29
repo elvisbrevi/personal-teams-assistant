@@ -5287,3 +5287,111 @@ async fn question_identification_uses_closed_ids_and_rejects_uncertain_matches()
         );
     }
 }
+
+async fn teams_post_fixture(server: &MockServer, members: serde_json::Value) -> Arc<Graph> {
+    let dir = Box::leak(Box::new(tempfile::tempdir().unwrap()));
+    let graph = support::graph(server, support::store(dir));
+    let me = graph.config.graph.user_id.clone();
+    Mock::given(method("GET"))
+        .and(path("/me"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": me})))
+        .mount(server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/chats/chat1/members"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"value": members})))
+        .mount(server)
+        .await;
+    graph
+}
+fn teams_members(graph: &Graph) -> serde_json::Value {
+    json!([
+        {"userId": graph.config.graph.user_id, "displayName": "Yo"},
+        {"userId": "ana-id", "displayName": "Ana Pérez"},
+        {"userId": "ana-lopez-id", "displayName": "Ana López"}
+    ])
+}
+
+#[tokio::test]
+async fn teams_post_sends_formatted_html_with_graph_mentions_once() {
+    let server = MockServer::start().await;
+    let probe = teams_post_fixture(&server, json!([])).await;
+    server.reset().await;
+    let graph = teams_post_fixture(&server, teams_members(&probe)).await;
+    Mock::given(method("POST"))
+        .and(path("/chats/chat1/messages"))
+        .respond_with(ResponseTemplate::new(201).set_body_json(json!({"id": "m1"})))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let sent = graph
+        .post_chat(
+            "chat1",
+            "Hola @[ana pérez], **revisa** `esto`:\n- uno\n- dos",
+        )
+        .await
+        .unwrap();
+    assert_eq!(sent["status"], "sent");
+    assert_eq!(sent["mentions"], json!(["Ana Pérez"]));
+    let requests = server.received_requests().await.unwrap();
+    let body: serde_json::Value = requests
+        .iter()
+        .find(|r| r.method.as_str() == "POST")
+        .unwrap()
+        .body_json()
+        .unwrap();
+    let html = body["body"]["content"].as_str().unwrap();
+    assert_eq!(body["body"]["contentType"], "html");
+    assert!(html.contains("<at id=\"0\">Ana Pérez</at>"), "{html}");
+    assert!(
+        html.contains("<b>revisa</b>") && html.contains("<li>"),
+        "{html}"
+    );
+    assert_eq!(body["mentions"][0]["mentioned"]["user"]["id"], "ana-id");
+    assert_eq!(body["mentions"][0]["mentionText"], "Ana Pérez");
+}
+
+#[tokio::test]
+async fn teams_post_refuses_unknown_ambiguous_mentions_and_foreign_chats_without_sending() {
+    let server = MockServer::start().await;
+    let probe = teams_post_fixture(&server, json!([])).await;
+    server.reset().await;
+    let graph = teams_post_fixture(&server, teams_members(&probe)).await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(201).set_body_json(json!({"id": "m1"})))
+        .expect(0)
+        .mount(&server)
+        .await;
+    for (text, expected) in [
+        ("hola @[Zoe]", "nobody in this chat"),
+        ("hola @[Ana]", "matches several members"),
+    ] {
+        let error = graph.post_chat("chat1", text).await.unwrap_err();
+        assert!(error.to_string().contains(expected), "{error}");
+    }
+    assert!(graph.post_chat("../x", "hola").await.is_err());
+    server.reset().await;
+    let graph = teams_post_fixture(
+        &server,
+        json!([{"userId": "someone-else", "displayName": "Otra"}]),
+    )
+    .await;
+    let error = graph.post_chat("chat1", "hola").await.unwrap_err();
+    assert!(error.to_string().contains("not a member"), "{error}");
+}
+
+#[tokio::test]
+async fn teams_post_failure_is_uncertain_and_never_retried() {
+    let server = MockServer::start().await;
+    let probe = teams_post_fixture(&server, json!([])).await;
+    server.reset().await;
+    let graph = teams_post_fixture(&server, teams_members(&probe)).await;
+    Mock::given(method("POST"))
+        .and(path("/chats/chat1/messages"))
+        .respond_with(ResponseTemplate::new(500))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let error = graph.post_chat("chat1", "hola").await.unwrap_err();
+    assert!(error.to_string().contains("uncertain"), "{error}");
+}

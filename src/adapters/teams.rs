@@ -358,6 +358,10 @@ fn table(header: &[String], rows: &[Vec<String>]) -> String {
         row("th", header)
     )
 }
+/// Text made safe to place inside Teams HTML.
+pub fn escape_text(text: &str) -> String {
+    escape(text)
+}
 fn escape(text: &str) -> String {
     text.replace('&', "&amp;")
         .replace('<', "&lt;")
