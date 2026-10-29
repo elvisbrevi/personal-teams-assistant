@@ -1044,7 +1044,8 @@ impl Graph {
         } else {
             chat
         };
-        teams::canonical_resource(&format!("chats/{id}/messages/0"))?;
+        teams::canonical_resource(&format!("chats/{id}/messages/0"))
+            .map_err(|_| PostRefusal::InvalidChat)?;
         let me = self.request(Method::GET, "me", None, true).await?;
         ensure!(
             me["id"].as_str() == Some(&self.config.graph.user_id),
@@ -1060,13 +1061,13 @@ impl Graph {
                 members
                     .iter()
                     .any(|m| m["userId"].as_str() == Some(&self.config.graph.user_id)),
-                "you are not a member of this chat"
+                PostRefusal::NotMember
             );
             members
         };
         let marker = regex::Regex::new(r"@\[([^\]\n]{1,100})\]")?;
         let mut mentioned: Vec<(String, String)> = Vec::new();
-        let mut failure = None;
+        let mut failure: Option<PostRefusal> = None;
         let text = markdown.replace(['\u{e000}', '\u{e001}'], "");
         let text = marker.replace_all(&text, |c: &regex::Captures| {
             let name = c[1].trim();
@@ -1087,8 +1088,8 @@ impl Graph {
                 }
             }
         });
-        if let Some(error) = failure {
-            return Err(error);
+        if let Some(refusal) = failure {
+            return Err(refusal.into());
         }
         let mut content = teams::html(&text);
         for (at, (_, shown)) in mentioned.iter().enumerate() {
@@ -1109,10 +1110,7 @@ impl Graph {
                 "{content}<p><a href=\"https://personalteams.invalid/output/{nonce}\">PTA</a></p>"
             );
         }
-        ensure!(
-            content.len() <= 27_800,
-            "message exceeds the Teams size limit"
-        );
+        ensure!(content.len() <= 27_800, PostRefusal::TooLong);
         let mut body = json!({"body":{"contentType":"html","content":content}});
         if !mentioned.is_empty() {
             body["mentions"] = mentioned
@@ -1141,12 +1139,12 @@ impl Graph {
                     .is_some_and(|e| (400..500).contains(&e.0));
                 self.store
                     .event("teams_post", if refused { "refused" } else { "uncertain" })?;
-                if refused {
-                    return Err(error.context("Teams refused the message; nothing was sent"));
+                return Err(if refused {
+                    PostRefusal::Refused
+                } else {
+                    PostRefusal::Uncertain
                 }
-                anyhow::bail!(
-                    "[uncertain] the result is unknown; check Teams by hand (never retried)"
-                );
+                .into());
             }
         };
         let sent = message["id"]
@@ -1555,8 +1553,44 @@ impl MessageAdapter for Graph {
     }
 }
 
+/// Why a message was not posted: fixed explanations that are safe to show as they are.
+#[derive(Debug, PartialEq, Eq)]
+pub enum PostRefusal {
+    InvalidChat,
+    NotMember,
+    MentionsUnavailable,
+    UnknownMention,
+    AmbiguousMention,
+    TooLong,
+    /// Teams answered with a client error: nothing was sent.
+    Refused,
+    /// The request may have reached Teams: check there; it is never retried.
+    Uncertain,
+}
+impl std::fmt::Display for PostRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::InvalidChat => "That is not a valid chat ID; take one from `teams chats`.",
+            Self::NotMember => "You are not a member of that chat; take one from `teams chats`.",
+            Self::MentionsUnavailable => {
+                "Mentions need a chat with listed members; the personal chat has none."
+            }
+            Self::UnknownMention => {
+                "A mention names nobody in this chat; use a member's display name from `teams chats`."
+            }
+            Self::AmbiguousMention => {
+                "A mention matches several members; write the full display name."
+            }
+            Self::TooLong => "The message exceeds the Teams size limit.",
+            Self::Refused => "Teams refused the message; nothing was sent.",
+            Self::Uncertain => "The result is unknown; check Teams by hand. It is never retried.",
+        })
+    }
+}
+impl std::error::Error for PostRefusal {}
+
 /// The chat member a `@[name]` mention names: an exact display name, else the only one containing it.
-fn mention_target(members: &[Value], name: &str) -> Result<(String, String)> {
+fn mention_target(members: &[Value], name: &str) -> Result<(String, String), PostRefusal> {
     let named = |m: &Value| {
         Some((
             m["userId"].as_str()?.to_owned(),
@@ -1564,7 +1598,9 @@ fn mention_target(members: &[Value], name: &str) -> Result<(String, String)> {
         ))
     };
     let all: Vec<(String, String)> = members.iter().filter_map(named).collect();
-    ensure!(!all.is_empty(), "mentions need a chat with listed members");
+    if all.is_empty() {
+        return Err(PostRefusal::MentionsUnavailable);
+    }
     let wanted = name.to_lowercase();
     let exact: Vec<_> = all
         .iter()
@@ -1576,14 +1612,8 @@ fn mention_target(members: &[Value], name: &str) -> Result<(String, String)> {
         .collect();
     match (exact.as_slice(), partial.as_slice()) {
         ([one], _) | ([], [one]) => Ok((*one).clone()),
-        ([], []) => anyhow::bail!(
-            "nobody in this chat is called «{name}»; members: {}",
-            all.iter()
-                .map(|(_, n)| n.as_str())
-                .collect::<Vec<_>>()
-                .join(", ")
-        ),
-        _ => anyhow::bail!("«{name}» matches several members; write the full display name"),
+        ([], []) => Err(PostRefusal::UnknownMention),
+        _ => Err(PostRefusal::AmbiguousMention),
     }
 }
 
