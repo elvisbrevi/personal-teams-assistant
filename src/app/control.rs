@@ -1473,6 +1473,12 @@ mod tests {
         .unwrap();
         assert!(existing_host_at(dir.path()).is_ok());
         drop(lease);
+        // A child another test is spawning holds a copy of the lock descriptor until its exec,
+        // so the released lock can look held for an instant.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while existing_host_at(dir.path()).is_ok() && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
         assert!(existing_host_at(dir.path()).is_err());
     }
     #[test]
