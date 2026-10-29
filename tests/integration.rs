@@ -5388,6 +5388,35 @@ async fn teams_post_refuses_unknown_ambiguous_mentions_and_foreign_chats_without
 }
 
 #[tokio::test]
+async fn teams_post_to_a_chat_graph_does_not_know_is_a_refusal_without_sending() {
+    let server = MockServer::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let graph = support::graph(&server, support::store(&dir));
+    Mock::given(method("GET"))
+        .and(path("/me"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"id": graph.config.graph.user_id})),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/chats/ghost/members"))
+        .respond_with(ResponseTemplate::new(404))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(201).set_body_json(json!({"id": "m1"})))
+        .expect(0)
+        .mount(&server)
+        .await;
+    let error = graph.post_chat("ghost", "hola").await.unwrap_err();
+    assert_eq!(
+        error.downcast_ref::<PostRefusal>(),
+        Some(&PostRefusal::NotMember)
+    );
+}
+
+#[tokio::test]
 async fn teams_post_failure_is_uncertain_and_never_retried() {
     let server = MockServer::start().await;
     let probe = teams_post_fixture(&server, json!([])).await;
