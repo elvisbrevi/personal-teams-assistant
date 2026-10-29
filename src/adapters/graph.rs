@@ -1056,7 +1056,17 @@ impl Graph {
         let members = if notes {
             Vec::new()
         } else {
-            let members = self.list_collection(&format!("chats/{id}/members")).await?;
+            // A chat that does not exist or is not the user's answers with a client error.
+            let members = self
+                .list_collection(&format!("chats/{id}/members"))
+                .await
+                .map_err(|error| {
+                    if refused_by_graph(&error) {
+                        PostRefusal::NotMember.into()
+                    } else {
+                        error
+                    }
+                })?;
             ensure!(
                 members
                     .iter()
@@ -1134,9 +1144,7 @@ impl Graph {
         let message = match result {
             Ok(message) => message,
             Err(error) => {
-                let refused = error
-                    .downcast_ref::<GraphHttpError>()
-                    .is_some_and(|e| (400..500).contains(&e.0));
+                let refused = refused_by_graph(&error);
                 self.store
                     .event("teams_post", if refused { "refused" } else { "uncertain" })?;
                 return Err(if refused {
@@ -1615,6 +1623,13 @@ fn mention_target(members: &[Value], name: &str) -> Result<(String, String), Pos
         ([], []) => Err(PostRefusal::UnknownMention),
         _ => Err(PostRefusal::AmbiguousMention),
     }
+}
+
+/// Graph answered with a client error: the request was understood and refused.
+fn refused_by_graph(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<GraphHttpError>()
+        .is_some_and(|e| (400..500).contains(&e.0))
 }
 
 #[derive(Debug)]
