@@ -199,6 +199,13 @@ fn fail<E: Into<anyhow::Error>>(error: E) -> String {
             _ => format!("[conflict] {refusal}"),
         };
     }
+    if let Some(refusal) = error.downcast_ref::<crate::adapters::graph::PostRefusal>() {
+        use crate::adapters::graph::PostRefusal::{Refused, Uncertain};
+        return match refusal {
+            Refused | Uncertain => format!("[error] {refusal}"),
+            _ => format!("[invalid_input] {refusal}"),
+        };
+    }
     if let Some(message) = error.downcast_ref::<crate::adapters::oauth::AuthorizationRequired>() {
         return format!("[not_ready] {message}");
     }

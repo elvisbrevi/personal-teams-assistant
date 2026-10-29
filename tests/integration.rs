@@ -8,7 +8,7 @@ use axum::{
 use personal_teams_assistant::{
     adapters::{
         MessageAdapter,
-        graph::Graph,
+        graph::{Graph, PostRefusal},
         webhook::{self, WebState},
     },
     knowledge::{Access, KnowledgeMap, Resource},
@@ -5363,13 +5363,17 @@ async fn teams_post_refuses_unknown_ambiguous_mentions_and_foreign_chats_without
         .mount(&server)
         .await;
     for (text, expected) in [
-        ("hola @[Zoe]", "nobody in this chat"),
-        ("hola @[Ana]", "matches several members"),
+        ("hola @[Zoe]", PostRefusal::UnknownMention),
+        ("hola @[Ana]", PostRefusal::AmbiguousMention),
     ] {
         let error = graph.post_chat("chat1", text).await.unwrap_err();
-        assert!(error.to_string().contains(expected), "{error}");
+        assert_eq!(error.downcast_ref::<PostRefusal>(), Some(&expected));
     }
-    assert!(graph.post_chat("../x", "hola").await.is_err());
+    let error = graph.post_chat("../x", "hola").await.unwrap_err();
+    assert_eq!(
+        error.downcast_ref::<PostRefusal>(),
+        Some(&PostRefusal::InvalidChat)
+    );
     server.reset().await;
     let graph = teams_post_fixture(
         &server,
@@ -5377,7 +5381,10 @@ async fn teams_post_refuses_unknown_ambiguous_mentions_and_foreign_chats_without
     )
     .await;
     let error = graph.post_chat("chat1", "hola").await.unwrap_err();
-    assert!(error.to_string().contains("not a member"), "{error}");
+    assert_eq!(
+        error.downcast_ref::<PostRefusal>(),
+        Some(&PostRefusal::NotMember)
+    );
 }
 
 #[tokio::test]
@@ -5393,5 +5400,8 @@ async fn teams_post_failure_is_uncertain_and_never_retried() {
         .mount(&server)
         .await;
     let error = graph.post_chat("chat1", "hola").await.unwrap_err();
-    assert!(error.to_string().contains("uncertain"), "{error}");
+    assert_eq!(
+        error.downcast_ref::<PostRefusal>(),
+        Some(&PostRefusal::Uncertain)
+    );
 }
