@@ -1335,7 +1335,7 @@ function renderSteps(s) {
   const config = s.config;
   const missing = missingCredentials(s.credentials);
   const steps = [
-    { done: !missing.length, title: t('Variables'), text: missing.length ? t('Missing: {names}.', { names: missing.join(', ') }) : t('The required variables are stored.'), go: ['settings', 'panel-variables'] },
+    { done: !missing.length, title: t('Variables'), text: missing.length ? t('Missing: {names}.', { names: missing.join(', ') }) : t('The required variables are stored.'), go: ['settings', missing.length ? 'panel-consumers' : 'panel-variables'] },
     { done: enabledChain(config).length > 0, title: t('Language model'), text: t('Turn on and order Codex, Claude Code, OpenCode or DeepSeek.'), go: ['settings', 'panel-llm'] },
     { done: entraReady(config), title: t('Entra registration'), text: t('Tenant and client ID of your existing registration.'), go: ['settings', 'panel-teams'] },
     { done: s.microsoft_connected, title: t('Microsoft account'), text: t('Sign in to read and answer as you.'), go: ['settings', 'panel-teams'] },
@@ -2240,6 +2240,51 @@ function launcherRow(launcher) {
     el('div', { class: 'variable-actions' }, actions));
 }
 
+/** What reads a `[secrets]` reference: the sources and settings that name it. */
+function referenceUses(reference) {
+  const uses = [];
+  for (const resource of current?.map?.resources ?? []) {
+    const tool = resource.tool;
+    if (!tool) continue;
+    const kind = toolNames[tool.type] ?? tool.type;
+    if (tool.secret_ref === reference) uses.push(t('{kind} source {id}', { kind, id: resource.id }));
+    if (tool.link_secret_ref === reference) uses.push(t('linking work to work items in {id}', { id: resource.id }));
+  }
+  if (current?.config?.knowledge_index?.embeddings?.secret_ref === reference) uses.push(t('semantic search'));
+  return uses;
+}
+
+/** One configured credential reference: which variable it uses by name, and a choice of another. */
+function referenceRow(reference, name) {
+  const key = `ref:${reference}`;
+  const uses = referenceUses(reference);
+  const title = el('span', { class: 'cred-name', textContent: reference, translate: 'no' });
+  const using = variableState.variables.find(v => v.name.toUpperCase() === name.toUpperCase());
+  const status = using ? badge(t('Using {name} · version {n}', { name: using.name, n: using.version }), 'ok')
+    : badge(t('Missing {name}', { name }), 'warn');
+  const summary = uses.length ? t('Used by {uses}.', { uses: uses.join(', ') }) : t('Not used by any source.');
+  const chosen = consumerChoice[key] ?? using?.name ?? '';
+  const select = el('select', { 'aria-label': t('Variable for {consumer}', { consumer: reference }) },
+    el('option', { value: '', textContent: t('Choose a variable') }),
+    variableState.variables.map(v => el('option', { value: v.name, textContent: `${v.name} · v${v.version}`, selected: v.name === chosen, translate: 'no' })));
+  const use = el('button', { type: 'button', textContent: t('Use this variable') });
+  const sync = () => { use.disabled = !select.value || select.value === name; };
+  select.onchange = () => { consumerChoice[key] = select.value; sync(); };
+  sync();
+  use.onclick = () => busy(use, async () => {
+    const chosenName = select.value;
+    current.config.secrets[reference] = chosenName;
+    try { await save(); } catch (error) { await reload(); throw error; }
+    delete consumerChoice[key];
+    consumerNote[key] = t('{consumer} now uses {name}.', { consumer: reference, name: chosenName });
+    renderConsumers();
+  });
+  return el('div', { class: 'row variable-row' },
+    rowText(title, summary, status),
+    el('div', { class: 'variable-actions' }, [select, use]),
+    consumerNote[key] ? el('p', { class: 'hint variable-note', role: 'status', textContent: consumerNote[key] }) : null);
+}
+
 /** Plain text only: summaries come from the host's fixed registry; names and paths are user data. */
 function renderConsumers() {
   const { consumers, launchers, error } = consumerState;
@@ -2247,6 +2292,7 @@ function renderConsumers() {
   list.replaceChildren();
   if (error) list.append(el('p', { class: 'hint', role: 'status', textContent: tx(error) }));
   for (const consumer of consumers) list.append(consumerRow(consumer));
+  for (const [reference, name] of Object.entries(current?.config?.secrets ?? {})) list.append(referenceRow(reference, name));
   $('#launchers').hidden = !launchers.length;
   $('#launcher-list').replaceChildren(...launchers.map(launcherRow));
 }
