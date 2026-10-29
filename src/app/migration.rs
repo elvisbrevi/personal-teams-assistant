@@ -88,6 +88,11 @@ pub(super) fn excluded(name: &str) -> Option<(&'static str, &'static str)> {
 /// without being configured so they are reported as excluded instead of silently ignored.
 fn configured(config: &Config) -> Vec<String> {
     let mut names = super::credential_names(config);
+    names.extend(
+        variables::identity::FIELDS
+            .iter()
+            .map(|(name, _)| (*name).to_owned()),
+    );
     names.push("GITHUB_OAUTH_TOKENS".into());
     names.extend(super::RETIRED_CREDENTIALS.iter().map(|n| (*n).to_owned()));
     names.sort();
@@ -500,7 +505,18 @@ fn stored(host: &Host, name: &str) -> Option<String> {
 
 /// Where the installation's own stores hold a credential, ignoring account variables.
 fn origin_of(host: &Host, name: &str) -> Origin {
-    let _ = host;
+    if variables::identity::FIELDS
+        .iter()
+        .any(|(field, _)| *field == name)
+    {
+        return match read_config(&host.state.config_path) {
+            Ok(config) if variables::identity::value(&config, name).is_some() => {
+                Origin::Found("configuration")
+            }
+            Ok(_) => Origin::Missing,
+            Err(_) => Origin::Unreadable,
+        };
+    }
     #[cfg(test)]
     if stored(host, name).is_some() {
         return Origin::Found("system");
@@ -514,6 +530,15 @@ fn origin_of(host: &Host, name: &str) -> Origin {
 
 /// The value held by the installation's own store, read only to copy it.
 fn read(host: &Host, name: &str) -> Result<String> {
+    if variables::identity::FIELDS
+        .iter()
+        .any(|(field, _)| *field == name)
+    {
+        let config = read_config(&host.state.config_path)?;
+        return variables::identity::value(&config, name)
+            .map(str::to_owned)
+            .context("The Microsoft setup identifier is not configured.");
+    }
     #[cfg(test)]
     if let Some(value) = stored(host, name) {
         return Ok(value);

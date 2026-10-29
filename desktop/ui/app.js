@@ -1396,6 +1396,8 @@ function renderLive() {
   $('#start').hidden = s.running;
   $('#restart').hidden = $('#stop').hidden = !s.running;
   for (const button of [$('#start'), $('#restart'), $('#stop')]) button.disabled = Boolean(transition) || button.classList.contains('busy');
+  $('#teams-identity-error').hidden = !s.teams_identity_error;
+  $('#teams-identity-error').textContent = s.teams_identity_error ? tx(s.teams_identity_error) : '';
   $('#microsoft-state').className = `badge ${s.microsoft_connected ? 'ok' : 'warn'}`;
   $('#microsoft-state').textContent = s.microsoft_connected ? t('Account connected') : t('Account not connected');
   $('#teams-login').textContent = s.microsoft_connected ? t('Reconnect the account') : t('Connect Microsoft account');
@@ -1418,7 +1420,15 @@ function renderLive() {
 /** Refreshes persisted state without touching unsaved form edits. */
 async function refreshLive() {
   live = await invoke('snapshot');
-  if (current) { current.credentials = live.credentials; current.github_connected = live.github_connected; }
+  if (current) {
+    current.credentials = live.credentials; current.github_connected = live.github_connected;
+    // Refresh restored setup without overwriting any unsaved form edits.
+    if (!dirty && ['tenant_id', 'client_id', 'user_id'].some(key => current.config.graph[key] !== live.config.graph[key])) {
+      // Reload the whole revision so a later save cannot overwrite another synchronized field.
+      await reload();
+      return;
+    }
+  }
   renderLive();
   renderChatSources();
 }
@@ -1677,7 +1687,7 @@ function migrationRow(row) {
   const choice = migrationChoice(row);
   const pick = el('input', { type: 'checkbox', checked: choice.picked, 'aria-label': t('Move {name}', { name: row.credential }) });
   pick.onchange = () => { choice.picked = pick.checked; renderMigration(); };
-  const origin = { system: t('System store'), environment: t('Environment variable'), file: t('Private file') }[row.origin] ?? row.origin;
+  const origin = { configuration: t('Settings'), system: t('System store'), environment: t('Environment variable'), file: t('Private file') }[row.origin] ?? row.origin;
   const head = el('label', { class: 'check' }, pick, el('span', { class: 'cred-name', textContent: row.credential, translate: 'no' }), ' ', badge(origin, 'muted'),
     row.consumer ? badge(t('Used by {consumer}', { consumer: row.consumer.title }), 'info') : badge(t('No consumer uses it yet'), 'muted'),
     row.account_bound ? badge(t('Already uses an account variable'), 'ok') : null);

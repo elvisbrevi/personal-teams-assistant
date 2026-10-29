@@ -501,7 +501,10 @@ pub(in crate::app) fn auto(host: &Arc<Host>) {
     }
     let host = host.clone();
     tokio::spawn(async move {
-        let _ = synchronize(&host, &link, false, Mode::Automatic).await;
+        if synchronize(&host, &link, false, Mode::Automatic).await.ok {
+            let _guard = host.state.operations.lock().await;
+            let _ = super::identity::restore(&host).await;
+        }
     });
 }
 
@@ -747,6 +750,7 @@ pub(in crate::app) fn machine_call(
         .variables
         .store(host)
         .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+    credentials::migrate(host, &store).map_err(|error| anyhow::anyhow!(error.to_string()))?;
     serve(host, &store, method, args).map_err(|error| match error {
         vault::Error::Conflict(message) => anyhow::anyhow!("[state_conflict] {message}"),
         other => anyhow::anyhow!(other.to_string()),

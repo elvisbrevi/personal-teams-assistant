@@ -28,6 +28,27 @@ async function open(options = {}, scenario = 'full') {
   return { context, page, errors };
 }
 
+// Restored public Microsoft identifiers appear without overwriting unsaved setup edits.
+{
+  const { context, page, errors } = await open();
+  await page.click('nav [data-tab="settings"]');
+  await page.click('#settings-tab-teams');
+  await page.evaluate(async () => {
+    window.__ptaSetMicrosoftSetup({ tenant_id: '11111111-1111-4111-8111-111111111111' });
+    await refreshLive();
+  });
+  check('restored Microsoft setup appears in its field', await page.inputValue('#tenant-id') === '11111111-1111-4111-8111-111111111111');
+  await page.fill('#client-id', '22222222-2222-4222-8222-222222222222');
+  await page.evaluate(async () => {
+    window.__ptaSetMicrosoftSetup({ client_id: '33333333-3333-4333-8333-333333333333' }, 'A Microsoft setup variable is invalid. Enter a real UUID in Variables.');
+    await refreshLive();
+  });
+  check('Microsoft setup refresh preserves unsaved edits', await page.inputValue('#client-id') === '22222222-2222-4222-8222-222222222222');
+  check('Microsoft setup conflicts are translated and visible', await page.locator('#teams-identity-error').isVisible() && await page.locator('#teams-identity-error').innerText().then(text => text.includes('UUID real')));
+  check('Microsoft setup has no client errors', errors.length === 0, errors.join('; '));
+  await context.close();
+}
+
 // Native date/time controls must fit their label, including an empty end date.
 {
   const { context, page } = await open({ context: { viewport: { width: 320, height: 780 }, isMobile: true, hasTouch: true } });

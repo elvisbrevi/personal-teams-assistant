@@ -13,6 +13,7 @@ pub(in crate::app) fn migrate(host: &Host, store: &Store) -> std::result::Result
         return Ok(());
     }
     let config = read_config(&host.state.config_path)?;
+    super::identity::migrate(host, &config, store)?;
     for name in credential_names(&config)
         .into_iter()
         .filter(|name| managed(&config, name))

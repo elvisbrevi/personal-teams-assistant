@@ -4,6 +4,14 @@
 const UI_LANGUAGES = ['es', 'en'];
 
 const UI_CATALOG = { es: {
+  "Your Entra tenant, client ID and Teams user ID are saved in account Variables and restored when you sign in on another computer. Each computer still connects to Microsoft separately.": "El tenant de Entra, el Client ID y el ID de usuario de Teams se guardan en las Variables de tu cuenta y se restauran al iniciar sesión en otro equipo. Cada equipo sigue conectándose a Microsoft por separado.",
+  "A Microsoft setup variable is invalid. Enter a real UUID in Variables.": "Una variable de configuración de Microsoft no es válida. Introduce un UUID real en Variables.",
+  "The signed-in account changed. Synchronize again.": "La cuenta con sesión iniciada cambió. Vuelve a sincronizar.",
+  "The account's Microsoft setup differs from this computer's Teams database. Use a fresh profile to connect that identity.": "La configuración de Microsoft de la cuenta difiere de la base de Teams de este equipo. Usa un perfil nuevo para conectar esa identidad.",
+  "The account's Microsoft setup conflicts with this computer's configuration.": "La configuración de Microsoft de la cuenta entra en conflicto con la de este equipo.",
+  "Stop the assistant before restoring Microsoft setup from Variables.": "Detén el asistente antes de restaurar la configuración de Microsoft desde Variables.",
+  "Microsoft setup changed in Variables. Refresh the app before saving it again.": "La configuración de Microsoft cambió en Variables. Actualiza la aplicación antes de volver a guardarla.",
+
   "through": "mediante ",
   "on this computer and leave the local file empty; you can also use a local file with a final 404 rule. If another supervisor runs the tunnel, leave both off.": " en este computador y deja vacío el archivo local; también puedes usar un archivo local con una regla final 404. Si otro supervisor ejecuta el túnel, deja ambas opciones desactivadas.",
   "A connected worker cannot serve coordinator requests.": "Una máquina conectada a otro coordinador no puede atender solicitudes como coordinador.",

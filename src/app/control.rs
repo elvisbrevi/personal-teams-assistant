@@ -940,6 +940,12 @@ async fn operate(
     args: &Value,
 ) -> std::result::Result<Value, String> {
     let state = &host.state;
+    if matches!(
+        method,
+        "start_assistant" | "restart" | "begin_azure_cli_login"
+    ) {
+        variables::identity::restore(host).await?;
+    }
     let value = match method {
         "snapshot" => serde_json::to_value(snapshot(host).await?).map_err(fail)?,
         "list_azure_hus" | "list_azure_tasks" | "list_github_epics" | "list_github_issues"
@@ -1012,7 +1018,7 @@ async fn operate(
         }
         "save_settings" => {
             save_settings(
-                state,
+                host,
                 arg(args, "config")?,
                 arg(args, "map")?,
                 arg(args, "tunnel_config").or_else(|_| arg(args, "tunnelConfig"))?,
@@ -1278,10 +1284,10 @@ async fn operate(
             config.graph.self_chat = None;
             let map = KnowledgeMap::load(&state.map_path).map_err(fail)?;
             let tunnel = fs::read_to_string(&state.tunnel_path).unwrap_or_default();
-            save_settings(state, config, map, tunnel).await?;
+            save_settings(host, config, map, tunnel).await?;
             json!({"enabled":false})
         }
-        "question_associate" => super::notes::associate(state, args).await?,
+        "question_associate" => super::notes::associate(host, args).await?,
         "answer_feedback" => super::notes::feedback(state, args)?,
         "notes_list" => super::notes::list(state, args)?,
         "notes_save" => portable::note_save(state, args).await?,

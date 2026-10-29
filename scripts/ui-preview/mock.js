@@ -548,6 +548,7 @@
     set_credential: args => { snapshot.credentials[args.name] = 'system'; return {}; },
     delete_credential: args => { snapshot.credentials[args.name] = 'missing'; return {}; },
   };
+  window.__ptaSetMicrosoftSetup = (graph, error = null) => { Object.assign(snapshot.config.graph, graph); snapshot.teams_identity_error = error; };
   window.__ptaCalls = [];
   window.__ptaUpdateCalls = [];
   window.__ptaUpdateFinish = () => { updateState = 'staged'; updateApply = null; };

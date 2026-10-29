@@ -10,7 +10,9 @@ A positive allowlist defines it; anything not listed stays on the computer that 
 | --- | --- |
 | `llm.language`, `llm.style`, `llm.chain` (provider, model, effort, on/off, order), `policy.greeting`, `policy.max_context_chars`, `policy.max_message_age_seconds`, `policy.sensitive_patterns` | data directory, bind, public URL, tunnel, webhook prefix, `knowledge_map` path, `[secrets]` mapping |
 | sources: ID, description, topics, enabled, external processing, audiences (`allowed_conversations`, `allowed_senders`), the repository **alias** and relative path or the URL/tool definition | repository **folders** (`repositories` bindings), allowed roots, execution machines, the selected Teams machine |
-| contexts, questions (with their associated requests), verified notes | Microsoft tenant/client/user and chats, Microsoft/GitHub/Azure sessions, provider logins and CLIs, credentials, machine credentials, internal keys, people profiles, launchers, activity records |
+| contexts, questions (with their associated requests), verified notes | Microsoft chats, Microsoft/GitHub/Azure sessions, provider logins and CLIs, credentials, machine credentials, internal keys, people profiles, launchers, activity records |
+
+Microsoft setup identifiers follow the account separately through Variables (`ENTRA_TENANT_ID`, `ENTRA_CLIENT_ID`, `TEAMS_USER_ID`, 0.10.2+), and restore into local Microsoft Teams settings. They are public setup metadata, not a Microsoft session; the existing database identity is still protected. See [Microsoft setup identifiers](variables.md#microsoft-setup-identifiers-0102).
 
 A source keeps its account meaning (ID, audience, flags) everywhere. Its folder is the computer's own binding: if the repository alias has no folder here (or a file source's file is missing), the source is **unavailable**, listed in `unavailable`, and nothing reinterprets it. Questions that read only unavailable sources are unavailable too; contexts and questions that lose some are reported as `partial`. Editing a context or question here never drops the references to sources only the account can resolve.
 

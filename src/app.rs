@@ -133,6 +133,7 @@ struct Snapshot {
     profile: PathBuf,
     tunnel_running: bool,
     microsoft_connected: bool,
+    teams_identity_error: Option<String>,
     config: Config,
     map: KnowledgeMap,
     credentials: BTreeMap<String, String>,
@@ -572,6 +573,7 @@ fn required_credentials(config: &Config) -> Vec<String> {
 }
 
 async fn snapshot(host: &Host) -> std::result::Result<Snapshot, String> {
+    let teams_identity_error = variables::identity::restore(host).await.err();
     let state = &host.state;
     let config = read_config(&state.config_path).map_err(fail)?;
     let map = KnowledgeMap::load(&state.map_path).map_err(fail)?;
@@ -609,6 +611,7 @@ async fn snapshot(host: &Host) -> std::result::Result<Snapshot, String> {
         let _ = finished.task.await;
     }
     Ok(Snapshot {
+        teams_identity_error,
         account: web::account_identity(&state.authority).map_err(fail)?,
         revision: control::revision(state).map_err(fail)?,
         loaded_config: state
@@ -824,11 +827,12 @@ async fn start_service(state: &DesktopState) -> Result<()> {
 }
 
 async fn save_settings(
-    state: &DesktopState,
+    host: &Arc<Host>,
     mut config: Config,
     map: KnowledgeMap,
     tunnel_config: String,
 ) -> std::result::Result<(), String> {
+    let state = &host.state;
     let previous = read_config(&state.config_path).map_err(fail)?;
     config.knowledge_map = state.map_path.clone();
     // The map's own rules say what to fix (a duplicate context, an unknown source); they never
@@ -853,6 +857,7 @@ async fn save_settings(
     let previous_map = KnowledgeMap::load(&state.map_path).map_err(fail)?;
     let forwarded =
         portable::before_save(state, (&previous, &previous_map), (&config, &map)).await?;
+    variables::identity::save(host, &previous, &config).await?;
     let was_running = state.running.lock().await.is_some();
     if was_running {
         stop(state).await.map_err(fail)?;
@@ -1128,6 +1133,7 @@ async fn desktop_callback(
 }
 
 async fn begin_microsoft(host: &Arc<Host>, open: bool) -> std::result::Result<String, String> {
+    variables::identity::restore(host).await?;
     let state = &host.state;
     if state
         .microsoft_login
@@ -1216,8 +1222,10 @@ async fn begin_microsoft(host: &Arc<Host>, open: bool) -> std::result::Result<St
             .map_err(|_| "Microsoft authorization timed out.".to_string())?
             .map_err(fail)?
             .ok_or_else(|| "Microsoft authorization failed.".to_string())?;
-        let mut next = read_config(&state.config_path).map_err(fail)?;
+        let before = read_config(&state.config_path).map_err(fail)?;
+        let mut next = before.clone();
         next.graph.user_id = user;
+        variables::identity::save(&host, &before, &next).await?;
         write_private(
             &state.config_path,
             &toml::to_string_pretty(&next).map_err(fail)?,
