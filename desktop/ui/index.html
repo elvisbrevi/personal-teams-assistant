@@ -248,6 +248,8 @@
           <div class="panel" id="panel-teams">
             <div class="panel-head"><h2>Microsoft Teams and Entra</h2><span id="microsoft-state" class="badge muted"></span></div>
             <p class="hint">Use your existing Entra registration (<em>Mobile and desktop</em> platform with <code>http://localhost</code> and delegated permissions). The user ID is filled in when you connect the account.</p>
+            <p class="hint">Your Entra tenant, client ID and Teams user ID are saved in account Variables and restored when you sign in on another computer. Each computer still connects to Microsoft separately.</p>
+            <p id="teams-identity-error" class="callout warn" role="status" hidden></p>
             <div class="grid">
               <label>Entra tenant ID<input id="tenant-id" class="cfg" spellcheck="false"></label>
               <label>Entra client ID<input id="client-id" class="cfg" spellcheck="false"></label>

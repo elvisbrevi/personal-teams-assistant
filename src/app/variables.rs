@@ -11,6 +11,7 @@ use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 
 pub(super) mod credentials;
+pub(super) mod identity;
 mod sync;
 pub(super) use sync::{auto, cached, call_account, machine_call};
 
@@ -24,6 +25,7 @@ pub(super) struct State {
     entries: std::sync::Mutex<BTreeMap<String, Entry>>,
     pub(super) consumers: consumers::State,
     catalog: sync::Mirror,
+    identity: std::sync::Mutex<Option<String>>,
 }
 
 /// A pending protected entry: name, description and the entry (ID, seen version) it replaces.
@@ -47,6 +49,7 @@ impl State {
             entries: std::sync::Mutex::new(BTreeMap::new()),
             consumers: consumers::State::new(profile),
             catalog: sync::Mirror::new(profile),
+            identity: std::sync::Mutex::new(None),
         }
     }
     /// Whether a protected entry is waiting for its value: a person is in the middle of it.
@@ -59,6 +62,7 @@ impl State {
     /// Drop the synchronized catalog: the installation left or changed its account.
     pub(super) fn forget_catalog(&self) {
         self.catalog.forget();
+        *self.identity.lock().unwrap() = None;
     }
     /// Route the coordinator exchanges of an installation in tests.
     #[cfg(test)]

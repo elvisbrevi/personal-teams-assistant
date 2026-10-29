@@ -85,6 +85,17 @@ impl Store {
         Ok(())
     }
 
+    /// An explicit configuration edit already wrote this named variable. Never reimport its
+    /// later cached configuration copy, even if the user deletes the entry before the next read.
+    pub(crate) fn mark_credential_managed(&self, name: &str) -> Result<()> {
+        validate_name(name)?;
+        self.lock().execute(
+            "INSERT OR IGNORE INTO meta(key,value) VALUES (?1,'managed')",
+            [format!("credential-import/{}/{name}", self.account)],
+        )?;
+        Ok(())
+    }
+
     /// Point a consumer slot at one entry of this account, replacing an earlier binding.
     pub fn bind(&self, consumer: &str, slot: &str, entry: &str) -> Result<Binding> {
         let entry = entry_id(entry)?;

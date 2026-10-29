@@ -86,6 +86,12 @@ Settings › Variables is the only editor. On the account's authoritative instal
 
 `pta credentials set/delete` remain compatibility commands for these same entries. Internal state keys, webhook, machine/control, tunnel/hosting, provider sessions and retired credentials remain local with their existing protections. Microsoft sessions and the state-encryption key are unchanged. On a signed-in execution machine, named application variables require a fresh live coordinator authorization at every use and never fall back to local credentials. Signing in does not automatically upload that computer's legacy credentials into another account; use the reviewed migration below for that transfer.
 
+## Microsoft setup identifiers (0.10.2+)
+
+The Entra tenant, Entra public Client ID and Teams user ID also live in Variables as `ENTRA_TENANT_ID`, `ENTRA_CLIENT_ID` and `TEAMS_USER_ID`. Existing real UUIDs migrate automatically on the authoritative installation; example/nil IDs do not. Editing those fields in Microsoft Teams settings updates the same entries, and connecting Microsoft saves the verified user ID. An existing different variable is a conflict to review; replaced or deleted values are never reimported. The reviewed migration below includes configured identifiers with origin `configuration`, for explicitly moving another computer's setup into the account.
+
+After assistant-account sign-in and catalog synchronization, the native app restores the public IDs into Microsoft Teams settings automatically. An unchanged account/version is reused as local setup; the catalog itself still holds no values. Each computer still signs in to Microsoft separately: no OAuth session or encryption key moves. An existing Teams database tied to another identity is never reused: the app shows the conflict beside Microsoft setup, and that identity needs a fresh profile. Sign-out keeps the local Microsoft session/identity, but restored identifiers are never automatically uploaded into the standalone store or another account. No Teams service starts or permissions change during restoration.
+
 ## Migrate existing credentials
 
 Moving what an installation already uses into the signed-in account is opt-in, selective and never touches the originals. The host reads each value from its own credential store, so you never see, pass or receive one; do not use `credentials set` or a pipe to simulate it.
