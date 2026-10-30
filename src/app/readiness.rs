@@ -51,6 +51,7 @@ const CONFIG_SYNCED: &str =
 const CONFIG_NEVER: &str = "Your account configuration has not been restored on this computer yet. Synchronize to restore it.";
 const CONFIG_STALE: &str = "The account has a newer configuration than this computer loaded. Synchronize to bring it here.";
 const CONFIG_DIVERGED: &str = "This computer has configuration changes that were never saved to the account. Nothing was replaced; review them before synchronizing.";
+const CONFIG_LOCAL: &str = "This computer was configured before it signed in, so the account's configuration was not loaded over it. Replace this computer's settings with the account's (a private backup is kept) to restore them.";
 const CONFIG_CONFLICT: &str = "A configuration change conflicted with a newer one. Synchronize, review the result and try again.";
 const CONFIG_ERROR: &str = "The last configuration synchronization failed. Synchronize again; the account and this computer were left as they were.";
 const CONFIG_BUSY: &str = "The account configuration is synchronizing now.";
@@ -236,6 +237,16 @@ pub(super) async fn operate(host: &Arc<Host>, request: &control::Request) -> Rep
         .find(|s| s.required && s.open())
         .or_else(|| steps.iter().find(|s| s.open() && s.state != "unknown"))
         .map(|s| json!({"step":s.id,"state":s.state,"detail":s.detail,"actions":s.actions}));
+    // A standalone installation other computers signed in to is a coordinator: it has no
+    // account to sign in to.
+    let coordinating = link.is_none()
+        && !shared
+        && machines.list.as_ref().is_some_and(|list| {
+            list["machines"].as_array().is_some_and(|all| {
+                all.iter()
+                    .any(|m| m["local"] != true && m["trust"] != "revoked")
+            })
+        });
     let mode = if shared {
         "portal_account"
     } else if link.is_some() {
@@ -253,6 +264,7 @@ pub(super) async fn operate(host: &Arc<Host>, request: &control::Request) -> Rep
         },
         "local_owner": local,
         "coordinator": link.as_ref().map(|l| l.origin.clone()),
+        "coordinating": coordinating,
         "steps": steps.iter().map(Step::view).collect::<Vec<_>>(),
         "next": next,
         "agent": {
@@ -329,17 +341,17 @@ async fn coordinator(
         "denied" | "expired" => step
             .is("todo", ENDED)
             .facts(facts)
-            .act(gui("Settings > Execution machines > Connect this machine"))
+            .act(gui("Sidebar > Sign in"))
             .act(cli("pta auth machine login URL")),
         _ if remembered.is_some() => step
             .is("todo", SIGNED_OUT)
             .facts(facts)
-            .act(gui("Settings > Execution machines > Connect this machine"))
+            .act(gui("Sidebar > Sign in"))
             .act(cli("pta auth machine login")),
         _ => step
             .is("optional", STANDALONE)
             .facts(facts)
-            .act(gui("Settings > Execution machines > Connect this machine"))
+            .act(gui("Sidebar > Sign in"))
             .act(cli("pta auth machine login URL")),
     }
 }
@@ -363,7 +375,7 @@ fn connection(host: &Arc<Host>, link: Option<&implementation::Link>) -> Step {
             .act(cli("pta account sync")),
         "revoked" => step
             .is("todo", standing::REVOKED)
-            .act(gui("Settings > Execution machines > Connect this machine"))
+            .act(gui("Sidebar > Sign in"))
             .act(sign_in),
         _ => step
             .is("unknown", STANDING_UNKNOWN)
@@ -396,12 +408,12 @@ fn listed(machines: &Machines, connected: bool, browser: bool) -> Step {
     match entry {
         Some(m) if m["trust"] == "revoked" => step
             .is("todo", REVOKED_HERE)
-            .act(gui("Settings > Execution machines > Connect this machine"))
+            .act(gui("Sidebar > Sign in"))
             .act(cli("pta auth machine login")),
         Some(_) => step.is("done", LISTED),
         None => step
             .is("todo", NOT_LISTED)
-            .act(gui("Settings > Execution machines > Connect this machine"))
+            .act(gui("Sidebar > Sign in"))
             .act(cli("pta auth machine login")),
     }
 }
@@ -431,6 +443,9 @@ async fn configuration(host: &Arc<Host>, connected: bool) -> Step {
         "authoritative" => step.is("done", CONFIG_OWN),
         "synced" => step.is("done", CONFIG_SYNCED),
         "syncing" => step.is("waiting", CONFIG_BUSY),
+        "never" if sync["error"].is_null() && sync["local_changes"] == true => step
+            .is("attention", CONFIG_LOCAL)
+            .act(cli("pta account sync --reset")),
         "never" if sync["error"].is_null() => step.is("todo", CONFIG_NEVER).act(sync_now),
         "stale" => step.is("attention", CONFIG_STALE).act(sync_now),
         "diverged" => step

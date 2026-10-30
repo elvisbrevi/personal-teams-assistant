@@ -1073,22 +1073,16 @@ async function editAccountMachine(machine, trigger) {
     el('div', { class: 'directory-picker-footer' }, revoke, save));
   document.body.append(dialog); document.body.classList.add('directory-picker-open'); dialog.showModal(); close.focus();
 }
-let loadedCoordinator = '';
 async function loadMachines() {
   const epoch = accountEpoch;
   const [settings, fleet] = await Promise.all([invoke('machine_settings'), invoke('machine_list')]);
   if (epoch !== accountEpoch) return;
-  const coordinator = settings.coordinator || settings.coordinator_origin || '';
-  // Refreshing after another action must not discard an address the user has typed but not yet connected.
-  if ($('#machine-coordinator').value === loadedCoordinator) field('#machine-coordinator', coordinator);
-  loadedCoordinator = coordinator;
   field('#machine-name', settings.name);
   machineRoots = settings.roots;
   $('#machine-roots-choose').disabled = Boolean(live?.config.server.webhook_prefix);
   renderMachineRoots();
   // The portal is the coordinator itself: browsers approve other computers, never join.
-  $('#machine-connect').hidden = $('#machine-connect-hint').hidden = window.ptaTransport.browser;
-  $('#machine-connect').disabled = Boolean(settings.coordinator);
+  $('#machine-connect-hint').hidden = window.ptaTransport.browser || Boolean(settings.coordinator);
   $('#machine-disconnect').disabled = !settings.coordinator;
   renderTeamsMachines(fleet);
 }
@@ -1342,10 +1336,8 @@ function renderSteps(s) {
     { done: urlReady(config), title: t('Public URL and tunnel'), text: t('A stable HTTPS URL that reaches the local port.'), go: ['settings', 'panel-server'] },
     { done: readySources(s.map).length > 0, title: t('Authorized sources'), text: t('At least one source enabled, with external processing and an audience.'), go: ['knowledge'] },
     { done: s.running, title: t('Start the assistant'), text: t('It starts receiving Teams messages.'), start: true },
-    { done: readiness?.mode !== 'standalone', optional: true, hidden: !readiness, title: t('Add this computer to your account'), text: t('Sign in once to restore your configuration and variables here.'), go: ['settings', 'panel-machines'] },
     { done: !config.policy.dry_run, optional: true, title: t('Turn sending on'), text: t('Review the proposals in Messages and turn observation mode off.'), go: ['settings', 'panel-behavior'] },
   ];
-  steps.splice(0, steps.length, ...steps.filter(step => !step.hidden));
   const required = steps.filter(step => !step.optional);
   const completed = required.filter(step => step.done).length;
   $('#setup-progress').textContent = t('{ready} of {total} ready', { ready: completed, total: required.length });
@@ -1528,6 +1520,7 @@ function adoptAccount(epoch, standing) {
 }
 
 function renderStanding() {
+  renderAccountChip();
   const standing = accountStanding;
   const problem = standing && ['offline', 'revoked'].includes(standing.state);
   const text = !problem ? '' : [
@@ -1977,7 +1970,7 @@ function renderAccountConfig() {
   const panel = $('#panel-account-config');
   const sync = accountConfig;
   panel.hidden = sync?.mode !== 'replica';
-  if (panel.hidden) return;
+  if (panel.hidden) return renderAccountChip();
   const [label, tone] = ACCOUNT_STATES[sync.state] ?? ACCOUNT_STATES.never;
   const badge = $('#account-config-state');
   badge.textContent = t(label);
@@ -1988,9 +1981,11 @@ function renderAccountConfig() {
   const problem = $('#account-config-problem');
   const message = sync.conflict ? `${t('A change conflicted with a newer one. Synchronize, review the result and try again.')} ${tx(sync.conflict)}`
     : sync.state === 'diverged' ? t('This computer has configuration changes that were never saved to the account. Nothing was replaced.')
+    : sync.state === 'never' && sync.local_changes ? t("This computer was configured before it signed in, so the account's configuration was not loaded over it. Replace this computer's settings with the account's to restore them.")
     : sync.error ? tx(sync.error.message) : '';
   problem.textContent = message.trim();
   problem.hidden = !problem.textContent;
+  renderAccountChip();
   const setup = $('#account-config-setup');
   setup.replaceChildren();
   const items = [...(sync.local_setup ?? [])];
@@ -1999,14 +1994,10 @@ function renderAccountConfig() {
   const hidden = (sync.unavailable?.sources?.length ?? 0) + (sync.unavailable?.questions?.length ?? 0);
   if (hidden) setup.append(el('p', { class: 'hint', textContent: tn(hidden, '{n} item from your account is unavailable on this computer.', '{n} items from your account are unavailable on this computer.') }));
   const reset = $('#account-config-reset');
-  reset.hidden = !['diverged', 'conflict', 'error'].includes(sync.state) && !(sync.state === 'never' && sync.error);
+  reset.hidden = !['diverged', 'conflict', 'error'].includes(sync.state) && !(sync.state === 'never' && (sync.error || sync.local_changes));
   reset.textContent = accountResetArmed ? t('Tap again to replace') : t("Replace this computer's settings with the account's");
 }
 
-$('#account-config-sync').onclick = event => busy(event.currentTarget, async () => {
-  try { await invoke('portable_sync'); } finally { await loadAccountConfig(); }
-  done(t('Account configuration synchronized.'));
-});
 $('#account-config-reset').onclick = event => {
   if (!accountResetArmed) {
     accountResetArmed = true;
@@ -2016,7 +2007,7 @@ $('#account-config-reset').onclick = event => {
   }
   accountResetArmed = false;
   busy(event.currentTarget, async () => {
-    try { await invoke('portable_sync', { reset: true }); } finally { await loadAccountConfig(); }
+    await syncAccount({ adopt: true });
     done(t('This computer now uses the account configuration. The previous settings are kept in a private backup.'));
   });
 };
@@ -2097,12 +2088,16 @@ function renderReadiness() {
   const panel = $('#account-setup-panel');
   const report = readiness;
   const coordinator = report?.steps.find(step => step.id === 'coordinator');
-  // A computer that works on its own and was never offered an account has nothing to guide.
-  panel.hidden = !report || (report.mode === 'standalone' && coordinator?.state === 'optional');
+  if (report?.mode === 'signed_in' && !accountConfig) loadAccountConfig();
+  renderAccountChip();
+  maybeOfferSignIn();
+  // A coordinator, or a portal browser on one, has no account to join: nothing to guide.
+  panel.hidden = !report || (report.mode === 'standalone' && coordinator?.state === 'optional' && !canSignIn());
   if (panel.hidden) return;
   const state = $('#account-setup-state');
-  state.textContent = report.ready ? t('Ready') : t('Needs attention');
-  state.className = `badge ${report.ready ? 'ok' : 'warn'}`;
+  const signedOut = report.mode === 'standalone';
+  state.textContent = signedOut ? t('Not signed in') : report.ready ? t('Ready') : t('Needs attention');
+  state.className = `badge ${report.ready && !signedOut ? 'ok' : 'warn'}`;
   const next = $('#account-setup-next');
   next.textContent = report.next ? tx(report.next.detail) : '';
   next.hidden = !report.next || report.ready;
@@ -2119,7 +2114,11 @@ function renderReadiness() {
       facts ? el('p', { class: 'hint', textContent: facts }) : null,
       expected.length ? el('ul', { class: 'hint' }, expected) : null);
     let action = null;
-    if (step.state !== 'done') {
+    const signIn = canSignIn() && ['coordinator', 'connection', 'machine'].includes(step.id) && step.state !== 'waiting';
+    if (signIn && step.id === 'coordinator') {
+      action = el('button', { class: 'small', textContent: t('Sign in') });
+      action.onclick = () => openAccountLogin();
+    } else if (step.state !== 'done' && step.state !== 'not_applicable') {
       action = el('button', { class: 'secondary small', textContent: t('Set up') });
       action.onclick = () => showTab('settings', panelId);
     }
@@ -2130,6 +2129,147 @@ function renderReadiness() {
 $('#account-setup-refresh').onclick = event => busy(event.currentTarget, loadReadiness);
 setTimeout(loadReadiness, 1200);
 setInterval(() => { if (current && tab === 'overview') loadReadiness(); }, 30_000);
+
+// ---------------------------------------------------------------- account sign-in and synchronization
+
+/** Set on this device when its user chose to work without an account; the sidebar still offers sign-in. */
+const SIGN_IN_SKIPPED_KEY = 'pta-sign-in-skipped';
+let signInOffered = false;
+
+/** Whether this window may add its computer to an account: the owner's own window on a computer
+ *  that is not signed in and is not itself the coordinator other computers use. */
+function canSignIn() {
+  const report = readiness;
+  return Boolean(report) && !window.ptaTransport.browser && report.local_owner
+    && (report.mode === 'standalone' ? !report.coordinating : report.mode === 'signed_in' && accountStanding?.state === 'revoked');
+}
+
+/**
+ * Brings the account's variables and configuration to this computer from its coordinator, which is
+ * authoritative. `adopt` replaces settings this computer had before signing in (the host keeps a
+ * private backup). Resolves whether the configuration changed.
+ */
+async function syncAccount({ adopt = false } = {}) {
+  // Unsaved edits would be saved over the account's newer configuration later: settle them first.
+  if (dirty) throw t('Save or discard your changes before synchronizing with your account.');
+  // One host step brings the variable catalog, then the configuration (`pta account sync`, MCP account_sync).
+  let changed = false, problem = null;
+  try {
+    const reply = await invoke('account_sync', adopt ? { reset: true } : {});
+    changed = reply.changes?.changed === true;
+  } catch (error) { problem = error; }
+  // The forms show what the account restored (configuration, Microsoft identifiers) right away,
+  // so a later save never writes an older copy over it.
+  await reload();
+  await Promise.all([loadVariables(), loadAccountConfig(), loadReadiness()]).catch(() => {});
+  if (problem) throw problem;
+  return changed;
+}
+
+/** Signs this computer in from the sign-in screen, then loads the account here. */
+async function signIn(url, adopt) {
+  if (!await machineLogin(url)) return;
+  await syncAccount({ adopt });
+  try { localStorage.removeItem(SIGN_IN_SKIPPED_KEY); } catch { /* this page only */ }
+  done(t("Signed in. Your account's settings and variables are on this computer."));
+  showTab('overview');
+}
+
+async function openAccountLogin() {
+  const dialog = $('#account-login-dialog');
+  if (dialog.open || $('#machine-login-dialog').open) return;
+  $('#account-login-status').textContent = '';
+  const input = $('#account-login-url');
+  if (!input.value) {
+    const settings = await invoke('machine_settings').catch(() => null);
+    input.value = settings?.coordinator || settings?.coordinator_origin || '';
+  }
+  $('#account-login-adopt').checked = true;
+  dialog.showModal();
+  (input.value ? $('#account-login-submit') : input).focus();
+}
+
+/** Offers the sign-in screen once per window to a computer that is not part of an account yet. */
+function maybeOfferSignIn() {
+  if (!canSignIn() || readiness.mode !== 'standalone' || signInOffered) return;
+  if (readiness.steps.find(step => step.id === 'coordinator')?.state === 'waiting') return;
+  let skipped = false;
+  try { skipped = localStorage.getItem(SIGN_IN_SKIPPED_KEY) === '1'; } catch { /* offer it */ }
+  signInOffered = true;
+  if (!skipped) openAccountLogin().catch(fail);
+}
+
+$('#account-login-form').onsubmit = event => {
+  event.preventDefault();
+  const url = $('#account-login-url').value.trim(), adopt = $('#account-login-adopt').checked;
+  $('#account-login-dialog').close();
+  busy($('#account-chip-action'), () => signIn(url, adopt));
+};
+$('#account-login-skip').onclick = () => {
+  try { localStorage.setItem(SIGN_IN_SKIPPED_KEY, '1'); } catch { /* asked again next time */ }
+  $('#account-login-dialog').close();
+  notify(t('This computer works on its own. Sign in any time from the sidebar.'));
+};
+
+/** The account configuration's state, as the indicator words it. */
+function chipState(state) {
+  switch (state) {
+    case 'synced': return [t('Up to date'), 'ok'];
+    case 'syncing': return [t('Synchronizing…'), 'info'];
+    case 'stale': return [t('Newer version available'), 'warn'];
+    case 'diverged': return [t('Unsaved changes'), 'warn'];
+    case 'conflict': return [t('Conflict'), 'warn'];
+    case 'error': return [t('Synchronization failed'), 'warn'];
+    default: return [t('Not loaded yet'), 'warn'];
+  }
+}
+
+/** The sidebar's account indicator: always in sight in the owner's window, with the next action. */
+function renderAccountChip() {
+  const chip = $('#account-chip');
+  const report = readiness;
+  chip.hidden = !report || window.ptaTransport.browser || !report.local_owner || report.mode === 'portal_account'
+    || (report.mode === 'standalone' && report.coordinating);
+  if (chip.hidden) return;
+  let title, detail, tone, label, glyph;
+  const standing = accountStanding?.state ?? report.steps.find(step => step.id === 'connection')?.facts?.standing;
+  const host = (report.coordinator ?? '').replace(/^https:\/\//, '');
+  if (report.mode === 'standalone') {
+    const waiting = report.steps.find(step => step.id === 'coordinator')?.state === 'waiting';
+    [title, detail, tone, label, glyph] = [t('Not signed in'), waiting ? t('A sign-in is waiting for your approval.') : t('Your account settings are not on this computer.'), 'warn', t('Sign in'), 'user'];
+  } else if (standing === 'revoked') {
+    [title, detail, tone, label, glyph] = [t('Sign-in no longer valid'), host, 'error', t('Sign in again'), 'user'];
+  } else {
+    const sync = accountConfig;
+    const [state, stateTone] = sync?.mode === 'replica' ? chipState(sync.state) : ['', 'ok'];
+    const when = sync?.synced_at ? t('Synchronized {when}.', { when: ago(sync.synced_at * 1000) }) : '';
+    title = standing === 'offline' ? t('Coordinator offline') : t('Signed in');
+    detail = [host, state, sync?.state === 'synced' ? when : ''].filter(Boolean).join(' · ');
+    tone = standing === 'offline' ? 'warn' : stateTone;
+    [label, glyph] = [t('Synchronize'), 'refresh'];
+  }
+  chip.className = `account-chip ${tone}`;
+  $('#account-chip-dot').className = `dot ${tone}`;
+  $('#account-chip-title').textContent = title;
+  $('#account-chip-detail').textContent = detail;
+  $('#account-chip-label').textContent = label;
+  $('#account-chip-icon').setAttribute('href', `#i-${glyph}`);
+  const action = $('#account-chip-action');
+  action.classList.toggle('secondary', glyph === 'refresh');
+  action.title = `${title}. ${detail}`;
+}
+
+$('#account-chip-action').onclick = event => {
+  const button = event.currentTarget;
+  if (readiness?.mode === 'signed_in' && accountStanding?.state !== 'revoked') {
+    busy(button, async () => {
+      const changed = await syncAccount();
+      done(changed ? t("Your account's latest settings and variables are on this computer.") : t('Already up to date with your account.'));
+    });
+  } else openAccountLogin().catch(fail);
+};
+// The indicator follows the account while the window is open (a local read; the host syncs by itself).
+setInterval(() => { if (readiness?.mode === 'signed_in' && !document.hidden) loadAccountConfig(); }, 60_000);
 
 // ---------------------------------------------------------------- variable consumers
 
@@ -2314,11 +2454,9 @@ function syncSummary(sync) {
 
 function renderVariables() {
   const { variables, pending, error, sync } = variableState;
-  const mirror = sync?.mode === 'mirror';
   const line = $('#variables-sync');
   line.textContent = syncSummary(sync);
   line.hidden = !line.textContent;
-  $('#variables-refresh').textContent = mirror ? t('Synchronize now') : t('Refresh');
   const query = $('#variables-search').value.trim().toLowerCase();
   const shown = variables.filter(v => !query || v.name.toLowerCase().includes(query) || v.description.toLowerCase().includes(query));
   const list = $('#variables');
@@ -2509,11 +2647,7 @@ $('#variable-create').onclick = event => busy(event.currentTarget, async () => {
   done(reply.replayed ? t('{name} was already stored.', { name: form.name }) : t('{name} stored.', { name: form.name }));
 });
 $('#variables-refresh').onclick = event => busy(event.currentTarget, async () => {
-  if (variableState.sync?.mode === 'mirror') {
-    // The coordinator is authoritative: ask it now, then show whatever this computer holds.
-    try { await invoke('variable_sync'); } finally { await loadVariables(); }
-    return done(t('Variables synchronized. Revision {n}.', { n: variableState.sync?.revision ?? '' }));
-  }
+  // Rereads this computer's list; bringing the account's catalog here is the sidebar's Synchronize.
   await loadVariables();
   done(t('Variables refreshed.'));
 });
@@ -4068,12 +4202,12 @@ $('#machine-roots-choose').onclick = () => chooseDirectories({ trigger: $('#mach
 $('#repo-path-choose').onclick = () => chooseDirectories({ trigger: $('#repo-path-choose'), title: t('Checkout path'), selected: lines($('#repo-path').value), multiple: false,
   browse: path => invoke('machine_browse', { path }), apply: paths => { field('#repo-path', paths[0]); $('#repo-path-value').textContent = paths[0]; } });
 // The modal dialog shows progress; loadMachines then decides whether Connect stays available.
-$('#machine-connect').onclick = () => machineLogin().catch(fail);
 
-/** Browser-assisted sign-in: the host keeps the verifier; this dialog only sees the public link and code. */
-async function machineLogin() {
+/** Browser-assisted sign-in: the host keeps the verifier; this dialog only sees the public link and code.
+ *  Resolves true once this computer is connected to the account at `url`. */
+async function machineLogin(url) {
   const dialog = $('#machine-login-dialog'), status = $('#machine-login-status'), link = $('#machine-login-link');
-  if (dialog.open) return;
+  if (dialog.open) return false;
   let cancelled = false, connected = false;
   $('#machine-login-code').textContent = '';
   $('#machine-login-copy').disabled = true;
@@ -4084,8 +4218,8 @@ async function machineLogin() {
   dialog.oncancel = cancel;
   $('#machine-login-cancel').onclick = cancel;
   try {
-    const login = await invoke('machine_login', { url: $('#machine-coordinator').value.trim(), open: true });
-    if (cancelled) return;
+    const login = await invoke('machine_login', { url, open: true });
+    if (cancelled) return false;
     $('#machine-login-code').textContent = login.code;
     link.href = login.approval_url; link.hidden = false;
     link.onclick = event => { event.preventDefault(); invoke('machine_login', { url: login.coordinator, open: true }).catch(fail); };
@@ -4099,29 +4233,30 @@ async function machineLogin() {
     link.focus();
     while (!cancelled && Date.now() < login.expires_at * 1000) {
       const result = await rawInvoke('command', { request: { method: 'machine_login_finish', args: {}, revision: null, contract: 1 } });
-      if (cancelled) return;
+      if (cancelled) return false;
       if (result.ok) {
         connected = true;
         done(result.data.username ? t('This computer is connected to {account}.', { account: result.data.username }) : t('This computer is connected to your account.'));
-        return;
+        return true;
       }
       if (result.code !== 'authorization_pending') throw new Error(tx(result.message || result.code));
       await sleep(2000);
     }
-    if (!cancelled) throw new Error(t('The sign-in expired. Nothing was trusted; select Connect this machine to try again.'));
+    if (!cancelled) throw new Error(t('The sign-in expired. Nothing was trusted; select Sign in to try again.'));
+    return false;
   } finally {
     if (!connected) await rawInvoke('command', { request: { method: 'machine_login_cancel', args: {}, revision: null, contract: 1 } }).catch(() => {});
     dialog.close();
     link.removeAttribute('href'); $('#machine-login-code').textContent = '';
     await loadMachines().catch(fail);
-    if (connected) { leaveAccount(); await Promise.all([loadVariables(), loadAccountConfig()]).catch(fail); }
+    if (connected) leaveAccount();
   }
 }
 $('#machine-disconnect').onclick = () => busy($('#machine-disconnect'), async () => {
   await invoke('machine_disconnect');
   leaveAccount();
   await loadMachines();
-  await Promise.all([loadVariables(), loadAccountConfig()]);
+  await Promise.all([loadVariables(), loadAccountConfig(), loadReadiness()]);
 });
 $('#todo-provider').onchange = () => {
   $('#todo-state').replaceChildren(el('option', { value: '', textContent: t('All states') }));

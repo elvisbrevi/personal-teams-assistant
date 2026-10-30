@@ -87,7 +87,10 @@ Accounts
   auth machine status|login [URL]|finish|cancel
                            Adds this computer to your account on your own coordinator (HTTPS origin; omitted reuses
                            the remembered one). login [--no-browser] returns the approval URL and code; sign in there
-                           and choose Trust this machine, then finish [--wait]. No credential is printed.
+                           and choose Trust this machine, then finish [--wait] [--replace-settings]. Once connected,
+                           finish brings the account's configuration and variables here (account sync);
+                           --replace-settings replaces settings this computer already had (a private backup is kept).
+                           No credential is printed.
   github repos             Repositories authorized for the GitHub App.
 
 Setup
@@ -102,9 +105,10 @@ Account configuration
   account status              Loaded and saved revisions of the account's portable configuration (preferences, model choices,
                            sources and audiences, contexts, questions, verified notes), unsaved local changes, what is
                            unavailable on this computer and the local setup still required. Reads local state only.
-  account sync [--reset]      Restores and refreshes that configuration from the coordinator, which is authoritative. Paths,
-                           repository folders, roots, tunnels, credentials and provider sessions are never synchronized and
-                           nothing is started. Unsaved local changes are kept: --reset replaces them (a private backup is kept).
+  account sync [--reset]      Brings the account here from the coordinator, which is authoritative: the variable catalog (names,
+                           never values) and that configuration, in one step. Paths, repository folders, roots, tunnels,
+                           credentials and provider sessions are never synchronized and nothing is started. Unsaved local
+                           changes are kept: --reset replaces them (a private backup is kept).
   account records status|history [DAY|FROM..TO]  Reads the coordinator's saved daily task record (read-only).
 
 Account variables
@@ -435,7 +439,7 @@ async fn account_command(args: &[String]) -> Result<Reply> {
         (Some("sync"), _) => {
             let reset = args.iter().any(|a| a == "--reset");
             call(
-                "portable_sync",
+                "account_sync",
                 if reset {
                     json!({"reset":true})
                 } else {
@@ -803,7 +807,7 @@ fn validate_args(args: &[String]) -> Result<()> {
         match a {
             "--json" | "--non-interactive" | "--offline" | "--no-browser" | "--wait"
             | "--content" | "--current-profile" | "--context-stdin" | "--value" | "--confirmed"
-            | "--reset" | "--bind" | "--settings" => {}
+            | "--reset" | "--bind" | "--settings" | "--replace-settings" => {}
             "--destination" | "--name" | "--existing" => {
                 i += 1;
                 ensure!(
@@ -1036,6 +1040,10 @@ fn validate_args(args: &[String]) -> Result<()> {
         ("--offline", p[0] == "doctor"),
         ("--no-browser", p[0] == "auth" && p.get(2) == Some(&"login")),
         ("--wait", p[0] == "auth" && p.get(2) == Some(&"finish")),
+        (
+            "--replace-settings",
+            p[0] == "auth" && p.get(1) == Some(&"machine") && p.get(2) == Some(&"finish"),
+        ),
         (
             "--redirect",
             p[0] == "auth" && p.get(1) == Some(&"microsoft") && p.get(2) == Some(&"finish"),
@@ -1538,6 +1546,18 @@ async fn execute(mut args: Vec<String>) -> Result<Reply> {
                     tokio::time::sleep(Duration::from_secs(2)).await;
                     reply = call(method, json!({}), None, true).await?;
                 }
+            }
+            // Once connected, the account's configuration and variables come here at once
+            // (the same step as the GUI's sign-in screen); signing in stays done if that fails.
+            if action == "finish" && reply.ok && reply.data["connected"] == true {
+                let reset = args.iter().any(|a| a == "--replace-settings");
+                let synced = call("account_sync", json!({"reset":reset}), None, true).await?;
+                reply.data["account"] = if synced.ok {
+                    synced.data
+                } else {
+                    json!({"ok":false,"code":synced.code,"message":synced.message,
+                        "next":"pta account sync (or --reset to replace this computer's settings with the account's)"})
+                };
             }
             return Ok(reply);
         }
@@ -2216,6 +2236,20 @@ mod wiki_tests {
         ] {
             assert!(check(args).is_err(), "{args:?}");
         }
+    }
+    #[test]
+    fn replacing_settings_is_scoped_to_finishing_a_machine_sign_in() {
+        let check =
+            |args: &[&str]| validate_args(&args.iter().map(|a| a.to_string()).collect::<Vec<_>>());
+        assert!(check(&["auth", "machine", "finish", "--wait", "--replace-settings"]).is_ok());
+        for args in [
+            &["auth", "microsoft", "finish", "--replace-settings"][..],
+            &["auth", "machine", "login", "--replace-settings"],
+            &["account", "sync", "--replace-settings"],
+        ] {
+            assert!(check(args).is_err(), "{args:?}");
+        }
+        assert!(check(&["account", "sync", "--reset"]).is_ok());
     }
 }
 #[cfg(test)]

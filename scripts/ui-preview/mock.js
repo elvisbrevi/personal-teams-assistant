@@ -253,6 +253,7 @@
       if (!window.__ptaMachineLoginTrusted) return { pending: true, state: 'pending' };
       window.__ptaMachineLoginPending = false;
       machineSettings = { ...machineSettings, coordinator: 'https://assistant.example.com', roots: [] };
+      if (window.__ptaReadiness) window.__ptaReadiness = { ...window.__ptaReadiness, mode: 'signed_in', coordinator: 'https://assistant.example.com' };
       return { connected: true, roots_reset: true, coordinator: 'https://assistant.example.com', username: 'ana' };
     },
     machine_login_cancel: () => { window.__ptaMachineLoginPending = false; return { cancelled: true }; },
@@ -437,8 +438,9 @@
       return structuredClone(updateView());
     },
     // Account readiness: the ordered steps of a fresh installation; a check overrides the report.
+    // The fixture coordinates a remote Mac, so it has no account to sign in to (no sign-in screen).
     setup_readiness: () => structuredClone(window.__ptaReadiness || {
-      ready: true, mode: 'standalone', client: 'window', local_owner: true, coordinator: null, next: null,
+      ready: true, mode: 'standalone', client: 'window', local_owner: true, coordinating: true, coordinator: null, next: null,
       steps: [{ id: 'coordinator', scope: 'coordinator', required: false, state: 'optional', detail: 'This installation works on its own. To use it with your assistant account, choose your coordinator and sign in once.', facts: {}, actions: [] }],
       agent: { skill_version: '0.9.13' } }),
     portable_status: () => ({ standing: window.__ptaStanding ? structuredClone(window.__ptaStanding) : undefined, sync: structuredClone(window.__ptaAccountConfig || { mode: 'authoritative', state: 'authoritative', revision: { generation: 3, digest: 'abcdef012345' } }) }),
@@ -449,6 +451,13 @@
       if (window.__ptaAccountFail) { sync.state = 'error'; sync.error = { code: 'dependency_or_network', message: "The coordinator could not be reached, or this installation is no longer connected to it. This computer's configuration is unchanged." }; throw new Error(sync.error.message); }
       Object.assign(sync, { state: 'synced', error: null, conflict: null, local_changes: false, loaded: { generation: 5, digest: 'abc' }, saved: { generation: 5, digest: 'abc' }, synced_at: secs(NOW) });
       return { sync: structuredClone(sync), changes: { changed: true } };
+    },
+    // The sidebar's Synchronize and the sign-in screen: the catalog, then the configuration, in one step.
+    account_sync: args => {
+      const variables = handlers.variable_sync();
+      if (window.__ptaAccountConfig?.mode !== 'replica') window.__ptaAccountSyncs = [...(window.__ptaAccountSyncs || []), args || {}];
+      const config = window.__ptaAccountConfig?.mode === 'replica' ? handlers.portable_sync(args) : { sync: { mode: 'authoritative', state: 'authoritative' }, changes: { changed: false } };
+      return { sync: config.sync, changes: config.changes, variables: variables.sync, standing: window.__ptaStanding ? structuredClone(window.__ptaStanding) : undefined };
     },
     variable_create: args => {
       window.__ptaVariableCreates.push({ id: args.id, name: args.name, description: args.description, valueLength: args.value.length });
