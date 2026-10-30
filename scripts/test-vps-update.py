@@ -31,6 +31,7 @@ CARGO = """#!/bin/sh
 echo "cargo $*" >> "$WORLD/calls"
 while [ $# -gt 0 ]; do [ "$1" = --version ] && version=$2; shift; done
 [ "$CARGO_INCREMENTAL" = 0 ] || exit 3
+[ "$CARGO_BUILD_JOBS" = 2 ] || exit 4
 if grep -qx "$version" "$WORLD/install-fails" 2>/dev/null; then echo "error: could not compile" >&2; exit 101; fi
 for name in pta personal-teams-assistant; do
   sed "s/{{version}}/$version/" "$WORLD/binary" > "$CARGO_HOME/bin/$name"

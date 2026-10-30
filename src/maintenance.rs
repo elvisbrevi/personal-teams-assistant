@@ -3,8 +3,8 @@
 //!
 //! Nothing here depends on the application. The registry, the crate and the installation root are
 //! fixed or derived from the running executable; no caller supplies a URL, crate, registry, target
-//! directory or command. Building only ever writes under a staging directory the caller chooses,
-//! so the executables that are installed (and running) are never touched.
+//! directory or command. Building only ever writes under a staging directory and a build cache the
+//! caller chooses, so the executables that are installed (and running) are never touched.
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
@@ -402,7 +402,14 @@ pub fn build_environment(
 }
 
 /// The `cargo install` arguments that rebuild `version` the way `installation` was built.
-pub fn install_args(installation: &Installation, version: &Version, root: &Path) -> Vec<OsString> {
+/// `target_dir` keeps Cargo's build cache between updates, so a release recompiles only what
+/// changed instead of every dependency (Cargo otherwise builds in a temporary directory).
+pub fn install_args(
+    installation: &Installation,
+    version: &Version,
+    root: &Path,
+    target_dir: &Path,
+) -> Vec<OsString> {
     let mut args: Vec<OsString> = ["install", CRATE, "--version"]
         .into_iter()
         .map(OsString::from)
@@ -410,6 +417,8 @@ pub fn install_args(installation: &Installation, version: &Version, root: &Path)
     args.push(version.to_string().into());
     args.extend(["--locked", "--root"].map(OsString::from));
     args.push(root.as_os_str().to_owned());
+    args.push("--target-dir".into());
+    args.push(target_dir.as_os_str().to_owned());
     args.extend(["--color", "never"].map(OsString::from));
     if installation.no_default_features {
         args.push("--no-default-features".into());
@@ -423,6 +432,21 @@ pub fn install_args(installation: &Installation, version: &Version, root: &Path)
         args.extend(["--target".into(), target.into()]);
     }
     args
+}
+
+/// Bytes in the regular files under `path` (symbolic links are not followed); 0 when it is missing.
+pub fn tree_size(path: &Path) -> u64 {
+    let Ok(entries) = std::fs::read_dir(path) else {
+        return 0;
+    };
+    entries
+        .flatten()
+        .map(|entry| match entry.file_type() {
+            Ok(kind) if kind.is_dir() => tree_size(&entry.path()),
+            Ok(kind) if kind.is_file() => entry.metadata().map_or(0, |m| m.len()),
+            _ => 0,
+        })
+        .sum()
 }
 
 /// The first `name` (or `name.exe`) in `path`.

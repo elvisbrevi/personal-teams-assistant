@@ -1,6 +1,6 @@
 [package]
 name = "personal-teams-assistant"
-version = "0.10.6"
+version = "0.10.7"
 edition = "2024"
 rust-version = "1.95"
 build = "build.rs"
@@ -28,6 +28,18 @@ include = [
     "/desktop/ui/**",
     "/desktop/skills/**",
 ]
+
+# `cargo binstall personal-teams-assistant` downloads the archive binaries.yml attaches to the GitHub
+# release (macOS and Windows, default features) instead of compiling; elsewhere, or when a release
+# has no archive for the target, it compiles like `cargo install`. Third-party builds are not used.
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/{ name }-{ target }-v{ version }{ archive-suffix }"
+bin-dir = "{ name }-{ target }-v{ version }/{ bin }{ binary-ext }"
+pkg-fmt = "tgz"
+disabled-strategies = ["quick-install"]
+
+[package.metadata.binstall.overrides.x86_64-pc-windows-msvc]
+pkg-fmt = "zip"
 
 [[bin]]
 name = "personal-teams-assistant"
@@ -90,8 +102,9 @@ tempfile = "3"
 wiremock = "0.6"
 tower = { version = "0.5", features = ["util"] }
 
+# No LTO: cross-crate LTO re-optimizes every dependency once per binary, which tripled the time
+# of each update (`cargo install`) for no measurable gain in an I/O-bound application.
 [profile.release]
-lto = "thin"
 strip = true
 
 [profile.dev]

@@ -2,7 +2,7 @@
 # that same commit, then tags it and writes a GitHub release. crates.io's Trusted Publishing
 # rejects workflow_run triggers, so this workflow runs on push and waits for CI itself.
 # workflow_dispatch retries the head of main (for example after re-running a failed CI).
-# See docs/delivery.md.
+# Once released, binaries.yml attaches prebuilt archives for `cargo binstall`. See docs/delivery.md.
 name: Release
 
 on:
@@ -125,3 +125,14 @@ jobs:
           fi
           gh release create "v$VERSION" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
             --title "Personal Teams Assistant $VERSION" --generate-notes
+
+  binaries:
+    name: Prebuilt binaries
+    needs: [check, github-release]
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    uses: ./.github/workflows/binaries.yml
+    with:
+      version: ${{ needs.check.outputs.version }}

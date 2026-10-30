@@ -56,6 +56,9 @@ DEFAULT_DATA = Path(os.environ.get("XDG_DATA_HOME") or HOME / ".local/share") / 
 GIB = 2**30
 MIN_FREE = float(os.environ.get("PTA_UPDATE_MIN_FREE_GIB", "5")) * GIB
 MAX_TARGET = float(os.environ.get("PTA_UPDATE_MAX_TARGET_GIB", "10")) * GIB
+# Parallel compiler jobs. It overrides a global `jobs = 1` in Cargo's configuration, which made a
+# release build take three times as long; two jobs stay well inside the server's memory.
+JOBS = os.environ.get("PTA_UPDATE_JOBS", "2")
 HEALTH_SECONDS = float(os.environ.get("PTA_UPDATE_HEALTH_SECONDS", "300"))
 BUSY_SECONDS = float(os.environ.get("PTA_UPDATE_BUSY_SECONDS", "900"))
 POLL_SECONDS = float(os.environ.get("PTA_UPDATE_POLL_SECONDS", "5"))
@@ -278,7 +281,7 @@ def restore():
 
 
 def install(version):
-    environment = dict(os.environ, CARGO_INCREMENTAL="0", CARGO_TARGET_DIR=str(TARGET))
+    environment = dict(os.environ, CARGO_INCREMENTAL="0", CARGO_TARGET_DIR=str(TARGET), CARGO_BUILD_JOBS=JOBS)
     command = ["cargo", "install", CRATE, "--version", version, "--locked", "--no-default-features", "--force"]
     with open(STATE / "install.log", "w", encoding="utf-8") as output:
         try:

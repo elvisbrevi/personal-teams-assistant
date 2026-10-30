@@ -7,6 +7,7 @@ flowchart LR
   PR[pull request] --> CI[ci.yml: full checks for changed paths] --> M[merge to main]
   M --> CF[Cloudflare Workers Builds: site/ only] --> L[landing]
   M --> CI2[ci.yml on main: Linux tests/package + security] --> R[release.yml: new version?] --> C[crates.io + tag + GitHub release]
+  C --> B[binaries.yml: archives for cargo binstall]
   C --> U[server timer: vps-update.py] --> P[web portal on the new version]
 ```
 
@@ -69,7 +70,7 @@ Wall-clock times on standard runners, from the pull request that added CI (no ca
 | Whole run | 7 – 7.5 min | |
 | Release, version already published | | |
 | Release, publishing | | |
-| Server update (build, restart, healthy) | | |
+| Server update (build, restart, healthy) | about 5 min build (four jobs) | 2 min 18 s (four jobs) – 3 min 33 s (two jobs) build, then about 7 s to healthy |
 
 In the Linux job the slowest steps are clippy with `gui` (about 2 min without cache), `cargo test` with `gui` (about 2 min) and `cargo package` (about 70 s).
 
@@ -80,6 +81,7 @@ Runs on every push to `main` (and by hand, `workflow_dispatch`, on the head of `
 1. **Version and CI.** Reads the version in `Cargo.toml`. If crates.io already has it, it stops: nothing to publish (most runs end here in seconds). Otherwise it waits for this commit's CI run and requires it to have passed with the Linux job run (not skipped).
 2. **Publish to crates.io**, in the `release` environment: a short-lived token from crates.io **Trusted Publishing** (OIDC, `rust-lang/crates-io-auth-action`), then `cargo publish --locked --no-verify` (CI already built, tested and packaged that commit).
 3. **Tag and GitHub release** `vX.Y.Z` on that commit, with generated notes (`contents: write` only in this job).
+4. **Prebuilt binaries** (`binaries.yml`, called by the release): a release build of both binaries per target on standard runners — `aarch64-apple-darwin` and `x86_64-apple-darwin` (`macos-latest`) and `x86_64-pc-windows-msvc` with the GUI, `x86_64-unknown-linux-gnu` headless on `ubuntu-22.04` (older glibc) — archived as `personal-teams-assistant-<target>-vX.Y.Z.tgz` (`.zip` on Windows; `personal-teams-assistant-headless-…` on Linux) with a `.sha256` each. The build jobs only read; a final job checks every archive names the version and its sum, signs GitHub build provenance (`gh attestation verify FILE --repo elvisbrevi/personal-teams-assistant`) and uploads them to the release. `[package.metadata.binstall]` in `Cargo.toml` points `cargo binstall` at the macOS and Windows archives; on Linux, or for a target whose build failed, binstall compiles like `cargo install` (the third-party `quick-install` strategy is disabled). A pull request that changes `binaries.yml` builds every archive without uploading.
 
 Releasing is therefore: merge a pull request that bumps the version in `Cargo.toml`, `Cargo.lock` and `desktop/tauri.conf.json`. A merge without a bump runs CI and publishes nothing. When delivering product changes, choose a version that crates.io does not have before opening the pull request, then verify the package was published and the server runs that version with its previous health. A green release workflow that skipped publishing an existing version is not a new delivery. If CI failed on a bump, fix `main` (the next commit releases) or re-run CI and then this workflow.
 
@@ -102,7 +104,7 @@ The server that runs the web portal (`personal-teams-assistant-web.service`, a s
 2. skips a version it blocked earlier, and does nothing while the portal service is not active (someone stopped it);
 3. defers while work is in flight, reading each profile's databases read-only (the profile and every isolated web portal profile): an activity review running (`runs.status = 'running'`), a task being written (`entries.state` `sending`/`refining`) or a Teams message being answered or sent (`jobs.status` `processing`/`sending`/`refining`);
 4. needs 5 GiB free (it removes only its own build cache to get them) and records the portal's health with `pta --json status`;
-5. backs up both binaries and Cargo's install records, then runs `cargo install personal-teams-assistant --version X --locked --no-default-features --force` with `CARGO_INCREMENTAL=0` and its own build cache in `~/.cache/personal-teams-assistant-update/target` (outside `~/src`, removed above 10 GiB), at low CPU and I/O priority; the old portal keeps serving during the build;
+5. backs up both binaries and Cargo's install records, then runs `cargo install personal-teams-assistant --version X --locked --no-default-features --force` with `CARGO_INCREMENTAL=0`, two compiler jobs (`CARGO_BUILD_JOBS=2`, overriding the server's global `jobs = 1`; `PTA_UPDATE_JOBS` changes it) and its own build cache in `~/.cache/personal-teams-assistant-update/target` (outside `~/src`, removed above 10 GiB), at low CPU and I/O priority and with `MemoryHigh=3G` on the unit; the old portal keeps serving during the build;
 6. checks for in-flight work again (waiting up to 15 minutes), restarts the service and waits up to 5 minutes for `pta --json status` to report the new host version and the health it had before (assistant running, active subscriptions and tunnel, when they were);
 7. on any failure restores the backup (instantly, without rebuilding), restarts and verifies the previous version, and blocks the failed version until a newer one is published. A failed build never restarts the portal and is retried up to three times.
 
