@@ -1,6 +1,6 @@
 # GUI design conventions
 
-The standard every change to `desktop/ui/` follows, so the native window, the web portal and the phone layout stay one consistent work tool. The architecture (§11) says what each section does; this document says how it looks and behaves. The reasoning behind the current structure is in the [UX redesign report](ux-redesign-report.md); the visual language (0.7.25) is a sticker sheet: playful neobrutalism kept at the density of a work tool.
+The standard every change to `desktop/ui/` follows, so the native window, the web portal and the phone layout stay one consistent work tool. The architecture (§11) says what each section does; this document says how it looks and behaves. The visual language is a sticker sheet: playful neobrutalism kept at the density of a work tool.
 
 ## 1. Character
 

@@ -1,13 +1,17 @@
 # Guide for agents
 
-Read [the architecture](docs/architecture.md) first: it explains components, pipeline, data, credentials, invariants and change recipes. [CONTEXT.md](CONTEXT.md) holds the domain's vocabulary (source, context, verified note, activity record…); use its terms.
+## Where to read
 
-## Which skill to use
+Read only what the change needs; do not load the long documents whole.
 
-- Save, correct or organize facts in the knowledge base: [save-knowledge](.agents/skills/save-knowledge/SKILL.md).
-- Configure, operate or diagnose the installed application: [personal-teams-assistant](desktop/skills/personal-teams-assistant/SKILL.md) (also `pta skill show`); from an agent with MCP, `pta mcp` exposes the same operations ([mcp.md](desktop/skills/personal-teams-assistant/references/mcp.md)).
-- Change the GUI (`desktop/ui/`): follow [the GUI design conventions](docs/ui-design-conventions.md).
-- Every directory input, selector or hierarchy browser uses the shared directory sheet: compact path rows, selection marks, a leading `../` row for parent navigation and explicit confirmation, presented as a bottom sheet on phones. Apply this to implementation machines, allowed roots and local repositories; do not introduce free-text directory fields or inline tree browsers.
+- [docs/architecture.md](docs/architecture.md) (over 200 KB) is the technical reference. List its sections with `grep -n '^##' docs/architecture.md` and read the ones you touch: §2 repository layout, §3 process model (host, browser GUI and owner profiles, accounts, account variables, readiness, updates, headless host), §4 profile, data and credentials, §5 configuration, §6 message pipeline, §7 Graph and Entra, §8 knowledge and tools, §9 security, §10 CLI contract, §11 GUI, §13 change recipes (new tool, provider, config field…), §14 decisions and why, §15 known limits, §16 work item implementation and execution machines.
+- [CONTEXT.md](CONTEXT.md): the domain's vocabulary (source, context, verified note, activity record…); use its terms.
+- [docs/delivery.md](docs/delivery.md): CI, releases, the server's updater and the manual fallback.
+- [docs/ui-design-conventions.md](docs/ui-design-conventions.md): every change to the GUI (`desktop/ui/`).
+- Operating the installed application: the [personal-teams-assistant skill](desktop/skills/personal-teams-assistant/SKILL.md) (also `pta skill show`) and its `references/`; from an agent with MCP, `pta mcp` exposes the same operations ([mcp.md](desktop/skills/personal-teams-assistant/references/mcp.md)). These files are compiled into the binary (`src/app/skill.rs`).
+- Saving, correcting or organizing facts in the knowledge base: [save-knowledge](.agents/skills/save-knowledge/SKILL.md).
+
+Every directory input, selector or hierarchy browser uses the shared directory sheet: compact path rows, selection marks, a leading `../` row for parent navigation and explicit confirmation, presented as a bottom sheet on phones. Apply this to implementation machines, allowed roots and local repositories; do not introduce free-text directory fields or inline tree browsers.
 
 ## Priorities
 
@@ -60,4 +64,4 @@ node --test scripts/test-activity-ui.cjs scripts/test-ui-i18n.cjs  # if the GUI 
 
 If the GUI changed and Playwright is available, also run the preview checks in [the GUI design conventions](docs/ui-design-conventions.md#10-verification) (axe WCAG 2.2 AA scans and interaction checks with synthetic data).
 
-Update the architecture and the skill when behavior, commands or schemas change.
+Update the architecture and the skill when behavior, commands or schemas change. Keep documents current rather than historical: replace superseded text instead of appending to it, and leave history to Git.

@@ -240,8 +240,8 @@ pta activity history 2026-10-01..2026-10-15   # the activities of every day in a
 
 - Project site: [teams-assistant.elvisbrevi.cl](https://teams-assistant.elvisbrevi.cl/), HTML and CSS in [`site/`](site/) published as a Cloudflare Worker.
 - [Security policy](SECURITY.md): access boundaries, deployment responsibilities, upstream notices and private vulnerability reporting.
-- [Architecture](docs/architecture.md): components, pipeline, data, security, CLI contract and change recipes.
-- [Proposed improvements](docs/proposed-improvements.md).
+- [Private portal](docs/private-deployment.md): running it on macOS and verifying a deployment.
+- [Architecture](docs/architecture.md): components, pipeline, data, security, CLI contract, change recipes, decisions and known limits.
 - [Operating skill](desktop/skills/personal-teams-assistant/SKILL.md) and [guide for agents](AGENTS.md).
 - [Activity registration](desktop/skills/personal-teams-assistant/references/activity-registration.md): scheduling, required task fields, calls, clarification and CLI commands.
 

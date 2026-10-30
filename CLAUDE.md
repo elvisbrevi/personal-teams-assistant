@@ -1,6 +1,6 @@
-# Claude Code
+@AGENTS.md
 
-[AGENTS.md](AGENTS.md) is the guide for every agent in this repository: read the architecture first, keep its invariants and run its checks before delivering. This file only adds what is specific to Claude Code and does not repeat it.
+## Claude Code only
 
-- GUI work (`desktop/ui/`): follow [the GUI design conventions](docs/ui-design-conventions.md) and look at the result with the preview harness described there (`scripts/ui-preview/`, synthetic data only).
-- Design skills installed for this project under `.claude/skills/` (`product-designer`, `information-architect`, `ux-heuristics`, `ui-ux-pro-max`) and the `frontend-design` plugin are advisory. Where they differ from AGENTS.md, the architecture or the conventions — landing-page patterns, external fonts, inline styles under the CSP, all-caps labels — the repository's documents win.
+- GUI work (`desktop/ui/`): check the result with the preview harness in [the GUI design conventions](docs/ui-design-conventions.md#10-verification) (`scripts/ui-preview/`, synthetic data only).
+- The design skills under `.claude/skills/` and the `frontend-design` plugin are advisory. Where they differ from this guide, the architecture or the GUI conventions (landing-page patterns, external fonts, inline styles under the CSP, all-caps labels), the repository wins.
