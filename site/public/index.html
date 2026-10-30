@@ -164,8 +164,11 @@
         <div class="platforms">
           <article class="platform">
             <h3>macOS and Windows</h3>
-            <p>Tray app, host and CLI. Requires Rust, the Tauri 2 prerequisites and Git.</p>
-            <pre tabindex="0"><code><span class="cmd">cargo install personal-teams-assistant --locked</span>
+            <p>Tray app, host and CLI. <a href="https://github.com/cargo-bins/cargo-binstall">cargo binstall</a> downloads the prebuilt release in seconds; <code>cargo install</code> compiles it and needs the Tauri 2 prerequisites. Both need Rust and Git.</p>
+            <pre tabindex="0"><code><span class="comment"># prebuilt, in seconds</span>
+<span class="cmd">cargo binstall personal-teams-assistant</span>
+<span class="comment"># or compiled here</span>
+<span class="cmd">cargo install personal-teams-assistant --locked</span>
 <span class="cmd">personal-teams-assistant</span>  <span class="comment"># opens the app</span></code></pre>
           </article>
           <article class="platform">
