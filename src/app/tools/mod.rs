@@ -219,6 +219,18 @@ pub(super) const TOOLS: &[Tool] = &[
         schema: || object(json!({}), &[]),
     },
     Tool {
+        name: "account_sync",
+        title: "Synchronize this computer with the account",
+        description: "Bring everything the account keeps for this computer from the coordinator, which is authoritative, in one step: the variable catalog (names, descriptions and versions, never values) and the account configuration (preferences, model choices, sources and audiences, contexts, questions and verified notes). The same action as the app's Synchronize button and `pta account sync`. Returns the configuration state and revisions (`sync`), whether it changed (`changes`), the variable catalog state (`variables`) and the coordinator standing. Machine-specific paths, repository folders, allowed roots, tunnels, credentials and Microsoft/GitHub/provider sessions are never synchronized, and nothing is started or enabled. On the coordinator itself this only reports its revisions. Unsaved local changes are never overwritten: a conflict means inspect (`portable_status`), then decide. Pass reset only after the user confirms they want this computer's portable settings replaced by the account's (the replaced ones are kept in a private backup).",
+        effect: Effect::Local,
+        schema: || {
+            object(
+                json!({"reset":{"type":"boolean","description":"Replace this computer's portable configuration with the account's; the only way past a conflict with settings this computer already had."}}),
+                &[],
+            )
+        },
+    },
+    Tool {
         name: "portable_sync",
         title: "Synchronize the account configuration",
         description: "Bring this installation's profile up to date with the account's configuration held by the coordinator (preferences, model choices, sources and audiences, contexts, questions and verified notes) and return the loaded and saved revisions, the state (synced, stale, diverged, conflict, error), what is unavailable on this computer and what local setup is still required. Machine-specific paths, repository folders, allowed roots, tunnels, credentials and Microsoft/GitHub/provider sessions are never synchronized, and nothing is started or enabled. On the coordinator itself this reports its revision. Unsaved local changes are never overwritten: a conflict means inspect, then decide. Pass reset only after the user confirms they want this computer's portable settings replaced by the account's (the replaced ones are kept in a private backup).",
@@ -1361,7 +1373,7 @@ pub(super) async fn run(name: &str, args: &Value) -> Result<Value, String> {
     match name {
         "list_azure_hus" | "list_azure_tasks" | "list_github_epics" | "list_github_issues" | "get_azure_hu" | "get_azure_task" | "get_github_epic" | "get_github_issue" | "open_work_item" => ipc(name, args.clone()).await,
         "azure_cli_status" | "github_cli_status" | "begin_azure_cli_login" | "cancel_azure_cli_login" => ipc(name, args.clone()).await,
-        "variable_list" | "variable_entry_status" | "variable_entry_cancel" | "variable_sync" | "variable_sync_status" | "portable_sync" | "portable_status" => ipc(name, args.clone()).await,
+        "variable_list" | "variable_entry_status" | "variable_entry_cancel" | "variable_sync" | "variable_sync_status" | "portable_sync" | "portable_status" | "account_sync" => ipc(name, args.clone()).await,
         "setup_status" => ipc("setup_readiness", args.clone()).await,
         "account_records" => ipc("portable_records", args.clone()).await,
         "variable_search" => ipc("variable_list", args.clone()).await,

@@ -37,6 +37,31 @@ async fn readiness(host: &Arc<Host>, transport: authority::Transport, args: Valu
     call(host, transport, "setup_readiness", args).await
 }
 
+/// Account configuration calls go to the coordinator over the machine protocol, in memory.
+fn wire(pair: &crate::app::variables::sync_tests::Pair) {
+    let (target, machine, token) = (
+        pair.coordinator.clone(),
+        pair.machine.clone(),
+        pair.token.clone(),
+    );
+    pair.native
+        .state
+        .portable
+        .use_transport(Arc::new(move |method, args| {
+            let (target, machine, token) = (target.clone(), machine.clone(), token.clone());
+            Box::pin(async move {
+                let reply = call(
+                    &target,
+                    Machine,
+                    "machine_protocol",
+                    json!({"id":machine,"token":token,"action":"call","method":method,"args":args}),
+                )
+                .await;
+                Ok(serde_json::to_value(reply)?)
+            })
+        }));
+}
+
 const ORDER: [&str; 10] = [
     "coordinator",
     "connection",
@@ -58,6 +83,8 @@ async fn a_fresh_installation_explains_what_exists_without_requiring_an_account(
     assert!(reply.ok, "{:?}", reply.message);
     assert_eq!(reply.data["mode"], "standalone");
     assert_eq!(reply.data["ready"], true);
+    // No other computer signed in to it: it is not a coordinator, so a GUI may offer sign-in.
+    assert_eq!(reply.data["coordinating"], false);
     let ids: Vec<&str> = reply.data["steps"]
         .as_array()
         .unwrap()
@@ -534,27 +561,7 @@ async fn configured_providers_and_roots_are_reported_without_changing_them() {
 async fn restoring_the_account_makes_a_signed_in_installation_ready() {
     let root = tempfile::tempdir().unwrap();
     let pair = pair(root.path(), None).await;
-    let (target, machine, token) = (
-        pair.coordinator.clone(),
-        pair.machine.clone(),
-        pair.token.clone(),
-    );
-    pair.native
-        .state
-        .portable
-        .use_transport(Arc::new(move |method, args| {
-            let (target, machine, token) = (target.clone(), machine.clone(), token.clone());
-            Box::pin(async move {
-                let reply = call(
-                    &target,
-                    Machine,
-                    "machine_protocol",
-                    json!({"id":machine,"token":token,"action":"call","method":method,"args":args}),
-                )
-                .await;
-                Ok(serde_json::to_value(reply)?)
-            })
-        }));
+    wire(&pair);
     assert!(
         call(
             &pair.coordinator,
@@ -584,4 +591,93 @@ async fn restoring_the_account_makes_a_signed_in_installation_ready() {
     // Another client of the same account sees the same list: the registered machine is there.
     assert_eq!(step(&after, "machine")["state"], "done");
     assert!(!text(&after).contains(SECRET));
+    // The coordinator has a signed-in machine: it is the account, with nothing to sign in to.
+    let own = readiness(&pair.coordinator, Local, json!({})).await;
+    assert_eq!(own.data["mode"], "standalone");
+    assert_eq!(own.data["coordinating"], true);
+    assert_eq!(after.data["coordinating"], false);
+}
+
+#[tokio::test]
+async fn a_computer_configured_before_signing_in_is_told_how_to_load_the_account() {
+    let root = tempfile::tempdir().unwrap();
+    let pair = pair(root.path(), None).await;
+    wire(&pair);
+    let mut mine = read_config(&pair.native.state.config_path).unwrap();
+    mine.llm.style = "Configured before signing in".into();
+    let map = KnowledgeMap::load(&pair.native.state.map_path).unwrap();
+    commit_settings(&pair.native.state, &mine, &map, "").unwrap();
+    // A plain synchronization never replaces what this computer already had.
+    let refused = call(&pair.native, Local, "portable_sync", json!({})).await;
+    assert_eq!(refused.code, "state_conflict");
+    let before = readiness(&pair.native, Local, json!({})).await;
+    let configuration = step(&before, "configuration");
+    assert_eq!(configuration["state"], "attention");
+    assert_eq!(configuration["facts"]["local_changes"], true);
+    assert!(actions(configuration).contains(&"pta account sync --reset".to_owned()));
+    // The reset it names loads the account (keeping a private backup) and settles the step.
+    let reset = call(&pair.native, Local, "portable_sync", json!({"reset":true})).await;
+    assert!(reset.ok, "{:?}", reset.message);
+    let after = readiness(&pair.native, Local, json!({})).await;
+    assert_eq!(step(&after, "configuration")["state"], "done");
+}
+
+#[tokio::test]
+async fn one_synchronization_brings_the_variables_and_the_configuration() {
+    let root = tempfile::tempdir().unwrap();
+    let pair = pair(root.path(), None).await;
+    wire(&pair);
+    assert!(
+        call(
+            &pair.coordinator,
+            Local,
+            "variable_create",
+            create("DEPLOY_ENDPOINT", SECRET)
+        )
+        .await
+        .ok
+    );
+    let mut account = read_config(&pair.coordinator.state.config_path).unwrap();
+    account.llm.style = "The account's style".into();
+    let map = KnowledgeMap::load(&pair.coordinator.state.map_path).unwrap();
+    commit_settings(&pair.coordinator.state, &account, &map, "").unwrap();
+
+    let synced = call(&pair.native, Window, "account_sync", json!({})).await;
+    assert!(synced.ok, "{:?}", synced.message);
+    assert_eq!(synced.data["sync"]["state"], "synced");
+    assert_eq!(synced.data["changes"]["changed"], true);
+    assert_eq!(synced.data["variables"]["state"], "synced");
+    assert!(!text(&synced).contains(SECRET));
+    let config = read_config(&pair.native.state.config_path).unwrap();
+    assert_eq!(config.llm.style, "The account's style");
+    let listed = call(&pair.native, Local, "variable_list", json!({})).await;
+    assert_eq!(listed.data["variables"][0]["name"], "DEPLOY_ENDPOINT");
+
+    // A configuration conflict is the reply, but the variables were still brought up to date.
+    let mut mine = config.clone();
+    mine.llm.style = "Edited here only".into();
+    let local_map = KnowledgeMap::load(&pair.native.state.map_path).unwrap();
+    commit_settings(&pair.native.state, &mine, &local_map, "").unwrap();
+    assert!(
+        call(
+            &pair.coordinator,
+            Local,
+            "variable_create",
+            create("SECOND_ENDPOINT", SECRET)
+        )
+        .await
+        .ok
+    );
+    let refused = call(&pair.native, Window, "account_sync", json!({})).await;
+    assert_eq!(refused.code, "state_conflict");
+    let listed = call(&pair.native, Local, "variable_list", json!({})).await;
+    assert_eq!(listed.data["variables"].as_array().unwrap().len(), 2);
+    // The coordinator itself only reports its revisions.
+    let own = call(&pair.coordinator, Local, "account_sync", json!({})).await;
+    assert!(own.ok, "{:?}", own.message);
+    assert_eq!(own.data["sync"]["mode"], "authoritative");
+    assert_eq!(own.data["changes"]["changed"], false);
+    // Arguments are checked like the configuration synchronization's.
+    let invalid = call(&pair.native, Window, "account_sync", json!({"reset":"yes"})).await;
+    assert_eq!(invalid.code, "invalid_input");
 }

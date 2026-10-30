@@ -14,8 +14,8 @@ use super::{
 use serde_json::{Value, json};
 
 pub(super) const OFFLINE: &str = "The coordinator cannot be reached right now, so account variables cannot be used. The synchronized configuration stays readable but may be out of date; try again when this computer is online.";
-pub(super) const REVOKED: &str = "The coordinator no longer accepts this installation (it was signed out or revoked, or its account changed). Nothing was used. Sign in again with Connect this machine or `pta auth machine login`.";
-const SIGNED_OUT: &str = "This installation is not signed in to an assistant account. Sign in with Connect this machine or `pta auth machine login` to restore your account here.";
+pub(super) const REVOKED: &str = "The coordinator no longer accepts this installation (it was signed out or revoked, or its account changed). Nothing was used. Sign in again from the sidebar or with `pta auth machine login`.";
+const SIGNED_OUT: &str = "This installation is not signed in to an assistant account. Sign in from the sidebar or with `pta auth machine login` to restore your account here.";
 const UNKNOWN: &str = "The coordinator has not been checked since this host started.";
 
 /// Why the coordinator did not serve an exchange; carried in the error chain so each caller can

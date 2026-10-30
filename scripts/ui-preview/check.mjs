@@ -762,20 +762,44 @@ for (const [label, viewport] of [['desktop', { width: 1440, height: 900 }], ['ph
   await page.click('#machine-save');
   await page.waitForFunction(() => window.__ptaMachineSettings?.roots.includes('/work/application'));
   check(`${label}: machine root picker saves selected directories`, await page.evaluate(() => window.__ptaMachineSettings.roots.includes('/work/application')));
-  await page.fill('#machine-coordinator', 'https://assistant.example.com');
-  await page.click('#machine-connect');
-  await page.waitForFunction(() => document.querySelector('#machine-login-code')?.textContent === '1A2B-3C4D');
-  check(`${label}: connecting this machine starts browser sign-in and shows its code`, await page.isVisible('#machine-login-dialog') && await page.evaluate(() => window.__ptaMachineLogin.url === 'https://assistant.example.com' && window.__ptaMachineLogin.open === true));
+  check(`${label}: a coordinator is not asked to sign in`, await page.locator('#account-chip').isHidden() && !await page.evaluate(() => $('#account-login-dialog').open)
+    && await page.locator('#machine-connect-hint').isHidden() === false);
+  // A computer outside any account: the sign-in screen opens by itself and the sidebar keeps the action.
+  await page.evaluate(() => {
+    window.__ptaReadiness = { ready: true, mode: 'standalone', client: 'window', local_owner: true, coordinating: false, coordinator: null, next: null,
+      steps: [{ id: 'coordinator', scope: 'coordinator', required: false, state: 'optional', detail: 'This installation works on its own. To use it with your assistant account, choose your coordinator and sign in once.', facts: {}, actions: [] }],
+      agent: { skill_version: '0.9.13' } };
+    return loadReadiness();
+  });
+  await page.waitForFunction(() => $('#account-login-dialog').open);
+  check(`${label}: a computer outside any account is offered the sign-in screen`, await page.locator('#account-login-adopt').isChecked() && await page.evaluate(() => document.activeElement?.id === 'account-login-url'));
   await page.evaluate(axeSource);
+  check(`${label}: the sign-in screen has no accessibility violations`, (await scan(page)).length === 0, JSON.stringify(await scan(page)));
+  await page.fill('#account-login-url', 'https://assistant.example.com');
+  await page.click('#account-login-submit');
+  await page.waitForFunction(() => document.querySelector('#machine-login-code')?.textContent === '1A2B-3C4D');
+  check(`${label}: signing in starts browser sign-in and shows its code`, await page.isVisible('#machine-login-dialog') && await page.evaluate(() => window.__ptaMachineLogin.url === 'https://assistant.example.com' && window.__ptaMachineLogin.open === true));
   check(`${label}: machine sign-in dialog has no accessibility violations`, (await scan(page)).length === 0);
   await page.click('#machine-login-cancel');
   await page.waitForFunction(() => !window.__ptaMachineLoginPending && !document.querySelector('#machine-login-dialog').open);
-  check(`${label}: cancelling machine sign-in withdraws it and trusts nothing`, await page.evaluate(() => window.__ptaCalls.includes('machine_login_cancel')) && !await page.isDisabled('#machine-connect'));
-  await page.click('#machine-connect');
+  check(`${label}: cancelling machine sign-in withdraws it and trusts nothing`, await page.evaluate(() => window.__ptaCalls.includes('machine_login_cancel') && !window.__ptaCalls.includes('account_sync')));
+  await page.locator('#account-chip').waitFor();
+  check(`${label}: the sidebar says this computer is not signed in`, await page.locator('#account-chip-action').innerText().then(text => text.includes('Iniciar sesión'))
+    && await page.locator('#account-chip-action').getAttribute('title').then(text => text.includes('Sin sesión iniciada')));
+  await page.click('#account-chip-action');
+  await page.waitForFunction(() => $('#account-login-dialog').open);
+  check(`${label}: the sign-in screen remembers the portal address`, await page.inputValue('#account-login-url') === 'https://assistant.example.com');
+  await page.click('#account-login-submit');
   await page.waitForFunction(() => document.querySelector('#machine-login-code')?.textContent === '1A2B-3C4D');
   await page.evaluate(() => { window.__ptaMachineLoginTrusted = true; });
-  await page.waitForFunction(() => !document.querySelector('#machine-login-dialog').open && document.querySelector('#machine-connect').disabled);
-  check(`${label}: a trusted sign-in connects this machine without another step`, !await page.isDisabled('#machine-disconnect') && (await page.textContent('#notice-text')).includes('ana'));
+  await page.locator('#notice.ok').getByText('Sesión iniciada').waitFor();
+  check(`${label}: a trusted sign-in brings the account's settings and variables at once`, !await page.isDisabled('#machine-disconnect')
+    && await page.evaluate(() => window.__ptaAccountSyncs?.at(-1)?.reset === true));
+  await page.locator('#account-chip-action', { hasText: 'Sincronizar' }).waitFor();
+  check(`${label}: once signed in the sidebar offers Synchronize`, await page.locator('#account-chip-title').innerText().then(text => text.includes('Sesión iniciada')));
+  await page.click('#account-chip-action');
+  await page.waitForFunction(() => window.__ptaAccountSyncs.length === 2);
+  check(`${label}: Synchronize never replaces local settings`, await page.evaluate(() => !window.__ptaAccountSyncs.at(-1).reset));
   check(`${label}: enrollment leaves previous directory grants empty`, await page.locator('#machine-roots code').count() === 0);
   await page.click('#notice-close');
   await page.evaluate(() => {
@@ -1002,27 +1026,35 @@ for (const [label, ctx] of [['machine-desktop', {}], ['machine-phone', { viewpor
   check(`${label}: machine workflow has no browser errors`, errors.length === 0, errors.join('; '));
   await context.close();
 }
-// Catalog synchronization: a connected installation shows where its copy stands and can synchronize now.
+// Catalog synchronization: a connected installation shows where its copy stands; the sidebar synchronizes it.
 for (const [label, ctx] of [['variable-sync-desktop', {}], ['variable-sync-phone', { viewport: { width: 393, height: 852 }, isMobile: true }]]) {
   const { context, page, errors } = await open({ axe: true, context: ctx });
   await page.evaluate(() => showTab('settings', 'panel-variables'));
   await page.locator('#variables .row').first().waitFor();
   check(`${label}: a catalog that is its own authority says it is current`, await page.locator('#variables-sync').innerText().then(text => text.includes('siempre están al día') && text.includes('Revisión 7')));
   check(`${label}: the button stays a plain refresh there`, await page.locator('#variables-refresh').innerText() === 'Actualizar');
-  await page.evaluate(() => { window.__ptaVariableSync = { mode: 'mirror', state: 'synced', coordinator: 'https://assistant.example.test', revision: 12, synced_at: Math.floor(Date.now() / 1000) - 120, entries: 2, error: null, conflict: null }; return loadVariables(); });
+  await page.evaluate(() => {
+    window.__ptaVariableSync = { mode: 'mirror', state: 'synced', coordinator: 'https://assistant.example.test', revision: 12, synced_at: Math.floor(Date.now() / 1000) - 120, entries: 2, error: null, conflict: null };
+    window.__ptaReadiness = { ready: true, mode: 'signed_in', client: 'window', local_owner: true, coordinating: false, coordinator: 'https://assistant.example.test', next: null,
+      steps: [{ id: 'coordinator', scope: 'coordinator', required: true, state: 'done', detail: "This computer is signed in to your account's coordinator.", facts: {}, actions: [] }], agent: { skill_version: '0.9.13' } };
+    return Promise.all([loadVariables(), loadReadiness()]);
+  });
   await page.locator('#variables-refresh').click();
-  await page.locator('#notice.ok').getByText('Variables sincronizadas. Revisión 13').waitFor();
-  check(`${label}: a mirror offers Synchronize now and reports the loaded revision`, await page.locator('#variables-refresh').innerText() === 'Sincronizar ahora'
-    && await page.locator('#variables-sync').innerText().then(text => text.includes('Sincronizado con tu cuenta') && text.includes('Revisión 13')));
+  check(`${label}: Refresh only rereads this computer's list`, await page.evaluate(() => !window.__ptaCalls.includes('variable_sync') && !window.__ptaCalls.includes('account_sync'))
+    && await page.locator('#variables-refresh').innerText() === 'Actualizar');
+  await page.locator('#account-chip-action').click();
+  await page.locator('#variables-sync', { hasText: 'Revisión 13' }).waitFor();
+  check(`${label}: the sidebar's Synchronize brings the catalog and reports the loaded revision`, await page.locator('#variables-sync').innerText().then(text => text.includes('Sincronizado con tu cuenta')));
   check(`${label}: the status is a live region`, await page.locator('#variables-sync').getAttribute('role') === 'status');
   await page.evaluate(() => { window.__ptaSyncFail = true; });
-  await page.locator('#variables-refresh').click();
+  await page.locator('#account-chip-action').click();
   await page.locator('#variables-sync', { hasText: 'Falló la sincronización' }).waitFor();
   check(`${label}: an outage keeps the last catalog and says so in Spanish`, await page.locator('#variables .row').count() === 2
     && await page.locator('#variables-sync').innerText().then(text => text.includes('Revisión 13') && text.includes('No se pudo contactar al coordinador')));
   await page.evaluate(() => { window.__ptaSyncFail = false; window.__ptaVariableSync = { ...window.__ptaVariableSync, state: 'conflict', error: null, conflict: 'API changed since it was loaded (it is now version 4). Inspect it before editing again.' }; return loadVariables(); });
   check(`${label}: a conflict is announced with advice`, await page.locator('#variables-sync').innerText().then(text => text.includes('chocó con otro más reciente') && text.includes('Revisa') === false && text.includes('revísala')));
-  await page.locator('#variables-refresh').click();
+  await page.click('#notice-close').catch(() => {});
+  await page.locator('#account-chip-action').click();
   await page.locator('#variables-sync', { hasText: 'Sincronizado con tu cuenta' }).waitFor();
   check(`${label}: an explicit synchronization clears a conflict`, await page.locator('#variables-sync').innerText().then(text => !text.includes('chocó')));
   check(`${label}: synchronization keeps the phone boundary`, await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
@@ -1038,8 +1070,8 @@ for (const [label, ctx] of [['readiness-desktop', {}], ['readiness-phone', { vie
   const { context, page, errors } = await open({ axe: true, context: ctx });
   await page.waitForFunction(() => readiness !== null);
   await page.evaluate(() => renderSteps(live));
-  check(`${label}: a computer that works on its own shows no account guidance`, await page.locator('#account-setup-panel').isHidden());
-  check(`${label}: the first-run checklist offers adding the computer as an optional step`, await page.locator('#setup-steps').innerText().then(text => text.includes('Agregar este equipo a tu cuenta') && text.includes('opcional')));
+  check(`${label}: a coordinator shows no account guidance`, await page.locator('#account-setup-panel').isHidden());
+  check(`${label}: signing in is not repeated in the first-run checklist`, await page.locator('#setup-steps').innerText().then(text => !text.includes('Agregar este equipo a tu cuenta') && !text.includes('Iniciar sesión')));
   await page.evaluate(() => {
     const step = (id, scope, state, detail, facts = {}, required = true) => ({ id, scope, required, state, detail, facts, actions: [] });
     window.__ptaReadiness = {
@@ -1100,16 +1132,21 @@ for (const [label, ctx] of [['account-config-desktop', {}], ['account-config-pho
       unavailable: { sources: [{ id: 'handbook-docs', repository: 'handbook' }], questions: ['where-is-the-guide'], partial: [] },
       local_setup: [{ id: 'repository:handbook', message: 'Connect the repository «handbook» on this computer; the sources that read it are unavailable until then.' },
         { id: 'roots', message: 'No directory is selected for coding agents on this computer; registering it does not grant access.' }] };
-    return loadAccountConfig();
+    window.__ptaReadiness = { ready: true, mode: 'signed_in', client: 'window', local_owner: true, coordinating: false, coordinator: 'https://assistant.example.test', next: null,
+      steps: [{ id: 'coordinator', scope: 'coordinator', required: true, state: 'done', detail: "This computer is signed in to your account's coordinator.", facts: {}, actions: [] }],
+      agent: { skill_version: '0.9.13' } };
+    return Promise.all([loadAccountConfig(), loadReadiness()]);
   });
   await page.locator('#panel-account-config').waitFor();
   check(`${label}: loaded and account revisions are both shown`, await page.locator('#account-config-summary').innerText().then(text => text.includes('Revisión cargada 4') && text.includes('revisión de la cuenta 5')));
   check(`${label}: local setup is separated from what was restored and translated`, await page.locator('#account-config-setup').innerText().then(text => text.includes('Aún se necesita en este computador') && text.includes('Conecta el repositorio «handbook»') && text.includes('2 elementos de tu cuenta no están disponibles')));
   check(`${label}: the state is a text badge`, await page.locator('#account-config-state').innerText() === 'Hay una versión más nueva');
   check(`${label}: replacing local settings is hidden unless there is something to resolve`, await page.locator('#account-config-reset').isHidden());
-  await page.locator('#account-config-sync').click();
-  await page.locator('#notice.ok').getByText('Configuración de la cuenta sincronizada').waitFor();
-  check(`${label}: Synchronize now reports the new state`, await page.locator('#account-config-state').innerText() === 'Sincronizado');
+  check(`${label}: the panel has no synchronize button of its own`, await page.locator('#panel-account-config button', { hasText: 'Sincronizar' }).count() === 0);
+  await page.locator('#account-chip-action').click();
+  await page.locator('#notice.ok').getByText('más recientes de tu cuenta').waitFor();
+  check(`${label}: the sidebar's Synchronize reports the new state`, await page.locator('#account-config-state').innerText() === 'Sincronizado'
+    && (await page.textContent('#account-chip-detail')).includes('Al día'));
   await page.evaluate(() => { window.__ptaAccountConfig = { ...window.__ptaAccountConfig, state: 'diverged', local_changes: true }; return loadAccountConfig(); });
   check(`${label}: unsaved local changes are explained and offer an explicit replacement`, await page.locator('#account-config-problem').innerText().then(text => text.includes('nunca se guardaron en la cuenta')) && await page.locator('#account-config-reset').isVisible());
   await page.locator('#account-config-reset').click();
@@ -1118,7 +1155,7 @@ for (const [label, ctx] of [['account-config-desktop', {}], ['account-config-pho
   await page.locator('#notice.ok').getByText('copia privada').waitFor();
   check(`${label}: the second tap requests a reset`, await page.evaluate(() => window.__ptaAccountSyncs.at(-1).reset === true));
   await page.evaluate(() => { window.__ptaAccountFail = true; });
-  await page.locator('#account-config-sync').click();
+  await page.locator('#account-chip-action').click();
   await page.locator('#account-config-problem', { hasText: 'No se pudo contactar al coordinador' }).waitFor();
   check(`${label}: an outage is announced as status and keeps the page usable`, await page.locator('#account-config-problem').getAttribute('role') === 'status' && await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
   await page.evaluate(axeSource);
@@ -1147,7 +1184,7 @@ for (const [label, ctx] of [['standing-desktop', {}], ['standing-phone', { viewp
   check(`${label}: the cached list stays readable`, await page.locator('#variables .row').count() > 0);
   check(`${label}: the warning is a status region`, await page.locator('#variables-standing').getAttribute('role') === 'status');
   await page.evaluate(() => {
-    window.__ptaStanding = { ...window.__ptaStanding, state: 'revoked', recovery: 'The coordinator no longer accepts this installation (it was signed out or revoked, or its account changed). Nothing was used. Sign in again with Connect this machine or `pta auth machine login`.' };
+    window.__ptaStanding = { ...window.__ptaStanding, state: 'revoked', recovery: 'The coordinator no longer accepts this installation (it was signed out or revoked, or its account changed). Nothing was used. Sign in again from the sidebar or with `pta auth machine login`.' };
     return loadVariables();
   });
   check(`${label}: revoked is distinct and says how to sign in again`, await page.locator('#variables-standing').innerText().then(text => text.includes('Sesión cerrada o revocada') && text.includes('Vuelve a iniciar sesión')));

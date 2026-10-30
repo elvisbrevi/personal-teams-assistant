@@ -146,7 +146,7 @@ impl State {
 }
 
 pub(super) fn handles(method: &str) -> bool {
-    method.starts_with("portable_")
+    method.starts_with("portable_") || method == "account_sync"
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -511,7 +511,7 @@ const UNSUPPORTED: Failure = Failure {
 const REFUSED: Failure = Failure {
     code: "operation_failed",
     exit: 1,
-    message: "The coordinator refused the synchronization. Sign this installation in again with Connect this machine.",
+    message: "The coordinator refused the synchronization. Sign this installation in again from the sidebar or with `pta auth machine login`.",
 };
 const INVALID: Failure = Failure {
     code: "operation_failed",
@@ -1063,6 +1063,13 @@ pub(super) async fn operate(host: &Arc<Host>, request: &control::Request) -> Rep
         Err(_) => return refused("The coordinator connection is unreadable."),
     };
     match method {
+        "account_sync" => {
+            let args: SyncArgs = match parse(&request.args) {
+                Ok(args) => args,
+                Err(_) => return Reply::error("invalid_input", 2, "Invalid arguments."),
+            };
+            account_sync(host, link, args.reset).await
+        }
         "portable_sync" | "portable_status" => {
             let args: SyncArgs = match parse(&request.args) {
                 Ok(args) => args,
@@ -1125,6 +1132,36 @@ pub(super) async fn operate(host: &Arc<Host>, request: &control::Request) -> Rep
         }
         _ => Reply::error("invalid_input", 2, "Unknown operation."),
     }
+}
+
+/// Everything the account keeps for this computer, in one step: the variable catalog, then the
+/// configuration (`reset` replaces settings this computer had, keeping a private backup). Both
+/// parts always run, so a configuration conflict still leaves the variables current; the first
+/// failure is the reply. On the coordinator itself it only reports both revisions.
+async fn account_sync(host: &Arc<Host>, link: Option<Link>, reset: bool) -> Reply {
+    let mut variables = control::Request::new("variable_sync");
+    variables.args = json!({});
+    // Boxed: variables dispatch reaches this module, so the futures would be recursive.
+    let variables = Box::pin(super::variables::operate(host, &variables)).await;
+    let config = match &link {
+        Some(link) => synchronize(host, link, reset, Mode::Explicit).await,
+        None => match authoritative(host).await {
+            Ok(sync) => Reply::success(json!({"sync": sync, "changes": {"changed": false}})),
+            Err(_) => refused("The configuration could not be read."),
+        },
+    };
+    if !config.ok {
+        return config;
+    }
+    if !variables.ok {
+        return variables;
+    }
+    Reply::success(json!({
+        "sync": config.data["sync"],
+        "changes": config.data["changes"],
+        "variables": variables.data["sync"],
+        "standing": host.state.standing.view(link.as_ref()),
+    }))
 }
 
 // ---------------------------------------------------------------------------------------------

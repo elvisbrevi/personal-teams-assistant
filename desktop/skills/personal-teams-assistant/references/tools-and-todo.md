@@ -158,8 +158,8 @@ children and run installed coding agents.
    takes an optional absolute `path` and reads this host's directories for these choices;
    an empty path lists its filesystem root (the home drive on Windows). Isolated web
    profiles can browse only their own repositories. Browsing grants no execution access.
-   Leave Connection portal empty on the coordinator; enter its HTTPS origin on another
-   computer that you want to connect.
+   The coordinator never signs in; another computer you want to connect enters its HTTPS
+   origin in the app's sign-in screen.
    In 0.9.13+, the account list is authoritative from desktop, web, CLI and MCP. After
    enrollment, verify the same machine ID from a second account client with `machine_list`;
    use `machine_detail` (`machine`) for trust, presence, last-seen time, last-known assistant
@@ -182,11 +182,13 @@ children and run installed coding agents.
    After any timeout/failure, refresh `machine_list` and `machine_detail` before a deliberate
    repeat. Never automatically replay start, send, implementation or root edits.
 2. On another computer you own, stop its Teams assistant and sign in (0.9.12+, `machine_login_support`):
-   Settings > Language models > Connect this machine with the coordinator's HTTPS origin, or
+   the app's sign-in screen (shown at start on a computer outside any account, and from
+   Sign in in the sidebar) with the coordinator's HTTPS origin, or
    `pta auth machine login URL [--no-browser]`, or the `machine_login` tool (`url`, optional
    `open`). Give the user only the returned approval URL and code; they sign in on any device
-   and choose Trust this machine. Then `pta auth machine finish --wait` or `machine_login_finish`
-   connects it (`machine_login_status` reads the state, `machine_login_cancel` withdraws it).
+   and choose Trust this machine. Then `pta auth machine finish --wait [--replace-settings]`
+   connects it and brings the account here, or `machine_login_finish` followed by `account_sync`
+   (`machine_login_status` reads the state, `machine_login_cancel` withdraws it).
    You never receive the credential; trust grants no roots, Teams ownership or start. The
    origin is remembered (`machine_settings.coordinator_origin`). Successful sign-in or
    private-file pairing resets any previous local root grants (`roots_reset: true`);

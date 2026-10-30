@@ -69,6 +69,11 @@
         <button data-tab="settings" title="Settings" class="nav-settings"><span class="tile" aria-hidden="true"><svg class="icon"><use href="#i-settings"/></svg></span><span>Settings</span></button>
       </nav>
       <div class="sidebar-foot">
+        <!-- This computer's place in the assistant account: sign in, or bring the account's latest state here. -->
+        <div id="account-chip" class="account-chip" hidden>
+          <p><i id="account-chip-dot" class="dot" aria-hidden="true"></i><span><strong id="account-chip-title"></strong><small id="account-chip-detail"></small></span></p>
+          <button id="account-chip-action" type="button" class="small"><svg class="icon" aria-hidden="true"><use id="account-chip-icon" href="#i-user"/></svg><span id="account-chip-label"></span></button>
+        </div>
         <span id="status" class="pill muted" role="status"><i></i><span>Loading…</span></span>
         <div id="web-account" class="web-account" hidden><span id="web-username"></span><button id="web-logout" class="secondary small">Sign out</button></div>
       </div>
@@ -223,8 +228,8 @@
             </div>
           </div>
           <div id="panel-account-config" class="panel" hidden>
-            <div class="panel-head"><h2>Account configuration</h2><span id="account-config-state" class="badge muted"></span><button id="account-config-sync" type="button" class="secondary">Synchronize now</button></div>
-            <p class="hint">Your preferences, model choices, sources and their audiences, contexts, questions and verified notes follow your account. Folders, credentials, sign-ins and tunnels stay on each computer.</p>
+            <div class="panel-head"><h2>Account configuration</h2><span id="account-config-state" class="badge muted"></span></div>
+            <p class="hint">Your preferences, model choices, sources and their audiences, contexts, questions and verified notes follow your account. Folders, credentials, sign-ins and tunnels stay on each computer. Synchronize from the account indicator in the sidebar.</p>
             <p id="account-standing" class="callout warn" role="status" hidden></p>
             <p id="account-config-summary" class="hint" role="status"></p>
             <p id="account-config-problem" class="callout warn" role="status" hidden></p>
@@ -283,13 +288,12 @@
           <div class="panel" id="panel-machines">
             <div class="panel-head"><h2>Execution machines</h2><button id="machines-refresh" class="secondary small">Refresh machines</button></div>
             <p class="hint">Manage your account's trusted machines here. Trust, allowed directories and Teams responsibility are separate choices.</p>
-            <p id="machine-connect-hint" class="hint">To add this computer, enter your portal's address and select Connect this machine: you sign in in the browser and choose Trust this machine once.</p>
+            <p id="machine-connect-hint" class="hint">To add this computer to your account, choose Sign in in the sidebar: you sign in in the browser and choose Trust this machine once.</p>
             <div class="grid">
               <label>Machine name<input id="machine-name" maxlength="100"></label>
-              <label>Connection portal<input id="machine-coordinator" type="url" spellcheck="false" placeholder="https://assistant.example.com" translate="no"><small>The HTTPS address of your main assistant portal. Set it on another computer to connect that computer; leave it empty on the coordinator. It is remembered for the next sign-in.</small></label>
             </div>
             <fieldset><legend>Allowed directory roots</legend><div id="machine-roots" class="implementation-paths"></div><button id="machine-roots-choose" class="secondary" type="button">Choose directories</button></fieldset>
-            <div class="actions"><button id="machine-save" class="secondary">Save machine</button><button id="machine-connect" class="secondary">Connect this machine</button><button id="machine-disconnect" class="secondary">Disconnect this machine</button></div>
+            <div class="actions"><button id="machine-save" class="secondary">Save machine</button><button id="machine-disconnect" class="secondary">Disconnect this machine</button></div>
             <fieldset><legend>Machine for Teams</legend><p class="hint">Only the selected machine reads and answers Teams messages. Other connected machines can run implementations. Switching machines waits for the previous machine to stop.</p><div id="machine-list" class="todo-list"></div></fieldset>
           </div>
           <div class="panel" id="panel-llm">
@@ -658,6 +662,17 @@
     <p><a id="azure-cli-link" target="_blank" rel="noopener noreferrer" hidden>Open Microsoft sign-in</a></p>
     <p id="azure-cli-login-status" class="hint" role="status"></p>
     <div class="actions"><button id="azure-cli-copy" type="button" class="secondary" disabled>Copy code</button><button id="azure-cli-cancel" type="button" class="secondary">Cancel</button></div>
+  </dialog>
+  <dialog id="account-login-dialog" aria-labelledby="account-login-title">
+    <h2 id="account-login-title">Sign in to your assistant account</h2>
+    <p>This computer is not signed in to your account. Sign in once to bring your account's settings, sources, notes and variables here; they stay synchronized afterwards.</p>
+    <form id="account-login-form">
+      <label>Your portal's address<input id="account-login-url" type="url" required spellcheck="false" autocomplete="url" placeholder="https://assistant.example.com" translate="no"><small>The HTTPS address of your main assistant portal (the coordinator). It is remembered for the next sign-in.</small></label>
+      <label class="check"><input id="account-login-adopt" type="checkbox" checked> Replace this computer's settings with the account's</label>
+      <p class="hint">A private backup of this computer's current settings is kept. Microsoft sign-in, model providers and folders stay set up on each computer.</p>
+      <p id="account-login-status" class="hint" role="status"></p>
+      <div class="actions"><button id="account-login-submit" type="submit">Sign in</button><button id="account-login-skip" type="button" class="secondary">Continue without an account</button></div>
+    </form>
   </dialog>
   <dialog id="machine-login-dialog" aria-labelledby="machine-login-title">
     <h2 id="machine-login-title">Add this computer to your account</h2>

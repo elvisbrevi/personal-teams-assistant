@@ -202,9 +202,9 @@ send real Teams messages as a smoke test.
 This is the normal path for a new desktop, CLI or headless installation. Both the
 installation's CLI/host and the coordinator must advertise `machine_login_support: true`.
 
-1. On the computer to add, stop its Teams assistant. In Settings > Language models enter
-   your coordinator's HTTPS origin under Connection portal and select Connect this machine,
-   or run `pta auth machine login https://your-portal.example` (add `--no-browser` on a
+1. On the computer to add, stop its Teams assistant. The app shows its sign-in screen at
+   start (or choose Sign in in the sidebar): enter your coordinator's HTTPS origin and select
+   Sign in, or run `pta auth machine login https://your-portal.example` (add `--no-browser` on a
    headless host). Through MCP/CLI tools call `machine_login` with `url` (and `open: true`
    on a desktop host). The origin is validated (HTTPS, no credentials, path or query) and
    remembered for the next sign-in; there is no default coordinator.
@@ -214,9 +214,10 @@ installation's CLI/host and the coordinator must advertise `machine_login_suppor
 3. Open the URL on any device, sign in with your GitHub identity through Access, check that
    the page names this computer and shows the same code, then choose Trust this machine (or
    Deny). This one confirmation is the only approval; signing in alone registers nothing.
-4. On the computer, select nothing more in the GUI (it finishes by itself), or run
-   `pta auth machine finish --wait` / call `machine_login_finish` until it returns
-   `connected`. `pta auth machine status` (`machine_login_status`) reports `pending`,
+4. On the computer, select nothing more in the GUI (it finishes by itself and brings the
+   account's configuration and variables), or run `pta auth machine finish --wait`
+   (which then runs `pta account sync`) / call `machine_login_finish` until it returns
+   `connected`, then `account_sync`. `pta auth machine status` (`machine_login_status`) reports `pending`,
    `approved`, `denied`, `expired` or `none` without finishing. `pta auth machine cancel`
    (`machine_login_cancel`) withdraws a pending request.
 5. Confirm `machine_list` shows the computer. Then choose its allowed roots, and separately

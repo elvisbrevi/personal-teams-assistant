@@ -183,7 +183,7 @@ const UNSUPPORTED: Failure = Failure {
 const REFUSED: Failure = Failure {
     code: "operation_failed",
     exit: 1,
-    message: "The coordinator refused the synchronization. Sign this installation in again with Connect this machine.",
+    message: "The coordinator refused the synchronization. Sign this installation in again from the sidebar or with `pta auth machine login`.",
 };
 const INVALID: Failure = Failure {
     code: "operation_failed",
