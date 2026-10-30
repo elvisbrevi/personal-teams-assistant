@@ -16,6 +16,8 @@ Nice=10
 CPUWeight=20
 IOSchedulingClass=best-effort
 IOSchedulingPriority=7
+# Above this the build is slowed down and swapped rather than letting it crowd out the portal.
+MemoryHigh=3G
 TimeoutStartSec=75min
 UMask=0077
 NoNewPrivileges=true

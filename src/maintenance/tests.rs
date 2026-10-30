@@ -159,10 +159,15 @@ fn the_feature_and_target_choices_are_kept() {
     let installation = inspect(&dir.path().join("bin").join("pta")).unwrap();
     assert_eq!(installation.features, ["gui"]);
     assert_eq!(installation.target.as_deref(), Some("aarch64-apple-darwin"));
-    let args: Vec<String> = install_args(&installation, &v("0.9.14"), Path::new("/stage/root"))
-        .iter()
-        .map(|a| a.to_string_lossy().into_owned())
-        .collect();
+    let args: Vec<String> = install_args(
+        &installation,
+        &v("0.9.14"),
+        Path::new("/stage/root"),
+        Path::new("/cache"),
+    )
+    .iter()
+    .map(|a| a.to_string_lossy().into_owned())
+    .collect();
     assert_eq!(
         args,
         [
@@ -173,6 +178,8 @@ fn the_feature_and_target_choices_are_kept() {
             "--locked",
             "--root",
             "/stage/root",
+            "--target-dir",
+            "/cache",
             "--color",
             "never",
             "--features",
@@ -184,11 +191,26 @@ fn the_feature_and_target_choices_are_kept() {
 }
 
 #[test]
+fn the_build_cache_size_counts_nested_files() {
+    let dir = tempfile::tempdir().unwrap();
+    assert_eq!(tree_size(&dir.path().join("missing")), 0);
+    std::fs::create_dir_all(dir.path().join("release/deps")).unwrap();
+    std::fs::write(dir.path().join("a"), [0u8; 3]).unwrap();
+    std::fs::write(dir.path().join("release/deps/b"), [0u8; 5]).unwrap();
+    assert_eq!(tree_size(dir.path()), 8);
+}
+
+#[test]
 fn a_headless_install_is_rebuilt_headless() {
     let dir = tempfile::tempdir().unwrap();
     write_records(dir.path(), &crates_io("0.9.13"), full_record());
     let installation = inspect(&dir.path().join("bin").join(exe_name(CLI))).unwrap();
-    let args = install_args(&installation, &v("0.9.14"), Path::new("/r"));
+    let args = install_args(
+        &installation,
+        &v("0.9.14"),
+        Path::new("/r"),
+        Path::new("/t"),
+    );
     assert!(args.iter().any(|a| a == "--no-default-features"));
     assert!(
         !args

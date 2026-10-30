@@ -1,0 +1,113 @@
+# Prebuilt binaries for a published release, so `cargo binstall personal-teams-assistant` installs
+# in seconds instead of compiling. release.yml calls it once the crate and its GitHub release exist;
+# a pull request that changes this file builds every archive without uploading anything.
+# The archive layout is what [package.metadata.binstall] in Cargo.toml expects. See docs/delivery.md.
+name: Binaries
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: Published version whose GitHub release receives the archives
+        required: true
+        type: string
+  pull_request:
+    paths:
+      - .github/workflows/binaries.yml
+
+permissions: {}
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The desktop platforms get the default build (GUI and CLI): binstall installs these.
+          - { os: macos-latest, target: aarch64-apple-darwin, name: personal-teams-assistant }
+          - { os: macos-latest, target: x86_64-apple-darwin, name: personal-teams-assistant }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc, name: personal-teams-assistant }
+          # Linux runs headless. Its own name keeps binstall off it: binstall would record a default
+          # (GUI) install, so it falls back to compiling instead. The oldest supported image keeps
+          # the glibc requirement low.
+          - { os: ubuntu-22.04, target: x86_64-unknown-linux-gnu, name: personal-teams-assistant-headless, flags: --no-default-features }
+    env:
+      TARGET: ${{ matrix.target }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Rust toolchain from rust-toolchain.toml
+        run: rustup toolchain install && rustup target add "$TARGET" && rustc --version
+      - name: Release build
+        run: cargo build --release --locked --target "$TARGET" ${{ matrix.flags }}
+      - name: Archive
+        env:
+          NAME: ${{ matrix.name }}
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
+          dir="$NAME-$TARGET-v$version"
+          ext=; [[ "$TARGET" == *windows* ]] && ext=.exe
+          mkdir -p dist "$dir"
+          cp "target/$TARGET/release/personal-teams-assistant$ext" "target/$TARGET/release/pta$ext" LICENSE README.md "$dir/"
+          if [[ "$TARGET" == *windows* ]]; then
+            file="$dir.zip"
+            7z a -tzip "dist/$file" "$dir" > /dev/null
+          else
+            file="$dir.tgz"
+            tar -czf "dist/$file" "$dir"
+          fi
+          cd dist
+          if command -v sha256sum > /dev/null; then sha256sum "$file"; else shasum -a 256 "$file"; fi > "$file.sha256"
+          cat "$file.sha256"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: binaries-${{ matrix.target }}
+          path: dist/
+          retention-days: 7
+          if-no-files-found: error
+
+  publish:
+    name: Attest and attach to the release
+    needs: build
+    # A target that failed to build leaves binstall compiling there; the others are still attached.
+    if: ${{ !cancelled() && inputs.version != '' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      VERSION: ${{ inputs.version }}
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: binaries-*
+          path: dist
+          merge-multiple: true
+      - name: Every archive is for this version
+        run: |
+          shopt -s nullglob
+          ls -l dist
+          for file in dist/*.tgz dist/*.zip; do
+            case "$file" in *"-v$VERSION".tgz|*"-v$VERSION".zip) ;; *) echo "::error::$file is not for $VERSION"; exit 1 ;; esac
+          done
+          (cd dist && sha256sum -c ./*.sha256)
+      - name: Build provenance attestation
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            dist/*.tgz
+            dist/*.zip
+      - name: Attach to the GitHub release
+        run: gh release upload "v$VERSION" dist/* --clobber --repo "$GITHUB_REPOSITORY"

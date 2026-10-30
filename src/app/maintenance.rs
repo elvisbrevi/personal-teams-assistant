@@ -19,6 +19,10 @@ use std::{collections::BTreeMap, ffi::OsString, sync::Mutex as StdMutex, time::D
 
 const SCHEMA: u32 = 1;
 const DIRECTORY: &str = core::DIRECTORY;
+/// Cargo's build cache for staging, kept between updates so a release recompiles only what changed.
+const BUILD_CACHE: &str = "target";
+/// Above this the cache is removed before the next build, which then compiles everything again.
+const MAX_BUILD_CACHE: u64 = 8 << 30;
 const AUTO_AFTER: u64 = 90;
 const AUTO_EVERY: u64 = 6 * 60 * 60;
 const AUTO_DUE: i64 = 12 * 60 * 60;
@@ -564,7 +568,16 @@ impl Work {
 
     async fn run(self) {
         let root = self.partial.join("root");
-        let args = core::install_args(&self.installation, &self.version, &root);
+        let cache = self.dir.join(BUILD_CACHE);
+        let trimmed = cache.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            if core::tree_size(&trimmed) > MAX_BUILD_CACHE {
+                let _ = fs::remove_dir_all(&trimmed);
+            }
+            security::private_dir(&trimmed)
+        })
+        .await;
+        let args = core::install_args(&self.installation, &self.version, &root, &cache);
         let built = core::build(
             &self.cargo,
             &args,
@@ -580,7 +593,17 @@ impl Work {
         )
         .await;
         let outcome = match built {
-            Err(failure) => Err((failure.reason, failure.tail)),
+            Err(failure) => {
+                // A full disk is the one failure the cache itself may cause: give the space back.
+                if failure
+                    .tail
+                    .iter()
+                    .any(|line| line.contains("No space left on device"))
+                {
+                    let _ = tokio::task::spawn_blocking(move || fs::remove_dir_all(cache)).await;
+                }
+                Err((failure.reason, failure.tail))
+            }
             Ok(()) => {
                 self.update(|stage| stage.phase = "verifying".into());
                 self.seal(&root)

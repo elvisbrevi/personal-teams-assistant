@@ -42,9 +42,12 @@ Activities can save the user's existing Azure tasks on a daily or interval sched
 One Cargo package, `personal-teams-assistant`, installs everything: the tray/menu bar app and host `personal-teams-assistant`, the `pta` CLI and the agent skill built into `pta`.
 
 ```sh
-cargo install personal-teams-assistant --locked   # from crates.io
+cargo binstall personal-teams-assistant           # prebuilt on macOS and Windows; compiles elsewhere
+cargo install personal-teams-assistant --locked   # from crates.io, compiled here
 cargo install --path . --locked                   # from this checkout
 ```
+
+[`cargo binstall`](https://github.com/cargo-bins/cargo-binstall) downloads the archive attached to the GitHub release instead of compiling, which takes seconds instead of minutes. Each archive has a `.sha256` and GitHub build provenance (`gh attestation verify FILE --repo elvisbrevi/personal-teams-assistant`). The binaries are not signed by Apple: one downloaded with a browser needs `xattr -d com.apple.quarantine` on macOS. The in-app update compiles from crates.io and works on installations made with `cargo install`; update a `cargo binstall` installation with `cargo binstall` again.
 
 If you had the old `personal-teams-desktop` package (0.4.0 or earlier), uninstall it first: both install `pta` and Cargo does not overwrite another package's binary. Your profile, credentials and account are kept.
 
