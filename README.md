@@ -242,7 +242,6 @@ pta activity history 2026-10-01..2026-10-15   # the activities of every day in a
 - [Security policy](SECURITY.md): access boundaries, deployment responsibilities, upstream notices and private vulnerability reporting.
 - [Private portal](docs/private-deployment.md): running it on macOS and verifying a deployment.
 - [Architecture](docs/architecture.md): components, pipeline, data, security, CLI contract, change recipes, decisions and known limits.
-- [Proposed improvements](docs/proposed-improvements.md).
 - [Operating skill](desktop/skills/personal-teams-assistant/SKILL.md) and [guide for agents](AGENTS.md).
 - [Activity registration](desktop/skills/personal-teams-assistant/references/activity-registration.md): scheduling, required task fields, calls, clarification and CLI commands.
 
