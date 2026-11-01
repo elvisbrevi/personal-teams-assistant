@@ -30,6 +30,7 @@ mod azure_cli;
 pub mod cli;
 mod consumers;
 pub mod control;
+mod deliveries;
 mod diagnostics;
 mod github;
 mod github_cli;

@@ -198,6 +198,10 @@
       staged: ['staged', 'deferred'].includes(updateState) ? { version: '0.9.14', staged_at: 2, features: ['gui'], no_default_features: false, target: null, binaries: ['personal-teams-assistant', 'pta'] } : null,
     };
   };
+  const destinations = [{ id: 'blog-editor-openai', description: 'Blog editor: OpenAI key <b>not markup</b>', url: 'https://editor.example.test/api/import/secrets/OPENAI_API_KEY',
+    target: { kind: 'http', method: 'PUT', headers: { 'X-Blog-Editor': '1' }, body: { value: '{{value}}' }, confirm_field: '/last4',
+      auth: { header: 'Authorization', prefix: 'Bearer ', variable: { id: 'aaaaaaaa-0000-4000-8000-000000000001', state: 'ok', name: 'DEPLOY_ENDPOINT', version: 1 } } },
+    variables: [{ id: 'aaaaaaaa-0000-4000-8000-000000000001', state: 'ok', name: 'DEPLOY_ENDPOINT', version: 1 }], digest: 'e'.repeat(64), approved: false, created_at: 1, approved_at: null }];
   const launchers = [{ id: 'release-tool', description: 'Publishes the release <b>not markup</b>', program: '/usr/local/bin/release', args: ['--fixed'], directory: '/home/user/work', timeout_seconds: 60, digest: 'd'.repeat(64), approved: false,
     variables: [{ env: 'RELEASE_URL', id: 'aaaaaaaa-0000-4000-8000-000000000001', state: 'ok', variable: { name: 'DEPLOY_ENDPOINT', version: 1 } }] }];
   const bindingView = () => {
@@ -562,6 +566,19 @@
       launcher.approved = true;
       return { launcher: args.id, approved_at: 1 };
     },
+    variable_delivery_list: () => ({ destinations: structuredClone(destinations), approve_here: true }),
+    variable_delivery_approve: args => {
+      window.__ptaDeliveryCalls.push({ method: 'approve', ...args });
+      const destination = destinations.find(d => d.id === args.id);
+      if (!destination || destination.digest !== args.digest) throw new Error('This destination changed since it was shown. Review it again before approving.');
+      destination.approved = true;
+      return { destination: args.id, approved_at: 1 };
+    },
+    variable_deliver: args => {
+      window.__ptaDeliveryCalls.push({ method: 'deliver', ...args });
+      return { destination: args.destination, url: destinations[0].url, variable: { id: args.variable, name: 'DEPLOY_ENDPOINT', version: 1 }, result: { status: 'ok', http_status: 200, confirmed_by_destination: true } };
+    },
+    variable_delivery_remove: args => { window.__ptaDeliveryCalls.push({ method: 'remove', ...args }); destinations.splice(0); return { destination: args.id, removed: true }; },
     variable_launcher_remove: args => { window.__ptaConsumerCalls.push({ method: 'remove', ...args }); launchers.splice(0); return { launcher: args.id, removed: true }; },
     set_credential: args => { snapshot.credentials[args.name] = 'system'; return {}; },
     delete_credential: args => { snapshot.credentials[args.name] = 'missing'; return {}; },
@@ -575,6 +592,7 @@
   window.__ptaUpdateFail = () => { updateState = 'failed'; updateApply = null; };
   window.__ptaVariableCreates = [];
   window.__ptaConsumerCalls = [];
+  window.__ptaDeliveryCalls = [];
   window.__ptaMigrationCalls = [];
   window.__ptaVariableReveals = [];
   window.__ptaVariableUpdates = [];

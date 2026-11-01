@@ -543,6 +543,49 @@ pub(super) const TOOLS: &[Tool] = &[
         },
     },
     Tool {
+        name: "delivery_list",
+        title: "Delivery destinations",
+        description: "Destinations the user approved (or that wait for approval) to receive chosen variables: URL, method, fixed headers, body template, the destination's own credential variable and the variables each may receive, by name and version. Never a value.",
+        effect: Effect::Read,
+        schema: none,
+    },
+    Tool {
+        name: "delivery_define",
+        title: "Propose a delivery destination",
+        description: "Propose another system that may receive chosen variables, so this host can deliver them without anyone seeing the value. It sends nothing until the user reviews and approves it in Settings > Variables (application window or portal); no tool can approve it, and any later change needs a new approval. target is either {kind:'http', url (https, port 443), method (PUT|POST|PATCH), headers (fixed; no Authorization), body (a JSON object containing the string \"{{value}}\" exactly once), auth? {header, prefix, variable: ID of the destination's own credential}, confirm_field? (JSON pointer to a reply field holding the value's last four characters)} or {kind:'cloudflare_worker_secret', account_id, script, secret_name, token: ID of a Cloudflare API token variable} (replaces `wrangler secret put`). variables lists the IDs that may be delivered there. Owner only. Needs the user's confirmation.",
+        effect: Effect::External,
+        schema: || {
+            object(
+                json!({"id":string("Destination name: lowercase letters, digits, - and _."),"description":string("What the destination is, 1 to 500 characters."),"target":{"type":"object","description":"http or cloudflare_worker_secret definition, see the tool description."},"variables":strings("Entry IDs from variable_list that may be delivered here (1 to 8)."),"confirmed":confirmed()}),
+                &["id", "description", "target", "variables"],
+            )
+        },
+    },
+    Tool {
+        name: "delivery_remove",
+        title: "Remove a delivery destination",
+        description: "Remove a delivery destination. A value already delivered stays there; rotate it at its provider to withdraw it.",
+        effect: Effect::Local,
+        schema: || {
+            object(
+                json!({"id":string("Destination name from delivery_list.")}),
+                &["id"],
+            )
+        },
+    },
+    Tool {
+        name: "variable_deliver",
+        title: "Deliver a variable to an approved destination",
+        description: "Have this host send one variable to a destination the user approved for it: the host resolves the value now (live coordinator check on a signed-in installation), builds the approved request and returns only the status (ok, rejected, failed, unreachable), the HTTP status and whether the destination confirmed the value. You never see the value, the response body or its headers. Limited to one delivery per destination per minute and 20 per hour; nothing is retried, so after unreachable ask the user to check the destination before repeating. Needs the user's confirmation.",
+        effect: Effect::External,
+        schema: || {
+            object(
+                json!({"destination":string("Destination name from delivery_list."),"variable":string("Variable ID allowed for that destination."),"version":{"type":"integer","minimum":1,"description":"Optional version you expect."},"confirmed":confirmed()}),
+                &["destination", "variable"],
+            )
+        },
+    },
+    Tool {
         name: "machine_list",
         title: "Execution machines",
         description: "Authoritative trusted and revoked machines of this account, presence and last-known assistant state, capabilities, allowed roots and the single selected Teams machine.",
@@ -1427,6 +1470,17 @@ pub(super) async fn run(name: &str, args: &Value) -> Result<Value, String> {
         }
         "consumer_unbind" => ipc("variable_consumer_unbind", args.clone()).await,
         "launcher_remove" => ipc("variable_launcher_remove", args.clone()).await,
+        "delivery_list" => ipc("variable_delivery_list", args.clone()).await,
+        "delivery_remove" => ipc("variable_delivery_remove", args.clone()).await,
+        "delivery_define" | "variable_deliver" => {
+            let mut args = args.clone();
+            args.as_object_mut().unwrap().remove("confirmed");
+            ipc(
+                if name == "delivery_define" { "variable_delivery_define" } else { "variable_deliver" },
+                args,
+            )
+            .await
+        }
         "consumer_bind" | "consumer_check" | "launcher_define" | "launcher_run" => {
             let mut args = args.clone();
             args.as_object_mut().unwrap().remove("confirmed");
@@ -1662,6 +1716,14 @@ pub(super) fn confirmation(name: &str, args: &Value) -> Option<String> {
         "launcher_run" => format!(
             "Run launcher {} now, giving its program the variables it names?",
             args["id"]
+        ),
+        "delivery_define" => format!(
+            "Propose delivery destination {} ({}) for the variables {}? It sends nothing until you approve it in Settings > Variables.",
+            args["id"], args["target"]["url"].as_str().unwrap_or("Cloudflare Worker secret"), args["variables"]
+        ),
+        "variable_deliver" => format!(
+            "Send variable {} to the approved destination {} now? The value stays there until you rotate it at its provider.",
+            args["variable"], args["destination"]
         ),
         "machine_disconnect" => "Disconnect this machine from its coordinator?".into(),
         "machine_update" => "Change this account machine's name or allowed roots?".into(),

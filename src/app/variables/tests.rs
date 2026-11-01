@@ -490,7 +490,8 @@ async fn agent_tools_never_accept_or_return_a_value() {
             "variable_usage",
             "variable_rename",
             "variable_rotation_request",
-            "variable_delete"
+            "variable_delete",
+            "variable_deliver"
         ]
     );
     // Revealing or copying a value is human-only: no agent-facing tool, under any name, reads one.
@@ -502,11 +503,12 @@ async fn agent_tools_never_accept_or_return_a_value() {
                 .any(|word| tool.name.starts_with("variable_") && tool.name.contains(word))),
         "an agent tool reads a variable value"
     );
-    // Deleting is irreversible, so it alone needs the user's confirmation; nothing else does.
+    // Deleting is irreversible and delivering sends a value out, so they alone need the user's
+    // confirmation; nothing else does.
     for tool in &variable_tools {
         assert_eq!(
             tool.effect == Effect::External,
-            tool.name == "variable_delete",
+            ["variable_delete", "variable_deliver"].contains(&tool.name),
             "{}",
             tool.name
         );

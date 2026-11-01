@@ -25,6 +25,7 @@ pub(super) struct State {
     store: std::sync::Mutex<Option<Arc<Store>>>,
     entries: std::sync::Mutex<BTreeMap<String, Entry>>,
     pub(super) consumers: consumers::State,
+    pub(super) deliveries: super::deliveries::State,
     catalog: sync::Mirror,
     identity: std::sync::Mutex<Option<String>>,
 }
@@ -49,6 +50,7 @@ impl State {
             store: std::sync::Mutex::new(None),
             entries: std::sync::Mutex::new(BTreeMap::new()),
             consumers: consumers::State::new(profile),
+            deliveries: super::deliveries::State::new(),
             catalog: sync::Mirror::new(profile),
             identity: std::sync::Mutex::new(None),
         }
@@ -242,6 +244,9 @@ pub(super) fn failure(error: vault::Error) -> Reply {
 }
 
 pub(super) async fn operate(host: &Arc<Host>, request: &control::Request) -> Reply {
+    if super::deliveries::handles(&request.method) {
+        return super::deliveries::operate(host, request).await;
+    }
     if request.method == "variable_usage" {
         return usage::usage(host, request).await;
     }

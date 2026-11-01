@@ -2275,6 +2275,9 @@ setInterval(() => { if (readiness?.mode === 'signed_in' && !document.hidden) loa
 
 /** Which variable each consumer uses (name and version only) and the approved local launchers. */
 let consumerState = { consumers: [], launchers: [], error: '' };
+let deliveryState = { destinations: [], approveHere: false };
+/** The destination and variable whose delivery waits for a second tap. */
+let armedDelivery = null;
 /** The variable picked in each selector, kept across refreshes until it is applied. */
 const consumerChoice = {};
 /** The last result shown under each consumer: a status sentence, never a value. */
@@ -2289,6 +2292,15 @@ async function loadConsumers() {
   } catch (error) {
     if (epoch !== accountEpoch) return;
     consumerState = { consumers: [], launchers: [], error: String(error?.message ?? error) };
+  }
+  try {
+    // Destinations belong to the installation's owner; another account simply has none.
+    const reply = await invoke('variable_delivery_list');
+    if (epoch !== accountEpoch) return;
+    deliveryState = { destinations: reply.destinations, approveHere: reply.approve_here };
+  } catch {
+    if (epoch !== accountEpoch) return;
+    deliveryState = { destinations: [], approveHere: false };
   }
   renderConsumers();
 }
@@ -2380,6 +2392,87 @@ function launcherRow(launcher) {
     el('div', { class: 'variable-actions' }, actions));
 }
 
+const DELIVERY_RESULTS = {
+  ok: 'Delivered to {destination}.',
+  rejected: '{destination} refused the delivery credential.',
+  failed: '{destination} answered with an error.',
+  unreachable: 'Could not reach {destination}. Check it before delivering again.',
+};
+
+/** A variable reference as the host reports it: its name, or that it is gone. */
+function deliveryVariable(reference) {
+  return reference?.state === 'ok' ? reference.name : t('variable deleted or missing');
+}
+
+/** Everything the approval covers, as plain text: a person approves exactly what is shown. */
+function deliveryLines(destination) {
+  const target = destination.target;
+  const lines = [`${target.method} ${destination.url}`];
+  if (target.kind === 'http') {
+    for (const [name, value] of Object.entries(target.headers ?? {})) lines.push(`${name}: ${value}`);
+    if (target.auth) lines.push(`${target.auth.header}: ${target.auth.prefix}‹${deliveryVariable(target.auth.variable)}›`);
+    lines.push(t('Body: {body}', { body: JSON.stringify(target.body) }));
+  } else {
+    lines.push(t('Cloudflare Worker {script}, secret {secret}', { script: target.script, secret: target.secret_name }));
+    lines.push(`Authorization: Bearer ‹${deliveryVariable(target.token)}›`);
+  }
+  lines.push(t('May receive: {names}', { names: destination.variables.map(deliveryVariable).join(', ') }));
+  return lines;
+}
+
+function deliveryRow(destination) {
+  const { id } = destination;
+  const title = el('span', { class: 'cred-name', textContent: id, translate: 'no' });
+  const status = destination.approved ? badge(t('Approved'), 'ok') : badge(t('Waiting for your approval'), 'warn');
+  const actions = [];
+  if (!destination.approved && deliveryState.approveHere) {
+    const approve = el('button', { type: 'button', textContent: t('Approve'), 'aria-label': t('Approve destination {name}', { name: id }) });
+    approve.onclick = () => busy(approve, async () => {
+      await invoke('variable_delivery_approve', { id, digest: destination.digest });
+      await loadConsumers();
+      done(t('Destination {name} approved.', { name: id }));
+    });
+    actions.push(approve);
+  }
+  if (destination.approved) {
+    for (const variable of destination.variables.filter(v => v.state === 'ok')) {
+      const armed = armedDelivery === `${id}/${variable.id}`;
+      const send = el('button', { type: 'button', class: armed ? 'danger' : 'secondary',
+        textContent: armed ? t('Confirm delivery of {name}', { name: variable.name }) : t('Deliver {name}', { name: variable.name }) });
+      send.onclick = () => busy(send, async () => {
+        if (!armed) {
+          armedDelivery = `${id}/${variable.id}`;
+          clearTimeout(armTimer);
+          armTimer = setTimeout(() => { armedDelivery = null; renderConsumers(); }, 8000);
+          return renderConsumers();
+        }
+        armedDelivery = null;
+        const reply = await invoke('variable_deliver', { destination: id, variable: variable.id, version: variable.version });
+        const result = reply.result;
+        consumerNote[`delivery:${id}`] = [t(DELIVERY_RESULTS[result.status] ?? DELIVERY_RESULTS.failed, { destination: id }),
+          result.http_status ? t('HTTP {status}.', { status: result.http_status }) : '',
+          result.confirmed_by_destination ? t('The destination confirmed the value it stored.') : ''].filter(Boolean).join(' ');
+        renderConsumers();
+      });
+      actions.push(send);
+    }
+  }
+  const remove = el('button', { type: 'button', class: 'danger', textContent: t('Remove'), 'aria-label': t('Remove destination {name}', { name: id }) });
+  remove.onclick = () => busy(remove, async () => {
+    await invoke('variable_delivery_remove', { id });
+    await loadConsumers();
+    done(t('Destination {name} removed. A value already delivered stays there until you rotate it at its provider.', { name: id }));
+  });
+  actions.push(remove);
+  const note = consumerNote[`delivery:${id}`];
+  return el('div', { class: 'row variable-row' },
+    rowText(title, destination.description, status),
+    ...deliveryLines(destination).map(line => el('p', { class: 'hint variable-note', textContent: line, translate: 'no' })),
+    el('div', { class: 'variable-actions' }, actions),
+    armedDelivery?.startsWith(`${id}/`) ? el('p', { class: 'hint variable-note', role: 'status', textContent: t('This host sends the value to the address above. It stays there until you rotate it at its provider.') }) : null,
+    note ? el('p', { class: 'hint variable-note', role: 'status', textContent: note }) : null);
+}
+
 /** What reads a `[secrets]` reference: the sources and settings that name it. */
 function referenceUses(reference) {
   const uses = [];
@@ -2435,6 +2528,8 @@ function renderConsumers() {
   for (const [reference, name] of Object.entries(current?.config?.secrets ?? {})) list.append(referenceRow(reference, name));
   $('#launchers').hidden = !launchers.length;
   $('#launcher-list').replaceChildren(...launchers.map(launcherRow));
+  $('#deliveries').hidden = !deliveryState.destinations.length;
+  $('#delivery-list').replaceChildren(...deliveryState.destinations.map(deliveryRow));
 }
 
 /** Plain text only: names and descriptions are user data, never markup or instructions. */

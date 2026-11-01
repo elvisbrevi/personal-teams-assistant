@@ -177,6 +177,10 @@ pub(super) fn check_shared_operation(request: &control::Request) -> Result<()> {
                 | "variable_launcher_remove"
                 | "variable_launcher_run"
                 | "variable_launcher_approve"
+                | "variable_delivery_define"
+                | "variable_delivery_approve"
+                | "variable_delivery_remove"
+                | "variable_deliver"
         ),
         "{EXECUTION_DENIED}"
     );

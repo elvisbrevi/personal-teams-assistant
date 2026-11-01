@@ -136,6 +136,17 @@ Account variables
   variables rename ID NAME --expected-version N
                            Renames a variable, keeping its ID, description and value (never read or shown).
                            Consumers and launchers refer to the ID; names the application reads by name are refused.
+  variables destinations      Delivery destinations: where each sends (URL, method, headers, body template), the variables it
+                           may receive and whether the user approved it. Never a value.
+  variables destination define NAME --description TEXT --target JSON --variable ID [--variable ID ...] --confirmed
+                           Proposes a destination: {\"kind\":\"http\",\"url\":\"https://...\",\"method\":\"PUT\",\"headers\":{},
+                           \"body\":{\"value\":\"{{value}}\"},\"auth\":{\"header\":\"Authorization\",\"prefix\":\"Bearer \",\"variable\":ID},
+                           \"confirm_field\":\"/last4\"} or {\"kind\":\"cloudflare_worker_secret\",\"account_id\":...,\"script\":...,
+                           \"secret_name\":...,\"token\":ID}. It sends nothing until the user approves it in Settings > Variables.
+  variables destination remove NAME  Removes a destination (a delivered value stays there).
+  variables deliver ID --to DESTINATION [--expected-version N] --confirmed
+                           This host sends the variable to an approved destination and prints only the status, the HTTP
+                           status and whether the destination confirmed it; the value is never shown or passed through.
   variables delete ID --expected-version N  Deletes a variable; its value cannot be recovered (the provider's credential is not revoked).
   variables entry start NAME --description TEXT  Asks for a value to be typed by the user (GUI or complete).
   variables entry replace ID  Asks for a replacement value to be typed by the user (GUI or complete).
@@ -308,6 +319,9 @@ fn words(args: &[String]) -> Vec<&str> {
                 | "--directory"
                 | "--env"
                 | "--arg"
+                | "--to"
+                | "--target"
+                | "--variable"
                 | "--timeout"
                 | "--pin"
                 | "--destination"
@@ -721,6 +735,64 @@ async fn variables_command(args: &[String]) -> Result<Reply> {
             )
             .await
         }
+        ("destinations", _) => call("variable_delivery_list", json!({}), None, true).await,
+        ("destination", Some("remove")) => {
+            call(
+                "variable_delivery_remove",
+                json!({"id":word(3)?}),
+                None,
+                true,
+            )
+            .await
+        }
+        ("destination", Some("define")) => {
+            let target: Value = serde_json::from_str(
+                option(args, "--target").context("--target is required (a JSON object)")?,
+            )
+            .context("--target must be a JSON object")?;
+            let variables = options(args, "--variable");
+            ensure!(!variables.is_empty(), "name at least one --variable ID");
+            if let Some(reply) = unconfirmed(
+                args,
+                format!(
+                    "Propose delivery destination {} for the variables {}? It sends nothing until the user approves it in Settings > Variables.",
+                    word(3)?,
+                    variables.join(", ")
+                ),
+            ) {
+                return Ok(reply);
+            }
+            call(
+                "variable_delivery_define",
+                json!({"id":word(3)?,"description":description()?,"target":target,"variables":variables}),
+                None,
+                true,
+            )
+            .await
+        }
+        ("deliver", _) => {
+            let variable = word(2)?;
+            let destination = option(args, "--to").context("--to DESTINATION is required")?;
+            let version = option(args, "--expected-version")
+                .map(|v| v.parse::<u64>().context("invalid version"))
+                .transpose()?;
+            if let Some(reply) = unconfirmed(
+                args,
+                format!("Send variable {variable} to the approved destination {destination} now?"),
+            ) {
+                return Ok(reply);
+            }
+            call(
+                "variable_deliver",
+                json!({"destination":destination,"variable":variable,"version":version}),
+                None,
+                true,
+            )
+            .await
+            .map_err(|error| {
+                error.context("The result is unknown: the value may have been delivered. Ask the user to check the destination before repeating.")
+            })
+        }
         ("launcher", Some("list")) => call("variable_consumer_list", json!({}), None, true).await,
         ("launcher", Some("remove")) => {
             call(
@@ -849,7 +921,7 @@ fn validate_args(args: &[String]) -> Result<()> {
             "--json" | "--non-interactive" | "--offline" | "--no-browser" | "--wait"
             | "--content" | "--current-profile" | "--context-stdin" | "--value" | "--confirmed"
             | "--reset" | "--bind" | "--settings" | "--replace-settings" => {}
-            "--destination" | "--name" | "--existing" => {
+            "--destination" | "--name" | "--existing" | "--to" | "--target" => {
                 i += 1;
                 ensure!(
                     args.get(i)
@@ -901,7 +973,7 @@ fn validate_args(args: &[String]) -> Result<()> {
                     "invalid description"
                 );
             }
-            "--id" => {
+            "--id" | "--variable" => {
                 i += 1;
                 ensure!(
                     args.get(i)
@@ -990,6 +1062,9 @@ fn validate_args(args: &[String]) -> Result<()> {
             | ["variables", "search" | "create" | "update" | "delete", _]
             | ["variables", "rename", _, _]
             | ["variables", "usage", ..]
+            | ["variables", "destinations"]
+            | ["variables", "destination", "define" | "remove", _]
+            | ["variables", "deliver", _]
             | ["variables", "consumers"]
             | ["variables", "migrate", "inspect" | "status"]
             | ["variables", "migrate", "run", _]
@@ -1109,6 +1184,8 @@ fn validate_args(args: &[String]) -> Result<()> {
         (
             "--description",
             p.as_slice().starts_with(&["variables", "create"])
+                || p.as_slice()
+                    .starts_with(&["variables", "destination", "define"])
                 || p.as_slice().starts_with(&["variables", "update"])
                 || p.as_slice().starts_with(&["variables", "entry", "start"])
                 || p.as_slice().starts_with(&["variables", "migrate", "run"])
@@ -1139,6 +1216,7 @@ fn validate_args(args: &[String]) -> Result<()> {
             "--expected-version",
             p.as_slice().starts_with(&["variables", "update"])
                 || p.as_slice().starts_with(&["variables", "rename"])
+                || p.as_slice().starts_with(&["variables", "deliver"])
                 || p.as_slice().starts_with(&["variables", "delete"])
                 || p.as_slice().starts_with(&["variables", "bind"])
                 || p.as_slice().starts_with(&["variables", "migrate", "run"])
@@ -1153,7 +1231,21 @@ fn validate_args(args: &[String]) -> Result<()> {
                 || p.as_slice().starts_with(&["variables", "check"])
                 || p.as_slice()
                     .starts_with(&["variables", "launcher", "define"])
-                || p.as_slice().starts_with(&["variables", "launcher", "run"]),
+                || p.as_slice().starts_with(&["variables", "launcher", "run"])
+                || p.as_slice().starts_with(&["variables", "deliver"])
+                || p.as_slice()
+                    .starts_with(&["variables", "destination", "define"]),
+        ),
+        ("--to", p.as_slice().starts_with(&["variables", "deliver"])),
+        (
+            "--target",
+            p.as_slice()
+                .starts_with(&["variables", "destination", "define"]),
+        ),
+        (
+            "--variable",
+            p.as_slice()
+                .starts_with(&["variables", "destination", "define"]),
         ),
         (
             "--program",

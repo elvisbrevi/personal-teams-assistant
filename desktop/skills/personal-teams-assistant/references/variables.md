@@ -21,6 +21,7 @@ Requires `account_variables_support: true` in `pta --json capabilities` and a ho
 - **"Is the secret X stored? Can I use it?"** Run `pta --json variables usage [TEXT]` (MCP `variable_usage`). Do not use `pta credentials list`: it lists this installation's internal credentials, not the account's variables. For each matching variable it returns `id`, `name`, `description` and `version`, plus `usable_now`. It also lists `paths`, the ways something uses the variable by reference:
   - `consumer`: a bound built-in consumer;
   - `launcher`: an approved launcher with its environment names;
+  - `delivery`: a delivery destination, approved or not;
   - `application`: a setting that reads the variable by name, such as `[secrets]`, the DeepSeek key or the Microsoft setup.
 
   Each path carries `operations`, `confirmation` and `available_here`. `here` says why this installation can or cannot use variables now (`standing`, `launchers`, `reason`). A variable without paths carries `next`: what to propose instead of asking for the value.
@@ -36,10 +37,13 @@ When a task needs a secret in another system (an API, a Worker, CI, another app'
 
 1. **Look in PTA first.** Run `variables usage` with words from the task, for example "OpenAI editor". Do this before writing any step that asks the user to set, paste or copy a secret.
 2. **If a path exists, use it.**
-   - Call its operation: `consumer_check`, or `launcher_run` on the owner's trusted machine.
+   - Call its operation: `variable_deliver` for an approved destination, `consumer_check`, or `launcher_run` on the owner's trusted machine.
    - Each needs the user's confirmation of that exact action (MCP asks; `pta tools call` needs `confirmed: true`; the CLI needs `--confirmed`).
    - Report the reference (ID, name, version) and the status you get back, never a value.
-3. **If the variable exists but no path fits, say so and propose the missing path.** The user decides on it: binding a built-in consumer, approving a launcher on their trusted machine, or approving a delivery destination where available. Do not work around it with a value.
+3. **If the variable exists but no path fits, say so and propose the missing path.**
+   - For another system (an API, a Worker secret, another app's settings), propose a delivery destination with `delivery_define` (see [Deliver to another system](#deliver-to-another-system)) and tell the user to approve it.
+   - Otherwise propose binding a built-in consumer, or a launcher they approve on their trusted machine.
+   - Do not work around a missing path with a value.
 4. **If no variable exists, start a protected entry** (`variable_entry_request`, name and description). The user types the value in Settings › Variables.
 5. **Never:**
    - ask the user to paste a value into the chat or a command line;
@@ -108,6 +112,40 @@ A variable does nothing until a **consumer** uses it by reference (its entry ID,
 - A launcher's program, arguments and working directory (inside the machine's allowed roots; empty roots grant nothing) are recorded when approved, with the program's digest: a changed program does not run. Up to eight environment names per launcher; protected names (`PATH`, `HOME`, `LD_*`, `DYLD_*`, `MALLOC_*`, `DOTNET_*`, `COR_*`, `NODE_OPTIONS`, `PYTHON*`, `LUA_*`, `OPENSSL_*`, `SSLKEYLOGFILE`, `GIT_*`, `EDITOR`, proxy and certificate settings, `PTA_*`, `STATE_ENCRYPTION_KEY`, webhook and tunnel keys...) are refused, and the process starts from a minimal environment, so no whole-environment export exists.
 - A launcher's standard output and error are not captured: its result is `succeeded`, `failed`, `timed_out` or `not_started` with the exit code and duration. Redaction does not make arbitrary program output safe, and nothing stops an approved program from keeping or forwarding what it receives; approve only programs the user trusts.
 - Launchers and generic process execution are denied to shared-portal accounts (no verified OS boundary), to browsers and to machine credentials; use the personal trusted machine.
+
+## Deliver to another system
+
+A **delivery destination** is another system a person approved to receive chosen variables: an HTTPS API, or a Cloudflare Worker secret (in place of `wrangler secret put`). This host performs the delivery itself. It resolves the value at that moment, sends the approved request and returns only a status. The value never passes through you, the CLI, MCP, arguments, files or logs.
+
+1. **Propose.** Call `delivery_define` (CLI: `pta variables destination define NAME --description TEXT --target JSON --variable ID [--variable ID ...] --confirmed`). It needs the user's confirmation and the owner of the installation. The `target` is one of:
+   - **HTTP**: `{"kind":"http","url":"https://host/path","method":"PUT|POST|PATCH","headers":{...},"body":{"value":"{{value}}"},"auth":{"header":"Authorization","prefix":"Bearer ","variable":ID},"confirm_field":"/last4"}`.
+     - The URL is HTTPS on port 443, with no credentials or fragment.
+     - Headers are fixed text. `Authorization`, `Host` and `Cookie` cannot be set: the destination's own credential goes in `auth`, as another variable named by ID.
+     - The JSON body contains the string `{{value}}` exactly once.
+     - `confirm_field` (optional) names a reply field that holds the value's last four characters.
+   - **Cloudflare Worker secret**: `{"kind":"cloudflare_worker_secret","account_id":"<32 hex>","script":"worker-name","secret_name":"NAME","token":ID}`. `token` is a variable holding a Cloudflare API token allowed to edit that Worker.
+
+   `variables` lists the entry IDs that may be delivered there, from 1 to 8.
+2. **The user approves.** In Settings › Variables › Where variables are used › Delivery destinations (application window or portal), they see the URL, method, headers, body template, credential variable and allowed variables. Approval records the definition's digest.
+   - No tool, command or local client can approve.
+   - A destination's name is never redefined in place: remove it and propose again, which needs a new approval.
+   - `delivery_list` (CLI `pta variables destinations`) shows `approved`, and `variable_usage` shows the destination as a `delivery` path.
+3. **Deliver.** Call `variable_deliver` with `destination` and `variable` (optional `version`). CLI: `pta variables deliver ID --to DESTINATION --confirmed`. It needs the user's confirmation. Before sending, the host checks that:
+   - the destination is still approved, and the variable is on its list;
+   - at most one delivery per destination per minute and 20 per hour have been made (counted in memory; reset when the host restarts);
+   - the value and the destination's credential resolve live. On a signed-in installation that means the coordinator, so offline or revoked denies the delivery.
+
+   The host refuses redirects and destinations that resolve to private or reserved addresses, and bounds the time and size of the reply.
+4. **Read the result.** The reply has `status`:
+   - `ok`: 2xx;
+   - `rejected`: 401/403, the destination refused its credential;
+   - `failed`: another HTTP error;
+   - `unreachable`.
+
+   It also has `http_status` and `confirmed_by_destination`. That last one is true only when the reply's `confirm_field` equals the last four characters of the delivered value (computed by the host), or when Cloudflare reports `success` for that secret name. The response body, its headers and those characters are never returned. Nothing is retried: after `unreachable` or a timeout the outcome is unknown, so ask the user to check the destination before delivering again. Every attempt is audited (`deliver`, plus `delivery_define|approve|remove`).
+5. **Remove.** `delivery_remove` (CLI `pta variables destination remove NAME`) stops future deliveries. A delivered value stays at the destination until it is rotated at its provider.
+
+Destinations are denied to shared-portal accounts and to machine credentials. They protect the agent-facing paths (tools, CLI, MCP): an agent with a shell running as the same OS user can read the profile directly, which is outside this boundary.
 
 ## Application credentials are variables (0.10.1+)
 
