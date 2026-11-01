@@ -48,7 +48,8 @@ Configuration
   config set FIELD JSON    Changes a field; the value is JSON (true, \"text\", [...], {...}).
   config apply|validate    Applies or validates {config,map,tunnel_config} as JSON or TOML on stdin.
   config import FILE       Imports an existing config.toml (with the assistant stopped).
-  credentials list         Credentials and their origin, without values.
+  credentials list         This installation's internal credentials and their origin, without values. For `is the secret X
+                           stored?`, use `variables search` or `variables usage`.
   credentials set NAME     Stores a credential read from stdin (never as an argument).
   credentials delete NAME
   tunnel status|validate   Status and local validation of the Cloudflare tunnel.
@@ -113,7 +114,13 @@ Account configuration
 
 Account variables
   variables list [--limit N]  Names, descriptions and versions of this account's stored variables; never values.
-  variables search TEXT       Variables whose name or description contains TEXT.
+  variables search TEXT       Variables matching TEXT: each word begins a word of the name or description (case, accents
+                           and filler words ignored, so `OpenAI key of the editor` finds BLOG_EDITOR_OPENAI_API_KEY).
+  variables usage [TEXT] [--limit N]
+                           For each matching variable: whether this installation can use it now and every path that uses it
+                           by reference (consumers, launchers, settings that read it by name), with the confirmation each
+                           needs. Answers `do I have the secret X and can I use it?`; never a value. Not `credentials list`,
+                           which shows the installation's internal credentials.
   variables sync [--reset]    Brings this installation's copy of the account's catalog up to date with the coordinator (names,
                            descriptions, versions; never values) and prints the revision. --reset discards the copy first,
                            the only way to accept a coordinator that was restored to an older state.
@@ -488,6 +495,19 @@ async fn variables_command(args: &[String]) -> Result<Reply> {
             call("variable_list", json!({"limit":limit}), None, true).await
         }
         ("search", _) => call("variable_list", json!({"query":word(2)?}), None, true).await,
+        ("usage", _) => {
+            let limit = option(args, "--limit")
+                .map(|v| v.parse::<usize>().context("invalid limit"))
+                .transpose()?;
+            let query = (words.len() > 2).then(|| words[2..].join(" "));
+            call(
+                "variable_usage",
+                json!({"query":query,"limit":limit}),
+                None,
+                true,
+            )
+            .await
+        }
         ("sync", _) => {
             let reset = args.iter().any(|a| a == "--reset");
             call(
@@ -969,6 +989,7 @@ fn validate_args(args: &[String]) -> Result<()> {
             | ["variables", "list" | "verify" | "audit" | "sync" | "status"]
             | ["variables", "search" | "create" | "update" | "delete", _]
             | ["variables", "rename", _, _]
+            | ["variables", "usage", ..]
             | ["variables", "consumers"]
             | ["variables", "migrate", "inspect" | "status"]
             | ["variables", "migrate", "run", _]

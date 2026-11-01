@@ -1003,3 +1003,63 @@ fn a_rename_is_versioned_unique_and_validated() {
     assert!(conflict(store.rename(&other.id, 2, "REVIVED")).contains("deleted"));
     assert!(store.verify().unwrap().failed.is_empty());
 }
+
+#[test]
+fn search_matches_words_across_naming_styles_languages_and_accents() {
+    let hit = |query: &str, name: &str, description: &str| search_score(query, name, description);
+    for name in [
+        "BLOG_EDITOR_OPENAI_API_KEY",
+        "BlogEditorOpenAiApiKey",
+        "blog-editor.openai.key",
+    ] {
+        assert!(
+            hit("la key de OpenAI del editor", name, "x").is_some(),
+            "{name}"
+        );
+        assert!(hit("openai", name, "x").is_some(), "{name}");
+        assert!(hit("Blog editor", name, "x").is_some(), "{name}");
+    }
+    // A word may come from the description, accents and case are ignored, and every meaningful
+    // word must be found somewhere.
+    assert_eq!(
+        hit(
+            "token de publicación",
+            "GH_PAT",
+            "Token para la PUBLICACION del blog"
+        ),
+        Some(0)
+    );
+    assert_eq!(
+        hit("openai github", "BLOG_EDITOR_OPENAI_API_KEY", "x"),
+        None
+    );
+    assert_eq!(hit("point", "API_ENDPOINT", "x"), None);
+    assert_eq!(hit("S3 bucket", "BACKUP_S3Bucket", "x"), Some(2));
+    assert_eq!(hit("APIKey", "OPENAI_API_KEY", "x"), Some(1));
+    // Better name matches come first; an empty or filler-only query keeps everything.
+    let entries = vec![
+        Metadata {
+            id: id(),
+            name: "GITHUB_TOKEN".into(),
+            description: "Blog editor token".into(),
+            version: 1,
+            created_at: 0,
+            updated_at: 0,
+        },
+        Metadata {
+            id: id(),
+            name: "BLOG_EDITOR_GITHUB_TOKEN".into(),
+            description: "Token".into(),
+            version: 1,
+            created_at: 0,
+            updated_at: 0,
+        },
+    ];
+    let names = |found: Vec<Metadata>| found.into_iter().map(|v| v.name).collect::<Vec<_>>();
+    assert_eq!(
+        names(search(entries.clone(), Some("blog editor token"))),
+        ["BLOG_EDITOR_GITHUB_TOKEN", "GITHUB_TOKEN"]
+    );
+    assert_eq!(names(search(entries.clone(), Some("de la"))).len(), 2);
+    assert_eq!(names(search(entries, Some("openai"))), Vec::<String>::new());
+}

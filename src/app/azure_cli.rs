@@ -410,6 +410,26 @@ pub(super) async fn require() -> Result<Session> {
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+
+    /// Writes a fake `az` and waits until it can be executed. While it is written, a process
+    /// another test forks inherits the write descriptor until it calls exec, and running the file
+    /// meanwhile fails with ETXTBSY; one successful run proves no writer is left.
+    fn install(binary: &Path, script: impl AsRef<[u8]>) -> std::io::Result<()> {
+        fs::write(binary, script)?;
+        fs::set_permissions(binary, fs::Permissions::from_mode(0o700))?;
+        for _ in 0..100 {
+            match std::process::Command::new(binary)
+                .stdin(std::process::Stdio::null())
+                .output()
+            {
+                Err(error) if error.raw_os_error() == Some(26) => {
+                    std::thread::sleep(std::time::Duration::from_millis(10))
+                }
+                _ => break,
+            }
+        }
+        Ok(())
+    }
     #[test]
     fn provider_diagnostics_keep_codes_and_transport_without_provider_text() {
         let error = LoginError::new("read_device_prompt", "read_failed", Instant::now(), 150, Some(1))
@@ -454,14 +474,14 @@ mod tests {
             "#!/bin/sh\n[ \"$AZURE_CONFIG_DIR\" = '{}' ] || exit 9\n[ \"$AZURE_CORE_LOGIN_EXPERIENCE_V2\" = off ] || exit 9\n[ -z \"${{GRAPH_WEBHOOK_SECRET+x}}\" ] || exit 9\n[ -z \"${{AZURE_DEVOPS_EXT_PAT+x}}\" ] || exit 9\n[ \"$*\" = 'login --use-device-code --allow-no-subscriptions --scope {RESOURCE}/.default --output none --tenant example.test' ] || exit 9\nprintf '%s\\n' 'To sign in, use a web browser to open the page https://login.microsoft.com/device and enter the code ABCD12345 to authenticate.' >&2\nexit 0\n",
             profile.join("home/.azure").display()
         );
-        fs::write(&binary, &script).unwrap();
+        install(&binary, &script).unwrap();
         fs::set_permissions(&binary, fs::Permissions::from_mode(0o700)).unwrap();
         let mut pending = begin_at(&binary, Some(&profile), "example.test")
             .await
             .unwrap();
         assert_eq!(pending.prompt.verification_uri, DEVICE_URL);
         (&mut pending.task).await.unwrap().unwrap();
-        fs::write(
+        install(
             &binary,
             script.replace(
                 "https://login.microsoft.com/device",
@@ -481,7 +501,7 @@ mod tests {
         assert!(!saved.contains("ABCD12345"));
         assert!(!saved.contains("untrusted.example"));
         assert!(fail(error).starts_with("[not_ready] Azure CLI sign-in failed"));
-        fs::write(
+        install(
             &binary,
             script.replace(
                 "exit 0",
@@ -501,7 +521,7 @@ mod tests {
                 .unwrap()
                 .contains("synthetic-private-error")
         );
-        fs::write(
+        install(
             &binary,
             script.replace(
                 "exit 0",
@@ -532,7 +552,7 @@ mod tests {
         })
         .await
         .expect("cancellation must kill the login child");
-        fs::write(
+        install(
             &binary,
             "#!/bin/sh\necho synthetic-private-error >&2\nexit 1\n",
         )
@@ -557,7 +577,7 @@ mod tests {
             expected.display(),
             RESOURCE
         );
-        fs::write(&binary, &script).unwrap();
+        install(&binary, &script).unwrap();
         fs::set_permissions(&binary, fs::Permissions::from_mode(0o700)).unwrap();
         let session = load(&binary, Some(&profile)).await.ok().unwrap();
         assert_eq!(session.token(), "synthetic-private-entra-token");
@@ -565,7 +585,7 @@ mod tests {
         let safe = serde_json::to_string(&session.status).unwrap();
         assert!(safe.contains("person@example.test"));
         assert!(!safe.contains("synthetic-private-entra-token"));
-        fs::write(&binary, script.replace("4102444800", "1")).unwrap();
+        install(&binary, script.replace("4102444800", "1")).unwrap();
         assert!(matches!(
             load(&binary, Some(&profile)).await,
             Err(Status {
@@ -574,7 +594,7 @@ mod tests {
                 ..
             })
         ));
-        fs::write(&binary, "#!/bin/sh\nexit 1\n").unwrap();
+        install(&binary, "#!/bin/sh\nexit 1\n").unwrap();
         assert!(matches!(
             load(&binary, Some(&profile)).await,
             Err(Status {

@@ -662,24 +662,10 @@ pub(super) async fn operate(host: &Arc<Host>, request: &control::Request) -> Opt
             if quiet && mirror.load(&link).is_none() {
                 let _ = synchronize(host, &link, false, Mode::Explicit).await;
             }
-            let needle = list
-                .query
-                .as_deref()
-                .map(str::to_lowercase)
-                .filter(|q| !q.trim().is_empty());
-            let mut variables: Vec<vault::Metadata> = mirror
-                .load(&link)
-                .map(|c| c.entries)
-                .unwrap_or_default()
-                .into_iter()
-                .filter(|v| {
-                    needle.as_ref().is_none_or(|q| {
-                        v.name.to_lowercase().contains(q.trim())
-                            || v.description.to_lowercase().contains(q.trim())
-                    })
-                })
-                .collect();
-            variables.sort_by_key(|v| v.name.to_ascii_uppercase());
+            let mut entries: Vec<vault::Metadata> =
+                mirror.load(&link).map(|c| c.entries).unwrap_or_default();
+            entries.sort_by_key(|v| v.name.to_ascii_uppercase());
+            let mut variables = vault::search(entries, list.query.as_deref());
             let total = variables.len();
             variables.truncate(list.limit.unwrap_or(vault::MAX_VARIABLES).max(1));
             let mut listed = listing(state, variables, total, mirror.describe(&link), now);

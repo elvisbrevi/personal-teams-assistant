@@ -237,6 +237,100 @@ pub fn validate_value(value: &str) -> Result<()> {
     Ok(())
 }
 
+/// Words a search ignores: articles, prepositions and conjunctions in Spanish and English.
+const STOPWORDS: &[&str] = &[
+    "a", "al", "an", "and", "con", "de", "del", "el", "en", "for", "la", "las", "lo", "los", "mi",
+    "my", "o", "of", "or", "para", "por", "que", "se", "su", "the", "to", "un", "una", "y",
+];
+
+/// Lowercase accent-folded words of a text, split at anything that is not a letter or digit and,
+/// with `camel`, at camelCase boundaries, so `BlogEditorOpenAiApiKey` and
+/// `BLOG_EDITOR_OPENAI_API_KEY` share words.
+fn words(text: &str, camel: bool) -> Vec<String> {
+    let fold = |c: char| match c {
+        'á' | 'à' | 'â' | 'ä' | 'Á' | 'À' | 'Â' | 'Ä' => 'a',
+        'é' | 'è' | 'ê' | 'ë' | 'É' | 'È' | 'Ê' | 'Ë' => 'e',
+        'í' | 'ì' | 'î' | 'ï' | 'Í' | 'Ì' | 'Î' | 'Ï' => 'i',
+        'ó' | 'ò' | 'ô' | 'ö' | 'Ó' | 'Ò' | 'Ô' | 'Ö' => 'o',
+        'ú' | 'ù' | 'û' | 'ü' | 'Ú' | 'Ù' | 'Û' | 'Ü' => 'u',
+        'ñ' | 'Ñ' => 'n',
+        'ç' | 'Ç' => 'c',
+        other => other,
+    };
+    let chars: Vec<char> = text.chars().map(fold).collect();
+    let mut words = Vec::new();
+    let mut word = String::new();
+    for (i, &c) in chars.iter().enumerate() {
+        if !c.is_alphanumeric() {
+            if !word.is_empty() {
+                words.push(std::mem::take(&mut word));
+            }
+            continue;
+        }
+        let previous = i.checked_sub(1).map(|j| chars[j]);
+        let next = chars.get(i + 1).copied();
+        // aB starts a word, and so does the B of ABc (an acronym followed by a word).
+        let boundary = camel
+            && c.is_uppercase()
+            && previous.is_some_and(|p| {
+                p.is_lowercase()
+                    || p.is_ascii_digit()
+                    || (p.is_uppercase() && next.is_some_and(char::is_lowercase))
+            });
+        if boundary && !word.is_empty() {
+            words.push(std::mem::take(&mut word));
+        }
+        word.extend(c.to_lowercase());
+    }
+    if !word.is_empty() {
+        words.push(word);
+    }
+    words
+}
+
+/// How well a variable answers a free-text query: `None` when some meaningful query word is not
+/// found, otherwise the number of query words found in the name. A query word matches when it
+/// begins a word of the name or description, or a run of consecutive words (`OpenAI` matches
+/// `Open` `Ai`). Case, accents and stopwords are ignored.
+pub fn search_score(query: &str, name: &str, description: &str) -> Option<usize> {
+    let wanted: Vec<String> = words(query, false)
+        .into_iter()
+        .filter(|w| !STOPWORDS.contains(&w.as_str()))
+        .collect();
+    let found_in = |text: &str| {
+        let words = words(text, true);
+        let runs: Vec<String> = (0..words.len()).map(|i| words[i..].concat()).collect();
+        move |w: &String| runs.iter().any(|run| run.starts_with(w.as_str()))
+    };
+    let (in_name, in_description) = (found_in(name), found_in(description));
+    let mut score = 0;
+    for word in &wanted {
+        if in_name(word) {
+            score += 1;
+        } else if !in_description(word) {
+            return None;
+        }
+    }
+    Some(score)
+}
+
+/// The entries that answer a query, best match first (by name otherwise); all when the query is
+/// empty or only stopwords.
+pub fn search(entries: Vec<Metadata>, query: Option<&str>) -> Vec<Metadata> {
+    let Some(query) = query.filter(|q| !q.trim().is_empty()) else {
+        return entries;
+    };
+    let mut scored: Vec<(usize, Metadata)> = entries
+        .into_iter()
+        .filter_map(|v| search_score(query, &v.name, &v.description).map(|score| (score, v)))
+        .collect();
+    scored.sort_by(|a, b| {
+        b.0.cmp(&a.0)
+            .then_with(|| name_key(&a.1.name).cmp(&name_key(&b.1.name)))
+    });
+    scored.into_iter().map(|(_, v)| v).collect()
+}
+
 fn now() -> i64 {
     chrono::Utc::now().timestamp()
 }
@@ -452,20 +546,8 @@ impl Store {
                 updated_at: r.get(5)?,
             })
         })?;
-        let needle = query
-            .map(str::to_lowercase)
-            .filter(|q| !q.trim().is_empty());
-        let mut found = Vec::new();
-        for row in rows {
-            let row = row?;
-            if needle.as_ref().is_none_or(|q| {
-                row.name.to_lowercase().contains(q.trim())
-                    || row.description.to_lowercase().contains(q.trim())
-            }) {
-                found.push(row);
-            }
-        }
-        Ok(found)
+        let rows = rows.collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(search(rows, query))
     }
 
     /// One consistent page of the account's catalog for synchronization, ordered by entry ID.

@@ -926,3 +926,92 @@ async fn a_rename_keeps_bindings_by_id_and_never_moves_a_lookup_by_name() {
     let verified = call(&host, Local, "variable_verify", json!({})).await;
     assert_eq!(verified.data["ok"], true, "{:?}", verified.message);
 }
+
+#[tokio::test]
+async fn usage_names_every_path_by_reference_and_never_a_value() {
+    let root = tempfile::tempdir().unwrap();
+    let host = host(root.path());
+    let bound = store(&host, "BlogEditorOpenAiApiKey", KEY).await;
+    let named = store(&host, "AZURE_DEVOPS_TOKEN", "synthetic-token-5d2e").await;
+    let idle = store(&host, "BLOG_EDITOR_GITHUB_TOKEN", "synthetic-token-91aa").await;
+    assert!(
+        call(
+            &host,
+            Local,
+            "variable_consumer_bind",
+            json!({"consumer":"deepseek","variable":bound}),
+        )
+        .await
+        .ok
+    );
+    let mut config = read_config(&host.state.config_path).unwrap();
+    config
+        .secrets
+        .insert("secret://azure/reader".into(), "AZURE_DEVOPS_TOKEN".into());
+    write_private(
+        &host.state.config_path,
+        &toml::to_string_pretty(&config).unwrap(),
+    )
+    .unwrap();
+
+    let all = call(&host, Local, "variable_usage", json!({})).await;
+    assert!(all.ok, "{:?}", all.message);
+    for secret in [KEY, "synthetic-token-5d2e", "synthetic-token-91aa"] {
+        assert!(!text(&all).contains(secret));
+    }
+    assert_eq!(all.data["here"]["standing"], "signed_out");
+    assert_eq!(all.data["here"]["variables_usable"], true);
+    let entry = |id: &str| {
+        all.data["variables"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|v| v["id"] == id)
+            .unwrap()
+            .clone()
+    };
+    let consumer = entry(&bound);
+    assert_eq!(consumer["paths"][0]["kind"], "consumer");
+    assert_eq!(consumer["paths"][0]["id"], "deepseek");
+    assert_eq!(consumer["paths"][0]["confirmation"], true);
+    assert_eq!(consumer["paths"][0]["available_here"], true);
+    let application = entry(&named);
+    assert_eq!(application["paths"][0]["kind"], "application");
+    assert_eq!(
+        application["paths"][0]["reference"],
+        "[secrets] secret://azure/reader"
+    );
+    let unused = entry(&idle);
+    assert_eq!(unused["paths"], json!([]));
+    assert!(
+        unused["next"]
+            .as_str()
+            .unwrap()
+            .contains("Do not ask for its value")
+    );
+
+    // Free text finds a variable whatever its naming style, best name match first.
+    let found = call(
+        &host,
+        Local,
+        "variable_usage",
+        json!({"query":"la key de OpenAI del editor"}),
+    )
+    .await;
+    assert_eq!(found.data["variables"].as_array().unwrap().len(), 1);
+    assert_eq!(found.data["variables"][0]["name"], "BlogEditorOpenAiApiKey");
+    let search = call(
+        &host,
+        Local,
+        "variable_list",
+        json!({"query":"blog editor"}),
+    )
+    .await;
+    assert_eq!(search.data["total"], 2);
+
+    // A machine credential cannot ask, and malformed arguments are refused without echo.
+    assert!(!call(&host, Machine, "variable_usage", json!({})).await.ok);
+    let forged = call(&host, Local, "variable_usage", json!({"value":KEY})).await;
+    assert_eq!(forged.code, "invalid_input");
+    assert!(!text(&forged).contains(KEY));
+}
