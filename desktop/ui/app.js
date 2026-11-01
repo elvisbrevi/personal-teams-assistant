@@ -2545,14 +2545,30 @@ function variableRow(variable) {
     editingVariable === id ? variableEditor(variable) : null);
 }
 
-/** Two independent edits of the same entry: description only, and a replacement value only. */
+/** Three independent edits of the same entry: name only, description only, and a replacement value only. */
 function variableEditor(variable) {
   const { id, name } = variable;
-  const description = el('input', { value: variableDraft?.id === id ? variableDraft.description : variable.description, maxLength: 500,
+  const draft = variableDraft?.id === id ? variableDraft : { id, name, description: variable.description };
+  const keep = patch => { variableDraft = { ...(variableDraft?.id === id ? variableDraft : draft), ...patch }; };
+  const newName = el('input', { value: draft.name, maxLength: 128, autocomplete: 'off', autocapitalize: 'off', spellcheck: false,
+    translate: 'no', 'aria-label': t('New name of {name}', { name }) });
+  const saveName = el('button', { type: 'button', textContent: t('Rename') });
+  const syncName = () => { saveName.disabled = !newName.value.trim() || newName.value.trim() === name; };
+  newName.oninput = () => { keep({ name: newName.value }); syncName(); };
+  syncName();
+  saveName.onclick = () => busy(saveName, async () => {
+    const next = newName.value.trim();
+    if (!VARIABLE_NAME.test(next)) throw t('A variable name uses letters, digits and _, cannot start with a digit and has at most 128 characters.');
+    await changeVariable('variable_rename', variable, { name: next });
+    variableDraft = editingVariable = null;
+    await loadVariables();
+    done(t('{name} renamed to {next}. Its value and references are unchanged.', { name, next }));
+  });
+  const description = el('input', { value: draft.description, maxLength: 500,
     autocomplete: 'off', spellcheck: false, 'aria-label': t('Description of {name}', { name }) });
   const saveDescription = el('button', { type: 'button', textContent: t('Save description') });
   const sync = () => { saveDescription.disabled = !description.value.trim() || description.value.trim() === variable.description; };
-  description.oninput = () => { variableDraft = { id, description: description.value }; sync(); };
+  description.oninput = () => { keep({ description: description.value }); sync(); };
   sync();
   saveDescription.onclick = () => busy(saveDescription, async () => {
     const text = description.value.trim();
@@ -2582,6 +2598,8 @@ function variableEditor(variable) {
   const close = el('button', { type: 'button', class: 'secondary', textContent: t('Cancel') });
   close.onclick = () => { input.value = ''; editingVariable = variableDraft = null; renderVariables(); };
   return el('div', { class: 'variable-edit' },
+    el('label', {}, t('Name'), newName),
+    el('div', { class: 'actions' }, saveName),
     el('label', {}, t('Description'), description),
     el('div', { class: 'actions' }, saveDescription),
     el('label', {}, t('New value'), el('small', { textContent: t('The name, description and references stay the same.') }), input),

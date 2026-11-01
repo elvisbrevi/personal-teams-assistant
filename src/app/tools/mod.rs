@@ -322,6 +322,18 @@ pub(super) const TOOLS: &[Tool] = &[
         },
     },
     Tool {
+        name: "variable_rename",
+        title: "Rename a variable",
+        description: "Give a stored variable you found with variable_list a new name, keeping its ID, description and value; the value is never read or returned. Consumers and launchers refer to the ID and keep working; a launcher run pinned to the old version fails until it is pinned again. Pass the version you saw: if the variable changed since, the call fails and you inspect it again. A name already used in the account, or a name the application reads by name (DEEPSEEK_API_KEY, a [secrets] reference, ENTRA_TENANT_ID, ENTRA_CLIENT_ID, TEAMS_USER_ID), is refused.",
+        effect: Effect::Local,
+        schema: || {
+            object(
+                json!({"id":string("Variable ID from variable_list."),"version":{"type":"integer","minimum":1,"description":"Version from variable_list."},"name":string("New name: letters, digits and _, not starting with a digit, at most 128 characters.")}),
+                &["id", "version", "name"],
+            )
+        },
+    },
+    Tool {
         name: "variable_rotation_request",
         title: "Ask the user to replace a variable's value",
         description: "Start a protected entry that replaces the value of an existing variable, keeping its ID, name and description so references continue to work. The user types the new value in Settings > Credentials > Variables or pipes it to `pta variables entry complete`; you never receive it. Check variable_entry_status afterwards. The request fails if the variable changes first.",
@@ -1378,7 +1390,7 @@ pub(super) async fn run(name: &str, args: &Value) -> Result<Value, String> {
         "account_records" => ipc("portable_records", args.clone()).await,
         "variable_search" => ipc("variable_list", args.clone()).await,
         "variable_entry_request" => ipc("variable_entry_start", args.clone()).await,
-        "variable_update" => ipc(name, args.clone()).await,
+        "variable_update" | "variable_rename" => ipc(name, args.clone()).await,
         "consumer_list" => ipc("variable_consumer_list", args.clone()).await,
         "update_status" => ipc("crate_update_status", args.clone()).await,
         "update_check" => ipc("crate_update_check", args.clone()).await,

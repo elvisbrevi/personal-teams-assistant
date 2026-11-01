@@ -487,6 +487,7 @@ async fn agent_tools_never_accept_or_return_a_value() {
             "variable_entry_status",
             "variable_entry_cancel",
             "variable_update",
+            "variable_rename",
             "variable_rotation_request",
             "variable_delete"
         ]

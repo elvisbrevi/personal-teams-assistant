@@ -415,7 +415,7 @@ pub(in crate::app) async fn protocol(host: &Arc<Host>, args: &Value) -> Result<V
                 .await
             }
             "variable_catalog" | "variable_resolve" | "variable_create" | "variable_update"
-            | "variable_delete" => variables::machine_call(
+            | "variable_rename" | "variable_delete" => variables::machine_call(
                 host,
                 args["method"].as_str().unwrap_or_default(),
                 &args["args"],

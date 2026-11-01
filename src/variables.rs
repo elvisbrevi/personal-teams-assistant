@@ -676,9 +676,30 @@ impl Store {
         description: Option<&str>,
         value: Option<&Secret>,
     ) -> Result<Updated> {
-        let id = entry_id(id)?;
         if description.is_none() && value.is_none() {
             return Err(input("Give a new description, a new value or both."));
+        }
+        self.edit(id, expected, None, description, value)
+    }
+
+    /// Give one entry a new name, keeping its ID, description and value. The value is
+    /// authenticated with its name, so the host re-encrypts it in the same transaction; it never
+    /// leaves this function. References by entry ID keep working; `expected` works as in `update`.
+    pub fn rename(&self, id: &str, expected: u64, name: &str) -> Result<Updated> {
+        self.edit(id, expected, Some(name), None, None)
+    }
+
+    fn edit(
+        &self,
+        id: &str,
+        expected: u64,
+        name: Option<&str>,
+        description: Option<&str>,
+        value: Option<&Secret>,
+    ) -> Result<Updated> {
+        let id = entry_id(id)?;
+        if let Some(name) = name {
+            validate_name(name)?;
         }
         if let Some(description) = description {
             validate_description(description)?;
@@ -697,12 +718,13 @@ impl Store {
             return Err(missing(&tx, &self.account, &id)?);
         };
         let current = self.plaintext(&tx, &row)?;
+        let same_name = name.is_none_or(|n| n == row.name);
         let same_description = description.is_none_or(|d| d == row.description);
         let same_value =
             value.is_none_or(|v| crate::security::constant_eq(v.expose(), current.expose()));
         if row.revision != expected {
             // The caller's earlier attempt may have succeeded before its reply was lost.
-            if row.revision == expected + 1 && same_description && same_value {
+            if row.revision == expected + 1 && same_name && same_description && same_value {
                 return Ok(Updated {
                     variable: row.metadata(),
                     replayed: true,
@@ -713,10 +735,26 @@ impl Store {
                 row.name, row.revision
             )));
         }
-        if same_description && same_value {
-            return Err(input(
-                "Nothing would change: the description and value match.",
-            ));
+        if same_name && same_description && same_value {
+            return Err(input(if name.is_some() {
+                "Nothing would change: the variable already has that name."
+            } else {
+                "Nothing would change: the description and value match."
+            }));
+        }
+        let name = name.unwrap_or(&row.name);
+        if name_key(name) != name_key(&row.name)
+            && let Some(taken) = tx
+                .query_row(
+                    "SELECT name FROM variables WHERE account=?1 AND name_key=?2",
+                    params![self.account, name_key(name)],
+                    |r| r.get::<_, String>(0),
+                )
+                .optional()?
+        {
+            return Err(Error::Conflict(format!(
+                "A variable named {taken} already exists in this account. Inspect it before choosing another name."
+            )));
         }
         let (data_key, key) = self.active_data_key(&tx)?;
         let revision = row.revision + 1;
@@ -724,18 +762,28 @@ impl Store {
         let description = description.unwrap_or(&row.description);
         let sealed = seal(
             &key,
-            &record_aad(&self.account, &id, &row.name, revision, data_key),
+            &record_aad(&self.account, &id, name, revision, data_key),
             value.unwrap_or(&current).expose().as_bytes(),
         )?;
         tx.execute(
-            "UPDATE variables SET description=?3, revision=?4, dek_version=?5, ciphertext=?6, updated_at=?7 WHERE account=?1 AND id=?2",
-            params![self.account, id, description, revision as i64, data_key, sealed, at],
+            "UPDATE variables SET name=?3, name_key=?4, description=?5, revision=?6, dek_version=?7, ciphertext=?8, updated_at=?9 WHERE account=?1 AND id=?2",
+            params![
+                self.account,
+                id,
+                name,
+                name_key(name),
+                description,
+                revision as i64,
+                data_key,
+                sealed,
+                at
+            ],
         )?;
         tx.commit()?;
         Ok(Updated {
             variable: Metadata {
                 id,
-                name: row.name,
+                name: name.to_owned(),
                 description: description.to_owned(),
                 version: revision,
                 created_at: row.created_at,

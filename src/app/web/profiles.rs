@@ -307,6 +307,7 @@ impl Portal {
             "setup_readiness",
             "variable_create",
             "variable_update",
+            "variable_rename",
             "variable_delete",
             "variable_reveal",
             "variable_rotation_start",
