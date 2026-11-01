@@ -18,7 +18,35 @@ Requires `account_variables_support: true` in `pta --json capabilities` and a ho
 
 ## Discover
 
-`pta --json variables list [--limit N]` and `pta --json variables search TEXT` (MCP: `variable_list`, `variable_search`) return `id`, `name`, `description`, `version` and timestamps for the signed-in account only, plus protected-entry requests still waiting for the user. Search matches the name or description, case-insensitive. Pick a variable by its description, not its name alone.
+- **"Is the secret X stored? Can I use it?"** Run `pta --json variables usage [TEXT]` (MCP `variable_usage`). Do not use `pta credentials list`: it lists this installation's internal credentials, not the account's variables. For each matching variable it returns `id`, `name`, `description` and `version`, plus `usable_now`. It also lists `paths`, the ways something uses the variable by reference:
+  - `consumer`: a bound built-in consumer;
+  - `launcher`: an approved launcher with its environment names;
+  - `application`: a setting that reads the variable by name, such as `[secrets]`, the DeepSeek key or the Microsoft setup.
+
+  Each path carries `operations`, `confirmation` and `available_here`. `here` says why this installation can or cannot use variables now (`standing`, `launchers`, `reason`). A variable without paths carries `next`: what to propose instead of asking for the value.
+- **Search.** `pta --json variables list [--limit N]`, `pta --json variables search TEXT` and `usage` (MCP: `variable_list`, `variable_search`, `variable_usage`) cover the signed-in account only, with names and descriptions and never values. `list` also shows the protected-entry requests still waiting for the user.
+  - Text is matched word by word. Each word of the query must begin a word, or a run of consecutive words, of the name or description.
+  - Case, accents and filler words (`la`, `de`, `the`, `of`…) are ignored, and camelCase or `_` names are split.
+  - So "la key de OpenAI del editor" finds `BLOG_EDITOR_OPENAI_API_KEY` and `BlogEditorOpenAiApiKey`. Better name matches come first.
+  - Pick a variable by its description, not its name alone.
+
+## Use a secret without seeing it
+
+When a task needs a secret in another system (an API, a Worker, CI, another app's settings), the flow is:
+
+1. **Look in PTA first.** Run `variables usage` with words from the task, for example "OpenAI editor". Do this before writing any step that asks the user to set, paste or copy a secret.
+2. **If a path exists, use it.**
+   - Call its operation: `consumer_check`, or `launcher_run` on the owner's trusted machine.
+   - Each needs the user's confirmation of that exact action (MCP asks; `pta tools call` needs `confirmed: true`; the CLI needs `--confirmed`).
+   - Report the reference (ID, name, version) and the status you get back, never a value.
+3. **If the variable exists but no path fits, say so and propose the missing path.** The user decides on it: binding a built-in consumer, approving a launcher on their trusted machine, or approving a delivery destination where available. Do not work around it with a value.
+4. **If no variable exists, start a protected entry** (`variable_entry_request`, name and description). The user types the value in Settings › Variables.
+5. **Never:**
+   - ask the user to paste a value into the chat or a command line;
+   - ask them to reveal or copy one for you;
+   - put a value in an argument, an environment export, a file or a commit;
+   - write handoff or README steps such as "run `wrangler secret put` and paste the value" or "export TOKEN=…" for a secret that is already a PTA variable. Reference the variable by name and say which PTA path delivers it, or which path the user still has to approve.
+6. **Withdrawing a value.** A value that reached another system stays there. Deleting or rotating the variable stops new uses only. To withdraw it, rotate or revoke the credential at its provider, then replace the variable's value (`variable_rotation_request`).
 
 ## Synchronize the catalog
 

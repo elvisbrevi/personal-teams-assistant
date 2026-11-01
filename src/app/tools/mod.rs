@@ -322,6 +322,18 @@ pub(super) const TOOLS: &[Tool] = &[
         },
     },
     Tool {
+        name: "variable_usage",
+        title: "What a variable can be used for",
+        description: "Answer 'is there a stored secret for X, and can I use it?' without any value. For each variable (optionally matching a free-text query such as 'the editor's OpenAI key': words are matched in the name and description, ignoring case, accents and filler words), returns its name, description and version, whether this installation can use variables now, and every path that uses it by reference: built-in consumers, approved launchers and application settings that read it by name, each with the operation to call, whether it needs the user's confirmation and whether it is available here. A variable with no path says what to propose instead. Use this, not `pta credentials list` (the installation's internal credentials), and never ask the user for a value.",
+        effect: Effect::Read,
+        schema: || {
+            object(
+                json!({"query":string("Optional free text, for example 'OpenAI key of the blog editor'."),"limit":{"type":"integer","minimum":1,"maximum":500}}),
+                &[],
+            )
+        },
+    },
+    Tool {
         name: "variable_rename",
         title: "Rename a variable",
         description: "Give a stored variable you found with variable_list a new name, keeping its ID, description and value; the value is never read or returned. Consumers and launchers refer to the ID and keep working; a launcher run pinned to the old version fails until it is pinned again. Pass the version you saw: if the variable changed since, the call fails and you inspect it again. A name already used in the account, or a name the application reads by name (DEEPSEEK_API_KEY, a [secrets] reference, ENTRA_TENANT_ID, ENTRA_CLIENT_ID, TEAMS_USER_ID), is refused.",
@@ -1390,7 +1402,7 @@ pub(super) async fn run(name: &str, args: &Value) -> Result<Value, String> {
         "account_records" => ipc("portable_records", args.clone()).await,
         "variable_search" => ipc("variable_list", args.clone()).await,
         "variable_entry_request" => ipc("variable_entry_start", args.clone()).await,
-        "variable_update" | "variable_rename" => ipc(name, args.clone()).await,
+        "variable_update" | "variable_rename" | "variable_usage" => ipc(name, args.clone()).await,
         "consumer_list" => ipc("variable_consumer_list", args.clone()).await,
         "update_status" => ipc("crate_update_status", args.clone()).await,
         "update_check" => ipc("crate_update_check", args.clone()).await,

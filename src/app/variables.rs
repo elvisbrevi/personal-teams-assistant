@@ -13,6 +13,7 @@ use serde_json::{Value, json};
 pub(super) mod credentials;
 pub(super) mod identity;
 mod sync;
+mod usage;
 pub(super) use sync::{auto, cached, call_account, machine_call};
 
 /// A protected-entry request stays open this long (seconds).
@@ -241,6 +242,9 @@ pub(super) fn failure(error: vault::Error) -> Reply {
 }
 
 pub(super) async fn operate(host: &Arc<Host>, request: &control::Request) -> Reply {
+    if request.method == "variable_usage" {
+        return usage::usage(host, request).await;
+    }
     if super::migration::handles(&request.method) {
         return super::migration::operate(host, request).await;
     }
