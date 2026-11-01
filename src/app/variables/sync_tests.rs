@@ -779,3 +779,103 @@ async fn a_standalone_installation_reports_that_its_own_catalog_is_authoritative
             .ok
     );
 }
+
+#[tokio::test]
+async fn a_rename_from_a_connected_installation_is_decided_by_the_coordinator() {
+    let root = tempfile::tempdir().unwrap();
+    let pair = pair(root.path(), None).await;
+    let body = create("BlogEditorOpenAiApiKey", SECRET);
+    let entry = body["id"].as_str().unwrap().to_owned();
+    assert!(call(&pair.native, Local, "variable_create", body).await.ok);
+    assert!(
+        call(
+            &pair.coordinator,
+            Local,
+            "variable_create",
+            create("TAKEN_NAME", "synthetic-other-value-9e1d")
+        )
+        .await
+        .ok
+    );
+
+    let renamed = call(
+        &pair.native,
+        Local,
+        "variable_rename",
+        json!({"id":entry,"version":1,"name":"BLOG_EDITOR_OPENAI_API_KEY"}),
+    )
+    .await;
+    assert!(renamed.ok, "{:?}", renamed.message);
+    assert_eq!(
+        renamed.data["variable"]["name"],
+        "BLOG_EDITOR_OPENAI_API_KEY"
+    );
+    assert_eq!(renamed.data["variable"]["version"], 2);
+    assert_eq!(renamed.data["sync"]["state"], "synced");
+    assert!(!text(&renamed).contains(SECRET));
+    // The mirror and the coordinator agree; the value never left the coordinator and still
+    // authenticates under its new name.
+    assert_eq!(
+        names(&call(&pair.native, Local, "variable_list", json!({})).await),
+        ["BLOG_EDITOR_OPENAI_API_KEY", "TAKEN_NAME"]
+    );
+    let held = call(
+        &pair.coordinator,
+        Window,
+        "variable_reveal",
+        json!({"id":entry}),
+    )
+    .await;
+    assert_eq!(held.data["value"], SECRET);
+    assert_eq!(held.data["variable"]["name"], "BLOG_EDITOR_OPENAI_API_KEY");
+    let verified = call(&pair.coordinator, Local, "variable_verify", json!({})).await;
+    assert_eq!(verified.data["ok"], true);
+    assert!(!pair.profile.join("variables/variables.db").exists());
+
+    // A repeat after a lost reply is a replay; a stale version or a taken name is a conflict.
+    let again = call(
+        &pair.native,
+        Local,
+        "variable_rename",
+        json!({"id":entry,"version":1,"name":"BLOG_EDITOR_OPENAI_API_KEY"}),
+    )
+    .await;
+    assert!(again.ok && again.data["replayed"] == true);
+    for (version, name, expected) in [
+        (1, "ANOTHER_NAME", "version 2"),
+        (2, "taken_name", "TAKEN_NAME"),
+    ] {
+        let refused = call(
+            &pair.native,
+            Local,
+            "variable_rename",
+            json!({"id":entry,"version":version,"name":name}),
+        )
+        .await;
+        assert_eq!(
+            (refused.code.as_str(), refused.exit_code),
+            ("state_conflict", 6)
+        );
+        assert!(refused.message.unwrap().contains(expected), "{name}");
+    }
+    // The coordinator also guards the names its own application reads.
+    let refused = call(
+        &pair.native,
+        Local,
+        "variable_rename",
+        json!({"id":entry,"version":2,"name":"DEEPSEEK_API_KEY"}),
+    )
+    .await;
+    assert_eq!(refused.code, "state_conflict");
+    let events = call(&pair.coordinator, Local, "variable_audit", json!({})).await;
+    assert!(
+        events.data["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["action"] == "rename"
+                && e["entry"] == entry.as_str()
+                && e["outcome"] == "ok")
+    );
+    assert!(!text(&events).contains(SECRET));
+}

@@ -924,3 +924,82 @@ fn credential_import_preserves_conflicts_and_retries_missing_sources() {
         .unwrap();
     assert_eq!(store.reveal(&entry.id).unwrap().0, entry);
 }
+
+#[test]
+fn a_rename_keeps_the_id_description_and_value_and_reencrypts_under_the_new_name() {
+    let f = fixture();
+    let store = account(&f, "alice");
+    let before = stored(&store, "BlogEditorOpenAiApiKey", SECRET);
+    let renamed = store
+        .rename(&before.id, 1, "BLOG_EDITOR_OPENAI_API_KEY")
+        .unwrap();
+    assert!(!renamed.replayed);
+    assert_eq!(renamed.variable.id, before.id);
+    assert_eq!(renamed.variable.name, "BLOG_EDITOR_OPENAI_API_KEY");
+    assert_eq!(renamed.variable.description, before.description);
+    assert_eq!(renamed.variable.version, 2);
+    assert!(!format!("{renamed:?}").contains(SECRET));
+    // Lookups follow the new name only; the value authenticates under it and is never in clear.
+    assert_eq!(
+        store
+            .resolve("blog_editor_openai_api_key")
+            .unwrap()
+            .expose(),
+        SECRET
+    );
+    assert!(store.resolve("BlogEditorOpenAiApiKey").is_err());
+    assert!(store.verify().unwrap().failed.is_empty());
+    assert!(raw_files(&f).iter().all(|file| !contains(file, SECRET)));
+    // Restoring the old name in the database alone fails authentication: the name is bound.
+    sql(
+        &f,
+        "UPDATE variables SET name='BlogEditorOpenAiApiKey', name_key='BLOGEDITOROPENAIAPIKEY'",
+    );
+    assert!(matches!(
+        store.resolve("BlogEditorOpenAiApiKey"),
+        Err(Error::Integrity(_))
+    ));
+}
+
+#[test]
+fn a_rename_is_versioned_unique_and_validated() {
+    let f = fixture();
+    let store = account(&f, "alice");
+    let entry = stored(&store, "FIRST", SECRET);
+    let other = stored(&store, "SECOND", OTHER);
+    // A changed case is the same name for lookups, so it is allowed for the entry itself.
+    let cased = store.rename(&entry.id, 1, "First").unwrap();
+    assert_eq!(
+        (cased.variable.name.as_str(), cased.variable.version),
+        ("First", 2)
+    );
+    // A repeat whose reply was lost is reported, not applied twice; a stale one is a conflict.
+    let repeat = store.rename(&entry.id, 1, "First").unwrap();
+    assert!(repeat.replayed);
+    assert_eq!(repeat.variable.version, 2);
+    assert!(conflict(store.rename(&entry.id, 1, "THIRD")).contains("version 2"));
+    // Another entry's name, in any case, is a conflict naming it.
+    assert!(conflict(store.rename(&entry.id, 2, "second")).contains("SECOND"));
+    for invalid in [
+        "",
+        "1STARTS_WITH_DIGIT",
+        "HAS-DASH",
+        "HAS SPACE",
+        &"N".repeat(MAX_NAME + 1),
+    ] {
+        assert!(
+            matches!(store.rename(&entry.id, 2, invalid), Err(Error::Input(_))),
+            "{invalid}"
+        );
+    }
+    assert!(matches!(
+        store.rename(&entry.id, 2, "First"),
+        Err(Error::Input(_))
+    ));
+    assert!(store.rename(&entry.id, 2, &"N".repeat(MAX_NAME)).is_ok());
+    // Nothing else moved, and a deleted entry cannot be renamed back to life.
+    assert_eq!(store.resolve("SECOND").unwrap().expose(), OTHER);
+    store.delete(&other.id, 1).unwrap();
+    assert!(conflict(store.rename(&other.id, 2, "REVIVED")).contains("deleted"));
+    assert!(store.verify().unwrap().failed.is_empty());
+}

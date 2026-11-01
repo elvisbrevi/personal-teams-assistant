@@ -592,6 +592,7 @@ pub(super) async fn operate(host: &Arc<Host>, request: &control::Request) -> Opt
             | "variable_list"
             | "variable_create"
             | "variable_update"
+            | "variable_rename"
             | "variable_delete"
             | "variable_reveal"
             | "variable_entry_complete"
@@ -718,10 +719,12 @@ pub(super) async fn operate(host: &Arc<Host>, request: &control::Request) -> Opt
             reply
         }
         _ => {
-            // Create, update and delete: validate the shape here, let the coordinator decide.
+            // Create, update, rename and delete: validate the shape here, let the coordinator
+            // decide. A rename is also checked against this installation's own lookups by name.
             let checked = match method {
                 "variable_create" => parse::<CreateArgs>(&request.args).map(|_| ()),
                 "variable_update" => parse::<UpdateArgs>(&request.args).map(|_| ()),
+                "variable_rename" => check_rename(host, &request.args),
                 _ => parse::<DeleteArgs>(&request.args).map(|_| ()),
             };
             match checked {
@@ -812,12 +815,16 @@ fn serve(
             Ok(json!({"variable":created.variable,"replayed":created.replayed}))
         }
         _ => {
-            let action = if method == "variable_update" {
-                "update"
-            } else {
-                "delete"
+            let action = match method {
+                "variable_update" => "update",
+                "variable_rename" => "rename",
+                _ => "delete",
             };
-            let result = mutate(store, method, args);
+            let result = if method == "variable_rename" {
+                check_rename(host, args).and_then(|()| mutate(store, method, args))
+            } else {
+                mutate(store, method, args)
+            };
             let replayed = result.as_ref().is_ok_and(|data| data["replayed"] == true);
             store.audit(
                 action,

@@ -126,6 +126,9 @@ Account variables
   variables update ID --expected-version N [--description TEXT] [--value]
                            Edits a description and/or replaces the value (read from a protected pipe on stdin when
                            --value is given). ID and version come from list; a changed variable is a conflict.
+  variables rename ID NAME --expected-version N
+                           Renames a variable, keeping its ID, description and value (never read or shown).
+                           Consumers and launchers refer to the ID; names the application reads by name are refused.
   variables delete ID --expected-version N  Deletes a variable; its value cannot be recovered (the provider's credential is not revoked).
   variables entry start NAME --description TEXT  Asks for a value to be typed by the user (GUI or complete).
   variables entry replace ID  Asks for a replacement value to be typed by the user (GUI or complete).
@@ -531,6 +534,24 @@ async fn variables_command(args: &[String]) -> Result<Reply> {
             }
             call("variable_update", body, None, true).await.map_err(|error| {
                 error.context("The result is unknown. Inspect with `pta variables list` before repeating.")
+            })
+        }
+        ("rename", _) => {
+            let version = option(args, "--expected-version")
+                .context("--expected-version is required")?
+                .parse::<u64>()
+                .context("invalid version")?;
+            call(
+                "variable_rename",
+                json!({"id":word(2)?,"version":version,"name":word(3)?}),
+                None,
+                true,
+            )
+            .await
+            .map_err(|error| {
+                error.context(
+                    "The result is unknown. Inspect with `pta variables list` before repeating.",
+                )
             })
         }
         ("delete", _) => {
@@ -947,6 +968,7 @@ fn validate_args(args: &[String]) -> Result<()> {
             | ["account", "records", "history", _]
             | ["variables", "list" | "verify" | "audit" | "sync" | "status"]
             | ["variables", "search" | "create" | "update" | "delete", _]
+            | ["variables", "rename", _, _]
             | ["variables", "consumers"]
             | ["variables", "migrate", "inspect" | "status"]
             | ["variables", "migrate", "run", _]
@@ -1095,6 +1117,7 @@ fn validate_args(args: &[String]) -> Result<()> {
         (
             "--expected-version",
             p.as_slice().starts_with(&["variables", "update"])
+                || p.as_slice().starts_with(&["variables", "rename"])
                 || p.as_slice().starts_with(&["variables", "delete"])
                 || p.as_slice().starts_with(&["variables", "bind"])
                 || p.as_slice().starts_with(&["variables", "migrate", "run"])

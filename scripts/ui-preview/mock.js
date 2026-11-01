@@ -487,6 +487,15 @@
       touch(variable);
       return { variable: structuredClone(variable), replayed: false };
     },
+    variable_rename: args => {
+      window.__ptaVariableRenames.push({ id: args.id, version: args.version, name: args.name, keys: Object.keys(args).sort().join(',') });
+      const variable = variables.find(v => v.id === args.id);
+      if (!variable) throw new Error('This variable was deleted. Refresh the list; create a new entry to store it again.');
+      staleVariable(variable, args.version, 'editing again');
+      variable.name = args.name;
+      touch(variable);
+      return { variable: structuredClone(variable), replayed: false };
+    },
     variable_delete: args => {
       window.__ptaVariableDeletes.push({ id: args.id, version: args.version });
       const variable = variables.find(v => v.id === args.id);
@@ -569,6 +578,7 @@
   window.__ptaMigrationCalls = [];
   window.__ptaVariableReveals = [];
   window.__ptaVariableUpdates = [];
+  window.__ptaVariableRenames = [];
   window.__ptaVariableDeletes = [];
   // Another client changing an entry: the next write that names the old version must conflict.
   window.__ptaVariableChangedElsewhere = id => { const variable = variables.find(v => v.id === id); touch(variable); variable.description = `${variable.description} (edited elsewhere)`; };

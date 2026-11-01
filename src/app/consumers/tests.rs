@@ -814,3 +814,115 @@ fn consumer_tools_take_references_and_never_a_value() {
         assert!(validate(name, &args).is_err(), "{name}");
     }
 }
+
+#[tokio::test]
+async fn a_rename_keeps_bindings_by_id_and_never_moves_a_lookup_by_name() {
+    let root = tempfile::tempdir().unwrap();
+    let host = host(root.path());
+    let server = server().await;
+    point_at(&host, &server);
+    let entry = store(&host, "DeepSeekKey", KEY).await;
+    let bound = call(
+        &host,
+        Local,
+        "variable_consumer_bind",
+        json!({"consumer":"deepseek","variable":entry}),
+    )
+    .await;
+    assert!(bound.ok, "{:?}", bound.message);
+
+    let renamed = call(
+        &host,
+        Local,
+        "variable_rename",
+        json!({"id":entry,"version":1,"name":"DEEPSEEK_KEY"}),
+    )
+    .await;
+    assert!(renamed.ok, "{:?}", renamed.message);
+    assert_eq!(renamed.data["variable"]["name"], "DEEPSEEK_KEY");
+    assert_eq!(renamed.data["variable"]["version"], 2);
+    assert!(!text(&renamed).contains(KEY));
+    // The binding refers to the entry ID: it follows the new name and still uses the same value.
+    let checked = call(
+        &host,
+        Local,
+        "variable_consumer_check",
+        json!({"consumer":"deepseek"}),
+    )
+    .await;
+    assert!(checked.ok, "{:?}", checked.message);
+    assert_eq!(checked.data["result"]["status"], "ok");
+    assert_eq!(checked.data["reference"]["name"], "DEEPSEEK_KEY");
+    assert_eq!(checked.data["reference"]["version"], 2);
+    assert_eq!(bearers(&server).await, [format!("Bearer {KEY}")]);
+
+    // Names the application reads by name can be neither taken nor given away by a rename.
+    let mut config = read_config(&host.state.config_path).unwrap();
+    config
+        .secrets
+        .insert("secret://azure/reader".into(), "AZURE_DEVOPS_TOKEN".into());
+    write_private(
+        &host.state.config_path,
+        &toml::to_string_pretty(&config).unwrap(),
+    )
+    .unwrap();
+    let referenced = store(&host, "AZURE_DEVOPS_TOKEN", "synthetic-token-0c41").await;
+    for (id, version, name) in [
+        (entry.as_str(), 2, "DEEPSEEK_API_KEY"),
+        (entry.as_str(), 2, "azure_devops_token"),
+        (entry.as_str(), 2, "ENTRA_CLIENT_ID"),
+        (referenced.as_str(), 1, "AZURE_READER"),
+    ] {
+        let refused = call(
+            &host,
+            Local,
+            "variable_rename",
+            json!({"id":id,"version":version,"name":name}),
+        )
+        .await;
+        assert_eq!(
+            (refused.code.as_str(), refused.exit_code),
+            ("state_conflict", 6),
+            "{name}"
+        );
+        assert!(refused.message.unwrap().contains("by name"), "{name}");
+    }
+    // A change of case is the same name for every lookup.
+    let cased = call(
+        &host,
+        Local,
+        "variable_rename",
+        json!({"id":referenced,"version":1,"name":"Azure_DevOps_Token"}),
+    )
+    .await;
+    assert!(cased.ok, "{:?}", cased.message);
+    let resolver = Resolver {
+        host: Arc::downgrade(&host),
+    };
+    assert_eq!(
+        resolver.value("AZURE_DEVOPS_TOKEN").unwrap(),
+        "synthetic-token-0c41"
+    );
+
+    // Every attempt is audited with the entry and outcome only; a machine cannot rename.
+    let audit = call(&host, Local, "variable_audit", json!({})).await;
+    let renames: Vec<_> = audit.data["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| e["action"] == "rename")
+        .map(|e| e["outcome"].as_str().unwrap())
+        .collect();
+    assert_eq!(renames, ["ok", "stale", "stale", "stale", "stale", "ok"]);
+    assert!(!text(&audit).contains(KEY));
+    let machine = call(
+        &host,
+        Machine,
+        "variable_rename",
+        json!({"id":entry,"version":2,"name":"FROM_A_MACHINE"}),
+    )
+    .await;
+    assert!(!machine.ok);
+    let verified = call(&host, Local, "variable_verify", json!({})).await;
+    assert_eq!(verified.data["ok"], true, "{:?}", verified.message);
+}

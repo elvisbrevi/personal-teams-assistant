@@ -168,6 +168,13 @@ struct UpdateArgs {
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct RenameArgs {
+    id: String,
+    version: u64,
+    name: String,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct DeleteArgs {
     id: String,
     version: u64,
@@ -297,9 +304,77 @@ fn entry_of(args: &Value) -> Option<String> {
         .map(|id| id.hyphenated().to_string())
 }
 
-/// Edit, delete and reveal one entry of the account.
+/// Whether this installation's application reads a variable of that name by name: the DeepSeek
+/// key, a `[secrets]` reference or a Microsoft setup identifier. Consumers and launchers refer to
+/// entry IDs instead, so a rename never moves them.
+pub(super) fn read_by_name(config: &Config, name: &str) -> bool {
+    name.eq_ignore_ascii_case("DEEPSEEK_API_KEY")
+        || config
+            .secrets
+            .values()
+            .any(|n| n.eq_ignore_ascii_case(name))
+        || identity::FIELDS
+            .iter()
+            .any(|(field, _)| field.eq_ignore_ascii_case(name))
+}
+
+/// A rename may not silently take a value away from an application lookup by name, nor hand a
+/// different value to one: either would change what the assistant sends where, which only a
+/// binding or the `[secrets]` reference itself may decide. A change of case alone is the same
+/// name for every lookup.
+pub(super) fn check_rename(host: &Host, args: &Value) -> std::result::Result<(), vault::Error> {
+    let RenameArgs { id, name, .. } = parse(args)?;
+    let id = uuid::Uuid::parse_str(&id)
+        .map_err(|_| vault::Error::Input("The entry ID must be a UUID.".into()))?
+        .hyphenated()
+        .to_string();
+    vault::validate_name(&name)?;
+    // A signed-in installation reads its synchronized catalog and never opens a local store.
+    let known = match implementation::link(&host.state)
+        .map_err(|_| vault::Error::Storage("The coordinator connection is unreadable.".into()))?
+    {
+        Some(link) => cached(host, &link),
+        None => host.state.variables.store(host)?.list(None)?,
+    };
+    let Some(current) = known.into_iter().find(|v| v.id == id) else {
+        // The store reports the precise reason (deleted, or never an entry of this account).
+        return Ok(());
+    };
+    if current.name.eq_ignore_ascii_case(&name) {
+        return Ok(());
+    }
+    let config = read_config(&host.state.config_path)?;
+    if let Some(used) = [current.name.as_str(), name.as_str()]
+        .into_iter()
+        .find(|n| read_by_name(&config, n))
+    {
+        return Err(vault::Error::Conflict(format!(
+            "The application reads the variable {used} by name, so renaming to or from it would change which value it uses. Point the reference to another name first (Settings > Variables > Where variables are used, or pta config set secrets), or bind the consumer by ID."
+        )));
+    }
+    let now = chrono::Utc::now().timestamp();
+    if host
+        .state
+        .variables
+        .entries()
+        .values()
+        .any(|e| e.state == "pending" && e.expires > now && e.name.eq_ignore_ascii_case(&name))
+    {
+        return Err(vault::Error::Conflict(
+            "A protected entry for that name is already waiting for the user.".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Edit, rename, delete and reveal one entry of the account.
 fn mutate(store: &Store, method: &str, args: &Value) -> std::result::Result<Value, vault::Error> {
     match method {
+        "variable_rename" => {
+            let rename: RenameArgs = parse(args)?;
+            let renamed = store.rename(&rename.id, rename.version, &rename.name)?;
+            Ok(json!({"variable":renamed.variable,"replayed":renamed.replayed}))
+        }
         "variable_update" => {
             let update: UpdateArgs = parse(args)?;
             let updated = store.update(
@@ -334,6 +409,7 @@ fn run(host: &Host, method: &str, args: &Value) -> std::result::Result<Value, va
         "variable_list"
         | "variable_create"
         | "variable_update"
+        | "variable_rename"
         | "variable_delete"
         | "variable_entry_status"
         | "variable_entry_complete"
@@ -371,10 +447,15 @@ fn run(host: &Host, method: &str, args: &Value) -> std::result::Result<Value, va
     if let Some(action) = match method {
         "variable_reveal" => Some("reveal"),
         "variable_update" => Some("update"),
+        "variable_rename" => Some("rename"),
         "variable_delete" => Some("delete"),
         _ => None,
     } {
-        let result = mutate(&store, method, args);
+        let result = if method == "variable_rename" {
+            check_rename(host, args).and_then(|()| mutate(&store, method, args))
+        } else {
+            mutate(&store, method, args)
+        };
         let entry = entry_of(args);
         let replayed = result.as_ref().is_ok_and(|data| data["replayed"] == true);
         store.audit(action, entry.as_deref(), outcome(&result, replayed));
