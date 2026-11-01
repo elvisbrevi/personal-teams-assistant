@@ -1307,14 +1307,14 @@ for (const [label, ctx] of [['variables-desktop', {}], ['variables-phone', { vie
   await button(DEPLOY, 'Editar').click();
   check(`${label}: saving a description needs a change`, await editor(DEPLOY).getByRole('button', { name: 'Guardar descripción' }).isDisabled());
   check(`${label}: the replacement value field is masked`, await editor(DEPLOY).locator('textarea').evaluate(node => getComputedStyle(node).webkitTextSecurity) === 'disc');
-  await editor(DEPLOY).locator('input:not([type=checkbox])').fill('Discarded description');
+  await editor(DEPLOY).getByRole('textbox', { name: /^Descripción de / }).fill('Discarded description');
   await editor(DEPLOY).locator('textarea').fill('discarded-value');
   const updatesBefore = await page.evaluate(() => window.__ptaVariableUpdates.length);
   await editor(DEPLOY).getByRole('button', { name: 'Cancelar', exact: true }).click();
   await button(DEPLOY, 'Editar').click();
   check(`${label}: Cancel discards edits without calling the host`, await page.evaluate(n => window.__ptaVariableUpdates.length === n, updatesBefore)
-    && await editor(DEPLOY).locator('input:not([type=checkbox])').inputValue() === 'Base URL of the release service <b>not markup</b>' && await editor(DEPLOY).locator('textarea').inputValue() === '');
-  await editor(DEPLOY).locator('input:not([type=checkbox])').fill('Release service base URL');
+    && await editor(DEPLOY).getByRole('textbox', { name: /^Descripción de / }).inputValue() === 'Base URL of the release service <b>not markup</b>' && await editor(DEPLOY).locator('textarea').inputValue() === '');
+  await editor(DEPLOY).getByRole('textbox', { name: /^Descripción de / }).fill('Release service base URL');
   await editor(DEPLOY).getByRole('button', { name: 'Guardar descripción' }).click();
   await row(DEPLOY).getByText('Release service base URL', { exact: true }).waitFor();
   check(`${label}: a description edit sends only the description and the seen version`, await page.evaluate(id => {
@@ -1340,15 +1340,29 @@ for (const [label, ctx] of [['variables-desktop', {}], ['variables-phone', { vie
 
   // Another client's newer change is reported, never overwritten, and the typed text survives.
   await button(KEY, 'Editar').click();
-  await editor(KEY).locator('input:not([type=checkbox])').fill('My conflicting description');
+  await editor(KEY).getByRole('textbox', { name: /^Descripción de / }).fill('My conflicting description');
   await page.evaluate(id => window.__ptaVariableChangedElsewhere(id), KEY_ID);
   await editor(KEY).getByRole('button', { name: 'Guardar descripción' }).click();
   await page.locator('#notice', { hasText: 'cambió desde que se cargó' }).waitFor();
   check(`${label}: a stale edit is reported as a conflict`, await notice().then(text => text.includes('cambió desde que se cargó')));
   await row(KEY).getByText('(edited elsewhere)').waitFor();
   check(`${label}: the conflict refreshed the list and kept the other client's change`, await row(KEY).innerText().then(text => text.includes('(edited elsewhere)') && text.includes('versión 3')));
-  check(`${label}: the conflict kept the typed description for another try`, await editor(KEY).locator('input:not([type=checkbox])').inputValue() === 'My conflicting description');
+  check(`${label}: the conflict kept the typed description for another try`, await editor(KEY).getByRole('textbox', { name: /^Descripción de / }).inputValue() === 'My conflicting description');
   await editor(KEY).getByRole('button', { name: 'Cancelar', exact: true }).click();
+
+  // A rename changes only the name: no value is read or sent, and the entry keeps its ID.
+  await button(KEY, 'Editar').click();
+  check(`${label}: renaming needs a different name`, await editor(KEY).getByRole('button', { name: 'Renombrar' }).isDisabled());
+  await editor(KEY).getByRole('textbox', { name: /^Nombre nuevo de / }).fill('SIGNING_KEY');
+  const revealsBeforeRename = await page.evaluate(() => window.__ptaVariableReveals.length);
+  await editor(KEY).getByRole('button', { name: 'Renombrar' }).click();
+  await page.locator('#variables .row', { hasText: 'SIGNING_KEY' }).getByText('versión 4').waitFor();
+  check(`${label}: a rename sends only the ID, the seen version and the new name`, await page.evaluate(([id, reveals]) => {
+    const last = window.__ptaVariableRenames.at(-1);
+    return last.id === id && last.version === 3 && last.name === 'SIGNING_KEY' && last.keys === 'id,name,version' && window.__ptaVariableReveals.length === reveals;
+  }, [KEY_ID, revealsBeforeRename]));
+  await page.locator('#notice', { hasText: 'se renombró a SIGNING_KEY' }).waitFor({ timeout: 5000 }).catch(() => {});
+  check(`${label}: the rename is confirmed in Spanish and closes the form`, await notice().then(text => text.includes('se renombró a SIGNING_KEY')) && await editor(KEY).count() === 0, await notice());
 
   // Axe sees an open editor and a revealed value, then deletion asks twice.
   await button(DEPLOY, 'Editar').click();
@@ -1367,7 +1381,7 @@ for (const [label, ctx] of [['variables-desktop', {}], ['variables-phone', { vie
   await button(KEY, 'Eliminar').click();
   await button(KEY, 'Confirmar eliminación').click();
   await page.locator('#variables .row', { hasText: KEY }).waitFor({ state: 'detached' });
-  check(`${label}: a confirmed deletion names the seen version and removes the entry`, await page.evaluate(([n, id]) => window.__ptaVariableDeletes.length === n + 1 && window.__ptaVariableDeletes.at(-1).id === id && window.__ptaVariableDeletes.at(-1).version === 3, [deletesBefore, KEY_ID]));
+  check(`${label}: a confirmed deletion names the seen version and removes the entry`, await page.evaluate(([n, id]) => window.__ptaVariableDeletes.length === n + 1 && window.__ptaVariableDeletes.at(-1).id === id && window.__ptaVariableDeletes.at(-1).version === 4, [deletesBefore, KEY_ID]));
   const listsBefore = await page.evaluate(() => window.__ptaCalls.filter(call => call === 'variable_list').length);
   await page.locator('#variables-refresh').click();
   await page.locator('#notice.ok').getByText('Variables actualizadas').waitFor();
