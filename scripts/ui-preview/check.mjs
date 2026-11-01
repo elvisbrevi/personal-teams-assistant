@@ -1416,6 +1416,28 @@ for (const [label, ctx] of [['variables-desktop', {}], ['variables-phone', { vie
   await page.locator('#launcher-list').getByRole('button', { name: /^Eliminar/ }).click();
   await page.locator('#launchers').waitFor({ state: 'hidden' });
   check(`${label}: approving, stopping and removing call only their own operations`, JSON.stringify(await consumerCalls()) === '["bind","check","approve","unbind","remove"]');
+  // Delivery destinations: a person approves exactly what is shown; a delivery asks twice and reports only a status.
+  const deliveries = page.locator('#deliveries');
+  check(`${label}: a proposed destination shows its address, headers, body, credential and variables as text`, await deliveries.innerText().then(text => text.includes('PUT https://editor.example.test/api/import/secrets/OPENAI_API_KEY')
+    && text.includes('X-Blog-Editor: 1') && text.includes('Authorization: Bearer ‹DEPLOY_ENDPOINT›') && text.includes('{"value":"{{value}}"}') && text.includes('Puede recibir: DEPLOY_ENDPOINT')
+    && text.includes('<b>not markup</b>') && text.includes('Esperando tu aprobación')) && await page.locator('#delivery-list b').count() === 0);
+  check(`${label}: nothing can be delivered before approval`, await deliveries.getByRole('button', { name: /^Entregar/ }).count() === 0);
+  await deliveries.getByRole('button', { name: 'Aprobar el destino blog-editor-openai' }).click();
+  await deliveries.locator('.badge', { hasText: 'Aprobado' }).waitFor();
+  await deliveries.getByRole('button', { name: 'Entregar DEPLOY_ENDPOINT' }).click();
+  check(`${label}: a delivery asks for a second tap and says where the value goes`, await page.evaluate(() => window.__ptaDeliveryCalls.length === 1)
+    && await deliveries.innerText().then(text => text.includes('lo rotes en su proveedor')));
+  await page.evaluate(axeSource);
+  check(`${label}: delivery destinations pass axe`, (await scan(page)).length === 0, JSON.stringify(await scan(page)));
+  await deliveries.getByRole('button', { name: 'Confirmar la entrega de DEPLOY_ENDPOINT' }).click();
+  await deliveries.getByText('Entregada a blog-editor-openai').waitFor();
+  check(`${label}: approving and delivering send the shown digest and only the reference`, await page.evaluate(() => {
+    const [approve, deliver] = window.__ptaDeliveryCalls;
+    return approve.digest === 'e'.repeat(64) && deliver.destination === 'blog-editor-openai' && deliver.variable === 'aaaaaaaa-0000-4000-8000-000000000001'
+      && Object.keys(deliver).sort().join(',') === 'destination,method,variable,version';
+  }) && await deliveries.innerText().then(text => text.includes('HTTP 200') && text.includes('confirmó el valor')));
+  await deliveries.getByRole('button', { name: 'Eliminar el destino blog-editor-openai' }).click();
+  await deliveries.waitFor({ state: 'hidden' });
   // Migration: choose entries, write descriptions and confirm the account; no value is ever involved.
   await page.evaluate(() => showTab('settings', 'panel-migration'));
   const migration = page.locator('#panel-migration');

@@ -12,7 +12,7 @@ struct UsageArgs {
     limit: Option<usize>,
 }
 
-const NO_PATH: &str = "Nothing uses this variable by reference yet. Do not ask for its value: tell the user which path is missing (a built-in consumer binding, a launcher they approve on their trusted machine, or a delivery destination they approve) and propose it.";
+const NO_PATH: &str = "Nothing uses this variable by reference yet. Do not ask for its value: tell the user which path is missing and propose it (delivery_define for another system that should receive it, a built-in consumer binding, or a launcher they approve on their trusted machine).";
 
 pub(super) async fn usage(host: &Arc<Host>, request: &control::Request) -> Reply {
     let args: UsageArgs = match parse(&request.args) {
@@ -33,6 +33,17 @@ pub(super) async fn usage(host: &Arc<Host>, request: &control::Request) -> Reply
     if !consumers.ok {
         return consumers;
     }
+    // Destinations belong to the installation's owner; for anyone else there are none.
+    let deliveries = Box::pin(super::super::deliveries::operate(
+        host,
+        &control::Request::new("variable_delivery_list"),
+    ))
+    .await;
+    let destinations = if deliveries.ok {
+        deliveries.data["destinations"].clone()
+    } else {
+        json!([])
+    };
     let config = match read_config(&host.state.config_path) {
         Ok(config) => config,
         Err(_) => {
@@ -89,6 +100,25 @@ pub(super) async fn usage(host: &Arc<Host>, request: &control::Request) -> Reply
                         "operations": ["launcher_run"],
                         "confirmation": true,
                         "available_here": usable && launchers_here && approved,
+                    }));
+                }
+            }
+            for destination in destinations.as_array().into_iter().flatten() {
+                if destination["variables"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .any(|v| v["id"] == id)
+                {
+                    let approved = destination["approved"] == true;
+                    paths.push(json!({
+                        "kind": "delivery",
+                        "id": destination["id"],
+                        "url": destination["url"],
+                        "approved": approved,
+                        "operations": ["variable_deliver"],
+                        "confirmation": true,
+                        "available_here": usable && approved,
                     }));
                 }
             }
