@@ -161,7 +161,7 @@ impl Server {
                         .copied()
                         .unwrap_or(PROTOCOLS[0]);
                     Ok(
-                        json!({"protocolVersion": version, "capabilities": {"tools": {"listChanged": false}, "experimental": {"account_authority_support":true,"shared_accounts_support":true}},
+                        json!({"protocolVersion": version, "capabilities": capabilities(),
                         "serverInfo": {"name": "personal-teams-assistant", "title": "Personal Teams Assistant", "version": env!("CARGO_PKG_VERSION")},
                         "instructions": INSTRUCTIONS}),
                     )
@@ -191,6 +191,11 @@ impl Server {
 }
 
 /// How to add the server to Claude Code and Codex.
+/// MCP makes every experimental capability an object: a client that checks the schema refuses
+/// any other value, so support is an empty object.
+fn capabilities() -> Value {
+    json!({"tools": {"listChanged": false}, "experimental": {"account_authority_support": {}, "shared_accounts_support": {}}})
+}
 pub(super) fn config() -> Reply {
     let pta = std::env::current_exe()
         .ok()
@@ -203,4 +208,15 @@ pub(super) fn config() -> Reply {
         "json": {"mcpServers": {"personal-teams-assistant": {"command": pta, "args": ["mcp"]}}},
         "tools": TOOLS.iter().map(|t| json!({"name": t.name, "effect": match t.effect { Effect::Read => "read", Effect::Local => "local", Effect::External => "needs confirmation" }})).collect::<Vec<_>>(),
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn experimental_capabilities_are_objects() {
+        let capabilities = super::capabilities();
+        let experimental = capabilities["experimental"].as_object().unwrap();
+        assert!(experimental.contains_key("account_authority_support"));
+        assert!(experimental.values().all(serde_json::Value::is_object));
+    }
 }

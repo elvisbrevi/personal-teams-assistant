@@ -4,5 +4,6 @@
 //! profile is the default implementation and behaves exactly as the files always did. The module
 //! is at the crate's root because the message pipeline uses it as much as the host does.
 
+pub mod audit;
 pub mod notes;
 pub(crate) mod settings;

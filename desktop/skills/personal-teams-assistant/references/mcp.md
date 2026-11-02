@@ -24,7 +24,7 @@ Other clients take `{"mcpServers":{"personal-teams-assistant":{"command":"pta","
 
 Implementation tools and their confirmation requirements are described in [work item implementation](tools-and-todo.md#implement-work-items-and-inspect-agent-sessions). To add the user's computer to their account, call `machine_login`, show the user its approval URL and code, wait for them to choose Trust this machine in the browser, then call `machine_login_finish`; results never contain credentials ([web-access.md](web-access.md#add-a-computer-you-own-by-signing-in-0912)). `implementation_runs` and `implementation_sessions` expose persistent native session IDs, work item associations, machine, state and start/finish times. Daily activity tools remain read-only.
 
-Account and invocation authority requires `account_authority_support` (0.9.10+).
+Account and invocation authority requires `account_authority_support` (0.9.10+). The server announces it, and `shared_accounts_support`, under `capabilities.experimental` as empty objects, as MCP requires; before 0.10.19 they were `true`, which clients that check the schema refuse at `initialize`.
 MCP tools use the same authenticated host dispatcher as CLI and GUI; tool arguments
 cannot select an account or acquire operator maintenance authority. Ordinary
 shared-host provider/coding processes are refused before launch; use a personal

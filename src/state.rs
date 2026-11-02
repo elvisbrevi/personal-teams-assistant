@@ -1,7 +1,11 @@
+use crate::store::audit::{self, AuditEntry, AuditStore, LocalAudit};
 use anyhow::Result;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
-use std::{path::Path, sync::Mutex};
+use std::{
+    path::Path,
+    sync::{Mutex, MutexGuard},
+};
 
 pub struct Store {
     db: Mutex<Connection>,
@@ -134,20 +138,40 @@ impl Audit {
         });
     }
 }
-impl Store {
-    pub fn associate_question(
-        path: &Path,
-        resource: &str,
-        question: &crate::questions::IdentifiedQuestion,
-    ) -> Result<()> {
-        let store = Self::attach(path)?;
-        let changed = store.db.lock().unwrap().execute("UPDATE jobs SET audit=json_set(audit,'$.identified_question',json(?2),'$.reason','question_associated','$.trace[#]',json(?3)) WHERE resource=?1 AND status IN ('ignored','dry_run')", params![resource, serde_json::to_string(question)?, serde_json::to_string(&TraceStep { at: chrono::Utc::now().timestamp_millis(), step: "question association".into(), detail: question.id.clone() })?])?;
-        anyhow::ensure!(
-            changed == 1,
-            "message changed while associating the question"
-        );
-        Ok(())
+/// A stored audit as JSON: a job still queued has none yet, an empty object, never null.
+pub(crate) fn audit_value(text: Option<&str>) -> Result<serde_json::Value> {
+    Ok(text
+        .map(serde_json::from_str)
+        .transpose()?
+        .unwrap_or_else(|| serde_json::json!({})))
+}
+/// Remove the message content from an audit (what `audit` shows without `content`).
+pub fn redact(audit: &mut serde_json::Value) {
+    let Some(obj) = audit.as_object_mut() else {
+        return;
+    };
+    for field in [
+        "proposed",
+        "sent",
+        "question",
+        "resolved_question",
+        "topic",
+        "refinement",
+    ] {
+        obj.remove(field);
     }
+    if let Some(messages) = obj
+        .get_mut("teams_messages")
+        .and_then(serde_json::Value::as_array_mut)
+    {
+        for message in messages {
+            if let Some(m) = message.as_object_mut() {
+                m.remove("text");
+            }
+        }
+    }
+}
+impl Store {
     /// Attach to an existing database without recovering jobs. Used by account probes.
     pub fn attach(path: &Path) -> Result<Self> {
         let db = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
@@ -175,20 +199,13 @@ impl Store {
             UPDATE jobs SET status='ignored',audit=json_set(coalesce(audit,'{}'),'$.status','ignored','$.reason','refinement_failed') WHERE status='refining';"#)?;
         Ok(store)
     }
+    /// The connection, for the profile's local stores in the same database (`LocalAudit`).
+    pub(crate) fn connection(&self) -> MutexGuard<'_, Connection> {
+        self.db.lock().unwrap()
+    }
     /// Append a host diagnostic without recovering or changing in-flight jobs.
     pub(crate) fn append_event(path: &Path, kind: &str, detail: &str) -> Result<()> {
         Self::initialize(path)?.event(kind, detail)
-    }
-    /// Set (or clear) the user's judgment of an answer without touching anything else in the
-    /// job, so it never races with a job being processed. False when the job does not exist or
-    /// is being processed, written or sent.
-    pub fn set_feedback(path: &Path, resource: &str, feedback: Option<&Feedback>) -> Result<bool> {
-        let db = Self::attach(path)?;
-        let changed = db.db.lock().unwrap().execute(
-            "UPDATE jobs SET audit=CASE WHEN ?2 IS NULL THEN json_remove(audit,'$.feedback') ELSE json_set(audit,'$.feedback',json(?2)) END WHERE resource=?1 AND audit IS NOT NULL AND status NOT IN ('pending','processing','refining','sending')",
-            params![resource, feedback.map(serde_json::to_string).transpose()?],
-        )?;
-        Ok(changed > 0)
     }
     /// Diagnostic connections never recover or mutate jobs.
     pub fn self_chat_diagnostics(path: &Path) -> Result<serde_json::Value> {
@@ -273,47 +290,37 @@ impl Store {
             let mut stmt =
                 db.prepare("SELECT time,kind,detail FROM events ORDER BY id DESC LIMIT ?1")?;
             for row in stmt.query_map([limit.min(1000)], |r| Ok(serde_json::json!({"time":r.get::<_,i64>(0)?,"kind":r.get::<_,String>(1)?,"detail":r.get::<_,String>(2)?})))? { out.push(row?); }
-        } else {
-            let mut stmt = db.prepare("SELECT resource,status,audit,created_at FROM jobs WHERE (?1 IS NULL OR resource=?1) ORDER BY created_at DESC LIMIT ?2")?;
-            for row in stmt.query_map(params![resource, limit.min(1000)], |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, Option<String>>(2)?,
-                    r.get::<_, i64>(3)?,
-                ))
-            })? {
-                let (resource, status, text, created_at) = row?;
-                // A job still queued has no audit yet: an empty object, never null.
-                let mut audit: serde_json::Value = text
-                    .as_deref()
-                    .map(serde_json::from_str)
-                    .transpose()?
-                    .unwrap_or_else(|| serde_json::json!({}));
-                if !content && let Some(obj) = audit.as_object_mut() {
-                    for field in [
-                        "proposed",
-                        "sent",
-                        "question",
-                        "resolved_question",
-                        "topic",
-                        "refinement",
-                    ] {
-                        obj.remove(field);
-                    }
-                    if let Some(messages) = obj
-                        .get_mut("teams_messages")
-                        .and_then(serde_json::Value::as_array_mut)
-                    {
-                        for message in messages {
-                            if let Some(m) = message.as_object_mut() {
-                                m.remove("text");
-                            }
-                        }
-                    }
-                }
-                out.push(serde_json::json!({"resource":resource,"status":status,"created_at":created_at,"audit":audit}));
+            return Ok(out);
+        }
+        // The worker's in-flight messages, then the finished ones from the audit history.
+        let mut stmt = db.prepare("SELECT resource,status,audit,created_at FROM jobs WHERE status IN ('pending','processing','refining','sending') AND (?1 IS NULL OR resource=?1) ORDER BY created_at DESC LIMIT ?2")?;
+        let mut entries = Vec::new();
+        for row in stmt.query_map(params![resource, limit.min(1000)], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, Option<String>>(2)?,
+                r.get::<_, i64>(3)?,
+            ))
+        })? {
+            let (resource, status, text, created_at) = row?;
+            entries.push(AuditEntry {
+                resource,
+                status,
+                created_at,
+                audit: audit_value(text.as_deref())?,
+            });
+        }
+        drop(stmt);
+        let store = Self { db: Mutex::new(db) };
+        entries.extend(LocalAudit::new(&store).entries(resource, limit)?);
+        entries.sort_by_key(|e| std::cmp::Reverse(e.created_at));
+        entries.truncate(limit.min(1000));
+        for mut entry in entries {
+            if !content {
+                redact(&mut entry.audit);
             }
+            out.push(serde_json::json!({"resource":entry.resource,"status":entry.status,"created_at":entry.created_at,"audit":entry.audit}));
         }
         Ok(out)
     }
@@ -454,7 +461,12 @@ impl Store {
         self.db.lock().unwrap().execute("UPDATE jobs SET status=?2,next_at=unixepoch()+?3,audit=?4 WHERE resource=?1 AND status='processing'", params![job.resource,status,2i64.pow(job.attempts+1),serde_json::to_string(&audit)?])?;
         Ok(())
     }
+    /// Write a message's status and audit: a finished one goes to the audit history, an
+    /// in-flight one stays the worker's.
     pub fn record(&self, resource: &str, audit: &Audit) -> Result<()> {
+        if audit::finished(&audit.status) {
+            return LocalAudit::new(self).record(resource, audit);
+        }
         self.db.lock().unwrap().execute(
             "UPDATE jobs SET status=?2,audit=?3 WHERE resource=?1",
             params![resource, audit.status, serde_json::to_string(audit)?],
@@ -592,14 +604,15 @@ mod tests {
             context: None,
             at: 1,
         };
-        assert!(Store::set_feedback(&path, "done", Some(&feedback)).unwrap());
+        let history = LocalAudit::new(&store);
+        assert!(history.set_feedback("done", Some(&feedback)).unwrap());
         let saved = store.audit("done").unwrap().unwrap();
         assert_eq!(saved.feedback, Some(feedback.clone()));
         assert_eq!(saved.sent.as_deref(), Some("Respuesta"));
         assert_eq!(store.status("done").unwrap().as_deref(), Some("sent"));
-        assert!(!Store::set_feedback(&path, "busy", Some(&feedback)).unwrap());
-        assert!(!Store::set_feedback(&path, "missing", Some(&feedback)).unwrap());
-        assert!(Store::set_feedback(&path, "done", None).unwrap());
+        assert!(!history.set_feedback("busy", Some(&feedback)).unwrap());
+        assert!(!history.set_feedback("missing", Some(&feedback)).unwrap());
+        assert!(history.set_feedback("done", None).unwrap());
         assert_eq!(store.audit("done").unwrap().unwrap().feedback, None);
     }
     #[test]
@@ -614,6 +627,47 @@ mod tests {
         );
         let rows = Store::inspect(&path, false, 10, None, false).unwrap();
         assert_eq!(rows[0]["audit"], serde_json::json!({}));
+    }
+    #[test]
+    fn the_listing_joins_in_flight_and_finished_messages_without_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("assistant.db");
+        let store = Store::open(&path).unwrap();
+        for resource in ["queued", "answered"] {
+            store.enqueue(resource).unwrap();
+        }
+        store
+            .connection()
+            .execute(
+                "UPDATE jobs SET created_at=created_at-60 WHERE resource='answered'",
+                [],
+            )
+            .unwrap();
+        store
+            .record(
+                "answered",
+                &Audit {
+                    status: "sent".into(),
+                    sent: Some("Respuesta".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let rows = Store::inspect(&path, false, 10, None, false).unwrap();
+        let listed: Vec<_> = rows
+            .iter()
+            .map(|r| r["resource"].as_str().unwrap())
+            .collect();
+        assert_eq!(listed, ["queued", "answered"], "newest first");
+        assert_eq!(rows[1]["status"], "sent");
+        assert!(rows[1]["audit"].get("sent").is_none(), "content stays out");
+        let rows = Store::inspect(&path, false, 1, Some("answered"), true).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["audit"]["sent"], "Respuesta");
+        assert_eq!(
+            Store::inspect(&path, false, 1, None, true).unwrap().len(),
+            1
+        );
     }
     #[test]
     fn activity_index_survives_restart() {

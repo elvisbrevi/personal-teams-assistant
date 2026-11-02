@@ -5,6 +5,7 @@
 use super::Host;
 use super::{DesktopState, fail};
 use crate::store::{
+    audit::{AuditStore, LocalAudit},
     notes::{Example, LocalNotes, NotesStore},
     settings::SettingsStore,
 };
@@ -297,7 +298,11 @@ pub(super) fn feedback(state: &DesktopState, args: &Value) -> Reply {
         context: context.clone(),
         at: chrono::Utc::now().timestamp(),
     });
-    if !crate::state::Store::set_feedback(&db, &resource, feedback.as_ref()).map_err(fail)? {
+    let store = crate::state::Store::attach(&db).map_err(fail)?;
+    if !LocalAudit::new(&store)
+        .set_feedback(&resource, feedback.as_ref())
+        .map_err(fail)?
+    {
         return Err("[conflict] This message is being processed; rate it when it ends.".into());
     }
     let request = audit
@@ -438,7 +443,10 @@ pub(super) async fn associate(host: &Arc<Host>, args: &Value) -> Reply {
     };
     let tunnel = state.settings.tunnel().unwrap_or_default();
     super::save_settings(host, config, map, tunnel).await?;
-    crate::state::Store::associate_question(&db, &resource, &identified).map_err(fail)?;
+    let store = crate::state::Store::attach(&db).map_err(fail)?;
+    LocalAudit::new(&store)
+        .associate_question(&resource, &identified)
+        .map_err(fail)?;
     Ok(json!({"resource":resource,"question":identified}))
 }
 
