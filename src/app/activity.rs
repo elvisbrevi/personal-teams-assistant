@@ -1,6 +1,9 @@
 //! Host-owned read-only daily task snapshots, independent of Teams and language models.
 use super::*;
-use crate::store::settings::SettingsStore;
+use crate::store::{
+    activity::{ActivityStore, LocalActivity},
+    settings::SettingsStore,
+};
 use crate::{
     activity::{Summary, store::Database},
     tools::{ToolSpec, tasks::Day},
@@ -63,12 +66,12 @@ pub(super) async fn inspect(
     let days = if pending {
         vec![]
     } else {
-        db.days(&since, &until)?
+        LocalActivity::new(&db).days(&since, &until)?
     };
     let record = days.iter().find(|d| d.day == until);
     let summaries: Vec<_> = days.iter().map(|d| json!({"day":d.day,"tasks":d.tasks.len(),"hours":d.hours,"target_hours":d.target_hours,"saved_at":d.saved_at,"partial":d.partial})).collect();
     Ok(
-        json!({"day":until,"running":active(state).await,"days":summaries,"record":record,"entries":[],"runs":db.runs(Some(&until))?,"last_run":db.runs(None)?.first(),"summary":db.summary(&until)?,"settings":config.activity_registration}),
+        json!({"day":until,"running":active(state).await,"days":summaries,"record":record,"entries":[],"runs":db.runs(Some(&until))?,"last_run":db.runs(None)?.first(),"summary":LocalActivity::new(&db).summary(&until)?,"settings":config.activity_registration}),
     )
 }
 pub(super) async fn run(
@@ -143,7 +146,7 @@ pub(super) async fn run(
             }
             day.saved_at = Utc::now().timestamp();
             ensure!(authority::invocation(&h.state)?.scope.admitted, "Account binding changed.");
-            db.save_day(&day)?;
+            LocalActivity::new(&db).save_day(&day)?;
             Ok(day)
         }.await;
         if !authority::invocation(&h.state).is_ok_and(|i| i.scope.admitted) {
@@ -167,7 +170,7 @@ pub(super) async fn run(
                     warnings,
                     ..Default::default()
                 };
-                let _ = db.save_summary(&day.day, &summary);
+                let _ = LocalActivity::new(&db).save_summary(&day.day, &summary);
                 let body = language.say(
                     format!("Saved {} tasks for {}.", day.tasks.len(), day.day),
                     format!("Se guardaron {} tareas del {}.", day.tasks.len(), day.day),
@@ -180,7 +183,7 @@ pub(super) async fn run(
                 (None, error, body)
             }
         };
-        let _ = db.finish_run(&run_id, summary.as_ref(), &error);
+        let _ = LocalActivity::new(&db).finish_run(&run_id, summary.as_ref(), &error);
         let _ =
             h.shell
                 .notify_activity(&language.say("Daily tasks", "Tareas del día"), &body, None);

@@ -3397,7 +3397,8 @@ async fn what_the_user_did_on_a_day_comes_from_the_recorded_activities() {
         created_at: None,
         dates: vec![],
     };
-    activities
+    use personal_teams_assistant::store::activity::{ActivityStore, LocalActivity};
+    LocalActivity::new(&activities)
         .save_day(&Day {
             day: (today - chrono::Duration::days(1)).to_string(),
             saved_at: 1,
