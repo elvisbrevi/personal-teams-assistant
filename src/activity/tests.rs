@@ -1,5 +1,6 @@
 use super::*;
 use crate::config::Config;
+use crate::store::activity::{ActivityStore, LocalActivity};
 use serde_json::json;
 
 #[test]
@@ -102,11 +103,16 @@ fn daily_snapshots_replace_atomically_keep_legacy_data_and_supply_verified_recap
         saved_at: 1,
         ..Default::default()
     };
-    db.save_day(&record).unwrap();
-    db.save_day(&record).unwrap();
+    LocalActivity::new(&db).save_day(&record).unwrap();
+    LocalActivity::new(&db).save_day(&record).unwrap();
     drop(db);
     let db = store::Database::open(&path).unwrap();
-    assert_eq!(db.days(day, day).unwrap()[0].tasks.len(), 1);
+    assert_eq!(
+        LocalActivity::new(&db).days(day, day).unwrap()[0]
+            .tasks
+            .len(),
+        1
+    );
     let entries = store::Database::recorded(&path, day, day).unwrap();
     let evidence = recorded::evidence(&entries, &[], day, day).unwrap();
     assert!(
@@ -128,7 +134,7 @@ fn daily_snapshots_replace_atomically_keep_legacy_data_and_supply_verified_recap
     parent.project = "Other".into();
     parent.url = "https://dev.azure.com/example/Other/_workitems/edit/50".into();
     related.tasks[0].parent = Some(parent);
-    db.save_day(&related).unwrap();
+    LocalActivity::new(&db).save_day(&related).unwrap();
     let entries = store::Database::recorded(&path, day, day).unwrap();
     let linked = recorded::evidence(&entries, &[], day, day).unwrap();
     assert_eq!(
@@ -139,13 +145,14 @@ fn daily_snapshots_replace_atomically_keep_legacy_data_and_supply_verified_recap
     for reference in &linked.references {
         reference.validate().unwrap();
     }
-    db.save_day(&Day {
-        day: day.into(),
-        saved_at: 2,
-        ..Default::default()
-    })
-    .unwrap();
-    assert_eq!(db.days(day, day).unwrap().len(), 1);
+    LocalActivity::new(&db)
+        .save_day(&Day {
+            day: day.into(),
+            saved_at: 2,
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(LocalActivity::new(&db).days(day, day).unwrap().len(), 1);
     let empty = store::Database::recorded(&path, day, day).unwrap();
     assert!(
         recorded::evidence(&empty, &[], day, day)

@@ -1,10 +1,16 @@
-//! A separate database: opening it never recovers or changes the Teams worker's jobs.
-use super::{Entry, Summary, activity_key};
+//! A separate database: opening it never recovers or changes the Teams worker's jobs. The
+//! user's record in it (snapshots, summaries, finished runs, legacy decisions) is read and
+//! written through `store::activity`; the scheduler's running runs and recovery stay here.
+use super::{Entry, activity_key};
+use crate::store::activity::{self, ActivityStore, LocalActivity};
 use anyhow::{Context, Result, ensure};
 use chrono::Utc;
 use rusqlite::{Connection, OptionalExtension, params};
-use serde_json::{Value, json};
-use std::{path::Path, sync::Mutex};
+use serde_json::Value;
+use std::{
+    path::Path,
+    sync::{Mutex, MutexGuard},
+};
 
 pub struct Database {
     db: Mutex<Connection>,
@@ -76,48 +82,6 @@ impl Database {
         )?;
         Ok(())
     }
-    pub fn finish_run(&self, id: &str, summary: Option<&Summary>, error: &str) -> Result<()> {
-        self.db.lock().unwrap().execute(
-            "UPDATE runs SET status=?2,summary=?3,diagnostics=json_set(diagnostics,'$.error',?4,'$.finished_at',?5) WHERE id=?1",
-            params![
-                id,
-                if summary.is_some() {
-                    "completed"
-                } else {
-                    "failed"
-                },
-                serde_json::to_string(&summary)?,
-                error,
-                Utc::now().timestamp(),
-            ],
-        )?;
-        Ok(())
-    }
-    pub fn runs(&self, day: Option<&str>) -> Result<Vec<Value>> {
-        let db = self.db.lock().unwrap();
-        let mut stmt=db.prepare("SELECT id,day,status,summary,created_at,diagnostics FROM runs WHERE (?1 IS NULL OR day=?1) ORDER BY created_at DESC,rowid DESC LIMIT 100")?;
-        let rows = stmt.query_map([day], |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, String>(2)?,
-                r.get::<_, String>(3)?,
-                r.get::<_, i64>(4)?,
-                r.get::<_, String>(5)?,
-            ))
-        })?;
-        rows.map(|r| {
-            let (id, day, status, summary, at, diagnostics) = r?;
-            let summary = serde_json::from_str::<Value>(&summary)?;
-            // The stored empty default means no result yet, including recovered runs.
-            let summary = if summary == json!({}) {
-                Value::Null
-            } else {
-                summary
-            };
-            Ok(json!({"id":id,"day":day,"status":status,"summary":summary,"created_at":at,"diagnostics":serde_json::from_str::<Value>(&diagnostics)?}))
-        }).collect()
-    }
     pub fn claimed(&self, key: &str) -> Result<bool> {
         Ok(self.db.lock().unwrap().query_row(
             "SELECT EXISTS(SELECT 1 FROM claims WHERE activity=?1)",
@@ -183,7 +147,7 @@ impl Database {
     }
     /// Entries from `since` to `until` (yyyy-mm-dd, inclusive), newest day first.
     pub fn between(&self, since: &str, until: &str) -> Result<Vec<Entry>> {
-        between(&self.db.lock().unwrap(), since, until)
+        activity::between(&self.db.lock().unwrap(), since, until)
     }
     pub fn entries(&self, day: Option<&str>) -> Result<Vec<Entry>> {
         let db = self.db.lock().unwrap();
@@ -191,6 +155,29 @@ impl Database {
         stmt.query_map([day], |r| r.get::<_, String>(0))?
             .map(|r| Ok(serde_json::from_str(&r?)?))
             .collect()
+    }
+    /// Entries recorded from `since` to `until` (yyyy-mm-dd, inclusive), newest day first,
+    /// read without opening the database for writing: the Teams pipeline reads them as context
+    /// while the host's recorder owns the file. A missing database has no entries.
+    pub fn recorded(path: &Path, since: &str, until: &str) -> Result<Vec<Entry>> {
+        if !path.exists() {
+            return Ok(Vec::new());
+        }
+        let db = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        db.busy_timeout(std::time::Duration::from_secs(2))?;
+        LocalActivity::new(&Self { db: Mutex::new(db) }).recorded(since, until)
+    }
+    /// Every run, running or finished, the newest first (at most 100); `day` keeps that day's.
+    pub fn runs(&self, day: Option<&str>) -> Result<Vec<Value>> {
+        let mut runs = activity::runs(&self.connection(), "status='running'", day)?;
+        runs.extend(LocalActivity::new(self).runs(day)?);
+        runs.sort_by_key(|r| std::cmp::Reverse(r["created_at"].as_i64()));
+        runs.truncate(100);
+        Ok(runs)
+    }
+    /// The connection, for the profile's activity record in the same database (`LocalActivity`).
+    pub(crate) fn connection(&self) -> MutexGuard<'_, Connection> {
+        self.db.lock().unwrap()
     }
     fn in_states(&self, condition: &str) -> Result<Vec<Entry>> {
         // Only fixed code-owned predicates are passed here.
@@ -205,123 +192,4 @@ impl Database {
     pub fn pending(&self) -> Result<Vec<Entry>> {
         self.in_states("state IN ('pending','refining')")
     }
-    /// Entries recorded from `since` to `until` (yyyy-mm-dd, inclusive), newest day first,
-    /// read without opening the database for writing: the Teams pipeline reads them as context
-    /// while the host's recorder owns the file. A missing database has no entries.
-    pub fn recorded(path: &Path, since: &str, until: &str) -> Result<Vec<Entry>> {
-        if !path.exists() {
-            return Ok(Vec::new());
-        }
-        let db = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-        db.busy_timeout(std::time::Duration::from_secs(2))?;
-        let mut entries = between(&db, since, until)?;
-        if db.query_row(
-            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='task_days')",
-            [],
-            |r| r.get::<_, bool>(0),
-        )? {
-            for day in task_days(&db, since, until)? {
-                entries.retain(|e| e.day != day.day);
-                entries.extend(day.entries());
-            }
-        }
-        Ok(entries)
-    }
-
-    pub fn save_day(&self, day: &crate::tools::tasks::Day) -> Result<()> {
-        self.db.lock().unwrap().execute("INSERT INTO task_days(day,payload) VALUES(?1,?2) ON CONFLICT(day) DO UPDATE SET payload=excluded.payload", params![day.day, serde_json::to_string(day)?])?;
-        Ok(())
-    }
-
-    pub fn days(&self, since: &str, until: &str) -> Result<Vec<crate::tools::tasks::Day>> {
-        let db = self.db.lock().unwrap();
-        let mut days = task_days(&db, since, until)?;
-        let snapshot_days: std::collections::BTreeSet<_> =
-            days.iter().map(|d| d.day.clone()).collect();
-        // Retain the confirmed tasks saved by older versions; new snapshots supersede them.
-        for e in between(&db, since, until)?
-            .into_iter()
-            .filter(|e| e.state == "done")
-        {
-            if snapshot_days.contains(&e.day) {
-                continue;
-            }
-            let Some(parent) = e.parents.iter().find(|p| Some(p.id) == e.draft.parent) else {
-                continue;
-            };
-            let (Some(id), Some(url)) = (e.task_id, e.task_url) else {
-                continue;
-            };
-            let index = match days.iter().position(|d| d.day == e.day) {
-                Some(index) => index,
-                None => {
-                    days.push(crate::tools::tasks::Day {
-                        day: e.day.clone(),
-                        ..Default::default()
-                    });
-                    days.len() - 1
-                }
-            };
-            let day = &mut days[index];
-            let item = |id, title, url, state, kind| crate::tools::todo::Item {
-                id,
-                title,
-                url,
-                state,
-                kind,
-                category: String::new(),
-                project: parent.project.clone(),
-                created_at: None,
-                dates: vec![],
-            };
-            day.hours += e.draft.hours.unwrap_or_default();
-            day.tasks.push(crate::tools::tasks::Task {
-                item: item(id, e.draft.title, url, "".into(), "Task".into()),
-                source: String::new(),
-                organization: parent.organization.clone(),
-                user: String::new(),
-                description: e.draft.description,
-                hours: e.draft.hours.unwrap_or_default(),
-                parent: Some(item(
-                    parent.id,
-                    parent.title.clone(),
-                    parent.url.clone(),
-                    parent.state.clone(),
-                    parent.kind.clone(),
-                )),
-            });
-        }
-        days.sort_by(|a, b| b.day.cmp(&a.day));
-        Ok(days)
-    }
-    pub fn save_summary(&self, day: &str, summary: &Summary) -> Result<()> {
-        self.db.lock().unwrap().execute("INSERT INTO totals(day,summary) VALUES(?1,?2) ON CONFLICT(day) DO UPDATE SET summary=excluded.summary",params![day,serde_json::to_string(summary)?])?;
-        Ok(())
-    }
-    pub fn summary(&self, day: &str) -> Result<Option<Summary>> {
-        let text: Option<String> = self
-            .db
-            .lock()
-            .unwrap()
-            .query_row("SELECT summary FROM totals WHERE day=?1", [day], |r| {
-                r.get(0)
-            })
-            .optional()?;
-        text.map(|s| Ok(serde_json::from_str(&s)?)).transpose()
-    }
-}
-fn task_days(db: &Connection, since: &str, until: &str) -> Result<Vec<crate::tools::tasks::Day>> {
-    let mut stmt =
-        db.prepare("SELECT payload FROM task_days WHERE day>=?1 AND day<=?2 ORDER BY day DESC")?;
-    stmt.query_map([since, until], |r| r.get::<_, String>(0))?
-        .map(|r| Ok(serde_json::from_str(&r?)?))
-        .collect()
-}
-fn between(db: &Connection, since: &str, until: &str) -> Result<Vec<Entry>> {
-    let mut stmt = db.prepare(
-        "SELECT payload FROM entries WHERE day>=?1 AND day<=?2 ORDER BY day DESC, updated_at DESC LIMIT 1000",
-    )?;
-    stmt.query_map([since, until], |r| r.get::<_, String>(0))?
-        .map(|r| Ok(serde_json::from_str(&r?)?))
-        .collect()
 }
