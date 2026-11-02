@@ -3896,28 +3896,41 @@ function renderQuestions() {
   }
 }
 
+/** Association forms being filled (resource → { open, question, text, selected }), kept across list refreshes. */
+const associationDrafts = new Map();
+
 function questionAssociation(row, associated = () => {}) {
+  const draft = associationDrafts.get(row.resource) ?? { open: false, question: '', text: row.audit.question ?? '', selected: new Set() };
+  associationDrafts.set(row.resource, draft);
   const select = el('select', {}, el('option', { value: '', textContent: t('Create a new question') }),
     ...(current.map.questions ?? []).map(q => el('option', { value: q.id, textContent: t(q.text) })));
-  const text = el('input', { value: row.audit.question ?? '', maxLength: 1000 });
+  select.value = draft.question;
+  if (select.value !== draft.question) { draft.question = ''; select.value = ''; }
+  const text = el('input', { value: draft.text, maxLength: 1000 });
+  text.oninput = () => { draft.text = text.value; };
   const textLabel = el('label', {}, t('New question'), text);
-  let selected = new Set();
+  textLabel.hidden = !!select.value;
+  const selected = draft.selected;
   let choices = questionSourceChoices(selected, () => {});
   select.onchange = () => {
     textLabel.hidden = !!select.value;
-    selected = new Set(current.map.questions?.find(q => q.id === select.value)?.sources ?? []);
+    draft.question = select.value;
+    selected.clear();
+    for (const id of current.map.questions?.find(q => q.id === select.value)?.sources ?? []) selected.add(id);
     const next = questionSourceChoices(selected, () => {}); choices.replaceWith(next); choices = next;
   };
   const outcome = el('p', { class: 'hint', role: 'status' });
   const save = el('button', { type: 'button', class: 'secondary', textContent: t('Save association') });
-  const form = el('details', { class: 'fold question-association' }, el('summary', { textContent: t('Associate question') }),
+  const form = el('details', { class: 'fold question-association', open: draft.open }, el('summary', { textContent: t('Associate question') }),
     el('label', {}, t('Existing question or new'), select), textLabel, choices,
     el('p', { class: 'hint', textContent: t('The message becomes an example of this question. Source audiences still apply. Saving does not send an answer.') }), save, outcome);
+  form.ontoggle = () => { draft.open = form.open; };
   save.onclick = () => busy(save, async () => {
     if (!selected.size || (!select.value && !text.value.trim())) throw t('Write a question and select at least one source.');
     const result = await applying(() => invoke('question_associate', { resource: row.resource,
       ...(select.value ? { question_id: select.value } : { text: text.value.trim() }), sources: [...selected] }));
     row.audit.identified_question = result.question;
+    associationDrafts.delete(row.resource);
     associated(result.question);
     outcome.textContent = t('Associated with: {question}', { question: t(result.question.text) });
     done(t('Question associated. You can review it in Questions.'));
@@ -4498,7 +4511,8 @@ $('#messages-hide-ineligible').onchange = renderMessages;
 $('#messages-search').oninput = renderMessages;
 setInterval(() => {
   // Not while context is typed for an answer: a rebuilt list would move it under the user.
-  if (tab === 'messages' && $('#messages-auto').checked && !document.activeElement?.classList?.contains('answer-context')) loadMessages().catch(() => {});
+  if (tab === 'messages' && $('#messages-auto').checked && !document.activeElement?.classList?.contains('answer-context')
+    && !document.activeElement?.closest?.('.question-association')) loadMessages().catch(() => {});
 }, 10_000);
 $('#add-llm').onclick = () => {
   const info = llmCatalog.providers.find(provider => provider.id === $('#add-llm-provider').value);
