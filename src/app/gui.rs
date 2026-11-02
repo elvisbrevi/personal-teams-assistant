@@ -1,5 +1,6 @@
 //! Tauri shell: tray/menu-bar icon and the settings/chat window. Operations live in the host.
 use super::*;
+use crate::app::store::settings::SettingsStore;
 use tauri::{
     Emitter, Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent,
     image::Image,
@@ -103,7 +104,7 @@ fn host(app: &tauri::AppHandle) -> Arc<Host> {
 /// The configured language of the tray, window titles and notifications (Spanish by default).
 fn language(app: &tauri::AppHandle) -> crate::config::Language {
     app.try_state::<Arc<Host>>()
-        .and_then(|host| read_config(&host.state.config_path).ok())
+        .and_then(|host| host.state.settings.config().ok())
         .map(|config| config.llm.language)
         .unwrap_or_default()
 }

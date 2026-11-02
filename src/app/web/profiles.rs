@@ -1,4 +1,5 @@
 use super::*;
+use crate::app::store::settings::{LocalSettings, SettingsStore};
 use serde_json::Value;
 
 pub(super) struct Worker {
@@ -43,7 +44,7 @@ pub(super) fn create_profile(root: &Path, account: &Account) -> Result<()> {
     let _ = init_state(&dir, &dir.join("data"))?;
     security::private_dir(&dir.join("data/repositories"))?;
     security::private_dir(&dir.join("home"))?;
-    let mut config = read_config(&dir.join("config.toml"))?;
+    let mut config = LocalSettings::at(&dir).config()?;
     // Providers' CLI login is private to this profile; API credentials are private too.
     config.llm.chain = vec![crate::config::LlmChoice {
         provider: "deepseek".into(),
@@ -60,7 +61,7 @@ pub(super) fn create_profile(root: &Path, account: &Account) -> Result<()> {
     config.server.bind = std::net::TcpListener::bind("127.0.0.1:0")?
         .local_addr()?
         .to_string();
-    write_private(&dir.join("config.toml"), &toml::to_string_pretty(&config)?)
+    LocalSettings::at(&dir).save_config(&config)
 }
 
 pub(super) fn worker_command(binary: &Path, dir: &Path) -> tokio::process::Command {
@@ -131,7 +132,7 @@ impl Portal {
         if control::existing_host_at(&dir).is_ok() {
             control::require_account_host_at(&dir, &account.id, &account.version)?;
             if !account.current_profile {
-                let mut config = read_config(&dir.join("config.toml"))?;
+                let mut config = LocalSettings::at(&dir).config()?;
                 let public_url = if self.settings.https() {
                     self.settings.public_url.clone()
                 } else {
@@ -165,7 +166,7 @@ impl Portal {
                 .kill_on_drop(true);
             command
         } else {
-            let mut config = read_config(&dir.join("config.toml"))?;
+            let mut config = LocalSettings::at(&dir).config()?;
             let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
             config.server.bind = listener.local_addr()?.to_string();
             config.server.public_url = if self.settings.https() {
@@ -175,7 +176,7 @@ impl Portal {
             };
             config.server.cloudflare_tunnel = false;
             config.server.webhook_prefix = format!("/webhooks/{}", account.id);
-            write_private(&dir.join("config.toml"), &toml::to_string_pretty(&config)?)?;
+            LocalSettings::at(&dir).save_config(&config)?;
             drop(listener);
             worker_command(&self.binary, &dir)
         };
@@ -260,7 +261,7 @@ impl Portal {
             dirs.push(desktop);
         }
         for dir in dirs {
-            if let Ok(other) = read_config(&dir.join("config.toml")) {
+            if let Ok(other) = LocalSettings::at(&dir).config() {
                 ensure!(
                     !other
                         .graph
@@ -425,7 +426,7 @@ impl Portal {
             "Operation is unavailable in the web interface."
         );
         let dir = profile_dir(&self.root, account);
-        let saved = read_config(&dir.join("config.toml"))?;
+        let saved = LocalSettings::at(&dir).config()?;
         if matches!(request.method.as_str(), "save_settings" | "validate") {
             let config: Config = serde_json::from_value(request.args["config"].clone())?;
             let map: KnowledgeMap = serde_json::from_value(request.args["map"].clone())?;
@@ -437,9 +438,7 @@ impl Portal {
                     .or_else(|| request.args.get("tunnelConfig"))
                     .and_then(Value::as_str)
                     .unwrap_or("")
-                    == fs::read_to_string(dir.join("cloudflared-path.txt"))
-                        .unwrap_or_default()
-                        .trim(),
+                    == LocalSettings::at(&dir).tunnel().unwrap_or_default().trim(),
                 "The portal operator manages tunnel configuration."
             );
             self.unique_identity(account, &config)?;

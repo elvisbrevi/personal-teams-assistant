@@ -1,6 +1,7 @@
 //! Compatibility for named application credentials. Variables are their only runtime store;
 //! legacy stores are read once for migration and retained unchanged for recovery.
 use super::*;
+use crate::app::store::settings::SettingsStore;
 
 pub(in crate::app) fn managed(config: &Config, name: &str) -> bool {
     (name == "DEEPSEEK_API_KEY" || config.secrets.values().any(|n| n == name))
@@ -12,7 +13,7 @@ pub(in crate::app) fn migrate(host: &Host, store: &Store) -> std::result::Result
     if implementation::link(&host.state)?.is_some() {
         return Ok(());
     }
-    let config = read_config(&host.state.config_path)?;
+    let config = host.state.settings.config()?;
     super::identity::migrate(host, &config, store)?;
     for name in credential_names(&config)
         .into_iter()
@@ -85,15 +86,11 @@ mod tests {
     async fn application_lookups_and_compatibility_writes_use_the_same_variables() {
         let root = tempfile::tempdir().unwrap();
         let host = super::super::tests::host(root.path());
-        let mut config = read_config(&host.state.config_path).unwrap();
+        let mut config = host.state.settings.config().unwrap();
         config
             .secrets
             .insert("secret://azure/reader".into(), "AZURE_DEVOPS_TOKEN".into());
-        write_private(
-            &host.state.config_path,
-            &toml::to_string_pretty(&config).unwrap(),
-        )
-        .unwrap();
+        host.state.settings.save_config(&config).unwrap();
         assert!(managed(&config, "AZURE_DEVOPS_TOKEN"));
         for name in [
             "STATE_ENCRYPTION_KEY",

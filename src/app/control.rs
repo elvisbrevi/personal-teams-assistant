@@ -3,7 +3,6 @@ use super::*;
 use axum::{Json, extract::DefaultBodyLimit, http::HeaderMap, routing::post};
 use fs2::FileExt;
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
 use std::time::Duration;
 
 pub const CONTRACT: u32 = 1;
@@ -632,12 +631,7 @@ fn authorized(headers: &HeaderMap, token: &str) -> bool {
             .is_some_and(|h| security::constant_eq(h, &format!("Bearer {token}")))
 }
 pub(super) fn revision(state: &DesktopState) -> Result<String> {
-    let mut hash = Sha256::new();
-    for path in [&state.config_path, &state.map_path, &state.tunnel_path] {
-        hash.update(fs::read(path).unwrap_or_default());
-        hash.update([0]);
-    }
-    Ok(format!("{:x}", hash.finalize()))
+    state.settings.revision()
 }
 fn arg<T: serde::de::DeserializeOwned>(
     value: &Value,
@@ -1027,8 +1021,8 @@ async fn operate(
             json!({"applied":true,"running":state.running.lock().await.is_some()})
         }
         "validate_tunnel" => {
-            let config = read_config(&state.config_path).map_err(fail)?;
-            let path = fs::read_to_string(&state.tunnel_path).unwrap_or_default();
+            let config = state.settings.config().map_err(fail)?;
+            let path = state.settings.tunnel().unwrap_or_default();
             validate_tunnel_mode(&config, &path).map_err(fail)?;
             if !path.trim().is_empty() {
                 validate_tunnel(Path::new(path.trim()), &config).map_err(fail)?;
@@ -1074,7 +1068,7 @@ async fn operate(
         "begin_azure_cli_login" => {
             let mut pending = state.azure_login.lock().await;
             if pending.is_none() {
-                let config = read_config(&state.config_path).map_err(fail)?;
+                let config = state.settings.config().map_err(fail)?;
                 *pending = Some(
                     azure_cli::begin(&config.graph.tenant_id)
                         .await
@@ -1209,7 +1203,7 @@ async fn operate(
         "microsoft_logout" => {
             stop(state).await.map_err(fail)?;
             *state.activity_graph.lock().await = None;
-            let config = read_config(&state.config_path).map_err(fail)?;
+            let config = state.settings.config().map_err(fail)?;
             Store::logout(&config.server.data_dir.join("assistant.db")).map_err(fail)?;
             json!({"local_logout":true,"remote_revoked":false,"running":false})
         }
@@ -1223,7 +1217,7 @@ async fn operate(
             .map_err(fail)?
         }
         "test_providers" => {
-            let config = read_config(&state.config_path).map_err(fail)?;
+            let config = state.settings.config().map_err(fail)?;
             consumers::stage(state).await;
             crate::diagnostics::providers(&config).await.map_err(fail)?
         }
@@ -1280,10 +1274,10 @@ async fn operate(
             .await
             .map_err(fail)?,
         "self_chat_disable" => {
-            let mut config = read_config(&state.config_path).map_err(fail)?;
+            let mut config = state.settings.config().map_err(fail)?;
             config.graph.self_chat = None;
-            let map = KnowledgeMap::load(&state.map_path).map_err(fail)?;
-            let tunnel = fs::read_to_string(&state.tunnel_path).unwrap_or_default();
+            let map = state.settings.map().map_err(fail)?;
+            let tunnel = state.settings.tunnel().unwrap_or_default();
             save_settings(host, config, map, tunnel).await?;
             json!({"enabled":false})
         }
@@ -1300,7 +1294,7 @@ async fn operate(
         "teams_chats" => teams_chats(state, args).await?,
         "teams_post" => teams_post(state, args).await?,
         "audit" | "logs" => {
-            let config = read_config(&state.config_path).map_err(fail)?;
+            let config = state.settings.config().map_err(fail)?;
             let limit = args.get("limit").and_then(Value::as_u64).unwrap_or(50) as usize;
             json!(
                 Store::inspect(

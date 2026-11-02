@@ -1,5 +1,6 @@
 //! Authority comes from the owning profile and authenticated transport, never arguments.
 use super::*;
+use crate::app::store::settings::SettingsStore;
 use serde_json::Value;
 
 pub(super) const EXECUTION_DENIED: &str = "Shared-host execution requires a verified OS security boundary. Use your personal trusted machine; a working directory or tool-less prompt is not an OS sandbox.";
@@ -55,7 +56,7 @@ pub(super) async fn from_window<T>(
     state: &DesktopState,
     operation: impl std::future::Future<Output = T>,
 ) -> T {
-    match web::account_scope(state.config_path.parent().unwrap()) {
+    match web::account_scope(state.settings.profile()) {
         Ok(scope) => {
             let window = Invocation {
                 scope,
@@ -68,7 +69,7 @@ pub(super) async fn from_window<T>(
 }
 
 pub(super) fn invocation(state: &DesktopState) -> Result<Invocation> {
-    let scope = web::account_scope(state.config_path.parent().unwrap())?;
+    let scope = web::account_scope(state.settings.profile())?;
     ensure!(
         scope == state.authority,
         "Account binding changed. Restart this host."
@@ -123,7 +124,7 @@ pub(super) fn authorize(state: &DesktopState, request: &control::Request) -> Res
             request.method.as_str(),
             "chat" | "test_providers" | "start_assistant" | "restart" | "answer_refine"
         ) {
-            require_api_config(&read_config(&state.config_path)?)?;
+            require_api_config(&state.settings.config()?)?;
         }
     }
     match invocation.transport {

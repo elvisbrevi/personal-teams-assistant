@@ -1,7 +1,8 @@
 //! Host adapters for the typed To-Do tools. Reads work without a running Teams assistant.
-use super::super::{DesktopState, fail, github, read_config};
+use super::super::{DesktopState, fail, github};
+use crate::app::store::settings::SettingsStore;
 use crate::{
-    knowledge::{Access, KnowledgeMap},
+    knowledge::Access,
     security,
     state::Store,
     tools::{
@@ -20,8 +21,8 @@ struct Azure {
     guides: Vec<crate::work_items::Guide>,
 }
 fn azure(state: &DesktopState, source: Option<&str>) -> anyhow::Result<Azure> {
-    let config = read_config(&state.config_path)?;
-    let map = KnowledgeMap::load(&state.map_path)?;
+    let config = state.settings.config()?;
+    let map = state.settings.map()?;
     let sources: Vec<_> = map
         .resources
         .iter()
@@ -165,8 +166,8 @@ pub(in crate::app) async fn read(
         }).await.map_err(|_| "[network] GitHub Epic read timed out.".to_owned())?
             .map_err(|error| if error.to_string().starts_with("invalid") { format!("[invalid_input] {error}") } else { "[network] GitHub epics could not be read; check the connection and Issues read access.".into() })?
     } else {
-        let config = read_config(&state.config_path).map_err(fail)?;
-        let map = KnowledgeMap::load(&state.map_path).map_err(fail)?;
+        let config = state.settings.config().map_err(fail)?;
+        let map = state.settings.map().map_err(fail)?;
         let sources: Vec<_> = map
             .resources
             .iter()

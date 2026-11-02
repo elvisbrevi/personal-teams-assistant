@@ -12,7 +12,7 @@ const STATE_KEY: &str = "synthetic-state-key-aa11bb22cc33";
 
 /// Make the installation's own stores hold synthetic credentials, and configure `SVC_TOKEN`.
 fn stock(host: &Arc<Host>, values: &[(&str, &str)]) {
-    let path = &host.state.config_path;
+    let path = host.state.settings.config_path();
     let mut config = read_config(path).unwrap();
     config
         .secrets
@@ -25,7 +25,7 @@ fn stock(host: &Arc<Host>, values: &[(&str, &str)]) {
     }
 }
 fn forget(host: &Arc<Host>, name: &str) {
-    let profile = host.state.config_path.parent().unwrap().to_path_buf();
+    let profile = host.state.settings.profile().to_path_buf();
     STORED.lock().unwrap().remove(&(profile, name.into()));
 }
 fn stocked(host: &Arc<Host>) {

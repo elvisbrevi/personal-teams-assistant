@@ -112,7 +112,7 @@ pub(super) async fn operate(host: &Arc<Host>, request: &control::Request) -> Rep
 }
 
 fn destinations(host: &Host) -> std::result::Result<Destinations, vault::Error> {
-    let profile = host.state.config_path.parent().unwrap();
+    let profile = host.state.settings.profile();
     Ok(
         match implementation::link(&host.state).map_err(|_| {
             vault::Error::Storage("The coordinator connection is unreadable.".into())

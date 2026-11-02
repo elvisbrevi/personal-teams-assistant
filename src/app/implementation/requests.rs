@@ -1,5 +1,6 @@
 //! Explicit request creation, independent from read-only evidence and daily activity runs.
 use super::*;
+use crate::app::store::settings::SettingsStore;
 use crate::{knowledge::Access, tools::ToolSpec};
 
 #[derive(Deserialize, Serialize)]
@@ -16,8 +17,8 @@ struct Request {
 }
 
 fn azure(state: &DesktopState, source: &str) -> Result<(reqwest::Client, String, String)> {
-    let config = read_config(&state.config_path)?;
-    let map = KnowledgeMap::load(&state.map_path)?;
+    let config = state.settings.config()?;
+    let map = state.settings.map()?;
     let source = map
         .resources
         .iter()
@@ -221,8 +222,8 @@ async fn run(host: &Arc<Host>, request: Request, prepared: Value, directory: Pat
     let db = &host.state.implementation.db;
     let result = async {
         authority::require_execution(&host.state)?;
-        let language = read_config(&host.state.config_path)?.llm.language;
-        let map = KnowledgeMap::load(&host.state.map_path)?;
+        let language = host.state.settings.config()?.llm.language;
+        let map = host.state.settings.map()?;
         let provider = request.target["provider"].as_str().unwrap();
         // The provider's type name: the process type resolved for Azure, the issue type on GitHub.
         let kind = prepared["kind"].as_str().unwrap_or("Epic");

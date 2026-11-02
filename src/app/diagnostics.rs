@@ -1,5 +1,6 @@
 //! Structured host failures: retain causes and locations without retaining error text or inputs.
 use super::*;
+use crate::app::store::settings::SettingsStore;
 use serde_json::{Value, json};
 use std::{cell::RefCell, future::Future, panic::Location, time::Duration};
 
@@ -76,7 +77,7 @@ pub(super) fn record(
     let detail = detail(method, reply, elapsed, causes);
     tracing::warn!(event="app_operation_failed", detail=%detail);
     let result = (|| -> Result<()> {
-        let config = read_config(&state.config_path)?;
+        let config = state.settings.config()?;
         fs::create_dir_all(&config.server.data_dir)?;
         Store::append_event(
             &config.server.data_dir.join("assistant.db"),

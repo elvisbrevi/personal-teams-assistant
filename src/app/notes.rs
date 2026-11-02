@@ -3,7 +3,8 @@
 //! source holds. Notes are data, not profile: saving one needs no revision and no restart.
 
 use super::Host;
-use super::{DesktopState, fail, read_config};
+use super::{DesktopState, fail};
+use crate::app::store::settings::SettingsStore;
 use crate::{
     index::{Index, NOTES, Note, ORGANIZATION},
     knowledge::{Access, KnowledgeMap, Resource},
@@ -17,8 +18,8 @@ type Reply = std::result::Result<Value, String>;
 fn open(
     state: &DesktopState,
 ) -> std::result::Result<(crate::config::Config, KnowledgeMap, Index), String> {
-    let config = read_config(&state.config_path).map_err(fail)?;
-    let map = KnowledgeMap::load(&state.map_path).map_err(fail)?;
+    let config = state.settings.config().map_err(fail)?;
+    let map = state.settings.map().map_err(fail)?;
     let index = Index::open(&config.server.data_dir.join(crate::index::FILE)).map_err(fail)?;
     index
         .sync_organization(&map.organization, &map.work_item_guides)
@@ -426,7 +427,7 @@ pub(super) async fn associate(host: &Arc<Host>, args: &Value) -> Reply {
         id: q.id.clone(),
         text: q.text.clone(),
     };
-    let tunnel = std::fs::read_to_string(&state.tunnel_path).unwrap_or_default();
+    let tunnel = state.settings.tunnel().unwrap_or_default();
     super::save_settings(host, config, map, tunnel).await?;
     crate::state::Store::associate_question(&db, &resource, &identified).map_err(fail)?;
     Ok(json!({"resource":resource,"question":identified}))

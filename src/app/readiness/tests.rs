@@ -136,7 +136,7 @@ async fn reading_readiness_changes_nothing_and_asks_nothing_of_the_machine_or_th
     let before = (
         machines(call(&host, Local, "machine_list", json!({})).await.data),
         call(&host, Local, "variable_list", json!({})).await.data,
-        fs::read_to_string(&host.state.config_path).unwrap(),
+        fs::read_to_string(host.state.settings.config_path()).unwrap(),
     );
     for _ in 0..2 {
         assert!(
@@ -148,7 +148,7 @@ async fn reading_readiness_changes_nothing_and_asks_nothing_of_the_machine_or_th
     let after = (
         machines(call(&host, Local, "machine_list", json!({})).await.data),
         call(&host, Local, "variable_list", json!({})).await.data,
-        fs::read_to_string(&host.state.config_path).unwrap(),
+        fs::read_to_string(host.state.settings.config_path()).unwrap(),
     );
     assert_eq!(before, after);
     assert!(host.state.running.lock().await.is_none());
@@ -497,7 +497,7 @@ async fn a_second_client_sees_the_account_and_each_failure_is_understood() {
 async fn teams_distinguishes_configured_running_received_and_sent() {
     let root = tempfile::tempdir().unwrap();
     let host = host(root.path());
-    let config = read_config(&host.state.config_path).unwrap();
+    let config = host.state.settings.config().unwrap();
     let db = config.server.data_dir.join("assistant.db");
     let store = Store::open(&db).unwrap();
     assert!(store.enqueue("chats/a/messages/1").unwrap());
@@ -531,11 +531,11 @@ async fn teams_distinguishes_configured_running_received_and_sent() {
 async fn configured_providers_and_roots_are_reported_without_changing_them() {
     let root = tempfile::tempdir().unwrap();
     let host = host(root.path());
-    let mut config = read_config(&host.state.config_path).unwrap();
+    let mut config = host.state.settings.config().unwrap();
     for choice in &mut config.llm.chain {
         choice.enabled = false;
     }
-    fs::write(&host.state.config_path, toml::to_string(&config).unwrap()).unwrap();
+    host.state.settings.save_config(&config).unwrap();
     let none = readiness(&host, Local, json!({})).await;
     assert_eq!(step(&none, "providers")["state"], "todo");
     assert_eq!(step(&none, "providers")["detail"], PROVIDERS_NONE);
@@ -603,10 +603,10 @@ async fn a_computer_configured_before_signing_in_is_told_how_to_load_the_account
     let root = tempfile::tempdir().unwrap();
     let pair = pair(root.path(), None).await;
     wire(&pair);
-    let mut mine = read_config(&pair.native.state.config_path).unwrap();
+    let mut mine = pair.native.state.settings.config().unwrap();
     mine.llm.style = "Configured before signing in".into();
-    let map = KnowledgeMap::load(&pair.native.state.map_path).unwrap();
-    commit_settings(&pair.native.state, &mine, &map, "").unwrap();
+    let map = pair.native.state.settings.map().unwrap();
+    pair.native.state.settings.commit(&mine, &map, "").unwrap();
     // A plain synchronization never replaces what this computer already had.
     let refused = call(&pair.native, Local, "portable_sync", json!({})).await;
     assert_eq!(refused.code, "state_conflict");
@@ -637,10 +637,14 @@ async fn one_synchronization_brings_the_variables_and_the_configuration() {
         .await
         .ok
     );
-    let mut account = read_config(&pair.coordinator.state.config_path).unwrap();
+    let mut account = pair.coordinator.state.settings.config().unwrap();
     account.llm.style = "The account's style".into();
-    let map = KnowledgeMap::load(&pair.coordinator.state.map_path).unwrap();
-    commit_settings(&pair.coordinator.state, &account, &map, "").unwrap();
+    let map = pair.coordinator.state.settings.map().unwrap();
+    pair.coordinator
+        .state
+        .settings
+        .commit(&account, &map, "")
+        .unwrap();
 
     let synced = call(&pair.native, Window, "account_sync", json!({})).await;
     assert!(synced.ok, "{:?}", synced.message);
@@ -648,7 +652,7 @@ async fn one_synchronization_brings_the_variables_and_the_configuration() {
     assert_eq!(synced.data["changes"]["changed"], true);
     assert_eq!(synced.data["variables"]["state"], "synced");
     assert!(!text(&synced).contains(SECRET));
-    let config = read_config(&pair.native.state.config_path).unwrap();
+    let config = pair.native.state.settings.config().unwrap();
     assert_eq!(config.llm.style, "The account's style");
     let listed = call(&pair.native, Local, "variable_list", json!({})).await;
     assert_eq!(listed.data["variables"][0]["name"], "DEPLOY_ENDPOINT");
@@ -656,8 +660,12 @@ async fn one_synchronization_brings_the_variables_and_the_configuration() {
     // A configuration conflict is the reply, but the variables were still brought up to date.
     let mut mine = config.clone();
     mine.llm.style = "Edited here only".into();
-    let local_map = KnowledgeMap::load(&pair.native.state.map_path).unwrap();
-    commit_settings(&pair.native.state, &mine, &local_map, "").unwrap();
+    let local_map = pair.native.state.settings.map().unwrap();
+    pair.native
+        .state
+        .settings
+        .commit(&mine, &local_map, "")
+        .unwrap();
     assert!(
         call(
             &pair.coordinator,
