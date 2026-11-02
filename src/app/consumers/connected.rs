@@ -468,7 +468,7 @@ impl State {
         }
     }
     pub(super) fn launchers_of(&self, host: &Host, link: &Link) -> rules::Launchers {
-        let profile = host.state.config_path.parent().unwrap();
+        let profile = host.state.settings.profile();
         rules::Launchers::account(profile, &standing::qualifier(link))
     }
 }

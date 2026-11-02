@@ -1,5 +1,6 @@
 //! Work-item implementation, with durable runs and account-bound execution machines.
 use super::*;
+use crate::app::store::settings::SettingsStore;
 use crate::tools::todo::{Detail, DetailRequest};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -278,7 +279,7 @@ pub(super) async fn roots(host: &Host) -> Result<Vec<PathBuf>> {
         .await
         .settings
         .clone();
-    let config = read_config(&host.state.config_path)?;
+    let config = host.state.settings.config()?;
     if !config.server.webhook_prefix.is_empty() {
         return Ok(vec![config.server.data_dir.join("repositories")]);
     }
@@ -303,11 +304,14 @@ pub(super) async fn directories(host: &Host, selected: &[PathBuf]) -> Result<Vec
         "Select between one and sixteen directories."
     );
     let allowed = roots(host).await?;
-    let profile = host.state.config_path.parent().unwrap().canonicalize()?;
+    let profile = host.state.settings.profile().canonicalize()?;
     let mut result = Vec::new();
     for path in selected {
         let path = confined(path, &allowed)?;
-        let repositories = read_config(&host.state.config_path)?
+        let repositories = host
+            .state
+            .settings
+            .config()?
             .server
             .data_dir
             .join("repositories")
@@ -484,7 +488,7 @@ async fn operation(host: &Arc<Host>, method: &str, args: &Value) -> Result<Value
             );
             let detail = detail(host, &request.item).await?;
             let planning = planning(&request.item, &detail);
-            let map = KnowledgeMap::load(&host.state.map_path)?;
+            let map = host.state.settings.map()?;
             let (provider, project) = (&request.item.provider, &detail.item.project);
             let guides = if planning {
                 crate::work_items::for_project(&map.work_item_guides, provider, project)
@@ -516,7 +520,7 @@ async fn operation(host: &Arc<Host>, method: &str, args: &Value) -> Result<Value
                     .collect(),
                 request,
                 detail,
-                language: read_config(&host.state.config_path)?.llm.language,
+                language: host.state.settings.config()?.llm.language,
             };
             fleet::call(
                 host,
@@ -552,7 +556,7 @@ async fn operation(host: &Arc<Host>, method: &str, args: &Value) -> Result<Value
 }
 
 fn browse_machine(host: &Host, args: &Value) -> Result<Value> {
-    let config = read_config(&host.state.config_path)?;
+    let config = host.state.settings.config()?;
     let allowed = if !config.server.webhook_prefix.is_empty() {
         vec![config.server.data_dir.join("repositories")]
     } else {
@@ -1302,11 +1306,11 @@ mod tests {
         assert!(local(&host, "implementation_browse", &args).await.is_err());
         assert!(operation(&host, "machine_browse", &args).await.is_ok());
 
-        let mut config = read_config(&host.state.config_path).unwrap();
+        let mut config = host.state.settings.config().unwrap();
         config.server.webhook_prefix = "/webhooks/synthetic".into();
         let repositories = config.server.data_dir.join("repositories");
         fs::create_dir_all(&repositories).unwrap();
-        fs::write(&host.state.config_path, toml::to_string(&config).unwrap()).unwrap();
+        host.state.settings.save_config(&config).unwrap();
         assert!(operation(&host, "machine_browse", &args).await.is_err());
         let listing = operation(&host, "machine_browse", &json!({"path":repositories}))
             .await

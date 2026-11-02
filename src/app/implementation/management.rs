@@ -1,5 +1,6 @@
 //! Account-authoritative machine metadata. Filesystem changes execute on the target.
 use super::*;
+use crate::app::store::settings::SettingsStore;
 
 pub(super) fn version(host: &Host) -> Result<String> {
     Ok(authority::invocation(&host.state)?
@@ -23,7 +24,7 @@ pub(super) async fn list(host: &Arc<Host>) -> Result<Value> {
     let version = version(host)?;
     let state = &host.state.implementation;
     let data = state.registry.lock().await;
-    let config = read_config(&host.state.config_path)?;
+    let config = host.state.settings.config()?;
     let local = json!({"id":data.id,"name":data.settings.name,"os":std::env::consts::OS,
         "online":true,"local":true,"presence":"online","trust":"trusted","last_seen":now(),"last_known":false,
         "assistant_phase":*host.state.phase.borrow(),"roots":data.settings.roots,
@@ -65,7 +66,7 @@ pub(super) async fn save_roots(host: &Arc<Host>, args: &Value) -> Result<Value> 
     let roots: Vec<PathBuf> = serde_json::from_value(args["roots"].clone())?;
     ensure!(roots.len() <= 16, "Select at most sixteen allowed roots.");
     let state = &host.state.implementation;
-    let config = read_config(&host.state.config_path)?;
+    let config = host.state.settings.config()?;
     let mut data = state.registry.lock().await;
     ensure!(
         config.server.webhook_prefix.is_empty() || roots == data.settings.roots,

@@ -9,11 +9,11 @@ const CLIENT: &str = "22222222-2222-4222-8222-222222222222";
 const USER: &str = "33333333-3333-4333-8333-333333333333";
 
 fn configured(host: &Host) -> Config {
-    let mut config = read_config(&host.state.config_path).unwrap();
+    let mut config = host.state.settings.config().unwrap();
     config.graph.tenant_id = TENANT.into();
     config.graph.client_id = CLIENT.into();
     config.graph.user_id = USER.into();
-    write_private(&host.state.config_path, &toml::to_string(&config).unwrap()).unwrap();
+    host.state.settings.save_config(&config).unwrap();
     config
 }
 
@@ -37,10 +37,7 @@ async fn existing_setup_is_imported_once_encrypted_and_configuration_edits_updat
     );
     restore(&host).await.unwrap();
     assert_eq!(
-        read_config(&host.state.config_path)
-            .unwrap()
-            .graph
-            .client_id,
+        host.state.settings.config().unwrap().graph.client_id,
         next.graph.client_id
     );
     let entry = store
@@ -66,7 +63,7 @@ async fn a_new_signed_in_machine_restores_setup_without_copying_the_microsoft_se
             .ok
     );
     restore(&pair.native).await.unwrap();
-    let config = read_config(&pair.native.state.config_path).unwrap();
+    let config = pair.native.state.settings.config().unwrap();
     assert_eq!(values(&config), [TENANT, CLIENT, USER]);
     assert!(!crate::state::Store::has_token(&config.server.data_dir.join("assistant.db")).unwrap());
     // A second read requires no more variable uses when the same versions are already applied.
@@ -104,10 +101,7 @@ async fn invalid_and_conflicting_setup_preserve_the_existing_database_identity()
         .unwrap();
     assert!(restore(&host).await.unwrap_err().contains("invalid"));
     assert_eq!(
-        read_config(&host.state.config_path)
-            .unwrap()
-            .graph
-            .tenant_id,
+        host.state.settings.config().unwrap().graph.tenant_id,
         TENANT
     );
     store
@@ -121,10 +115,7 @@ async fn invalid_and_conflicting_setup_preserve_the_existing_database_identity()
     fs::write(config.server.data_dir.join("assistant.db"), []).unwrap();
     assert!(restore(&host).await.unwrap_err().contains("Teams database"));
     assert_eq!(
-        read_config(&host.state.config_path)
-            .unwrap()
-            .graph
-            .tenant_id,
+        host.state.settings.config().unwrap().graph.tenant_id,
         TENANT
     );
 }
@@ -133,7 +124,7 @@ async fn invalid_and_conflicting_setup_preserve_the_existing_database_identity()
 fn template_values_are_never_migrated() {
     let root = tempfile::tempdir().unwrap();
     let host = host(root.path());
-    let config = read_config(&host.state.config_path).unwrap();
+    let config = host.state.settings.config().unwrap();
     let store = host.state.variables.store(&host).unwrap();
     migrate(&host, &config, &store).unwrap();
     assert!(store.list(None).unwrap().is_empty());
@@ -143,7 +134,7 @@ fn template_values_are_never_migrated() {
 async fn deleting_setup_saved_on_a_fresh_installation_never_reimports_it() {
     let root = tempfile::tempdir().unwrap();
     let host = host(root.path());
-    let before = read_config(&host.state.config_path).unwrap();
+    let before = host.state.settings.config().unwrap();
     let mut next = before.clone();
     next.graph.tenant_id = TENANT.into();
     save(&host, &before, &next).await.unwrap();
@@ -171,10 +162,7 @@ async fn an_existing_different_variable_is_reported_without_overwriting_either_c
     let store = host.state.variables.store(&host).unwrap();
     assert_eq!(store.resolve("ENTRA_TENANT_ID").unwrap().expose(), CLIENT);
     assert_eq!(
-        read_config(&host.state.config_path)
-            .unwrap()
-            .graph
-            .tenant_id,
+        host.state.settings.config().unwrap().graph.tenant_id,
         TENANT
     );
     let list = call(&host, Local, "variable_list", json!({})).await;

@@ -10,6 +10,7 @@
 //! failure puts the previous pair back and starts it. Nothing here retries a Graph send or a work
 //! item write: those operations are not touched, and the update waits while one is in flight.
 use super::*;
+use crate::app::store::settings::{LocalSettings, SettingsStore};
 use crate::maintenance::apply::{
     self as journal, Apply, Health, Intent, Journal, Lock, Phase, Profile,
 };
@@ -73,9 +74,10 @@ pub(super) fn unsupported(env: &Environment) -> Option<&'static str> {
 
 /// The profiles a restart affects: this one and the isolated profiles of a portal under it.
 pub(super) fn profiles(host: &Host) -> Vec<Profile> {
-    let own = host.state.config_path.parent().unwrap().to_path_buf();
+    let own = host.state.settings.profile().to_path_buf();
     let data = |dir: &Path| {
-        read_config(&dir.join("config.toml"))
+        LocalSettings::at(dir)
+            .config()
             .map(|config| config.server.data_dir)
             .unwrap_or_else(|_| dir.join("data"))
     };
@@ -101,7 +103,7 @@ pub(super) fn profiles(host: &Host) -> Vec<Profile> {
 /// Why the assistant should not be restarted now, beyond what the databases say.
 async fn in_memory(host: &Host) -> Vec<String> {
     let mut reasons = Vec::new();
-    let profile = host.state.config_path.parent().unwrap();
+    let profile = host.state.settings.profile();
     if super::super::migration::active(profile) {
         reasons.push("A migration is running.".to_owned());
     }

@@ -1,5 +1,6 @@
 //! Public Microsoft setup identifiers backed by encrypted account variables. Sessions stay local.
 use super::*;
+use crate::app::store::settings::SettingsStore;
 
 pub(in crate::app) const FIELDS: [(&str, &str); 3] = [
     (
@@ -52,9 +53,8 @@ pub(in crate::app) fn migrate(
 
 fn restored_path(host: &Host) -> PathBuf {
     host.state
-        .config_path
-        .parent()
-        .unwrap()
+        .settings
+        .profile()
         .join("variables/microsoft-setup-account.json")
 }
 
@@ -81,7 +81,7 @@ pub(in crate::app) async fn restore(host: &Host) -> std::result::Result<(), Stri
     authority::require_account(&host.state).map_err(fail)?;
     let state = &host.state;
     let link = implementation::link(state).map_err(fail)?;
-    let config = read_config(&state.config_path).map_err(fail)?;
+    let config = state.settings.config().map_err(fail)?;
     let entries = if let Some(link) = &link {
         super::cached(host, link)
     } else {
@@ -131,12 +131,9 @@ pub(in crate::app) async fn restore(host: &Host) -> std::result::Result<(), Stri
         .map_err(fail)?;
     }
     if values(&next) != values(&config) {
-        web::validate_profile_identity(state.config_path.parent().unwrap(), &next).map_err(
-            |_| {
-                "The account's Microsoft setup conflicts with this computer's configuration."
-                    .to_owned()
-            },
-        )?;
+        web::validate_profile_identity(state.settings.profile(), &next).map_err(|_| {
+            "The account's Microsoft setup conflicts with this computer's configuration.".to_owned()
+        })?;
         protect_identity(&config, &next).map_err(|_| "The account's Microsoft setup differs from this computer's Teams database. Use a fresh profile to connect that identity.".to_owned())?;
         next.validate().map_err(|_| {
             "The account's Microsoft setup conflicts with this computer's configuration.".to_owned()
@@ -146,11 +143,7 @@ pub(in crate::app) async fn restore(host: &Host) -> std::result::Result<(), Stri
                 "Stop the assistant before restoring Microsoft setup from Variables.".into(),
             );
         }
-        write_private(
-            &state.config_path,
-            &toml::to_string_pretty(&next).map_err(fail)?,
-        )
-        .map_err(fail)?;
+        state.settings.save_config(&next).map_err(fail)?;
         *state.activity_graph.lock().await = None;
     }
     *state.variables.identity.lock().unwrap() = Some(signature(&next, &link, &entries));

@@ -10,6 +10,7 @@
 //! switched only after the destination value was read back and matched. The original stores are
 //! never modified.
 use super::{authority, consumers, control::Reply, implementation, portable, standing, *};
+use crate::app::store::settings::SettingsStore;
 use crate::{
     consumers as rules,
     variables::{self as vault, Secret},
@@ -31,7 +32,7 @@ pub(super) fn active(profile: &Path) -> bool {
 struct Running(PathBuf);
 impl Running {
     fn start(host: &Host) -> Option<Self> {
-        let profile = host.state.config_path.parent().unwrap().to_path_buf();
+        let profile = host.state.settings.profile().to_path_buf();
         BUSY.lock()
             .unwrap_or_else(|e| e.into_inner())
             .insert(profile.clone())
@@ -301,9 +302,8 @@ async fn catalog(
 
 fn journal_path(host: &Host, key: &str) -> PathBuf {
     host.state
-        .config_path
-        .parent()
-        .unwrap()
+        .settings
+        .profile()
         .join("migration")
         .join(format!("{key}.json"))
 }
@@ -394,7 +394,10 @@ pub(super) async fn operate(host: &Arc<Host>, request: &control::Request) -> Rep
 /// and metadata only.
 async fn inspect(host: &Arc<Host>) -> std::result::Result<Value, vault::Error> {
     let destination = destination(host)?;
-    let config = read_config(&host.state.config_path)
+    let config = host
+        .state
+        .settings
+        .config()
         .map_err(|_| vault::Error::Storage("The configuration could not be read.".into()))?;
     // The catalog may be unavailable offline: the review then says so instead of guessing.
     let (catalog, catalog_error) = match catalog(host, destination.connected, true).await {
@@ -492,10 +495,7 @@ pub(super) static STORED: std::sync::Mutex<BTreeMap<(PathBuf, String), String>> 
 
 #[cfg(test)]
 fn stored(host: &Host, name: &str) -> Option<String> {
-    let key = (
-        host.state.config_path.parent().unwrap().to_path_buf(),
-        name.to_owned(),
-    );
+    let key = (host.state.settings.profile().to_path_buf(), name.to_owned());
     STORED
         .lock()
         .unwrap_or_else(|e| e.into_inner())
@@ -509,7 +509,7 @@ fn origin_of(host: &Host, name: &str) -> Origin {
         .iter()
         .any(|(field, _)| *field == name)
     {
-        return match read_config(&host.state.config_path) {
+        return match host.state.settings.config() {
             Ok(config) if variables::identity::value(&config, name).is_some() => {
                 Origin::Found("configuration")
             }
@@ -534,7 +534,7 @@ fn read(host: &Host, name: &str) -> Result<String> {
         .iter()
         .any(|(field, _)| *field == name)
     {
-        let config = read_config(&host.state.config_path)?;
+        let config = host.state.settings.config()?;
         return variables::identity::value(&config, name)
             .map(str::to_owned)
             .context("The Microsoft setup identifier is not configured.");
@@ -617,7 +617,7 @@ async fn run(host: &Arc<Host>, args: RunArgs) -> Reply {
             Vec::new(),
         );
     }
-    let config = match read_config(&host.state.config_path) {
+    let config = match host.state.settings.config() {
         Ok(config) => config,
         Err(_) => {
             return Reply::error(

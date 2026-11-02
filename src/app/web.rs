@@ -1,6 +1,7 @@
 //! Authenticated browser transport for the existing GUI. Each account owns one host;
 //! the desktop's private IPC remains loopback-only and rejects browser requests.
 use super::*;
+use crate::app::store::settings::{LocalSettings, SettingsStore};
 use axum::{
     Json,
     body::Bytes,
@@ -55,11 +56,13 @@ pub(super) fn account_scope(profile: &Path) -> Result<authority::Scope> {
         && !owner
         && let Some(entry) = entry
     {
-        let config = read_config(&profile.join("config.toml"))?;
+        let config = LocalSettings::at(&profile).config()?;
         ensure!(
             config.server.data_dir.canonicalize()? == profile.join("data").canonicalize()?
                 && config.knowledge_map.canonicalize()?
-                    == profile.join("knowledge-map.toml").canonicalize()?
+                    == profile
+                        .join(super::store::settings::MAP_FILE)
+                        .canonicalize()?
                 && config.server.webhook_prefix == format!("/webhooks/{}", entry.id)
                 && profiles::confined(&config.server.data_dir, &profile)
                 && profiles::confined(&config.knowledge_map, &profile),
@@ -173,7 +176,7 @@ pub(super) fn validate_profile_identity(dir: &Path, config: &Config) -> Result<(
         .collect();
     directories.push(root.parent().unwrap().to_path_buf());
     for other in directories.into_iter().filter(|other| other != dir) {
-        if let Ok(other) = read_config(&other.join("config.toml")) {
+        if let Ok(other) = LocalSettings::at(&other).config() {
             ensure!(
                 !other
                     .graph
@@ -810,7 +813,7 @@ async fn command(
         Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
     };
     if matches!(request.method.as_str(), "start_assistant" | "restart")
-        && let Ok(config) = read_config(&dir.join("config.toml"))
+        && let Ok(config) = LocalSettings::at(&dir).config()
         && portal.unique_identity(&account, &config).is_err()
     {
         return Json(control::Reply::error(
@@ -836,7 +839,7 @@ async fn command(
     if reply.ok
         && method == "finish_microsoft"
         && reply.data["connected"] == true
-        && let Ok(config) = read_config(&dir.join("config.toml"))
+        && let Ok(config) = LocalSettings::at(&dir).config()
         && portal.unique_identity(&account, &config).is_err()
     {
         let _ = control::client_at(control::Request::new("microsoft_logout"), &dir).await;
@@ -1013,7 +1016,7 @@ async fn webhook(
     if control::require_account_host_at(&dir, &account.id, &account.version).is_err() {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     }
-    let Ok(config) = read_config(&dir.join("config.toml")) else {
+    let Ok(config) = LocalSettings::at(&dir).config() else {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
     let Ok(bind) = config.server.bind.parse::<std::net::SocketAddr>() else {
@@ -1092,7 +1095,7 @@ pub(super) fn run() -> Result<()> {
                 if let Ok(dir) = portal.worker(&account).await
                     && fs::read_to_string(portal.root.join("resume").join(&account.id)).is_ok_and(|value| value == "1") {
                     let _guard = portal.identities.lock().await;
-                    if let Ok(config) = read_config(&dir.join("config.toml"))
+                    if let Ok(config) = LocalSettings::at(&dir).config()
                         && portal.unique_identity(&account, &config).is_ok() {
                         let _ = control::client_at(control::Request::new("start_assistant"), &dir).await;
                     }

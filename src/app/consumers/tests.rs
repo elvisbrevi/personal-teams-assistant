@@ -857,15 +857,11 @@ async fn a_rename_keeps_bindings_by_id_and_never_moves_a_lookup_by_name() {
     assert_eq!(bearers(&server).await, [format!("Bearer {KEY}")]);
 
     // Names the application reads by name can be neither taken nor given away by a rename.
-    let mut config = read_config(&host.state.config_path).unwrap();
+    let mut config = host.state.settings.config().unwrap();
     config
         .secrets
         .insert("secret://azure/reader".into(), "AZURE_DEVOPS_TOKEN".into());
-    write_private(
-        &host.state.config_path,
-        &toml::to_string_pretty(&config).unwrap(),
-    )
-    .unwrap();
+    host.state.settings.save_config(&config).unwrap();
     let referenced = store(&host, "AZURE_DEVOPS_TOKEN", "synthetic-token-0c41").await;
     for (id, version, name) in [
         (entry.as_str(), 2, "DEEPSEEK_API_KEY"),
@@ -944,15 +940,11 @@ async fn usage_names_every_path_by_reference_and_never_a_value() {
         .await
         .ok
     );
-    let mut config = read_config(&host.state.config_path).unwrap();
+    let mut config = host.state.settings.config().unwrap();
     config
         .secrets
         .insert("secret://azure/reader".into(), "AZURE_DEVOPS_TOKEN".into());
-    write_private(
-        &host.state.config_path,
-        &toml::to_string_pretty(&config).unwrap(),
-    )
-    .unwrap();
+    host.state.settings.save_config(&config).unwrap();
 
     let all = call(&host, Local, "variable_usage", json!({})).await;
     assert!(all.ok, "{:?}", all.message);

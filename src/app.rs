@@ -22,6 +22,7 @@ use std::{
     path::{Path, PathBuf},
     sync::Arc,
 };
+use store::settings::{LocalSettings, SettingsStore};
 use tokio::sync::{Mutex, oneshot, watch};
 
 mod activity;
@@ -46,6 +47,7 @@ mod portable;
 mod readiness;
 mod skill;
 mod standing;
+mod store;
 mod tools;
 mod variables;
 mod web;
@@ -100,8 +102,7 @@ pub(crate) struct DesktopState {
     authority: authority::Scope,
     operations: Mutex<()>,
     loaded_config: Mutex<Option<Config>>,
-    config_path: PathBuf,
-    map_path: PathBuf,
+    settings: LocalSettings,
     running: Mutex<Option<Running>>,
     phase: watch::Sender<AssistantPhase>,
     github_login: Mutex<Option<github::Pending>>,
@@ -110,7 +111,6 @@ pub(crate) struct DesktopState {
     microsoft_login: Mutex<Option<tokio::task::JoinHandle<std::result::Result<(), String>>>>,
     microsoft_redirect: Mutex<Option<String>>,
     github_api: Mutex<()>,
-    tunnel_path: PathBuf,
     /// This host replaced an outdated one whose assistant was running: the window asks
     /// whether to keep it running.
     restart_offer: std::sync::atomic::AtomicBool,
@@ -543,55 +543,16 @@ pub(crate) fn init_state(config_dir: &Path, data_dir: &Path) -> Result<DesktopSt
     let (config_dir, data_dir) = (config_dir.to_path_buf(), data_dir.to_path_buf());
     security::private_dir(&config_dir)?;
     security::private_dir(&data_dir)?;
-    let config_path = config_dir.join("config.toml");
-    let map_path = config_dir.join("knowledge-map.toml");
-    let tunnel_path = config_dir.join("cloudflared-path.txt");
-    if !map_path.exists() {
-        write_private(
-            &map_path,
-            &toml::to_string_pretty(&KnowledgeMap {
-                repositories: BTreeMap::new(),
-                resources: Vec::new(),
-                contexts: Vec::new(),
-                cases: Vec::new(),
-                questions: None,
-                people: Vec::new(),
-                agent_prompts: Vec::new(),
-                work_item_guides: Vec::new(),
-                organization: Default::default(),
-            })?,
-        )?;
-    }
-    if !config_path.exists() {
-        let mut config = Config::desktop_template()?;
-        config.knowledge_map = map_path.clone();
-        config.server.data_dir = data_dir;
-        config.server.bind = "127.0.0.1:38655".into();
-        config.graph.user_id = uuid::Uuid::nil().to_string();
-        write_private(&config_path, &toml::to_string_pretty(&config)?)?;
-    }
-    let journal = config_dir.join("settings-rollback.json");
-    if journal.exists() {
-        let previous: Vec<(PathBuf, String)> = serde_json::from_slice(&fs::read(&journal)?)?;
-        for (path, content) in previous {
-            ensure!(
-                [&config_path, &map_path, &tunnel_path].contains(&&path),
-                "invalid recovery path"
-            );
-            write_private(&path, &content)?;
-        }
-        fs::remove_file(journal)?;
-    }
+    let settings = LocalSettings::open(&config_dir, &data_dir)?;
     Ok(DesktopState {
         authority: web::account_scope(&config_dir)?,
-        implementation: implementation::State::new(config_path.parent().unwrap())?,
-        variables: variables::State::new(config_path.parent().unwrap()),
-        portable: portable::State::new(config_path.parent().unwrap()),
+        implementation: implementation::State::new(&config_dir)?,
+        variables: variables::State::new(&config_dir),
+        portable: portable::State::new(&config_dir),
         standing: standing::State::default(),
         operations: Mutex::new(()),
         loaded_config: Mutex::new(None),
-        config_path,
-        map_path,
+        settings,
         running: Mutex::new(None),
         phase: watch::Sender::new(AssistantPhase::Stopped),
         github_login: Mutex::new(None),
@@ -600,7 +561,6 @@ pub(crate) fn init_state(config_dir: &Path, data_dir: &Path) -> Result<DesktopSt
         microsoft_login: Mutex::new(None),
         microsoft_redirect: Mutex::new(None),
         github_api: Mutex::new(()),
-        tunnel_path,
         restart_offer: std::sync::atomic::AtomicBool::new(false),
         activity_task: Mutex::new(None),
         activity_graph: Mutex::new(None),
@@ -642,8 +602,8 @@ fn required_credentials(config: &Config) -> Vec<String> {
 async fn snapshot(host: &Host) -> std::result::Result<Snapshot, String> {
     let teams_identity_error = variables::identity::restore(host).await.err();
     let state = &host.state;
-    let config = read_config(&state.config_path).map_err(fail)?;
-    let map = KnowledgeMap::load(&state.map_path).map_err(fail)?;
+    let config = state.settings.config().map_err(fail)?;
+    let map = state.settings.map().map_err(fail)?;
     let (active_subscriptions, subscription_issue) =
         Store::subscription_health(&config.server.data_dir.join("assistant.db")).map_err(fail)?;
     let mut credentials = BTreeMap::new();
@@ -690,7 +650,7 @@ async fn snapshot(host: &Host) -> std::result::Result<Snapshot, String> {
         host_version: env!("CARGO_PKG_VERSION").into(),
         host_running: true,
         headless: host.shell.headless(),
-        profile: state.config_path.parent().unwrap().to_path_buf(),
+        profile: state.settings.profile().to_path_buf(),
         tunnel_running: running.as_ref().is_some_and(|r| r.tunnel.is_some()),
         microsoft_connected: Store::has_token(&config.server.data_dir.join("assistant.db"))
             .map_err(fail)?,
@@ -703,7 +663,7 @@ async fn snapshot(host: &Host) -> std::result::Result<Snapshot, String> {
         github_connected: security::secret_source("GITHUB_OAUTH_TOKENS")
             .map_err(fail)?
             .is_some(),
-        tunnel_config: fs::read_to_string(&state.tunnel_path).unwrap_or_default(),
+        tunnel_config: state.settings.tunnel().unwrap_or_default(),
         restart_offer: state
             .restart_offer
             .load(std::sync::atomic::Ordering::Relaxed),
@@ -789,9 +749,9 @@ async fn start_service(state: &DesktopState) -> Result<()> {
         "This machine is not the selected Teams machine, or the previous machine still holds its lease."
     );
     consumers::stage(state).await;
-    let config = read_config(&state.config_path)?;
-    web::validate_profile_identity(state.config_path.parent().unwrap(), &config)?;
-    let map = KnowledgeMap::load(&state.map_path)?;
+    let config = state.settings.config()?;
+    web::validate_profile_identity(state.settings.profile(), &config)?;
+    let map = state.settings.map()?;
     validate_local(&config, &map)?;
     validate_teams_setup(&config)?;
     for name in ["GRAPH_WEBHOOK_SECRET", "STATE_ENCRYPTION_KEY"] {
@@ -807,11 +767,7 @@ async fn start_service(state: &DesktopState) -> Result<()> {
     for name in required_credentials(&config) {
         security::secret(&name)?;
     }
-    let tunnel_path = if state.tunnel_path.exists() {
-        fs::read_to_string(&state.tunnel_path)?
-    } else {
-        String::new()
-    };
+    let tunnel_path = state.settings.tunnel()?;
     let tunnel_config_path = if tunnel_path.trim().is_empty() {
         None
     } else {
@@ -835,7 +791,7 @@ async fn start_service(state: &DesktopState) -> Result<()> {
         return Ok(());
     }
     let (stop, receiver) = watch::channel(false);
-    let path = state.config_path.to_string_lossy().into_owned();
+    let path = state.settings.config_path().to_string_lossy().into_owned();
     let (ready_tx, ready_rx) = oneshot::channel();
     let phase = state.phase.clone();
     let mut task = tokio::spawn(async move {
@@ -901,8 +857,8 @@ async fn save_settings(
     tunnel_config: String,
 ) -> std::result::Result<(), String> {
     let state = &host.state;
-    let previous = read_config(&state.config_path).map_err(fail)?;
-    config.knowledge_map = state.map_path.clone();
+    let previous = state.settings.config().map_err(fail)?;
+    config.knowledge_map = state.settings.map_path().to_path_buf();
     // The map's own rules say what to fix (a duplicate context, an unknown source); they never
     // carry secrets.
     toml::to_string(&map)
@@ -922,7 +878,7 @@ async fn save_settings(
     }
     // An installation signed in to an account first sends the portable part of the change to the
     // account's coordinator, which decides it under optimistic concurrency.
-    let previous_map = KnowledgeMap::load(&state.map_path).map_err(fail)?;
+    let previous_map = state.settings.map().map_err(fail)?;
     crate::organization::stamp(
         &previous_map.organization,
         &mut map.organization,
@@ -935,7 +891,10 @@ async fn save_settings(
     if was_running {
         stop(state).await.map_err(fail)?;
     }
-    commit_settings(state, &config, &map, tunnel_config.trim()).map_err(fail)?;
+    state
+        .settings
+        .commit(&config, &map, tunnel_config.trim())
+        .map_err(fail)?;
     portable::after_save(state, forwarded);
     forget_removed_sources(&config, &map);
     *state.activity_graph.lock().await = None;
@@ -997,10 +956,10 @@ async fn import_existing(state: &DesktopState, path: String) -> std::result::Res
             *path = map_dir.join(&path);
         }
     }
-    config.knowledge_map = state.map_path.clone();
+    config.knowledge_map = state.settings.map_path().to_path_buf();
     validate_local(&config, &map)
         .map_err(|_| "[invalid_input] Configuration or knowledge map is invalid.".to_string())?;
-    let previous = read_config(&state.config_path).map_err(fail)?;
+    let previous = state.settings.config().map_err(fail)?;
     if previous.server.data_dir == config.server.data_dir {
         protect_identity(&previous, &config).map_err(|_| {
             "[conflict] The existing database belongs to another identity.".to_string()
@@ -1009,9 +968,12 @@ async fn import_existing(state: &DesktopState, path: String) -> std::result::Res
     ensure_stopped(state)
         .await
         .map_err(|_| "[conflict] Stop the service before this operation.".to_string())?;
-    let tunnel = fs::read_to_string(&state.tunnel_path).unwrap_or_default();
+    let tunnel = state.settings.tunnel().unwrap_or_default();
     validate_tunnel_mode(&config, &tunnel).map_err(fail)?;
-    commit_settings(state, &config, &map, &tunnel).map_err(fail)?;
+    state
+        .settings
+        .commit(&config, &map, &tunnel)
+        .map_err(fail)?;
     *state.activity_graph.lock().await = None;
     Ok(())
 }
@@ -1030,7 +992,7 @@ async fn set_credential(
     value: String,
 ) -> std::result::Result<(), String> {
     let state = &host.state;
-    let config = read_config(&state.config_path).map_err(fail)?;
+    let config = state.settings.config().map_err(fail)?;
     if !credential_names(&config).contains(&name) {
         return Err("[invalid_input] Credential name not allowed".into());
     }
@@ -1050,7 +1012,7 @@ async fn set_credential(
 
 async fn delete_credential(host: &Arc<Host>, name: String) -> std::result::Result<(), String> {
     let state = &host.state;
-    let config = read_config(&state.config_path).map_err(fail)?;
+    let config = state.settings.config().map_err(fail)?;
     if variables::credentials::managed(&config, &name) {
         let entry = if let Some(link) = implementation::link(state).map_err(fail)? {
             variables::cached(host, &link)
@@ -1089,7 +1051,7 @@ async fn chat(
 ) -> std::result::Result<SimulationResult, String> {
     consumers::stage(state).await;
     // Every provider call carries its own deadline; maximum-effort reasoning takes minutes.
-    local_chat::chat(&state.config_path, input)
+    local_chat::chat(state.settings.config_path(), input)
         .await
         .map_err(fail)
 }
@@ -1120,8 +1082,8 @@ async fn clone_github_repository(
     alias: String,
 ) -> std::result::Result<(), String> {
     let _guard = state.github_api.lock().await;
-    let config = read_config(&state.config_path).map_err(fail)?;
-    let mut map = KnowledgeMap::load(&state.map_path).map_err(fail)?;
+    let config = state.settings.config().map_err(fail)?;
+    let mut map = state.settings.map().map_err(fail)?;
     if map.repositories.contains_key(&alias) {
         return Err("That alias already exists.".into());
     }
@@ -1131,11 +1093,7 @@ async fn clone_github_repository(
     map.repositories.insert(alias, path);
     validate_local(&config, &map)
         .map_err(|_| "[invalid_input] Configuration or knowledge map is invalid.".to_string())?;
-    write_private(
-        &state.map_path,
-        &toml::to_string_pretty(&map).map_err(fail)?,
-    )
-    .map_err(fail)?;
+    state.settings.save_map(&map).map_err(fail)?;
     if state.running.lock().await.is_some() {
         stop(state).await.map_err(fail)?;
         start(state).await.map_err(fail)?;
@@ -1148,8 +1106,8 @@ async fn update_github_repository(
     alias: String,
 ) -> std::result::Result<(), String> {
     let _guard = state.github_api.lock().await;
-    let config = read_config(&state.config_path).map_err(fail)?;
-    let map = KnowledgeMap::load(&state.map_path).map_err(fail)?;
+    let config = state.settings.config().map_err(fail)?;
+    let map = state.settings.map().map_err(fail)?;
     let path = map
         .repositories
         .get(&alias)
@@ -1220,7 +1178,7 @@ async fn begin_microsoft(host: &Arc<Host>, open: bool) -> std::result::Result<St
         return Err("Microsoft login already pending.".into());
     }
     let was_running = state.running.lock().await.is_some();
-    let config = read_config(&state.config_path).map_err(fail)?;
+    let config = state.settings.config().map_err(fail)?;
     config.validate().map_err(fail)?;
     if security::secret_source("STATE_ENCRYPTION_KEY")
         .map_err(fail)?
@@ -1297,15 +1255,11 @@ async fn begin_microsoft(host: &Arc<Host>, open: bool) -> std::result::Result<St
             .map_err(|_| "Microsoft authorization timed out.".to_string())?
             .map_err(fail)?
             .ok_or_else(|| "Microsoft authorization failed.".to_string())?;
-        let before = read_config(&state.config_path).map_err(fail)?;
+        let before = state.settings.config().map_err(fail)?;
         let mut next = before.clone();
         next.graph.user_id = user;
         variables::identity::save(&host, &before, &next).await?;
-        write_private(
-            &state.config_path,
-            &toml::to_string_pretty(&next).map_err(fail)?,
-        )
-        .map_err(fail)?;
+        state.settings.save_config(&next).map_err(fail)?;
         drop(dataset_lock);
         if was_running {
             start(state).await.map_err(fail)?;
@@ -1361,36 +1315,6 @@ async fn forward_microsoft_redirect(
     Ok(())
 }
 
-fn commit_settings(
-    state: &DesktopState,
-    config: &Config,
-    map: &KnowledgeMap,
-    tunnel: &str,
-) -> Result<()> {
-    let paths = [&state.config_path, &state.map_path, &state.tunnel_path];
-    let previous: Vec<(PathBuf, String)> = paths
-        .iter()
-        .map(|p| (p.to_path_buf(), fs::read_to_string(p).unwrap_or_default()))
-        .collect();
-    let journal = state.config_path.with_file_name("settings-rollback.json");
-    let contents = [
-        toml::to_string_pretty(config)?,
-        toml::to_string_pretty(map)?,
-        tunnel.into(),
-    ];
-    write_private(&journal, &serde_json::to_string(&previous)?)?;
-    for (path, content) in paths.iter().zip(contents) {
-        if let Err(error) = write_private(path, &content) {
-            for (path, old) in &previous {
-                write_private(path, old)?;
-            }
-            fs::remove_file(&journal)?;
-            return Err(error);
-        }
-    }
-    fs::remove_file(journal)?;
-    Ok(())
-}
 struct ProfileGraph {
     graph: crate::adapters::graph::Graph,
     _lock: fs::File,
@@ -1416,7 +1340,7 @@ fn claim_dataset(path: &Path) -> Result<fs::File> {
 }
 async fn profile_graph(state: &DesktopState) -> Result<ProfileGraph> {
     ensure_stopped(state).await?;
-    let config = Arc::new(read_config(&state.config_path)?);
+    let config = Arc::new(state.settings.config()?);
     ensure!(
         Store::has_token(&config.server.data_dir.join("assistant.db"))?,
         "Microsoft login required"
@@ -1446,7 +1370,7 @@ async fn profile_graph(state: &DesktopState) -> Result<ProfileGraph> {
     })
 }
 async fn self_chat_status(state: &DesktopState) -> Result<serde_json::Value> {
-    let config = read_config(&state.config_path)?;
+    let config = state.settings.config()?;
     Ok(
         serde_json::json!({"enabled":config.graph.self_chat.is_some(),"configuration":config.graph.self_chat,
         "reception":"webhook_and_bounded_poll_10s", "diagnostics":Store::self_chat_diagnostics(&config.server.data_dir.join("assistant.db"))?}),
@@ -1468,7 +1392,7 @@ async fn enable_self_chat(state: &DesktopState, id: Option<&str>) -> Result<serd
             }
         };
         graph.validate_self_chat(&id).await?;
-        let mut config = read_config(&state.config_path)?;
+        let mut config = state.settings.config()?;
         // Preserve activation boundary when re-enabling the same validated chat.
         let enabled_at = config
             .graph
@@ -1482,13 +1406,10 @@ async fn enable_self_chat(state: &DesktopState, id: Option<&str>) -> Result<serd
             user_id: config.graph.user_id.clone(),
             enabled_at,
         });
-        let map = KnowledgeMap::load(&state.map_path)?;
-        commit_settings(
-            state,
-            &config,
-            &map,
-            &fs::read_to_string(&state.tunnel_path).unwrap_or_default(),
-        )?;
+        let map = state.settings.map()?;
+        state
+            .settings
+            .commit(&config, &map, &state.settings.tunnel().unwrap_or_default())?;
         self_chat_status(state).await
     }
     .await;
@@ -1522,7 +1443,7 @@ fn import_secret_from_stdin(name: &str) -> Result<()> {
     let mut value = String::new();
     std::io::stdin().take(16_385).read_to_string(&mut value)?;
     ensure!(value.len() <= 16_384, "credential is too long");
-    let config = read_config(&control::profile_dir()?.join("config.toml"))?;
+    let config = LocalSettings::at(&control::profile_dir()?).config()?;
     ensure!(
         credential_names(&config).iter().any(|n| n == name),
         "credential name is not allowed"
@@ -1669,8 +1590,8 @@ async fn azure_wiki(
     input: serde_json::Value,
 ) -> std::result::Result<serde_json::Value, String> {
     use crate::{ado::wiki, tools::ToolSpec};
-    let config = read_config(&state.config_path).map_err(fail)?;
-    let map = KnowledgeMap::load(&state.map_path).map_err(fail)?;
+    let config = state.settings.config().map_err(fail)?;
+    let map = state.settings.map().map_err(fail)?;
     let source = map
         .resources
         .iter()

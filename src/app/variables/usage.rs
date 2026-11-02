@@ -2,6 +2,7 @@
 //! whether it can use them now and which need the user's confirmation. Metadata only: it is built
 //! from `variable_list` and `variable_consumer_list` replies and never resolves a value.
 use super::*;
+use crate::app::store::settings::SettingsStore;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -44,7 +45,7 @@ pub(super) async fn usage(host: &Arc<Host>, request: &control::Request) -> Reply
     } else {
         json!([])
     };
-    let config = match read_config(&host.state.config_path) {
+    let config = match host.state.settings.config() {
         Ok(config) => config,
         Err(_) => {
             return failure(vault::Error::Storage(

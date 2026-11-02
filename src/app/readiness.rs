@@ -19,6 +19,7 @@ use super::{
     control::{self, Reply},
     implementation, maintenance, portable, variables as vars, *,
 };
+use crate::app::store::settings::SettingsStore;
 use crate::{state::Store, variables as vault};
 use serde_json::{Value, json};
 
@@ -587,7 +588,7 @@ async fn migration_step(host: &Arc<Host>, connected: bool) -> Step {
 
 async fn providers(host: &Arc<Host>) -> Step {
     let step = Step::new("providers", "this_machine", false);
-    let Ok(config) = read_config(&host.state.config_path) else {
+    let Ok(config) = host.state.settings.config() else {
         return step;
     };
     if config.llm.active().is_empty() {
@@ -638,7 +639,7 @@ async fn roots(host: &Arc<Host>, shared: bool) -> Step {
 
 async fn teams(host: &Arc<Host>, machines: &Machines, connected: bool) -> Step {
     let step = Step::new("teams", "this_machine", false);
-    let Ok(config) = read_config(&host.state.config_path) else {
+    let Ok(config) = host.state.settings.config() else {
         return step;
     };
     let db = config.server.data_dir.join("assistant.db");

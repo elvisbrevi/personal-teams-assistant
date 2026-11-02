@@ -1,4 +1,5 @@
 use crate::app::control::{self, Reply, Request};
+use crate::app::store::settings::{LocalSettings, SettingsStore};
 use crate::{config::Config, knowledge::KnowledgeMap};
 use anyhow::{Context, Result, ensure};
 use serde_json::{Value, json};
@@ -922,12 +923,12 @@ fn assign(value: &mut Value, key: &str, next: Value) -> Result<()> {
 }
 fn safe_status_stopped() -> Result<Reply> {
     let dir = control::profile_dir()?;
-    if !dir.join("config.toml").exists() {
+    if !LocalSettings::at(&dir).config_path().exists() {
         return Ok(Reply::success(
             json!({"host_running":false,"running":false,"configured":false,"profile":dir}),
         ));
     }
-    let config: Config = toml::from_str(&std::fs::read_to_string(dir.join("config.toml"))?)?;
+    let config: Config = LocalSettings::at(&dir).config()?;
     Ok(Reply::success(
         json!({"host_running":false,"running":false,"persisted_dry_run":config.policy.dry_run,"loaded_config":null,"profile":dir,"config":config,"credential_metadata":"requires host"}),
     ))
@@ -1575,7 +1576,7 @@ async fn execute(mut args: Vec<String>) -> Result<Reply> {
     }
     if command == "doctor" && args.iter().any(|a| a == "--offline") {
         let dir = control::profile_dir()?;
-        let config: Config = toml::from_str(&std::fs::read_to_string(dir.join("config.toml"))?)?;
+        let config: Config = LocalSettings::at(&dir).config()?;
         let map = KnowledgeMap::load(&config.knowledge_map)?;
         crate::app::validate_local(&config, &map)?;
         return Ok(Reply::success(

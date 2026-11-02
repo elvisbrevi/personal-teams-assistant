@@ -155,13 +155,13 @@ fn url_source(id: &str, enabled: bool) -> Resource {
 /// Give the coordinator an account configuration of its own.
 fn configure(host: &Host) {
     let state = &host.state;
-    let mut config = read_config(&state.config_path).unwrap();
+    let mut config = state.settings.config().unwrap();
     config.llm.language = crate::config::Language::En;
     config.llm.style = "Synthetic account style".into();
     config.policy.greeting = "Hello from the account".into();
     config.graph.user_id = "00000000-0000-0000-0000-0000000000a1".into();
     config.graph.allowed_chats = vec!["19:coordinator-only@thread.v2".into()];
-    let mut map = KnowledgeMap::load(&state.map_path).unwrap();
+    let mut map = state.settings.map().unwrap();
     let activity = map.resources[0].id.clone();
     map.resources.push(url_source("billing-site", true));
     map.contexts.push(crate::knowledge::Context {
@@ -177,7 +177,7 @@ fn configure(host: &Host) {
         sources: vec!["billing-site".into(), activity],
         examples: vec![],
     });
-    commit_settings(state, &config, &map, "").unwrap();
+    state.settings.commit(&config, &map, "").unwrap();
     let index = Index::open(&config.server.data_dir.join(crate::index::FILE)).unwrap();
     index
         .save_note(Note {
@@ -190,17 +190,17 @@ fn configure(host: &Host) {
 }
 
 fn notes_of(host: &Host) -> Vec<Note> {
-    let config = read_config(&host.state.config_path).unwrap();
+    let config = host.state.settings.config().unwrap();
     Index::open(&config.server.data_dir.join(crate::index::FILE))
         .unwrap()
         .notes(None, 1000)
         .unwrap()
 }
 fn map_of(host: &Host) -> KnowledgeMap {
-    KnowledgeMap::load(&host.state.map_path).unwrap()
+    host.state.settings.map().unwrap()
 }
 fn config_of(host: &Host) -> Config {
-    read_config(&host.state.config_path).unwrap()
+    host.state.settings.config().unwrap()
 }
 async fn save(host: &Arc<Host>, config: &Config, map: &KnowledgeMap) -> Reply {
     call(
@@ -540,13 +540,11 @@ async fn concurrent_edits_conflict_and_unsaved_local_changes_are_never_overwritt
     // The account changes elsewhere; the installation's stale edit is a conflict.
     let mut elsewhere = config_of(&pair.coordinator);
     elsewhere.llm.style = "Changed at the account".into();
-    commit_settings(
-        &pair.coordinator.state,
-        &elsewhere,
-        &map_of(&pair.coordinator),
-        "",
-    )
-    .unwrap();
+    pair.coordinator
+        .state
+        .settings
+        .commit(&elsewhere, &map_of(&pair.coordinator), "")
+        .unwrap();
     let mut stale = config_of(&pair.native);
     stale.policy.greeting = "Late edit".into();
     let conflict = save(&pair.native, &stale, &map_of(&pair.native)).await;
@@ -573,16 +571,18 @@ async fn concurrent_edits_conflict_and_unsaved_local_changes_are_never_overwritt
     // Changes made on this computer by other means are kept, not replaced.
     let mut local = config_of(&pair.native);
     local.llm.style = "Hand edited".into();
-    commit_settings(&pair.native.state, &local, &map_of(&pair.native), "").unwrap();
+    pair.native
+        .state
+        .settings
+        .commit(&local, &map_of(&pair.native), "")
+        .unwrap();
     let mut account = config_of(&pair.coordinator);
     account.llm.language = crate::config::Language::Es;
-    commit_settings(
-        &pair.coordinator.state,
-        &account,
-        &map_of(&pair.coordinator),
-        "",
-    )
-    .unwrap();
+    pair.coordinator
+        .state
+        .settings
+        .commit(&account, &map_of(&pair.coordinator), "")
+        .unwrap();
     let blocked = sync(&pair.native, json!({})).await;
     assert!(!blocked.ok);
     assert_eq!(blocked.code, "state_conflict");
@@ -625,7 +625,11 @@ async fn an_already_configured_installation_needs_an_explicit_reset_before_it_ad
     configure(&pair.coordinator);
     let mut mine = config_of(&pair.native);
     mine.llm.style = "My own style".into();
-    commit_settings(&pair.native.state, &mine, &map_of(&pair.native), "").unwrap();
+    pair.native
+        .state
+        .settings
+        .commit(&mine, &map_of(&pair.native), "")
+        .unwrap();
     let first = sync(&pair.native, json!({})).await;
     assert!(!first.ok);
     assert_eq!(first.code, "state_conflict");
@@ -664,13 +668,11 @@ async fn sources_bound_to_a_missing_repository_are_unavailable_and_survive_edits
         sources: vec!["handbook-docs".into()],
         examples: vec![],
     });
-    commit_settings(
-        &pair.coordinator.state,
-        &config_of(&pair.coordinator),
-        &map,
-        "",
-    )
-    .unwrap();
+    pair.coordinator
+        .state
+        .settings
+        .commit(&config_of(&pair.coordinator), &map, "")
+        .unwrap();
 
     let synced = sync(&pair.native, json!({})).await;
     assert!(synced.ok, "{:?}", synced.message);
@@ -858,13 +860,11 @@ async fn a_different_account_or_an_older_state_never_replaces_the_loaded_configu
     *swap.lock().unwrap() = Some("b".repeat(32));
     let mut changed = config_of(&pair.coordinator);
     changed.llm.style = "Bob's style".into();
-    commit_settings(
-        &pair.coordinator.state,
-        &changed,
-        &map_of(&pair.coordinator),
-        "",
-    )
-    .unwrap();
+    pair.coordinator
+        .state
+        .settings
+        .commit(&changed, &map_of(&pair.coordinator), "")
+        .unwrap();
     let other = sync(&pair.native, json!({})).await;
     assert!(!other.ok);
     assert_eq!(other.code, "state_conflict");

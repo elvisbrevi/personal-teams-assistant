@@ -7,6 +7,7 @@
 //! local program and exist only on the trusted personal machine: the application window or the
 //! local CLI of an installation owner, inside its allowed roots.
 use super::{authority, control::Reply, implementation, variables as vars, *};
+use crate::app::store::settings::SettingsStore;
 use crate::{
     consumers::{self as rules, BUILT_IN, Definition},
     variables::{self as vault, Secret, Store},
@@ -532,7 +533,7 @@ impl crate::security::AccountSecrets for Resolver {
         let Some(host) = self.live()? else {
             return Ok(false);
         };
-        let config = read_config(&host.state.config_path)?;
+        let config = host.state.settings.config()?;
         Ok(vars::credentials::managed(&config, name))
     }
     fn present(&self, name: &str) -> anyhow::Result<bool> {

@@ -6,6 +6,7 @@
 //! or machines. An agent starts a protected-entry request (to store or to replace a value) by
 //! name or ID and later reads only its state.
 use super::{authority, consumers, control::Reply, *};
+use crate::app::store::settings::SettingsStore;
 use crate::variables::{self as vault, KeyBackup, NewVariable, Secret, Store};
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
@@ -352,7 +353,7 @@ pub(super) fn check_rename(host: &Host, args: &Value) -> std::result::Result<(),
     if current.name.eq_ignore_ascii_case(&name) {
         return Ok(());
     }
-    let config = read_config(&host.state.config_path)?;
+    let config = host.state.settings.config()?;
     if let Some(used) = [current.name.as_str(), name.as_str()]
         .into_iter()
         .find(|n| read_by_name(&config, n))

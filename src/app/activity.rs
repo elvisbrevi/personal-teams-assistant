@@ -1,5 +1,6 @@
 //! Host-owned read-only daily task snapshots, independent of Teams and language models.
 use super::*;
+use crate::app::store::settings::SettingsStore;
 use crate::{
     activity::{Summary, store::Database},
     tools::{ToolSpec, tasks::Day},
@@ -8,7 +9,7 @@ use chrono::{NaiveDate, Utc};
 use serde_json::{Value, json};
 
 fn database(state: &DesktopState) -> Result<Arc<Database>> {
-    let config = read_config(&state.config_path)?;
+    let config = state.settings.config()?;
     security::private_dir(&config.server.data_dir)?;
     let path = config.server.data_dir.join("activity-registration.db");
     let db = Arc::new(Database::open(&path)?);
@@ -24,7 +25,7 @@ pub(super) async fn active(state: &DesktopState) -> bool {
         .is_some_and(|t| !t.is_finished())
 }
 async fn recover(state: &DesktopState) -> Result<()> {
-    let path = read_config(&state.config_path)?.server.data_dir;
+    let path = state.settings.config()?.server.data_dir;
     let mut recovered = state.activity_recovered.lock().await;
     if recovered.as_ref() != Some(&path) {
         database(state)?.recover()?;
@@ -33,7 +34,7 @@ async fn recover(state: &DesktopState) -> Result<()> {
     Ok(())
 }
 fn day(state: &DesktopState, value: Option<&str>) -> Result<NaiveDate> {
-    let settings = read_config(&state.config_path)?.activity_registration;
+    let settings = state.settings.config()?.activity_registration;
     settings.validate()?;
     let today = settings.zoned(Utc::now()).date_naive();
     Ok(value
@@ -48,7 +49,7 @@ pub(super) async fn inspect(
     pending: bool,
 ) -> Result<Value> {
     recover(state).await?;
-    let config = read_config(&state.config_path)?;
+    let config = state.settings.config()?;
     let until = day(state, date)?.to_string();
     let since = from
         .unwrap_or("0001-01-01")
@@ -91,8 +92,8 @@ pub(super) async fn run(
         task.as_ref().is_none_or(|t| t.is_finished()),
         Rejected::Conflict("An activity operation is already running. Wait for it to finish.")
     );
-    let config = read_config(&host.state.config_path)?;
-    let map = KnowledgeMap::load(&host.state.map_path)?;
+    let config = host.state.settings.config()?;
+    let map = host.state.settings.map()?;
     let selected: Vec<_> = map
         .resources
         .iter()
@@ -224,7 +225,7 @@ pub(super) async fn schedule(host: Arc<Host>) {
             if authority::invocation(&host.state).is_ok_and(|i| i.scope.admitted)
                 && no_login
                 && !active(&host.state).await
-                && let Ok(config) = read_config(&host.state.config_path)
+                && let Ok(config) = host.state.settings.config()
                 && let Ok(Some(slot)) = config.activity_registration.slot(Utc::now())
                 && run(&host, None, Some(&slot), "").await.is_err()
             {

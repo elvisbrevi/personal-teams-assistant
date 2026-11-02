@@ -120,7 +120,7 @@ fn live() -> std::sync::MutexGuard<'static, BTreeMap<PathBuf, Stage>> {
 }
 
 fn directory(host: &Host) -> PathBuf {
-    host.state.config_path.parent().unwrap().join(DIRECTORY)
+    host.state.settings.profile().join(DIRECTORY)
 }
 
 fn load(dir: &Path) -> Saved {

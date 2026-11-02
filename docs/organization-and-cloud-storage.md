@@ -6,7 +6,8 @@ Design, 2026-11-02. Phase 1 (analysis) of the move described in §14 of the
 2026-11-02 ([sources](#sources)); re-read them before each implementation phase.
 
 Phase 1b (0.10.16) implemented the local organization layer: see §8 «Organization» and §16 of the
-architecture, and the skill's knowledge and account-configuration references.
+architecture, and the skill's knowledge and account-configuration references. Phase 2 is under
+way: the settings store (0.10.17) is the first aggregate behind its trait (§10).
 
 ## 1. Goals and non-goals
 
@@ -36,7 +37,7 @@ process or machine that wrote it).
 
 | Store | Contents | Size | Written / read by | Class | Destination |
 | --- | --- | --- | --- | --- | --- |
-| `config.toml` | `Config`: language, style, model chain, policy, `[secrets]` references, server/Graph IDs, tunnel, embeddings, message style, activity schedule | 4 KB | host (`commit_settings`), GUI/CLI/MCP | U + R | portable part → cloud (already an allowlist in `portable.rs`); bind, URLs, paths, tunnel, Graph IDs, `[secrets]` stay local |
+| `config.toml` | `Config`: language, style, model chain, policy, `[secrets]` references, server/Graph IDs, tunnel, embeddings, message style, activity schedule | 4 KB | host (`SettingsStore`), GUI/CLI/MCP | U + R | portable part → cloud (already an allowlist in `portable.rs`); bind, URLs, paths, tunnel, Graph IDs, `[secrets]` stay local |
 | `knowledge-map.toml` | sources, contexts, questions and associated requests, people, `work_item_guides`, `agent_prompts`, repository bindings, legacy cases | 36 KB | host, GUI/CLI/MCP | U + O | sources/contexts/questions/people/prompts → account cloud store; guides → organization layer; `repositories` bindings stay local |
 | `assistant.db` › `jobs` | every Teams message handled: status and the audit JSON (question, evidence trace, proposal, answer, feedback) | ≈5.6 MB (with WAL) | pipeline worker; GUI/CLI `audit` | U (sensitive) | audit history → cloud; in-flight rows (`pending`/`processing`/`sending`) stay local |
 | `assistant.db` › `vault` | Microsoft OAuth tokens sealed with `STATE_ENCRYPTION_KEY` | small | OAuth adapter | S | local, never uploaded |
@@ -333,7 +334,7 @@ parity, the `AGENTS.md` checks, and delivery verified on crates.io and on the se
 | --- | --- | --- |
 | 1a. Cleanup (0.10.15) | Synthetic names in tests, docs, README, prompts, the GUI placeholder and catalogs; To-Do items carry `category`; the GUI decides by category; the task type listed with bugs comes from its guide (`listed_with_bugs`); the production guide is updated as data in the same delivery. | The production To-Do stops listing that type until its guide carries the field: update it right after the install, verify the list. |
 | 1b. Organization (local) — done (0.10.16) | `[organization]` in the map (name, entries, source IDs); guides shown as entries; new `organization` source kind (disabled by default) and index documents; Settings › Organization replaces the current guides editor (no duplicate control); `pta organization …` with `pta guides …` kept as its guides subcommand; MCP `organization_*`; agents receive norms and architecture as untrusted input; skill, architecture and `CONTEXT.md`. The organization, guides included, joins the account configuration's allowlist and travels with the account. | Prompt size growth for agents (bound entries per run); a second place to edit guides if the old editor is not removed in the same PR. |
-| 2. Storage abstraction | Repository traits per aggregate (settings and map, notes and feedback, audit history, activity records, runs, organization), the current local implementation as default, one shared contract test suite. No behavior change. | Broad refactor of hot paths: done store by store, each PR behavior-neutral and fully tested. |
+| 2. Storage abstraction — in progress | Repository traits per aggregate (settings and map, notes and feedback, audit history, activity records, runs, organization), the current local implementation as default, one shared contract test suite. No behavior change. Done: `SettingsStore` (0.10.17, `app/store/settings.rs`): `Config`, `KnowledgeMap` and the tunnel path, committed together with the existing journal; `LocalSettings` is the profile's files and every host, portal and CLI read or write of them goes through it. The organization lives in the map, so it is part of this store until the cloud keeps it apart. | Broad refactor of hot paths: done store by store, each PR behavior-neutral and fully tested. |
 | 3a. Worker and authentication | `cloud/` Worker, `Registry`, `AccountStore` schema v1 (encrypted records with clear metadata), Access service token, installation credential, health; Workers Builds; host `cloud status/connect`. | Access/Workers configuration mistakes: staging Worker first, contract tests including cross-account attempts. |
 | 3b. Mirror | Outbox for append-only records, encrypted snapshots of configuration, `cloud verify`; local stays the source of truth. | Outbox growth while offline (bounded, visible in status); latency measured here. |
 | 3c. Primary | Compare-and-swap configuration writes through the Worker; local replica; `portable_*` served from the account store. | Conflict handling regressions: reuse the portable rules and their tests. |

@@ -14,6 +14,7 @@ use super::{
     implementation::{self, Link},
     *,
 };
+use crate::app::store::settings::SettingsStore;
 use crate::{
     index::{Index, Note},
     portable::{self as core, Document, Patch, Unavailable},
@@ -154,8 +155,8 @@ pub(super) fn handles(method: &str) -> bool {
 
 /// The profile's configuration, knowledge map and notes.
 fn local(state: &DesktopState) -> anyhow::Result<(Config, KnowledgeMap, Vec<Note>)> {
-    let config = read_config(&state.config_path)?;
-    let map = KnowledgeMap::load(&state.map_path)?;
+    let config = state.settings.config()?;
+    let map = state.settings.map()?;
     let index = Index::open(&config.server.data_dir.join(crate::index::FILE))?;
     let notes = index.notes(None, core::MAX_NOTES + 1)?;
     Ok((config, map, notes))
@@ -413,8 +414,8 @@ pub(in crate::app) async fn machine_call(
             validate_local(&next_config, &next_map).map_err(|_| {
                 invalid("The change is invalid for the account's own installation.")
             })?;
-            let tunnel = fs::read_to_string(&state.tunnel_path).unwrap_or_default();
-            commit_settings(state, &next_config, &next_map, &tunnel)?;
+            let tunnel = state.settings.tunnel().unwrap_or_default();
+            state.settings.commit(&next_config, &next_map, &tunnel)?;
             forget_removed_sources(&next_config, &next_map);
             *state.activity_graph.lock().await = None;
             let (_, _, _, _, after) = account_view(state)?;
@@ -715,8 +716,8 @@ fn clear(state: &DesktopState) -> anyhow::Result<()> {
     let (next_config, next_map, _) = pristine.install(&config, &map, |_| true);
     validate_local(&next_config, &next_map)?;
     let index = Index::open(&next_config.server.data_dir.join(crate::index::FILE))?;
-    let tunnel = fs::read_to_string(&state.tunnel_path).unwrap_or_default();
-    commit_settings(state, &next_config, &next_map, &tunnel)?;
+    let tunnel = state.settings.tunnel().unwrap_or_default();
+    state.settings.commit(&next_config, &next_map, &tunnel)?;
     index.replace_notes(&[])?;
     forget_removed_sources(&next_config, &next_map);
     Ok(())
@@ -839,12 +840,15 @@ async fn synchronize(host: &Arc<Host>, link: &Link, reset: bool, mode: Mode) -> 
         }
         let index = Index::open(&next_config.server.data_dir.join(crate::index::FILE))
             .map_err(|_| CANNOT_APPLY)?;
-        let tunnel = fs::read_to_string(&state.tunnel_path).unwrap_or_default();
+        let tunnel = state.settings.tunnel().unwrap_or_default();
         // Marked before anything changes, so an interrupted install is still cleared on leaving.
         security::private_dir(&portable.dir)
             .and_then(|_| write_private(&portable.holding_path(), ""))
             .map_err(|_| CANNOT_APPLY)?;
-        commit_settings(state, &next_config, &next_map, &tunnel).map_err(|_| CANNOT_APPLY)?;
+        state
+            .settings
+            .commit(&next_config, &next_map, &tunnel)
+            .map_err(|_| CANNOT_APPLY)?;
         index
             .replace_notes(&fetched.notes)
             .map_err(|_| CANNOT_APPLY)?;
@@ -938,7 +942,7 @@ pub(super) async fn local_setup(host: &Host, unavailable: &Unavailable) -> Vec<V
             "message": format!("Connect the repository «{alias}» on this computer; the sources that read it are unavailable until then."),
         }));
     }
-    if let Ok(config) = read_config(&host.state.config_path) {
+    if let Ok(config) = host.state.settings.config() {
         // An ordinary portal account never learns what is installed on the operator's computer.
         let owner = authority::invocation(&host.state).is_ok_and(|i| i.scope.owner);
         for choice in config
@@ -1297,7 +1301,7 @@ pub(super) async fn note_save(
     let note: Note = serde_json::from_value(args.get("note").cloned().unwrap_or(Value::Null))
         .map_err(|_| "[invalid_input] A note needs title and text, and optionally contexts, keywords, origin and reference.".to_owned())?;
     ready(state, &link, true)?;
-    let config = read_config(&state.config_path).map_err(fail)?;
+    let config = state.settings.config().map_err(fail)?;
     let index = Index::open(&config.server.data_dir.join(crate::index::FILE)).map_err(fail)?;
     let expected = if note.id.is_empty() {
         None
@@ -1346,7 +1350,7 @@ pub(super) async fn note_remove(
         .and_then(Value::as_str)
         .ok_or("[invalid_input] A note ID is required.")?;
     ready(state, &link, true)?;
-    let config = read_config(&state.config_path).map_err(fail)?;
+    let config = state.settings.config().map_err(fail)?;
     let index = Index::open(&config.server.data_dir.join(crate::index::FILE)).map_err(fail)?;
     let held = index
         .note(id)
