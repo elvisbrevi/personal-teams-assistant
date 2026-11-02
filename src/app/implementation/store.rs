@@ -1,10 +1,14 @@
-//! SQLite is authoritative for execution states and native agent sessions.
+//! SQLite is authoritative for execution states and native agent sessions. The finished runs
+//! and request runs are read and written through `store::implementation`; the in-flight ones,
+//! the change feed and the coordinator's session index stay here.
 use super::*;
+use crate::store::implementation::{ImplementationStore, LocalImplementation};
 use rusqlite::{Connection, params};
+use std::sync::MutexGuard;
 
-pub(super) struct Database(std::sync::Mutex<Connection>);
+pub(crate) struct Database(std::sync::Mutex<Connection>);
 impl Database {
-    pub(super) fn open(path: &Path) -> Result<Self> {
+    pub(crate) fn open(path: &Path) -> Result<Self> {
         let db = Connection::open(path)?;
         security::protect_file(path)?;
         db.busy_timeout(Duration::from_secs(5))?;
@@ -32,7 +36,12 @@ impl Database {
             UPDATE request_runs SET state=CASE WHEN state='sending' THEN 'uncertain' ELSE 'interrupted' END WHERE state IN ('generating','sending');")?;
         Ok(Self(std::sync::Mutex::new(db)))
     }
-    pub(super) fn request_insert(&self, record: &Value) -> Result<()> {
+    /// The connection, for the installation's implementation record in the same database
+    /// (`LocalImplementation`).
+    pub(crate) fn connection(&self) -> MutexGuard<'_, Connection> {
+        self.0.lock().unwrap()
+    }
+    pub(crate) fn request_insert(&self, record: &Value) -> Result<()> {
         self.0.lock().unwrap().execute(
             "INSERT INTO request_runs(id,state,requested_at,payload) VALUES (?1,?2,?3,?4)",
             params![
@@ -66,9 +75,19 @@ impl Database {
         tx.commit()?;
         Ok(())
     }
-    pub(super) fn requests(&self, id: Option<&str>) -> Result<Vec<Value>> {
+    /// Every request run, in flight or finished, the most recently requested first (at most
+    /// 100); `id` keeps one.
+    pub(crate) fn requests(&self, id: Option<&str>) -> Result<Vec<Value>> {
+        let mut requests = self.request_rows(id, "state IN ('generating','sending')")?;
+        requests.extend(LocalImplementation::new(self).requests(id)?);
+        requests.sort_by(|a, b| b["created_at"].as_str().cmp(&a["created_at"].as_str()));
+        requests.truncate(100);
+        Ok(requests)
+    }
+    /// Request runs in the states `condition` names (a fixed, code-owned predicate).
+    pub(crate) fn request_rows(&self, id: Option<&str>, condition: &str) -> Result<Vec<Value>> {
         let db = self.0.lock().unwrap();
-        let mut query = db.prepare("SELECT payload,state FROM request_runs WHERE (?1 IS NULL OR id=?1) ORDER BY requested_at DESC LIMIT 100")?;
+        let mut query = db.prepare(&format!("SELECT payload,state FROM request_runs WHERE {condition} AND (?1 IS NULL OR id=?1) ORDER BY requested_at DESC LIMIT 100"))?;
         let rows = query.query_map([id], |r| {
             Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
         })?;
@@ -112,7 +131,7 @@ impl Database {
         runs.sort_by(|a, b| b["created_at"].as_str().cmp(&a["created_at"].as_str()));
         Ok(runs)
     }
-    pub(super) fn insert(&self, run: &Run) -> Result<()> {
+    pub(crate) fn insert(&self, run: &Run) -> Result<()> {
         let launch = &run.launch;
         let request = &launch.request;
         let mut db = self.0.lock().unwrap();
@@ -125,15 +144,38 @@ impl Database {
         tx.commit()?;
         Ok(())
     }
-    pub(super) fn list(
+    /// Runs, the most recently requested first: every run (at most 100), or with `active` only
+    /// those planning or running.
+    pub(crate) fn list(
         &self,
         url: Option<&str>,
         id: Option<&str>,
         active: bool,
     ) -> Result<Vec<Run>> {
+        let mut runs = self.runs(
+            url,
+            id,
+            "state IN ('running','planning')",
+            if active { -1 } else { 100 },
+        )?;
+        if !active {
+            runs.extend(LocalImplementation::new(self).runs(url, id)?);
+            runs.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+            runs.truncate(100);
+        }
+        Ok(runs)
+    }
+    /// Runs in the states `condition` names (a fixed, code-owned predicate); `limit` -1 is all.
+    pub(crate) fn runs(
+        &self,
+        url: Option<&str>,
+        id: Option<&str>,
+        condition: &str,
+        limit: i64,
+    ) -> Result<Vec<Run>> {
         let db = self.0.lock().unwrap();
-        let mut statement=db.prepare("SELECT payload,state,session_id,started_at,finished_at FROM agent_runs WHERE (?1 IS NULL OR work_item_url=?1) AND (?2 IS NULL OR id=?2) AND (?3=0 OR state IN ('running','planning')) ORDER BY requested_at DESC LIMIT CASE WHEN ?3=1 THEN -1 ELSE 100 END")?;
-        let rows = statement.query_map(params![url, id, active], |row| {
+        let mut statement=db.prepare(&format!("SELECT payload,state,session_id,started_at,finished_at FROM agent_runs WHERE {condition} AND (?1 IS NULL OR work_item_url=?1) AND (?2 IS NULL OR id=?2) ORDER BY requested_at DESC LIMIT ?3"))?;
+        let rows = statement.query_map(params![url, id, limit], |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
@@ -154,7 +196,7 @@ impl Database {
         }
         Ok(runs)
     }
-    pub(super) fn get(&self, id: &str) -> Result<Option<Run>> {
+    pub(crate) fn get(&self, id: &str) -> Result<Option<Run>> {
         Ok(self.list(None, Some(id), false)?.pop())
     }
     pub(super) fn session(&self, id: &str, session: Option<&str>) -> Result<()> {
@@ -193,27 +235,6 @@ impl Database {
                 params![id, value],
             )?;
         }
-        tx.commit()?;
-        Ok(())
-    }
-    pub(super) fn finish(
-        &self,
-        id: &str,
-        state: &str,
-        output: &str,
-        plan: Option<Value>,
-    ) -> Result<()> {
-        let mut run = self.get(id)?.context("Execution record unavailable.")?;
-        if !["running", "planning"].contains(&run.state.as_str()) {
-            return Ok(());
-        }
-        run.state = state.into();
-        run.output = output.into();
-        run.plan = plan;
-        let finished = chrono::Utc::now().to_rfc3339();
-        let mut db = self.0.lock().unwrap();
-        let tx = db.transaction()?;
-        if tx.execute("UPDATE agent_runs SET state=?2,finished_at=?3,payload=?4 WHERE id=?1 AND state IN ('running','planning')",params![id,state,finished,serde_json::to_string(&run)?])?>0 { tx.execute("INSERT INTO agent_run_events(run_id) VALUES (?1)",[id])?; }
         tx.commit()?;
         Ok(())
     }
@@ -334,7 +355,8 @@ mod tests {
         assert!(running.session_id.is_some());
         assert!(running.started_at.is_some());
         assert!(running.finished_at.is_none());
-        db.finish(id, "done", "Implemented and checked.", None)
+        LocalImplementation::new(&db)
+            .finish_run(id, "done", "Implemented and checked.", None)
             .unwrap();
         assert!(db.insert(&run).is_err());
         let (cursor, updates) = db.changes(0).unwrap();
