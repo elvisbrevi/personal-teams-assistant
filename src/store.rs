@@ -8,4 +8,5 @@ pub mod activity;
 pub mod audit;
 pub(crate) mod implementation;
 pub mod notes;
+pub mod organization;
 pub(crate) mod settings;

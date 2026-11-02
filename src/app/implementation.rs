@@ -2,6 +2,7 @@
 use super::*;
 use crate::store::{
     implementation::{ImplementationStore, LocalImplementation},
+    organization::{LocalOrganization, OrganizationStore},
     settings::SettingsStore,
 };
 use crate::tools::todo::{Detail, DetailRequest};
@@ -493,12 +494,13 @@ async fn operation(host: &Arc<Host>, method: &str, args: &Value) -> Result<Value
             let detail = detail(host, &request.item).await?;
             let planning = planning(&request.item, &detail);
             let map = host.state.settings.map()?;
+            let organization = LocalOrganization::new(&host.state.settings).organization()?;
             let (provider, project) = (&request.item.provider, &detail.item.project);
             let guides = if planning {
-                crate::work_items::for_project(&map.work_item_guides, provider, project)
+                crate::work_items::for_project(&organization.guides, provider, project)
             } else {
                 crate::work_items::for_item(
-                    &map.work_item_guides,
+                    &organization.guides,
                     provider,
                     &detail.item.kind,
                     project,
@@ -518,7 +520,7 @@ async fn operation(host: &Arc<Host>, method: &str, args: &Value) -> Result<Value
                     },
                 )),
                 guides: guides.into_iter().cloned().collect(),
-                organization: crate::organization::for_agents(&map.organization, project)
+                organization: crate::organization::for_agents(&organization.organization, project)
                     .into_iter()
                     .cloned()
                     .collect(),
