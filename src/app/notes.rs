@@ -7,6 +7,7 @@ use super::{DesktopState, fail};
 use crate::store::{
     audit::{AuditStore, LocalAudit},
     notes::{Example, LocalNotes, NotesStore},
+    organization::{LocalOrganization, OrganizationStore},
     settings::SettingsStore,
 };
 use crate::{
@@ -25,8 +26,11 @@ fn open(
     let config = state.settings.config().map_err(fail)?;
     let map = state.settings.map().map_err(fail)?;
     let index = Index::open(&config.server.data_dir.join(crate::index::FILE)).map_err(fail)?;
+    let organization = LocalOrganization::new(&state.settings)
+        .organization()
+        .map_err(fail)?;
     index
-        .sync_organization(&map.organization, &map.work_item_guides)
+        .sync_organization(&organization.organization, &organization.guides)
         .map_err(fail)?;
     Ok((config, map, index))
 }

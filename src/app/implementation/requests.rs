@@ -2,6 +2,7 @@
 use super::*;
 use crate::store::{
     implementation::{ImplementationStore, LocalImplementation},
+    organization::{LocalOrganization, OrganizationStore},
     settings::SettingsStore,
 };
 use crate::{knowledge::Access, tools::ToolSpec};
@@ -227,18 +228,19 @@ async fn run(host: &Arc<Host>, request: Request, prepared: Value, directory: Pat
         authority::require_execution(&host.state)?;
         let language = host.state.settings.config()?.llm.language;
         let map = host.state.settings.map()?;
+        let organization = LocalOrganization::new(&host.state.settings).organization()?;
         let provider = request.target["provider"].as_str().unwrap();
         // The provider's type name: the process type resolved for Azure, the issue type on GitHub.
         let kind = prepared["kind"].as_str().unwrap_or("Epic");
         let project = request.target["project"].as_str().unwrap_or_default();
-        let guide = crate::work_items::for_item(&map.work_item_guides, provider, kind, project);
+        let guide = crate::work_items::for_item(&organization.guides, provider, kind, project);
         let mut input = json!({"context":request.context,"kind":request.kind,"type":kind,"language":language,"today":chrono::Local::now().date_naive()});
         if let Some(guide) = guide {
             input["work_item_guide"] = json!(guide);
         }
-        let organization = crate::organization::for_agents(&map.organization, project);
-        if !organization.is_empty() {
-            input["organization"] = crate::organization::agent_input(organization);
+        let entries = crate::organization::for_agents(&organization.organization, project);
+        if !entries.is_empty() {
+            input["organization"] = crate::organization::agent_input(entries);
         }
         let input = input.to_string();
         let instructions =
@@ -293,7 +295,7 @@ async fn run(host: &Arc<Host>, request: Request, prepared: Value, directory: Pat
                 &client,
                 &key,
                 &catalog,
-                &map.work_item_guides,
+                &organization.guides,
                 &prepared,
                 &draft,
             )
