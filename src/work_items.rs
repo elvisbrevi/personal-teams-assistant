@@ -33,6 +33,10 @@ pub struct Guide {
     pub instructions: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub fields: Vec<Field>,
+    /// To-Do lists this Azure task-category type together with the bugs (a process may classify
+    /// a development bug as a task). Without it, To-Do lists only requirement and bug categories.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub listed_with_bugs: bool,
 }
 fn azure() -> String {
     "azure".into()
@@ -45,7 +49,7 @@ fn is_false(value: &bool) -> bool {
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct Field {
-    /// The provider's reference name («Custom.Mes», «Microsoft.VSTS.Common.AcceptanceCriteria»).
+    /// The provider's reference name («Custom.Month», «Microsoft.VSTS.Common.AcceptanceCriteria»).
     pub reference: String,
     /// The label people see.
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -117,6 +121,10 @@ pub fn validate(guides: &[Guide]) -> Result<()> {
             "a work item guide applies to at most 50 projects"
         );
         ensure!(
+            !guide.listed_with_bugs || guide.provider == "azure",
+            "only an Azure work item guide can list its type with the bugs"
+        );
+        ensure!(
             guide.fields.len() <= 80,
             "a work item guide has at most 80 fields"
         );
@@ -174,6 +182,10 @@ pub fn for_item<'a>(
         first
     })
 }
+/// Whether To-Do lists an Azure task-category type of a project with the bugs.
+pub fn listed_with_bugs(guides: &[Guide], kind: &str, project: &str) -> bool {
+    for_item(guides, "azure", kind, project).is_some_and(|g| g.listed_with_bugs)
+}
 /// Every guide that applies in a project, one per type.
 pub fn for_project<'a>(guides: &'a [Guide], provider: &str, project: &str) -> Vec<&'a Guide> {
     let mut kinds = BTreeSet::new();
@@ -201,6 +213,22 @@ mod tests {
             projects: projects.iter().map(|p| p.to_string()).collect(),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn a_guide_lists_an_azure_task_type_with_the_bugs_in_its_projects() {
+        let mut general = guide("dev-bug", "Development Bug", &[]);
+        general.listed_with_bugs = true;
+        let mut payments = guide("dev-bug-payments", "Development Bug", &["Payments"]);
+        payments.listed_with_bugs = false;
+        let guides = [general.clone(), payments];
+        assert!(validate(&guides).is_ok());
+        assert!(listed_with_bugs(&guides, "development bug", "Billing"));
+        // The project's own guide wins over the general one.
+        assert!(!listed_with_bugs(&guides, "Development Bug", "Payments"));
+        assert!(!listed_with_bugs(&guides, "Task", "Billing"));
+        general.provider = "github".into();
+        assert!(validate(&[general]).is_err());
     }
 
     #[test]
@@ -232,7 +260,7 @@ mod tests {
     fn only_azure_fields_outside_system_can_be_filled() {
         let mut task = guide("task", "Task", &[]);
         task.fields = vec![Field {
-            reference: "Custom.Mes".into(),
+            reference: "Custom.Month".into(),
             values: vec!["Octubre".into()],
             fill: true,
             ..Default::default()

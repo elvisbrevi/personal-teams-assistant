@@ -60,7 +60,7 @@ test('every To-Do card opens its own detail after the list is rendered', async (
   assert.deepEqual(opened, [7, 8, 9]);
 });
 
-test('Bug Desarrollo opens task detail and workflow states get distinct colors', () => {
+test('a task-category item opens task detail and workflow states get distinct colors', () => {
   const nodes = new Map(), opened = [];
   const node = props => ({ ...props, children: props?.children ?? [] });
   const $ = selector => {
@@ -74,7 +74,7 @@ test('Bug Desarrollo opens task detail and workflow states get distinct colors',
   });
   vm.runInContext('let todoSelection, todoListScroll, todoReturnFocus;\n' +
     source.slice(source.indexOf('function todoStateStyle('), source.indexOf('\nfunction closeTodoDetail(')), context);
-  const card = vm.runInContext(`todoItem(${JSON.stringify({ id: 27176, title: 'Bug Desarrollo', kind: 'Bug Desarrollo', state: 'Done', project: 'Payments', created_at: null, dates: [] })})`, context);
+  const card = vm.runInContext(`todoItem(${JSON.stringify({ id: 41176, title: 'Development Bug', kind: 'Development Bug', category: 'task', state: 'Done', project: 'Payments', created_at: null, dates: [] })})`, context);
   assert.equal(card.class, 'todo-item done');
   assert.equal(card.children[1].children[0].tone, 'ok');
   const stateStyles = JSON.parse(vm.runInContext(`JSON.stringify(['Active', 'Resolved', 'New'].map(state => {
@@ -107,7 +107,7 @@ test('To-Do work item actions include a copy button that copies the original URL
     done: message => notices.push(['ok', message]), fail: message => notices.push(['error', message]),
   });
   vm.runInContext(source.slice(source.indexOf('function todoOriginal('), source.indexOf('\nlet todoDetailRequest')), context);
-  const actions = vm.runInContext("todoOriginal({ id: 27176, url: 'https://dev.azure.com/example/_workitems/edit/27176' })", context);
+  const actions = vm.runInContext("todoOriginal({ id: 41176, url: 'https://dev.azure.com/example/_workitems/edit/41176' })", context);
   assert.equal(actions.class, 'todo-actions');
   assert.equal(actions.children[0].children[0].icon, 'wrench');
   assert.equal(actions.children[1].children[0].icon, 'link');
@@ -115,7 +115,7 @@ test('To-Do work item actions include a copy button that copies the original URL
   assert.equal(copyButton['aria-label'], 'Copy work item link');
   assert.equal(copyButton.children[0].icon, 'copy');
   await copyButton.onclick();
-  assert.deepEqual(copied, ['https://dev.azure.com/example/_workitems/edit/27176']);
+  assert.deepEqual(copied, ['https://dev.azure.com/example/_workitems/edit/41176']);
   assert.deepEqual(notices, [['ok', 'Link copied: {url}']]);
   assert.match(style, /\.todo-actions\s*\{[^}]*display:\s*flex/);
   assert.match(i18n, /'Copy work item link': 'Copiar enlace del work item'/);

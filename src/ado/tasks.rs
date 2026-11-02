@@ -21,6 +21,7 @@ pub(super) fn item(source: &Source, project: &str, value: &Value) -> Result<Item
         project: project.into(),
         state: field(value, "System.State").into(),
         kind: field(value, "System.WorkItemType").into(),
+        category: "task".into(),
         created_at: todo::timestamp(&value["fields"]["System.CreatedDate"]),
         dates: [
             "Microsoft.VSTS.Scheduling.StartDate",

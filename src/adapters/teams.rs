@@ -639,12 +639,12 @@ mod tests {
     }
     #[test]
     fn markdown_answer_renders_as_escaped_teams_html() {
-        let answer = "El servicio **Crear SPS** se invoca con `POST /api/v1/solicitudes/crear`.\nSegunda línea <script>x</script> & más.\n\nPasos:\n1. Arma el cuerpo:\n   ```json\n   {\n     \"Servicios\": []\n   }\n   ```\n2. Envía la solicitud.\n\n- Campo `RutTramitador`\n  - Subcampo\n- [evil](javascript:alert(1)) [ok](https://dev.azure.com/o/p/_wiki?pagePath=%2FA%20(b))\n\n**Fuentes**\n- [Crear SPS (Solicitud de Servicio)](https://dev.azure.com/o/p/_wiki/wikis/w?pagePath=%2FCrear%20SPS&x=1): wiki del proyecto P.";
+        let answer = "El servicio **Crear ODC** se invoca con `POST /api/v1/solicitudes/crear`.\nSegunda línea <script>x</script> & más.\n\nPasos:\n1. Arma el cuerpo:\n   ```json\n   {\n     \"Servicios\": []\n   }\n   ```\n2. Envía la solicitud.\n\n- Campo `RutTramitador`\n  - Subcampo\n- [evil](javascript:alert(1)) [ok](https://dev.azure.com/o/p/_wiki?pagePath=%2FA%20(b))\n\n**Fuentes**\n- [Crear ODC (Solicitud de Servicio)](https://dev.azure.com/o/p/_wiki/wikis/w?pagePath=%2FCrear%20ODC&x=1): wiki del proyecto P.";
         let html = html(answer);
         assert_eq!(
             html,
             concat!(
-                "<p>El servicio <b>Crear SPS</b> se invoca con <code>POST /api/v1/solicitudes/crear</code>.",
+                "<p>El servicio <b>Crear ODC</b> se invoca con <code>POST /api/v1/solicitudes/crear</code>.",
                 "<br>Segunda línea &lt;script&gt;x&lt;/script&gt; &amp; más.</p>",
                 "<p>Pasos:</p>",
                 "<ol><li>Arma el cuerpo:<codeblock class=\"json\"><code>{<br>&nbsp;&nbsp;&quot;Servicios&quot;: []<br>}</code></codeblock>",
@@ -652,7 +652,7 @@ mod tests {
                 "<ul><li>Campo <code>RutTramitador</code><ul><li>Subcampo</li></ul>",
                 "</li><li>[evil](javascript:alert(1)) <a href=\"https://dev.azure.com/o/p/_wiki?pagePath=%2FA%20(b)\">ok</a></li></ul>",
                 "<p><b>Fuentes</b></p>",
-                "<ul><li><a href=\"https://dev.azure.com/o/p/_wiki/wikis/w?pagePath=%2FCrear%20SPS&amp;x=1\">Crear SPS (Solicitud de Servicio)</a>: wiki del proyecto P.</li></ul>",
+                "<ul><li><a href=\"https://dev.azure.com/o/p/_wiki/wikis/w?pagePath=%2FCrear%20ODC&amp;x=1\">Crear ODC (Solicitud de Servicio)</a>: wiki del proyecto P.</li></ul>",
             )
         );
         assert_eq!(super::html("¡Hola!"), "<p>¡Hola!</p>");
@@ -660,11 +660,11 @@ mod tests {
     }
     #[test]
     fn rich_markdown_renders_tables_quotes_rules_checklists_and_colors() {
-        let answer = "## Estado de **Crear SPS**\n\nEl servicio está *disponible* y ~~en pruebas~~ en producción.\n| Ambiente | Estado | Nota |\n|---|:---:|---|\n| QA | {green:OK} | `GET /a\\|b` |\n| Prod | {red: Caído} |\n\n> **Importante:** revisar el *token*.\n> > anidado\n\n---\n- [x] Desplegado\n- [ ] Validado";
+        let answer = "## Estado de **Crear ODC**\n\nEl servicio está *disponible* y ~~en pruebas~~ en producción.\n| Ambiente | Estado | Nota |\n|---|:---:|---|\n| QA | {green:OK} | `GET /a\\|b` |\n| Prod | {red: Caído} |\n\n> **Importante:** revisar el *token*.\n> > anidado\n\n---\n- [x] Desplegado\n- [ ] Validado";
         assert_eq!(
             html(answer),
             concat!(
-                "<h2>Estado de <b>Crear SPS</b></h2>",
+                "<h2>Estado de <b>Crear ODC</b></h2>",
                 "<p>El servicio está <i>disponible</i> y <s>en pruebas</s> en producción.</p>",
                 "<table><thead><tr><th>Ambiente</th><th>Estado</th><th>Nota</th></tr></thead><tbody>",
                 "<tr><td>QA</td><td><span style=\"color:#13A10E\">OK</span></td><td><code>GET /a|b</code></td></tr>",

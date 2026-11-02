@@ -202,7 +202,7 @@ function todoItem(item, onSelect = null, selection = null) {
     if (onSelect) return onSelect(select);
     todoListScroll = window.scrollY;
     todoReturnFocus = select;
-    todoSelection = { provider: $('#todo-provider').value, source: $('#todo-source').value, item, task: item.kind === 'Bug Desarrollo' };
+    todoSelection = { provider: $('#todo-provider').value, source: $('#todo-source').value, item, task: item.category === 'task' };
     loadTodoDetail();
   };
   return el('article', { class: `todo-item ${stateStyle.class}`.trim() },
@@ -760,7 +760,7 @@ let implementationRequest = 0;
 function implementationSelection(item, selection) {
   const provider = item.url.startsWith('https://github.com/') ? 'github' : 'azure';
   return { provider, id: item.id, project: item.project, source: provider === 'azure' ? selection?.source || $('#todo-source').value || undefined : undefined,
-    task: provider === 'azure' && (selection?.task ?? ['Task', 'Bug Desarrollo', 'Documentación', 'Tarea de Prueba'].includes(item.kind)) };
+    task: provider === 'azure' && (selection?.task ?? item.category === 'task') };
 }
 async function openImplementation(item, selection, trigger) {
   const request = ++implementationRequest;
@@ -3393,7 +3393,7 @@ function answerActions(row) {
   const drafted = unsentDraft(row);
   const sources = sourceChooser(row);
   const context = drafted ? el('textarea', { class: 'answer-context', rows: 3, maxLength: 4000,
-    placeholder: t('E.g. It is already in validation and Luis Felipe owns it; the production deployment is planned for 10/20 and the production variables are still missing.'),
+    placeholder: t('E.g. It is already in validation and Alex owns it; the production deployment is planned for 10/20 and the production variables are still missing.'),
     value: answerContext.get(row.resource) || '' }) : null;
   if (context) {
     context.setAttribute('data-resource', row.resource);
@@ -4144,9 +4144,11 @@ function renderGuides() {
     const provider = el('select', {}, ...['azure', 'github'].map(value => el('option', { value, textContent: providerLabel(value), selected: guide.provider === value })));
     provider.onchange = () => {
       guide.provider = provider.value;
-      if (guide.provider === 'github') for (const f of guide.fields) f.fill = false;
+      if (guide.provider === 'github') { for (const f of guide.fields) f.fill = false; guide.listed_with_bugs = false; }
       changed(); renderGuides();
     };
+    const withBugs = el('input', { type: 'checkbox', checked: Boolean(guide.listed_with_bugs), disabled: guide.provider !== 'azure' });
+    withBugs.onchange = () => { guide.listed_with_bugs = withBugs.checked; changed(); };
     const fields = el('div', { class: 'list' }, ...guide.fields.map(field => guideFieldEditor(guide, field, changed)));
     const addField = el('button', { type: 'button', class: 'secondary small', textContent: t('Add field') });
     addField.onclick = () => {
@@ -4164,6 +4166,7 @@ function renderGuides() {
         input(t('Type, as the provider names it'), guide.type, 'Product Backlog Item', value => { guide.type = value.trim(); }, { translate: 'no' }),
         el('label', {}, t('Provider'), provider),
         input(t('Projects or repositories, comma separated'), (guide.projects ?? []).join(', '), t('Empty applies to all'), value => { guide.projects = names(value); })),
+      el('label', { class: 'check' }, withBugs, t('To-Do lists this task type with the bugs')),
       area(t('When it is used'), guide.purpose, t('What this type is for in your organization'), value => { guide.purpose = value; }),
       area(t('How to write it'), guide.instructions, t('Title pattern, description structure, conventions'), value => { guide.instructions = value; }, 6),
       el('fieldset', {}, el('legend', { textContent: t('Fields') }), fields, el('div', { class: 'actions' }, addField)),

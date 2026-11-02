@@ -1,8 +1,8 @@
-//! A work item a status request names («avance de la HU #23553»), read directly in the
+//! A work item a status request names («avance de la HU #41553»), read directly in the
 //! catalog's scope whoever holds it now: its state and since when, the current owner, state
 //! and assignment changes, planned dates, child tasks, linked code and recent comments. The
 //! user's own recent activity alone misses an HU already handed over to someone else. A pull
-//! request the request names («PR !4848») is read by ID too, so the answer can link it.
+//! request the request names («PR !7348») is read by ID too, so the answer can link it.
 use super::{
     Source, artifact, field, item_reference, label, organization_url, project_url, request,
     same_user, unreadable,
@@ -22,7 +22,7 @@ const COMMENTS: usize = 5;
 /// Custom date fields whose display name is looked up per status read.
 const FIELD_NAMES: usize = 8;
 
-/// Work item IDs the request names: «HU #23553», «bug 4512», «AB#77» or a bare «#23553», but
+/// Work item IDs the request names: «HU #41553», «bug 4512», «AB#77» or a bare «#41553», but
 /// not a run, build, pull request or release number («run #345»).
 pub(super) fn requested(question: &str) -> Vec<u64> {
     let mut ids: Vec<u64> = Vec::new();
@@ -66,8 +66,8 @@ pub(super) fn requested(question: &str) -> Vec<u64> {
     ids
 }
 
-/// Pull requests the request names: «PR !4848», «PR #4848», «PR 4848», «pull request 4848» or
-/// a bare «!4848».
+/// Pull requests the request names: «PR !7348», «PR #7348», «PR 7348», «pull request 7348» or
+/// a bare «!7348».
 pub(super) fn requested_pull_requests(question: &str) -> Vec<u64> {
     let mut ids: Vec<u64> = Vec::new();
     for pattern in [
@@ -668,25 +668,25 @@ mod tests {
     #[test]
     fn requested_items_are_work_items_not_runs_or_releases() {
         assert_eq!(
-            requested("1) Avance de lo que tienes en curso: HU #23553"),
-            [23553]
+            requested("1) Avance de lo que tienes en curso: HU #41553"),
+            [41553]
         );
         assert_eq!(requested("¿cómo va la HU 4512 y el bug #778?"), [4512, 778]);
-        assert_eq!(requested("estado de #23553 y AB#9001"), [23553, 9001]);
+        assert_eq!(requested("estado de #41553 y AB#9001"), [41553, 9001]);
         assert!(requested("¿falló el run #345 o el build #346?").is_empty());
         assert!(requested("Release #12 y PR #88").is_empty());
         assert!(requested("1) avance 2) compromiso").is_empty());
-        assert!(requested("¿Me pasas el ticket del PR !4848?").is_empty());
+        assert!(requested("¿Me pasas el ticket del PR !7348?").is_empty());
     }
 
     #[test]
     fn requested_pull_requests_take_every_usual_form() {
         assert_eq!(
-            requested_pull_requests("el ticket del PR !4848 y el PR #12, pull request 77 o !9"),
-            [4848, 12, 77, 9]
+            requested_pull_requests("el ticket del PR !7348 y el PR #12, pull request 77 o !9"),
+            [7348, 12, 77, 9]
         );
         assert_eq!(requested_pull_requests("PR 5122 de TLS Redis"), [5122]);
-        assert!(requested_pull_requests("¡Hola! la HU #23553 y PROD 3").is_empty());
+        assert!(requested_pull_requests("¡Hola! la HU #41553 y PROD 3").is_empty());
     }
 
     #[tokio::test]
@@ -704,14 +704,14 @@ mod tests {
             author_email: "elvis@example.com".into(),
         };
         Mock::given(method("GET"))
-            .and(path("/example/_apis/git/pullrequests/4848"))
+            .and(path("/example/_apis/git/pullrequests/7348"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "pullRequestId":4848,"title":"Template dotnet10","status":"active","isDraft":false,
+                "pullRequestId":7348,"title":"Template dotnet","status":"active","isDraft":false,
                 "createdBy":{"displayName":"Elvis Brevi","uniqueName":"Elvis@example.com"},
                 "creationDate":"2026-10-13T15:00:00Z","closedDate":"0001-01-01T00:00:00",
                 "sourceRefName":"refs/heads/feature/dotnet10-template","targetRefName":"refs/heads/main",
-                "repository":{"id":"r1","name":"sag.transversal.templates.pipelines",
-                    "project":{"name":"Soluciones Transversales"}}})))
+                "repository":{"id":"r1","name":"contoso.shared.templates.pipelines",
+                    "project":{"name":"Shared Solutions"}}})))
             .mount(&server)
             .await;
         Mock::given(method("GET"))
@@ -720,20 +720,20 @@ mod tests {
             .mount(&server)
             .await;
         let client = reqwest::Client::new();
-        let (text, reference) = pull_request(&client, "key", &source, 4848)
+        let (text, reference) = pull_request(&client, "key", &source, 7348)
             .await
             .unwrap()
             .unwrap();
         assert_eq!(
             text,
-            "Requested pull request (named in the request): PR #4848 «Template dotnet10» in repository sag.transversal.templates.pipelines (project Soluciones Transversales): active, created by the user on 2026-10-13, branch feature/dotnet10-template → main."
+            "Requested pull request (named in the request): PR #7348 «Template dotnet» in repository contoso.shared.templates.pipelines (project Shared Solutions): active, created by the user on 2026-10-13, branch feature/dotnet10-template → main."
         );
         assert_eq!(
             reference.url,
-            "https://dev.azure.com/example/Soluciones%20Transversales/_git/sag.transversal.templates.pipelines/pullrequest/4848"
+            "https://dev.azure.com/example/Shared%20Solutions/_git/contoso.shared.templates.pipelines/pullrequest/7348"
         );
         assert_eq!(reference.kind, "pull_request");
-        assert!(reference.aliases.contains(&"PR !4848".to_string()));
+        assert!(reference.aliases.contains(&"PR !7348".to_string()));
         assert!(
             pull_request(&client, "key", &source, 77)
                 .await
@@ -741,8 +741,8 @@ mod tests {
                 .is_none()
         );
         // A project the catalog does not configure is out of scope.
-        source.projects = vec!["Cobro Pago y Tarifas".into()];
-        let outside = pull_request(&client, "key", &source, 4848).await.unwrap();
+        source.projects = vec!["Cobros y Tarifas".into()];
+        let outside = pull_request(&client, "key", &source, 7348).await.unwrap();
         super::super::TEST_SERVER.with(|s| *s.borrow_mut() = None);
         assert!(outside.is_none());
     }
@@ -756,28 +756,28 @@ mod tests {
                 "System.AssignedTo":{"newValue":{"displayName":"Elvis Brevi","uniqueName":"elvis@example.com"}}}},
             {"revisedBy":{"displayName":"Elvis Brevi"},"fields":{
                 "System.ChangedDate":{"newValue":"2026-10-10T15:00:00Z"},
-                "System.State":{"oldValue":"En desarrollo","newValue":"Enviado a validación"},
+                "System.State":{"oldValue":"En desarrollo","newValue":"En validación"},
                 "System.AssignedTo":{"oldValue":{"displayName":"Elvis Brevi","uniqueName":"elvis@example.com"},
-                    "newValue":{"displayName":"Luis Felipe","uniqueName":"luis@example.com"}}}}
+                    "newValue":{"displayName":"Alex Rivera","uniqueName":"alex@example.com"}}}}
         ]});
         let history = changes(&updates, "Elvis@example.com", "2026-09-10");
         assert_eq!(
             history.states,
             [
                 "2026-09-20 created as New (by Elvis Brevi)",
-                "2026-10-10 En desarrollo → Enviado a validación (by Elvis Brevi)"
+                "2026-10-10 En desarrollo → En validación (by Elvis Brevi)"
             ]
         );
         assert_eq!(
             history.assignments[1],
-            "2026-10-10 Elvis Brevi → Luis Felipe (by Elvis Brevi)"
+            "2026-10-10 Elvis Brevi → Alex Rivera (by Elvis Brevi)"
         );
         assert!(history.assigned);
         // Older facts stay out of the window; the whole history still says the user held it.
         let recent = changes(&updates, "Elvis@example.com", "2026-10-01");
         assert_eq!(
             recent.states,
-            ["2026-10-10 En desarrollo → Enviado a validación (by Elvis Brevi)"]
+            ["2026-10-10 En desarrollo → En validación (by Elvis Brevi)"]
         );
         assert_eq!(recent.assignments.len(), 1);
         assert!(recent.assigned);
@@ -838,11 +838,11 @@ mod tests {
             author_email: "elvis@example.com".into(),
         };
         let elvis = json!({"displayName":"Elvis Brevi","uniqueName":"elvis@example.com"});
-        let luis = json!({"displayName":"Luis Felipe","uniqueName":"luis@example.com"});
-        let hu = json!({"id":23553,"fields":{
+        let alex = json!({"displayName":"Alex Rivera","uniqueName":"alex@example.com"});
+        let hu = json!({"id":41553,"fields":{
             "System.TeamProject":"Payments","System.WorkItemType":"User Story",
-            "System.Title":"Pagos QR","System.State":"Enviado a validación",
-            "System.AssignedTo":luis,"System.ChangedBy":elvis,"System.CreatedBy":luis,
+            "System.Title":"Pagos en línea","System.State":"En validación",
+            "System.AssignedTo":alex,"System.ChangedBy":elvis,"System.CreatedBy":alex,
             "System.ChangedDate":at(4),
             "Microsoft.VSTS.Common.StateChangeDate":at(4),
             "Custom.FechaCompromiso":at(-10)},
@@ -863,8 +863,8 @@ mod tests {
             "System.Title":"Pagos","System.State":"Active","System.ChangedDate":at(13)}});
         // Someone else's HU: never assigned to the user, changed or commented by them.
         let foreign = json!({"id":24000,"fields":{"System.TeamProject":"Payments","System.WorkItemType":"User Story",
-            "System.Title":"Reporte de cobros","System.State":"Active","System.AssignedTo":luis,
-            "System.CreatedBy":luis,"System.ChangedBy":luis,"System.ChangedDate":at(2)}});
+            "System.Title":"Reporte de cobros","System.State":"Active","System.AssignedTo":alex,
+            "System.CreatedBy":alex,"System.ChangedBy":alex,"System.ChangedDate":at(2)}});
         let outside = json!({"id":999,"fields":{"System.TeamProject":"Other","System.Title":"x","System.State":"New"}});
         Mock::given(method("GET"))
             .and(path("/example/_apis/wit/workitems"))
@@ -888,31 +888,31 @@ mod tests {
             .mount(&server)
             .await;
         Mock::given(method("GET"))
-            .and(path("/example/Payments/_apis/wit/workItems/23553/updates"))
+            .and(path("/example/Payments/_apis/wit/workItems/41553/updates"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({"value":[
-                {"revisedBy":luis,"fields":{
+                {"revisedBy":alex,"fields":{
                     "System.ChangedDate":{"newValue":at(60)},
                     "System.State":{"oldValue":"New","newValue":"En desarrollo"},
                     "System.AssignedTo":{"newValue":elvis}}},
                 {"revisedBy":elvis,"fields":{
                     "System.ChangedDate":{"newValue":at(4)},
-                    "System.State":{"oldValue":"En desarrollo","newValue":"Enviado a validación"},
-                    "System.AssignedTo":{"oldValue":elvis,"newValue":luis}}}]})))
+                    "System.State":{"oldValue":"En desarrollo","newValue":"En validación"},
+                    "System.AssignedTo":{"oldValue":elvis,"newValue":alex}}}]})))
             .mount(&server)
             .await;
         Mock::given(method("GET"))
-            .and(path("/example/Payments/_apis/wit/workItems/23553/comments"))
+            .and(path("/example/Payments/_apis/wit/workItems/41553/comments"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({"comments":[
-                {"text":"<div>Faltan las variables de Consul en producción; las pedí a Francisco.</div>",
+                {"text":"<div>Faltan las variables de Consul en producción; las pedí a Sam.</div>",
                  "createdBy":elvis,"createdDate":at(3)},
-                {"text":"Comentario antiguo","createdBy":luis,"createdDate":at(50)}]})))
+                {"text":"Comentario antiguo","createdBy":alex,"createdDate":at(50)}]})))
             .mount(&server)
             .await;
         Mock::given(method("GET"))
             .and(path("/example/Payments/_apis/wit/workItems/24000/updates"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({"value":[
-                {"revisedBy":luis,"fields":{"System.ChangedDate":{"newValue":at(2)},
-                    "System.State":{"newValue":"Active"},"System.AssignedTo":{"newValue":luis}}}]})))
+                {"revisedBy":alex,"fields":{"System.ChangedDate":{"newValue":at(2)},
+                    "System.State":{"newValue":"Active"},"System.AssignedTo":{"newValue":alex}}}]})))
             .mount(&server)
             .await;
         Mock::given(method("GET"))
@@ -933,7 +933,7 @@ mod tests {
             &reqwest::Client::new(),
             "key",
             &source,
-            &[23553, 999, 24000],
+            &[41553, 999, 24000],
         )
         .await
         .unwrap();
@@ -941,19 +941,19 @@ mod tests {
         // The item outside the catalog's projects is not described.
         assert_eq!(described.len(), 2);
         let (id, text, references) = &described[0];
-        assert_eq!(*id, 23553);
+        assert_eq!(*id, 41553);
         for expected in [
-            "Requested work item (named in the request): User Story #23553 Pagos QR — Enviado a validación.".to_owned(),
-            format!("Current state: Enviado a validación since {}. Assigned to now: Luis Felipe. Last change {} by Elvis Brevi.", d(4), d(4)),
+            "Requested work item (named in the request): User Story #41553 Pagos en línea — En validación.".to_owned(),
+            format!("Current state: En validación since {}. Assigned to now: Alex Rivera. Last change {} by Elvis Brevi.", d(4), d(4)),
             "The user took part in it and is or was assigned to it.".to_owned(),
-            format!("{} En desarrollo → Enviado a validación (by Elvis Brevi)", d(4)),
-            format!("{} Elvis Brevi → Luis Felipe (by Elvis Brevi)", d(4)),
+            format!("{} En desarrollo → En validación (by Elvis Brevi)", d(4)),
+            format!("{} Elvis Brevi → Alex Rivera (by Elvis Brevi)", d(4)),
             format!("Dates on the item: Fecha de compromiso {}.", d(-10)),
             "Parent: Feature #23000 Pagos — Active.".to_owned(),
             "Child items: 2 (2 Done).".to_owned(),
             format!("Task #23601 Implementar QR — Done (Elvis Brevi, changed {}).", d(5)),
             format!("1 commit(s), 1 pull request(s); latest linked {}.", d(5)),
-            format!("{} Elvis Brevi: «Faltan las variables de Consul en producción; las pedí a Francisco.»", d(3)),
+            format!("{} Elvis Brevi: «Faltan las variables de Consul en producción; las pedí a Sam.»", d(3)),
         ] {
             assert!(text.contains(&expected), "{expected}\n{text}");
         }
@@ -969,7 +969,7 @@ mod tests {
         assert_eq!(
             urls,
             [
-                "https://dev.azure.com/example/Payments/_workitems/edit/23553",
+                "https://dev.azure.com/example/Payments/_workitems/edit/41553",
                 "https://dev.azure.com/example/Payments/_workitems/edit/23000",
                 "https://dev.azure.com/example/Payments/_workitems/edit/23601",
             ]
@@ -978,7 +978,7 @@ mod tests {
         let (id, text, references) = &described[1];
         assert_eq!(*id, 24000);
         assert!(
-            text.contains("Assigned to now: Luis Felipe. The user has not taken part in it"),
+            text.contains("Assigned to now: Alex Rivera. The user has not taken part in it"),
             "{text}"
         );
         assert!(!text.contains("Current state") && !text.contains("Child items"));

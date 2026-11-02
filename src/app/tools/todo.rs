@@ -222,7 +222,7 @@ pub(in crate::app) async fn read(
             } else {
             match &detail {
                 Some(args) => serde_json::to_value(crate::ado::detail::get(&client, &key, &catalog, &cache, args).await?),
-                None => serde_json::to_value(crate::ado::todo::list(&client, &key, &catalog, &cache, &filters).await?),
+                None => serde_json::to_value(crate::ado::todo::list(&client, &key, &catalog, &cache, &filters, &map.work_item_guides).await?),
             }.map_err(anyhow::Error::from)
             }
         }).await.map_err(|_| "[network] Azure work item read timed out.".to_owned())?

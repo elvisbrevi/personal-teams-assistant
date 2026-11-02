@@ -1651,7 +1651,7 @@ mod tests {
             }],
             runs: vec![Run {
                 id: 29809,
-                definition: "Portal Recaudación".into(),
+                definition: "Portal Cobranzas".into(),
                 result: "succeeded".into(),
                 date: "2026-10-13T22:47:45Z".into(),
                 sha: "16a36bdabae37440b73aa258f04d9a2ce2e9340c".into(),
@@ -1660,7 +1660,7 @@ mod tests {
             releases: vec![Release {
                 id: 2760,
                 name: "Release-1568".into(),
-                definition: "Portal Recaudación".into(),
+                definition: "Portal Cobranzas".into(),
                 status: "active".into(),
                 date: "2026-10-13T22:56:28Z".into(),
                 builds: vec![29247, 19259, 29588, 29809],

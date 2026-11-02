@@ -512,6 +512,7 @@ async fn get_kind(
             project: project.clone(),
             kind: field(&item, "System.WorkItemType").into(),
             state: field(&item, "System.State").into(),
+            category: String::new(),
             created_at: todo::timestamp(&item["fields"]["System.CreatedDate"]),
             dates,
         },

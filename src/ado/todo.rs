@@ -1,6 +1,7 @@
 //! The user's HUs and bugs by process-specific assignment, independent of activity windows.
 use super::*;
 use crate::tools::todo::{Date, Filters, Item, List};
+use crate::work_items::{self, Guide};
 use sha2::{Digest, Sha256};
 
 fn literal(value: &str) -> String {
@@ -76,6 +77,8 @@ pub(super) async fn metadata(client: &Client, key: &str, cache: &Store, url: Url
 
 struct Kind {
     name: String,
+    /// `requirement`, `bug` or `task`: the process category it was read from.
+    category: &'static str,
     assignments: Vec<Value>,
 }
 struct Schema {
@@ -91,6 +94,7 @@ async fn schema(
     source: &Source,
     project: &str,
     filter: Option<&str>,
+    guides: &[Guide],
 ) -> Result<Schema> {
     let fields = metadata(
         client,
@@ -102,12 +106,12 @@ async fn schema(
     let fields = fields["value"]
         .as_array()
         .context("invalid organization fields")?;
-    let mut names = BTreeSet::new();
-    for (category, group) in [
-        ("Microsoft.RequirementCategory", "hu"),
-        ("Microsoft.BugCategory", "bug"),
-        // This process classifies its development bug as a task.
-        ("Microsoft.TaskCategory", "bug"),
+    let mut names = BTreeMap::new();
+    for (category, group, label) in [
+        ("Microsoft.RequirementCategory", "hu", "requirement"),
+        ("Microsoft.BugCategory", "bug", "bug"),
+        // A process may classify a development bug as a task: its guide lists it with the bugs.
+        ("Microsoft.TaskCategory", "bug", "task"),
     ] {
         if filter.is_some_and(|filter| filter != group) {
             continue;
@@ -136,17 +140,19 @@ async fn schema(
             let Some(name) = kind["name"].as_str() else {
                 continue;
             };
-            if category == "Microsoft.TaskCategory" && name != "Bug Desarrollo" {
+            if category == "Microsoft.TaskCategory"
+                && !work_items::listed_with_bugs(guides, name, project)
+            {
                 continue;
             }
-            names.insert(name.to_owned());
+            names.entry(name.to_owned()).or_insert(label);
         }
     }
     ensure!(names.len() <= 40, "invalid work item types");
     let mut kinds = Vec::new();
     let mut states = BTreeSet::new();
     let mut used = BTreeSet::new();
-    for kind in names {
+    for (kind, category) in names {
         let definition = metadata(
             client,
             key,
@@ -177,6 +183,7 @@ async fn schema(
         used.extend(type_fields.into_iter().map(str::to_owned));
         kinds.push(Kind {
             name: kind,
+            category,
             assignments,
         });
     }
@@ -202,6 +209,7 @@ async fn schema(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn in_project(
     client: &Client,
     key: &str,
@@ -209,9 +217,19 @@ async fn in_project(
     source: &Source,
     project: &str,
     filters: &Filters,
+    guides: &[Guide],
     result: &mut List,
 ) -> Result<()> {
-    let schema = schema(client, key, cache, source, project, filters.kind.as_deref()).await?;
+    let schema = schema(
+        client,
+        key,
+        cache,
+        source,
+        project,
+        filters.kind.as_deref(),
+        guides,
+    )
+    .await?;
     result.states.extend(schema.states.iter().cloned());
     result.assignment_fields.extend(
         schema
@@ -339,13 +357,20 @@ async fn in_project(
             continue;
         }
         let link = item_reference(source, project, item)?;
+        let kind = field(item, "System.WorkItemType");
         result.items.push(Item {
             id: item["id"].as_u64().context("invalid HU ID")?,
             title: field(item, "System.Title").into(),
             url: link.url,
             project: project.into(),
             state: field(item, "System.State").into(),
-            kind: field(item, "System.WorkItemType").into(),
+            kind: kind.into(),
+            category: schema
+                .kinds
+                .iter()
+                .find(|k| k.name == kind)
+                .map(|k| k.category.to_owned())
+                .unwrap_or_default(),
             created_at: timestamp(&item["fields"]["System.CreatedDate"]),
             dates: schema
                 .dates
@@ -370,6 +395,7 @@ pub async fn list(
     catalog: &str,
     cache: &Store,
     filters: &Filters,
+    guides: &[Guide],
 ) -> Result<List> {
     filters.validate()?;
     let catalog = Catalog::parse(catalog)?.own(client, key).await?;
@@ -384,9 +410,18 @@ pub async fn list(
             {
                 continue;
             }
-            if in_project(client, key, cache, source, project, filters, &mut result)
-                .await
-                .is_err()
+            if in_project(
+                client,
+                key,
+                cache,
+                source,
+                project,
+                filters,
+                guides,
+                &mut result,
+            )
+            .await
+            .is_err()
             {
                 result.warn(format!("HUs or process fields could not be read in {project}; check the Azure read credential."));
             }
@@ -444,14 +479,14 @@ mod tests {
             ),
             (
                 "/example/Payments/_apis/wit/workitemtypecategories/Microsoft.TaskCategory",
-                json!({"workItemTypes":[{"name":"Bug Desarrollo"},{"name":"Task"}]}),
+                json!({"workItemTypes":[{"name":"Development Bug"},{"name":"Task"}]}),
             ),
             (
                 "/example/Payments/_apis/wit/workitemtypes/Bug",
                 json!({"fields":[{"referenceName":"System.AssignedTo"}],"states":[{"name":"Resolved"}]}),
             ),
             (
-                "/example/Payments/_apis/wit/workitemtypes/Bug%20Desarrollo",
+                "/example/Payments/_apis/wit/workitemtypes/Development%20Bug",
                 json!({"fields":[{"referenceName":"System.AssignedTo"}],"states":[{"name":"New"},{"name":"Done"}]}),
             ),
             (
@@ -469,8 +504,8 @@ mod tests {
             let query = r.body_json::<Value>().unwrap()["query"].as_str().unwrap().to_owned();
             if query.contains("Custom HU") { assert!(query.contains("[Custom.Developer1] = 'me@example.test' OR [Custom.Developer2] = 'me@example.test'"), "{query}"); }
             if query.contains("[System.WorkItemType] = 'Bug' AND") { assert!(query.contains("[System.WorkItemType] = 'Bug' AND ([System.AssignedTo] = 'me@example.test')")); }
-            if query.contains("Bug Desarrollo") {
-                assert!(query.contains("[System.WorkItemType] = 'Bug Desarrollo' AND ([System.AssignedTo] = 'me@example.test')"), "{query}");
+            if query.contains("Development Bug") {
+                assert!(query.contains("[System.WorkItemType] = 'Development Bug' AND ([System.AssignedTo] = 'me@example.test')"), "{query}");
                 assert!(!query.contains("[System.WorkItemType] = 'Task'"), "{query}");
             }
             assert!(query.contains("[System.CreatedDate] DESC"));
@@ -479,7 +514,7 @@ mod tests {
         }).mount(&server).await;
         let item = |id, assigned: &str| {
             json!({"id":id,"fields":{
-                "System.TeamProject":"Payments","System.WorkItemType":match id { 2 => "Bug", 3 => "Bug Desarrollo", _ => "Custom HU" },"System.Title":format!("HU {id}"),"System.State":"Developing",
+                "System.TeamProject":"Payments","System.WorkItemType":match id { 2 => "Bug", 3 => "Development Bug", _ => "Custom HU" },"System.Title":format!("HU {id}"),"System.State":"Developing",
                 "System.CreatedDate":format!("2026-10-0{id}T12:00:00Z"),"System.AssignedTo":{"uniqueName":if id == 2 || id == 3 { "me@example.test" } else { "owner@example.test" }},
                 "Custom.Developer2":{"uniqueName":assigned},"Custom.DevStart":"2026-10-04T12:00:00Z","Custom.DevFinish":"2026-10-05T12:00:00Z"
             }})
@@ -487,11 +522,40 @@ mod tests {
         Mock::given(method("GET")).and(path("/example/Payments/_apis/wit/workitems")).respond_with(ResponseTemplate::new(200).set_body_json(json!({"value":[item(1,"me@example.test"),item(3,"me@example.test"),item(2,"other@example.test")]}))).mount(&server).await;
         let dir = tempfile::tempdir().unwrap();
         let cache = Store::open(&dir.path().join("cache.db")).unwrap();
-        let result = list(&Client::new(), "test-key", "[[sources]]\norganization='https://dev.azure.com/example/'\nprojects=['Payments']\nauthor_email='me@example.test'", &cache, &Filters { limit:2, ..Default::default() }).await.unwrap();
+        // The process lists its task-category development bug with the bugs through its guide.
+        let guides = [Guide {
+            id: "development-bug".into(),
+            provider: "azure".into(),
+            kind: "Development Bug".into(),
+            listed_with_bugs: true,
+            ..Default::default()
+        }];
+        let catalog = "[[sources]]\norganization='https://dev.azure.com/example/'\nprojects=['Payments']\nauthor_email='me@example.test'";
+        let result = list(
+            &Client::new(),
+            "test-key",
+            catalog,
+            &cache,
+            &Filters {
+                limit: 2,
+                ..Default::default()
+            },
+            &guides,
+        )
+        .await
+        .unwrap();
         assert!(!result.partial, "{:?}", result.warnings);
         assert_eq!(
             result.items.iter().map(|i| i.id).collect::<Vec<_>>(),
             [3, 2]
+        );
+        assert_eq!(
+            result
+                .items
+                .iter()
+                .map(|i| i.category.as_str())
+                .collect::<Vec<_>>(),
+            ["task", "bug"]
         );
         assert!(result.states.contains(&"Unused state".into()));
         assert_eq!(result.items[0].dates.len(), 4);
@@ -510,7 +574,20 @@ mod tests {
         );
         assert!(result.states.contains(&"Resolved".into()));
         for (kind, expected) in [("hu", vec![1]), ("bug", vec![3, 2])] {
-            let filtered = list(&Client::new(), "test-key", "[[sources]]\norganization='https://dev.azure.com/example/'\nprojects=['Payments']\nauthor_email='me@example.test'", &cache, &Filters { limit: 2, kind: Some(kind.into()), ..Default::default() }).await.unwrap();
+            let filtered = list(
+                &Client::new(),
+                "test-key",
+                catalog,
+                &cache,
+                &Filters {
+                    limit: 2,
+                    kind: Some(kind.into()),
+                    ..Default::default()
+                },
+                &guides,
+            )
+            .await
+            .unwrap();
             assert!(!filtered.partial, "{:?}", filtered.warnings);
             assert_eq!(
                 filtered.items.iter().map(|i| i.id).collect::<Vec<_>>(),
@@ -521,6 +598,22 @@ mod tests {
                 assert_eq!(filtered.assignment_fields, ["Assigned To"]);
             }
         }
+        // Without that guide only the requirement and bug categories are listed.
+        let unguided = list(
+            &Client::new(),
+            "test-key",
+            catalog,
+            &cache,
+            &Filters {
+                limit: 2,
+                kind: Some("bug".into()),
+                ..Default::default()
+            },
+            &[],
+        )
+        .await
+        .unwrap();
+        assert_eq!(unguided.items.iter().map(|i| i.id).collect::<Vec<_>>(), [2]);
         TEST_SERVER.with(|s| *s.borrow_mut() = None);
     }
 }

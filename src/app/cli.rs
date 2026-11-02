@@ -239,7 +239,8 @@ Knowledge
   guides list | guides show ID | guides add | guides edit ID | guides remove ID
                            Work item guides: JSON with id, provider (azure|github), type, name,
                            projects, purpose, instructions and fields (reference, name, required,
-                           values, default, guidance, fill). The implementation agents follow them.
+                           values, default, guidance, fill) and listed_with_bugs (To-Do lists that
+                           Azure task type with the bugs). The implementation agents follow them.
   prompts list | prompts show ID         The implementation agents' instructions (plan, code, request).
   prompts edit ID | prompts reset ID     JSON on stdin: {\"instructions\": TEXT}; reset restores the default.
   notes list [--context ID] [--limit N]  Verified notes, newest first.

@@ -352,7 +352,7 @@ fn same_user(identity: &Value, email: &str) -> bool {
         .is_some_and(|name| name.eq_ignore_ascii_case(email))
 }
 
-/// Work item IDs a status request names («HU #23553»), read directly whoever holds them.
+/// Work item IDs a status request names («HU #41553»), read directly whoever holds them.
 pub fn requested_work_items(question: &str) -> Vec<u64> {
     progress::requested(question)
 }
@@ -1860,14 +1860,14 @@ mod tests {
     #[test]
     fn own_projects_come_from_the_users_teams() {
         let teams = json!({"value":[
-            {"name":"Pagos","projectName":"Cobro Pago y Tarifas"},
-            {"name":"QA","projectName":"Cobro Pago y Tarifas"},
+            {"name":"Pagos","projectName":"Cobros y Tarifas"},
+            {"name":"QA","projectName":"Cobros y Tarifas"},
             {"name":"Docs","projectName":"Normas Generales"},
             {"name":"Broken"}
         ]});
         assert_eq!(
             team_projects(&teams).unwrap(),
-            ["Cobro Pago y Tarifas", "Normas Generales"]
+            ["Cobros y Tarifas", "Normas Generales"]
         );
         assert!(team_projects(&json!({})).is_err());
         let source = Source {

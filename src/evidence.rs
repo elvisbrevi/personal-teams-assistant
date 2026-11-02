@@ -343,8 +343,8 @@ fn spoken_names(reference: &Reference) -> Vec<String> {
     }
     names
 }
-/// A name that identifies its entity on its own: one with a digit or a symbol (`#26477`,
-/// `PR !4848`, `sag.portalpagos.ms.solicitud`) or of several words. A single plain word
+/// A name that identifies its entity on its own: one with a digit or a symbol (`#41477`,
+/// `PR !7348`, `contoso.pagos.ms.solicitud`) or of several words. A single plain word
 /// («Desarrollo», «QA») is too common to link without saying what it is.
 fn distinctive(name: &str) -> bool {
     name.chars()
@@ -416,7 +416,7 @@ fn occurrences(text: &str, name: &str) -> Vec<Range<usize>> {
 }
 /// Where code links `reference` in `body` without a model: the earliest distinctive name of it
 /// outside `taken` (or a single word right after a word saying what it is, «stage QA»), joined
-/// with the names of it that follow, so «#26477 — PR Pipeline Transversal» is one link.
+/// with the names of it that follow, so «#41477 — PR Pipeline Template» is one link.
 fn code_span(body: &str, reference: &Reference, taken: &[Range<usize>]) -> Option<Range<usize>> {
     let names = spoken_names(reference);
     let mut best: Option<Range<usize>> = None;
@@ -515,7 +515,7 @@ pub fn unlinked(answer: &str) -> String {
         .unwrap_or_else(|_| answer.to_owned())
 }
 /// Runs before the privacy checks. Every reference selected as used is verified; each one the
-/// answer names becomes a link on those very words («[#26477 — PR Pipeline Transversal](…)»),
+/// answer names becomes a link on those very words («[#41477 — PR Pipeline Template](…)»),
 /// first where code sees a distinctive name, then on the words a model marked in `mentions`.
 /// A Wiki page the text uses without naming it is linked in one closing sentence, so a
 /// Wiki-based answer always links its pages; third-party pages say who last edited them. No
@@ -809,69 +809,69 @@ mod tests {
     }
     #[test]
     fn named_entities_become_links_on_their_own_words() {
-        let mut item = reference("w26477", "work_item");
-        item.label = "#26477 PR Pipeline Transversal — New".into();
-        item.url = "https://dev.azure.com/test/Project/_workitems/edit/26477".into();
+        let mut item = reference("w41477", "work_item");
+        item.label = "#41477 PR Pipeline Template — New".into();
+        item.url = "https://dev.azure.com/test/Project/_workitems/edit/41477".into();
         item.aliases = vec![
-            "#26477".into(),
-            "HU 26477".into(),
-            "work item 26477".into(),
-            "PR Pipeline Transversal".into(),
+            "#41477".into(),
+            "HU 41477".into(),
+            "work item 41477".into(),
+            "PR Pipeline Template".into(),
         ];
         let mut copy = item.clone();
-        copy.id = "w26477-other-organization-form".into();
-        copy.aliases = vec!["#26477".into(), "work item 26477".into()];
+        copy.id = "w41477-other-organization-form".into();
+        copy.aliases = vec!["#41477".into(), "work item 41477".into()];
         let mut stage = reference("stage", "stage_configuration");
         stage.label = "Stage Desarrollo, configured in release #29".into();
         stage.url =
             "https://dev.azure.com/test/Project/_release?definitionId=29&_a=definition-tasks"
                 .into();
         stage.aliases = vec!["Desarrollo".into()];
-        let mut pr = reference("pr4848", "pull_request");
-        pr.label = "PR #4848 Template dotnet10 (templates.pipelines)".into();
-        pr.project = "Soluciones Transversales".into();
-        pr.url = "https://dev.azure.com/test/Soluciones%20Transversales/_git/templates.pipelines/pullrequest/4848".into();
+        let mut pr = reference("pr7348", "pull_request");
+        pr.label = "PR #7348 Template dotnet (templates.pipelines)".into();
+        pr.project = "Shared Solutions".into();
+        pr.url = "https://dev.azure.com/test/Shared%20Solutions/_git/templates.pipelines/pullrequest/7348".into();
         pr.aliases = vec![
-            "PR #4848".into(),
-            "PR !4848".into(),
-            "PR 4848".into(),
-            "pull request 4848".into(),
-            "!4848".into(),
+            "PR #7348".into(),
+            "PR !7348".into(),
+            "PR 7348".into(),
+            "pull request 7348".into(),
+            "!7348".into(),
         ];
         let page = reference("pap", "wiki");
         let e = Evidence {
             references: vec![page, item, copy, stage, pr],
             ..Default::default()
         };
-        let body = "Tengo identificado el **#26477 — PR Pipeline Transversal**, pero está en **Cobro Pago y Tarifas**. No tengo el ticket en **Sección Desarrollo / Apoyo Coor-Dev** con el enlace al PR !4848.";
+        let body = "Tengo identificado el **#41477 — PR Pipeline Template**, pero está en **Cobros y Tarifas**. No tengo el ticket en **Área Desarrollo / Soporte** con el enlace al PR !7348.";
         let used = named_references(body, &e);
         assert_eq!(
             used,
             [
-                "w26477",
-                "w26477-other-organization-form",
+                "w41477",
+                "w41477-other-organization-form",
                 "stage",
-                "pr4848"
+                "pr7348"
             ]
         );
-        // «Sección Desarrollo» is a project, not the stage: a single common word is linked
+        // «Área Desarrollo» is a project, not the stage: a single common word is linked
         // only with a model's mark or right after a word saying what it is.
         assert_eq!(
             code_linked(body, &e),
             BTreeSet::from([
-                "w26477".to_string(),
-                "w26477-other-organization-form".into(),
-                "pr4848".into()
+                "w41477".to_string(),
+                "w41477-other-organization-form".into(),
+                "pr7348".into()
             ])
         );
         let a = complete_answer(body, &used, &none(), &e, "", Language::Es).unwrap();
         assert_eq!(
             a,
-            "Tengo identificado el **[#26477 — PR Pipeline Transversal](https://dev.azure.com/test/Project/_workitems/edit/26477)**, pero está en **Cobro Pago y Tarifas**. No tengo el ticket en **Sección Desarrollo / Apoyo Coor-Dev** con el enlace al [PR !4848](https://dev.azure.com/test/Soluciones%20Transversales/_git/templates.pipelines/pullrequest/4848)."
+            "Tengo identificado el **[#41477 — PR Pipeline Template](https://dev.azure.com/test/Project/_workitems/edit/41477)**, pero está en **Cobros y Tarifas**. No tengo el ticket en **Área Desarrollo / Soporte** con el enlace al [PR !7348](https://dev.azure.com/test/Shared%20Solutions/_git/templates.pipelines/pullrequest/7348)."
         );
         let html = crate::adapters::teams::html(&a);
         assert!(
-            html.contains("<b><a href=\"https://dev.azure.com/test/Project/_workitems/edit/26477\">#26477 — PR Pipeline Transversal</a></b>"),
+            html.contains("<b><a href=\"https://dev.azure.com/test/Project/_workitems/edit/41477\">#41477 — PR Pipeline Template</a></b>"),
             "{html}"
         );
         // The consulted page that no one selected stays in the audit only.
@@ -879,15 +879,15 @@ mod tests {
         assert!(!a.contains("pagePath") && !a.contains("Páginas consultadas"));
         // A stage named as such is linked on its name.
         let a = complete_answer(
-            "Falta el stage Desarrollo de #26477.",
-            &["stage".into(), "w26477".into()],
+            "Falta el stage Desarrollo de #41477.",
+            &["stage".into(), "w41477".into()],
             &none(),
             &e,
             "",
             Language::Es,
         )
         .unwrap();
-        assert!(a.starts_with("Falta el [stage Desarrollo](https://dev.azure.com/test/Project/_release?definitionId=29&_a=definition-tasks) de [#26477]("), "{a}");
+        assert!(a.starts_with("Falta el [stage Desarrollo](https://dev.azure.com/test/Project/_release?definitionId=29&_a=definition-tasks) de [#41477]("), "{a}");
     }
     #[test]
     fn model_marks_never_link_inside_code_or_existing_links() {
@@ -920,8 +920,8 @@ mod tests {
             unlinked("Ver [#42](https://x.test/a_(b)) y [A](https://b.test)."),
             "Ver #42 y A."
         );
-        assert!(distinctive("#26477") && distinctive("PR !4848"));
-        assert!(distinctive("sag.portalpagos.ms.solicitud") && distinctive("Portal Recaudación"));
+        assert!(distinctive("#41477") && distinctive("PR !7348"));
+        assert!(distinctive("contoso.pagos.ms.solicitud") && distinctive("Portal Cobranzas"));
         assert!(!distinctive("Desarrollo") && !distinctive("QA"));
     }
     #[test]

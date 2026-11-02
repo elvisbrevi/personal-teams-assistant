@@ -83,6 +83,7 @@ fn daily_snapshots_replace_atomically_keep_legacy_data_and_supply_verified_recap
             project: "Payments".into(),
             state: "Done".into(),
             kind: "Task".into(),
+            category: "task".into(),
             created_at: None,
             dates: vec![],
         },

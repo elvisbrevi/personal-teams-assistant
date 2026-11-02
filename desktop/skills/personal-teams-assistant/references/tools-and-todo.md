@@ -20,13 +20,13 @@ printf '%s\n' '{"source":"azure-devops-status","state":"Developing","limit":25}'
 - `source`: an enabled Azure DevOps activity source ID. Optional when exactly one is enabled.
 - `project`: optionally narrow to a project in that source's catalog.
 - `state`: an exact state returned by the tool. Omit it for all states.
-- `kind`: `hu` or `bug`; omit for both requirement-category HUs and bug-category items. Bug results also include the task-category type `Bug Desarrollo`.
+- `kind`: `hu` or `bug`; omit for both requirement-category HUs and bug-category items. Bug results also include task-category types whose work item guide sets `listed_with_bugs` (a process may classify its development bug as a task).
 - `limit`: 1–100, default 10, newest creation date first across the selected projects.
 
 The tool reuses the catalog's organization, projects, author identity and read credential.
 `*` retains its meaning: projects of teams the connected user belongs to. It discovers the
-process's requirement and bug categories (including custom types), plus `Bug Desarrollo` from the
-task category, all defined states, developer identity fields and start/finish/target/closure date fields. It matches the catalog user in
+process's requirement and bug categories (including custom types), plus the task-category types
+whose work item guide sets `listed_with_bugs`, all defined states, developer identity fields and start/finish/target/closure date fields. It matches the catalog user in
 any developer role, rather than the current responsible owner. Assignment is discovered separately
 for each type: a bug without developer identity fields falls back to `System.AssignedTo` even
 when the HU type has developer roles. Returned assignments are checked
@@ -110,7 +110,7 @@ and GitHub issue links. These local reads work with Teams stopped, use no model,
 change any source audience or authorize external processing.
 
 Pressing an item opens its mobile detail inside To-Do through `get_azure_hu`, `get_azure_task`
-(for `Bug Desarrollo`) or `get_github_epic`. Card backgrounds and borders reinforce known states:
+(for an item whose `category` is `task`) or `get_github_epic`. Card backgrounds and borders reinforce known states:
 green for completed, blue for active/development, amber for review/testing/validation and gray for
 not started; unknown states keep the default card style. Back restores the list, filters, scroll and keyboard focus. Type-specific
 rich fields, comments and evidence stay readable; all original fields and change history
@@ -220,11 +220,11 @@ children and run installed coding agents.
 5. `implementation_start` on an HU/bug/Epic proposes children. Review/edit/select them and
    confirm `implementation_create`; no child is written just because a model proposed it.
    Each Azure child may carry `type` (a task type of the project; empty uses the default) and
-   `fields` (`[{"reference":"Custom.Mes","value":"Noviembre"}]`), proposed from the work item
+   `fields` (`[{"reference":"Custom.Month","value":"Noviembre"}]`), proposed from the work item
    guides; only fields the type's guide marks `fill` and values valid for the live type are
    accepted, and every child is checked before anything is written. The agents start from the
    editable agent instructions (`pta prompts`) plus fixed rules.
-   On a process task, Bug Desarrollo or ordinary GitHub issue, Start implements that item in
+   On a process task (any task-category type, such as a development bug a guide lists with the bugs) or ordinary GitHub issue, Start implements that item in
    the chosen directories. Changes remain local; the coding prompt does not authorize pushing,
    publishing, changing work items or sending Teams messages.
 
