@@ -4,7 +4,10 @@
 
 use super::Host;
 use super::{DesktopState, fail};
-use crate::store::settings::SettingsStore;
+use crate::store::{
+    notes::{Example, LocalNotes, NotesStore},
+    settings::SettingsStore,
+};
 use crate::{
     index::{Index, NOTES, Note, ORGANIZATION},
     knowledge::{Access, KnowledgeMap, Resource},
@@ -63,11 +66,15 @@ pub(super) fn list(state: &DesktopState, args: &Value) -> Reply {
                 .map_err(fail)?;
             let notes: Vec<Note> = hits
                 .iter()
-                .filter_map(|h| index.note(&h.key).ok().flatten())
+                .filter_map(|h| LocalNotes::new(&index).note(&h.key).ok().flatten())
                 .collect();
             Ok(json!(notes))
         }
-        None => Ok(json!(index.notes(context, limit).map_err(fail)?)),
+        None => Ok(json!(
+            LocalNotes::new(&index)
+                .notes(context, limit)
+                .map_err(fail)?
+        )),
     }
 }
 
@@ -88,10 +95,11 @@ pub(super) fn save(state: &DesktopState, args: &Value) -> Reply {
     if texts.into_iter().any(|t| !redactor.clean(t)) {
         return Err("[invalid_input] The note contains sensitive data (a secret, an email, a phone number or an ID); remove it and save again.".into());
     }
-    if !note.id.is_empty() && index.note(&note.id).map_err(fail)?.is_none() {
+    let records = LocalNotes::new(&index);
+    if !note.id.is_empty() && records.note(&note.id).map_err(fail)?.is_none() {
         return Err("[invalid_input] Unknown note.".into());
     }
-    Ok(json!(index.save_note(note).map_err(fail)?))
+    Ok(json!(records.save_note(note).map_err(fail)?))
 }
 
 pub(super) fn remove(state: &DesktopState, args: &Value) -> Reply {
@@ -100,7 +108,7 @@ pub(super) fn remove(state: &DesktopState, args: &Value) -> Reply {
         .get("id")
         .and_then(Value::as_str)
         .ok_or("[invalid_input] A note ID is required.")?;
-    if !index.remove_note(id).map_err(fail)? {
+    if !LocalNotes::new(&index).remove_note(id).map_err(fail)? {
         return Err("[invalid_input] Unknown note.".into());
     }
     Ok(json!({"removed": id}))
@@ -224,6 +232,7 @@ pub(super) fn search(state: &DesktopState, args: &Value) -> Reply {
 pub(super) fn feedback(state: &DesktopState, args: &Value) -> Reply {
     let resource = rating_resource(args)?;
     let (config, map, index) = open(state)?;
+    let records = LocalNotes::new(&index);
     let rating = match args.get("rating") {
         None | Some(Value::Null) => None,
         Some(Value::String(r)) if r == "good" || r == "bad" => Some(r.clone()),
@@ -297,7 +306,7 @@ pub(super) fn feedback(state: &DesktopState, args: &Value) -> Reply {
         .or(audit.question.clone())
         .unwrap_or_default();
     match (&feedback, &answer, &audit.identified_question) {
-        (Some(f), Some(answer), Some(q)) => index
+        (Some(f), Some(answer), Some(q)) => records
             .save_evaluation(&crate::questions::AnswerEvaluation {
                 resource: resource.clone(),
                 question_id: q.id.clone(),
@@ -319,22 +328,22 @@ pub(super) fn feedback(state: &DesktopState, args: &Value) -> Reply {
                 },
             })
             .map_err(fail)?,
-        _ => index.remove_evaluation(&resource).map_err(fail)?,
+        _ => records.remove_evaluation(&resource).map_err(fail)?,
     }
     match (&feedback, answer) {
         (Some(f), Some(answer))
             if audit.identified_question.is_none() && f.example && !request.is_empty() =>
         {
-            index
-                .save_example(
-                    &resource,
-                    &request,
-                    &crate::evidence::unlinked(&answer),
-                    context.as_deref(),
-                )
+            records
+                .save_example(&Example {
+                    resource: resource.clone(),
+                    request: request.clone(),
+                    answer: crate::evidence::unlinked(&answer),
+                    context: context.clone(),
+                })
                 .map_err(fail)?
         }
-        _ => index.remove_example(&resource).map_err(fail)?,
+        _ => records.remove_example(&resource).map_err(fail)?,
     }
     Ok(json!({"resource": resource, "feedback": feedback}))
 }
@@ -509,7 +518,13 @@ mod tests {
         let id = result["question"]["id"].as_str().unwrap();
         assert_eq!(
             index
-                .evaluations(id, "status", None, std::slice::from_ref(&source))
+                .evaluations(
+                    &LocalNotes::new(&index),
+                    id,
+                    "status",
+                    None,
+                    std::slice::from_ref(&source)
+                )
                 .unwrap()[0]
                 .rating,
             "bad"
@@ -517,7 +532,7 @@ mod tests {
         feedback(state, &json!({"resource":resource,"rating":null})).unwrap();
         assert!(
             index
-                .evaluations(id, "status", None, &[source])
+                .evaluations(&LocalNotes::new(&index), id, "status", None, &[source])
                 .unwrap()
                 .is_empty()
         );

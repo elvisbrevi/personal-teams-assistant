@@ -1,4 +1,7 @@
-use crate::store::settings::{LocalSettings, SettingsStore};
+use crate::store::{
+    notes::{LocalNotes, NotesStore},
+    settings::{LocalSettings, SettingsStore},
+};
 use crate::{
     adapters::oauth::OAuth,
     config::Config,
@@ -918,6 +921,8 @@ fn forget_removed_sources(config: &Config, map: &KnowledgeMap) {
         .collect();
     let forgotten = crate::index::Index::open(&path).and_then(|index| {
         if let Some(questions) = &map.questions {
+            let ids: Vec<&str> = questions.iter().map(|q| q.id.as_str()).collect();
+            LocalNotes::new(&index).retain_evaluations(&ids)?;
             index.sync_questions(questions)?;
         }
         index.sync_organization(&map.organization, &map.work_item_guides)?;

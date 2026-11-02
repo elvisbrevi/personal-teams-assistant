@@ -14,7 +14,10 @@ use super::{
     implementation::{self, Link},
     *,
 };
-use crate::store::settings::SettingsStore;
+use crate::store::{
+    notes::{LocalNotes, NotesStore},
+    settings::SettingsStore,
+};
 use crate::{
     index::{Index, Note},
     portable::{self as core, Document, Patch, Unavailable},
@@ -158,7 +161,7 @@ fn local(state: &DesktopState) -> anyhow::Result<(Config, KnowledgeMap, Vec<Note
     let config = state.settings.config()?;
     let map = state.settings.map()?;
     let index = Index::open(&config.server.data_dir.join(crate::index::FILE))?;
-    let notes = index.notes(None, core::MAX_NOTES + 1)?;
+    let notes = LocalNotes::new(&index).notes(None, core::MAX_NOTES + 1)?;
     Ok((config, map, notes))
 }
 fn local_digest(state: &DesktopState) -> anyhow::Result<String> {
@@ -435,7 +438,7 @@ pub(in crate::app) async fn machine_call(
                 None
             } else {
                 Some(
-                    index
+                    LocalNotes::new(&index)
                         .note(&note.id)?
                         .ok_or_else(|| invalid("Unknown note."))?,
                 )
@@ -455,7 +458,9 @@ pub(in crate::app) async fn machine_call(
             let _guard = state.operations.lock().await;
             let (config, _, _, _, before) = account_view(state)?;
             let index = Index::open(&config.server.data_dir.join(crate::index::FILE))?;
-            let held = index.note(&id)?.ok_or_else(|| invalid("Unknown note."))?;
+            let held = LocalNotes::new(&index)
+                .note(&id)?
+                .ok_or_else(|| invalid("Unknown note."))?;
             if token(&held) != expected {
                 return Err(conflict(
                     "The note changed elsewhere. Synchronize, read it again and repeat the change.",
@@ -718,7 +723,7 @@ fn clear(state: &DesktopState) -> anyhow::Result<()> {
     let index = Index::open(&next_config.server.data_dir.join(crate::index::FILE))?;
     let tunnel = state.settings.tunnel().unwrap_or_default();
     state.settings.commit(&next_config, &next_map, &tunnel)?;
-    index.replace_notes(&[])?;
+    LocalNotes::new(&index).replace_notes(&[])?;
     forget_removed_sources(&next_config, &next_map);
     Ok(())
 }
@@ -849,7 +854,7 @@ async fn synchronize(host: &Arc<Host>, link: &Link, reset: bool, mode: Mode) -> 
             .settings
             .commit(&next_config, &next_map, &tunnel)
             .map_err(|_| CANNOT_APPLY)?;
-        index
+        LocalNotes::new(&index)
             .replace_notes(&fetched.notes)
             .map_err(|_| CANNOT_APPLY)?;
         forget_removed_sources(&next_config, &next_map);
@@ -1307,7 +1312,7 @@ pub(super) async fn note_save(
         None
     } else {
         Some(token(
-            &index
+            &LocalNotes::new(&index)
                 .note(&note.id)
                 .map_err(fail)?
                 .ok_or("[invalid_input] Unknown note.")?,
@@ -1328,7 +1333,7 @@ pub(super) async fn note_save(
     }
     let saved: Note = serde_json::from_value(outcome["data"]["note"].clone())
         .map_err(|_| "The coordinator returned an unexpected reply.".to_owned())?;
-    index.put_note(&saved).map_err(fail)?;
+    LocalNotes::new(&index).put_note(&saved).map_err(fail)?;
     if let (Ok(previous), Ok(revision)) = (
         serde_json::from_value(outcome["data"]["previous"].clone()),
         serde_json::from_value(outcome["data"]["revision"].clone()),
@@ -1352,7 +1357,7 @@ pub(super) async fn note_remove(
     ready(state, &link, true)?;
     let config = state.settings.config().map_err(fail)?;
     let index = Index::open(&config.server.data_dir.join(crate::index::FILE)).map_err(fail)?;
-    let held = index
+    let held = LocalNotes::new(&index)
         .note(id)
         .map_err(fail)?
         .ok_or("[invalid_input] Unknown note.")?;
@@ -1369,7 +1374,7 @@ pub(super) async fn note_remove(
     if outcome["ok"] != true {
         return Err(rejected(state, &outcome));
     }
-    index.remove_note(id).map_err(fail)?;
+    LocalNotes::new(&index).remove_note(id).map_err(fail)?;
     if let (Ok(previous), Ok(revision)) = (
         serde_json::from_value(outcome["data"]["previous"].clone()),
         serde_json::from_value(outcome["data"]["revision"].clone()),
