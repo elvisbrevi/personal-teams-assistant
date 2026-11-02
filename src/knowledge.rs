@@ -32,6 +32,13 @@ pub struct KnowledgeMap {
     /// How the user's work item types are used and filled; see `crate::work_items`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub work_item_guides: Vec<crate::work_items::Guide>,
+    /// The user's organization: its entries and the sources that document it; see
+    /// `crate::organization`. Its work item guides are `work_item_guides`.
+    #[serde(
+        default,
+        skip_serializing_if = "crate::organization::Organization::is_empty"
+    )]
+    pub organization: crate::organization::Organization,
 }
 /// Someone who writes to the user, and how the user addresses them. It reaches the model only
 /// when answering that person.
@@ -113,11 +120,16 @@ pub enum Access {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         contexts: Vec<String>,
     },
+    /// The organization's entries and work item guides, searched through the knowledge index.
+    Organization {},
 }
 impl Access {
     /// Read through the knowledge index rather than whole.
     pub fn indexed(&self) -> bool {
-        matches!(self, Self::Repository { .. } | Self::Notes { .. })
+        matches!(
+            self,
+            Self::Repository { .. } | Self::Notes { .. } | Self::Organization {}
+        )
     }
 }
 impl KnowledgeMap {
@@ -186,6 +198,9 @@ impl KnowledgeMap {
         }
         crate::agent_prompts::validate(&map.agent_prompts)?;
         crate::work_items::validate(&map.work_item_guides)?;
+        crate::organization::validate(&map.organization, |id| {
+            map.resources.iter().find(|r| r.id == id).map(|r| &r.access)
+        })?;
         ensure!(map.people.len() <= 500, "too many people");
         let mut person_ids = BTreeSet::new();
         for person in &map.people {
@@ -306,6 +321,7 @@ impl KnowledgeMap {
                         "a notes source's contexts must exist in the knowledge map"
                     );
                 }
+                Access::Organization {} => {}
                 Access::Tool { tool } => {
                     tool.validate()?;
                     // A catalog file must live in a declared repository; an inline one needs none.
@@ -403,7 +419,7 @@ impl KnowledgeMap {
                 parts.join("\n\n")
             }
             Access::Tool { .. } => anyhow::bail!("tool resources require the tool registry"),
-            Access::Repository { .. } | Access::Notes { .. } => {
+            Access::Repository { .. } | Access::Notes { .. } | Access::Organization {} => {
                 anyhow::bail!("indexed resources are read through the knowledge index")
             }
         };

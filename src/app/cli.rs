@@ -236,6 +236,16 @@ Knowledge
   people list | people show ID | people add | people edit ID | people remove ID
                            How you address each person: JSON with id, name, senders (Teams user IDs),
                            aliases, address and notes; used only when answering that person.
+  organization show | organization name TEXT
+                           Your organization: its name (display only, empty clears it), entries,
+                           documenting sources and work item guides. It travels with the account.
+  organization entries list | entries show ID | entries add | entries edit ID | entries remove ID
+                           JSON on stdin: id, kind (norm|architecture|convention|glossary_term|template),
+                           title, text (Markdown) and projects (empty applies to all). The organization
+                           source reads them for answers; agents get norms, architecture and conventions.
+  organization sources list | sources add ID | sources remove ID
+                           Sources that document the organization (a Wiki, repository, file or URL);
+                           naming one grants nothing: it is read only where it is authorized.
   guides list | guides show ID | guides add | guides edit ID | guides remove ID
                            Work item guides: JSON with id, provider (azure|github), type, name,
                            projects, purpose, instructions and fields (reference, name, required,
@@ -1153,6 +1163,12 @@ fn validate_args(args: &[String]) -> Result<()> {
             | ["people", "show" | "edit" | "remove", _]
             | ["guides", "list" | "add"]
             | ["guides", "show" | "edit" | "remove", _]
+            | ["organization", "show"]
+            | ["organization", "name", _]
+            | ["organization", "entries" | "sources", "list"]
+            | ["organization", "entries", "add"]
+            | ["organization", "entries", "show" | "edit" | "remove", _]
+            | ["organization", "sources", "add" | "remove", _]
             | ["prompts", "list"]
             | ["prompts", "show" | "edit" | "reset", _]
             | ["questions", "list" | "add"]
@@ -1957,6 +1973,80 @@ async fn execute(mut args: Vec<String>) -> Result<Reply> {
                 }
             }
         }
+        ("organization", "show") => {
+            let organization = &data["map"]["organization"];
+            snap.data = json!({
+                "name": organization["name"].as_str().unwrap_or_default(),
+                "entries": organization["entries"].as_array().cloned().unwrap_or_default(),
+                "sources": organization["sources"].as_array().cloned().unwrap_or_default(),
+                "work_item_guides": data["map"]["work_item_guides"].as_array().cloned().unwrap_or_default(),
+            });
+            return Ok(snap);
+        }
+        ("organization", "name") => {
+            data["map"]["organization"]["name"] = json!(positional(&args, 2)?);
+        }
+        ("organization", "entries" | "sources") => {
+            let list = if action == "entries" {
+                "entries"
+            } else {
+                "sources"
+            };
+            let organization = &mut data["map"]["organization"];
+            if organization.is_null() {
+                *organization = json!({});
+            }
+            let items = organization
+                .as_object_mut()
+                .context("invalid organization")?
+                .entry(list)
+                .or_insert_with(|| json!([]))
+                .as_array_mut()
+                .context("invalid organization")?;
+            let id = |item: &Value| {
+                if list == "entries" {
+                    item["id"].clone()
+                } else {
+                    item.clone()
+                }
+            };
+            match positional(&args, 2)? {
+                "list" => {
+                    snap.data = json!(items);
+                    return Ok(snap);
+                }
+                "add" if list == "entries" => items.push(input()?),
+                "add" => {
+                    let source = positional(&args, 3)?;
+                    ensure!(
+                        !items.iter().any(|s| s == source),
+                        "the organization already names that source"
+                    );
+                    items.push(json!(source));
+                }
+                sub => {
+                    let wanted = positional(&args, 3)?;
+                    let i = items
+                        .iter()
+                        .position(|item| id(item) == wanted)
+                        .with_context(|| format!("unknown organization {list} item"))?;
+                    match sub {
+                        "show" => {
+                            snap.data = items[i].clone();
+                            return Ok(snap);
+                        }
+                        "edit" => {
+                            let entry = input()?;
+                            ensure!(entry["id"] == wanted, "organization entry ID cannot change");
+                            items[i] = entry;
+                        }
+                        _ => {
+                            items.remove(i);
+                        }
+                    }
+                }
+            }
+        }
         ("prompts", "list") => {
             snap.data = json!({"built_in": snap.data["agent_prompts"], "changes": data["map"]["agent_prompts"]});
             return Ok(snap);
@@ -2551,6 +2641,13 @@ mod help_tests {
             &["people", "edit", "ana"],
             &["guides", "list"],
             &["guides", "edit", "task"],
+            &["organization", "show"],
+            &["organization", "name", "Contoso"],
+            &["organization", "entries", "list"],
+            &["organization", "entries", "add"],
+            &["organization", "entries", "edit", "review"],
+            &["organization", "sources", "add", "handbook"],
+            &["organization", "sources", "remove", "handbook"],
             &["prompts", "list"],
             &["prompts", "reset", "code"],
             &["questions", "list"],

@@ -519,7 +519,7 @@
           <button role="tab" id="knowledge-tab-questions" data-group="questions" aria-controls="knowledge-questions" aria-selected="false" tabindex="-1">Questions</button>
           <button role="tab" id="knowledge-tab-notes" data-group="notes" aria-controls="knowledge-notes" aria-selected="false" tabindex="-1">Notes</button>
           <button role="tab" id="knowledge-tab-people" data-group="people" aria-controls="knowledge-people" aria-selected="false" tabindex="-1">People</button>
-          <button role="tab" id="knowledge-tab-work-items" data-group="work-items" aria-controls="knowledge-work-items" aria-selected="false" tabindex="-1">Work items</button>
+          <button role="tab" id="knowledge-tab-organization" data-group="organization" aria-controls="knowledge-organization" aria-selected="false" tabindex="-1">Organization</button>
           <button role="tab" id="knowledge-tab-repositories" data-group="repositories" aria-controls="knowledge-repositories" aria-selected="false" tabindex="-1">Repositories</button>
         </div>
         <div id="knowledge-sources" role="tabpanel" aria-labelledby="knowledge-tab-sources">
@@ -623,7 +623,34 @@
             </details>
           </div>
         </div>
-        <div id="knowledge-work-items" role="tabpanel" aria-labelledby="knowledge-tab-work-items" hidden>
+        <div id="knowledge-organization" role="tabpanel" aria-labelledby="knowledge-tab-organization" hidden>
+          <div class="panel">
+            <div class="panel-head"><h2>Organization</h2><span id="organization-summary" class="hint"></span></div>
+            <p class="hint">How the organization you work for does things, kept as your account's data: norms, architecture, conventions, glossary terms, templates and work item guides. It travels with your account to every computer signed in to it, and nothing here grants access.</p>
+            <label>Organization name <small>Shown only to you.</small><input id="organization-name" placeholder="Contoso"></label>
+            <div id="organization-offer" class="callout info" hidden>
+              <div class="grow">
+                <p>No source reads these entries for answers yet. Add the organization source, then enable and authorize it in Sources.</p>
+                <div class="actions"><button id="add-organization-source" type="button" class="secondary">Add organization source</button></div>
+              </div>
+            </div>
+            <fieldset id="organization-sources" class="choices"><legend>Sources that document it</legend></fieldset>
+          </div>
+          <div class="panel">
+            <div class="panel-head"><h2>Entries</h2><span id="entries-summary" class="hint"></span></div>
+            <p class="hint">The organization source reads every entry for answers. The implementation agents also receive the norms, architecture and conventions of the item's project, as information to weigh, never as permission.</p>
+            <div id="organization-entries" class="list"></div>
+            <details id="entry-form" class="add-form">
+              <summary>Add an entry</summary>
+              <div class="grid">
+                <label>Entry ID<input id="entry-id" translate="no" placeholder="code-review" spellcheck="false"></label>
+                <label>Kind<select id="entry-kind"><option value="norm">Norm</option><option value="architecture">Architecture</option><option value="convention">Convention</option><option value="glossary_term">Glossary term</option><option value="template">Template</option></select></label>
+              </div>
+              <label>Title<input id="entry-title" placeholder="Code review"></label>
+              <label>Text, in Markdown<textarea id="entry-text" rows="5" placeholder="Every pull request needs two approvals before it is merged."></textarea></label>
+              <div class="actions"><button id="add-entry" class="secondary">Add entry</button></div>
+            </details>
+          </div>
           <div class="panel">
             <div class="panel-head"><h2>Work item guides</h2><span id="guides-summary" class="hint"></span></div>
             <p class="hint">How your organization uses each work item type: when to use it, how to write it and what each field is for. The implementation agents follow the guide when they plan children, implement an item or write a request, and an agent connected through MCP reads it before it creates or changes a work item. A guide never grants access: the project, the type and every value are checked against Azure DevOps or GitHub, and the agents propose values only for the fields you mark.</p>

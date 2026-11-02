@@ -223,7 +223,8 @@ children and run installed coding agents.
    `fields` (`[{"reference":"Custom.Month","value":"Noviembre"}]`), proposed from the work item
    guides; only fields the type's guide marks `fill` and values valid for the live type are
    accepted, and every child is checked before anything is written. The agents start from the
-   editable agent instructions (`pta prompts`) plus fixed rules.
+   editable agent instructions (`pta prompts`) plus fixed rules, and also receive the
+   organization's norms, architecture and conventions for the item's project as untrusted input.
    On a process task (any task-category type, such as a development bug a guide lists with the bugs) or ordinary GitHub issue, Start implements that item in
    the chosen directories. Changes remain local; the coding prompt does not authorize pushing,
    publishing, changing work items or sending Teams messages.

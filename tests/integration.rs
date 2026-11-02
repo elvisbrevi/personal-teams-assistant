@@ -72,6 +72,7 @@ fn knowledge(dir: &tempfile::TempDir) -> KnowledgeMap {
         people: Vec::new(),
         agent_prompts: Vec::new(),
         work_item_guides: Vec::new(),
+        organization: Default::default(),
     }
 }
 fn used_ref(id: &str, mention: &str) -> personal_teams_assistant::evidence::Used {
@@ -1331,6 +1332,7 @@ async fn wiki_priority_current_request_mixed_citations_and_complete_gate_without
                     people: Vec::new(),
                     agent_prompts: Vec::new(),
                     work_item_guides: Vec::new(),
+                    organization: Default::default(),
                 },
                 llm: Arc::new(WikiLlm { used: ids.clone() }),
                 tools: Arc::new(WikiTools {
@@ -1467,6 +1469,7 @@ async fn follow_up_without_subject_searches_the_previous_topic_and_keeps_it_for_
                 people: Vec::new(),
                 agent_prompts: Vec::new(),
                 work_item_guides: Vec::new(),
+                organization: Default::default(),
             },
             llm: Arc::new(FollowUpLlm { resolve }),
             tools: Arc::new(WikiTools {
@@ -1574,6 +1577,7 @@ async fn a_first_wiki_question_searches_its_topic_not_the_whole_request() {
             people: Vec::new(),
             agent_prompts: Vec::new(),
             work_item_guides: Vec::new(),
+            organization: Default::default(),
         },
         llm: Arc::new(TopicLlm),
         // Generic words of the whole request («body», «endpoint») rank other API pages first.
@@ -1702,6 +1706,7 @@ async fn explicit_local_selection_still_requires_enabled_and_external_processing
                 people: Vec::new(),
                 agent_prompts: Vec::new(),
                 work_item_guides: Vec::new(),
+                organization: Default::default(),
             },
             llm: Arc::new(NoLlm),
             tools: Arc::new(NoTools),
@@ -1747,6 +1752,7 @@ async fn implicit_documentation_does_not_bypass_teams_source_audiences() {
             people: Vec::new(),
             agent_prompts: Vec::new(),
             work_item_guides: Vec::new(),
+            organization: Default::default(),
         },
         llm: Arc::new(NoLlm),
         tools: Arc::new(NoTools),
@@ -1884,6 +1890,7 @@ async fn teams_simulation_keeps_who_said_what_in_the_evidence_and_the_log() {
             people: Vec::new(),
             agent_prompts: Vec::new(),
             work_item_guides: Vec::new(),
+            organization: Default::default(),
         },
         llm: Arc::new(TeamsAttributionLlm),
         tools: Arc::new(TeamsEvidenceTool),

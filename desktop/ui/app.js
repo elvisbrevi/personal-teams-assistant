@@ -1462,7 +1462,7 @@ async function reload() {
   dirtyGroups.clear();
   renderSavebar();
   renderLive();
-  renderRepositories(); renderResources(); renderContexts(); renderQuestions(); renderPeople(); renderGuides(); renderAgentPrompts(); renderNoteContexts(); renderChatSources();
+  renderRepositories(); renderResources(); renderContexts(); renderQuestions(); renderPeople(); renderOrganization(); renderEntries(); renderGuides(); renderAgentPrompts(); renderNoteContexts(); renderChatSources();
   loadAzureCliStatus(); loadGithubCliStatus();
   await Promise.all([loadChain(), loadSelfChat()]);
 }
@@ -3718,6 +3718,7 @@ function kindName(resource) {
   if (resource.kind === 'url' || resource.kind === 'urls') return 'URL';
   if (resource.kind === 'repository') return t('Repository');
   if (resource.kind === 'notes') return t('Notes');
+  if (resource.kind === 'organization') return t('Organization');
   return toolNames[resource.tool?.type] || resource.tool?.type || t('Tool');
 }
 
@@ -3728,6 +3729,7 @@ const indexOf = resource => indexStatus.sources.find(s => s.id === resource.id)?
 function indexText(resource) {
   const held = indexOf(resource);
   if (resource.kind === 'notes') return tn(indexStatus.notes?.documents ?? 0, '1 note', '{n} notes');
+  if (resource.kind === 'organization') return tn(indexStatus.organization?.documents ?? 0, '1 entry or guide', '{n} entries and guides');
   if (!held?.synced_at) return t('Not indexed yet: it is indexed the first time an answer reads it');
   return t('{files} files, {sections} sections indexed {when}', { files: held.documents, sections: held.sections, when: ago(held.synced_at * 1000) });
 }
@@ -3740,6 +3742,7 @@ function accessText(resource) {
   if (resource.kind === 'notes') return resource.contexts?.length
     ? t('Your verified notes of {contexts} and the general ones', { contexts: resource.contexts.join(', ') })
     : `${t('Your verified notes')} · ${indexText(resource)}`;
+  if (resource.kind === 'organization') return `${t('Your organization\'s entries and work item guides')} · ${indexText(resource)}`;
   const tool = resource.tool ?? {};
   if (tool.page_urls) return tool.page_urls.join(' · ');
   if (tool.organization) return `${tool.organization} / ${tool.project}`;
@@ -3800,7 +3803,7 @@ function renderResources() {
     remove.onclick = () => {
       if (current.map.questions?.some(q => q.sources.includes(resource.id))) return fail(t('This source belongs to a question. Change or remove that question first.'));
       current.map.resources = current.map.resources.filter(r => r !== resource);
-      for (const context of current.map.contexts ?? []) context.sources = context.sources.filter(id => id !== resource.id);
+      forgetSources([resource.id]);
       markDirty(); renderResources(); renderContexts();
     };
     const actions = [remove];
@@ -3836,6 +3839,14 @@ function renderResources() {
       el('div', { class: 'resource-head' }, el('strong', { textContent: resource.id }), badge(kindName(resource), 'active'), el('span', { class: 'grow' }), state),
       facts, toggles, edit));
   }
+  renderOrganization();
+}
+
+/** Removed sources leave the contexts and the organization that named them. */
+function forgetSources(ids) {
+  for (const context of current.map.contexts ?? []) context.sources = context.sources.filter(id => !ids.includes(id));
+  const organization = current.map.organization;
+  if (organization?.sources) organization.sources = organization.sources.filter(id => !ids.includes(id));
 }
 
 function renderRepositories() {
@@ -3861,8 +3872,9 @@ function renderRepositories() {
       if (current.map.questions?.some(q => files.some(r => q.sources.includes(r.id)))) return fail(t('This source belongs to a question. Change or remove that question first.'));
       delete current.map.repositories[alias];
       current.map.resources = current.map.resources.filter(r => r.repository !== alias);
+      forgetSources(files.map(r => r.id));
       markDirty();
-      renderRepositories(); renderResources();
+      renderRepositories(); renderResources(); renderContexts();
       if (files.length) notify(t('Its sources were removed too: {ids}.', { ids: files.map(r => r.id).join(', ') }));
     };
     const source = current.map.resources.find(r => r.kind === 'repository' && r.repository === alias);
@@ -4072,6 +4084,83 @@ function renderPeople() {
   }
 }
 
+// ---------------------------------------------------------------- organization
+
+const entryKinds = { norm: t('Norm'), architecture: t('Architecture'), convention: t('Convention'), glossary_term: t('Glossary term'), template: t('Template') };
+/** Entries whose edit fold is open, kept across re-renders. */
+const openEntries = new Set();
+/** Sources that can document the organization: a Wiki, a repository, a file or a URL. */
+const documentsOrganization = r => ['file', 'url', 'urls', 'repository'].includes(r.kind) || r.tool?.type === 'azure_devops_wiki';
+
+function renderOrganization() {
+  const organization = current.map.organization ??= {};
+  const name = $('#organization-name');
+  if (document.activeElement !== name) name.value = organization.name ?? '';
+  $('#organization-offer').hidden = current.map.resources.some(r => r.kind === 'organization');
+  const fieldset = $('#organization-sources');
+  fieldset.querySelectorAll('label, p').forEach(node => node.remove());
+  const chosen = organization.sources ??= [];
+  const usable = current.map.resources.filter(documentsOrganization);
+  if (!usable.length) fieldset.append(el('p', { class: 'hint', textContent: t('Add a Wiki, repository, file or URL source in Sources to name it here.') }));
+  for (const resource of usable) {
+    const box = el('input', { type: 'checkbox', value: resource.id, checked: chosen.includes(resource.id) });
+    box.onchange = () => {
+      organization.sources = box.checked ? [...chosen.filter(id => id !== resource.id), resource.id] : chosen.filter(id => id !== resource.id);
+      markDirty({ target: fieldset }); renderOrganization();
+    };
+    fieldset.append(el('label', { class: 'check' }, box, el('span', { textContent: resource.id }), ' ', el('small', { textContent: kindName(resource) })));
+  }
+  const entries = organization.entries?.length ?? 0, guides = current.map.work_item_guides?.length ?? 0;
+  $('#organization-summary').textContent = entries || guides
+    ? [tn(entries, '1 entry', '{n} entries'), tn(guides, '1 guide', '{n} guides')].join(' · ') : '';
+}
+$('#organization-name').oninput = event => {
+  (current.map.organization ??= {}).name = event.target.value;
+  markDirty(event);
+};
+
+function renderEntries() {
+  const container = $('#organization-entries');
+  container.replaceChildren();
+  const organization = current.map.organization ??= {};
+  const entries = organization.entries ??= [];
+  $('#entries-summary').textContent = entries.length ? tn(entries.length, '1 entry', '{n} entries') : '';
+  if (!entries.length) container.append(el('div', { class: 'empty' }, el('p', { textContent: t('No entries yet. Add the norms, architecture and conventions you follow, or ask an agent to add them with pta organization entries add.') })));
+  for (const entry of entries) {
+    entry.projects ??= [];
+    const facts = el('p', { class: 'resource-facts' });
+    const renderFacts = () => facts.replaceChildren(el('span', { textContent: entry.text.split('\n').find(line => line.trim()) ?? '' }),
+      el('small', { textContent: [`${t('Projects')}: ${entry.projects.join(', ') || t('all')}`,
+        ...(entry.updated_at ? [t('Updated {when}', { when: ago(entry.updated_at * 1000) })] : [])].join(' · ') }));
+    renderFacts();
+    const changed = () => { renderFacts(); markDirty({ target: container }); };
+    const title = el('input', { value: entry.title });
+    title.oninput = () => { entry.title = title.value; heading.textContent = title.value; changed(); };
+    const kind = el('select', {}, ...Object.entries(entryKinds).map(([value, label]) => el('option', { value, textContent: label, selected: entry.kind === value })));
+    const kindBadge = badge(entryKinds[entry.kind] ?? entry.kind, 'muted');
+    kind.onchange = () => { entry.kind = kind.value; kindBadge.textContent = entryKinds[entry.kind]; changed(); };
+    const projects = el('input', { value: entry.projects.join(', '), placeholder: t('Empty applies to all'), spellcheck: false });
+    projects.oninput = () => { entry.projects = names(projects.value); changed(); };
+    const text = el('textarea', { value: entry.text, rows: 8 });
+    text.oninput = () => { entry.text = text.value; changed(); };
+    const remove = el('button', { type: 'button', class: 'danger small', textContent: t('Remove entry') });
+    remove.onclick = () => { organization.entries = entries.filter(e => e !== entry); openEntries.delete(entry.id); markDirty({ target: container }); renderEntries(); renderOrganization(); };
+    const heading = el('strong', { class: 'title', textContent: entry.title });
+    const edit = el('details', { class: 'fold resource-edit', open: openEntries.has(entry.id) },
+      el('summary', { textContent: t('Edit the entry') }),
+      el('div', { class: 'grid' },
+        el('label', {}, t('Title'), title),
+        el('label', {}, t('Kind'), kind),
+        el('label', {}, t('Projects or repositories, comma separated'), projects)),
+      el('label', {}, t('Text, in Markdown'), text),
+      el('div', { class: 'actions' }, remove));
+    edit.ontoggle = () => { if (edit.open) openEntries.add(entry.id); else openEntries.delete(entry.id); };
+    container.append(el('div', { class: 'resource' },
+      el('div', { class: 'resource-head' }, heading, el('code', { textContent: entry.id }), el('span', { class: 'grow' }), kindBadge),
+      facts, edit));
+  }
+}
+
 // ---------------------------------------------------------------- work item guides and agent instructions
 
 /** Guides and guide fields whose edit fold is open, kept across re-renders. */
@@ -4158,7 +4247,7 @@ function renderGuides() {
       changed(); renderGuides();
     };
     const remove = el('button', { type: 'button', class: 'danger small', textContent: t('Remove guide') });
-    remove.onclick = () => { current.map.work_item_guides = guides.filter(g => g !== guide); markDirty({ target: container }); renderGuides(); };
+    remove.onclick = () => { current.map.work_item_guides = guides.filter(g => g !== guide); markDirty({ target: container }); renderGuides(); renderOrganization(); };
     const edit = el('details', { class: 'fold resource-edit', open: openGuides.has(guide.id) },
       el('summary', { textContent: t('Edit the guide and its fields') }),
       el('div', { class: 'grid' },
@@ -4918,8 +5007,34 @@ $('#add-guide').onclick = () => {
   for (const name of ['#guide-id', '#guide-type', '#guide-name']) field(name, '');
   $('#guide-form').open = false;
   markDirty({ target: $('#add-guide') });
-  renderGuides();
+  renderGuides(); renderOrganization();
   notify(t('Guide {id} added. Describe how the type is used and save the changes.', { id }));
+};
+$('#add-entry').onclick = () => {
+  const id = $('#entry-id').value.trim();
+  const title = $('#entry-title').value.trim();
+  const text = $('#entry-text').value;
+  if (!/^[a-z][a-z0-9_-]{0,63}$/.test(id) || !title || !text.trim()) return fail(t('Give the entry an ID (lowercase letters, digits, - or _), a title and a text.'));
+  const organization = current.map.organization ??= {};
+  const entries = organization.entries ??= [];
+  if (entries.some(e => e.id === id)) return fail(t('That ID already exists.'));
+  entries.push({ id, kind: $('#entry-kind').value, title, text, projects: [] });
+  for (const name of ['#entry-id', '#entry-title', '#entry-text']) field(name, '');
+  $('#entry-form').open = false;
+  markDirty({ target: $('#add-entry') });
+  renderEntries(); renderOrganization();
+  notify(t('Entry {id} added. Save the changes to keep it.', { id }));
+};
+$('#add-organization-source').onclick = () => {
+  if (current.map.resources.some(r => r.kind === 'organization')) return;
+  const id = current.map.resources.some(r => r.id === 'organization') ? 'organization-entries' : 'organization';
+  current.map.resources.push({ id, description: t('How my organization works: norms, architecture, conventions and work item guides.'),
+    topics: [], enabled: false, external_processing: false, allowed_conversations: [], allowed_senders: [], kind: 'organization' });
+  openSources.add(id);
+  markDirty({ target: $('#add-organization-source') });
+  renderResources();
+  selectTab($('#knowledge-tabs'), 'sources');
+  notify(t('Source {id} added, disabled. Enable it, authorize it, choose its conversations and save.', { id }));
 };
 $('#add-notes-source').onclick = () => {
   if (current.map.resources.some(r => r.kind === 'notes')) return;

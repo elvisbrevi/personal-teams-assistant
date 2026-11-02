@@ -110,6 +110,10 @@ struct Launch {
     /// planning children.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     guides: Vec<crate::work_items::Guide>,
+    /// The organization's norms, architecture and conventions for the item's project, within
+    /// the run's budget; untrusted input, like the guides.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    organization: Vec<crate::organization::Entry>,
 }
 #[derive(Clone, Serialize, Deserialize)]
 struct Run {
@@ -506,6 +510,10 @@ async fn operation(host: &Arc<Host>, method: &str, args: &Value) -> Result<Value
                     },
                 )),
                 guides: guides.into_iter().cloned().collect(),
+                organization: crate::organization::for_agents(&map.organization, project)
+                    .into_iter()
+                    .cloned()
+                    .collect(),
                 request,
                 detail,
                 language: read_config(&host.state.config_path)?.llm.language,
@@ -858,6 +866,9 @@ async fn run(host: &Arc<Host>, launch: Launch) {
     let mut input = json!({"verified_item":launch.detail,"user_context":request.context,"working_directories":request.directories,"language":launch.language,"today":chrono::Local::now().date_naive()});
     if !launch.guides.is_empty() {
         input["work_item_guides"] = json!(launch.guides);
+    }
+    if !launch.organization.is_empty() {
+        input["organization"] = crate::organization::agent_input(&launch.organization);
     }
     let input = input.to_string();
     let instructions = launch.instructions.clone().unwrap_or_else(|| {

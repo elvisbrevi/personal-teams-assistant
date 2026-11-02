@@ -5,8 +5,8 @@
 use super::Host;
 use super::{DesktopState, fail, read_config};
 use crate::{
-    index::{Index, NOTES, Note},
-    knowledge::{Access, KnowledgeMap},
+    index::{Index, NOTES, Note, ORGANIZATION},
+    knowledge::{Access, KnowledgeMap, Resource},
 };
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
@@ -20,7 +20,19 @@ fn open(
     let config = read_config(&state.config_path).map_err(fail)?;
     let map = KnowledgeMap::load(&state.map_path).map_err(fail)?;
     let index = Index::open(&config.server.data_dir.join(crate::index::FILE)).map_err(fail)?;
+    index
+        .sync_organization(&map.organization, &map.work_item_guides)
+        .map_err(fail)?;
     Ok((config, map, index))
+}
+
+/// The index documents an indexed source reads, and what kind of source it is.
+fn held_by(source: &Resource) -> (&str, &'static str) {
+    match source.access {
+        Access::Notes { .. } => (NOTES, "notes"),
+        Access::Organization {} => (ORGANIZATION, "organization"),
+        _ => (source.id.as_str(), "repository"),
+    }
 }
 
 /// Notes, newest first: `context` keeps that context's and the general ones; `query` searches
@@ -102,16 +114,14 @@ pub(super) fn status(state: &DesktopState) -> Reply {
         .iter()
         .filter(|r| r.access.indexed())
         .map(|r| {
-            let key = match r.access {
-                Access::Notes { .. } => NOTES,
-                _ => r.id.as_str(),
-            };
-            json!({"id": r.id, "kind": if key == NOTES { "notes" } else { "repository" }, "enabled": r.enabled, "index": held.get(key).cloned().unwrap_or_default()})
+            let (key, kind) = held_by(r);
+            json!({"id": r.id, "kind": kind, "enabled": r.enabled, "index": held.get(key).cloned().unwrap_or_default()})
         })
         .collect();
     Ok(json!({
         "sources": sources,
         "notes": held.get(NOTES).cloned().unwrap_or_default(),
+        "organization": held.get(ORGANIZATION).cloned().unwrap_or_default(),
         "embeddings": config.knowledge_index.embeddings.as_ref().map(|e| json!({"url": e.url, "model": e.model})),
     }))
 }
@@ -187,10 +197,7 @@ pub(super) fn search(state: &DesktopState, args: &Value) -> Reply {
         .iter()
         .filter(|r| r.access.indexed())
         .filter(|r| wanted.as_ref().is_none_or(|w| w.contains(&r.id)))
-        .map(|r| match r.access {
-            Access::Notes { .. } => NOTES,
-            _ => r.id.as_str(),
-        })
+        .map(|r| held_by(r).0)
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect();

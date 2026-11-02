@@ -50,6 +50,10 @@
           { reference: 'Custom.Evidence', name: 'Completion evidence', required: false, values: [], default: '', guidance: 'Pull request, commit, build and release links.', fill: false },
         ] },
     ];
+    snapshot.map.organization = {
+      name: 'Contoso', sources: ['handbook'],
+      entries: [{ id: 'code-review', kind: 'norm', title: 'Code review', text: 'Every pull request needs two approvals before it is merged.', projects: [], updated_at: secs(NOW - 86_400_000) }],
+    };
     snapshot.map.agent_prompts = [{ id: 'code', instructions: 'Implement the work item. Follow the repository instructions and run its checks.' }];
     snapshot.map.contexts = [
       { id: 'billing', name: 'Billing', description: 'Invoices, payments and bank reconciliation', keywords: ['invoice', 'bank reconciliation', 'refund'], sources: ['payments', 'wiki'], instructions: 'Call collections «recaudación» and name the settlement batch when it applies.' },
@@ -385,8 +389,8 @@
       Object.assign(row.audit, { reason: 'manual_send', sent: row.audit.proposed });
       return { status: 'sent' };
     },
-    index_status: () => ({ sources: snapshot.map.resources.filter(r => ['repository', 'notes'].includes(r.kind)).map(r => ({ id: r.id, kind: r.kind, enabled: r.enabled,
-      index: r.kind === 'repository' ? { documents: 42, sections: 318, embedded: 0, synced_at: secs(ago(12)) } : {} })), notes: { documents: notes.length, sections: notes.length, embedded: 0 }, embeddings: null }),
+    index_status: () => ({ sources: snapshot.map.resources.filter(r => ['repository', 'notes', 'organization'].includes(r.kind)).map(r => ({ id: r.id, kind: r.kind, enabled: r.enabled,
+      index: r.kind === 'repository' ? { documents: 42, sections: 318, embedded: 0, synced_at: secs(ago(12)) } : {} })), notes: { documents: notes.length, sections: notes.length, embedded: 0 }, organization: { documents: (snapshot.map.organization?.entries?.length ?? 0) + (snapshot.map.work_item_guides?.length ?? 0) }, embeddings: null }),
     index_refresh: args => [{ id: args.source, sync: { added: 1, updated: 2, removed: 0, unchanged: 39, skipped: 0 } }],
     question_associate: args => {
       const row = audit.find(r => r.resource === args.resource);
