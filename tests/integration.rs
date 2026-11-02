@@ -1274,7 +1274,7 @@ fn wiki_resource() -> Resource {
 async fn wiki_priority_current_request_mixed_citations_and_complete_gate_without_graph_send() {
     for question in [
         "Según la wiki, ¿cómo se configura el pipeline?",
-        "como se usa el microservicio crearsps",
+        "como se usa el microservicio crearodc",
         "¿Cómo se configura el pipeline?",
         "como funciona la notificacion de pagos",
         "¿Qué parámetros necesita crear una solicitud de servicio?",
@@ -1397,13 +1397,13 @@ impl LlmProvider for FollowUpLlm {
         _history: &str,
         current: &str,
     ) -> Result<Option<personal_teams_assistant::llm::StandaloneRequest>> {
-        assert_eq!(previous_question, "como se usa el microservicio crearsps");
+        assert_eq!(previous_question, "como se usa el microservicio crearodc");
         assert!(!previous_answer.contains("Fuentes"));
         assert_eq!(current, "como se invoca si quiero pagar 2 servicios?");
         anyhow::ensure!(self.resolve, "provider unavailable");
         Ok(Some(personal_teams_assistant::llm::StandaloneRequest {
-            question: "¿Cómo se invoca el microservicio Crear SPS para pagar 2 servicios?".into(),
-            topic: "Crear SPS".into(),
+            question: "¿Cómo se invoca el microservicio Crear ODC para pagar 2 servicios?".into(),
+            topic: "Crear ODC".into(),
         }))
     }
     async fn select_references(
@@ -1425,7 +1425,7 @@ impl LlmProvider for FollowUpLlm {
         ));
         assert_eq!(
             input.question.contains(
-                "interpreted with the context: ¿Cómo se invoca el microservicio Crear SPS"
+                "interpreted with the context: ¿Cómo se invoca el microservicio Crear ODC"
             ),
             self.resolve
         );
@@ -1450,8 +1450,8 @@ async fn follow_up_without_subject_searches_the_previous_topic_and_keeps_it_for_
         store
             .save_context(
                 "chats/simulation-follow",
-                "como se usa el microservicio crearsps",
-                "El Microservicio Crear SPS recibe un POST con Servicios[].",
+                "como se usa el microservicio crearodc",
+                "El Microservicio Crear ODC recibe un POST con Servicios[].",
             )
             .unwrap();
         let pipeline = Pipeline {
@@ -1473,7 +1473,7 @@ async fn follow_up_without_subject_searches_the_previous_topic_and_keeps_it_for_
                 result: synthetic_wiki_result(),
                 // Without a resolution the literal request is kept (previous behavior).
                 question: if resolve {
-                    "Crear SPS"
+                    "Crear ODC"
                 } else {
                     "como se invoca si quiero pagar 2 servicios?"
                 },
@@ -1501,7 +1501,7 @@ async fn follow_up_without_subject_searches_the_previous_topic_and_keeps_it_for_
         assert_eq!(
             context.question,
             if resolve {
-                "¿Cómo se invoca el microservicio Crear SPS para pagar 2 servicios?"
+                "¿Cómo se invoca el microservicio Crear ODC para pagar 2 servicios?"
             } else {
                 "como se invoca si quiero pagar 2 servicios?"
             }
@@ -2052,8 +2052,8 @@ async fn graph_history_returns_earlier_messages_oldest_first_with_author_and_tim
         json!({"id":"9","messageType":"message","createdDateTime":at(1),"deletedDateTime":null,"from":{"user":{"id":"ana"}},"body":{"contentType":"html","content":format!("<p>Respuesta del asistente</p><p><a href=\"https://personalteams.invalid/output/{nonce}\">PTA</a></p>")}}),
         json!({"id":"8","messageType":"systemEventMessage","createdDateTime":at(2),"deletedDateTime":null,"from":null,"body":{"contentType":"html","content":"<p>Evento</p>"}}),
         json!({"id":"7","messageType":"message","createdDateTime":at(3),"deletedDateTime":at(1),"from":{"user":{"id":"ana"}},"body":{"contentType":"text","content":"borrado"}}),
-        json!({"id":"6","messageType":"message","createdDateTime":at(4),"deletedDateTime":null,"from":{"user":{"id":"ana","displayName":"Ana Pérez"}},"body":{"contentType":"html","content":"<p>Hablamos del <b>microservicio Crear SPS</b></p>"}}),
-        json!({"id":"5","messageType":"message","createdDateTime":at(5),"deletedDateTime":null,"from":{"user":{"id":me}},"body":{"contentType":"text","content":"¿Cómo se usa crearsps?"}}),
+        json!({"id":"6","messageType":"message","createdDateTime":at(4),"deletedDateTime":null,"from":{"user":{"id":"ana","displayName":"Ana Pérez"}},"body":{"contentType":"html","content":"<p>Hablamos del <b>microservicio Crear ODC</b></p>"}}),
+        json!({"id":"5","messageType":"message","createdDateTime":at(5),"deletedDateTime":null,"from":{"user":{"id":me}},"body":{"contentType":"text","content":"¿Cómo se usa crearodc?"}}),
     ];
     for minutes in 6..20 {
         page.push(json!({"id":format!("{minutes}00"),"messageType":"message","createdDateTime":at(minutes),"deletedDateTime":null,"from":{"user":{"id":me}},"body":{"contentType":"text","content":format!("mensaje antiguo {minutes}")}}));
@@ -2092,8 +2092,8 @@ async fn graph_history_returns_earlier_messages_oldest_first_with_author_and_tim
         newest,
         vec![
             ("assistant", "Respuesta del asistente"),
-            ("Ana Pérez", "Hablamos del microservicio Crear SPS"),
-            ("me", "¿Cómo se usa crearsps?"),
+            ("Ana Pérez", "Hablamos del microservicio Crear ODC"),
+            ("me", "¿Cómo se usa crearodc?"),
         ]
     );
     assert!(history.iter().all(|m| !m.text.contains("borrado")
@@ -2148,12 +2148,12 @@ impl MessageAdapter for HistoryTeams {
             personal_teams_assistant::adapters::teams::HistoryMessage {
                 author: "me".into(),
                 at: "2026-10-01 18:49".into(),
-                text: "¿Cómo se usa el microservicio crearsps?".into(),
+                text: "¿Cómo se usa el microservicio crearodc?".into(),
             },
             personal_teams_assistant::adapters::teams::HistoryMessage {
                 author: "assistant".into(),
                 at: "2026-10-01 18:51".into(),
-                text: "El microservicio Crear SPS se consume con POST.".into(),
+                text: "El microservicio Crear ODC se consume con POST.".into(),
             },
         ])
     }
@@ -2224,7 +2224,7 @@ async fn earlier_messages_with_time_reach_the_model_and_the_log() {
     pipeline.process(resource).await.unwrap();
     let history = llm.seen.lock().unwrap().last().cloned().unwrap();
     assert!(history.starts_with(
-        "[2026-10-01 18:49 · me] ¿Cómo se usa el microservicio crearsps?\n[2026-10-01 18:51 · assistant] El microservicio Crear SPS se consume con POST.\n["
+        "[2026-10-01 18:49 · me] ¿Cómo se usa el microservicio crearodc?\n[2026-10-01 18:51 · assistant] El microservicio Crear ODC se consume con POST.\n["
     ));
     assert!(history.ends_with("· current request]"));
     let audit = store.audit(resource).unwrap().unwrap();
@@ -3237,7 +3237,7 @@ async fn a_review_proposes_where_to_register_each_piece_and_applies_it_on_confir
     }
 }
 
-/// Records an activity the Activities section found on `day`, under HU #23553.
+/// Records an activity the Activities section found on `day`, under HU #41553.
 fn record(
     db: &personal_teams_assistant::activity::store::Database,
     key: &str,
@@ -3247,12 +3247,12 @@ fn record(
     task: Option<u64>,
 ) {
     let hu = personal_teams_assistant::ado::link::Target {
-        id: 23553,
-        title: "Pagos QR".into(),
-        url: "https://dev.azure.com/example/Payments/_workitems/edit/23553".into(),
+        id: 41553,
+        title: "Pagos en línea".into(),
+        url: "https://dev.azure.com/example/Payments/_workitems/edit/41553".into(),
         organization: "https://dev.azure.com/example".into(),
         project: "Payments".into(),
-        state: "Enviado a validación".into(),
+        state: "En validación".into(),
         ..Default::default()
     };
     assert!(
@@ -3263,7 +3263,7 @@ fn record(
             state: state.into(),
             draft: personal_teams_assistant::activity::Draft {
                 activities: vec![key.into()],
-                parent: Some(23553),
+                parent: Some(41553),
                 title: format!("Registro {key}"),
                 description: "Ajuste del flujo de pago QR.".into(),
                 evidence: String::new(),
@@ -3323,9 +3323,9 @@ impl LlmProvider for RecapLlm {
         input: GenerationInput<'_>,
     ) -> Result<personal_teams_assistant::llm::GeneratedAnswer> {
         assert!(
-            input
-                .evidence
-                .contains("Recorded task #26410 under #23553 «Pagos QR»: «Registro y1» (2 h)"),
+            input.evidence.contains(
+                "Recorded task #26410 under #41553 «Pagos en línea»: «Registro y1» (2 h)"
+            ),
             "{}",
             input.evidence
         );
@@ -3337,7 +3337,7 @@ impl LlmProvider for RecapLlm {
         );
         Ok(personal_teams_assistant::llm::GeneratedAnswer {
             answer:
-                "Ayer registré la tarea #26410 en la HU #23553: ajuste del flujo de pago QR (2 h)."
+                "Ayer registré la tarea #26410 en la HU #41553: ajuste del flujo de pago QR (2 h)."
                     .into(),
             detailed: false,
             used_sources: Vec::new(),
@@ -3385,6 +3385,7 @@ async fn what_the_user_did_on_a_day_comes_from_the_recorded_activities() {
         url: format!("https://dev.azure.com/example/Payments/_workitems/edit/{id}"),
         project: "Payments".into(),
         kind: "Task".into(),
+        category: "task".into(),
         state: "Done".into(),
         created_at: None,
         dates: vec![],
@@ -3401,7 +3402,7 @@ async fn what_the_user_did_on_a_day_comes_from_the_recorded_activities() {
                 user: "me@example.test".into(),
                 description: "Ajuste del flujo de pago QR.".into(),
                 hours: 2.,
-                parent: Some(item(23553, "Pagos QR")),
+                parent: Some(item(41553, "Pagos en línea")),
             }],
             ..Default::default()
         })
@@ -3887,20 +3888,20 @@ impl ReadOnlyTool for StatusTools {
             matches!(spec, ToolSpec::AzureDevopsStatus { .. }),
             "a status round does not search the Wiki"
         );
-        assert!(question.contains("HU #23553"), "{question}");
-        let hu = "Requested work item (named in the request): User Story #23553 Pagos QR — Enviado a validación.\n- Current state: Enviado a validación since 2026-10-10. Assigned to now: Luis Felipe. Last change 2026-10-10 by Elvis Brevi.\n- State changes: 2026-10-10 En desarrollo → Enviado a validación (by Elvis Brevi).\n- The user is or was assigned to it.";
+        assert!(question.contains("HU #41553"), "{question}");
+        let hu = "Requested work item (named in the request): User Story #41553 Pagos en línea — En validación.\n- Current state: En validación since 2026-10-10. Assigned to now: Alex Rivera. Last change 2026-10-10 by Elvis Brevi.\n- State changes: 2026-10-10 En desarrollo → En validación (by Elvis Brevi).\n- The user is or was assigned to it.";
         Ok(serde_json::to_string(&Evidence {
             text: format!("Azure DevOps activity since 2026-09-30 (last 14 days).\n{hu}\n"),
             blocks: vec![Block {
                 text: hu.into(),
-                source_ids: vec!["work_item:23553".into()],
+                source_ids: vec!["work_item:41553".into()],
             }],
             references: vec![review_reference(
-                "work_item:23553",
+                "work_item:41553",
                 "work_item",
-                "#23553 Pagos QR — Enviado a validación",
-                "https://dev.azure.com/example/Payments/_workitems/edit/23553",
-                &["#23553", "HU 23553", "Pagos QR"],
+                "#41553 Pagos en línea — En validación",
+                "https://dev.azure.com/example/Payments/_workitems/edit/41553",
+                &["#41553", "HU 41553", "Pagos en línea"],
             )],
             ..Default::default()
         })?)
@@ -3908,8 +3909,8 @@ impl ReadOnlyTool for StatusTools {
     async fn status_pages(&self, spec: &ToolSpec, question: &str) -> Result<String> {
         use personal_teams_assistant::evidence::{Block, Evidence};
         assert!(matches!(spec, ToolSpec::AzureDevopsWiki { .. }));
-        assert!(question.contains("HU #23553"));
-        let page = "Wiki page the user created on 2026-10-12: \"Paso a producción Pagos QR\" (Payments / Payments.wiki); it names #23553.\nFecha del paso a producción: 2026-10-20.\nPendiente: variables de Consul en producción, solicitadas a Francisco.";
+        assert!(question.contains("HU #41553"));
+        let page = "Wiki page the user created on 2026-10-12: \"Paso a producción Pagos en línea\" (Payments / Payments.wiki); it names #41553.\nFecha del paso a producción: 2026-10-20.\nPendiente: variables de Consul en producción, solicitadas a Sam.";
         Ok(serde_json::to_string(&Evidence {
             text: page.into(),
             blocks: vec![Block {
@@ -3919,7 +3920,7 @@ impl ReadOnlyTool for StatusTools {
             references: vec![review_reference(
                 "wiki:paso",
                 "wiki",
-                "Payments / Payments.wiki / Paso a producción Pagos QR",
+                "Payments / Payments.wiki / Paso a producción Pagos en línea",
                 "https://dev.azure.com/example/Payments/_wiki/wikis/abcdeabc-abcd-abcd-abcd-abcdeabcdea2?pagePath=%2FPaso",
                 &[],
             )],
@@ -3959,12 +3960,12 @@ impl LlmProvider for StatusLlm {
     ) -> Result<personal_teams_assistant::llm::GeneratedAnswer> {
         assert!(!input.review);
         for expected in [
-            "Assigned to now: Luis Felipe",
-            "Enviado a validación since 2026-10-10",
+            "Assigned to now: Alex Rivera",
+            "En validación since 2026-10-10",
             "Fecha del paso a producción: 2026-10-20",
-            "solicitadas a Francisco",
+            "solicitadas a Sam",
             "Work recorded in the app's Activities section, by day",
-            "Registered as task #26401 under #23553 «Pagos QR»: «Registro a1» (2 h)",
+            "Registered as task #41401 under #41553 «Pagos en línea»: «Registro a1» (2 h)",
         ] {
             assert!(
                 input.evidence.contains(expected),
@@ -3975,7 +3976,7 @@ impl LlmProvider for StatusLlm {
         // Work drawn from a chat this conversation may not read stays out.
         assert!(!input.evidence.contains("Registro a2"));
         Ok(personal_teams_assistant::llm::GeneratedAnswer {
-            answer: "1) La HU #23553 ya la envié a validación el 10/10; ahora está a cargo de Luis Felipe, y hoy registré la tarea #26401.\n2) Mi compromiso es el paso a producción del 20/10.\n3) Depende de las variables de Consul en producción, que pedí a Francisco.".into(),
+            answer: "1) La HU #41553 ya la envié a validación el 10/10; ahora está a cargo de Alex Rivera, y hoy registré la tarea #41401.\n2) Mi compromiso es el paso a producción del 20/10.\n3) Depende de las variables de Consul en producción, que pedí a Sam.".into(),
             detailed: false,
             used_sources: Vec::new(),
             provider: None,
@@ -4008,7 +4009,7 @@ async fn a_status_round_reads_the_named_hu_and_the_users_deployment_page() {
             "a1",
             "https://dev.azure.com/example/Payments/_git/api/pullrequest/12",
             "done",
-            Some(26401),
+            Some(41401),
         ),
         (
             "a2",
@@ -4047,7 +4048,7 @@ async fn a_status_round_reads_the_named_hu_and_the_users_deployment_page() {
         &pipeline,
         SimulationRequest {
             session: "status".into(),
-            text: "Hola Elvis, ronda de actualización. Te pido 3 cosas cortas: 1) Avance de lo que tienes en curso: HU #23553 2) Compromiso: qué cierras y para qué fecha. 3) Riesgos o bloqueos (dependencias, accesos, definiciones pendientes).".into(),
+            text: "Hola Elvis, ronda de actualización. Te pido 3 cosas cortas: 1) Avance de lo que tienes en curso: HU #41553 2) Compromiso: qué cierras y para qué fecha. 3) Riesgos o bloqueos (dependencias, accesos, definiciones pendientes).".into(),
             group: false,
             mentioned: false,
             sources: sources.clone(),
@@ -4060,8 +4061,8 @@ async fn a_status_round_reads_the_named_hu_and_the_users_deployment_page() {
     assert_eq!(result.reason, "supported_answer");
     let answer = result.answer.unwrap();
     for link in [
-        "](https://dev.azure.com/example/Payments/_workitems/edit/23553)",
-        "[Paso a producción Pagos QR](https://dev.azure.com/example/Payments/_wiki/wikis/abcdeabc-abcd-abcd-abcd-abcdeabcdea2?pagePath=%2FPaso)",
+        "](https://dev.azure.com/example/Payments/_workitems/edit/41553)",
+        "[Paso a producción Pagos en línea](https://dev.azure.com/example/Payments/_wiki/wikis/abcdeabc-abcd-abcd-abcd-abcdeabcdea2?pagePath=%2FPaso)",
     ] {
         assert!(answer.contains(link), "{link}\n{answer}");
     }
@@ -4083,7 +4084,7 @@ async fn a_status_round_reads_the_named_hu_and_the_users_deployment_page() {
             "read_recorded_activities"
         ]
     );
-    assert!(answer.contains("](https://dev.azure.com/example/Payments/_workitems/edit/26401)"));
+    assert!(answer.contains("](https://dev.azure.com/example/Payments/_workitems/edit/41401)"));
     assert_eq!(audit.source.as_deref(), Some("azure-devops-status,manuals"));
     assert!(server.received_requests().await.unwrap().is_empty());
 }
@@ -4127,7 +4128,7 @@ impl LlmProvider for DraftLlm {
                 vec!["invented".into()]
             },
             answer: if refining {
-                "Ya está en validación y la tiene Luis Felipe; el paso a producción es el 20/10."
+                "Ya está en validación y la tiene Alex Rivera; el paso a producción es el 20/10."
             } else {
                 "No tengo a mano el avance de esa HU."
             }
@@ -4175,13 +4176,13 @@ async fn an_unsent_answer_is_improved_with_context_and_sent_once_by_hand() {
 
     // Context with personal data is refused before anything changes.
     let refusal = pipeline
-        .begin_refinement(resource, "escríbele a luis@example.com", &[])
+        .begin_refinement(resource, "escríbele a alex@example.com", &[])
         .unwrap_err();
     assert!(matches!(
         refusal.downcast_ref::<DraftRefusal>(),
         Some(DraftRefusal::SensitiveGuidance)
     ));
-    let context = "Ya está en validación con Luis Felipe; el paso a producción es el 20/10.";
+    let context = "Ya está en validación con Alex Rivera; el paso a producción es el 20/10.";
     pipeline.begin_refinement(resource, context, &[]).unwrap();
     assert_eq!(store.status(resource).unwrap().as_deref(), Some("refining"));
     // A second request cannot start another improvement, nor send the old answer meanwhile.
@@ -4192,7 +4193,7 @@ async fn an_unsent_answer_is_improved_with_context_and_sent_once_by_hand() {
     assert_eq!(audit.status, "ignored");
     assert_eq!(audit.reason, "draft_ready");
     assert_eq!(audit.refinement.as_deref(), Some(context));
-    assert!(audit.proposed.as_deref().unwrap().contains("Luis Felipe"));
+    assert!(audit.proposed.as_deref().unwrap().contains("Alex Rivera"));
     assert!(audit.trace.iter().any(|s| s.step == "draft"));
     // The model received the context and the answer it improves; nothing was sent.
     assert_eq!(
@@ -4225,7 +4226,7 @@ async fn an_unsent_answer_is_improved_with_context_and_sent_once_by_hand() {
     );
     assert_eq!(
         teams.sent.lock().unwrap().as_slice(),
-        ["Ya está en validación y la tiene Luis Felipe; el paso a producción es el 20/10."]
+        ["Ya está en validación y la tiene Alex Rivera; el paso a producción es el 20/10."]
     );
 }
 #[tokio::test]
@@ -4322,9 +4323,9 @@ impl LlmProvider for ReplyLlm {
         Ok(personal_teams_assistant::llm::GeneratedAnswer {
             used_sources: Vec::new(),
             answer: if input.guidance.is_empty() {
-                "Perfecto, lo dejo como Bug Desarrollo y lo vinculo al incidente."
+                "Perfecto, lo dejo como Development Bug y lo vinculo al incidente."
             } else {
-                "Listo, ya quedó como Bug Desarrollo vinculado al incidente."
+                "Listo, ya quedó como Development Bug vinculado al incidente."
             }
             .into(),
             detailed: false,
@@ -4339,7 +4340,7 @@ fn knowledge_with_unassigned(dir: &tempfile::TempDir) -> KnowledgeMap {
     let mut map = knowledge(dir);
     std::fs::write(
         dir.path().join("manual.md"),
-        "Un hotfix de producción se registra como Bug Desarrollo.",
+        "Un hotfix de producción se registra como Development Bug.",
     )
     .unwrap();
     for (id, enabled) in [("manual", true), ("draft", false)] {
@@ -4367,7 +4368,7 @@ async fn an_unanswered_message_gets_an_answer_from_chosen_sources_and_is_sent_on
     let teams = Arc::new(HistoryTeams {
         conversation: "chats/chat1".into(),
         sender: "sender".into(),
-        text: "Para un hotfix de producción va como Bug Desarrollo: describe el síntoma, la causa y el cambio, y vincúlalo al incidente.",
+        text: "Para un hotfix de producción va como Development Bug: describe el síntoma, la causa y el cambio, y vincúlalo al incidente.",
         sent: Default::default(),
     });
     let llm = Arc::new(ReplyLlm {
@@ -4423,14 +4424,14 @@ async fn an_unanswered_message_gets_an_answer_from_chosen_sources_and_is_sent_on
     assert_eq!(audit.source.as_deref(), Some("manual"));
     assert_eq!(
         audit.proposed.as_deref(),
-        Some("Perfecto, lo dejo como Bug Desarrollo y lo vinculo al incidente.")
+        Some("Perfecto, lo dejo como Development Bug y lo vinculo al incidente.")
     );
     {
         let seen = llm.seen.lock().unwrap();
         assert_eq!(seen.len(), 1);
         assert!(seen[0].unprompted);
         assert!(seen[0].previous_draft.is_empty());
-        assert!(seen[0].evidence.contains("Bug Desarrollo"));
+        assert!(seen[0].evidence.contains("Development Bug"));
         assert!(!seen[0].evidence.contains("soporte"));
     }
     assert!(teams.sent.lock().unwrap().is_empty());
@@ -4449,7 +4450,7 @@ async fn an_unanswered_message_gets_an_answer_from_chosen_sources_and_is_sent_on
         assert_eq!(seen[1].guidance, context);
         assert_eq!(
             seen[1].previous_draft,
-            "Perfecto, lo dejo como Bug Desarrollo y lo vinculo al incidente."
+            "Perfecto, lo dejo como Development Bug y lo vinculo al incidente."
         );
         assert!(seen[1].evidence.contains("soporte"));
     }
@@ -4457,7 +4458,7 @@ async fn an_unanswered_message_gets_an_answer_from_chosen_sources_and_is_sent_on
     assert_eq!(pipeline.send_draft(resource).await.unwrap(), "sent");
     assert_eq!(
         teams.sent.lock().unwrap().as_slice(),
-        ["Listo, ya quedó como Bug Desarrollo vinculado al incidente."]
+        ["Listo, ya quedó como Development Bug vinculado al incidente."]
     );
     assert!(pipeline.begin_refinement(resource, "", &[]).is_err());
 }
@@ -4946,7 +4947,7 @@ impl LlmProvider for TaskReportLlm {
             assert!(!input.evidence.contains(absent), "{}", input.evidence);
         }
         Ok(personal_teams_assistant::llm::GeneratedAnswer {
-            answer: "Ya registré mis tareas de hoy: tarea #26410 en la HU #23553, ajuste del flujo de pago QR (2 h).".into(),
+            answer: "Ya registré mis tareas de hoy: tarea #26410 en la HU #41553, ajuste del flujo de pago QR (2 h).".into(),
             detailed: false, used_sources: Vec::new(), provider: None, fallbacks: Vec::new(),
         })
     }

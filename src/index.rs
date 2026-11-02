@@ -1266,7 +1266,7 @@ mod tests {
         let contexts = BTreeSet::from(["cobros", "pagos"]);
         let note = Note {
             title: "Hotfix de producción".into(),
-            text: "Un hotfix de producción se registra como Bug Desarrollo, no como HU.".into(),
+            text: "Un hotfix de producción se registra como Development Bug, no como HU.".into(),
             contexts: vec!["cobros".into()],
             keywords: vec!["incidente".into()],
             ..Default::default()
@@ -1314,7 +1314,7 @@ mod tests {
         );
         // Editing keeps its creation date; removing drops it from the search.
         let mut edited = saved.clone();
-        edited.text = "Un hotfix se registra como Bug Desarrollo vinculado al incidente.".into();
+        edited.text = "Un hotfix se registra como Development Bug vinculado al incidente.".into();
         let edited = index.save_note(edited).unwrap();
         assert_eq!(edited.created_at, saved.created_at);
         assert!(
@@ -1390,7 +1390,7 @@ mod tests {
             .save_example(
                 "chats/a/messages/1",
                 "¿Cómo registro un hotfix de producción?",
-                "Se registra como Bug Desarrollo vinculado al incidente.",
+                "Se registra como Development Bug vinculado al incidente.",
                 Some("cobros"),
             )
             .unwrap();
@@ -1410,7 +1410,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(found.len(), 1);
-        assert!(found[0].1.contains("Bug Desarrollo"));
+        assert!(found[0].1.contains("Development Bug"));
         // One shared common word is not similar enough; another context's example stays out.
         assert!(
             index

@@ -91,6 +91,7 @@ async fn detail_with(
                 .context("invalid Epic state")?
                 .into(),
             kind: issue["type"]["name"].as_str().unwrap_or("Issue").into(),
+            category: String::new(),
             created_at: issue["created_at"].as_str().map(str::to_owned),
             dates: vec![Date {
                 field: "closed_at".into(),
@@ -243,6 +244,7 @@ async fn detail_with(
                                         .unwrap_or_default(),
                                     state: value["state"].as_str().unwrap_or_default().into(),
                                     kind: value["type"]["name"].as_str().unwrap_or("Issue").into(),
+                                    category: String::new(),
                                     created_at: value["created_at"].as_str().map(str::to_owned),
                                     dates: Vec::new(),
                                 }),

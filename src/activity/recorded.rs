@@ -401,9 +401,9 @@ mod tests {
 
     fn entry(day: &str, state: &str, url: &str, task: Option<u64>) -> Entry {
         let hu = Target {
-            id: 23553,
-            title: "Pagos QR".into(),
-            url: "https://dev.azure.com/example/Payments/_workitems/edit/23553".into(),
+            id: 41553,
+            title: "Pagos en línea".into(),
+            url: "https://dev.azure.com/example/Payments/_workitems/edit/41553".into(),
             organization: "https://dev.azure.com/example".into(),
             project: "Payments".into(),
             state: "Active".into(),
@@ -416,7 +416,7 @@ mod tests {
             state: state.into(),
             draft: super::super::Draft {
                 activities: vec!["a1".into()],
-                parent: Some(23553),
+                parent: Some(41553),
                 title: format!("Trabajo del {day}"),
                 description: "Descripción del trabajo.".into(),
                 evidence: String::new(),
@@ -450,7 +450,7 @@ mod tests {
         let commit = "https://dev.azure.com/example/Payments/_git/api/commit/abc";
         let chat = "https://teams.microsoft.com/l/message/19:abc/1";
         let entries = [
-            entry("2026-10-13", "done", commit, Some(26401)),
+            entry("2026-10-13", "done", commit, Some(41401)),
             entry("2026-10-14", "pending", commit, None),
             entry("2026-10-14", "done", chat, Some(26402)),
             entry("2026-10-11", "pending", chat, None),
@@ -479,10 +479,10 @@ mod tests {
             ]
         );
         assert!(evidence.text.contains(
-            "- Detected, not registered yet under #23553 «Pagos QR»: «Trabajo del 2026-10-14» (2 h): Descripción del trabajo."
+            "- Detected, not registered yet under #41553 «Pagos en línea»: «Trabajo del 2026-10-14» (2 h): Descripción del trabajo."
         ));
         assert!(evidence.text.contains(
-            "- Registered as task #26401 under #23553 «Pagos QR»: «Trabajo del 2026-10-13» (2 h)"
+            "- Registered as task #41401 under #41553 «Pagos en línea»: «Trabajo del 2026-10-13» (2 h)"
         ));
         assert!(evidence.text.contains("#26402"), "{}", evidence.text);
         assert!(!evidence.text.contains("2026-10-11") && !evidence.text.contains("2026-08-01"));
@@ -490,9 +490,9 @@ mod tests {
         assert_eq!(
             urls,
             [
-                "https://dev.azure.com/example/Payments/_workitems/edit/23553",
+                "https://dev.azure.com/example/Payments/_workitems/edit/41553",
                 "https://dev.azure.com/example/Payments/_workitems/edit/26402",
-                "https://dev.azure.com/example/Payments/_workitems/edit/26401"
+                "https://dev.azure.com/example/Payments/_workitems/edit/41401"
             ]
         );
         // With the chat authorized too, its unregistered work shows; with nothing to show, no
@@ -555,8 +555,8 @@ mod tests {
         }
         for text in [
             "¿Qué hice?",
-            "¿Cómo va la HU #23553?",
-            "PR !4848 y build 10",
+            "¿Cómo va la HU #41553?",
+            "PR !7348 y build 10",
             "may I ask something?",
             "¿qué haré mañana?",
         ] {

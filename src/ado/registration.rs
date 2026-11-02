@@ -991,7 +991,7 @@ mod tests {
                     Value::Null,
                 ),
                 field("Microsoft.VSTS.Common.Activity", "Activity", Value::Null),
-                field("Custom.Mes", "Mes", json!("")),
+                field("Custom.Month", "Mes", json!("")),
                 field("Custom.Area", "Área", json!("Pagos")),
             ],
             completed_states: vec!["Done".into()],
@@ -1002,7 +1002,7 @@ mod tests {
             .into_iter()
             .map(|f| f.reference)
             .collect();
-        assert_eq!(inputs, ["Microsoft.VSTS.Common.Activity", "Custom.Mes"]);
+        assert_eq!(inputs, ["Microsoft.VSTS.Common.Activity", "Custom.Month"]);
         let task = TaskFields {
             title: "Diagnose".into(),
             description: "Diagnosed it.".into(),
@@ -1032,8 +1032,8 @@ mod tests {
                 field("System.Title", "Title"),
                 field("Microsoft.VSTS.Scheduling.RemainingWork", "Remaining Work"),
                 field("Custom.Estimatedwork", "Estimated work"),
-                field("Custom.EsfuerzoReal", "Esfuerzo Real"),
-                field("Custom.Mes", "Mes"),
+                field("Custom.ActualEffort", "Esfuerzo efectivo"),
+                field("Custom.Month", "Mes"),
             ],
             completed_states: vec!["Done".into()],
             initial_states: Vec::new(),
@@ -1055,7 +1055,7 @@ mod tests {
         );
         assert!(issue.contains("Campo de esfuerzo"), "{issue}");
         assert!(
-            issue.ends_with("Este tipo tiene: Esfuerzo Real (Custom.EsfuerzoReal), Estimated work (Custom.Estimatedwork)."),
+            issue.ends_with("Este tipo tiene: Esfuerzo efectivo (Custom.ActualEffort), Estimated work (Custom.Estimatedwork)."),
             "{issue}"
         );
     }
@@ -1117,7 +1117,7 @@ mod tests {
                     ])
                 );
                 ResponseTemplate::new(200).set_body_json(
-                    json!({"id":900,"fields":{"System.State":"Done","Custom.EsfuerzoReal":2.0}}),
+                    json!({"id":900,"fields":{"System.State":"Done","Custom.ActualEffort":2.0}}),
                 )
             })
             .expect(1)
@@ -1144,7 +1144,7 @@ mod tests {
             .iter()
             .map(|r| field(r, r))
             .chain([
-                field("Custom.EsfuerzoReal", "Esfuerzo Real"),
+                field("Custom.ActualEffort", "Esfuerzo efectivo"),
                 field("Microsoft.VSTS.Scheduling.RemainingWork", "Remaining Work"),
                 field("Custom.URLCommit", "URL Commit"),
             ])
@@ -1168,7 +1168,7 @@ mod tests {
             day: "2026-10-13".into(),
             kind: "Task".into(),
             state: "Done".into(),
-            effort_field: "Custom.EsfuerzoReal".into(),
+            effort_field: "Custom.ActualEffort".into(),
             extra: BTreeMap::new(),
         };
         let check = check_with(&client, "k", &source, &schema, &parent, &task, &[])

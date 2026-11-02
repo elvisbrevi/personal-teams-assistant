@@ -269,6 +269,7 @@ impl Database {
                 url,
                 state,
                 kind,
+                category: String::new(),
                 project: parent.project.clone(),
                 created_at: None,
                 dates: vec![],

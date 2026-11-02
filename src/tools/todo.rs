@@ -68,6 +68,9 @@ pub struct Item {
     pub state: String,
     #[serde(default)]
     pub kind: String,
+    /// The process category of its type (`requirement`, `bug` or `task`); empty when unknown.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub category: String,
     pub created_at: Option<String>,
     pub dates: Vec<Date>,
 }

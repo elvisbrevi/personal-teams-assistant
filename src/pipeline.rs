@@ -3996,8 +3996,8 @@ mod tests {
     #[test]
     fn documentation_routes_read_requests_with_a_topic() {
         for question in [
-            "como se usa el microservicio crearsps",
-            "¿Cómo se invoca el microservicio Crear SPS para pagar 2 servicios?",
+            "como se usa el microservicio crearodc",
+            "¿Cómo se invoca el microservicio Crear ODC para pagar 2 servicios?",
             "¿Cómo se configura el pipeline?",
             "Explícame la configuración del pipeline",
             "¿Qué parámetros necesita el pipeline?",

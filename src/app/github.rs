@@ -482,6 +482,7 @@ async fn issues_with(
             project: repo,
             state: state.into(),
             kind: issue["type"]["name"].as_str().unwrap_or("Issue").into(),
+            category: String::new(),
             created_at: issue["created_at"].as_str().map(str::to_owned),
             dates: vec![
                 Date {

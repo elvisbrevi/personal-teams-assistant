@@ -64,33 +64,25 @@ classified U or O migrates, caches are rebuilt locally, secrets and runtime stat
 
 A broad search (organization, domain, project, repository and people names, custom process
 types, fields and states, real work item and pull request numbers) found no organization name,
-domain or Azure DevOps organization URL, but it found the following. They are listed here by
-category only; the concrete strings were reported to the owner privately and are not repeated in
-the repository or its pull requests (the repository is public).
+domain or Azure DevOps organization URL, but it found real repository prefixes, project and system
+names, colleagues' names, work item and pull request numbers, and the organization's custom types,
+fields and states in tests, doc comments, examples, a prompt example, the README, the
+architecture, the skill and one GUI placeholder. Phase 1a (0.10.15) replaced them with synthetic
+names (`contoso`, `example`); the concrete strings were reported to the owner privately and are
+not repeated in the repository or its pull requests (the repository is public).
 
-| Category | Where | Kind |
-| --- | --- | --- |
-| Repository names carrying the employer's prefix | `src/ado/progress.rs` (tests), `src/ado/wiki.rs` (tests), `src/evidence.rs` (doc comments and tests) | test data, doc comments |
-| Real project and system names (team projects, a payments portal, a QR payments story) | `src/ado/progress.rs`, `src/ado/wiki.rs`, `src/ado/review.rs`, `src/activity/recorded.rs`, `src/evidence.rs`, `tests/integration.rs`, `README.md`, `docs/architecture.md` §6 and §14 | test data, examples, decision history |
-| A real colleague's name | `src/ado/progress.rs`, `tests/integration.rs`, `desktop/ui/app.js` (a placeholder) with its `i18n.js` entry | test data, **GUI text** |
-| Real work item and pull request numbers and titles | `src/ado/progress.rs`, `src/ado.rs`, `src/evidence.rs`, `tests/integration.rs`, `README.md`, `docs/architecture.md`, `src/llm/prompts.rs` | doc comments, tests, prompt example |
-| The organization's custom process types (a development bug type in the task category, a documentation and a test task type) | **`src/ado/todo.rs:139` (production logic)**, **`desktop/ui/app.js:205,763` (production logic)**, `src/app/tools/mod.rs` (tool descriptions), `src/index.rs` (tests), `scripts/test-activity-ui.cjs`, the skill's `tools-and-todo.md`, `docs/architecture.md` §11 and §16 | code, tool descriptions, docs |
-| The organization's custom fields and workflow states (month, effort, «sent to validation») | `src/ado/implementation.rs`, `src/ado/registration.rs`, `src/work_items.rs` (tests and a doc comment), the skill's `tools-and-todo.md`, `tests/integration.rs` | tests, docs |
-| Organization phrases used as examples (hotfix registration rule, a «collections» term) | `knowledge-map.example.toml`, `scripts/ui-preview/mock.js`, `scripts/test-ui-i18n.cjs`, the skill's `tests-and-diagnostics.md` | examples |
+Two were behavior, not data, and now follow generic rules:
 
-Two are behavior, not data, and need a generic rule:
+- **To-Do listed one specific task-category type together with bugs.** A work item guide now says
+  so (`listed_with_bugs`, Azure only); without such a guide only the requirement and bug categories
+  are listed, as for any process. The production guide carries the flag as data.
+- **The GUI decided "this is a task" from fixed type names.** To-Do items carry their type's
+  process `category` (`requirement`, `bug`, `task`) and the GUI uses it: `Microsoft.TaskCategory`
+  decides.
 
-- **To-Do lists one specific task-category type together with bugs** (`src/ado/todo.rs:139`).
-  Generic replacement: a work item guide says how its type is listed (new optional guide field,
-  e.g. `todo = "bug"`); without a guide only the requirement and bug categories are listed, as for
-  any process. The production guide for that type gets the field as data in the same delivery.
-- **The GUI decides "this is a task" from a fixed list of four type names**
-  (`desktop/ui/app.js:763`) and from one name (`:205`). Generic replacement: To-Do items already
-  come from process categories in `ado/todo.rs`; they carry an additive `category`
-  (`requirement`, `bug`, `task`) and the GUI uses it. `Microsoft.TaskCategory` decides.
-
-The repository owner's own name and GitHub handle (package metadata, site, README links) are not
-organization data and stay.
+Generic Spanish and English words the code detects without a model (deployment pages, effort
+fields, workflow states) stay, because users write in both languages. The repository owner's own
+name and GitHub handle (package metadata, site, README links) are not organization data and stay.
 
 ## 4. Data model
 
@@ -349,7 +341,7 @@ parity, the `AGENTS.md` checks, and delivery verified on crates.io and on the se
 
 | Phase | Content | Risks |
 | --- | --- | --- |
-| 1a. Cleanup | Synthetic names in tests, docs, README, prompts, the GUI placeholder and catalogs; To-Do items carry `category`; the GUI decides by category; the task type listed with bugs comes from its guide (`todo = "bug"`); the production guide is updated as data in the same delivery. | The production To-Do stops listing that type until its guide carries the field: update it right after the install, verify the list. |
+| 1a. Cleanup (0.10.15) | Synthetic names in tests, docs, README, prompts, the GUI placeholder and catalogs; To-Do items carry `category`; the GUI decides by category; the task type listed with bugs comes from its guide (`listed_with_bugs`); the production guide is updated as data in the same delivery. | The production To-Do stops listing that type until its guide carries the field: update it right after the install, verify the list. |
 | 1b. Organization (local) | `[organization]` in the map (name, entries, source IDs); guides shown as entries; new `organization` source kind (disabled by default) and index documents; Settings › Organization replaces the current guides editor (no duplicate control); `pta organization …` with `pta guides …` kept as its guides subcommand; MCP `organization_*`; agents receive norms and architecture as untrusted input; skill, architecture and `CONTEXT.md`. The organization, guides included, joins the account configuration's allowlist and travels with the account. | Prompt size growth for agents (bound entries per run); a second place to edit guides if the old editor is not removed in the same PR. |
 | 2. Storage abstraction | Repository traits per aggregate (settings and map, notes and feedback, audit history, activity records, runs, organization), the current local implementation as default, one shared contract test suite. No behavior change. | Broad refactor of hot paths: done store by store, each PR behavior-neutral and fully tested. |
 | 3a. Worker and authentication | `cloud/` Worker, `Registry`, `AccountStore` schema v1 (encrypted records with clear metadata), Access service token, installation credential, health; Workers Builds; host `cloud status/connect`. | Access/Workers configuration mistakes: staging Worker first, contract tests including cross-account attempts. |

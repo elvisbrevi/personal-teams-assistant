@@ -756,13 +756,13 @@ mod tests {
     #[test]
     fn only_guide_fields_with_valid_values_are_written() {
         let guide: Guide = toml::from_str(
-            "id='task'\ntype='Task'\n[[fields]]\nreference='Custom.Mes'\nfill=true\n[[fields]]\nreference='Custom.Horas'\nfill=true\n[[fields]]\nreference='Custom.Listo'\nfill=true\n[[fields]]\nreference='Custom.Notas'\n[[fields]]\nreference='Custom.Owner'\nfill=true",
+            "id='task'\ntype='Task'\n[[fields]]\nreference='Custom.Month'\nfill=true\n[[fields]]\nreference='Custom.Hours'\nfill=true\n[[fields]]\nreference='Custom.Ready'\nfill=true\n[[fields]]\nreference='Custom.Notas'\n[[fields]]\nreference='Custom.Owner'\nfill=true",
         )
         .unwrap();
         let mut fields = BTreeMap::from([
-            ("Custom.Mes".to_owned(), live("string", &["Octubre"])),
-            ("Custom.Horas".to_owned(), live("double", &[])),
-            ("Custom.Listo".to_owned(), live("boolean", &[])),
+            ("Custom.Month".to_owned(), live("string", &["Octubre"])),
+            ("Custom.Hours".to_owned(), live("double", &[])),
+            ("Custom.Ready".to_owned(), live("boolean", &[])),
             ("Custom.Notas".to_owned(), live("html", &[])),
         ]);
         fields.insert(
@@ -774,22 +774,22 @@ mod tests {
         );
         let operations =
             |proposed: Value| field_operations(Some(&guide), "Task", &proposed, &fields, &[]);
-        let written = operations(json!([{"reference":"Custom.Mes","value":"octubre"},{"reference":"Custom.Horas","value":"2,5"},{"reference":"Custom.Listo","value":"no"},{"reference":"Custom.Notas","value":" "}])).unwrap();
+        let written = operations(json!([{"reference":"Custom.Month","value":"octubre"},{"reference":"Custom.Hours","value":"2,5"},{"reference":"Custom.Ready","value":"no"},{"reference":"Custom.Notas","value":" "}])).unwrap();
         assert_eq!(
             written,
             [
-                json!({"op":"add","path":"/fields/Custom.Mes","value":"Octubre"}),
-                json!({"op":"add","path":"/fields/Custom.Horas","value":2.5}),
-                json!({"op":"add","path":"/fields/Custom.Listo","value":false})
+                json!({"op":"add","path":"/fields/Custom.Month","value":"Octubre"}),
+                json!({"op":"add","path":"/fields/Custom.Hours","value":2.5}),
+                json!({"op":"add","path":"/fields/Custom.Ready","value":false})
             ]
         );
         // Not a value of its list, not marked fill, locked, unknown to the type, repeated.
         for proposed in [
-            json!([{"reference":"Custom.Mes","value":"Brumario"}]),
+            json!([{"reference":"Custom.Month","value":"Brumario"}]),
             json!([{"reference":"Custom.Notas","value":"x"}]),
             json!([{"reference":"Custom.Owner","value":"x"}]),
-            json!([{"reference":"Custom.Horas","value":"dos"}]),
-            json!([{"reference":"Custom.Mes","value":"Octubre"},{"reference":"Custom.Mes","value":"Octubre"}]),
+            json!([{"reference":"Custom.Hours","value":"dos"}]),
+            json!([{"reference":"Custom.Month","value":"Octubre"},{"reference":"Custom.Month","value":"Octubre"}]),
         ] {
             assert!(operations(proposed).is_err());
         }
@@ -797,7 +797,7 @@ mod tests {
             field_operations(
                 None,
                 "Task",
-                &json!([{"reference":"Custom.Mes","value":"Octubre"}]),
+                &json!([{"reference":"Custom.Month","value":"Octubre"}]),
                 &fields,
                 &[]
             )

@@ -861,7 +861,7 @@ pub(super) const TOOLS: &[Tool] = &[
     Tool {
         name: "list_azure_hus",
         title: "My Azure DevOps HUs",
-        description: "HUs and bugs assigned to the catalog user, newest first. Includes the task-category type Bug Desarrollo with bug results. Assignment roles are discovered separately for each type; kind optionally filters hu or bug. Discovers the process's developer roles, all HU states and start/finish fields, including separate development dates. Falls back to Assigned To only in processes without developer roles. Local read; no model or Teams audience changes.",
+        description: "HUs and bugs assigned to the catalog user, newest first. Bug results also include task-category types whose work item guide sets listed_with_bugs. Assignment roles are discovered separately for each type; kind optionally filters hu or bug. Discovers the process's developer roles, all HU states and start/finish fields, including separate development dates. Falls back to Assigned To only in processes without developer roles. Local read; no model or Teams audience changes.",
         effect: Effect::Read,
         schema: todo_schema,
     },
@@ -1142,11 +1142,11 @@ pub(super) const TOOLS: &[Tool] = &[
     Tool {
         name: "work_item_guide_save",
         title: "Save a work item guide",
-        description: "Adds or replaces a work item guide by id: provider (azure or github), type (the provider's exact type name), name, projects (empty applies to all), purpose, instructions and fields (reference, name, required, values, default, guidance, fill). fill lets the implementation agents propose that field's value when they create an item of the type; only Azure fields outside System.* can be filled, and values are checked against the live type.",
+        description: "Adds or replaces a work item guide by id: provider (azure or github), type (the provider's exact type name), name, projects (empty applies to all), purpose, instructions fields (reference, name, required, values, default, guidance, fill) and listed_with_bugs. fill lets the implementation agents propose that field's value when they create an item of the type; only Azure fields outside System.* can be filled, and values are checked against the live type. listed_with_bugs (Azure only) makes To-Do list that task-category type with the bugs.",
         effect: Effect::Local,
         schema: || {
             object(
-                json!({"guide": {"type": "object", "description": "id, provider, type, name, projects, purpose, instructions, fields."}}),
+                json!({"guide": {"type": "object", "description": "id, provider, type, name, projects, purpose, instructions, fields, listed_with_bugs."}}),
                 &["guide"],
             )
         },
@@ -1335,7 +1335,7 @@ fn todo_schema() -> Value {
         json!({
             "source": string("Azure DevOps activity source ID; optional when exactly one is enabled."),
             "project": string("One configured Azure project, or GitHub OWNER/REPO."),
-            "kind": {"type":"string", "enum":["hu","bug"], "description":"Azure only: omit for HUs, bugs and Bug Desarrollo tasks."},
+            "kind": {"type":"string", "enum":["hu","bug"], "description":"Azure only: omit for HUs, bugs and the task types listed with them."},
             "state": string("Exact state returned by the tool; omit to include all states."),
             "limit": {"type":"integer","minimum":1,"maximum":100,"default":10}
         }),
@@ -1344,7 +1344,7 @@ fn todo_schema() -> Value {
 }
 fn implementation_item() -> Value {
     object(
-        json!({"provider":{"type":"string","enum":["azure","github"]},"id":{"type":"integer","minimum":1},"project":string("Azure project or GitHub OWNER/REPO."),"source":string("Enabled Azure source ID."),"task":{"type":"boolean","description":"Azure task-category item (including Bug Desarrollo)."}}),
+        json!({"provider":{"type":"string","enum":["azure","github"]},"id":{"type":"integer","minimum":1},"project":string("Azure project or GitHub OWNER/REPO."),"source":string("Enabled Azure source ID."),"task":{"type":"boolean","description":"Azure task-category item (including a development bug listed with the bugs)."}}),
         &["provider", "id", "project"],
     )
 }

@@ -20,7 +20,7 @@ A personal Microsoft Teams assistant written in Rust. It reads and answers **as 
 
 Ask it, for example, which work you did in the last two weeks that no task records: it compares your commits, pull requests, pipeline runs, releases, Wiki edits and (if you authorize them) your Teams messages with your Azure DevOps work items, and answers briefly with each unregistered piece of work, its verified link and the work items where it could go. Activities keeps daily lists of your existing Azure tasks, with verified links and hours, so questions about what you did can be answered concisely from the saved record. These activity operations do not create, link or change Azure tasks.
 
-To-Do cards and work item details also offer **Implement**. Choose an enrolled machine, working directories, context and an installed Codex, Claude Code or OpenCode V2 agent, model and effort. HUs, backlog bugs and GitHub epics propose children for you to review and create; tasks, Bug Desarrollo and ordinary GitHub issues implement the selected item. Every execution retains its real agent session, state and start/end times in SQLite, with app links where supported. Machines connect to your account's portal; Settings selects the single machine allowed to read and reply through Teams. See the [implementation workflow](desktop/skills/personal-teams-assistant/references/tools-and-todo.md#implement-work-items-and-inspect-agent-sessions) for enrollment, permissions and supported session links.
+To-Do cards and work item details also offer **Implement**. Choose an enrolled machine, working directories, context and an installed Codex, Claude Code or OpenCode V2 agent, model and effort. HUs, backlog bugs and GitHub epics propose children for you to review and create; tasks (any task-category type) and ordinary GitHub issues implement the selected item. Every execution retains its real agent session, state and start/end times in SQLite, with app links where supported. Machines connect to your account's portal; Settings selects the single machine allowed to read and reply through Teams. See the [implementation workflow](desktop/skills/personal-teams-assistant/references/tools-and-todo.md#implement-work-items-and-inspect-agent-sessions) for enrollment, permissions and supported session links.
 
 The app and its answers to Teams follow the configured language, Spanish or English (`llm.language`); the CLI and audit log are in English. The GUI also works on phones: the web portal has a floating tab bar, follows the system's light or dark mode (or the one you choose in Settings › General) and installs on the home screen with its own icon.
 
@@ -120,7 +120,7 @@ Activities section, by day, to status answers and activity reviews.
 
 Version 0.7.15 drops the «Fuentes» and «Páginas consultadas» sections: each work
 item, pull request, pipeline, stage or Wiki page is linked on the words of the
-answer that name it («[#26477 — PR Pipeline Transversal](…)», «[PR !4848](…)»),
+answer that name it («[#41477 — PR Pipeline Template](…)», «[PR !7348](…)»),
 and a pull request named in a status question is read so it can be linked. The
 full list of cited references and Wiki pages read stays in the message history
 (Messages tab and `pta audit show`).

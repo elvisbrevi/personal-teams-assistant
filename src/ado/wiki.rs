@@ -261,7 +261,7 @@ fn fold(text: &str) -> String {
         .collect()
 }
 /// Whether a repository name carries every term, ignoring separators; a term of five or more
-/// letters may lose its last one («crear» names `cyp-crea-usuario-natural`).
+/// letters may lose its last one («crear» names `acme-crea-usuario-natural`).
 fn names_repository(name: &str, terms: &[String]) -> bool {
     let name: String = fold(name).chars().filter(|c| c.is_alphanumeric()).collect();
     !terms.is_empty()
@@ -328,8 +328,8 @@ impl WikiResult {
                 header,
                 note: original
                     .map_or_else(String::new, |o| format!("Same content as Wiki page {o}.\n")),
-                // Canonical titles preserve spaced names such as "Crear SPS" when the caller
-                // used an identifier such as "crearsps". URLs/revisions stay in the verified
+                // Canonical titles preserve spaced names such as "Crear ODC" when the caller
+                // used an identifier such as "crearodc". URLs/revisions stay in the verified
                 // registry instead of consuming the model's text budget.
                 text: original
                     .is_none()
@@ -2315,15 +2315,15 @@ mod tests {
                 vec![],
             ),
             edit(
-                "Paso a producción Pagos QR",
+                "Paso a producción Pagos en línea",
                 "2026-10-12T10:00:00Z",
-                "Fecha: 2026-10-20.\nPendiente: variables de Consul en producción (Francisco).",
+                "Fecha: 2026-10-20.\nPendiente: variables de Consul en producción (Sam).",
                 vec![],
             ),
             edit(
                 "Diseño",
                 "2026-10-11T10:00:00Z",
-                "Detalle de la HU 23553.",
+                "Detalle de la HU 41553.",
                 vec![],
             ),
             edit(
@@ -2333,13 +2333,13 @@ mod tests {
                 vec![],
             ),
             edit(
-                "PAP - HU 23796 - Detalle de SPS",
+                "PAP - HU 41796 - Detalle de ODC",
                 "2026-10-14T09:00:00Z",
                 &plan,
                 vec![],
             ),
         ];
-        let evidence = status_evidence(&edits, &[], false, "avance HU #23553", &[23553], 30);
+        let evidence = status_evidence(&edits, &[], false, "avance HU #41553", &[41553], 30);
         let titles: Vec<&str> = evidence.references.iter().map(|r| r.id.as_str()).collect();
         // The page naming the HU, then the deployment plans by title (a «PAP» too, newest
         // first); pages that only mention a deployment and unrelated ones are left out.
@@ -2347,8 +2347,8 @@ mod tests {
             titles,
             [
                 "wiki:Diseño",
-                "wiki:PAP - HU 23796 - Detalle de SPS",
-                "wiki:Paso a producción Pagos QR"
+                "wiki:PAP - HU 41796 - Detalle de ODC",
+                "wiki:Paso a producción Pagos en línea"
             ]
         );
         assert!(
@@ -2550,17 +2550,17 @@ mod tests {
         let terms = repository_terms("Microservicio Crear Usuario Natural");
         assert_eq!(terms, ["crear", "usuario", "natural"]);
         assert!(names_repository(
-            "sag.portalpagos.ms.crearusuarionatural",
+            "contoso.pagos.ms.crearusuarionatural",
             &terms
         ));
-        assert!(names_repository("cyp-crea-usuario-natural", &terms));
+        assert!(names_repository("acme-crea-usuario-natural", &terms));
         assert!(!names_repository(
-            "sag.portalpagos.ms.crearusuariojuridico",
+            "contoso.pagos.ms.crearusuariojuridico",
             &terms
         ));
         assert!(names_repository(
-            "sag.portalpagos.ms.crearsps",
-            &repository_terms("endpoint crear SPS")
+            "contoso.pagos.ms.crearodc",
+            &repository_terms("endpoint crear ODC")
         ));
         assert!(repository_terms("API del microservicio").is_empty());
         assert!(!names_repository("anything", &[]));
@@ -2683,8 +2683,8 @@ mod tests {
         Mock::given(method("GET"))
             .and(path("/test/Project/_apis/git/repositories"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({"value":[
-                {"id":RID,"name":"sag.portalpagos.ms.crearusuarionatural","project":{"id":PID,"name":"Project"},"defaultBranch":"refs/heads/main"},
-                {"id":other,"name":"sag.portalpagos.ms.crearusuariojuridico","project":{"id":PID,"name":"Project"},"defaultBranch":"refs/heads/main"},
+                {"id":RID,"name":"contoso.pagos.ms.crearusuarionatural","project":{"id":PID,"name":"Project"},"defaultBranch":"refs/heads/main"},
+                {"id":other,"name":"contoso.pagos.ms.crearusuariojuridico","project":{"id":PID,"name":"Project"},"defaultBranch":"refs/heads/main"},
                 {"id":WID,"name":"Project.wiki","project":{"id":PID,"name":"Project"},"defaultBranch":"refs/heads/wikiMaster"}
             ]})))
             .mount(&server)
@@ -2769,11 +2769,11 @@ mod tests {
         assert_eq!(readme.kind, "repository_file");
         assert_eq!(
             readme.label,
-            "sag.portalpagos.ms.crearusuarionatural / README.md"
+            "contoso.pagos.ms.crearusuarionatural / README.md"
         );
         assert_eq!(
             readme.url,
-            "https://dev.azure.com/test/Project/_git/sag.portalpagos.ms.crearusuarionatural?path=%2FREADME.md&version=GBmain"
+            "https://dev.azure.com/test/Project/_git/contoso.pagos.ms.crearusuarionatural?path=%2FREADME.md&version=GBmain"
         );
         readme.validate().unwrap();
         let evidence = result.evidence("¿qué parámetros recibe?", 4000);
@@ -3223,16 +3223,16 @@ mod tests {
             "pipeline"
         );
         assert_eq!(
-            question_query("como se usa el microservicio crearsps").unwrap(),
-            "crearsps"
+            question_query("como se usa el microservicio crearodc").unwrap(),
+            "crearodc"
         );
         assert_eq!(
-            question_query("¿Cómo se usa el microservicio Crear SPS?").unwrap(),
-            "Crear SPS"
+            question_query("¿Cómo se usa el microservicio Crear ODC?").unwrap(),
+            "Crear ODC"
         );
         assert_eq!(
-            question_query("¿Cómo se invoca el microservicio Crear SPS si quiero pagar?").unwrap(),
-            "Crear SPS pagar"
+            question_query("¿Cómo se invoca el microservicio Crear ODC si quiero pagar?").unwrap(),
+            "Crear ODC pagar"
         );
         assert!(question_query("busca en la wiki").is_err());
         assert!(question_query("Según la wiki, dame más detalles").is_err());
