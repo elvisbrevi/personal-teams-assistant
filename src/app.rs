@@ -41,7 +41,7 @@ mod github_cli;
 #[cfg(feature = "gui")]
 mod gui;
 mod headless;
-mod implementation;
+pub(crate) mod implementation;
 mod maintenance;
 mod mcp;
 mod migration;

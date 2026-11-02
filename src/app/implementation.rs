@@ -1,6 +1,9 @@
 //! Work-item implementation, with durable runs and account-bound execution machines.
 use super::*;
-use crate::store::settings::SettingsStore;
+use crate::store::{
+    implementation::{ImplementationStore, LocalImplementation},
+    settings::SettingsStore,
+};
 use crate::tools::todo::{Detail, DetailRequest};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -12,6 +15,7 @@ mod management;
 mod requests;
 mod store;
 pub(super) use fleet::register;
+pub(crate) use store::Database;
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -97,10 +101,10 @@ struct Start {
     effort: String,
 }
 #[derive(Clone, Serialize, Deserialize)]
-struct Launch {
-    id: String,
+pub(crate) struct Launch {
+    pub(crate) id: String,
     request: Start,
-    detail: Detail,
+    pub(crate) detail: Detail,
     language: crate::config::Language,
     planning: bool,
     /// The user's instructions for this kind of run, resolved where it was started; a launch
@@ -117,13 +121,13 @@ struct Launch {
     organization: Vec<crate::organization::Entry>,
 }
 #[derive(Clone, Serialize, Deserialize)]
-struct Run {
-    launch: Launch,
-    state: String,
+pub(crate) struct Run {
+    pub(crate) launch: Launch,
+    pub(crate) state: String,
     created_at: String,
-    finished_at: Option<String>,
-    output: String,
-    plan: Option<Value>,
+    pub(crate) finished_at: Option<String>,
+    pub(crate) output: String,
+    pub(crate) plan: Option<Value>,
     #[serde(default)]
     session_id: Option<String>,
     #[serde(default)]
@@ -677,7 +681,7 @@ async fn local(host: &Arc<Host>, method: &str, args: &Value) -> Result<Value> {
                 // Keep the run active, and its directories reserved, until the daemon confirms stop.
                 crate::llm::implementation::mobile::cancel_codex(&session).await?;
             }
-            state.db.finish(id, "cancelled", "", None)?;
+            LocalImplementation::new(&state.db).finish_run(id, "cancelled", "", None)?;
             Ok(json!({"cancelled":true}))
         }
         "implementation_launch" => {
@@ -931,11 +935,8 @@ async fn run(host: &Arc<Host>, launch: Launch) {
         Err(_)=>("failed","The selected CLI did not complete. Check its login, permissions and model availability on the execution machine.".into(),None),
     };
     if authority::invocation(&host.state).is_ok_and(|i| i.scope.owner) {
-        let _ = host
-            .state
-            .implementation
-            .db
-            .finish(&launch.id, status, &output, plan);
+        let _ = LocalImplementation::new(&host.state.implementation.db)
+            .finish_run(&launch.id, status, &output, plan);
     }
 }
 

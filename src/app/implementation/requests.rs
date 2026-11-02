@@ -1,6 +1,9 @@
 //! Explicit request creation, independent from read-only evidence and daily activity runs.
 use super::*;
-use crate::store::settings::SettingsStore;
+use crate::store::{
+    implementation::{ImplementationStore, LocalImplementation},
+    settings::SettingsStore,
+};
 use crate::{knowledge::Access, tools::ToolSpec};
 
 #[derive(Deserialize, Serialize)]
@@ -318,9 +321,9 @@ async fn run(host: &Arc<Host>, request: Request, prepared: Value, directory: Pat
             .await?
         };
         authority::require_execution(&host.state)?;
-        db.request_update(&request.id, |record| {
+        LocalImplementation::new(db).finish_request(&request.id, &mut |record| {
             record["state"] = item["state"].clone();
-            record["item"] = item;
+            record["item"] = item.clone();
             record["finished_at"] = json!(chrono::Utc::now().to_rfc3339());
             Ok(())
         })?;
@@ -328,7 +331,7 @@ async fn run(host: &Arc<Host>, request: Request, prepared: Value, directory: Pat
     }
     .await;
     if result.is_err() && authority::invocation(&host.state).is_ok_and(|i| i.scope.owner) {
-        let _ = db.request_update(&request.id,|record| {
+        let _ = LocalImplementation::new(db).finish_request(&request.id, &mut |record| {
             record["state"] = json!(if record["state"] == "sending" { "uncertain" } else { "failed" });
             record["output"] = json!("Request creation did not complete. Check the agent login and destination access. Inspect the provider before starting another request.");
             record["finished_at"] = json!(chrono::Utc::now().to_rfc3339()); Ok(())
