@@ -4,6 +4,15 @@
 const UI_LANGUAGES = ['es', 'en'];
 
 const UI_CATALOG = { es: {
+  "Stripe width": "Ancho de la franja",
+  "In pixels, from 2 to 16.": "En píxeles, de 2 a 16.",
+  "Message text size": "Tamaño del texto del mensaje",
+  "Band text size": "Tamaño del texto de la banda",
+  "Small": "Pequeño",
+  "Medium": "Mediano",
+  "Large": "Grande",
+  "Extra large": "Muy grande",
+  "The stripe width is a whole number of pixels from 2 to 16.": "El ancho de la franja es un número entero de píxeles, de 2 a 16.",
   "Message style in Teams": "Estilo de los mensajes en Teams",
   "Sends what the assistant writes in Teams as a card with a colored stripe and a band that says it was written with AI. Messages an agent posts with": "Envía lo que el asistente escribe en Teams como una tarjeta con una franja de color y una banda que indica que se escribió con IA. Los mensajes que un agente publica con ",
   "keep the plain format.": " conservan el formato normal.",

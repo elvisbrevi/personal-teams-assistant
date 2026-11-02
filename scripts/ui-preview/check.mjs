@@ -542,7 +542,7 @@ check('axe: no WCAG 2.2 AA violations in any scan', !Object.keys(totals).length,
   await page.selectOption('#style-position', 'top');
   await page.fill('#style-label', 'Escrito por mi asistente');
   const preview = await page.evaluate(() => [document.querySelector('#style-preview').className, document.querySelector('#style-preview').style.getPropertyValue('--stripe')]);
-  check('the preview follows the combination, position and label', preview[0] === 'teams-card band-good label-good at-top' && preview[1] === '#13a10e'
+  check('the preview follows the combination, position and label', preview[0] === 'teams-card band-good label-good at-top text-default label-size-small' && preview[1] === '#13a10e'
     && await page.textContent('#style-preview-label') === 'Escrito por mi asistente', preview.join(' | '));
   await page.evaluate(() => { document.querySelector('#style-custom').open = true; });
   await page.selectOption('#style-band', 'emphasis');
@@ -563,10 +563,23 @@ check('axe: no WCAG 2.2 AA violations in any scan', !Object.keys(totals).length,
   check('message style settings pass axe in every color pair and theme', true);
   await page.selectOption('#style-label-color', 'good');
   await page.selectOption('#style-band', 'emphasis');
+  await page.fill('#style-stripe-width', '20');
+  await page.click('#save');
+  await page.waitForTimeout(300);
+  check('a stripe wider than 16 px is refused before saving', await page.isVisible('#notice.error'));
+  await page.fill('#style-stripe-width', '8');
+  await page.selectOption('#style-text-size', 'large');
+  await page.selectOption('#style-label-size', 'medium');
+  const sized = await page.evaluate(() => {
+    const card = document.querySelector('#style-preview');
+    return [getComputedStyle(card).borderLeftWidth, card.classList.contains('text-large'), card.classList.contains('label-size-medium')];
+  });
+  check('the preview follows the stripe width and text sizes', JSON.stringify(sized) === JSON.stringify(['8px', true, true]), JSON.stringify(sized));
   await page.click('#save');
   await page.waitForTimeout(300);
   check('the message style is saved', await page.evaluate(() => JSON.stringify(window.__ptaLastSave?.config?.message_style)) === JSON.stringify({
-    enabled: true, label: 'Escrito por mi asistente', position: 'top', accent: '#13A10E', band: 'emphasis', label_color: 'good', icon: true }));
+    enabled: true, label: 'Escrito por mi asistente', position: 'top', accent: '#13A10E', band: 'emphasis', label_color: 'good', icon: true,
+    stripe_width: 8, text_size: 'large', label_size: 'medium' }));
   check('message style has no page errors', errors.length === 0, errors.join(' | '));
   await context.close();
 }

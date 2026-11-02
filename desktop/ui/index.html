@@ -237,6 +237,11 @@
                 </div>
                 <label class="check"><input id="style-icon" class="cfg" type="checkbox"> Show a robot icon before the band text</label>
               </details>
+              <div class="grid">
+                <label>Stripe width <small>In pixels, from 2 to 16.</small><input id="style-stripe-width" class="cfg" type="number" min="2" max="16" step="1" inputmode="numeric"></label>
+                <label>Message text size<select id="style-text-size" class="cfg"><option value="small">Small</option><option value="default">Normal</option><option value="medium">Medium</option><option value="large">Large</option><option value="extralarge">Extra large</option></select></label>
+                <label>Band text size<select id="style-label-size" class="cfg"><option value="small">Small</option><option value="default">Normal</option><option value="medium">Medium</option><option value="large">Large</option><option value="extralarge">Extra large</option></select></label>
+              </div>
               <p class="hint">Preview, in this app's theme. Teams shows the same card in its own light or dark theme.</p>
               <div id="style-preview" class="teams-card" aria-hidden="true">
                 <p>Here is how the assistant's messages will look in Teams.</p>

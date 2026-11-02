@@ -2943,7 +2943,7 @@ const STYLE_PRESETS = {
   gray: { accent: '#8A8A8A', band: 'emphasis', label_color: 'subtle' },
 };
 /** `[message_style]` as the host defaults it; the host omits the section while it is unchanged. */
-const STYLE_DEFAULT = { enabled: false, label: '', position: 'bottom', ...STYLE_PRESETS.teams, icon: true };
+const STYLE_DEFAULT = { enabled: false, label: '', position: 'bottom', ...STYLE_PRESETS.teams, icon: true, stripe_width: 4, text_size: 'default', label_size: 'small' };
 
 function renderMessageStyle() {
   const style = { ...STYLE_DEFAULT, ...current.config.message_style };
@@ -2954,6 +2954,9 @@ function renderMessageStyle() {
   field('#style-band', style.band);
   field('#style-label-color', style.label_color);
   $('#style-icon').checked = style.icon;
+  field('#style-stripe-width', style.stripe_width);
+  field('#style-text-size', style.text_size);
+  field('#style-label-size', style.label_size);
   renderStylePreview();
 }
 
@@ -2969,15 +2972,24 @@ function renderStylePreview() {
   $('#style-fields').hidden = !$('#style-enabled').checked;
   $('#style-preset').value = stylePreset();
   const preview = $('#style-preview');
-  preview.className = `teams-card band-${$('#style-band').value} label-${$('#style-label-color').value} at-${$('#style-position').value}`;
+  preview.className = `teams-card band-${$('#style-band').value} label-${$('#style-label-color').value} at-${$('#style-position').value} text-${$('#style-text-size').value} label-size-${$('#style-label-size').value}`;
   preview.style.setProperty('--stripe', $('#style-accent').value);
+  preview.style.setProperty('--stripe-width', `${stripeWidth() ?? 4}px`);
   // The default band text follows the reply language, like what the assistant sends.
   const fallback = $('#llm-language').value === 'en' ? 'AI-generated response' : 'Respuesta generada con IA';
   $('#style-preview-label').textContent = $('#style-label').value.trim() || fallback;
   $('#style-preview-icon').hidden = !$('#style-icon').checked;
 }
 
+/** The stripe width typed, when it is a whole number of pixels the host accepts. */
+function stripeWidth() {
+  const width = Number($('#style-stripe-width').value);
+  return Number.isInteger(width) && width >= 2 && width <= 16 ? width : null;
+}
+
 function collectMessageStyle() {
+  const stripe_width = stripeWidth();
+  if (stripe_width === null) throw t('The stripe width is a whole number of pixels from 2 to 16.');
   current.config.message_style = {
     enabled: $('#style-enabled').checked,
     label: $('#style-label').value.trim(),
@@ -2986,6 +2998,9 @@ function collectMessageStyle() {
     band: $('#style-band').value,
     label_color: $('#style-label-color').value,
     icon: $('#style-icon').checked,
+    stripe_width,
+    text_size: $('#style-text-size').value,
+    label_size: $('#style-label-size').value,
   };
 }
 
@@ -4512,7 +4527,7 @@ $('#style-preset').addEventListener('change', () => {
   renderStylePreview();
   $('#style-preset').value = chosen;
 });
-['#style-enabled', '#style-label', '#style-position', '#style-accent', '#style-band', '#style-label-color', '#style-icon', '#llm-language']
+['#style-enabled', '#style-label', '#style-position', '#style-accent', '#style-band', '#style-label-color', '#style-icon', '#style-stripe-width', '#style-text-size', '#style-label-size', '#llm-language']
   .forEach(id => $(id).addEventListener('input', renderStylePreview));
 document.querySelectorAll('#theme-choice button').forEach(button => {
   button.onclick = () => {

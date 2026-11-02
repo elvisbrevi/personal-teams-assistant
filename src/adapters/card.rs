@@ -6,7 +6,7 @@
 //! uses a Teams container style, which Teams shades for its light or dark theme. The card holds
 //! only text and links checked by the pipeline: no actions, inputs or remote images.
 use super::teams;
-use crate::config::{BandColor, BandPosition, LabelColor, Language, MessageStyle};
+use crate::config::{BandColor, BandPosition, LabelColor, Language, MessageStyle, TextSize};
 use base64::Engine;
 use serde_json::{Value, json};
 
@@ -46,11 +46,14 @@ pub fn message(
 /// The Adaptive Card for `markdown` in `style`.
 pub fn card(markdown: &str, style: &MessageStyle, language: Language) -> Value {
     let stripe = json!({
-        "url": stripe(&style.accent),
+        "url": stripe(&style.accent, style.stripe_width),
         "fillMode": "RepeatVertically",
         "horizontalAlignment": "Left",
     });
     let mut body = elements(markdown, true);
+    if style.text_size != TextSize::Default {
+        body.iter_mut().for_each(|e| resize(e, style.text_size));
+    }
     let mut band = band(style, language, &stripe);
     match style.position {
         BandPosition::Top => {
@@ -136,16 +139,23 @@ fn band(style: &MessageStyle, language: Language, stripe: &Value) -> Value {
         LabelColor::Attention => "Attention",
     };
     let subtle = style.label_color == LabelColor::Subtle;
-    let label = json!({"type": "TextBlock", "text": inline(&style.label(language)), "size": "Small",
+    let size = style.label_size.card();
+    let label = json!({"type": "TextBlock", "text": inline(&style.label(language)), "size": size,
         "wrap": true, "color": color, "isSubtle": subtle});
+    // Fluent icons have their own scale; these match the text sizes.
+    let icon = match style.label_size {
+        TextSize::Small => "xSmall",
+        TextSize::Default => "Small",
+        TextSize::Medium => "Standard",
+        TextSize::Large => "Medium",
+        TextSize::ExtraLarge => "Large",
+    };
     let column = |item: Value| json!({"type": "Column", "width": "auto", "verticalContentAlignment": "Center", "items": [item]});
     let mut columns = Vec::new();
     if style.icon {
         // Teams draws its Fluent icon; a client without the Icon element shows the emoji.
-        columns.push(column(
-            json!({"type": "Icon", "name": "Bot", "size": "xSmall",
-            "color": color, "fallback": {"type": "TextBlock", "text": "🤖", "size": "Small"}}),
-        ));
+        columns.push(column(json!({"type": "Icon", "name": "Bot", "size": icon,
+            "color": color, "fallback": {"type": "TextBlock", "text": "🤖", "size": size}})));
     }
     columns.push(column(label));
     let mut band = json!({"type": "Container", "id": BAND,
@@ -446,18 +456,39 @@ fn spans(text: &str, out: &mut String) {
     }
 }
 
-/// A data URI for an 8×1 PNG whose left half is `hex` and right half transparent: repeated
-/// down the card's left edge, it draws a 4-pixel stripe.
-fn stripe(hex: &str) -> String {
+/// Text sizes in the message's elements: headings (the blocks marked `Medium`) one step above
+/// `size`, everything else at `size`.
+fn resize(element: &mut Value, size: TextSize) {
+    match element {
+        Value::Object(object) => {
+            if matches!(
+                object.get("type").and_then(Value::as_str),
+                Some("TextBlock" | "TextRun")
+            ) {
+                let heading = object.get("size").and_then(Value::as_str) == Some("Medium");
+                let size = if heading { size.larger() } else { size };
+                object.insert("size".into(), json!(size.card()));
+            }
+            object.values_mut().for_each(|child| resize(child, size));
+        }
+        Value::Array(items) => items.iter_mut().for_each(|item| resize(item, size)),
+        _ => {}
+    }
+}
+
+/// A data URI for a PNG one pixel tall whose left `width` pixels are `hex`, followed by as many
+/// transparent ones: repeated down the card's left edge, it draws a stripe `width` pixels wide.
+fn stripe(hex: &str, width: u8) -> String {
     let rgb = u32::from_str_radix(hex.trim_start_matches('#'), 16).unwrap_or(0x5B5FC7);
     let [_, r, g, b] = rgb.to_be_bytes();
+    let width = u32::from(width.clamp(2, 16));
     let mut row = vec![0u8]; // filter: none
-    for x in 0..8 {
-        row.extend(if x < 4 { [r, g, b, 255] } else { [0; 4] });
+    for x in 0..2 * width {
+        row.extend(if x < width { [r, g, b, 255] } else { [0; 4] });
     }
     let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
     let mut header = Vec::new();
-    header.extend(8u32.to_be_bytes());
+    header.extend((2 * width).to_be_bytes());
     header.extend(1u32.to_be_bytes());
     header.extend([8, 6, 0, 0, 0]); // 8-bit RGBA
     chunk(&mut png, b"IHDR", &header);
@@ -576,7 +607,7 @@ mod tests {
 
     #[test]
     fn the_stripe_is_a_valid_png_in_the_chosen_color() {
-        let url = stripe("#5B5FC7");
+        let url = stripe("#5B5FC7", 4);
         let png = base64::engine::general_purpose::STANDARD
             .decode(url.strip_prefix("data:image/png;base64,").unwrap())
             .unwrap();
@@ -598,6 +629,18 @@ mod tests {
         assert_eq!(&row[17..], &[0; 16]);
         assert_eq!(crc32(b"123456789"), 0xCBF4_3926);
         assert_eq!(adler32(b"Wikipedia"), 0x11E6_0398);
+        // A wider stripe: twelve colored pixels, then twelve transparent ones.
+        let png = base64::engine::general_purpose::STANDARD
+            .decode(
+                stripe("#13A10E", 12)
+                    .strip_prefix("data:image/png;base64,")
+                    .unwrap(),
+            )
+            .unwrap();
+        assert_eq!(u32::from_be_bytes(png[16..20].try_into().unwrap()), 24);
+        let row = &png[8 + 12 + 13 + 8 + 7..][..97];
+        assert_eq!(&row[45..49], &[0x13, 0xA1, 0x0E, 255]);
+        assert_eq!(&row[49..], &[0; 48]);
     }
 
     #[test]
@@ -632,6 +675,39 @@ mod tests {
         assert_eq!(body[9]["language"], "Python");
         assert_eq!(body[10]["id"], BAND);
         assert_eq!(body.len(), 11);
+    }
+
+    #[test]
+    fn text_sizes_apply_to_the_message_and_the_band() {
+        // By default the message keeps the client's size and the band is small.
+        let card = card("# Título\nTexto", &style(), Language::Es);
+        assert_eq!(card["body"][0]["size"], "Medium");
+        assert!(card["body"][1].get("size").is_none());
+        let label = &card["body"][2]["items"][0]["columns"][1]["items"][0];
+        assert_eq!(label["size"], "Small");
+        let larger = MessageStyle {
+            text_size: TextSize::Large,
+            label_size: TextSize::Medium,
+            ..style()
+        };
+        let card = super::card(
+            "# Título\n### Sub\nTexto\n\n| A |\n| --- |\n| b |\n\n```\nx\n```",
+            &larger,
+            Language::Es,
+        );
+        let body = card["body"].as_array().unwrap();
+        assert_eq!(body[0]["size"], "ExtraLarge");
+        assert_eq!(body[1]["size"], "Large");
+        assert_eq!(body[2]["size"], "Large");
+        assert_eq!(body[3]["rows"][1]["cells"][0]["items"][0]["size"], "Large");
+        assert_eq!(
+            body[4]["fallback"]["items"][0]["inlines"][0]["size"],
+            "Large"
+        );
+        let band = body[5]["items"][0]["columns"].as_array().unwrap();
+        assert_eq!(band[0]["items"][0]["size"], "Standard");
+        assert_eq!(band[0]["items"][0]["fallback"]["size"], "Medium");
+        assert_eq!(band[1]["items"][0]["size"], "Medium");
     }
 
     #[test]

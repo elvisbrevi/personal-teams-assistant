@@ -47,7 +47,8 @@ Configuration
   config get FIELD         Reads a field by dotted path (e.g. policy.dry_run).
   config set FIELD JSON    Changes a field; the value is JSON (true, \"text\", [...], {...}).
                            Teams message style: config set message_style.enabled true (and .label,
-                           .position, .accent, .band, .label_color, .icon).
+                           .position, .accent, .band, .label_color, .icon, .stripe_width,
+                           .text_size, .label_size).
   config apply|validate    Applies or validates {config,map,tunnel_config} as JSON or TOML on stdin.
   config import FILE       Imports an existing config.toml (with the assistant stopped).
   credentials list         This installation's internal credentials and their origin, without values. For `is the secret X

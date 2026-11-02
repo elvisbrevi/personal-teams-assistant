@@ -149,6 +149,12 @@ pub struct MessageStyle {
     pub label_color: LabelColor,
     /// A robot icon before the label.
     pub icon: bool,
+    /// The stripe's width in pixels, 2 to 16.
+    pub stripe_width: u8,
+    /// The size of the message's text; headings stay a step larger.
+    pub text_size: TextSize,
+    /// The size of the band's text and icon.
+    pub label_size: TextSize,
 }
 impl Default for MessageStyle {
     fn default() -> Self {
@@ -160,6 +166,9 @@ impl Default for MessageStyle {
             band: BandColor::Accent,
             label_color: LabelColor::Default,
             icon: true,
+            stripe_width: 4,
+            text_size: TextSize::Default,
+            label_size: TextSize::Small,
         }
     }
 }
@@ -180,6 +189,10 @@ impl MessageStyle {
                 && self.accent[1..].chars().all(|c| c.is_ascii_hexdigit()),
             "the message style accent is a #RRGGBB color"
         );
+        ensure!(
+            (2..=16).contains(&self.stripe_width),
+            "the message style stripe is 2 to 16 pixels wide"
+        );
         Ok(())
     }
     /// The band's text: the configured one or the default in the reply language.
@@ -187,6 +200,38 @@ impl MessageStyle {
         match self.label.trim() {
             "" => language.say("AI-generated response", "Respuesta generada con IA"),
             label => label.to_owned(),
+        }
+    }
+}
+/// Adaptive Card text sizes; Teams sets the actual size for each client.
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TextSize {
+    Small,
+    #[default]
+    Default,
+    Medium,
+    Large,
+    ExtraLarge,
+}
+impl TextSize {
+    /// The Adaptive Card value.
+    pub fn card(self) -> &'static str {
+        match self {
+            Self::Small => "Small",
+            Self::Default => "Default",
+            Self::Medium => "Medium",
+            Self::Large => "Large",
+            Self::ExtraLarge => "ExtraLarge",
+        }
+    }
+    /// One size larger, up to the largest.
+    pub fn larger(self) -> Self {
+        match self {
+            Self::Small => Self::Default,
+            Self::Default => Self::Medium,
+            Self::Medium => Self::Large,
+            Self::Large | Self::ExtraLarge => Self::ExtraLarge,
         }
     }
 }
@@ -411,6 +456,17 @@ mod tests {
             partial.message_style.label(Language::Es),
             "Respuesta generada con IA"
         );
+        let sized: Config = toml::from_str(&format!(
+            "{example}\n[message_style]\nstripe_width = 8\ntext_size = \"extralarge\"\nlabel_size = \"medium\"\n"
+        ))
+        .unwrap();
+        sized.validate().unwrap();
+        assert_eq!(sized.message_style.text_size, super::TextSize::ExtraLarge);
+        for width in [1, 17] {
+            let mut wrong = sized.clone();
+            wrong.message_style.stripe_width = width;
+            assert!(wrong.validate().is_err(), "{width}");
+        }
         for (label, accent) in [
             ("a\nb", "#5B5FC7"),
             (&"x".repeat(81) as &str, "#5B5FC7"),

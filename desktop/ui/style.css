@@ -843,10 +843,10 @@ body.directory-picker-open { overflow: hidden; }
 
 /* Settings › General › Message style: an approximation of the card Teams shows. The stripe's
    color comes from the field (`--stripe`); the band and its text use Teams' theme-aware colors. */
-.teams-card { display: flex; flex-direction: column; max-width: 28rem; overflow: hidden; border: 1px solid var(--teams-border); border-left: 4px solid var(--stripe, #5b5fc7); border-radius: 8px; background: var(--teams-surface); color: var(--teams-text); }
+.teams-card { display: flex; flex-direction: column; max-width: 28rem; overflow: hidden; border: 1px solid var(--teams-border); border-left: var(--stripe-width, 4px) solid var(--stripe, #5b5fc7); border-radius: 8px; background: var(--teams-surface); color: var(--teams-text); }
 .teams-card.at-top { flex-direction: column-reverse; }
-.teams-card > p { margin: 0; padding: .8rem 1rem; }
-.teams-band { display: flex; justify-content: flex-end; align-items: center; gap: .45rem; padding: .55rem 1rem; font-size: .86rem; }
+.teams-card > p { margin: 0; padding: .8rem 1rem; font-size: .93rem; }
+.teams-band { display: flex; justify-content: flex-end; align-items: center; gap: .45rem; padding: .55rem 1rem; }
 .teams-card.band-accent .teams-band { background: var(--teams-accent); }
 .teams-card.band-emphasis .teams-band { background: var(--teams-emphasis); }
 .teams-card.band-good .teams-band { background: var(--teams-good); }
@@ -857,3 +857,13 @@ body.directory-picker-open { overflow: hidden; }
 .teams-card.label-good .teams-band { color: var(--teams-good-text); }
 .teams-card.label-warning .teams-band { color: var(--teams-warning-text); }
 .teams-card.label-attention .teams-band { color: var(--teams-attention-text); }
+/* Adaptive Card text sizes as Teams draws them: small 12px, normal 14px, medium 16px, large 18px, extra large 24px. */
+.teams-card.text-small > p { font-size: .8rem; }
+.teams-card.text-medium > p { font-size: 1.07rem; }
+.teams-card.text-large > p { font-size: 1.2rem; }
+.teams-card.text-extralarge > p { font-size: 1.6rem; }
+.teams-card.label-size-small .teams-band { font-size: .8rem; }
+.teams-card.label-size-default .teams-band { font-size: .93rem; }
+.teams-card.label-size-medium .teams-band { font-size: 1.07rem; }
+.teams-card.label-size-large .teams-band { font-size: 1.2rem; }
+.teams-card.label-size-extralarge .teams-band { font-size: 1.6rem; }

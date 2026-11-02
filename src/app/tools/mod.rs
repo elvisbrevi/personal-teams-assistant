@@ -1033,7 +1033,7 @@ pub(super) const TOOLS: &[Tool] = &[
     Tool {
         name: "message_style",
         title: "Teams message style",
-        description: "How answers look in Teams: enabled, the band's label, its position (top/bottom), the stripe color (accent, #RRGGBB), the band color, the label color and the robot icon.",
+        description: "How answers look in Teams: enabled, the band's label, its position (top/bottom), the stripe color (accent, #RRGGBB) and width (stripe_width, 2-16 px), the band color, the label color, the robot icon and the text sizes (text_size, label_size).",
         effect: Effect::Read,
         schema: none,
     },
@@ -1226,7 +1226,7 @@ pub(super) const TOOLS: &[Tool] = &[
     Tool {
         name: "message_style_update",
         title: "Change the Teams message style",
-        description: "Changes how answers look in Teams. Fields as message_style shows them; position is top or bottom, band is accent, emphasis, good, warning, attention or none, label_color is default, subtle, accent, good, warning or attention, and an empty label uses the default in the reply language.",
+        description: "Changes how answers look in Teams. Fields as message_style shows them; position is top or bottom, band is accent, emphasis, good, warning, attention or none, label_color is default, subtle, accent, good, warning or attention, text_size and label_size are small, default, medium, large or extralarge, stripe_width is 2 to 16 pixels, and an empty label uses the default in the reply language.",
         effect: Effect::Local,
         schema: || {
             object(
