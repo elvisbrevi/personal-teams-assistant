@@ -6,7 +6,7 @@
 //! or machines. An agent starts a protected-entry request (to store or to replace a value) by
 //! name or ID and later reads only its state.
 use super::{authority, consumers, control::Reply, *};
-use crate::app::store::settings::SettingsStore;
+use crate::store::settings::SettingsStore;
 use crate::variables::{self as vault, KeyBackup, NewVariable, Secret, Store};
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};

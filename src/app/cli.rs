@@ -1,5 +1,5 @@
 use crate::app::control::{self, Reply, Request};
-use crate::app::store::settings::{LocalSettings, SettingsStore};
+use crate::store::settings::{LocalSettings, SettingsStore};
 use crate::{config::Config, knowledge::KnowledgeMap};
 use anyhow::{Context, Result, ensure};
 use serde_json::{Value, json};

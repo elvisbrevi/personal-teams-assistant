@@ -1,6 +1,6 @@
 //! Structured host failures: retain causes and locations without retaining error text or inputs.
 use super::*;
-use crate::app::store::settings::SettingsStore;
+use crate::store::settings::SettingsStore;
 use serde_json::{Value, json};
 use std::{cell::RefCell, future::Future, panic::Location, time::Duration};
 

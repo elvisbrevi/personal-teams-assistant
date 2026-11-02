@@ -1,6 +1,6 @@
 //! Account-authoritative machine metadata. Filesystem changes execute on the target.
 use super::*;
-use crate::app::store::settings::SettingsStore;
+use crate::store::settings::SettingsStore;
 
 pub(super) fn version(host: &Host) -> Result<String> {
     Ok(authority::invocation(&host.state)?

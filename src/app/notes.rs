@@ -4,7 +4,7 @@
 
 use super::Host;
 use super::{DesktopState, fail};
-use crate::app::store::settings::SettingsStore;
+use crate::store::settings::SettingsStore;
 use crate::{
     index::{Index, NOTES, Note, ORGANIZATION},
     knowledge::{Access, KnowledgeMap, Resource},

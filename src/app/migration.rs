@@ -10,7 +10,7 @@
 //! switched only after the destination value was read back and matched. The original stores are
 //! never modified.
 use super::{authority, consumers, control::Reply, implementation, portable, standing, *};
-use crate::app::store::settings::SettingsStore;
+use crate::store::settings::SettingsStore;
 use crate::{
     consumers as rules,
     variables::{self as vault, Secret},

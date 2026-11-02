@@ -1,5 +1,5 @@
 use super::*;
-use crate::app::store::settings::{LocalSettings, SettingsStore};
+use crate::store::settings::{LocalSettings, SettingsStore};
 use serde_json::Value;
 
 pub(super) struct Worker {

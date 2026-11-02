@@ -7,7 +7,7 @@
 //! local program and exist only on the trusted personal machine: the application window or the
 //! local CLI of an installation owner, inside its allowed roots.
 use super::{authority, control::Reply, implementation, variables as vars, *};
-use crate::app::store::settings::SettingsStore;
+use crate::store::settings::SettingsStore;
 use crate::{
     consumers::{self as rules, BUILT_IN, Definition},
     variables::{self as vault, Secret, Store},

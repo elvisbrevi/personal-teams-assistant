@@ -1,6 +1,6 @@
 //! Host-owned read-only daily task snapshots, independent of Teams and language models.
 use super::*;
-use crate::app::store::settings::SettingsStore;
+use crate::store::settings::SettingsStore;
 use crate::{
     activity::{Summary, store::Database},
     tools::{ToolSpec, tasks::Day},

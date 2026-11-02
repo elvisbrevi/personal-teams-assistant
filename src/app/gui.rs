@@ -1,6 +1,6 @@
 //! Tauri shell: tray/menu-bar icon and the settings/chat window. Operations live in the host.
 use super::*;
-use crate::app::store::settings::SettingsStore;
+use crate::store::settings::SettingsStore;
 use tauri::{
     Emitter, Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent,
     image::Image,

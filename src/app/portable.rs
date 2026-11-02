@@ -14,7 +14,7 @@ use super::{
     implementation::{self, Link},
     *,
 };
-use crate::app::store::settings::SettingsStore;
+use crate::store::settings::SettingsStore;
 use crate::{
     index::{Index, Note},
     portable::{self as core, Document, Patch, Unavailable},

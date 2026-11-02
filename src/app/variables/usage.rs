@@ -2,7 +2,7 @@
 //! whether it can use them now and which need the user's confirmation. Metadata only: it is built
 //! from `variable_list` and `variable_consumer_list` replies and never resolves a value.
 use super::*;
-use crate::app::store::settings::SettingsStore;
+use crate::store::settings::SettingsStore;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
