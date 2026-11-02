@@ -8,6 +8,7 @@ Read only what the change needs; do not load the long documents whole.
 - [CONTEXT.md](CONTEXT.md): the domain's vocabulary (source, context, verified note, activity record…); use its terms.
 - [docs/delivery.md](docs/delivery.md): CI, releases, the server's updater and the manual fallback.
 - [docs/ui-design-conventions.md](docs/ui-design-conventions.md): every change to the GUI (`desktop/ui/`).
+- [docs/organization-and-cloud-storage.md](docs/organization-and-cloud-storage.md): the optional organization layer and the move of account data to Cloudflare (proposal, phases and open decisions).
 - Operating the installed application: the [personal-teams-assistant skill](desktop/skills/personal-teams-assistant/SKILL.md) (also `pta skill show`) and its `references/`; from an agent with MCP, `pta mcp` exposes the same operations ([mcp.md](desktop/skills/personal-teams-assistant/references/mcp.md)). These files are compiled into the binary (`src/app/skill.rs`).
 - Saving, correcting or organizing facts in the knowledge base: [save-knowledge](.agents/skills/save-knowledge/SKILL.md).
 
