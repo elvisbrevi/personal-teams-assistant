@@ -461,6 +461,27 @@ check('axe: no WCAG 2.2 AA violations in any scan', !Object.keys(totals).length,
   await page.click('#save');
   await page.waitForTimeout(300);
   check('the context is saved with its new source', await page.evaluate(() => window.__ptaLastSave?.map?.contexts?.[0]?.sources?.includes('handbook')));
+  // Work items: guides with their fields and the implementation agents' instructions, saved with the map.
+  await page.click('#knowledge-tab-work-items');
+  check('work item guides list the task guide', await page.isVisible('#guides .resource:has(code:text-is("Task"))'));
+  await page.click('#guide-form summary');
+  await page.fill('#guide-id', 'support');
+  await page.fill('#guide-type', 'Support');
+  await page.click('#add-guide');
+  const support = page.locator('#guides > .resource').last();
+  await support.locator('fieldset > .actions button').click();
+  await support.locator('fieldset .list details input').first().fill('Custom.Kind');
+  await page.click('#save'); await page.waitForTimeout(300);
+  check('a new guide is saved with its field', await page.evaluate(() => window.__ptaLastSave.map.work_item_guides.some(g => g.id === 'support' && g.type === 'Support' && g.provider === 'azure' && g.fields[0]?.reference === 'Custom.Kind')));
+  const plan = page.locator('#agent-prompts > .resource').first();
+  check('agent instructions show the built-in prompts', await page.$$eval('#agent-prompts > .resource', rows => rows.length) === 3);
+  await plan.locator('summary').click();
+  await plan.locator('textarea').fill('Plan at most three children.');
+  await page.click('#save'); await page.waitForTimeout(300);
+  check('a changed agent prompt is saved', await page.evaluate(() => window.__ptaLastSave.map.agent_prompts.some(p => p.id === 'plan' && p.instructions === 'Plan at most three children.')));
+  await plan.locator('.actions button').click();
+  await page.click('#save'); await page.waitForTimeout(300);
+  check('restoring the default removes the change', await page.evaluate(() => !window.__ptaLastSave.map.agent_prompts.some(p => p.id === 'plan')));
   // URL sources: public groups and exact authenticated Wiki pages.
   await page.click('#knowledge-tab-sources');
   await page.click('#url-source-form summary');

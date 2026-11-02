@@ -236,6 +236,12 @@ Knowledge
   people list | people show ID | people add | people edit ID | people remove ID
                            How you address each person: JSON with id, name, senders (Teams user IDs),
                            aliases, address and notes; used only when answering that person.
+  guides list | guides show ID | guides add | guides edit ID | guides remove ID
+                           Work item guides: JSON with id, provider (azure|github), type, name,
+                           projects, purpose, instructions and fields (reference, name, required,
+                           values, default, guidance, fill). The implementation agents follow them.
+  prompts list | prompts show ID         The implementation agents' instructions (plan, code, request).
+  prompts edit ID | prompts reset ID     JSON on stdin: {\"instructions\": TEXT}; reset restores the default.
   notes list [--context ID] [--limit N]  Verified notes, newest first.
   notes search TEXT [--context ID]       Notes by relevance.
   notes add | notes edit ID              JSON on stdin: title, text, contexts, keywords, origin, reference.
@@ -1144,6 +1150,10 @@ fn validate_args(args: &[String]) -> Result<()> {
             | ["teams", "chats" | "send", _]
             | ["people", "list" | "add"]
             | ["people", "show" | "edit" | "remove", _]
+            | ["guides", "list" | "add"]
+            | ["guides", "show" | "edit" | "remove", _]
+            | ["prompts", "list"]
+            | ["prompts", "show" | "edit" | "reset", _]
             | ["questions", "list" | "add"]
             | ["questions", "show" | "edit" | "remove" | "associate", _]
             | ["cases", "list"]
@@ -1906,6 +1916,82 @@ async fn execute(mut args: Vec<String>) -> Result<Reply> {
                 }
             }
         }
+        ("guides", "list") => {
+            snap.data = data["map"]["work_item_guides"].clone();
+            if snap.data.is_null() {
+                snap.data = json!([]);
+            }
+            return Ok(snap);
+        }
+        ("guides", "add") => {
+            let guide = input()?;
+            let map = data["map"].as_object_mut().context("invalid map")?;
+            map.entry("work_item_guides")
+                .or_insert_with(|| json!([]))
+                .as_array_mut()
+                .context("invalid work item guides")?
+                .push(guide);
+        }
+        ("guides", "show" | "edit" | "remove") => {
+            let id = positional(&args, 2)?;
+            let list = data["map"]["work_item_guides"]
+                .as_array_mut()
+                .context("unknown work item guide")?;
+            let i = list
+                .iter()
+                .position(|g| g["id"] == id)
+                .context("unknown work item guide")?;
+            match action {
+                "show" => {
+                    snap.data = list[i].clone();
+                    return Ok(snap);
+                }
+                "edit" => {
+                    let guide = input()?;
+                    ensure!(guide["id"] == id, "work item guide ID cannot change");
+                    list[i] = guide;
+                }
+                _ => {
+                    list.remove(i);
+                }
+            }
+        }
+        ("prompts", "list") => {
+            snap.data = json!({"built_in": snap.data["agent_prompts"], "changes": data["map"]["agent_prompts"]});
+            return Ok(snap);
+        }
+        ("prompts", "show") => {
+            let id = positional(&args, 2)?;
+            let built = snap.data["agent_prompts"]
+                .as_array()
+                .and_then(|prompts| prompts.iter().find(|p| p["id"] == id))
+                .cloned()
+                .context("unknown agent prompt")?;
+            let change = data["map"]["agent_prompts"]
+                .as_array()
+                .and_then(|prompts| prompts.iter().find(|p| p["id"] == id))
+                .cloned();
+            snap.data = json!({"built_in": built, "change": change});
+            return Ok(snap);
+        }
+        ("prompts", "edit" | "reset") => {
+            let id = positional(&args, 2)?;
+            let map = data["map"].as_object_mut().context("invalid map")?;
+            let list = map
+                .entry("agent_prompts")
+                .or_insert_with(|| json!([]))
+                .as_array_mut()
+                .context("invalid agent prompts")?;
+            list.retain(|p| p["id"] != id);
+            if action == "edit" {
+                let change = input()?;
+                ensure!(
+                    change.get("id").is_none_or(|v| v == id),
+                    "agent prompt ID cannot change"
+                );
+                list.push(json!({"id": id, "instructions": change["instructions"]}));
+            }
+        }
         ("cases", "list") => {
             snap.data = json!({"built_in": snap.data["cases"], "changes": data["map"]["cases"]});
             return Ok(snap);
@@ -2462,6 +2548,10 @@ mod help_tests {
             &["answer", "feedback", "resource"],
             &["people", "list"],
             &["people", "edit", "ana"],
+            &["guides", "list"],
+            &["guides", "edit", "task"],
+            &["prompts", "list"],
+            &["prompts", "reset", "code"],
             &["questions", "list"],
             &["questions", "add"],
             &["questions", "associate", "resource"],

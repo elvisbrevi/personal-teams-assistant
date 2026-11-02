@@ -11,17 +11,15 @@ use crate::{
 };
 use serde_json::Value;
 
-pub(in crate::app) async fn create_child(
-    state: &DesktopState,
-    provider: &str,
-    source: Option<&str>,
-    parent: &crate::tools::todo::Detail,
-    child: &Value,
-) -> anyhow::Result<Value> {
-    if provider == "github" {
-        let _guard = state.github_api.lock().await;
-        return github::create_child(parent, child).await;
-    }
+/// The enabled Azure source the implementation writes through: its read key, catalog and the
+/// user's work item guides.
+struct Azure {
+    client: reqwest::Client,
+    read_key: String,
+    catalog: String,
+    guides: Vec<crate::work_items::Guide>,
+}
+fn azure(state: &DesktopState, source: Option<&str>) -> anyhow::Result<Azure> {
     let config = read_config(&state.config_path)?;
     let map = KnowledgeMap::load(&state.map_path)?;
     let sources: Vec<_> = map
@@ -45,17 +43,59 @@ pub(in crate::app) async fn create_child(
     else {
         unreachable!()
     };
-    let read_key = security::resolve(secret_ref, &config.secrets)?;
+    Ok(Azure {
+        read_key: security::resolve(secret_ref, &config.secrets)?,
+        client: reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .redirect(reqwest::redirect::Policy::none())
+            .build()?,
+        catalog: tool.catalog(&map.repositories)?,
+        guides: map.work_item_guides,
+    })
+}
+
+/// Check a reviewed child against the provider's live types before anything is written.
+pub(in crate::app) async fn check_child(
+    state: &DesktopState,
+    provider: &str,
+    source: Option<&str>,
+    parent: &crate::tools::todo::Detail,
+    child: &Value,
+) -> anyhow::Result<()> {
+    if provider == "github" {
+        return Ok(());
+    }
+    let azure = azure(state, source)?;
+    crate::ado::implementation::check_child(
+        &azure.client,
+        &azure.read_key,
+        &azure.catalog,
+        &azure.guides,
+        parent,
+        child,
+    )
+    .await
+}
+
+pub(in crate::app) async fn create_child(
+    state: &DesktopState,
+    provider: &str,
+    source: Option<&str>,
+    parent: &crate::tools::todo::Detail,
+    child: &Value,
+) -> anyhow::Result<Value> {
+    if provider == "github" {
+        let _guard = state.github_api.lock().await;
+        return github::create_child(parent, child).await;
+    }
+    let azure = azure(state, source)?;
     let write_session = super::super::azure_cli::require().await?;
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .redirect(reqwest::redirect::Policy::none())
-        .build()?;
     crate::ado::implementation::create_child(
-        &client,
-        &read_key,
+        &azure.client,
+        &azure.read_key,
         write_session.token(),
-        &tool.catalog(&map.repositories)?,
+        &azure.catalog,
+        &azure.guides,
         parent,
         child,
     )

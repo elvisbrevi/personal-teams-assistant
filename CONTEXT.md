@@ -111,6 +111,14 @@ _Avoid_: activity plan, registration proposal
 One attempt to plan children or implement a selected task, development bug or GitHub issue, using the user's context and chosen coding agent on an execution machine.
 _Avoid_: activity run
 
+**Work item guide**:
+How the user's organization uses one work item type: when it is used, how it is written and what each field is for, with its allowed values and whether the agents may propose it. The implementation agents follow it; it never authorizes a destination, a type or a value.
+_Avoid_: template, schema
+
+**Agent instructions**:
+The editable text an implementation agent starts from when it plans children, implements an item or writes a request. Code always adds the rules it cannot change.
+_Avoid_: system prompt (in user-facing text)
+
 **Agent session**:
 The coding agent's own conversation associated with an implementation run and its work item. Its native session ID identifies it in that agent's tools and supported app links.
 _Avoid_: run ID

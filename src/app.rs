@@ -146,6 +146,8 @@ struct Snapshot {
     restart_offer: bool,
     /// The built-in cases with their default texts, for editors (additive).
     cases: &'static [crate::cases::BuiltIn],
+    /// The implementation agents' built-in prompts with their default instructions (additive).
+    agent_prompts: &'static [crate::agent_prompts::BuiltIn],
 }
 
 #[derive(Debug)]
@@ -554,6 +556,8 @@ pub(crate) fn init_state(config_dir: &Path, data_dir: &Path) -> Result<DesktopSt
                 cases: Vec::new(),
                 questions: None,
                 people: Vec::new(),
+                agent_prompts: Vec::new(),
+                work_item_guides: Vec::new(),
             })?,
         )?;
     }
@@ -703,6 +707,7 @@ async fn snapshot(host: &Host) -> std::result::Result<Snapshot, String> {
             .restart_offer
             .load(std::sync::atomic::Ordering::Relaxed),
         cases: &crate::cases::BUILT_IN,
+        agent_prompts: &crate::agent_prompts::BUILT_IN,
     })
 }
 

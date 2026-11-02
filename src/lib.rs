@@ -1,6 +1,7 @@
 pub mod activity;
 pub mod adapters;
 pub mod ado;
+pub mod agent_prompts;
 pub mod app;
 pub mod cases;
 pub mod config;
@@ -22,3 +23,4 @@ pub mod simulation;
 pub mod state;
 pub mod tools;
 pub mod variables;
+pub mod work_items;

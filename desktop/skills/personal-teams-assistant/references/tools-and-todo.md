@@ -219,6 +219,11 @@ children and run installed coding agents.
    browsing stays within the selected machine's allowed roots.
 5. `implementation_start` on an HU/bug/Epic proposes children. Review/edit/select them and
    confirm `implementation_create`; no child is written just because a model proposed it.
+   Each Azure child may carry `type` (a task type of the project; empty uses the default) and
+   `fields` (`[{"reference":"Custom.Mes","value":"Noviembre"}]`), proposed from the work item
+   guides; only fields the type's guide marks `fill` and values valid for the live type are
+   accepted, and every child is checked before anything is written. The agents start from the
+   editable agent instructions (`pta prompts`) plus fixed rules.
    On a process task, Bug Desarrollo or ordinary GitHub issue, Start implements that item in
    the chosen directories. Changes remain local; the coding prompt does not authorize pushing,
    publishing, changing work items or sending Teams messages.

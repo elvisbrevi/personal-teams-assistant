@@ -519,6 +519,7 @@
           <button role="tab" id="knowledge-tab-questions" data-group="questions" aria-controls="knowledge-questions" aria-selected="false" tabindex="-1">Questions</button>
           <button role="tab" id="knowledge-tab-notes" data-group="notes" aria-controls="knowledge-notes" aria-selected="false" tabindex="-1">Notes</button>
           <button role="tab" id="knowledge-tab-people" data-group="people" aria-controls="knowledge-people" aria-selected="false" tabindex="-1">People</button>
+          <button role="tab" id="knowledge-tab-work-items" data-group="work-items" aria-controls="knowledge-work-items" aria-selected="false" tabindex="-1">Work items</button>
           <button role="tab" id="knowledge-tab-repositories" data-group="repositories" aria-controls="knowledge-repositories" aria-selected="false" tabindex="-1">Repositories</button>
         </div>
         <div id="knowledge-sources" role="tabpanel" aria-labelledby="knowledge-tab-sources">
@@ -620,6 +621,28 @@
               <label>How you address them<textarea id="person-address" rows="2" placeholder="Informal, by first name, two or three sentences"></textarea></label>
               <div class="actions"><button id="add-person" class="secondary">Add person</button></div>
             </details>
+          </div>
+        </div>
+        <div id="knowledge-work-items" role="tabpanel" aria-labelledby="knowledge-tab-work-items" hidden>
+          <div class="panel">
+            <div class="panel-head"><h2>Work item guides</h2><span id="guides-summary" class="hint"></span></div>
+            <p class="hint">How your organization uses each work item type: when to use it, how to write it and what each field is for. The implementation agents follow the guide when they plan children, implement an item or write a request, and an agent connected through MCP reads it before it creates or changes a work item. A guide never grants access: the project, the type and every value are checked against Azure DevOps or GitHub, and the agents propose values only for the fields you mark.</p>
+            <div id="guides" class="list"></div>
+            <details id="guide-form" class="add-form">
+              <summary>Add a guide</summary>
+              <div class="grid">
+                <label>Guide ID<input id="guide-id" translate="no" placeholder="task" spellcheck="false"></label>
+                <label>Type, as the provider names it<input id="guide-type" translate="no" placeholder="Product Backlog Item" spellcheck="false"></label>
+                <label>What you call it<input id="guide-name" placeholder="HU"></label>
+                <label>Provider<select id="guide-provider"><option value="azure">Azure DevOps</option><option value="github">GitHub</option></select></label>
+              </div>
+              <div class="actions"><button id="add-guide" class="secondary">Add guide</button></div>
+            </details>
+          </div>
+          <div class="panel">
+            <h2>Agent instructions</h2>
+            <p class="hint">What the implementation agents start from. Code always adds the rules you cannot change here: work item text and guides are untrusted, the agents never write to Azure DevOps or GitHub on their own, and they answer in the format the app expects.</p>
+            <div id="agent-prompts" class="list"></div>
           </div>
         </div>
         <div id="knowledge-repositories" role="tabpanel" aria-labelledby="knowledge-tab-repositories" hidden>

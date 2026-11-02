@@ -1133,6 +1133,63 @@ pub(super) const TOOLS: &[Tool] = &[
         schema: || object(json!({"id": string("The person ID.")}), &["id"]),
     },
     Tool {
+        name: "work_item_guides_list",
+        title: "Work item guides",
+        description: "How the user's organization uses each work item type (Azure DevOps or GitHub): when to use it, how to write its title and description, and its fields with their reference names, allowed values, defaults, whether they are required and how to fill them. Read the guide for a type before you create or change a work item of that type, and follow it. A guide grants nothing.",
+        effect: Effect::Read,
+        schema: none,
+    },
+    Tool {
+        name: "work_item_guide_save",
+        title: "Save a work item guide",
+        description: "Adds or replaces a work item guide by id: provider (azure or github), type (the provider's exact type name), name, projects (empty applies to all), purpose, instructions and fields (reference, name, required, values, default, guidance, fill). fill lets the implementation agents propose that field's value when they create an item of the type; only Azure fields outside System.* can be filled, and values are checked against the live type.",
+        effect: Effect::Local,
+        schema: || {
+            object(
+                json!({"guide": {"type": "object", "description": "id, provider, type, name, projects, purpose, instructions, fields."}}),
+                &["guide"],
+            )
+        },
+    },
+    Tool {
+        name: "work_item_guide_remove",
+        title: "Remove a work item guide",
+        description: "Removes a work item guide.",
+        effect: Effect::Local,
+        schema: || object(json!({"id": string("The guide ID.")}), &["id"]),
+    },
+    Tool {
+        name: "agent_prompts_list",
+        title: "Implementation agent prompts",
+        description: "The implementation agents' instructions: plan (children of an HU, bug or GitHub epic), code (implementing a task, development bug or issue) and request (writing a new HU, bug or epic), with their defaults and the user's changes. The rules on untrusted evidence, provider writes and the JSON contract are added by code and cannot be changed.",
+        effect: Effect::Read,
+        schema: none,
+    },
+    Tool {
+        name: "agent_prompt_update",
+        title: "Change an implementation agent prompt",
+        description: "Replaces the instructions of one implementation agent prompt (plan, code or request); at most 8000 characters.",
+        effect: Effect::Local,
+        schema: || {
+            object(
+                json!({"id": {"type": "string", "enum": ["plan", "code", "request"]}, "instructions": string("The new instructions.")}),
+                &["id", "instructions"],
+            )
+        },
+    },
+    Tool {
+        name: "agent_prompt_reset",
+        title: "Reset an implementation agent prompt",
+        description: "Restores the default instructions of one implementation agent prompt.",
+        effect: Effect::Local,
+        schema: || {
+            object(
+                json!({"id": {"type": "string", "enum": ["plan", "code", "request"]}}),
+                &["id"],
+            )
+        },
+    },
+    Tool {
         name: "answer_rate",
         title: "Rate an answer",
         description: "Rates an answer good or bad with a comment; ratings automatically guide answers to the matched question: good suggests its approach, bad rejects its mistakes. Facts always come from fresh evidence. null clears the rating.",
@@ -1621,6 +1678,36 @@ pub(super) async fn run(name: &str, args: &Value) -> Result<Value, String> {
         "person_remove" => {
             let id = text(args, "id")?.to_owned();
             edit(|p| remove(p, "people", &id)).await
+        }
+        "work_item_guides_list" => {
+            let guides = ipc("snapshot", json!({})).await?["map"]["work_item_guides"].clone();
+            Ok(if guides.is_null() { json!([]) } else { guides })
+        }
+        "work_item_guide_save" => {
+            let guide = args.get("guide").cloned().filter(Value::is_object).ok_or("guide must be an object.")?;
+            edit(|p| upsert(p, "work_item_guides", guide)).await
+        }
+        "work_item_guide_remove" => {
+            let id = text(args, "id")?.to_owned();
+            edit(|p| remove(p, "work_item_guides", &id)).await
+        }
+        "agent_prompts_list" => {
+            let s = ipc("snapshot", json!({})).await?;
+            Ok(json!({"built_in": s["agent_prompts"], "changes": s["map"]["agent_prompts"]}))
+        }
+        "agent_prompt_update" => {
+            let change = json!({"id": text(args, "id")?, "instructions": text(args, "instructions")?});
+            edit(|p| upsert(p, "agent_prompts", change)).await
+        }
+        "agent_prompt_reset" => {
+            let id = text(args, "id")?.to_owned();
+            edit(|p| {
+                if let Some(prompts) = p["map"]["agent_prompts"].as_array_mut() {
+                    prompts.retain(|c| c["id"] != id.as_str());
+                }
+                Ok(())
+            })
+            .await
         }
         "answer_rate" => ipc("answer_feedback", json!({"resource": text(args, "resource")?, "rating": args.get("rating"),
             "comment": args.get("comment"), "example": args.get("example"), "context": args.get("context")})).await,

@@ -42,6 +42,15 @@
     snapshot.map.people = [
       { id: 'ana', name: 'Ana Pérez', senders: ['7c1d2e3f-0000-4000-8000-0000000000a1'], aliases: [], address: 'Informal, by first name, two sentences at most.', notes: 'Leads the payments team.' },
     ];
+    snapshot.map.work_item_guides = [
+      { id: 'task', provider: 'azure', type: 'Task', name: 'Task', projects: [], purpose: 'Development work under a user story, logged daily with its hours.',
+        instructions: 'Title: an action in the infinitive with the system as prefix. Description: context, change and validation.',
+        fields: [
+          { reference: 'Custom.Month', name: 'Month', required: true, values: ['October', 'November'], default: '', guidance: 'The month the work is done.', fill: true },
+          { reference: 'Custom.Evidence', name: 'Completion evidence', required: false, values: [], default: '', guidance: 'Pull request, commit, build and release links.', fill: false },
+        ] },
+    ];
+    snapshot.map.agent_prompts = [{ id: 'code', instructions: 'Implement the work item. Follow the repository instructions and run its checks.' }];
     snapshot.map.contexts = [
       { id: 'billing', name: 'Billing', description: 'Invoices, payments and bank reconciliation', keywords: ['invoice', 'bank reconciliation', 'refund'], sources: ['payments', 'wiki'], instructions: 'Call collections «recaudación» and name the settlement batch when it applies.' },
     ];
@@ -54,6 +63,12 @@
   const activitySource = { id: 'activity-record', description: 'Saved daily activities', topics: [], enabled: scenario !== 'fresh', external_processing: scenario !== 'fresh', allowed_conversations: scenario === 'fresh' ? [] : ['*'], allowed_senders: [], kind: 'tool', tool: { type: 'activity_record' } };
   snapshot.map.resources.push(activitySource);
   snapshot.map.questions = [{ id: 'daily-activities', text: 'What did you do today?', sources: ['activity-record'], examples: [] }];
+  // The implementation agents' built-in prompts the host sends, with short synthetic defaults.
+  snapshot.agent_prompts = [
+    { id: 'plan', name: 'Plan children', summary: 'Implement on an HU, a bug or a GitHub epic: the agent proposes child tasks for you to review before creating them.', instructions: 'Plan small child tasks for the parent.' },
+    { id: 'code', name: 'Implement', summary: 'Implement on a task, a development bug or a GitHub issue: the agent changes the code in the selected directories.', instructions: 'Implement the work item.' },
+    { id: 'request', name: 'Write a request', summary: 'Create request in To-Do: the agent writes the new HU, bug or GitHub epic from your context.', instructions: 'Write one request of the selected type.' },
+  ];
   // The built-in cases the host sends, with short synthetic default texts.
   snapshot.cases = [
     ['general', 'Every answer', true, true, false, null, false],
