@@ -201,6 +201,8 @@ impl Document {
             cases: Vec::new(),
             questions: Some(self.questions.clone()),
             people: Vec::new(),
+            agent_prompts: Vec::new(),
+            work_item_guides: Vec::new(),
         };
         KnowledgeMap::parse(&toml::to_string(&scratch)?)?;
         Ok(())
@@ -289,6 +291,8 @@ impl Document {
             cases: map.cases.clone(),
             questions: Some(questions),
             people: map.people.clone(),
+            agent_prompts: map.agent_prompts.clone(),
+            work_item_guides: map.work_item_guides.clone(),
         };
         (config, map, unavailable)
     }

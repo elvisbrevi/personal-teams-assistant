@@ -955,19 +955,32 @@ async function implementationRuns(form) {
         const record = form.creations[run.id];
         panel.append(badge(tx(record.state), record.state === 'created' ? 'ok' : 'warn'), ...(record.created || []).map(item => link(`#${item.id} ${item.title}`, item.url)));
       } else {
+        const azure = form.selected.provider === 'azure';
         const children = run.plan.children.map(child => {
           const selected = el('input', { type: 'checkbox', checked: true });
           const title = el('input', { value: child.title, maxLength: 200 });
           const description = el('textarea', { value: child.description, rows: 3, maxLength: 16000 });
-          panel.append(el('fieldset', {}, el('legend', {}, el('label', { class: 'check' }, selected, t('Create this child'))), el('label', {}, t('Title'), title), el('label', {}, t('Description'), description)));
-          return { selected, title, description };
+          const kind = el('input', { value: child.type ?? '', maxLength: 120, placeholder: t('Default task type'), translate: 'no', spellcheck: false });
+          // Values the agent proposed from the work item guide; an emptied value is not written.
+          const guide = () => (current?.map?.work_item_guides ?? []).find(g => g.provider === 'azure' && g.type.toLowerCase() === kind.value.trim().toLowerCase());
+          const values = (child.fields ?? []).map(proposed => {
+            const known = guide()?.fields?.find(f => f.reference === proposed.reference);
+            const value = known?.values?.length
+              ? el('select', {}, el('option', { value: '', textContent: t('Do not fill') }), ...[...new Set([...known.values, proposed.value])].map(v => el('option', { value: v, textContent: v, selected: v === proposed.value })))
+              : el('input', { value: proposed.value, spellcheck: false });
+            return { reference: proposed.reference, value, row: el('label', {}, el('span', {}, known?.name || proposed.reference, ' ', el('code', { textContent: proposed.reference })), value) };
+          });
+          panel.append(el('fieldset', {}, el('legend', {}, el('label', { class: 'check' }, selected, t('Create this child'))), el('label', {}, t('Title'), title), el('label', {}, t('Description'), description),
+            ...(azure ? [el('label', {}, t('Work item type'), kind), ...values.map(v => v.row)] : [])));
+          return { selected, title, description, kind, values };
         });
         const create = el('button', { type: 'button', class: 'secondary', textContent: t('Create selected children') });
         let reviewed = false;
         panel.addEventListener('input', () => { reviewed = false; create.textContent = t('Create selected children'); });
         create.onclick = () => busy(create, async () => {
           if (!reviewed) { reviewed = true; create.textContent = t('Confirm child creation'); return; }
-          const chosen = children.filter(c => c.selected.checked).map(c => ({ title: c.title.value, description: c.description.value }));
+          const chosen = children.filter(c => c.selected.checked).map(c => ({ title: c.title.value, description: c.description.value,
+            ...(azure ? { type: c.kind.value.trim(), fields: c.values.map(v => ({ reference: v.reference, value: v.value.value.trim() })).filter(v => v.value) } : {}) }));
           if (!chosen.length) throw t('Select at least one child.');
           form.creations[run.id] = await invoke('implementation_create', { machine, id: run.id, item: form.selected, children: chosen, confirmed: true });
           await implementationRuns(form);
@@ -1449,7 +1462,7 @@ async function reload() {
   dirtyGroups.clear();
   renderSavebar();
   renderLive();
-  renderRepositories(); renderResources(); renderContexts(); renderQuestions(); renderPeople(); renderNoteContexts(); renderChatSources();
+  renderRepositories(); renderResources(); renderContexts(); renderQuestions(); renderPeople(); renderGuides(); renderAgentPrompts(); renderNoteContexts(); renderChatSources();
   loadAzureCliStatus(); loadGithubCliStatus();
   await Promise.all([loadChain(), loadSelfChat()]);
 }
@@ -4059,6 +4072,140 @@ function renderPeople() {
   }
 }
 
+// ---------------------------------------------------------------- work item guides and agent instructions
+
+/** Guides and guide fields whose edit fold is open, kept across re-renders. */
+const openGuides = new Set();
+const openGuideFields = new Set();
+const openPrompts = new Set();
+const providerLabel = provider => provider === 'github' ? 'GitHub' : 'Azure DevOps';
+
+function guideFieldEditor(guide, field, changed) {
+  const key = `${guide.id}/${field.reference}`;
+  const summary = el('summary');
+  const renderSummary = () => summary.replaceChildren(el('strong', { textContent: field.name || field.reference }), ' ', el('code', { textContent: field.reference }),
+    ...(field.required ? [' ', badge(t('Required'), 'warn')] : []), ...(field.fill ? [' ', badge(t('Agents propose it'), 'active')] : []));
+  renderSummary();
+  const input = (label, value, placeholder, onchange, options = {}) => {
+    const element = el('input', { value: value ?? '', placeholder, spellcheck: false, ...options });
+    element.oninput = () => { onchange(element.value); renderSummary(); changed(); };
+    return el('label', {}, label, element);
+  };
+  const check = (label, value, onchange, disabled = false) => {
+    const box = el('input', { type: 'checkbox', checked: Boolean(value), disabled });
+    box.onchange = () => { onchange(box.checked); renderSummary(); changed(); };
+    return el('label', { class: 'check' }, box, label);
+  };
+  const values = el('textarea', { value: (field.values ?? []).join('\n'), rows: 3, spellcheck: false });
+  values.oninput = () => { field.values = lines(values.value); changed(); };
+  const guidance = el('textarea', { value: field.guidance ?? '', rows: 2 });
+  guidance.oninput = () => { field.guidance = guidance.value; changed(); };
+  const remove = el('button', { type: 'button', class: 'danger small', textContent: t('Remove field') });
+  remove.onclick = () => { guide.fields = guide.fields.filter(f => f !== field); openGuideFields.delete(key); changed(); renderGuides(); };
+  const fold = el('details', { class: 'fold', open: openGuideFields.has(key) }, summary,
+    el('div', { class: 'grid' },
+      input(t('Reference name'), field.reference, 'Custom.Field', value => { field.reference = value.trim(); }, { translate: 'no' }),
+      input(t('Label'), field.name, t('As people see it'), value => { field.name = value; }),
+      input(t('Default value'), field.default, '', value => { field.default = value; })),
+    el('div', { class: 'grid' },
+      check(t('Required'), field.required, value => { field.required = value; }),
+      check(t('The agents propose its value'), field.fill, value => { field.fill = value; }, guide.provider === 'github' || field.reference.startsWith('System.'))),
+    el('label', {}, t('Allowed values, one per line'), values),
+    el('label', {}, t('What it is for and how to fill it'), guidance),
+    el('div', { class: 'actions' }, remove));
+  fold.ontoggle = () => { if (fold.open) openGuideFields.add(key); else openGuideFields.delete(key); };
+  return fold;
+}
+
+function renderGuides() {
+  const container = $('#guides');
+  container.replaceChildren();
+  const guides = current.map.work_item_guides ??= [];
+  $('#guides-summary').textContent = guides.length ? tn(guides.length, '1 guide', '{n} guides') : '';
+  if (!guides.length) container.append(el('div', { class: 'empty' }, el('p', { textContent: t('No guides yet. Add one for each work item type you create: HU, bug, task, support task…') })));
+  for (const guide of guides) {
+    guide.fields ??= [];
+    const facts = el('p', { class: 'resource-facts' });
+    const renderFacts = () => facts.replaceChildren(el('span', { textContent: guide.purpose || t('No purpose written yet') }),
+      el('small', { textContent: [`${t('Projects')}: ${(guide.projects ?? []).join(', ') || t('all')}`,
+        tn(guide.fields.filter(f => f.fill).length, '1 field the agents fill', '{n} fields the agents fill')].join(' · ') }));
+    renderFacts();
+    const changed = () => { renderFacts(); markDirty({ target: container }); };
+    const input = (label, value, placeholder, onchange, options = {}) => {
+      const element = el('input', { value: value ?? '', placeholder, spellcheck: false, ...options });
+      element.oninput = () => { onchange(element.value); changed(); };
+      return el('label', {}, label, element);
+    };
+    const area = (label, value, placeholder, onchange, rows = 3) => {
+      const element = el('textarea', { value: value ?? '', placeholder, rows });
+      element.oninput = () => { onchange(element.value); changed(); };
+      return el('label', {}, label, element);
+    };
+    const provider = el('select', {}, ...['azure', 'github'].map(value => el('option', { value, textContent: providerLabel(value), selected: guide.provider === value })));
+    provider.onchange = () => {
+      guide.provider = provider.value;
+      if (guide.provider === 'github') for (const f of guide.fields) f.fill = false;
+      changed(); renderGuides();
+    };
+    const fields = el('div', { class: 'list' }, ...guide.fields.map(field => guideFieldEditor(guide, field, changed)));
+    const addField = el('button', { type: 'button', class: 'secondary small', textContent: t('Add field') });
+    addField.onclick = () => {
+      const field = { reference: '', name: '', required: false, values: [], default: '', guidance: '', fill: false };
+      guide.fields.push(field);
+      openGuideFields.add(`${guide.id}/`);
+      changed(); renderGuides();
+    };
+    const remove = el('button', { type: 'button', class: 'danger small', textContent: t('Remove guide') });
+    remove.onclick = () => { current.map.work_item_guides = guides.filter(g => g !== guide); markDirty({ target: container }); renderGuides(); };
+    const edit = el('details', { class: 'fold resource-edit', open: openGuides.has(guide.id) },
+      el('summary', { textContent: t('Edit the guide and its fields') }),
+      el('div', { class: 'grid' },
+        input(t('What you call it'), guide.name, 'HU', value => { guide.name = value; }),
+        input(t('Type, as the provider names it'), guide.type, 'Product Backlog Item', value => { guide.type = value.trim(); }, { translate: 'no' }),
+        el('label', {}, t('Provider'), provider),
+        input(t('Projects or repositories, comma separated'), (guide.projects ?? []).join(', '), t('Empty applies to all'), value => { guide.projects = names(value); })),
+      area(t('When it is used'), guide.purpose, t('What this type is for in your organization'), value => { guide.purpose = value; }),
+      area(t('How to write it'), guide.instructions, t('Title pattern, description structure, conventions'), value => { guide.instructions = value; }, 6),
+      el('fieldset', {}, el('legend', { textContent: t('Fields') }), fields, el('div', { class: 'actions' }, addField)),
+      el('div', { class: 'actions' }, remove));
+    edit.ontoggle = () => { if (edit.open) openGuides.add(guide.id); else openGuides.delete(guide.id); };
+    container.append(el('div', { class: 'resource' },
+      el('div', { class: 'resource-head' }, el('strong', { class: 'title', textContent: guide.name || guide.type }), el('code', { textContent: guide.type }), el('span', { class: 'grow' }),
+        badge(providerLabel(guide.provider), 'muted'), badge(tn(guide.fields.length, '1 field', '{n} fields'), guide.fields.length ? 'active' : 'muted')),
+      facts, edit));
+  }
+}
+
+function renderAgentPrompts() {
+  const container = $('#agent-prompts');
+  container.replaceChildren();
+  const changes = current.map.agent_prompts ??= [];
+  for (const built of current.agent_prompts ?? []) {
+    const change = () => changes.find(c => c.id === built.id);
+    const state = el('span');
+    const renderState = () => state.replaceChildren(change() ? badge(t('Your instructions'), 'active') : badge(t('Default instructions'), 'muted'));
+    renderState();
+    const text = el('textarea', { value: change()?.instructions ?? built.instructions, rows: 8 });
+    text.oninput = () => {
+      changes.splice(0, changes.length, ...changes.filter(c => c.id !== built.id));
+      if (text.value.trim() !== built.instructions) changes.push({ id: built.id, instructions: text.value });
+      renderState(); markDirty({ target: container });
+    };
+    const reset = el('button', { type: 'button', class: 'secondary small', textContent: t('Restore the default') });
+    reset.onclick = () => {
+      changes.splice(0, changes.length, ...changes.filter(c => c.id !== built.id));
+      text.value = built.instructions;
+      renderState(); markDirty({ target: container });
+    };
+    const edit = el('details', { class: 'fold resource-edit', open: openPrompts.has(built.id) }, el('summary', { textContent: t('Edit the instructions') }),
+      el('label', {}, t('Instructions'), text), el('div', { class: 'actions' }, reset));
+    edit.ontoggle = () => { if (edit.open) openPrompts.add(built.id); else openPrompts.delete(built.id); };
+    container.append(el('div', { class: 'resource' },
+      el('div', { class: 'resource-head' }, el('strong', { class: 'title', textContent: t(built.name) }), el('span', { class: 'grow' }), state),
+      el('p', { class: 'resource-facts' }, el('span', { textContent: t(built.summary) })), edit));
+  }
+}
+
 // ---------------------------------------------------------------- notes
 
 let notesList = [];
@@ -4756,6 +4903,20 @@ $('#add-context').onclick = () => {
   markDirty({ target: $('#add-context') });
   renderContexts(); renderNoteContexts();
   notify(t('Context {id} added. Choose its sources and save the changes.', { id }));
+};
+$('#add-guide').onclick = () => {
+  const id = $('#guide-id').value.trim();
+  const type = $('#guide-type').value.trim();
+  if (!/^[a-z][a-z0-9_-]{0,63}$/.test(id) || !type) return fail(t('Give the guide an ID (lowercase letters, digits, - or _) and the type as the provider names it.'));
+  const guides = current.map.work_item_guides ??= [];
+  if (guides.some(g => g.id === id)) return fail(t('That ID already exists.'));
+  guides.push({ id, provider: $('#guide-provider').value, type, name: $('#guide-name').value.trim(), projects: [], purpose: '', instructions: '', fields: [] });
+  openGuides.add(id);
+  for (const name of ['#guide-id', '#guide-type', '#guide-name']) field(name, '');
+  $('#guide-form').open = false;
+  markDirty({ target: $('#add-guide') });
+  renderGuides();
+  notify(t('Guide {id} added. Describe how the type is used and save the changes.', { id }));
 };
 $('#add-notes-source').onclick = () => {
   if (current.map.resources.some(r => r.kind === 'notes')) return;

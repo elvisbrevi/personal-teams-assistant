@@ -25,6 +25,13 @@ pub struct KnowledgeMap {
     /// People the user writes to, and how the user addresses each.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub people: Vec<Person>,
+    /// What the user changed in the implementation agents' instructions; see
+    /// `crate::agent_prompts`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub agent_prompts: Vec<crate::agent_prompts::Prompt>,
+    /// How the user's work item types are used and filled; see `crate::work_items`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub work_item_guides: Vec<crate::work_items::Guide>,
 }
 /// Someone who writes to the user, and how the user addresses them. It reaches the model only
 /// when answering that person.
@@ -177,6 +184,8 @@ impl KnowledgeMap {
         if map.questions.is_none() {
             crate::cases::validate(&map.cases, |id| map.resources.iter().any(|r| r.id == id))?;
         }
+        crate::agent_prompts::validate(&map.agent_prompts)?;
+        crate::work_items::validate(&map.work_item_guides)?;
         ensure!(map.people.len() <= 500, "too many people");
         let mut person_ids = BTreeSet::new();
         for person in &map.people {

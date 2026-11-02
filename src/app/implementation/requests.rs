@@ -222,8 +222,19 @@ async fn run(host: &Arc<Host>, request: Request, prepared: Value, directory: Pat
     let result = async {
         authority::require_execution(&host.state)?;
         let language = read_config(&host.state.config_path)?.llm.language;
-        let input =
-            json!({"context":request.context,"kind":request.kind,"language":language}).to_string();
+        let map = KnowledgeMap::load(&host.state.map_path)?;
+        let provider = request.target["provider"].as_str().unwrap();
+        // The provider's type name: the process type resolved for Azure, the issue type on GitHub.
+        let kind = prepared["kind"].as_str().unwrap_or("Epic");
+        let project = request.target["project"].as_str().unwrap_or_default();
+        let guide = crate::work_items::for_item(&map.work_item_guides, provider, kind, project);
+        let mut input = json!({"context":request.context,"kind":request.kind,"type":kind,"language":language,"today":chrono::Local::now().date_naive()});
+        if let Some(guide) = guide {
+            input["work_item_guide"] = json!(guide);
+        }
+        let input = input.to_string();
+        let instructions =
+            crate::agent_prompts::resolve(&map.agent_prompts, crate::agent_prompts::REQUEST);
         let observer = |session: Option<&str>| {
             authority::require_execution(&host.state)?;
             db.request_update(&request.id, |record| {
@@ -246,6 +257,7 @@ async fn run(host: &Arc<Host>, request: Request, prepared: Value, directory: Pat
         let draft = crate::llm::implementation::request(
             (&request.provider, &request.model, &request.effort),
             directory,
+            &instructions,
             &input,
             &observer,
             super::remote_observer(host, &request.id),
@@ -254,7 +266,6 @@ async fn run(host: &Arc<Host>, request: Request, prepared: Value, directory: Pat
         validate_child(&draft)?;
         authority::require_execution(&host.state)?;
         // Recheck catalog membership after generation: a model cannot authorize a destination.
-        let provider = request.target["provider"].as_str().unwrap();
         let available = targets(host, provider, request.target["source"].as_str()).await?;
         ensure!(
             available.contains(&request.target),
@@ -264,6 +275,23 @@ async fn run(host: &Arc<Host>, request: Request, prepared: Value, directory: Pat
             Some(super::super::azure_cli::require().await?)
         } else {
             None
+        };
+        // Field values are checked against the guide and the live type before anything is sent;
+        // GitHub issues take none.
+        let fields = if provider == "azure" {
+            let (client, key, catalog) =
+                azure(&host.state, request.target["source"].as_str().unwrap())?;
+            crate::ado::implementation::request_fields(
+                &client,
+                &key,
+                &catalog,
+                &map.work_item_guides,
+                &prepared,
+                &draft,
+            )
+            .await?
+        } else {
+            Vec::new()
         };
         db.request_update(&request.id, |record| {
             record["state"] = json!("sending");
@@ -280,6 +308,7 @@ async fn run(host: &Arc<Host>, request: Request, prepared: Value, directory: Pat
                 write_session.as_ref().unwrap().token(),
                 &prepared,
                 &draft,
+                fields,
             )
             .await?
         };

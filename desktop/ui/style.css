@@ -522,6 +522,10 @@ nav button .short { display: none; }
 .fold > summary small { color: var(--muted); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif; font-weight: 400; }
 .fold > label:first-of-type { margin-top: 0; }
 .fold.warnings { flex-basis: 100%; margin-top: .2rem; border-top: 0; }
+/* Work item guides: field folds wrap long reference names instead of widening the panel. */
+#guides fieldset { min-width: 0; }
+#guides .fold > summary { flex-wrap: wrap; row-gap: .3rem; }
+#guides code { overflow-wrap: anywhere; }
 .fold.warnings > summary { padding: .3rem 0; color: var(--warn); font-size: .9rem; }
 .fold-panel > summary { display: flex; align-items: center; gap: .6rem; cursor: pointer; list-style: none; font-family: var(--display); font-weight: 750; font-size: 1.08rem; }
 .fold-panel > summary::-webkit-details-marker { display: none; }
