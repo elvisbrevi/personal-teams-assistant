@@ -9,12 +9,15 @@
 //! someone adds it here deliberately. A source keeps its account meaning (ID, audiences, flags,
 //! the repository *alias* and a relative path) while the alias's folder on a computer stays that
 //! computer's own binding: a source whose binding does not resolve is unavailable there, never
-//! reinterpreted.
+//! reinterpreted. The organization (its name, entries and documenting sources) and the work
+//! item guides are account data too, and travel with it.
 use crate::{
     config::{Config, Language, LlmChoice},
     index::Note,
     knowledge::{Access, Context, KnowledgeMap, Resource},
+    organization::{Entry, Organization},
     questions::Question,
+    work_items::Guide,
 };
 use anyhow::{Result, ensure};
 use serde::{Deserialize, Serialize};
@@ -43,7 +46,14 @@ pub const SETTINGS_FIELDS: [&str; 7] = [
     "policy.sensitive_patterns",
 ];
 /// What synchronization carries besides the settings.
-pub const COLLECTIONS: [&str; 4] = ["sources", "contexts", "questions", "notes"];
+pub const COLLECTIONS: [&str; 6] = [
+    "sources",
+    "contexts",
+    "questions",
+    "notes",
+    "organization",
+    "work_item_guides",
+];
 
 /// Preferences that follow the account.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -105,7 +115,9 @@ impl Settings {
     }
 }
 
-/// Everything portable except the notes, which are paged. Collections are ordered by ID.
+/// Everything portable except the notes, which are paged. Collections are ordered by ID. The
+/// organization and the guides are left out while empty, so an account without them keeps the
+/// document (and the revision digest) an older installation computes.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct Document {
@@ -114,6 +126,10 @@ pub struct Document {
     pub sources: Vec<Resource>,
     pub contexts: Vec<Context>,
     pub questions: Vec<Question>,
+    #[serde(default, skip_serializing_if = "Organization::is_empty")]
+    pub organization: Organization,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub work_item_guides: Vec<Guide>,
 }
 
 impl PartialEq for Resource {
@@ -174,12 +190,19 @@ impl Document {
         contexts.sort_by(|a, b| a.id.cmp(&b.id));
         let mut questions = map.questions.clone().unwrap_or_default();
         questions.sort_by(|a, b| a.id.cmp(&b.id));
+        let mut organization = map.organization.clone();
+        organization.entries.sort_by(|a, b| a.id.cmp(&b.id));
+        organization.sources.sort();
+        let mut work_item_guides = map.work_item_guides.clone();
+        work_item_guides.sort_by(|a, b| a.id.cmp(&b.id));
         Self {
             schema: SCHEMA,
             settings: Settings::of(config),
             sources,
             contexts,
             questions,
+            organization,
+            work_item_guides,
         }
     }
 
@@ -202,7 +225,8 @@ impl Document {
             questions: Some(self.questions.clone()),
             people: Vec::new(),
             agent_prompts: Vec::new(),
-            work_item_guides: Vec::new(),
+            work_item_guides: self.work_item_guides.clone(),
+            organization: self.organization.clone(),
         };
         KnowledgeMap::parse(&toml::to_string(&scratch)?)?;
         Ok(())
@@ -224,10 +248,11 @@ impl Document {
     }
 
     /// Install this document into a profile: the portable fields are replaced, everything
-    /// local (paths, repository bindings, people, legacy cases, identity) is kept. Sources whose
-    /// repository binding does not resolve here are left out and reported, and so are the
-    /// questions that only read them; contexts and questions that lose some are reported as
-    /// partial. Nothing is enabled, widened or defaulted.
+    /// local (paths, repository bindings, people, legacy cases, agent instructions, identity)
+    /// is kept. Sources whose repository binding does not resolve here are left out and
+    /// reported, and so are the questions that only read them; contexts and questions that lose
+    /// some are reported as partial, and the organization stops naming them here. Nothing is
+    /// enabled, widened or defaulted.
     pub fn install(
         &self,
         config: &Config,
@@ -284,6 +309,10 @@ impl Document {
                 ..question.clone()
             });
         }
+        let organization = Organization {
+            sources: strip(&self.organization.sources),
+            ..self.organization.clone()
+        };
         let map = KnowledgeMap {
             repositories: map.repositories.clone(),
             resources: kept,
@@ -292,7 +321,8 @@ impl Document {
             questions: Some(questions),
             people: map.people.clone(),
             agent_prompts: map.agent_prompts.clone(),
-            work_item_guides: map.work_item_guides.clone(),
+            work_item_guides: self.work_item_guides.clone(),
+            organization,
         };
         (config, map, unavailable)
     }
@@ -333,6 +363,16 @@ pub struct Patch {
     pub contexts: Delta<Context>,
     #[serde(default)]
     pub questions: Delta<Question>,
+    /// The organization's new name, when it changed (empty clears it).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub organization_name: Option<String>,
+    /// The organization's documenting sources, whole, when they changed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub organization_sources: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Delta::is_empty")]
+    pub organization_entries: Delta<Entry>,
+    #[serde(default, skip_serializing_if = "Delta::is_empty")]
+    pub work_item_guides: Delta<Guide>,
 }
 
 impl Patch {
@@ -341,6 +381,10 @@ impl Patch {
             && self.sources.is_empty()
             && self.contexts.is_empty()
             && self.questions.is_empty()
+            && self.organization_name.is_none()
+            && self.organization_sources.is_none()
+            && self.organization_entries.is_empty()
+            && self.work_item_guides.is_empty()
     }
     /// What changes between two projections of the same installation.
     pub fn between(before: &Document, after: &Document) -> Self {
@@ -369,6 +413,16 @@ impl Patch {
             sources: delta(&before.sources, &after.sources, |s| &s.id),
             contexts: delta(&before.contexts, &after.contexts, |c| &c.id),
             questions: delta(&before.questions, &after.questions, |q| &q.id),
+            organization_name: (before.organization.name != after.organization.name)
+                .then(|| after.organization.name.clone()),
+            organization_sources: (before.organization.sources != after.organization.sources)
+                .then(|| after.organization.sources.clone()),
+            organization_entries: delta(
+                &before.organization.entries,
+                &after.organization.entries,
+                |e| &e.id,
+            ),
+            work_item_guides: delta(&before.work_item_guides, &after.work_item_guides, |g| &g.id),
         }
     }
 
@@ -429,9 +483,46 @@ impl Patch {
             |q| &q.id,
             |q| &mut q.sources,
         );
+        let organization = &mut document.organization;
+        if let Some(name) = &self.organization_name {
+            organization.name = name.clone();
+        }
+        if let Some(sources) = &self.organization_sources {
+            // References the sender could not see are not its to drop.
+            let mut kept: Vec<String> = organization
+                .sources
+                .iter()
+                .filter(|s| unavailable.contains(*s) && !sources.contains(*s))
+                .cloned()
+                .collect();
+            kept.extend(sources.iter().cloned());
+            organization.sources = kept;
+        }
+        let entries = &self.organization_entries;
+        organization
+            .entries
+            .retain(|e| !entries.remove.contains(&e.id));
+        for entry in &entries.upsert {
+            organization.entries.retain(|e| e.id != entry.id);
+            organization.entries.push(entry.clone());
+        }
+        let guides = &self.work_item_guides;
+        document
+            .work_item_guides
+            .retain(|g| !guides.remove.contains(&g.id));
+        for guide in &guides.upsert {
+            document.work_item_guides.retain(|g| g.id != guide.id);
+            document.work_item_guides.push(guide.clone());
+        }
         document.sources.sort_by(|a, b| a.id.cmp(&b.id));
         document.contexts.sort_by(|a, b| a.id.cmp(&b.id));
         document.questions.sort_by(|a, b| a.id.cmp(&b.id));
+        document
+            .organization
+            .entries
+            .sort_by(|a, b| a.id.cmp(&b.id));
+        document.organization.sources.sort();
+        document.work_item_guides.sort_by(|a, b| a.id.cmp(&b.id));
         Ok(())
     }
 }
@@ -718,13 +809,98 @@ mod tests {
             ..Default::default()
         });
         after.questions[0].examples.push("Qué hice hoy".into());
+        after.organization.name = "Contoso".into();
+        after.organization.entries.push(Entry {
+            id: "review".into(),
+            kind: crate::organization::Kind::Norm,
+            title: "Reviews".into(),
+            text: "Every change gets two approvals.".into(),
+            projects: vec![],
+            updated_at: 5,
+        });
+        after.work_item_guides.push(Guide {
+            id: "task".into(),
+            kind: "Task".into(),
+            provider: "azure".into(),
+            ..Default::default()
+        });
         let patch = Patch::between(&before, &after);
         assert!(!patch.is_empty() && patch.sources.is_empty());
+        assert_eq!(patch.organization_entries.upsert.len(), 1);
+        assert_eq!(patch.work_item_guides.upsert.len(), 1);
+        assert!(patch.organization_sources.is_none());
         let mut applied = before.clone();
         patch.apply_to(&mut applied, &BTreeSet::new()).unwrap();
         assert_eq!(applied, after);
         assert!(Patch::between(&after, &after).is_empty());
         assert_ne!(before.digest(&[]), after.digest(&[]));
         assert_eq!(after.digest(&[]), applied.digest(&[]));
+        // Removing them travels too.
+        let back = Patch::between(&after, &before);
+        assert_eq!(back.organization_entries.remove, ["review"]);
+        assert_eq!(back.work_item_guides.remove, ["task"]);
+        let mut applied = after.clone();
+        back.apply_to(&mut applied, &BTreeSet::new()).unwrap();
+        assert_eq!(applied, before);
+    }
+
+    #[test]
+    fn the_organization_and_guides_travel_with_the_account() {
+        let (config, mut map) = profile();
+        let empty = Document::project(&config, &map);
+        // Without them, the document is the one an older installation computes.
+        let text = serde_json::to_string(&empty).unwrap();
+        assert!(!text.contains("organization") && !text.contains("work_item_guides"));
+        let mut site = url("site");
+        site.enabled = false;
+        let mut hidden = url("hidden");
+        hidden.access = Access::Repository {
+            repository: "elsewhere".into(),
+        };
+        map.resources.extend([site, hidden]);
+        map.repositories
+            .insert("elsewhere".into(), PathBuf::from("/unbound"));
+        map.organization = Organization {
+            name: "Contoso".into(),
+            entries: vec![],
+            sources: vec!["site".into(), "hidden".into()],
+        };
+        map.work_item_guides = vec![Guide {
+            id: "task".into(),
+            kind: "Task".into(),
+            provider: "azure".into(),
+            ..Default::default()
+        }];
+        let account = Document::project(&config, &map);
+        account.check().unwrap();
+        let (local_config, mut local) = profile();
+        local.work_item_guides = vec![Guide {
+            id: "local-only".into(),
+            kind: "Bug".into(),
+            provider: "azure".into(),
+            ..Default::default()
+        }];
+        let (_, installed, unavailable) =
+            account.install(&local_config, &local, |r| alias(&r.access).is_none());
+        // The account's guides replace the computer's; a source missing here leaves its name.
+        assert_eq!(installed.work_item_guides, map.work_item_guides);
+        assert_eq!(installed.organization.name, "Contoso");
+        assert_eq!(installed.organization.sources, ["site"]);
+        assert_eq!(unavailable.sources[0].id, "hidden");
+        KnowledgeMap::parse(&toml::to_string(&installed).unwrap()).unwrap();
+
+        // A change from that computer keeps the source it could not see.
+        let mut changed = installed.clone();
+        changed.organization.sources.clear();
+        let patch = Patch::between(
+            &Document::project(&local_config, &installed),
+            &Document::project(&local_config, &changed),
+        );
+        assert_eq!(patch.organization_sources, Some(vec![]));
+        let mut next = account.clone();
+        patch
+            .apply_to(&mut next, &BTreeSet::from(["hidden".to_owned()]))
+            .unwrap();
+        assert_eq!(next.organization.sources, ["hidden"]);
     }
 }

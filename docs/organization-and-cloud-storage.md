@@ -5,6 +5,9 @@ Design, 2026-11-02. Phase 1 (analysis) of the move described in §14 of the
 [§11](#11-decisions); the phases in [§10](#10-phases) follow them. Cloudflare limits and prices were read from the official documentation on
 2026-11-02 ([sources](#sources)); re-read them before each implementation phase.
 
+Phase 1b (0.10.16) implemented the local organization layer: see §8 «Organization» and §16 of the
+architecture, and the skill's knowledge and account-configuration references.
+
 ## 1. Goals and non-goals
 
 Goals:
@@ -127,27 +130,14 @@ Compatibility: `[[work_item_guides]]` keeps its name and shape (fields cannot be
 `[organization]` section of `KnowledgeMap` (`#[serde(default)]`, omitted when empty) holds
 `name` (display only), `entries` and `sources` (source IDs). Guides therefore need no local
 migration: the Organization view shows them as its `work_item_guide` entries. In the cloud they
-are stored in the organization database when the account belongs to one, otherwise in the
-account's.
+are stored in the account's database with the rest of the organization (§11: organizations are
+not shared between accounts).
 
-### Proposed vocabulary (for `CONTEXT.md` once implemented)
+### Vocabulary
 
-- **Organization**: the optional, shared conventions of the user's employer — guides, norms,
-  architecture, conventions, glossary and templates — kept as data and detachable from the
-  account. _Avoid_: company, tenant (Microsoft's), workspace.
-- **Organization entry**: one stored item of the organization: a work item guide, a norm, an
-  architecture description, a convention, a glossary term or a template. _Avoid_: rule, policy
-  (code enforces policy, not entries).
-- **Organization source**: a source the user marked as documenting the organization (a Wiki, a
-  repository, a file or a URL); its access stays that of the source. _Avoid_: provider (in
-  user-facing text).
-- **Account store**: where an account's configuration, knowledge and history are kept: the local
-  profile, or the account's cloud database with the local profile as its replica. _Avoid_: cloud
-  sync, backup.
-- **Local replica**: an installation's readable copy of the account store, plus the caches
-  derived from it; it answers while offline. _Avoid_: offline mode.
-
-"Work item guide" keeps its meaning and becomes a kind of organization entry.
+The terms Organization, Organization entry, Organization source, Account store and Local replica
+are defined in [`CONTEXT.md`](../CONTEXT.md) since phase 1b. "Work item guide" keeps its meaning and
+is a kind of organization entry.
 
 ## 5. Cloudflare options
 
@@ -342,7 +332,7 @@ parity, the `AGENTS.md` checks, and delivery verified on crates.io and on the se
 | Phase | Content | Risks |
 | --- | --- | --- |
 | 1a. Cleanup (0.10.15) | Synthetic names in tests, docs, README, prompts, the GUI placeholder and catalogs; To-Do items carry `category`; the GUI decides by category; the task type listed with bugs comes from its guide (`listed_with_bugs`); the production guide is updated as data in the same delivery. | The production To-Do stops listing that type until its guide carries the field: update it right after the install, verify the list. |
-| 1b. Organization (local) | `[organization]` in the map (name, entries, source IDs); guides shown as entries; new `organization` source kind (disabled by default) and index documents; Settings › Organization replaces the current guides editor (no duplicate control); `pta organization …` with `pta guides …` kept as its guides subcommand; MCP `organization_*`; agents receive norms and architecture as untrusted input; skill, architecture and `CONTEXT.md`. The organization, guides included, joins the account configuration's allowlist and travels with the account. | Prompt size growth for agents (bound entries per run); a second place to edit guides if the old editor is not removed in the same PR. |
+| 1b. Organization (local) — done (0.10.16) | `[organization]` in the map (name, entries, source IDs); guides shown as entries; new `organization` source kind (disabled by default) and index documents; Settings › Organization replaces the current guides editor (no duplicate control); `pta organization …` with `pta guides …` kept as its guides subcommand; MCP `organization_*`; agents receive norms and architecture as untrusted input; skill, architecture and `CONTEXT.md`. The organization, guides included, joins the account configuration's allowlist and travels with the account. | Prompt size growth for agents (bound entries per run); a second place to edit guides if the old editor is not removed in the same PR. |
 | 2. Storage abstraction | Repository traits per aggregate (settings and map, notes and feedback, audit history, activity records, runs, organization), the current local implementation as default, one shared contract test suite. No behavior change. | Broad refactor of hot paths: done store by store, each PR behavior-neutral and fully tested. |
 | 3a. Worker and authentication | `cloud/` Worker, `Registry`, `AccountStore` schema v1 (encrypted records with clear metadata), Access service token, installation credential, health; Workers Builds; host `cloud status/connect`. | Access/Workers configuration mistakes: staging Worker first, contract tests including cross-account attempts. |
 | 3b. Mirror | Outbox for append-only records, encrypted snapshots of configuration, `cloud verify`; local stays the source of truth. | Outbox growth while offline (bounded, visible in status); latency measured here. |

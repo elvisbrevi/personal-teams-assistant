@@ -558,6 +558,7 @@ pub(crate) fn init_state(config_dir: &Path, data_dir: &Path) -> Result<DesktopSt
                 people: Vec::new(),
                 agent_prompts: Vec::new(),
                 work_item_guides: Vec::new(),
+                organization: Default::default(),
             })?,
         )?;
     }
@@ -896,7 +897,7 @@ async fn start_service(state: &DesktopState) -> Result<()> {
 async fn save_settings(
     host: &Arc<Host>,
     mut config: Config,
-    map: KnowledgeMap,
+    mut map: KnowledgeMap,
     tunnel_config: String,
 ) -> std::result::Result<(), String> {
     let state = &host.state;
@@ -922,6 +923,11 @@ async fn save_settings(
     // An installation signed in to an account first sends the portable part of the change to the
     // account's coordinator, which decides it under optimistic concurrency.
     let previous_map = KnowledgeMap::load(&state.map_path).map_err(fail)?;
+    crate::organization::stamp(
+        &previous_map.organization,
+        &mut map.organization,
+        chrono::Utc::now().timestamp(),
+    );
     let forwarded =
         portable::before_save(state, (&previous, &previous_map), (&config, &map)).await?;
     variables::identity::save(host, &previous, &config).await?;
@@ -939,7 +945,8 @@ async fn save_settings(
     Ok(())
 }
 
-/// The knowledge index keeps no documents of repository sources that left the map.
+/// The knowledge index keeps no documents of repository sources that left the map, and holds
+/// the map's current questions and organization.
 fn forget_removed_sources(config: &Config, map: &KnowledgeMap) {
     let path = config.server.data_dir.join(crate::index::FILE);
     if !path.exists() {
@@ -955,6 +962,7 @@ fn forget_removed_sources(config: &Config, map: &KnowledgeMap) {
         if let Some(questions) = &map.questions {
             index.sync_questions(questions)?;
         }
+        index.sync_organization(&map.organization, &map.work_item_guides)?;
         for source in index.status()?.into_keys() {
             if !source.starts_with('@') && !kept.contains(source.as_str()) {
                 index.forget(&source)?;

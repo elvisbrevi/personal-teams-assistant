@@ -2050,9 +2050,10 @@ impl Pipeline {
             statement: text("statement"),
         }
     }
-    /// Search an indexed source (a whole repository or the verified notes) for `query`: a
-    /// repository is first brought up to date with its checkout, and the notes keep those of
-    /// the source's contexts (or of the request's context) and the general ones. With
+    /// Search an indexed source (a whole repository, the verified notes or the organization) for
+    /// `query`: a repository is first brought up to date with its checkout, the organization
+    /// with the map, and the notes keep those of the source's contexts (or of the request's
+    /// context) and the general ones. With
     /// embeddings configured, the request's vector joins the full-text ranking.
     async fn indexed(
         &self,
@@ -2087,6 +2088,13 @@ impl Pipeline {
                 },
                 "search_notes",
             ),
+            Access::Organization {} => {
+                crate::index::Index::open(&path)?.sync_organization(
+                    &self.knowledge.organization,
+                    &self.knowledge.work_item_guides,
+                )?;
+                (crate::index::ORGANIZATION, None, "search_organization")
+            }
             _ => anyhow::bail!("not an indexed source"),
         };
         let index = crate::index::Index::open(&path)?;
@@ -2109,7 +2117,7 @@ impl Pipeline {
         Ok(hits
             .iter()
             .map(|h| {
-                if h.source == crate::index::NOTES {
+                if h.source == crate::index::NOTES || h.source == crate::index::ORGANIZATION {
                     format!("### {}\n{}\n\n", h.heading, h.text)
                 } else {
                     format!("### {} ({})\n{}\n\n", h.heading, h.key, h.text)

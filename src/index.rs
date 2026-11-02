@@ -24,6 +24,8 @@ pub const NOTES: &str = "@notes";
 /// The requests of answers the user approved as examples.
 pub const EXAMPLES: &str = "@examples";
 pub const QUESTIONS: &str = "@questions";
+/// The organization's entries and work item guides (`guide:ID` keys).
+pub const ORGANIZATION: &str = "@organization";
 pub fn feedback_source(question: &str) -> String {
     format!("@feedback:{question}")
 }
@@ -244,6 +246,55 @@ impl Index {
                     "[]",
                     &format!("{}\n{}", q.text, q.examples.join("\n")),
                 )?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Make the organization's documents those of `organization` and `guides`: changed ones are
+    /// rewritten, the others removed. Each entry and each guide is one document.
+    pub fn sync_organization(
+        &self,
+        organization: &crate::organization::Organization,
+        guides: &[crate::work_items::Guide],
+    ) -> Result<()> {
+        let mut wanted: BTreeMap<String, (String, String, String)> = BTreeMap::new();
+        for entry in &organization.entries {
+            wanted.insert(
+                entry.id.clone(),
+                (
+                    entry.title.clone(),
+                    serde_json::to_string(entry)?,
+                    crate::organization::entry_text(entry),
+                ),
+            );
+        }
+        for guide in guides {
+            wanted.insert(
+                format!("guide:{}", guide.id),
+                (
+                    crate::organization::guide_title(guide),
+                    serde_json::to_string(guide)?,
+                    crate::organization::guide_text(guide),
+                ),
+            );
+        }
+        let mut db = self.db.lock().unwrap();
+        let tx = db.transaction()?;
+        let held: Vec<(String, String)> = tx
+            .prepare("SELECT key,stamp FROM documents WHERE source=?1")?
+            .query_map([ORGANIZATION], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        for (key, _) in held.iter().filter(|(key, _)| !wanted.contains_key(key)) {
+            tx.execute(
+                "DELETE FROM documents WHERE source=?1 AND key=?2",
+                params![ORGANIZATION, key],
+            )?;
+        }
+        for (key, (title, stamp, text)) in &wanted {
+            if !held.iter().any(|(k, s)| k == key && s == stamp) {
+                write_document(&tx, ORGANIZATION, key, title, stamp, "[]", text)?;
             }
         }
         tx.commit()?;
@@ -1257,6 +1308,55 @@ mod tests {
         assert_eq!(index.status().unwrap()["handbook"].documents, 1);
         index.forget("handbook").unwrap();
         assert!(!index.status().unwrap().contains_key("handbook"));
+    }
+
+    #[test]
+    fn organization_entries_and_guides_are_documents_of_their_own() {
+        use crate::organization::{Entry, Kind, Organization};
+        let data = tempfile::tempdir().unwrap();
+        let index = Index::open(&data.path().join(FILE)).unwrap();
+        let mut organization = Organization {
+            entries: vec![Entry {
+                id: "branching".into(),
+                kind: Kind::Convention,
+                title: "Branch names".into(),
+                text: "A feature branch is named after its work item.".into(),
+                projects: vec!["Billing".into()],
+                updated_at: 1,
+            }],
+            ..Default::default()
+        };
+        let guide = crate::work_items::Guide {
+            id: "support".into(),
+            provider: "azure".into(),
+            kind: "Task".into(),
+            name: "Support task".into(),
+            purpose: "Registers the review of a pull request.".into(),
+            ..Default::default()
+        };
+        index
+            .sync_organization(&organization, std::slice::from_ref(&guide))
+            .unwrap();
+        let hits = index
+            .search(&[ORGANIZATION], "feature branch", None, None, 3)
+            .unwrap();
+        assert_eq!(hits[0].key, "branching");
+        assert!(hits[0].text.contains("Convention. Applies to: Billing."));
+        let hits = index
+            .search(&[ORGANIZATION], "review pull request", None, None, 3)
+            .unwrap();
+        assert_eq!(hits[0].key, "guide:support");
+        assert_eq!(hits[0].title, "Support task (Task)");
+        // Another source never reads them; removed ones leave the index.
+        assert!(
+            index
+                .search(&[NOTES], "feature branch", None, None, 3)
+                .unwrap()
+                .is_empty()
+        );
+        organization.entries.clear();
+        index.sync_organization(&organization, &[]).unwrap();
+        assert!(!index.status().unwrap().contains_key(ORGANIZATION));
     }
 
     #[test]

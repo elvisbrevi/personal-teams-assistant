@@ -71,8 +71,16 @@ _Avoid_: story, parent
 ### Accounts
 
 **Account configuration**:
-The preferences, model choices, sources with their audiences, contexts, questions and verified notes that follow an assistant account to every installation signed in to it. Folders, credentials, sign-ins and tunnels are never part of it.
+The preferences, model choices, sources with their audiences, contexts, questions, verified notes, the organization and its work item guides that follow an assistant account to every installation signed in to it. Folders, credentials, sign-ins and tunnels are never part of it.
 _Avoid_: profile (the profile is one computer's whole set of files), settings sync
+
+**Account store**:
+Where an account's configuration, knowledge and history are kept: the local profile, or the account's cloud database with the local profile as its replica.
+_Avoid_: cloud sync, backup
+
+**Local replica**:
+An installation's readable copy of the account store, plus the caches derived from it; it answers while offline.
+_Avoid_: offline mode
 
 **Account standing**:
 Whether an installation signed in to an account may still act for it, from its latest exchange with the coordinator: live, offline, signed out or revoked. Cached configuration stays readable in every state; a new use of an account variable needs a live answer.
@@ -94,6 +102,20 @@ _Avoid_: downloaded update, installed update
 A prepared update that was installed, restarted and found healthy; only the update journal's `committed` outcome says so, never the installed version alone. An unhealthy or interrupted one is rolled back to the previous matched application and `pta` pair.
 _Avoid_: finished update, upgrade
 
+### Organization
+
+**Organization**:
+The optional conventions of the organization the user works for — work item guides, norms, architecture, conventions, glossary and templates — kept as data of the user's own account (never shared with another account) and detachable from it.
+_Avoid_: company, tenant (Microsoft's), workspace
+
+**Organization entry**:
+One stored item of the organization: a norm, an architecture description, a convention, a glossary term or a template, optionally limited to some projects; a work item guide is one too. It informs answers and agents and grants nothing.
+_Avoid_: rule, policy (code enforces policy, not entries)
+
+**Organization source**:
+A source the user marked as documenting the organization (a Wiki, a repository, a file or a URL); its access stays that of the source.
+_Avoid_: provider (in user-facing text)
+
 ### Implementation
 
 **Execution machine**:
@@ -112,7 +134,7 @@ One attempt to plan children or implement a selected task, development bug or Gi
 _Avoid_: activity run
 
 **Work item guide**:
-How the user's organization uses one work item type: when it is used, how it is written and what each field is for, with its allowed values and whether the agents may propose it. The implementation agents follow it; it never authorizes a destination, a type or a value.
+How the user's organization uses one work item type: when it is used, how it is written and what each field is for, with its allowed values and whether the agents may propose it. A kind of organization entry. The implementation agents follow it; it never authorizes a destination, a type or a value.
 _Avoid_: template, schema
 
 **Agent instructions**:

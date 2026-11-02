@@ -232,6 +232,10 @@ async fn run(host: &Arc<Host>, request: Request, prepared: Value, directory: Pat
         if let Some(guide) = guide {
             input["work_item_guide"] = json!(guide);
         }
+        let organization = crate::organization::for_agents(&map.organization, project);
+        if !organization.is_empty() {
+            input["organization"] = crate::organization::agent_input(organization);
+        }
         let input = input.to_string();
         let instructions =
             crate::agent_prompts::resolve(&map.agent_prompts, crate::agent_prompts::REQUEST);

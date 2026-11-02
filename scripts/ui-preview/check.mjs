@@ -461,8 +461,24 @@ check('axe: no WCAG 2.2 AA violations in any scan', !Object.keys(totals).length,
   await page.click('#save');
   await page.waitForTimeout(300);
   check('the context is saved with its new source', await page.evaluate(() => window.__ptaLastSave?.map?.contexts?.[0]?.sources?.includes('handbook')));
-  // Work items: guides with their fields and the implementation agents' instructions, saved with the map.
-  await page.click('#knowledge-tab-work-items');
+  // Organization: its name, documenting sources and entries, then the guides with their fields and the
+  // implementation agents' instructions, all saved with the map.
+  await page.click('#knowledge-tab-organization');
+  check('the organization shows its entry', await page.isVisible('#organization-entries .resource:has-text("Code review")'));
+  check('the organization names its documenting source', await page.isChecked('#organization-sources input[value="handbook"]'));
+  check('the organization offers its source', await page.isVisible('#organization-offer'));
+  await page.fill('#organization-name', 'Contoso Ltd');
+  await page.click('#entry-form summary');
+  await page.fill('#entry-id', 'layers');
+  await page.selectOption('#entry-kind', 'architecture');
+  await page.fill('#entry-title', 'Service layers');
+  await page.fill('#entry-text', 'Handlers call services; services call repositories.');
+  await page.click('#add-entry');
+  await page.click('#save'); await page.waitForTimeout(300);
+  check('the organization is saved with its new entry', await page.evaluate(() => {
+    const o = window.__ptaLastSave?.map?.organization;
+    return o?.name === 'Contoso Ltd' && o.sources.includes('handbook') && o.entries.some(e => e.id === 'layers' && e.kind === 'architecture');
+  }));
   check('work item guides list the task guide', await page.isVisible('#guides .resource:has(code:text-is("Task"))'));
   await page.click('#guide-form summary');
   await page.fill('#guide-id', 'support');

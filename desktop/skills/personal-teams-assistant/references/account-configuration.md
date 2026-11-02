@@ -1,6 +1,6 @@
 # Account configuration
 
-The account's **portable configuration** follows the signed-in account to every installation: the preferences below, the model choices, the sources and their audiences, the contexts, the questions and the verified notes. Requires `account_portable_support: true` in `pta --json capabilities` and a host of the same release (`status.host_version`); update the host and CLI together, with no fallback.
+The account's **portable configuration** follows the signed-in account to every installation: the preferences below, the model choices, the sources and their audiences, the contexts, the questions, the verified notes, and the organization with its work item guides (0.10.16+). Requires `account_portable_support: true` in `pta --json capabilities` and a host of the same release (`status.host_version`); update the host and CLI together, with no fallback.
 
 ## What is portable, and what never is
 
@@ -10,11 +10,13 @@ A positive allowlist defines it; anything not listed stays on the computer that 
 | --- | --- |
 | `llm.language`, `llm.style`, `llm.chain` (provider, model, effort, on/off, order), `policy.greeting`, `policy.max_context_chars`, `policy.max_message_age_seconds`, `policy.sensitive_patterns` | data directory, bind, public URL, tunnel, webhook prefix, `knowledge_map` path, `[secrets]` mapping |
 | sources: ID, description, topics, enabled, external processing, audiences (`allowed_conversations`, `allowed_senders`), the repository **alias** and relative path or the URL/tool definition | repository **folders** (`repositories` bindings), allowed roots, execution machines, the selected Teams machine |
-| contexts, questions (with their associated requests), verified notes | Microsoft chats, Microsoft/GitHub/Azure sessions, provider logins and CLIs, credentials, machine credentials, internal keys, people profiles, launchers, activity records |
+| contexts, questions (with their associated requests), verified notes, the organization (name, entries, documenting sources) and the work item guides | Microsoft chats, Microsoft/GitHub/Azure sessions, provider logins and CLIs, credentials, machine credentials, internal keys, people profiles, agent instructions, launchers, activity records |
 
 Microsoft setup identifiers follow the account separately through Variables (`ENTRA_TENANT_ID`, `ENTRA_CLIENT_ID`, `TEAMS_USER_ID`, 0.10.2+), and restore into local Microsoft Teams settings. They are public setup metadata, not a Microsoft session; the existing database identity is still protected. See [Microsoft setup identifiers](variables.md#microsoft-setup-identifiers-0102).
 
-A source keeps its account meaning (ID, audience, flags) everywhere. Its folder is the computer's own binding: if the repository alias has no folder here (or a file source's file is missing), the source is **unavailable**, listed in `unavailable`, and nothing reinterprets it. Questions that read only unavailable sources are unavailable too; contexts and questions that lose some are reported as `partial`. Editing a context or question here never drops the references to sources only the account can resolve.
+A source keeps its account meaning (ID, audience, flags) everywhere. Its folder is the computer's own binding: if the repository alias has no folder here (or a file source's file is missing), the source is **unavailable**, listed in `unavailable`, and nothing reinterprets it. Questions that read only unavailable sources are unavailable too; contexts and questions that lose some are reported as `partial`. Editing a context, a question or the organization's sources here never drops the references to sources only the account can resolve, and an organization source unavailable here is simply not listed.
+
+Work item guides were local to each computer before 0.10.16. An installation that kept guides of its own and is signed in to an account reports unsaved local changes (`diverged`) after updating: save the guides on the coordinator first, or synchronize with `--reset` to adopt the account's (a backup of the replaced ones is kept). The coordinator and every installation of the account need 0.10.16 or later once the account has an organization or guides; an older installation cannot read that configuration and reports an error until it is updated.
 
 ## Commands
 
