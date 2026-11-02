@@ -6,6 +6,7 @@ use crate::{
     llm::{GenerationInput, Intent, LlmProvider},
     security::Redactor,
     state::{Audit, Store},
+    store::notes::{LocalNotes, NotesStore},
     tools::{ReadOnlyTool, ScopedTool, ToolArgs},
 };
 use anyhow::Result;
@@ -1428,8 +1429,14 @@ impl Pipeline {
                 )
                 .await??;
             if let Some(q) = &matched_question
-                && crate::index::Index::open(&self.config.server.data_dir.join(crate::index::FILE))?
-                    .is_rejected_answer(&q.id, &generated.answer, &audit.selected_sources)?
+                && crate::questions::is_rejected_answer(
+                    &LocalNotes::new(&crate::index::Index::open(
+                        &self.config.server.data_dir.join(crate::index::FILE),
+                    )?),
+                    &q.id,
+                    &generated.answer,
+                    &audit.selected_sources,
+                )?
             {
                 audit.proposed = Some(generated.answer);
                 audit.reason = "rejected_answer_repeated".into();
@@ -1879,7 +1886,7 @@ impl Pipeline {
             return String::new();
         }
         let found = crate::index::Index::open(&path)
-            .and_then(|index| index.examples(query, context, 2))
+            .and_then(|index| index.examples(&LocalNotes::new(&index), query, context, 2))
             .unwrap_or_default();
         if found.is_empty() {
             return String::new();
@@ -1914,6 +1921,8 @@ impl Pipeline {
         }
         let index =
             crate::index::Index::open(&self.config.server.data_dir.join(crate::index::FILE))?;
+        let ids: Vec<&str> = questions.iter().map(|q| q.id.as_str()).collect();
+        LocalNotes::new(&index).retain_evaluations(&ids)?;
         index.sync_questions(questions)?;
         let vector = self
             .query_vector(&index, crate::index::QUESTIONS, request)
@@ -1974,7 +1983,13 @@ impl Pipeline {
         let source = crate::index::feedback_source(&question.id);
         let vector = self.query_vector(&index, &source, request).await;
         index
-            .evaluations(&question.id, request, vector.as_deref(), allowed)
+            .evaluations(
+                &LocalNotes::new(&index),
+                &question.id,
+                request,
+                vector.as_deref(),
+                allowed,
+            )
             .unwrap_or_default()
     }
 

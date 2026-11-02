@@ -1,7 +1,7 @@
 //! Authenticated browser transport for the existing GUI. Each account owns one host;
 //! the desktop's private IPC remains loopback-only and rejects browser requests.
 use super::*;
-use crate::app::store::settings::{LocalSettings, SettingsStore};
+use crate::store::settings::{LocalSettings, SettingsStore};
 use axum::{
     Json,
     body::Bytes,
@@ -61,7 +61,7 @@ pub(super) fn account_scope(profile: &Path) -> Result<authority::Scope> {
             config.server.data_dir.canonicalize()? == profile.join("data").canonicalize()?
                 && config.knowledge_map.canonicalize()?
                     == profile
-                        .join(super::store::settings::MAP_FILE)
+                        .join(crate::store::settings::MAP_FILE)
                         .canonicalize()?
                 && config.server.webhook_prefix == format!("/webhooks/{}", entry.id)
                 && profiles::confined(&config.server.data_dir, &profile)

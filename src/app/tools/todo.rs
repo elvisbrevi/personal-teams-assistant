@@ -1,6 +1,6 @@
 //! Host adapters for the typed To-Do tools. Reads work without a running Teams assistant.
 use super::super::{DesktopState, fail, github};
-use crate::app::store::settings::SettingsStore;
+use crate::store::settings::SettingsStore;
 use crate::{
     knowledge::Access,
     security,

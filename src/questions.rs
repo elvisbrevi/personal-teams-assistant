@@ -78,6 +78,22 @@ pub fn normalize(text: &str) -> String {
         .join(" ")
 }
 
+/// Whether the user rejected this answer to `question` before, among every evaluation
+/// (including older ones outside the prompt budget) whose sources are still allowed.
+pub fn is_rejected_answer(
+    records: &dyn crate::store::notes::NotesStore,
+    question: &str,
+    answer: &str,
+    allowed: &[String],
+) -> Result<bool> {
+    let wanted = normalize(&crate::evidence::unlinked(answer));
+    Ok(records.evaluations(question)?.iter().any(|value| {
+        value.rating == "bad"
+            && value.sources.iter().all(|s| allowed.contains(s))
+            && normalize(&value.answer) == wanted
+    }))
+}
+
 pub fn valid_text(text: &str) -> bool {
     !normalize(text).is_empty()
         && text.chars().count() <= 1000
@@ -89,7 +105,11 @@ pub fn valid_text(text: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{index::Index, knowledge::KnowledgeMap};
+    use crate::{
+        index::Index,
+        knowledge::KnowledgeMap,
+        store::notes::{LocalNotes, NotesStore},
+    };
 
     #[test]
     fn migration_seeds_once_and_question_feedback_stays_with_its_authorized_sources() {
@@ -113,6 +133,7 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let index = Index::open(&dir.path().join("index.db")).unwrap();
+        let records = LocalNotes::new(&index);
         let allowed = vec!["activities".to_owned()];
         let mut value = AnswerEvaluation {
             resource: "m1".into(),
@@ -123,35 +144,38 @@ mod tests {
             comment: "Use a concise list".into(),
             sources: allowed.clone(),
         };
-        index.save_evaluation(&value).unwrap();
+        records.save_evaluation(&value).unwrap();
         // A differently worded request benefits even without an embeddings server.
         let found = index
-            .evaluations("daily", "Resumen de actividades", None, &allowed)
+            .evaluations(&records, "daily", "Resumen de actividades", None, &allowed)
             .unwrap();
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].rating, "bad");
         assert!(
             index
-                .evaluations("unrelated", "today", None, &allowed)
+                .evaluations(&records, "unrelated", "today", None, &allowed)
                 .unwrap()
                 .is_empty()
         );
         assert!(
             index
-                .evaluations("daily", "today", None, &[])
+                .evaluations(&records, "daily", "today", None, &[])
                 .unwrap()
                 .is_empty()
         );
         value.rating = "good".into();
-        index.save_evaluation(&value).unwrap();
+        records.save_evaluation(&value).unwrap();
         assert_eq!(
-            index.evaluations("daily", "today", None, &allowed).unwrap()[0].rating,
+            index
+                .evaluations(&records, "daily", "today", None, &allowed)
+                .unwrap()[0]
+                .rating,
             "good"
         );
-        index.remove_evaluation("m1").unwrap();
+        records.remove_evaluation("m1").unwrap();
         assert!(
             index
-                .evaluations("daily", "today", None, &allowed)
+                .evaluations(&records, "daily", "today", None, &allowed)
                 .unwrap()
                 .is_empty()
         );

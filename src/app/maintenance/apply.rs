@@ -10,10 +10,10 @@
 //! failure puts the previous pair back and starts it. Nothing here retries a Graph send or a work
 //! item write: those operations are not touched, and the update waits while one is in flight.
 use super::*;
-use crate::app::store::settings::{LocalSettings, SettingsStore};
 use crate::maintenance::apply::{
     self as journal, Apply, Health, Intent, Journal, Lock, Phase, Profile,
 };
+use crate::store::settings::{LocalSettings, SettingsStore};
 
 pub(super) const FLAG: &str = "--maintenance-apply";
 /// Set by the helper on the host it starts, so that host is not mistaken for one started in the

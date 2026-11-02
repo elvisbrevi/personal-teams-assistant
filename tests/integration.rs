@@ -4682,7 +4682,10 @@ async fn a_repository_source_answers_from_its_most_relevant_sections() {
 }
 #[tokio::test]
 async fn a_context_reads_its_sources_its_notes_and_its_instructions() {
-    use personal_teams_assistant::index::{FILE, Index, Note};
+    use personal_teams_assistant::{
+        index::{FILE, Index, Note},
+        store::notes::{LocalNotes, NotesStore},
+    };
     let dir = tempfile::tempdir().unwrap();
     let mut map = knowledge(&dir);
     std::fs::write(
@@ -4737,7 +4740,7 @@ async fn a_context_reads_its_sources_its_notes_and_its_instructions() {
             vec![],
         ),
     ] {
-        index
+        LocalNotes::new(&index)
             .save_note(Note {
                 title: title.into(),
                 text: text.into(),
@@ -4822,7 +4825,10 @@ impl LlmProvider for GuidedLlm {
 }
 #[tokio::test]
 async fn a_person_profile_and_approved_examples_guide_the_answer() {
-    use personal_teams_assistant::index::{FILE, Index};
+    use personal_teams_assistant::{
+        index::{FILE, Index},
+        store::notes::{Example, LocalNotes, NotesStore},
+    };
     let dir = tempfile::tempdir().unwrap();
     let server = MockServer::start().await;
     let store = support::store(&dir);
@@ -4840,13 +4846,13 @@ async fn a_person_profile_and_approved_examples_guide_the_answer() {
         ..Default::default()
     }];
     let index = Index::open(&dir.path().join(FILE)).unwrap();
-    index
-        .save_example(
-            "chats/19:x/messages/1",
-            "¿Cuál es el horario de soporte técnico?",
-            "El soporte atiende de lunes a viernes, de 9:00 a 18:00.",
-            None,
-        )
+    LocalNotes::new(&index)
+        .save_example(&Example {
+            resource: "chats/19:x/messages/1".into(),
+            request: "¿Cuál es el horario de soporte técnico?".into(),
+            answer: "El soporte atiende de lunes a viernes, de 9:00 a 18:00.".into(),
+            context: None,
+        })
         .unwrap();
     drop(index);
     let sources: Vec<String> = map.resources.iter().map(|r| r.id.clone()).collect();
@@ -5124,6 +5130,7 @@ async fn configured_questions_preserve_dates_limit_sources_and_learn_from_both_r
     use personal_teams_assistant::{
         index::Index,
         questions::{AnswerEvaluation, Question},
+        store::notes::{LocalNotes, NotesStore},
     };
     for (text, identified, allowed, rating, expected) in [
         (
@@ -5197,8 +5204,7 @@ async fn configured_questions_preserve_dates_limit_sources_and_learn_from_both_r
             examples: vec![],
         }]);
         if let Some(rating) = rating {
-            Index::open(&dir.path().join("knowledge-index.db"))
-                .unwrap()
+            LocalNotes::new(&Index::open(&dir.path().join("knowledge-index.db")).unwrap())
                 .save_evaluation(&AnswerEvaluation {
                     resource: "previous".into(),
                     question_id: "daily-activities".into(),

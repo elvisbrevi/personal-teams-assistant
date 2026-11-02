@@ -1,6 +1,6 @@
 //! Work-item implementation, with durable runs and account-bound execution machines.
 use super::*;
-use crate::app::store::settings::SettingsStore;
+use crate::store::settings::SettingsStore;
 use crate::tools::todo::{Detail, DetailRequest};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};

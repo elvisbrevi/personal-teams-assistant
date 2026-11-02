@@ -1,7 +1,7 @@
 //! Compatibility for named application credentials. Variables are their only runtime store;
 //! legacy stores are read once for migration and retained unchanged for recovery.
 use super::*;
-use crate::app::store::settings::SettingsStore;
+use crate::store::settings::SettingsStore;
 
 pub(in crate::app) fn managed(config: &Config, name: &str) -> bool {
     (name == "DEEPSEEK_API_KEY" || config.secrets.values().any(|n| n == name))

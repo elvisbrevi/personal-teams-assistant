@@ -1,6 +1,6 @@
 //! Authority comes from the owning profile and authenticated transport, never arguments.
 use super::*;
-use crate::app::store::settings::SettingsStore;
+use crate::store::settings::SettingsStore;
 use serde_json::Value;
 
 pub(super) const EXECUTION_DENIED: &str = "Shared-host execution requires a verified OS security boundary. Use your personal trusted machine; a working directory or tool-less prompt is not an OS sandbox.";

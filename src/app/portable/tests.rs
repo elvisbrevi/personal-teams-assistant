@@ -179,7 +179,7 @@ fn configure(host: &Host) {
     });
     state.settings.commit(&config, &map, "").unwrap();
     let index = Index::open(&config.server.data_dir.join(crate::index::FILE)).unwrap();
-    index
+    LocalNotes::new(&index)
         .save_note(Note {
             title: "Invoice rule".into(),
             text: "Invoices are issued on the first business day.".into(),
@@ -191,8 +191,7 @@ fn configure(host: &Host) {
 
 fn notes_of(host: &Host) -> Vec<Note> {
     let config = host.state.settings.config().unwrap();
-    Index::open(&config.server.data_dir.join(crate::index::FILE))
-        .unwrap()
+    LocalNotes::new(&Index::open(&config.server.data_dir.join(crate::index::FILE)).unwrap())
         .notes(None, 1000)
         .unwrap()
 }

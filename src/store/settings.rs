@@ -3,7 +3,7 @@
 //! together. The validation and access rules stay with their callers (`save_settings`, the
 //! portable configuration, the portal); a store only keeps and returns what it was given.
 
-use super::super::{read_config, write_private};
+use crate::app::{read_config, write_private};
 use crate::{config::Config, knowledge::KnowledgeMap};
 use anyhow::{Result, ensure};
 use sha2::{Digest, Sha256};

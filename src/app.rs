@@ -1,3 +1,7 @@
+use crate::store::{
+    notes::{LocalNotes, NotesStore},
+    settings::{LocalSettings, SettingsStore},
+};
 use crate::{
     adapters::oauth::OAuth,
     config::Config,
@@ -22,7 +26,6 @@ use std::{
     path::{Path, PathBuf},
     sync::Arc,
 };
-use store::settings::{LocalSettings, SettingsStore};
 use tokio::sync::{Mutex, oneshot, watch};
 
 mod activity;
@@ -47,7 +50,6 @@ mod portable;
 mod readiness;
 mod skill;
 mod standing;
-mod store;
 mod tools;
 mod variables;
 mod web;
@@ -365,11 +367,11 @@ fn validate_teams_setup(config: &Config) -> Result<()> {
     Ok(())
 }
 
-fn read_config(path: &Path) -> Result<Config> {
+pub(crate) fn read_config(path: &Path) -> Result<Config> {
     Ok(toml::from_str(&fs::read_to_string(path)?)?)
 }
 
-fn write_private(path: &Path, content: &str) -> Result<()> {
+pub(crate) fn write_private(path: &Path, content: &str) -> Result<()> {
     let temp = path.with_extension(format!("tmp-{}", uuid::Uuid::new_v4()));
     let mut options = fs::OpenOptions::new();
     options.write(true).create_new(true);
@@ -919,6 +921,8 @@ fn forget_removed_sources(config: &Config, map: &KnowledgeMap) {
         .collect();
     let forgotten = crate::index::Index::open(&path).and_then(|index| {
         if let Some(questions) = &map.questions {
+            let ids: Vec<&str> = questions.iter().map(|q| q.id.as_str()).collect();
+            LocalNotes::new(&index).retain_evaluations(&ids)?;
             index.sync_questions(questions)?;
         }
         index.sync_organization(&map.organization, &map.work_item_guides)?;

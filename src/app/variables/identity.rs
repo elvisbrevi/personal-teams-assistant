@@ -1,6 +1,6 @@
 //! Public Microsoft setup identifiers backed by encrypted account variables. Sessions stay local.
 use super::*;
-use crate::app::store::settings::SettingsStore;
+use crate::store::settings::SettingsStore;
 
 pub(in crate::app) const FIELDS: [(&str, &str); 3] = [
     (

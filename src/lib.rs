@@ -22,6 +22,7 @@ pub mod runtime;
 pub mod security;
 pub mod simulation;
 pub mod state;
+pub mod store;
 pub mod tools;
 pub mod variables;
 pub mod work_items;

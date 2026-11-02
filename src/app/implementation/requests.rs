@@ -1,6 +1,6 @@
 //! Explicit request creation, independent from read-only evidence and daily activity runs.
 use super::*;
-use crate::app::store::settings::SettingsStore;
+use crate::store::settings::SettingsStore;
 use crate::{knowledge::Access, tools::ToolSpec};
 
 #[derive(Deserialize, Serialize)]

@@ -8,7 +8,7 @@
 //! is indexed when it is read (or refreshed by hand), and only its files' sizes and times are
 //! compared on each read, so an unchanged checkout costs one directory walk.
 
-use anyhow::{Context, Result, ensure};
+use anyhow::{Result, ensure};
 use rusqlite::{Connection, OptionalExtension, params, params_from_iter};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -198,6 +198,24 @@ impl Index {
         Ok(Self { db: Mutex::new(db) })
     }
 
+    /// Read the database (the local notes store keeps its records in the index's file).
+    pub(crate) fn read<T>(&self, f: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {
+        f(&self.db.lock().unwrap())
+    }
+
+    /// Change the database in one transaction: the local notes store writes a record and its
+    /// searchable document together.
+    pub(crate) fn write<T>(
+        &self,
+        f: impl FnOnce(&rusqlite::Transaction) -> Result<T>,
+    ) -> Result<T> {
+        let mut db = self.db.lock().unwrap();
+        let tx = db.transaction()?;
+        let out = f(&tx)?;
+        tx.commit()?;
+        Ok(out)
+    }
+
     /// Questions and their owner-associated requests share the existing hybrid index.
     pub fn sync_questions(&self, questions: &[crate::questions::Question]) -> Result<()> {
         let mut db = self.db.lock().unwrap();
@@ -211,19 +229,6 @@ impl Index {
                 tx.execute(
                     "DELETE FROM documents WHERE source=?1 AND key=?2",
                     params![QUESTIONS, key],
-                )?;
-            }
-        }
-        let feedback_questions: Vec<String> = tx
-            .prepare("SELECT DISTINCT question_id FROM question_feedback")?
-            .query_map([], |r| r.get(0))?
-            .collect::<rusqlite::Result<_>>()?;
-        for id in feedback_questions {
-            if !questions.iter().any(|q| q.id == id) {
-                tx.execute("DELETE FROM question_feedback WHERE question_id=?1", [&id])?;
-                tx.execute(
-                    "DELETE FROM documents WHERE source=?1",
-                    [feedback_source(&id)],
                 )?;
             }
         }
@@ -301,45 +306,12 @@ impl Index {
         Ok(())
     }
 
-    pub fn save_evaluation(&self, value: &crate::questions::AnswerEvaluation) -> Result<()> {
-        let now = chrono::Utc::now().timestamp();
-        let mut db = self.db.lock().unwrap();
-        let tx = db.transaction()?;
-        tx.execute(
-            "DELETE FROM documents WHERE key=?1 AND source LIKE '@feedback:%'",
-            [&value.resource],
-        )?;
-        tx.execute("INSERT OR REPLACE INTO question_feedback(resource,question_id,payload,updated_at) VALUES (?1,?2,?3,?4)", params![value.resource, value.question_id, serde_json::to_string(value)?, now])?;
-        write_document(
-            &tx,
-            &feedback_source(&value.question_id),
-            &value.resource,
-            "Answer evaluation",
-            &now.to_string(),
-            "[]",
-            &value.request,
-        )?;
-        tx.commit()?;
-        Ok(())
-    }
-
-    pub fn remove_evaluation(&self, resource: &str) -> Result<()> {
-        let db = self.db.lock().unwrap();
-        db.execute(
-            "DELETE FROM question_feedback WHERE resource=?1",
-            [resource],
-        )?;
-        db.execute(
-            "DELETE FROM documents WHERE key=?1 AND source LIKE '@feedback:%'",
-            [resource],
-        )?;
-        Ok(())
-    }
-
     /// Rank evaluations within the matched question, then include recent judgments too:
-    /// synonyms without embeddings must still benefit from the owner's corrections.
+    /// synonyms without embeddings must still benefit from the owner's corrections. `records`
+    /// keeps the evaluations; this index ranks their requests.
     pub fn evaluations(
         &self,
+        records: &dyn crate::store::notes::NotesStore,
         question: &str,
         query: &str,
         vector: Option<&[f32]>,
@@ -347,8 +319,12 @@ impl Index {
     ) -> Result<Vec<crate::questions::AnswerEvaluation>> {
         let source = feedback_source(question);
         let ranked = self.search(&[&source], query, None, vector, 8)?;
-        let db = self.db.lock().unwrap();
-        let mut found: Vec<crate::questions::AnswerEvaluation> = db.prepare("SELECT payload FROM question_feedback WHERE question_id=?1 ORDER BY updated_at DESC,resource LIMIT 100")?.query_map([question], |r| r.get::<_, String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?.into_iter().filter_map(|p| serde_json::from_str(&p).ok()).filter(|v: &crate::questions::AnswerEvaluation| v.sources.iter().all(|s| allowed.contains(s))).collect();
+        let mut found: Vec<crate::questions::AnswerEvaluation> = records
+            .evaluations(question)?
+            .into_iter()
+            .take(100)
+            .filter(|v| v.sources.iter().all(|s| allowed.contains(s)))
+            .collect();
         found.sort_by_key(|v| {
             (
                 v.rating != "bad",
@@ -371,29 +347,6 @@ impl Index {
             }
         }
         Ok(selected)
-    }
-
-    /// Check every rejected answer, including older evaluations outside the prompt budget.
-    pub fn is_rejected_answer(
-        &self,
-        question: &str,
-        answer: &str,
-        allowed: &[String],
-    ) -> Result<bool> {
-        let wanted = crate::questions::normalize(&crate::evidence::unlinked(answer));
-        let db = self.db.lock().unwrap();
-        let mut statement = db.prepare("SELECT payload FROM question_feedback WHERE question_id=?1 AND json_extract(payload,'$.rating')='bad'")?;
-        let mut rows = statement.query([question])?;
-        while let Some(row) = rows.next()? {
-            let value: crate::questions::AnswerEvaluation =
-                serde_json::from_str(&row.get::<_, String>(0)?)?;
-            if value.sources.iter().all(|s| allowed.contains(s))
-                && crate::questions::normalize(&value.answer) == wanted
-            {
-                return Ok(true);
-            }
-        }
-        Ok(false)
     }
 
     /// Bring a repository source up to date with its checkout: new and changed files are
@@ -467,159 +420,13 @@ impl Index {
         Ok(())
     }
 
-    /// Create a note (empty `id`) or replace one; returns it as saved.
-    pub fn save_note(&self, mut note: Note) -> Result<Note> {
-        let now = chrono::Utc::now().timestamp();
-        let mut db = self.db.lock().unwrap();
-        if note.id.is_empty() {
-            note.id = uuid::Uuid::new_v4().to_string();
-            note.created_at = now;
-        } else {
-            ensure!(
-                note.id.len() <= 64
-                    && note
-                        .id
-                        .chars()
-                        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'),
-                "invalid note ID"
-            );
-            let existing: Option<String> = db
-                .query_row("SELECT payload FROM notes WHERE id=?1", [&note.id], |r| {
-                    r.get(0)
-                })
-                .optional()?;
-            let existing: Note = serde_json::from_str(&existing.context("unknown note")?)?;
-            note.created_at = existing.created_at;
-        }
-        note.updated_at = now;
-        let tx = db.transaction()?;
-        put_note(&tx, &note)?;
-        tx.commit()?;
-        Ok(note)
-    }
-
-    /// Store a note exactly as given, keeping its ID and timestamps (a note the account's
-    /// coordinator already saved).
-    pub fn put_note(&self, note: &Note) -> Result<()> {
-        let mut db = self.db.lock().unwrap();
-        let tx = db.transaction()?;
-        put_note(&tx, note)?;
-        tx.commit()?;
-        Ok(())
-    }
-
-    /// Make the notes exactly these (a synchronized snapshot): changed ones are rewritten and
-    /// the others removed, in one transaction.
-    pub fn replace_notes(&self, notes: &[Note]) -> Result<()> {
-        let mut db = self.db.lock().unwrap();
-        let tx = db.transaction()?;
-        let held: Vec<(String, String)> = tx
-            .prepare("SELECT id,payload FROM notes")?
-            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
-            .collect::<std::result::Result<_, _>>()?;
-        let wanted: BTreeSet<&str> = notes.iter().map(|n| n.id.as_str()).collect();
-        for (id, _) in held.iter().filter(|(id, _)| !wanted.contains(id.as_str())) {
-            tx.execute("DELETE FROM notes WHERE id=?1", [id])?;
-            tx.execute(
-                "DELETE FROM documents WHERE source=?1 AND key=?2",
-                params![NOTES, id],
-            )?;
-        }
-        for note in notes {
-            let payload = serde_json::to_string(note)?;
-            if held
-                .iter()
-                .any(|(id, held)| id == &note.id && held == &payload)
-            {
-                continue;
-            }
-            put_note(&tx, note)?;
-        }
-        tx.commit()?;
-        Ok(())
-    }
-
-    pub fn note(&self, id: &str) -> Result<Option<Note>> {
-        let db = self.db.lock().unwrap();
-        let payload: Option<String> = db
-            .query_row("SELECT payload FROM notes WHERE id=?1", [id], |r| r.get(0))
-            .optional()?;
-        payload
-            .map(|p| serde_json::from_str(&p).map_err(Into::into))
-            .transpose()
-    }
-
-    pub fn remove_note(&self, id: &str) -> Result<bool> {
-        let db = self.db.lock().unwrap();
-        let removed = db.execute("DELETE FROM notes WHERE id=?1", [id])? > 0;
-        db.execute(
-            "DELETE FROM documents WHERE source=?1 AND key=?2",
-            params![NOTES, id],
-        )?;
-        Ok(removed)
-    }
-
-    /// Notes, newest first; `context` keeps those in it (and those in every context).
-    pub fn notes(&self, context: Option<&str>, limit: usize) -> Result<Vec<Note>> {
-        let db = self.db.lock().unwrap();
-        let notes: Vec<Note> = db
-            .prepare("SELECT payload FROM notes ORDER BY updated_at DESC")?
-            .query_map([], |r| r.get::<_, String>(0))?
-            .filter_map(|p| p.ok().and_then(|p| serde_json::from_str(&p).ok()))
-            .filter(|n: &Note| {
-                context.is_none_or(|c| n.contexts.is_empty() || n.contexts.iter().any(|x| x == c))
-            })
-            .take(limit)
-            .collect();
-        Ok(notes)
-    }
-
-    /// Keep an answer the user approved as an example for similar requests (its request is
-    /// searched; the whole answer is returned).
-    pub fn save_example(
-        &self,
-        resource: &str,
-        request: &str,
-        answer: &str,
-        context: Option<&str>,
-    ) -> Result<()> {
-        let now = chrono::Utc::now().timestamp();
-        let mut db = self.db.lock().unwrap();
-        let tx = db.transaction()?;
-        tx.execute(
-            "INSERT INTO examples(resource,request,answer,context,updated_at) VALUES (?1,?2,?3,?4,?5) ON CONFLICT(resource) DO UPDATE SET request=excluded.request,answer=excluded.answer,context=excluded.context,updated_at=excluded.updated_at",
-            params![resource, request, answer, context, now],
-        )?;
-        let contexts = serde_json::to_string(&context.map(|c| vec![c]).unwrap_or_default())?;
-        write_document(
-            &tx,
-            EXAMPLES,
-            resource,
-            "example",
-            &now.to_string(),
-            &contexts,
-            request,
-        )?;
-        tx.commit()?;
-        Ok(())
-    }
-
-    pub fn remove_example(&self, resource: &str) -> Result<()> {
-        let db = self.db.lock().unwrap();
-        db.execute("DELETE FROM examples WHERE resource=?1", [resource])?;
-        db.execute(
-            "DELETE FROM documents WHERE source=?1 AND key=?2",
-            params![EXAMPLES, resource],
-        )?;
-        Ok(())
-    }
-
     /// Approved examples for `query`, as (request, answer): only those whose request shares at
     /// least half of the query's meaningful words (two at least, when it has two), so a single
     /// common word does not bring in an unrelated answer. `context` keeps its examples and the
-    /// general ones.
+    /// general ones. `records` keeps the examples; this index finds their requests.
     pub fn examples(
         &self,
+        records: &dyn crate::store::notes::NotesStore,
         query: &str,
         context: Option<&str>,
         limit: usize,
@@ -630,20 +437,13 @@ impl Index {
         }
         let contexts = context.map(|c| vec![c.to_owned()]);
         let hits = self.search(&[EXAMPLES], query, contexts.as_deref(), None, limit * 4)?;
-        let db = self.db.lock().unwrap();
         let mut out = Vec::new();
         for hit in hits {
             let shared = terms(&hit.text).intersection(&wanted).count();
             if shared * 2 < wanted.len() || shared < wanted.len().min(2) {
                 continue;
             }
-            let found: Option<(String, String)> = db
-                .query_row(
-                    "SELECT request,answer FROM examples WHERE resource=?1",
-                    [&hit.key],
-                    |r| Ok((r.get(0)?, r.get(1)?)),
-                )
-                .optional()?;
+            let found = records.example(&hit.key)?.map(|e| (e.request, e.answer));
             if let Some(example) = found
                 && !out.contains(&example)
             {
@@ -879,30 +679,7 @@ impl Index {
 }
 
 /// Replace one document and its sections.
-/// Write a note row and its searchable document.
-fn put_note(tx: &rusqlite::Transaction, note: &Note) -> Result<()> {
-    tx.execute(
-        "INSERT INTO notes(id,payload,updated_at) VALUES (?1,?2,?3) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload,updated_at=excluded.updated_at",
-        params![note.id, serde_json::to_string(note)?, note.updated_at],
-    )?;
-    // The keywords are searched with the text; the note is one document.
-    let body = if note.keywords.is_empty() {
-        note.text.clone()
-    } else {
-        format!("{}\n\n{}", note.text, note.keywords.join(", "))
-    };
-    write_document(
-        tx,
-        NOTES,
-        &note.id,
-        &note.title,
-        &note.updated_at.to_string(),
-        &serde_json::to_string(&note.contexts)?,
-        &body,
-    )
-}
-
-fn write_document(
+pub(crate) fn write_document(
     tx: &rusqlite::Transaction,
     source: &str,
     key: &str,
@@ -1227,6 +1004,7 @@ impl Embeddings {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::store::notes::NotesStore;
 
     fn checkout() -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
@@ -1363,6 +1141,7 @@ mod tests {
     fn notes_are_found_by_text_and_keywords_within_their_contexts() {
         let data = tempfile::tempdir().unwrap();
         let index = Index::open(&data.path().join(FILE)).unwrap();
+        let records = crate::store::notes::LocalNotes::new(&index);
         let contexts = BTreeSet::from(["cobros", "pagos"]);
         let note = Note {
             title: "Hotfix de producción".into(),
@@ -1372,9 +1151,9 @@ mod tests {
             ..Default::default()
         };
         note.validate(&contexts).unwrap();
-        let saved = index.save_note(note).unwrap();
+        let saved = records.save_note(note).unwrap();
         assert!(!saved.id.is_empty() && saved.created_at > 0);
-        let general = index
+        let general = records
             .save_note(Note {
                 title: "Horario".into(),
                 text: "El soporte atiende de 9 a 18.".into(),
@@ -1409,13 +1188,13 @@ mod tests {
             1
         );
         assert_eq!(
-            index.notes(Some("pagos"), 10).unwrap(),
+            records.notes(Some("pagos"), 10).unwrap(),
             vec![general.clone()]
         );
         // Editing keeps its creation date; removing drops it from the search.
         let mut edited = saved.clone();
         edited.text = "Un hotfix se registra como Development Bug vinculado al incidente.".into();
-        let edited = index.save_note(edited).unwrap();
+        let edited = records.save_note(edited).unwrap();
         assert_eq!(edited.created_at, saved.created_at);
         assert!(
             index
@@ -1423,7 +1202,7 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
-        assert!(index.remove_note(&saved.id).unwrap());
+        assert!(records.remove_note(&saved.id).unwrap());
         assert!(
             index
                 .search(&[NOTES], "hotfix", None, None, 5)
@@ -1445,9 +1224,10 @@ mod tests {
     fn vectors_find_what_other_words_say_and_change_with_the_model() {
         let data = tempfile::tempdir().unwrap();
         let index = Index::open(&data.path().join(FILE)).unwrap();
+        let records = crate::store::notes::LocalNotes::new(&index);
         index.use_embeddings("a").unwrap();
         for (title, text) in [("Uno", "alfa"), ("Dos", "beta")] {
-            index
+            records
                 .save_note(Note {
                     title: title.into(),
                     text: text.into(),
@@ -1486,24 +1266,26 @@ mod tests {
     fn approved_examples_guide_only_similar_requests() {
         let data = tempfile::tempdir().unwrap();
         let index = Index::open(&data.path().join(FILE)).unwrap();
-        index
-            .save_example(
-                "chats/a/messages/1",
-                "¿Cómo registro un hotfix de producción?",
-                "Se registra como Development Bug vinculado al incidente.",
-                Some("cobros"),
-            )
+        let records = crate::store::notes::LocalNotes::new(&index);
+        records
+            .save_example(&crate::store::notes::Example {
+                resource: "chats/a/messages/1".into(),
+                request: "¿Cómo registro un hotfix de producción?".into(),
+                answer: "Se registra como Development Bug vinculado al incidente.".into(),
+                context: Some("cobros".into()),
+            })
             .unwrap();
-        index
-            .save_example(
-                "chats/a/messages/2",
-                "¿Hay reunión mañana?",
-                "Sí, a las 10.",
-                None,
-            )
+        records
+            .save_example(&crate::store::notes::Example {
+                resource: "chats/a/messages/2".into(),
+                request: "¿Hay reunión mañana?".into(),
+                answer: "Sí, a las 10.".into(),
+                context: None,
+            })
             .unwrap();
         let found = index
             .examples(
+                &records,
                 "¿cómo se registran los hotfix en producción?",
                 Some("cobros"),
                 2,
@@ -1514,36 +1296,36 @@ mod tests {
         // One shared common word is not similar enough; another context's example stays out.
         assert!(
             index
-                .examples("¿Cómo está la producción del reporte?", None, 2)
+                .examples(&records, "¿Cómo está la producción del reporte?", None, 2)
                 .unwrap()
                 .is_empty()
         );
         assert!(
             index
-                .examples("registro hotfix producción", Some("pagos"), 2)
+                .examples(&records, "registro hotfix producción", Some("pagos"), 2)
                 .unwrap()
                 .is_empty()
         );
         // Saving again replaces it; removing forgets it.
-        index
-            .save_example(
-                "chats/a/messages/1",
-                "¿Cómo registro un hotfix de producción?",
-                "Como Bug.",
-                None,
-            )
+        records
+            .save_example(&crate::store::notes::Example {
+                resource: "chats/a/messages/1".into(),
+                request: "¿Cómo registro un hotfix de producción?".into(),
+                answer: "Como Bug.".into(),
+                context: None,
+            })
             .unwrap();
         assert_eq!(
             index
-                .examples("registro hotfix producción", None, 2)
+                .examples(&records, "registro hotfix producción", None, 2)
                 .unwrap()[0]
                 .1,
             "Como Bug."
         );
-        index.remove_example("chats/a/messages/1").unwrap();
+        records.remove_example("chats/a/messages/1").unwrap();
         assert!(
             index
-                .examples("registro hotfix producción", None, 2)
+                .examples(&records, "registro hotfix producción", None, 2)
                 .unwrap()
                 .is_empty()
         );

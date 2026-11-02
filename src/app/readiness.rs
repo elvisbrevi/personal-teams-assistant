@@ -19,7 +19,7 @@ use super::{
     control::{self, Reply},
     implementation, maintenance, portable, variables as vars, *,
 };
-use crate::app::store::settings::SettingsStore;
+use crate::store::settings::SettingsStore;
 use crate::{state::Store, variables as vault};
 use serde_json::{Value, json};
 
