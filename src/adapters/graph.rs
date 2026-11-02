@@ -168,11 +168,7 @@ fn registration_message(
     if raw.contains("personalteams.invalid/output/") {
         return None;
     }
-    let text = if message["body"]["contentType"].as_str() == Some("html") {
-        teams::plain_text(raw)
-    } else {
-        raw.to_owned()
-    };
+    let text = super::card::message_text(message);
     if !call && text.trim().is_empty() {
         return None;
     }
@@ -456,7 +452,7 @@ impl Graph {
                     }
                     let raw = message["body"]["content"].as_str().unwrap_or("");
                     let body = if message["body"]["contentType"].as_str() == Some("html") {
-                        let mut body = teams::plain_text(raw);
+                        let mut body = super::card::message_text(message);
                         let fragment = scraper::Html::parse_fragment(raw);
                         let selector = scraper::Selector::parse("a[href]").unwrap();
                         for link in fragment
@@ -701,11 +697,7 @@ impl Graph {
                         continue;
                     }
                     let raw = message["body"]["content"].as_str().unwrap_or("");
-                    let text = if message["body"]["contentType"].as_str() == Some("html") {
-                        teams::plain_text(raw)
-                    } else {
-                        raw.to_owned()
-                    };
+                    let text = super::card::message_text(message);
                     if text.trim().is_empty() || raw.contains("personalteams.invalid/output/") {
                         continue;
                     }
@@ -1477,11 +1469,7 @@ impl MessageAdapter for Graph {
             }
             let content = value["body"]["content"].as_str().unwrap_or("");
             let output = self.store.is_output(&m.conversation, id, content)?;
-            let text = if value["body"]["contentType"] == "html" {
-                teams::plain_text(content)
-            } else {
-                content.to_owned()
-            };
+            let text = super::card::message_text(value);
             // Answers sent by this app end with their «PTA» output marker.
             let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
             let text: String = text
@@ -1542,13 +1530,20 @@ impl MessageAdapter for Graph {
         } else {
             None
         };
-        let content = match &nonce {
-            Some(nonce) => format!(
-                "{content}<p><a href=\"https://personalteams.invalid/output/{nonce}\">PTA</a></p>"
-            ),
-            None => content,
-        };
-        let body = json!({"body":{"contentType":"html","content":content}});
+        let marker = nonce
+            .as_ref()
+            .map(|nonce| {
+                format!("<p><a href=\"https://personalteams.invalid/output/{nonce}\">PTA</a></p>")
+            })
+            .unwrap_or_default();
+        // The configured style, or plain HTML when it is off or the card does not fit.
+        let body = super::card::message(
+            text,
+            &self.config.message_style,
+            self.config.llm.language,
+            &marker,
+        )
+        .unwrap_or_else(|| json!({"body":{"contentType":"html","content":content + &marker}}));
         // Never retry a send: Graph provides no idempotency guarantee for this endpoint.
         let result = self.request(Method::POST, &path, Some(body), false).await?;
         let id = result["id"]

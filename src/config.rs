@@ -21,6 +21,10 @@ pub struct Config {
     /// The knowledge index: optional embeddings for semantic search.
     #[serde(default, skip_serializing_if = "crate::index::Settings::is_default")]
     pub knowledge_index: crate::index::Settings,
+    /// How answers look in Teams; omitted while it is the default (plain answers), so a host
+    /// that predates it still loads the profile.
+    #[serde(default, skip_serializing_if = "MessageStyle::is_default")]
+    pub message_style: MessageStyle,
 }
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -125,6 +129,143 @@ impl Llm {
         self.chain.iter().filter(|c| c.enabled).cloned().collect()
     }
 }
+/// How the assistant's messages look in Teams (`[message_style]`): off, they are plain chat
+/// HTML; on, they are an Adaptive Card with a colored stripe along the left edge and a band
+/// with a label above or below the text (`adapters::card`). Teams ignores styles in chat HTML,
+/// so a card is the only way to color a message.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields, default)]
+pub struct MessageStyle {
+    pub enabled: bool,
+    /// The band's text; empty means «Respuesta generada con IA» or "AI-generated response",
+    /// following `llm.language`.
+    pub label: String,
+    pub position: BandPosition,
+    /// The stripe's color, `#RRGGBB`. Any color: the stripe carries no text.
+    pub accent: String,
+    /// The band's background, by Teams' name: Teams picks the shade for its light or dark
+    /// theme, so the label stays readable in both.
+    pub band: BandColor,
+    pub label_color: LabelColor,
+    /// A robot icon before the label.
+    pub icon: bool,
+    /// The stripe's width in pixels, 2 to 16.
+    pub stripe_width: u8,
+    /// The size of the message's text; headings stay a step larger.
+    pub text_size: TextSize,
+    /// The size of the band's text and icon.
+    pub label_size: TextSize,
+}
+impl Default for MessageStyle {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            label: String::new(),
+            position: BandPosition::Bottom,
+            accent: "#5B5FC7".into(),
+            band: BandColor::Accent,
+            label_color: LabelColor::Default,
+            icon: true,
+            stripe_width: 4,
+            text_size: TextSize::Default,
+            label_size: TextSize::Small,
+        }
+    }
+}
+impl MessageStyle {
+    pub const MAX_LABEL_CHARS: usize = 80;
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+    pub fn validate(&self) -> Result<()> {
+        ensure!(
+            self.label.chars().count() <= Self::MAX_LABEL_CHARS
+                && !self.label.chars().any(char::is_control),
+            "the message style label is one line of up to 80 characters"
+        );
+        ensure!(
+            self.accent.len() == 7
+                && self.accent.starts_with('#')
+                && self.accent[1..].chars().all(|c| c.is_ascii_hexdigit()),
+            "the message style accent is a #RRGGBB color"
+        );
+        ensure!(
+            (2..=16).contains(&self.stripe_width),
+            "the message style stripe is 2 to 16 pixels wide"
+        );
+        Ok(())
+    }
+    /// The band's text: the configured one or the default in the reply language.
+    pub fn label(&self, language: Language) -> String {
+        match self.label.trim() {
+            "" => language.say("AI-generated response", "Respuesta generada con IA"),
+            label => label.to_owned(),
+        }
+    }
+}
+/// Adaptive Card text sizes; Teams sets the actual size for each client.
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TextSize {
+    Small,
+    #[default]
+    Default,
+    Medium,
+    Large,
+    ExtraLarge,
+}
+impl TextSize {
+    /// The Adaptive Card value.
+    pub fn card(self) -> &'static str {
+        match self {
+            Self::Small => "Small",
+            Self::Default => "Default",
+            Self::Medium => "Medium",
+            Self::Large => "Large",
+            Self::ExtraLarge => "ExtraLarge",
+        }
+    }
+    /// One size larger, up to the largest.
+    pub fn larger(self) -> Self {
+        match self {
+            Self::Small => Self::Default,
+            Self::Default => Self::Medium,
+            Self::Medium => Self::Large,
+            Self::Large | Self::ExtraLarge => Self::ExtraLarge,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BandPosition {
+    Top,
+    #[default]
+    Bottom,
+}
+/// Adaptive Card container styles; `none` leaves the band on the card's own background.
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BandColor {
+    #[default]
+    Accent,
+    Emphasis,
+    Good,
+    Warning,
+    Attention,
+    None,
+}
+/// Adaptive Card text colors; `subtle` is the default color, dimmed.
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LabelColor {
+    #[default]
+    Default,
+    Subtle,
+    Accent,
+    Good,
+    Warning,
+    Attention,
+}
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Policy {
@@ -209,6 +350,7 @@ impl Config {
         crate::llm::validate(&self.llm)?;
         self.activity_registration.validate()?;
         self.knowledge_index.validate()?;
+        self.message_style.validate()?;
         if let Some(reference) = self
             .knowledge_index
             .embeddings
@@ -291,6 +433,57 @@ mod tests {
             Language::En
         );
         assert_eq!(serde_json::to_string(&Language::Es).unwrap(), "\"es\"");
+    }
+
+    #[test]
+    fn message_style_is_omitted_while_default_and_validated() {
+        let example = include_str!("../config.example.toml");
+        let mut config: Config = toml::from_str(example).unwrap();
+        // Hosts that predate the section keep loading a profile that never changed it.
+        assert!(!toml::to_string(&config).unwrap().contains("message_style"));
+        config.message_style.enabled = true;
+        config.message_style.position = super::BandPosition::Top;
+        let saved = toml::to_string(&config).unwrap();
+        assert!(saved.contains("[message_style]"), "{saved}");
+        let loaded: Config = toml::from_str(&saved).unwrap();
+        assert_eq!(loaded.message_style, config.message_style);
+        loaded.validate().unwrap();
+        // A partial section takes the defaults for the rest.
+        let partial: Config =
+            toml::from_str(&format!("{example}\n[message_style]\nenabled = true\n")).unwrap();
+        assert_eq!(partial.message_style.accent, "#5B5FC7");
+        assert_eq!(
+            partial.message_style.label(Language::Es),
+            "Respuesta generada con IA"
+        );
+        let sized: Config = toml::from_str(&format!(
+            "{example}\n[message_style]\nstripe_width = 8\ntext_size = \"extralarge\"\nlabel_size = \"medium\"\n"
+        ))
+        .unwrap();
+        sized.validate().unwrap();
+        assert_eq!(sized.message_style.text_size, super::TextSize::ExtraLarge);
+        for width in [1, 17] {
+            let mut wrong = sized.clone();
+            wrong.message_style.stripe_width = width;
+            assert!(wrong.validate().is_err(), "{width}");
+        }
+        for (label, accent) in [
+            ("a\nb", "#5B5FC7"),
+            (&"x".repeat(81) as &str, "#5B5FC7"),
+            ("", "5B5FC7"),
+            ("", "#5B5FCZ"),
+            ("", "#5B5FC77"),
+        ] {
+            config.message_style.label = label.into();
+            config.message_style.accent = accent.into();
+            assert!(config.validate().is_err(), "{label:?} {accent:?}");
+        }
+        assert!(
+            toml::from_str::<Config>(&format!(
+                "{example}\n[message_style]\nposition = \"left\"\n"
+            ))
+            .is_err()
+        );
     }
 
     #[test]

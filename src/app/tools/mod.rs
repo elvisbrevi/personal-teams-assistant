@@ -24,6 +24,9 @@ pub(super) struct Tool {
     pub schema: fn() -> Value,
 }
 
+fn default_message_style() -> Value {
+    serde_json::to_value(crate::config::MessageStyle::default()).unwrap_or_default()
+}
 fn object(properties: Value, required: &[&str]) -> Value {
     json!({"type": "object", "properties": properties, "required": required, "additionalProperties": false})
 }
@@ -1028,6 +1031,13 @@ pub(super) const TOOLS: &[Tool] = &[
         schema: none,
     },
     Tool {
+        name: "message_style",
+        title: "Teams message style",
+        description: "How answers look in Teams: enabled, the band's label, its position (top/bottom), the stripe color (accent, #RRGGBB) and width (stripe_width, 2-16 px), the band color, the label color, the robot icon and the text sizes (text_size, label_size).",
+        effect: Effect::Read,
+        schema: none,
+    },
+    Tool {
         name: "chat_simulate",
         title: "Try a question",
         description: "Runs the real pipeline on a test question and returns the answer; never sends to Teams. Uses the configured models' quota.",
@@ -1209,6 +1219,18 @@ pub(super) const TOOLS: &[Tool] = &[
         schema: || {
             object(
                 json!({"changes": {"type": "object", "description": "Fields of activity_registration to set, as activity_settings shows them."}}),
+                &["changes"],
+            )
+        },
+    },
+    Tool {
+        name: "message_style_update",
+        title: "Change the Teams message style",
+        description: "Changes how answers look in Teams. Fields as message_style shows them; position is top or bottom, band is accent, emphasis, good, warning, attention or none, label_color is default, subtle, accent, good, warning or attention, text_size and label_size are small, default, medium, large or extralarge, stripe_width is 2 to 16 pixels, and an empty label uses the default in the reply language.",
+        effect: Effect::Local,
+        schema: || {
+            object(
+                json!({"changes": {"type": "object", "description": "Fields of message_style to set."}}),
                 &["changes"],
             )
         },
@@ -1551,6 +1573,10 @@ pub(super) async fn run(name: &str, args: &Value) -> Result<Value, String> {
         "activity_status" => ipc("activity_status", json!({})).await,
         "activity_history" => ipc("activity_history", json!({"day": args.get("day"), "from": args.get("from")})).await,
         "activity_settings" => Ok(ipc("snapshot", json!({})).await?["config"]["activity_registration"].clone()),
+        "message_style" => {
+            let style = ipc("snapshot", json!({})).await?["config"]["message_style"].clone();
+            Ok(if style.is_null() { default_message_style() } else { style })
+        }
         "chat_simulate" => {
             let input = json!({"session": args.get("session").and_then(Value::as_str).unwrap_or("mcp"), "text": text(args, "text")?,
                 "group": false, "mentioned": false, "sources": args.get("sources").cloned().unwrap_or(json!([]))});
@@ -1611,6 +1637,23 @@ pub(super) async fn run(name: &str, args: &Value) -> Result<Value, String> {
                 let settings = p["config"]["activity_registration"].as_object_mut().ok_or("Invalid profile.")?;
                 for (key, value) in changes {
                     settings.insert(key, value);
+                }
+                Ok(())
+            })
+            .await
+        }
+        "message_style_update" => {
+            let changes = args.get("changes").and_then(Value::as_object).ok_or("changes must be an object.")?.clone();
+            edit(|p| {
+                let style = p["config"]
+                    .as_object_mut()
+                    .ok_or("Invalid profile.")?
+                    .entry("message_style")
+                    .or_insert_with(default_message_style)
+                    .as_object_mut()
+                    .ok_or("Invalid profile.")?;
+                for (key, value) in changes {
+                    style.insert(key, value);
                 }
                 Ok(())
             })
