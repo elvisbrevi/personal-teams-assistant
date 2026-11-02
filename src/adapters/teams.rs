@@ -294,12 +294,12 @@ fn blocks(markdown: &str, quotes: bool) -> String {
     out
 }
 /// `---`, `***` or `___`, three or more and spaces allowed: a horizontal rule.
-fn rule(line: &str) -> bool {
+pub(super) fn rule(line: &str) -> bool {
     let marks: Vec<char> = line.chars().filter(|c| !c.is_whitespace()).collect();
     marks.len() >= 3 && matches!(marks[0], '-' | '*' | '_') && marks.iter().all(|m| *m == marks[0])
 }
 /// `#` to `######` and a space: the heading level (`#`/`##` as 2, deeper as 3) and its text.
-fn heading(line: &str) -> Option<(u8, &str)> {
+pub(super) fn heading(line: &str) -> Option<(u8, &str)> {
     let text = line.trim_start_matches('#');
     let level = line.len() - text.len();
     ((1..=6).contains(&level) && text.starts_with(' ') && !text.trim().is_empty())
@@ -307,7 +307,7 @@ fn heading(line: &str) -> Option<(u8, &str)> {
 }
 /// The cells of a pipe-table row. `|` separates cells unless escaped (`\|`) or inside a code
 /// span; the outer pipes are optional.
-fn cells(row: &str) -> Vec<String> {
+pub(super) fn cells(row: &str) -> Vec<String> {
     let row = row.trim();
     let row = row.strip_prefix('|').unwrap_or(row);
     let mut cells = vec![String::new()];
@@ -332,7 +332,7 @@ fn cells(row: &str) -> Vec<String> {
     cells.iter().map(|c| c.trim().to_owned()).collect()
 }
 /// The number of columns of a table delimiter row such as `| --- | :---: |`.
-fn delimiter(line: &str) -> Option<usize> {
+pub(super) fn delimiter(line: &str) -> Option<usize> {
     let cells = cells(line);
     let dashes = |cell: &String| {
         let cell = cell.strip_prefix(':').unwrap_or(cell);
@@ -486,20 +486,22 @@ fn emphasis(text: &str, before: Option<char>) -> Option<(String, usize)> {
 /// `{green:text}`: the text in one of the [`COLORS`]. Another name, a nested brace or an
 /// empty text stays as written.
 fn color(text: &str) -> Option<(String, usize)> {
+    colored(text).map(|(hex, body, used)| {
+        let html = format!("<span style=\"color:{hex}\">{}</span>", inline(body));
+        (html, used)
+    })
+}
+/// `{green:text}` at the start of `text`: the color's hex value, the text and the bytes it spans.
+pub(super) fn colored(text: &str) -> Option<(&'static str, &str, usize)> {
     let colon = 1 + text[1..].char_indices().take(8).find(|(_, c)| *c == ':')?.0;
     let (_, hex) = COLORS.iter().find(|(name, _)| *name == &text[1..colon])?;
     let body = &text[colon + 1..];
     let end = body.find(['{', '}'])?;
-    (body[end..].starts_with('}') && !body[..end].trim().is_empty()).then(|| {
-        let html = format!(
-            "<span style=\"color:{hex}\">{}</span>",
-            inline(body[..end].trim())
-        );
-        (html, colon + end + 2)
-    })
+    (body[end..].starts_with('}') && !body[..end].trim().is_empty())
+        .then(|| (*hex, body[..end].trim(), colon + end + 2))
 }
 /// `[label](https://url)` at the start of `text`, with balanced parentheses in the URL.
-fn link(text: &str) -> Option<(&str, &str, usize)> {
+pub(super) fn link(text: &str) -> Option<(&str, &str, usize)> {
     let close = text.find("](")?;
     let label = &text[1..close];
     if label.trim().is_empty() || label.contains(['[', ']']) {

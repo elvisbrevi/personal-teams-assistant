@@ -218,6 +218,32 @@
             <label>Language <small>The language of this app, of what the assistant writes in Teams (including notices and sources) and of the tasks it drafts. It overrides the style.</small><select id="llm-language" class="cfg" translate="no"><option value="es">Español</option><option value="en">English</option></select></label>
             <label>Answer style<textarea id="llm-style" class="cfg" rows="3"></textarea></label>
           </div>
+          <div class="panel" id="panel-message-style">
+            <h2>Message style in Teams</h2>
+            <p class="hint">Sends what the assistant writes in Teams as a card with a colored stripe and a band that says it was written with AI. Messages an agent posts with <code>teams_post</code> keep the plain format.</p>
+            <label class="check"><input id="style-enabled" class="cfg" type="checkbox"> Show the assistant's messages as a card with a band</label>
+            <div id="style-fields">
+              <div class="grid">
+                <label>Band text <small>Empty uses the default in the reply language.</small><input id="style-label" class="cfg" maxlength="80"></label>
+                <label>Band position<select id="style-position" class="cfg"><option value="bottom">Below the text</option><option value="top">Above the text</option></select></label>
+                <label>Color combination<select id="style-preset" class="cfg"><option value="teams">Teams purple</option><option value="blue">Blue</option><option value="green">Green</option><option value="amber">Amber</option><option value="red">Red</option><option value="gray">Gray</option><option value="custom">Custom</option></select></label>
+              </div>
+              <details class="fold" id="style-custom">
+                <summary>Choose each color <small>Advanced</small></summary>
+                <div class="grid">
+                  <label>Stripe color<input id="style-accent" class="cfg" type="color"></label>
+                  <label>Band color <small>Teams adapts it to its light or dark theme.</small><select id="style-band" class="cfg"><option value="accent">Lavender</option><option value="emphasis">Gray</option><option value="good">Green</option><option value="warning">Amber</option><option value="attention">Red</option><option value="none">No band color</option></select></label>
+                  <label>Band text color<select id="style-label-color" class="cfg"><option value="default">Normal</option><option value="subtle">Soft</option><option value="accent">Accent</option><option value="good">Green</option><option value="warning">Amber</option><option value="attention">Red</option></select></label>
+                </div>
+                <label class="check"><input id="style-icon" class="cfg" type="checkbox"> Show a robot icon before the band text</label>
+              </details>
+              <p class="hint">Preview, in this app's theme. Teams shows the same card in its own light or dark theme.</p>
+              <div id="style-preview" class="teams-card" aria-hidden="true">
+                <p>Here is how the assistant's messages will look in Teams.</p>
+                <div class="teams-band"><span id="style-preview-icon">🤖</span><span id="style-preview-label" translate="no"></span></div>
+              </div>
+            </div>
+          </div>
           <div class="panel" id="panel-appearance">
             <h2>Appearance</h2>
             <p class="hint">Saved on this device and applied right away. Match the system follows its light or dark mode; other devices keep their own choice.</p>

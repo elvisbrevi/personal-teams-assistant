@@ -1444,6 +1444,7 @@ async function reload() {
   renderChatList();
   renderRegistrationSettings();
   renderEmbeddings();
+  renderMessageStyle();
   dirty = false;
   dirtyGroups.clear();
   renderSavebar();
@@ -2900,6 +2901,7 @@ function collectSettings() {
   config.policy.dry_run = $('#dry-run').checked;
   collectRegistrationSettings();
   collectEmbeddings();
+  collectMessageStyle();
 }
 
 /** The reference the embeddings credential is mapped from in `[secrets]`. */
@@ -2927,6 +2929,64 @@ function renderEmbeddings() {
   field('#embeddings-url', embeddings?.url);
   field('#embeddings-model', embeddings?.model);
   field('#embeddings-credential', embeddings?.secret_ref ? current.config.secrets[embeddings.secret_ref] : '');
+}
+
+// ---------------------------------------------------------------- Teams message style
+
+/** Color combinations for the Teams card: any stripe color, and Teams' theme-aware band and text colors. */
+const STYLE_PRESETS = {
+  teams: { accent: '#5B5FC7', band: 'accent', label_color: 'default' },
+  blue: { accent: '#2F80ED', band: 'accent', label_color: 'accent' },
+  green: { accent: '#13A10E', band: 'good', label_color: 'good' },
+  amber: { accent: '#CA5010', band: 'warning', label_color: 'warning' },
+  red: { accent: '#E74856', band: 'attention', label_color: 'attention' },
+  gray: { accent: '#8A8A8A', band: 'emphasis', label_color: 'subtle' },
+};
+/** `[message_style]` as the host defaults it; the host omits the section while it is unchanged. */
+const STYLE_DEFAULT = { enabled: false, label: '', position: 'bottom', ...STYLE_PRESETS.teams, icon: true };
+
+function renderMessageStyle() {
+  const style = { ...STYLE_DEFAULT, ...current.config.message_style };
+  $('#style-enabled').checked = style.enabled;
+  field('#style-label', style.label);
+  field('#style-position', style.position);
+  field('#style-accent', style.accent.toLowerCase());
+  field('#style-band', style.band);
+  field('#style-label-color', style.label_color);
+  $('#style-icon').checked = style.icon;
+  renderStylePreview();
+}
+
+/** The combination the color fields match, or custom. */
+function stylePreset() {
+  const accent = $('#style-accent').value.toUpperCase();
+  const match = Object.entries(STYLE_PRESETS).find(([, preset]) =>
+    preset.accent === accent && preset.band === $('#style-band').value && preset.label_color === $('#style-label-color').value);
+  return match?.[0] ?? 'custom';
+}
+
+function renderStylePreview() {
+  $('#style-fields').hidden = !$('#style-enabled').checked;
+  $('#style-preset').value = stylePreset();
+  const preview = $('#style-preview');
+  preview.className = `teams-card band-${$('#style-band').value} label-${$('#style-label-color').value} at-${$('#style-position').value}`;
+  preview.style.setProperty('--stripe', $('#style-accent').value);
+  // The default band text follows the reply language, like what the assistant sends.
+  const fallback = $('#llm-language').value === 'en' ? 'AI-generated response' : 'Respuesta generada con IA';
+  $('#style-preview-label').textContent = $('#style-label').value.trim() || fallback;
+  $('#style-preview-icon').hidden = !$('#style-icon').checked;
+}
+
+function collectMessageStyle() {
+  current.config.message_style = {
+    enabled: $('#style-enabled').checked,
+    label: $('#style-label').value.trim(),
+    position: $('#style-position').value,
+    accent: $('#style-accent').value.toUpperCase(),
+    band: $('#style-band').value,
+    label_color: $('#style-label-color').value,
+    icon: $('#style-icon').checked,
+  };
 }
 
 async function save() {
@@ -4439,6 +4499,21 @@ document.querySelectorAll('.cfg').forEach(input => {
   input.addEventListener('change', markDirty);
 });
 $('#discover-chats').addEventListener('change', renderChatList);
+$('#style-preset').addEventListener('change', () => {
+  const chosen = $('#style-preset').value;
+  const preset = STYLE_PRESETS[chosen];
+  if (preset) {
+    field('#style-accent', preset.accent.toLowerCase());
+    field('#style-band', preset.band);
+    field('#style-label-color', preset.label_color);
+  } else {
+    $('#style-custom').open = true;
+  }
+  renderStylePreview();
+  $('#style-preset').value = chosen;
+});
+['#style-enabled', '#style-label', '#style-position', '#style-accent', '#style-band', '#style-label-color', '#style-icon', '#llm-language']
+  .forEach(id => $(id).addEventListener('input', renderStylePreview));
 document.querySelectorAll('#theme-choice button').forEach(button => {
   button.onclick = () => {
     const choice = button.dataset.themeChoice;

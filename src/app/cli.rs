@@ -46,6 +46,8 @@ Configuration
   config show              Saved configuration.
   config get FIELD         Reads a field by dotted path (e.g. policy.dry_run).
   config set FIELD JSON    Changes a field; the value is JSON (true, \"text\", [...], {...}).
+                           Teams message style: config set message_style.enabled true (and .label,
+                           .position, .accent, .band, .label_color, .icon).
   config apply|validate    Applies or validates {config,map,tunnel_config} as JSON or TOML on stdin.
   config import FILE       Imports an existing config.toml (with the assistant stopped).
   credentials list         This installation's internal credentials and their origin, without values. For `is the secret X
@@ -1777,11 +1779,21 @@ async fn execute(mut args: Vec<String>) -> Result<Reply> {
             snap.data = lookup(&data["config"], positional(&args, 2)?)?.clone();
             return Ok(snap);
         }
-        ("config", "set") => assign(
-            &mut data["config"],
-            positional(&args, 2)?,
-            serde_json::from_str(positional(&args, 3)?)?,
-        )?,
+        ("config", "set") => {
+            // A section left out while it holds its defaults can still be edited by path.
+            let key = positional(&args, 2)?;
+            if key.split('.').next() == Some("message_style")
+                && data["config"].get("message_style").is_none()
+            {
+                data["config"]["message_style"] =
+                    serde_json::to_value(crate::config::MessageStyle::default())?;
+            }
+            assign(
+                &mut data["config"],
+                key,
+                serde_json::from_str(positional(&args, 3)?)?,
+            )?
+        }
         ("config", "apply" | "validate") => {
             data = input()?;
             if action == "validate" {

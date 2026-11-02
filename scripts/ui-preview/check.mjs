@@ -531,6 +531,46 @@ check('axe: no WCAG 2.2 AA violations in any scan', !Object.keys(totals).length,
   await context.close();
 }
 {
+  // Message style: hidden while off; a combination fills the colors, the preview follows and Save sends the section.
+  const { context, page, errors } = await open({ axe: true });
+  await page.evaluate(() => showTab('settings', 'panel-message-style'));
+  check('message style fields stay hidden while it is off', !await page.isVisible('#style-fields'));
+  await page.check('#style-enabled');
+  check('turning the message style on shows its fields and the default label', await page.isVisible('#style-preview')
+    && await page.textContent('#style-preview-label') === 'Respuesta generada con IA' && await page.inputValue('#style-preset') === 'teams');
+  await page.selectOption('#style-preset', 'green');
+  await page.selectOption('#style-position', 'top');
+  await page.fill('#style-label', 'Escrito por mi asistente');
+  const preview = await page.evaluate(() => [document.querySelector('#style-preview').className, document.querySelector('#style-preview').style.getPropertyValue('--stripe')]);
+  check('the preview follows the combination, position and label', preview[0] === 'teams-card band-good label-good at-top' && preview[1] === '#13a10e'
+    && await page.textContent('#style-preview-label') === 'Escrito por mi asistente', preview.join(' | '));
+  await page.evaluate(() => { document.querySelector('#style-custom').open = true; });
+  await page.selectOption('#style-band', 'emphasis');
+  check('changing one color makes the combination custom', await page.inputValue('#style-preset') === 'custom');
+  await page.evaluate(axeSource);
+  const scan = () => page.evaluate(async () => (await axe.run(document, { runOnly: { type: 'tag', values: ['wcag2a', 'wcag2aa', 'wcag21aa', 'wcag22aa'] } })).violations);
+  for (const label of ['default', 'subtle', 'accent', 'good', 'warning', 'attention']) {
+    await page.selectOption('#style-label-color', label);
+    for (const band of ['accent', 'emphasis', 'good', 'warning', 'attention', 'none']) {
+      await page.selectOption('#style-band', band);
+      for (const theme of ['light', 'dark']) {
+        await page.evaluate(choice => applyTheme(choice), theme);
+        const violations = await scan();
+        if (violations.length) check(`message style preview passes axe (${label} on ${band}, ${theme})`, false, JSON.stringify(violations));
+      }
+    }
+  }
+  check('message style settings pass axe in every color pair and theme', true);
+  await page.selectOption('#style-label-color', 'good');
+  await page.selectOption('#style-band', 'emphasis');
+  await page.click('#save');
+  await page.waitForTimeout(300);
+  check('the message style is saved', await page.evaluate(() => JSON.stringify(window.__ptaLastSave?.config?.message_style)) === JSON.stringify({
+    enabled: true, label: 'Escrito por mi asistente', position: 'top', accent: '#13A10E', band: 'emphasis', label_color: 'good', icon: true }));
+  check('message style has no page errors', errors.length === 0, errors.join(' | '));
+  await context.close();
+}
+{
   // Theme: this device's choice applies at once, asks for no save and survives a reload.
   const { context, page } = await open();
   const theme = () => page.evaluate(() => [document.documentElement.dataset.theme ?? null, getComputedStyle(document.body).backgroundColor, localStorage.getItem('pta-theme')]);
