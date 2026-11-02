@@ -1,9 +1,8 @@
 # Organization layer and per-account cloud storage
 
-Design proposal, 2026-11-02. Phase 1 (analysis) of the move described in §14 of the
-[architecture](architecture.md#14-current-decisions-and-why). Nothing here is implemented yet;
-the decisions in [§11](#11-decisions-the-owner-must-take) must be taken before the phases that
-depend on them start. Cloudflare limits and prices were read from the official documentation on
+Design, 2026-11-02. Phase 1 (analysis) of the move described in §14 of the
+[architecture](architecture.md#14-current-decisions-and-why). The owner's decisions are in
+[§11](#11-decisions); the phases in [§10](#10-phases) follow them. Cloudflare limits and prices were read from the official documentation on
 2026-11-02 ([sources](#sources)); re-read them before each implementation phase.
 
 ## 1. Goals and non-goals
@@ -101,13 +100,14 @@ organization data and stay.
 | --- | --- | --- |
 | **User** | A person, identified by the immutable provider identity the portal already binds (Access + GitHub subject). | One assistant account today. |
 | **Account** | The assistant account (today: a portal account with its own profile, host and coordinator). The unit of tenancy and of the cloud database. | Portable settings, sources (definitions, never credentials), contexts, questions and associated requests, verified notes, answer evaluations, approved examples, person profiles, agent instructions, activity records, message audit history, finished implementation and request runs. |
-| **Organization** (optional) | The employer's shared conventions. 0 or 1 per account; N accounts to 1 organization. | Work item guides, norms, reference architecture, process conventions, glossary terms, templates, and the list of sources that document the organization. Default agent instructions may come from it later. |
+| **Organization** (optional) | The employer's conventions, kept by each account for itself (organizations are not shared between accounts, §11). 0 or 1 per account. | Work item guides, norms, reference architecture, process conventions, glossary terms, templates, and the list of sources that document the organization. Default agent instructions may come from it later. |
 | **Installation** | One computer's host and profile. | Paths, repository bindings, roots, tunnel, bind and public URL, Graph IDs and vault, every secret and provider session, the job queue's in-flight rows and send nonces, caches. |
 
 An account without an organization keeps its work item guides in its own layer: the layer is
-optional, the guides are not lost when it is absent. Leaving an organization removes its entries
-from the installation's cache (as `portable::leave` does for an account) and never copies them
-into the account.
+optional, the guides are not lost when it is absent. The organization is part of the account's
+data: it is stored in the account's database and travels with the account configuration to every
+installation signed in to the account (work item guides do not travel today). Detaching it
+removes it as a whole, after a private backup, without touching the rest of the account.
 
 ### The organization layer
 
@@ -179,8 +179,7 @@ Workers Paid costs a $5/month account minimum and includes 10 M requests and 30 
 has 100,000 requests/day and 10 ms of CPU per invocation.
 
 **Recommendation: one Worker with SQLite-backed Durable Objects** — an `AccountStore` object per
-account, an `OrganizationStore` per organization and a small `Registry` object (identities,
-installation credentials, memberships) — plus one R2 bucket for encrypted backups and exports.
+account, a small `Registry` object (identities, accounts and installation credentials) — plus one R2 bucket for encrypted backups and exports.
 No Vectorize and no KV for now.
 
 - **Isolation by construction.** The object is the database: a request routed to
@@ -203,9 +202,14 @@ No Vectorize and no KV for now.
   America: there is no South American placement). Expect on the order of 100–200 ms per round
   trip; phase 3 measures it before anything depends on it. The pipeline and the GUI read the local
   replica, so latency only affects writes and synchronization.
-- **Cost for one account.** Well inside the Free plan (thousands of requests and writes a day at
-  most, megabytes of storage). Paid ($5/month) mainly buys headroom, 1 TB of account storage and
-  longer limits; it is the owner's call (§11).
+- **Cost on the Free plan (decided, §11).** One account uses thousands of requests and row writes
+  a day at most and megabytes of storage. Free quotas belong to the Cloudflare account and are
+  shared by every assistant account: 100,000 Worker requests, 100,000 Durable Object requests and
+  100,000 rows written a day, 5 GB stored in total, 10 ms of CPU per Worker invocation (enough,
+  because encryption happens on the client). The outbox batches records into few requests, the
+  Worker keeps a per-account daily share so one account cannot exhaust the others, and an
+  exhausted quota behaves like being offline (reads stay local, records wait in the outbox; §7).
+  `cloud status` shows the usage. Moving to Workers Paid later changes no code.
 
 ## 6. Security and privacy
 
@@ -215,7 +219,7 @@ person profiles and activity records. Data classes:
 | Class | Examples | In Cloudflare |
 | --- | --- | --- |
 | Secrets | variable values and keys, credentials, OAuth vault, machine tokens, provider sessions | never |
-| Sensitive content | audits, answers, notes, evaluations, examples, people, activity records, run prompts and outputs, organization entries | **encrypted by the client** (recommended; §11 decides) |
+| Sensitive content | audits, answers, notes, evaluations, examples, people, activity records, run prompts and outputs, organization entries | **encrypted by the client** (§11) |
 | Configuration structure | sources (URLs, tool catalogs with organization URLs and emails), contexts, questions, prompts | encrypted by the client |
 | Operational metadata | record IDs, collection, revision, content digest, sizes, timestamps, schema versions | clear (needed for synchronization, never content) |
 
@@ -239,11 +243,9 @@ Trust model: the same as account variables (ADR 0001). The host that holds the c
 decrypts for unattended operation; this protects against Cloudflare and its account, not against
 a compromised server.
 
-**Organization store.** Shared between accounts, so a key would need distribution to every
-member (per-member key wrapping). Two options for §11: (a) encrypted with an organization key
-wrapped per member, or (b) clear, because norms and guides are less sensitive and clear text
-allows server search across members. Until there are other users the organization lives inside
-the account store, encrypted with the account key.
+**Organization.** Organizations are not shared between accounts (§11), so the organization lives
+inside the account store, encrypted with the account's content key like the rest. Sharing would
+need an organization key wrapped per member; it is out of scope.
 
 **Installation authentication.**
 
@@ -256,11 +258,10 @@ the account store, encrypted with the account key.
   existing trust confirmation, revocable per installation — the same shape as today's machine
   credential, stored in the credential store under a new name (`CLOUD_STORE_TOKEN`). mTLS was
   considered and rejected: it adds a certificate authority and issuance for no isolation gain.
-- *Authority:* `authenticate(request) → Principal {account, installation, organization roles}`
-  is the only source of identity. Paths and bodies never carry an account ID; the stub is
-  `AccountStore.idFromName(principal.account)`; an organization request is admitted only if the
-  `Registry` lists the account as a member (role `member` reads, `admin` writes). No endpoint lists
-  or reads across accounts. Contract tests include cross-account attempts.
+- *Authority:* `authenticate(request) → Principal {account, installation}` is the only source
+  of identity. Paths and bodies never carry an account ID; the stub is
+  `AccountStore.idFromName(principal.account)`, so every user's requests reach only that user's
+  database. No endpoint lists or reads across accounts. Contract tests include cross-account attempts.
 - *Logs:* the Worker logs method, route, status and duration only; never bodies, headers or IDs
   beyond an opaque request ID.
 
@@ -349,29 +350,30 @@ parity, the `AGENTS.md` checks, and delivery verified on crates.io and on the se
 | Phase | Content | Risks |
 | --- | --- | --- |
 | 1a. Cleanup | Synthetic names in tests, docs, README, prompts, the GUI placeholder and catalogs; To-Do items carry `category`; the GUI decides by category; the task type listed with bugs comes from its guide (`todo = "bug"`); the production guide is updated as data in the same delivery. | The production To-Do stops listing that type until its guide carries the field: update it right after the install, verify the list. |
-| 1b. Organization (local) | `[organization]` in the map (name, entries, source IDs); guides shown as entries; new `organization` source kind (disabled by default) and index documents; Settings › Organization replaces the current guides editor (no duplicate control); `pta organization …` with `pta guides …` kept as its guides subcommand; MCP `organization_*`; agents receive norms and architecture as untrusted input; skill, architecture and `CONTEXT.md`. Decide whether the organization travels with the account configuration (today guides do not). | Prompt size growth for agents (bound entries per run); a second place to edit guides if the old editor is not removed in the same PR. |
+| 1b. Organization (local) | `[organization]` in the map (name, entries, source IDs); guides shown as entries; new `organization` source kind (disabled by default) and index documents; Settings › Organization replaces the current guides editor (no duplicate control); `pta organization …` with `pta guides …` kept as its guides subcommand; MCP `organization_*`; agents receive norms and architecture as untrusted input; skill, architecture and `CONTEXT.md`. The organization, guides included, joins the account configuration's allowlist and travels with the account. | Prompt size growth for agents (bound entries per run); a second place to edit guides if the old editor is not removed in the same PR. |
 | 2. Storage abstraction | Repository traits per aggregate (settings and map, notes and feedback, audit history, activity records, runs, organization), the current local implementation as default, one shared contract test suite. No behavior change. | Broad refactor of hot paths: done store by store, each PR behavior-neutral and fully tested. |
 | 3a. Worker and authentication | `cloud/` Worker, `Registry`, `AccountStore` schema v1 (encrypted records with clear metadata), Access service token, installation credential, health; Workers Builds; host `cloud status/connect`. | Access/Workers configuration mistakes: staging Worker first, contract tests including cross-account attempts. |
 | 3b. Mirror | Outbox for append-only records, encrypted snapshots of configuration, `cloud verify`; local stays the source of truth. | Outbox growth while offline (bounded, visible in status); latency measured here. |
 | 3c. Primary | Compare-and-swap configuration writes through the Worker; local replica; `portable_*` served from the account store. | Conflict handling regressions: reuse the portable rules and their tests. |
 | 4a. Migration | `cloud migrate/promote/rollback/erase` with backup and read-back verification; production migrated when the owner decides. | Data loss: never delete local data; rollback rehearsed on a copy of the production profile first. |
-| 4b. Shared organization | `OrganizationStore`, membership and invitations, the key or clear decision; leaving an organization clears its cache. | Key distribution complexity if encrypted; authorization bugs between accounts. |
+| 4b. Other users | Every portal account gets its own cloud account store: the operator enables it per account, each with its own content key, installation credentials and quota share; the owner's account is not special in the Worker. | Authorization bugs between accounts (cross-account contract tests); the shared Free quota (per-account shares, §5). |
 
-## 11. Decisions the owner must take
+## 11. Decisions
 
-1. **Cloudflare account, plan and cost.** Which account (the one that already runs the tunnel,
-   Access and the landing?) and whether to stay on Free (enough for one account) or pay Workers
-   Paid ($5/month minimum).
-2. **Data residency.** No jurisdiction (placement near where objects are created: eastern North
-   America from South America) or a fixed `us`/`eu` jurisdiction. It cannot change after creation
-   without a migration.
-3. **Client-side encryption versus server-side search.** Recommended: encrypt every content record
-   on the client, search in the local replica. The organization store's choice (§6) can wait.
-4. **Other users.** Whether accounts other than the owner's will use the cloud store and shared
-   organizations; it changes the registry, invitations and the plan's limits.
-5. **When to migrate production.** After phase 4a has been rehearsed on a copy.
+Taken by the owner on 2026-11-02:
 
-Phases 1a, 1b and 2 depend on none of these and can start right away.
+1. **Cloudflare account and plan.** The account that already runs the tunnel, Access and the
+   landing, on the **Free** plan (§5 explains how the shared quota is handled).
+2. **Data residency.** No preference: no jurisdiction is set, so objects are placed near where they
+   are created (eastern North America from South America, the lowest latency available). A
+   jurisdiction could only be added later by migrating.
+3. **Encryption.** Client-side encryption of every content record; search runs in the local
+   replica (§6).
+4. **Users.** Several users, each with their own data (one account store per assistant account);
+   **no organizations shared between accounts**. The organization layer is part of each account
+   and travels with its configuration.
+5. **Production migration.** After phase 4a has been rehearsed on a copy of the production
+   profile, then the owner's account first.
 
 ## Sources
 
