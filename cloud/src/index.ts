@@ -89,7 +89,7 @@ function match(method: string, path: string): { route: string; handle: Handler }
   if (first === "health" && parts.length === 2) return route("/v1/health", { GET: health });
   if (first === "enroll" && parts.length === 2) return route("/v1/enroll", { POST: enroll });
   if (first === "whoami" && parts.length === 2) return route("/v1/whoami", { GET: whoami });
-  if (first === "store" && parts.length === 2) return route("/v1/store", { GET: store });
+  if (first === "store" && parts.length === 2) return route("/v1/store", { GET: store, DELETE: erase });
   if (first === "installations" && parts.length === 2) return route("/v1/installations", { GET: installations });
   if (first === "installations" && parts.length === 3) {
     return route("/v1/installations/:id", { DELETE: (r, e) => revoke(r, e, decode(second)) });
@@ -306,6 +306,32 @@ async function revoke(request: Request, env: Env, id: string): Promise<Response>
 async function store(request: Request, env: Env): Promise<Response> {
   const principal = await authenticate(request, env);
   return json(await accountStore(env, principal).summary(limits(env), now()));
+}
+
+/**
+ * Erase the caller's account store: its records, then every object under the account's R2 prefix.
+ * Each request removes a bounded share and answers `more` until nothing is left, so it is safe to
+ * repeat. Only an account with a single active installation (the caller) may erase, so no other
+ * installation keeps writing into a store that is being emptied. The enrollment stays.
+ */
+async function erase(request: Request, env: Env): Promise<Response> {
+  const principal = await authenticate(request, env);
+  const input = await body(request, 1024);
+  closed(input, ["confirm"], "the erasure");
+  if (input.confirm !== "erase") throw new Refusal("invalid_input", "An erasure must be confirmed.");
+  if ((await registry(env).account(principal.account)).installations > 1) {
+    throw new Refusal("conflict", "Revoke the account's other installations before erasing its store.");
+  }
+  const records = charged(await accountStore(env, principal).erase(limits(env), now()));
+  let backups = 0;
+  let truncated = false;
+  if (records.remaining === 0) {
+    const listing = await env.BACKUPS.list({ prefix: `accounts/${principal.account}/`, limit: LIMITS.eraseObjects });
+    if (listing.objects.length > 0) await env.BACKUPS.delete(listing.objects.map((object) => object.key));
+    backups = listing.objects.length;
+    truncated = listing.truncated;
+  }
+  return json({ erased: records.erased, backups, more: records.remaining > 0 || truncated });
 }
 
 async function write(request: Request, env: Env): Promise<Response> {

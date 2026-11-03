@@ -28,7 +28,7 @@ describe("health", () => {
       service: "personal-teams-assistant-cloud",
       environment: "production",
       protocols: [1],
-      features: ["cas"],
+      features: ["cas", "erase"],
       schema: { registry: 1, account_store: 1 },
       configured: true,
     });
@@ -317,6 +317,104 @@ describe("account store", () => {
     // Another account's share is untouched.
     const theirs = await call("/v1/records", { method: "POST", caller: other, body: { records: [records[0]] } });
     expect(theirs.status).toBe(200);
+  });
+});
+
+describe("erase", () => {
+  async function backup(caller: Awaited<ReturnType<typeof enrolled>>, name: string) {
+    const { digest } = await sealed("backup bytes");
+    const put = await call(`/v1/backups/${name}`, {
+      method: "PUT",
+      caller,
+      raw: "backup bytes",
+      headers: { "x-content-sha256": digest, "content-length": "12" },
+    });
+    expect(put.status).toBe(201);
+  }
+
+  async function summary(caller: Awaited<ReturnType<typeof enrolled>>) {
+    return (await (await call("/v1/store", { caller })).json()) as {
+      collections: Record<string, { records: number; tombstones: number; generation: number }>;
+      erased_at: number | null;
+    };
+  }
+
+  it("removes the caller's records and backups, keeps generations and is safe to repeat", async () => {
+    const owner = await enrolled(identity());
+    const stranger = await enrolled(identity());
+    const records = [await record("notes", "a", 1, "one"), await record("settings", "config", 1, "two")];
+    await call("/v1/records", { method: "POST", caller: owner, body: { records } });
+    const tombstone = { collection: "notes", id: "a", revision: 2, schema: 1, deleted: true, digest: EMPTY_DIGEST };
+    await call("/v1/records", { method: "POST", caller: owner, body: { records: [tombstone] } });
+    await call("/v1/records", { method: "POST", caller: stranger, body: { records: [await record("notes", "a", 1, "theirs")] } });
+    await backup(owner, "mine.bin");
+    await backup(stranger, "theirs.bin");
+    expect((await summary(owner)).erased_at).toBeNull();
+
+    const erased = await call("/v1/store", { method: "DELETE", caller: owner, body: { confirm: "erase" } });
+    expect(erased.status).toBe(200);
+    expect(await erased.json()).toEqual({ erased: 2, backups: 1, more: false });
+    const after = await summary(owner);
+    expect(after.collections.notes).toMatchObject({ records: 0, tombstones: 0, generation: 2 });
+    expect(after.collections.settings).toMatchObject({ records: 0, generation: 1 });
+    expect(after.erased_at).toEqual(expect.any(Number));
+    expect((await call("/v1/records/settings/config", { caller: owner })).status).toBe(404);
+    const listed = (await (await call("/v1/backups", { caller: owner })).json()) as { backups: unknown[] };
+    expect(listed.backups).toEqual([]);
+
+    // Another account keeps everything.
+    const theirs = (await (await call("/v1/records/notes/a", { caller: stranger })).json()) as { sealed: string };
+    expect(atob(theirs.sealed)).toBe("theirs");
+    expect((await call("/v1/backups/theirs.bin", { caller: stranger })).status).toBe(200);
+
+    // Repeating changes nothing; a later write continues above the kept generation.
+    const again = await call("/v1/store", { method: "DELETE", caller: owner, body: { confirm: "erase" } });
+    expect(await again.json()).toEqual({ erased: 0, backups: 0, more: false });
+    await call("/v1/records", { method: "POST", caller: owner, body: { records: [await record("notes", "a", 1, "new")] } });
+    const page = (await (await call("/v1/records/notes?since=2", { caller: owner })).json()) as {
+      records: { id: string; generation: number }[];
+    };
+    expect(page.records.map((entry) => [entry.id, entry.generation])).toEqual([["a", 3]]);
+  });
+
+  it("needs a confirmed, closed body and a single active installation", async () => {
+    const token = identity();
+    const owner = await enrolled(token);
+    await call("/v1/records", { method: "POST", caller: owner, body: { records: [await record("notes", "a", 1, "one")] } });
+    for (const body of [{}, { confirm: "yes" }, { confirm: "erase", account: "other" }]) {
+      expect((await call("/v1/store", { method: "DELETE", caller: owner, body })).status).toBe(400);
+    }
+    expect((await call("/v1/store", { method: "DELETE" })).status).toBe(401);
+
+    const second = await enrolled(token, "second host");
+    const refused = await call("/v1/store", { method: "DELETE", caller: owner, body: { confirm: "erase" } });
+    expect(refused.status).toBe(409);
+    expect((await summary(owner)).collections.notes?.records).toBe(1);
+    expect((await call(`/v1/installations/${second.installation}`, { method: "DELETE", caller: owner })).status).toBe(200);
+    const erased = await call("/v1/store", { method: "DELETE", caller: owner, body: { confirm: "erase" } });
+    expect(erased.status).toBe(200);
+  });
+
+  it("never reaches another account's store", async () => {
+    const owner = await enrolled(identity());
+    const stranger = await enrolled(identity());
+    await call("/v1/records", { method: "POST", caller: owner, body: { records: [await record("notes", "a", 1, "mine")] } });
+    await backup(owner, "mine.bin");
+    const erased = await call("/v1/store", { method: "DELETE", caller: stranger, body: { confirm: "erase" } });
+    expect(await erased.json()).toEqual({ erased: 0, backups: 0, more: false });
+    const forged = { identity: stranger.identity, token: owner.token };
+    expect((await call("/v1/store", { method: "DELETE", caller: forged, body: { confirm: "erase" } })).status).toBe(401);
+    expect((await summary(owner)).collections.notes?.records).toBe(1);
+    expect((await call("/v1/backups/mine.bin", { caller: owner })).status).toBe(200);
+  });
+
+  it("is charged as rows written against the account's share", async () => {
+    const caller = await enrolled(identity());
+    const records = await Promise.all(Array.from({ length: 25 }, (_, i) => record("notes", `n${i}`, 1, `x${i}`)));
+    expect((await call("/v1/records", { method: "POST", caller, body: { records } })).status).toBe(200);
+    const exhausted = await call("/v1/store", { method: "DELETE", caller, body: { confirm: "erase" } });
+    expect(exhausted.status).toBe(429);
+    expect((await summary(caller)).collections.notes?.records).toBe(25);
   });
 });
 
