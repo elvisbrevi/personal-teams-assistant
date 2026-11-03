@@ -11,7 +11,9 @@ import { ACCOUNT_STORE_SCHEMA, COLLECTIONS, type Collection, LIMITS } from "./pr
  * the last change. Deleting writes a tombstone so an older replica cannot resurrect the record.
  * Writes are idempotent upserts keyed by collection, ID and revision. A record that names the
  * revision it replaces (`base`) is written only over exactly that revision (compare-and-swap; 0 is
- * "no record yet"), and an atomic batch writes all of its records or none.
+ * "no record yet"), and an atomic batch writes all of its records or none. Erasing removes the
+ * records, tombstones included, but keeps the collection generations and the daily usage, so a
+ * replica never sees a generation go back and an erasure never resets the account's share.
  */
 
 export interface SealedRecord {
@@ -222,6 +224,22 @@ export class AccountStore extends DurableObject<Env> {
       .one().generation;
   }
 
+  /**
+   * Remove up to `batch` records (tombstones included) in one transaction, charged as rows written.
+   * When none remain, `erased_at` records the time.
+   */
+  erase(limits: Limits, now: number, batch: number = LIMITS.eraseRecords): Charged<{ erased: number; remaining: number }> {
+    const total = this.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM records").one().n;
+    const rows = Math.min(total, batch);
+    const exhausted = this.charge(limits, rows, now);
+    if (exhausted) return { ok: false, reason: "quota_exhausted", usage: exhausted };
+    this.ctx.storage.transactionSync(() => {
+      this.sql.exec("DELETE FROM records WHERE rowid IN (SELECT rowid FROM records LIMIT ?)", rows);
+      if (rows === total) this.sql.exec("INSERT OR REPLACE INTO meta (key, value) VALUES ('erased_at', ?)", now);
+    });
+    return { ok: true, value: { erased: rows, remaining: total - rows } };
+  }
+
   /** Changes of a collection after a generation, oldest first, bounded by count and bytes. */
   changes(
     collection: Collection,
@@ -301,9 +319,11 @@ export class AccountStore extends DurableObject<Env> {
         ];
       }),
     );
+    const erased = this.sql.exec<{ value: number }>("SELECT value FROM meta WHERE key = 'erased_at'").toArray()[0];
     return {
       schema: ACCOUNT_STORE_SCHEMA,
       collections,
+      erased_at: erased?.value ?? null,
       usage: this.usage(limits, now),
       stored_bytes: this.ctx.storage.sql.databaseSize,
     };

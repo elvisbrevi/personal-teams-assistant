@@ -371,6 +371,22 @@ def verify(access, report):
         check(result(a, 2, 1, "next") == "updated", "a write naming the current revision is accepted", checks)
         check(result(b, 3, 2, "theirs") == "conflict",
               "account b's compare-and-swap never reaches account a's record", checks)
+        check("erase" in health.get("features", []), "the Worker offers erasure", checks)
+        erase = {"confirm": "erase"}
+        check(request(base + "/v1/store", "DELETE", b, erase)[0] == 200, "account b erases its own store", checks)
+        check(request(base + f"/v1/records/notes/verify-{run}", headers=a)[0] == 200,
+              "account b's erasure leaves account a's records", checks)
+        status, body = request(base + "/v1/enroll", "POST", edge_headers(first),
+                               {"label": "verification a2", "host_version": "0.0.0"})
+        check(status == 201, "a second installation of account a enrolls", checks)
+        a2 = {**edge_headers(first), "Authorization": "Bearer " + json.loads(body)["token"]}
+        check(request(base + "/v1/store", "DELETE", a, erase)[0] == 409,
+              "an account with another active installation cannot erase its store", checks)
+        check(request(base + "/v1/installations/self", "DELETE", a2)[0] == 200,
+              "the second installation revokes itself", checks)
+        status, body = request(base + "/v1/store", "DELETE", a, erase)
+        check(status == 200 and json.loads(body).get("more") is False, "account a erases its store", checks)
+        check(request(base + f"/v1/records/notes/verify-{run}", headers=a)[0] == 404, "an erased record is gone", checks)
         check(request(base + f"/v1/installations/{enrolled['a']['installation']}", "DELETE", b)[0] == 404,
               "account b cannot revoke account a's installation", checks)
         for name, headers in (("a", a), ("b", b)):

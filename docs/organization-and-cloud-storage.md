@@ -145,7 +145,7 @@ is a kind of organization entry.
 ## 5. Cloudflare options
 
 Verified on 2026-11-02 in the official documentation ([sources](#sources)) and again on 2026-11-03
-before phases 3a and 3b: no limit or price in this section changed. Two details matter to the
+before phases 3a, 3b, 3c and 4a: no limit or price in this section changed. Two details matter to the
 implementation: SQLite storage in Durable Objects is billed since January 2026 (on Free it is
 the 5 GB total below), and new Access service token secrets carry a `cfast_` prefix and accept
 tags, while the headers stay `CF-Access-Client-Id` / `CF-Access-Client-Secret`.
@@ -346,7 +346,13 @@ and is deployed before the host release that needs it. An older host cannot load
   (the refused ones answer `conflict`/`stale`, the others `aborted`). Hosts that send neither
   field see the earlier behavior; `GET /v1/records/{collection}?since=&limit=` and
   `GET /v1/records/{collection}/{id}`; `GET|PUT|DELETE /v1/backups/{name}` and `GET /v1/backups`
-  under the account's own R2 prefix. Bodies are closed schemas: an unknown field (an account ID,
+  under the account's own R2 prefix. Since Worker 0.3.0 (feature `erase`, phase 4a)
+  `DELETE /v1/store` with `{"confirm": "erase"}` removes the caller's records (tombstones
+  included, up to 1,000 per request, charged as rows written) and then every object under the
+  account's R2 prefix, answering `{erased, backups, more}` until `more` is false; it is refused
+  (`conflict`) while the account has another active installation, keeps the enrollment, the
+  collection generations (so a replica never sees one go back) and the daily usage, and
+  `GET /v1/store` reports `erased_at`. Bodies are closed schemas: an unknown field (an account ID,
   for instance) is refused. Each account has a daily share of requests and rows written
   (`ACCOUNT_DAILY_*`); over it the Worker answers `quota_exhausted` (429), which the host treats
   as being offline.
@@ -376,7 +382,7 @@ parity, the `AGENTS.md` checks, and delivery verified on crates.io and on the se
 | 3a. Worker and authentication — under way (Worker: 0.10.23; host link: 0.10.25) | `cloud/` Worker, `Registry`, `AccountStore` schema v1 (encrypted records with clear metadata), Access service token, installation credential, health; Workers Builds; host `cloud status/connect`. | Access/Workers configuration mistakes: staging Worker first, contract tests including cross-account attempts. |
 | 3b. Mirror — done (0.10.26) | Content key, sealing and blinded IDs; the ledger as outbox for every collection (finished records and configuration snapshots); `cloud mirror` (plan, verified initial upload, then mode `mirror`; stop) and `cloud verify`; key in the operator key backup; latency in `cloud status` (0.10.26). The link as a standing kind, the `account_store` step of `setup_status`, `cloud disconnect` and the service token's expiry (0.10.27). Local stays the source of truth. | Outbox growth while offline (bounded by the local records, visible in status); latency measured here (§5). |
 | 3c. Primary — done (Worker 0.2.0 with 0.10.28; host 0.10.29) | Compare-and-swap (`base_revision`, `atomic`, feature `cas`) in the Worker; mode `primary` (`cloud promote|demote`, after a clean verification): every configuration edit is written to the store first and saved locally once accepted, read-only without an answer; the loop pulls the configuration into the local replica; conflicts stay local until `cloud pull --replace`; the coordinator serves `portable_*` from the replica it pulls. Primary scope: the whole `config` (but `[secrets]`/`[cloud]`), the map, the organization and the notes (decision 10). | Conflict handling regressions: reuse the portable rules and their tests. |
-| 4a. Migration | `cloud migrate/promote/rollback/erase` with backup and read-back verification; production migrated when the owner decides. | Data loss: never delete local data; rollback rehearsed on a copy of the production profile first. |
+| 4a. Migration — under way (Worker 0.3.0 with 0.10.30) | `cloud migrate/promote/rollback/erase` with backup and read-back verification; production migrated when the owner decides. | Data loss: never delete local data; rollback rehearsed on a copy of the production profile first. |
 | 4b. Other users | Every portal account gets its own cloud account store: the operator enables it per account, each with its own content key, installation credentials and quota share; the owner's account is not special in the Worker. | Authorization bugs between accounts (cross-account contract tests); the shared Free quota (per-account shares, §5). |
 
 ## 11. Decisions

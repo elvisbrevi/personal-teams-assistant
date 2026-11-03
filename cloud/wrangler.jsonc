@@ -45,8 +45,8 @@
       "version_metadata": { "binding": "VERSION" },
       "vars": {
         "ENVIRONMENT": "staging",
-        "ACCOUNT_DAILY_REQUESTS": "2000",
-        "ACCOUNT_DAILY_ROWS_WRITTEN": "2000"
+        "ACCOUNT_DAILY_REQUESTS": "5000",
+        "ACCOUNT_DAILY_ROWS_WRITTEN": "5000"
       }
     }
   }

@@ -1,12 +1,13 @@
 /** Version of this Worker's code; reported by `/v1/health`. */
-export const WORKER_VERSION = "0.2.0";
+export const WORKER_VERSION = "0.3.0";
 /** Protocol versions served. Changes inside a version are additive only. */
 export const PROTOCOLS = [1] as const;
 /**
  * Additive capabilities of protocol 1 that a host checks before relying on them. `cas`: a record
- * may name the revision it replaces (`base_revision`) and a batch may be `atomic`.
+ * may name the revision it replaces (`base_revision`) and a batch may be `atomic`. `erase`:
+ * `DELETE /v1/store` removes the account's records and backups.
  */
-export const FEATURES = ["cas"] as const;
+export const FEATURES = ["cas", "erase"] as const;
 /** Schema versions of the Durable Objects; each applies forward-only migrations on start. */
 export const REGISTRY_SCHEMA = 1;
 export const ACCOUNT_STORE_SCHEMA = 1;
@@ -45,6 +46,9 @@ export const LIMITS = {
   backupBytes: 64 * 1024 * 1024,
   /** Label of an installation. */
   labelChars: 80,
+  /** Records, and then backup objects, one erasure request removes. */
+  eraseRecords: 1000,
+  eraseObjects: 1000,
 } as const;
 
 /** Defaults of the daily per-account share of the plan's quota. */
