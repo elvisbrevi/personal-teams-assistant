@@ -78,6 +78,7 @@ class CloudAccessTests(unittest.TestCase):
         return {"success": True, "result": value}
 
     def run_setup(self, environment, **extra):
+        extra.setdefault("portal_user", None)
         args = argparse.Namespace(environment=environment, report=self.report, label="server", **extra)
         code = setup.run(args)
         report = self.report.read_text()
@@ -134,6 +135,25 @@ class CloudAccessTests(unittest.TestCase):
         self.assertEqual(len(seen), 1)
         self.assertNotIn("CLOUDFLARE_API_TOKEN", seen[0])
         self.assertEqual(os.environ["CLOUDFLARE_API_TOKEN"], API_SECRET)
+
+    def test_a_portal_account_gets_its_own_token_through_stdin_only(self):
+        runs = []
+
+        def fake_run(command, **kwargs):
+            runs.append((command, kwargs.get("input")))
+            return setup.subprocess.CompletedProcess(command, 0, json.dumps({"code": "ok", "data": {"enabled": True}}), "")
+
+        with patch.object(setup.subprocess, "run", fake_run):
+            code, report = self.run_setup("production", portal_user="synthetic-user")
+        self.assertEqual(code, 0, report)
+        self.assertEqual(len(runs), 1)
+        command, stdin = runs[0]
+        self.assertEqual(command[1:7], ["--json", "web", "users", "cloud", "enable", "synthetic-user"])
+        self.assertNotIn("secret-of-token-0", " ".join(command))
+        self.assertEqual(json.loads(stdin), {"client_id": "token-0.access", "client_secret": "secret-of-token-0"})
+        self.assertIn("--token-expires", command)
+        self.assertEqual(self.tokens["token-0"]["name"], "pta-cloud production portal synthetic-user")
+        self.assertFalse(report["portal_user"]["replaced"])
 
     def test_unmanaged_applications_on_the_hostname_are_never_changed(self):
         _, hostname = setup.worker_settings("staging")

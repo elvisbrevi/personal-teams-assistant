@@ -467,7 +467,11 @@
       steps: [{ id: 'coordinator', scope: 'coordinator', required: false, state: 'optional', detail: 'This installation works on its own. To use it with your assistant account, choose your coordinator and sign in once.', facts: {}, actions: [] }],
       agent: { skill_version: '0.9.13' } }),
     // Synthetic account store link: connected, nothing uploaded.
-    cloud_status: () => ({
+    cloud_status: () => window.__ptaCloudEnabled === false ? ({
+      mode: 'off', endpoint: null, enrolled: false, installation: null, enabled: false, standing: 'disconnected',
+      problem: 'The portal operator has not enabled the account store for this account.', checked_at: Math.floor(Date.now() / 1000), mirror: { key: { present: false }, mode: 'off' },
+    }) : ({
+      ...(window.__ptaCloudGranted ? { enabled: true, granted_endpoint: window.__ptaCloudGranted } : {}),
       mode: window.__ptaCloudMirror?.mode ?? 'off', endpoint: 'https://store.example.com', enrolled: !window.__ptaCloudDisconnected, installation: '00000000-0000-4000-8000-000000000001',
       standing: 'live', checked_at: Math.floor(Date.now() / 1000) - 30,
       worker: { environment: 'production', version: '0.1.0', deployment: null, protocols: [1], schema: { registry: 1, account_store: 1 } },

@@ -460,12 +460,13 @@
             </div>
             <details class="fold" id="cloud-connect-fold">
               <summary>Connect this computer <small>Advanced</small></summary>
-              <p class="hint">The address and the Access service token come from whoever runs your account store. The client secret is kept only on this computer.</p>
+              <p class="hint" id="cloud-connect-own">The address and the Access service token come from whoever runs your account store. The client secret is kept only on this computer.</p>
+              <p class="hint" id="cloud-connect-granted" hidden>The portal operator enabled the account store for this account and keeps its service token. Connecting enrolls this account; nothing is uploaded until you migrate.</p>
               <div class="grid">
                 <label>Account store address<input id="cloud-endpoint" type="url" inputmode="url" spellcheck="false" autocomplete="off" placeholder="https://store.example.com"></label>
                 <label>Name of this computer <small>Shown in the account store.</small><input id="cloud-label" maxlength="80" autocomplete="off"></label>
-                <label>Access client ID<input id="cloud-client-id" spellcheck="false" autocomplete="off"></label>
-                <label>Access client secret <small>Empty uses the one this computer already has.</small><input id="cloud-client-secret" type="password" spellcheck="false" autocomplete="off"></label>
+                <label id="cloud-client-id-field">Access client ID<input id="cloud-client-id" spellcheck="false" autocomplete="off"></label>
+                <label id="cloud-client-secret-field">Access client secret <small>Empty uses the one this computer already has.</small><input id="cloud-client-secret" type="password" spellcheck="false" autocomplete="off"></label>
               </div>
               <div class="actions"><button id="cloud-connect" type="button">Connect to the account store</button></div>
             </details>

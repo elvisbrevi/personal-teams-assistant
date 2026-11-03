@@ -110,8 +110,6 @@ fn file_read(path: &Path) -> Result<Option<String>> {
     }
 }
 
-// Exercised on every platform by tests; used at runtime only without an OS keychain.
-#[cfg_attr(any(target_os = "macos", target_os = "windows"), allow(dead_code))]
 fn file_write(path: &Path, value: &str) -> Result<()> {
     let parent = path.parent().context("invalid credential path")?;
     private_dir(parent)?;
@@ -177,6 +175,24 @@ pub fn put_desktop_secret(profile: &str, name: &str, value: &str) -> Result<()> 
         &file_store_path(profile, name).context("credential store is unavailable")?,
         value,
     )
+}
+
+/// Write a credential into another profile's private file store (`<dir>/<profile>/<NAME>`),
+/// the one an isolated portal account reads. Only operator-local administration uses it.
+pub fn put_file_secret(dir: &Path, profile: &str, name: &str, value: &str) -> Result<()> {
+    validate_profile(profile)?;
+    validate_secret(name, value)?;
+    file_write(&dir.join(profile).join(name), value)
+}
+
+/// Remove a credential from another profile's private file store; a missing one is not an error.
+pub fn delete_file_secret(dir: &Path, profile: &str, name: &str) -> Result<()> {
+    validate_profile(profile)?;
+    validate_name(name)?;
+    match std::fs::remove_file(dir.join(profile).join(name)) {
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error.into()),
+        _ => Ok(()),
+    }
 }
 
 pub fn delete_desktop_secret(profile: &str, name: &str) -> Result<()> {

@@ -271,7 +271,6 @@ async fn mirroring_needs_the_owner_a_link_and_a_key() {
     for name in ["cloud_mirror", "cloud_verify"] {
         let reply = call(&host, Machine, name, json!({})).await;
         assert_eq!(reply.code, "authority_denied", "{name}");
-        assert!(authority::check_shared_operation(&control::Request::new(name)).is_err());
     }
     // The plan needs nothing but the local stores and sends nothing.
     let plan = call(

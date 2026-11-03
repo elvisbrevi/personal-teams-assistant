@@ -2128,6 +2128,15 @@ function renderCloud() {
   }
   details.hidden = !details.childElementCount;
   if (status?.endpoint && !$('#cloud-endpoint').value) $('#cloud-endpoint').value = status.endpoint;
+  // A portal account connects only to the store its operator enabled, with the operator's token.
+  const granted = status?.granted_endpoint;
+  $('#cloud-connect-fold').hidden = status?.enabled === false;
+  $('#cloud-connect-own').hidden = Boolean(granted);
+  $('#cloud-connect-granted').hidden = !granted;
+  $('#cloud-client-id-field').hidden = Boolean(granted);
+  $('#cloud-client-secret-field').hidden = Boolean(granted);
+  if (granted) $('#cloud-endpoint').value = granted;
+  $('#cloud-endpoint').readOnly = Boolean(granted);
   renderCloudInstallations();
   renderCloudMirror();
 }

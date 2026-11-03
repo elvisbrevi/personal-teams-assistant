@@ -106,7 +106,8 @@ const STORE_BLOCKED: &str = "Some records are too large for the account store an
 const STORE_DIFFERS: &str =
     "The last verification found differences in the encrypted copy. Migrate again to repair it.";
 const STORE_TOKEN: &str = "The account store's service token expires within 30 days. Ask whoever runs the account store to renew it, then connect again with the new expiry.";
-const STORE_SHARED: &str = "The account store is not available to this account yet.";
+const STORE_SHARED: &str =
+    "The portal operator has not enabled the account store for this account.";
 const STORE_UNCONFIGURED: &str =
     "The account store's Access settings are missing; see docs/delivery.md.";
 
@@ -247,7 +248,12 @@ pub(super) async fn operate(host: &Arc<Host>, request: &control::Request) -> Rep
         providers(host).await,
         roots(host, shared).await,
         teams(host, &machines, link.is_some()).await,
-        account_store(host, shared || browser && !invocation.scope.owner).await,
+        account_store(
+            host,
+            (shared || browser && !invocation.scope.owner)
+                && super::cloud::grant(host.state.settings.profile()).is_none(),
+        )
+        .await,
         versions(host).await,
     ];
 

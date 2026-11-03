@@ -245,8 +245,8 @@ async fn machines_and_shared_accounts_cannot_connect() {
     let reply = call(&host, Machine, "cloud_connect", args).await;
     assert!(!reply.ok);
     assert_eq!(reply.code, "authority_denied");
-    assert!(authority::check_shared_operation(&control::Request::new("cloud_connect")).is_err());
-    assert!(authority::check_shared_operation(&control::Request::new("cloud_status")).is_ok());
+    // Portal accounts reach the operations; the host checks the operator's grant (`web::tests`).
+    assert!(authority::check_shared_operation(&control::Request::new("cloud_connect")).is_ok());
 }
 
 #[tokio::test]
@@ -262,7 +262,6 @@ async fn installations_need_the_owner_and_a_link_and_never_revoke_this_one() {
     ] {
         let machine = call(&host, Machine, method, args.clone()).await;
         assert_eq!(machine.code, "authority_denied", "{method}");
-        assert!(authority::check_shared_operation(&control::Request::new(method)).is_err());
         // Not connected: nothing to ask.
         let local = call(&host, Local, method, args).await;
         assert_eq!(local.code, "not_ready", "{method}");
@@ -417,7 +416,6 @@ async fn disconnect_is_local_safe_to_repeat_and_keeps_the_copy() {
             call(&host, Machine, name, json!({})).await.code,
             "authority_denied"
         );
-        assert!(authority::check_shared_operation(&control::Request::new(name)).is_err());
     }
     let mut config = host.state.settings.config().unwrap();
     config.cloud = Cloud {
