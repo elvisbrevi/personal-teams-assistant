@@ -472,7 +472,7 @@
       standing: 'live', checked_at: Math.floor(Date.now() / 1000) - 30,
       worker: { environment: 'production', version: '0.1.0', deployment: null, protocols: [1], schema: { registry: 1, account_store: 1 } },
       principal: { label: 'Synthetic laptop', enrolled_at: Math.floor(Date.now() / 1000) - 86400, account_installations: 2 },
-      store: { schema: 1, collections: {}, usage: { day: '2026-01-01', requests: 12, rows_written: 0, limits: { requests: 20000, rows_written: 20000 } } },
+      store: { schema: 1, collections: {}, usage: { day: '2026-01-01', requests: 12, rows_written: 0, limits: { requests: 20000, rows_written: 20000 } }, plan: { requests: 100000, rows_written: 100000, accounts: 6, oversubscribed: true } },
       latency_ms: { health: 41, whoami: 152, store: 148 },
       ...(window.__ptaCloudToken ? { service_token: { expires_at: Math.floor(Date.now() / 1000) + 20 * 86400, days_left: 20, renew: true } } : {}),
       mirror: window.__ptaCloudMirror ? structuredClone(window.__ptaCloudMirror) : { key: { present: false }, mode: 'off' },
@@ -496,6 +496,18 @@
     cloud_erase: () => {
       window.__ptaCloudMirror = { key: { present: false }, mode: 'off', erased_at: secs(NOW), backups: window.__ptaCloudMirror.backups };
       return { action: 'erase', erased: 42, backups: 0, key_retired: '/profile/keys/cloud-content-retired-1.json' };
+    },
+    // Synthetic installations of the account: this one, another computer and a revoked one.
+    cloud_installations: () => ({ installations: structuredClone(window.__ptaCloudInstallations ??= [
+      { id: '00000000-0000-4000-8000-000000000001', label: 'Synthetic laptop', host_version: '0.10.33', enrolled_at: secs(NOW) - 86400, last_seen_at: secs(NOW) - 60, revoked_at: null, current: true },
+      { id: '00000000-0000-4000-8000-000000000002', label: 'Synthetic <b>desktop</b>', host_version: '0.10.33', enrolled_at: secs(NOW) - 7200, last_seen_at: secs(NOW) - 600, revoked_at: null, current: false },
+      { id: '00000000-0000-4000-8000-000000000003', label: 'Old computer', host_version: '0.10.25', enrolled_at: secs(NOW) - 900000, last_seen_at: secs(NOW) - 800000, revoked_at: secs(NOW) - 700000, current: false },
+    ]), active: 2 }),
+    cloud_revoke: args => {
+      window.__ptaCloudRevoked = args.installation;
+      const entry = window.__ptaCloudInstallations.find(i => i.id === args.installation);
+      entry.revoked_at = secs(NOW);
+      return { revoked: args.installation };
     },
     cloud_disconnect: () => { window.__ptaCloudDisconnected = true; if (window.__ptaCloudMirror) window.__ptaCloudMirror.mode = 'off'; return { changed: true, store_notified: true }; },
     cloud_verify: () => ({ ok: true, verify: { ok: true, collections: [{ name: 'audits', ok: true, pending: 2, local: 30, remote: 28 }] } }),

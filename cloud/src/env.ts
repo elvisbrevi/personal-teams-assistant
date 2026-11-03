@@ -15,6 +15,14 @@ export interface Env {
   ACCOUNT_DAILY_REQUESTS?: string;
   /** Daily share of one account: record rows written. */
   ACCOUNT_DAILY_ROWS_WRITTEN?: string;
+  /**
+   * Shares of particular accounts, as JSON `{"<service token client ID>": {"requests": N,
+   * "rows_written": N}}`; accounts not named get the defaults above. Client IDs are not secret.
+   */
+  ACCOUNT_SHARES?: string;
+  /** The plan's daily quota every account shares, reported by `GET /v1/store`. */
+  PLAN_DAILY_REQUESTS?: string;
+  PLAN_DAILY_ROWS_WRITTEN?: string;
   /** Environment label shown by the health check (`production` or `staging`). */
   ENVIRONMENT?: string;
 }

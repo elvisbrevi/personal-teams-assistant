@@ -6,6 +6,8 @@ import { LIMITS, REGISTRY_SCHEMA } from "./protocol";
 export interface Principal {
   account: string;
   installation: string;
+  /** The Access service token identity (its client ID) the account is bound to. */
+  identity: string;
 }
 
 export interface Installation {
@@ -20,6 +22,10 @@ export interface Installation {
 export type Enrollment =
   | { ok: true; installation: string; generation: number }
   | { ok: false; reason: "installation_limit" };
+
+export type Rebinding =
+  | { ok: true; rebound: boolean; principal: Principal }
+  | { ok: false; reason: "unauthorized" | "identity_in_use" };
 
 /** How often an installation's `last_seen_at` is written: once an hour keeps row writes low. */
 const SEEN_INTERVAL_SECONDS = 3600;
@@ -132,7 +138,46 @@ export class Registry extends DurableObject<Env> {
     if (now - row.last_seen_at >= SEEN_INTERVAL_SECONDS) {
       this.sql.exec("UPDATE installations SET last_seen_at = ? WHERE id = ?", now, row.installation);
     }
-    return { account: row.account, installation: row.installation };
+    return { account: row.account, installation: row.installation, identity };
+  }
+
+  /**
+   * Bind the account of an active installation credential to another Access identity (a renewed
+   * or replaced service token), keeping the account, its store and its installations. The new
+   * identity must not belong to an account yet; afterwards the previous identity reaches nothing
+   * of this account, and every installation must present the new service token.
+   */
+  rebind(identity: string, tokenSha256: string, now: number): Rebinding {
+    return this.ctx.storage.transactionSync(() => {
+      const row = this.sql
+        .exec<{ installation: string; account: string; identity: string }>(
+          `SELECT i.id AS installation, i.account AS account, a.identity AS identity
+             FROM installations i JOIN accounts a ON a.id = i.account
+            WHERE i.token_sha256 = ? AND i.revoked_at IS NULL AND i.generation = a.generation`,
+          tokenSha256,
+        )
+        .toArray()[0];
+      if (!row) return { ok: false, reason: "unauthorized" } as const;
+      const principal = { account: row.account, installation: row.installation, identity };
+      if (row.identity === identity) return { ok: true, rebound: false, principal } as const;
+      const taken = this.sql
+        .exec<{ n: number }>("SELECT COUNT(*) AS n FROM accounts WHERE identity = ?", identity)
+        .one().n;
+      if (taken > 0) return { ok: false, reason: "identity_in_use" } as const;
+      this.sql.exec("UPDATE accounts SET identity = ? WHERE id = ?", identity, row.account);
+      this.sql.exec("UPDATE installations SET last_seen_at = ? WHERE id = ?", now, row.installation);
+      return { ok: true, rebound: true, principal } as const;
+    });
+  }
+
+  /** Accounts with at least one active installation: those sharing the plan's quota now. */
+  sharing(): number {
+    return this.sql
+      .exec<{ n: number }>(
+        `SELECT COUNT(DISTINCT a.id) AS n FROM accounts a JOIN installations i ON i.account = a.id
+          WHERE i.revoked_at IS NULL AND i.generation = a.generation`,
+      )
+      .one().n;
   }
 
   /** The account's installations, newest first. */

@@ -505,6 +505,25 @@ pub(super) const TOOLS: &[Tool] = &[
         schema: || object(json!({"confirmed":confirmed()}), &[]),
     },
     Tool {
+        name: "cloud_installations",
+        title: "Account store installations",
+        description: "The account's computers in the account store: ID, label, host version, when each enrolled and was last seen, whether it was revoked and which one is this computer (current). Read-only. Owner only.",
+        effect: Effect::Read,
+        schema: none,
+    },
+    Tool {
+        name: "cloud_revoke",
+        title: "Revoke an account store installation",
+        description: "Revoke another computer of the account in the account store, by the ID cloud_installations lists: its credential stops working at once, and it keeps its own data. Use it for a lost or retired computer, or before cloud_erase, which needs a single connected computer. This computer disconnects with cloud_disconnect instead. Owner only. Needs the user's confirmation.",
+        effect: Effect::External,
+        schema: || {
+            object(
+                json!({"installation":string("The installation ID from cloud_installations."),"confirmed":confirmed()}),
+                &["installation"],
+            )
+        },
+    },
+    Tool {
         name: "cloud_disconnect",
         title: "Disconnect from the account store",
         description: "Disconnect this installation from the account store: revoke its installation credential in the Worker when it answers (store_notified), remove CLOUD_STORE_TOKEN and set the mode to off. forget_service_token also removes the account's Access service token and the endpoint from this installation. The encrypted copy, the account content key and the outbox are kept, so connecting again continues. Owner only. Needs the user's confirmation.",
@@ -1671,8 +1690,8 @@ pub(super) async fn run(name: &str, args: &Value) -> Result<Value, String> {
         "variable_entry_request" => ipc("variable_entry_start", args.clone()).await,
         "variable_update" | "variable_rename" | "variable_usage" => ipc(name, args.clone()).await,
         "consumer_list" => ipc("variable_consumer_list", args.clone()).await,
-        "cloud_status" | "cloud_verify" => ipc(name, args.clone()).await,
-        "cloud_migrate" | "cloud_rollback" | "cloud_erase" | "cloud_disconnect" | "cloud_promote" | "cloud_pull" => {
+        "cloud_status" | "cloud_verify" | "cloud_installations" => ipc(name, args.clone()).await,
+        "cloud_migrate" | "cloud_rollback" | "cloud_erase" | "cloud_disconnect" | "cloud_promote" | "cloud_pull" | "cloud_revoke" => {
             let mut args = args.clone();
             args.as_object_mut().unwrap().remove("confirmed");
             ipc(name, args).await
@@ -2032,6 +2051,10 @@ pub(super) fn confirmation(name: &str, args: &Value) -> Option<String> {
             "Bring the account store's configuration back to this computer, verify and stop using the account store (the copy in the store stays)?".into()
         },
         "cloud_erase" => "Erase this account's copy in the account store (records and backups) and set the content key aside? This computer keeps all of its data.".into(),
+        "cloud_revoke" => format!(
+            "Revoke installation {} of this account in the account store? That computer keeps its data.",
+            args["installation"].as_str().unwrap_or_default()
+        ),
         "cloud_connect" => format!(
             "Enroll this installation with the account store at {}?",
             args["endpoint"].as_str().unwrap_or_default()

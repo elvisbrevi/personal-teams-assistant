@@ -364,9 +364,18 @@ and is deployed before the host release that needs it. An older host cannot load
   account's R2 prefix, answering `{erased, backups, more}` until `more` is false; it is refused
   (`conflict`) while the account has another active installation, keeps the enrollment, the
   collection generations (so a replica never sees one go back) and the daily usage, and
-  `GET /v1/store` reports `erased_at`. Bodies are closed schemas: an unknown field (an account ID,
-  for instance) is refused. Each account has a daily share of requests and rows written
-  (`ACCOUNT_DAILY_*`); over it the Worker answers `quota_exhausted` (429), which the host treats
+  `GET /v1/store` reports `erased_at`. Since Worker 0.4.0 (phase 4b): feature `origin`, a listed
+  or read record carries `own` (whether the calling installation wrote that revision; no
+  installation ID is listed); feature `rebind`, `POST /v1/rebind` with `{"confirm": "rebind"}`, a
+  new service token at the edge and an active installation credential of the account moves the
+  account to the new token's identity (refused with `conflict` when that identity already has an
+  account), keeping the account, its store and its installations; feature `plan`, `GET /v1/store`
+  adds `plan {requests, rows_written, accounts, oversubscribed}`: the plan's daily quota
+  (`PLAN_DAILY_*`, by default Free's 100,000), how many accounts with an active installation share
+  it and whether every account at its share would exceed it. Bodies are closed schemas: an unknown
+  field (an account ID, for instance) is refused. Each account has a daily share of requests and
+  rows written (`ACCOUNT_DAILY_*`, or its own entry in `ACCOUNT_SHARES`, keyed by the service
+  token's client ID); over it the Worker answers `quota_exhausted` (429), which the host treats
   as being offline.
 - **Publishing.** Workers Builds connected to the repository with root directory `cloud/`, as the
   landing does: Cloudflare builds and deploys on merge to `main`, so GitHub holds no deploy secret.
@@ -395,7 +404,7 @@ parity, the `AGENTS.md` checks, and delivery verified on crates.io and on the se
 | 3b. Mirror — done (0.10.26) | Content key, sealing and blinded IDs; the ledger as outbox for every collection (finished records and configuration snapshots); `cloud mirror` (plan, verified initial upload, then mode `mirror`; stop) and `cloud verify`; key in the operator key backup; latency in `cloud status` (0.10.26). The link as a standing kind, the `account_store` step of `setup_status`, `cloud disconnect` and the service token's expiry (0.10.27). Local stays the source of truth. | Outbox growth while offline (bounded by the local records, visible in status); latency measured here (§5). |
 | 3c. Primary — done (Worker 0.2.0 with 0.10.28; host 0.10.29) | Compare-and-swap (`base_revision`, `atomic`, feature `cas`) in the Worker; mode `primary` (`cloud promote|demote`, after a clean verification): every configuration edit is written to the store first and saved locally once accepted, read-only without an answer; the loop pulls the configuration into the local replica; conflicts stay local until `cloud pull --replace`; the coordinator serves `portable_*` from the replica it pulls. Primary scope: the whole `config` (but `[secrets]`/`[cloud]`), the map, the organization and the notes (decision 10). | Conflict handling regressions: reuse the portable rules and their tests. |
 | 4a. Migration — done (Worker 0.3.0 with 0.10.30; host 0.10.31) | `cloud migrate/promote/rollback/erase` with backup and read-back verification, the rehearsal script, and the rehearsal on a copy of the production profile against staging; production migrated when the owner decides. | Data loss: never delete local data; rollback rehearsed on a copy of the production profile first. |
-| 4b. Other users — under way (launchers approved in the portal: 0.10.32) | Every portal account gets its own cloud account store: the operator enables it per account, each with its own content key, installation credentials and quota share; the owner's account is not special in the Worker. | Authorization bugs between accounts (cross-account contract tests); the shared Free quota (per-account shares, §5). |
+| 4b. Other users — under way (launchers approved in the portal: 0.10.32; Worker 0.4.0 with installations, rebinding and the shared plan: 0.10.33) | Every portal account gets its own cloud account store: the operator enables it per account, each with its own content key, installation credentials and quota share; the owner's account is not special in the Worker. | Authorization bugs between accounts (cross-account contract tests); the shared Free quota (per-account shares, §5). |
 
 ## 11. Decisions
 

@@ -1,13 +1,16 @@
 /** Version of this Worker's code; reported by `/v1/health`. */
-export const WORKER_VERSION = "0.3.0";
+export const WORKER_VERSION = "0.4.0";
 /** Protocol versions served. Changes inside a version are additive only. */
 export const PROTOCOLS = [1] as const;
 /**
  * Additive capabilities of protocol 1 that a host checks before relying on them. `cas`: a record
  * may name the revision it replaces (`base_revision`) and a batch may be `atomic`. `erase`:
- * `DELETE /v1/store` removes the account's records and backups.
+ * `DELETE /v1/store` removes the account's records and backups. `origin`: listed and read records
+ * say whether the calling installation wrote them (`own`). `rebind`: `POST /v1/rebind` moves the
+ * account to another Access service token. `plan`: `GET /v1/store` reports the plan's daily quota
+ * the accounts share and how many accounts share it.
  */
-export const FEATURES = ["cas", "erase"] as const;
+export const FEATURES = ["cas", "erase", "origin", "rebind", "plan"] as const;
 /** Schema versions of the Durable Objects; each applies forward-only migrations on start. */
 export const REGISTRY_SCHEMA = 1;
 export const ACCOUNT_STORE_SCHEMA = 1;
@@ -54,6 +57,9 @@ export const LIMITS = {
 /** Defaults of the daily per-account share of the plan's quota. */
 export const DEFAULT_DAILY_REQUESTS = 20_000;
 export const DEFAULT_DAILY_ROWS_WRITTEN = 20_000;
+/** Defaults of the plan's daily quota every account shares (Workers Free: requests and rows written). */
+export const DEFAULT_PLAN_DAILY_REQUESTS = 100_000;
+export const DEFAULT_PLAN_DAILY_ROWS_WRITTEN = 100_000;
 
 export type ErrorCode =
   | "unauthorized"

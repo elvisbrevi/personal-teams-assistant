@@ -102,6 +102,8 @@ struct Endpoint {
     cloud_primary_support: bool,
     #[serde(default)]
     cloud_migration_support: bool,
+    #[serde(default)]
+    cloud_installations_support: bool,
     contract: u32,
     port: u16,
     token: String,
@@ -504,6 +506,14 @@ async fn client_with_transport(
                 ),
             "Incompatible account store host: update the host and CLI together before migrating to or from the account store."
         );
+        ensure!(
+            endpoint.cloud_installations_support
+                || !matches!(
+                    request.method.as_str(),
+                    "cloud_installations" | "cloud_revoke"
+                ),
+            "Incompatible account store host: update the host and CLI together before managing the account's installations."
+        );
         ensure!(endpoint.contract == CONTRACT, "incompatible host contract");
         ensure!(
             endpoint.web_support
@@ -613,6 +623,7 @@ pub(crate) fn launch(
             cloud_disconnect_support: true,
             cloud_primary_support: true,
             cloud_migration_support: true,
+            cloud_installations_support: true,
             contract: CONTRACT,
             port: listener.local_addr()?.port(),
             token: token.clone(),
@@ -1477,6 +1488,7 @@ mod tests {
                 cloud_disconnect_support: true,
                 cloud_primary_support: true,
                 cloud_migration_support: true,
+                cloud_installations_support: true,
                 account_authority_support: true,
                 shared_accounts_support: true,
                 account_binding: None,
@@ -1511,6 +1523,7 @@ mod tests {
                 cloud_disconnect_support: true,
                 cloud_primary_support: true,
                 cloud_migration_support: true,
+                cloud_installations_support: true,
                 account_authority_support: true,
                 shared_accounts_support: true,
                 account_binding: None,
@@ -1560,6 +1573,7 @@ mod tests {
                     cloud_disconnect_support: true,
                     cloud_primary_support: true,
                     cloud_migration_support: true,
+                    cloud_installations_support: true,
                     account_authority_support: true,
                     shared_accounts_support: true,
                     account_binding: None,

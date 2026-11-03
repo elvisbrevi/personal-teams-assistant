@@ -92,6 +92,9 @@ pub struct Stored {
     pub deleted: bool,
     pub generation: u64,
     pub sealed: Option<Vec<u8>>,
+    /// Whether this installation wrote the held revision (Worker feature `origin`); `None` from
+    /// a Worker without it, read as this installation's.
+    pub own: Option<bool>,
 }
 
 pub struct Page {
@@ -473,8 +476,15 @@ impl<L: Local, T: Transport> Engine<'_, L, T> {
     fn verify_collection(
         &self,
         collection: Collection,
-        remote: Vec<Stored>,
+        mut remote: Vec<Stored>,
     ) -> Result<CollectionReport> {
+        // History is each installation's own: another computer of the account mirrors its records
+        // and verifies them itself. The configuration is the account's and is compared whole.
+        let held = remote.len();
+        if !collection.is_configuration() {
+            remote.retain(|s| s.own != Some(false));
+        }
+        let others = (held - remote.len()) as u64;
         let local: BTreeMap<String, String> = self
             .local
             .collect(collection)?
@@ -537,6 +547,7 @@ impl<L: Local, T: Transport> Engine<'_, L, T> {
             differing: 0,
             undecryptable: 0,
             content_differs: 0,
+            others,
             local_digest,
             remote_digest,
             ok: false,
@@ -650,6 +661,8 @@ pub struct CollectionReport {
     pub differing: u64,
     pub undecryptable: u64,
     pub content_differs: u64,
+    /// History records other installations of the account wrote: kept and verified by them.
+    pub others: u64,
     pub local_digest: String,
     pub remote_digest: String,
     pub ok: bool,

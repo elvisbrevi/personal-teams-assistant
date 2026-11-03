@@ -195,14 +195,32 @@ pub(crate) struct Worker {
     /// Store the next write but lose its answer.
     lose_answer: Mutex<bool>,
     writes: Mutex<u64>,
+    /// The installation the next requests come from (feature `origin`), and who wrote each record.
+    pub(crate) installation: Mutex<u32>,
+    writers: Mutex<HashMap<(Collection, String), u32>>,
 }
 
 impl Worker {
+    /// A record as listed to the current installation: `own` says whether it wrote it.
+    fn listed(&self, stored: &Stored) -> Stored {
+        let writer = self
+            .writers
+            .lock()
+            .unwrap()
+            .get(&(stored.collection, stored.id.clone()))
+            .copied();
+        Stored {
+            own: Some(writer.unwrap_or_default() == *self.installation.lock().unwrap()),
+            ..stored.clone()
+        }
+    }
+
     /// `DELETE /v1/store`: every record goes, the generations stay. Returns how many went.
     pub(crate) fn erase(&self) -> u64 {
         let mut held = self.records.lock().unwrap();
         let erased = held.len() as u64;
         held.clear();
+        self.writers.lock().unwrap().clear();
         erased
     }
 
@@ -273,7 +291,12 @@ impl Transport for Worker {
                     deleted: wire.deleted,
                     generation: *generation,
                     sealed: wire.sealed.clone(),
+                    own: None,
                 },
+            );
+            self.writers.lock().unwrap().insert(
+                (wire.collection, wire.id.clone()),
+                *self.installation.lock().unwrap(),
             );
         }
         if std::mem::take(&mut *self.lose_answer.lock().unwrap()) {
@@ -292,7 +315,7 @@ impl Transport for Worker {
         let mut found: Vec<Stored> = held
             .values()
             .filter(|s| s.collection == collection && s.generation > since)
-            .cloned()
+            .map(|s| self.listed(s))
             .collect();
         found.sort_by_key(|s| s.generation);
         let more = found.len() > limit;
@@ -309,7 +332,7 @@ impl Transport for Worker {
             .lock()
             .unwrap()
             .get(&(collection, id.to_owned()))
-            .cloned())
+            .map(|s| self.listed(s)))
     }
 }
 
@@ -396,6 +419,44 @@ async fn the_first_pass_uploads_everything_and_verifies() {
         let sealed = stored.sealed.as_ref().unwrap();
         assert!(!sealed.windows(5).any(|w| w == b"hello" || w == b"chats"));
     }
+}
+
+#[tokio::test]
+async fn another_installations_history_is_its_own_and_the_configuration_is_shared() {
+    let f = Fixture::new();
+    f.filled();
+    f.flush(100).await;
+    // A second installation of the account, with the same key, uploads its own history.
+    let dir = tempfile::tempdir().unwrap();
+    let ledger = Ledger::open(&dir.path().join("mirror.db")).unwrap();
+    let local = Records::default();
+    local.set(
+        Collection::Audits,
+        "chats('y')/messages('2')",
+        json!({"status": "sent", "audit": {"proposed": "hi"}}),
+    );
+    *f.worker.installation.lock().unwrap() = 2;
+    let second = Engine {
+        local: &local,
+        transport: &f.worker,
+        ledger: &ledger,
+        content: &f.content,
+        cas: false,
+    };
+    second.flush(200, Limits::default()).await.unwrap();
+    let theirs = second.verify().await.unwrap().unwrap();
+    let audits = collection(&theirs, "audits");
+    assert_eq!(
+        (audits.remote, audits.others, audits.unknown_remote),
+        (1, 1, 0)
+    );
+    // The first installation's notes and settings are the account's, so the second must pull them.
+    assert_eq!(collection(&theirs, "notes").unknown_remote, 2);
+    assert!(!theirs.ok);
+    *f.worker.installation.lock().unwrap() = 0;
+    let mine = f.verify().await;
+    assert!(mine.ok, "{mine:?}");
+    assert_eq!(collection(&mine, "audits").others, 1);
 }
 
 #[tokio::test]
@@ -668,6 +729,7 @@ async fn verification_finds_every_kind_of_difference() {
             deleted: false,
             generation: 99,
             sealed: Some(b"x".to_vec()),
+            own: None,
         },
     );
     let report = f.verify().await;

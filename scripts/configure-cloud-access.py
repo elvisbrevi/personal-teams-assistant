@@ -8,8 +8,9 @@ and Worker names come from cloud/wrangler.jsonc. Every run writes a report witho
 --report.
 
   staging     Access applications and Worker secrets for the staging Worker, then an end-to-end check
-              with two temporary service tokens (enrollment, cross-account refusals, revocation);
-              the temporary tokens are removed afterwards.
+              with three temporary service tokens (enrollment, cross-account refusals, compare-and-swap,
+              origin, erasure, rebinding, the shared plan, revocation); the temporary tokens are
+              removed afterwards.
   production  Access applications and Worker secrets for the production Worker, then one service
               token for this account, whose client ID and secret go only to `pta cloud connect` on
               standard input.
@@ -233,10 +234,29 @@ class Access:
         result(self.token, "DELETE", f"{self.base}/service_tokens/{ident}")
 
 
+def node():
+    """The first Node.js on PATH that wrangler accepts (22 or newer), or None.
+
+    A launcher puts its program's folder first on PATH, which may hold an older system Node."""
+    for folder in os.environ.get("PATH", "").split(os.pathsep):
+        candidate = Path(folder) / "node"
+        if not folder or not candidate.is_file() or not os.access(candidate, os.X_OK):
+            continue
+        try:
+            version = subprocess.run([str(candidate), "--version"], capture_output=True, text=True, timeout=10).stdout
+        except (OSError, subprocess.SubprocessError):
+            continue
+        major = re.match(r"v(\d+)\.", version.strip())
+        if major and int(major.group(1)) >= 22:
+            return str(candidate)
+    return None
+
+
 def wrangler():
     local = CLOUD / "node_modules" / ".bin" / "wrangler"
     if local.exists():
-        return [str(local)]
+        runtime = node()
+        return [runtime, str(local.resolve())] if runtime else [str(local)]
     npx = shutil.which("npx")
     if not npx:
         raise SetupError("wrangler is unavailable: run `bun install` in cloud/.")
@@ -247,7 +267,10 @@ def put_worker_secret(environment, name, value):
     command = wrangler() + ["secret", "put", name]
     if environment != "production":
         command += ["--env", environment]
-    completed = subprocess.run(command, input=value, text=True, cwd=CLOUD, capture_output=True, timeout=120)
+    # wrangler prefers CLOUDFLARE_API_TOKEN over the maintainer's login; the Access token a launcher
+    # passes in it has no Workers permission, so wrangler never sees it.
+    env = {key: value for key, value in os.environ.items() if key not in ("CLOUDFLARE_API_TOKEN", "CLOUDFLARE_API_TOKEN_FILE")}
+    completed = subprocess.run(command, input=value, text=True, cwd=CLOUD, capture_output=True, timeout=120, env=env)
     if completed.returncode != 0:
         raise SetupError(f"wrangler could not set the Worker secret {name}; check the maintainer's wrangler login.")
 
@@ -320,11 +343,13 @@ def check(condition, message, checks):
 
 
 def verify(access, report):
-    """End-to-end check of the staging Worker with two temporary service tokens."""
+    """End-to-end check of the staging Worker with three temporary service tokens."""
     run = secrets.token_hex(4)
     first = access.create_token(f"verify {run} a")
     second = access.create_token(f"verify {run} b")
-    temporary = [first["id"], second["id"]]
+    # Never enrolled: account a moves to it (rebinding).
+    third = access.create_token(f"verify {run} c")
+    temporary = [first["id"], second["id"], third["id"]]
     checks = report.setdefault("checks", [])
     try:
         configure_worker(access, access.admitted() | set(temporary))
@@ -335,6 +360,7 @@ def verify(access, report):
         check(status in (302, 401, 403), "a request without a service token is refused", checks)
         wait_for_admission(access.hostname, first)
         wait_for_admission(access.hostname, second)
+        wait_for_admission(access.hostname, third)
         enrolled = {}
         for name, token in (("a", first), ("b", second)):
             status, body = request(base + "/v1/enroll", "POST", edge_headers(token),
@@ -380,6 +406,12 @@ def verify(access, report):
                                {"label": "verification a2", "host_version": "0.0.0"})
         check(status == 201, "a second installation of account a enrolls", checks)
         a2 = {**edge_headers(first), "Authorization": "Bearer " + json.loads(body)["token"]}
+        check("origin" in health.get("features", []), "the Worker says which installation wrote a record", checks)
+        def own(headers):
+            status, body = request(base + "/v1/records/notes", headers=headers)
+            return [entry.get("own") for entry in json.loads(body)["records"]] if status == 200 else status
+        check(own(a) == [True] and own(a2) == [False],
+              "a record is the writing installation's own and another installation's not", checks)
         check(request(base + "/v1/store", "DELETE", a, erase)[0] == 409,
               "an account with another active installation cannot erase its store", checks)
         check(request(base + "/v1/installations/self", "DELETE", a2)[0] == 200,
@@ -389,9 +421,23 @@ def verify(access, report):
         check(request(base + f"/v1/records/notes/verify-{run}", headers=a)[0] == 404, "an erased record is gone", checks)
         check(request(base + f"/v1/installations/{enrolled['a']['installation']}", "DELETE", b)[0] == 404,
               "account b cannot revoke account a's installation", checks)
-        for name, headers in (("a", a), ("b", b)):
+        check("rebind" in health.get("features", []), "the Worker offers rebinding", checks)
+        a_under_c = {**edge_headers(third), "Authorization": "Bearer " + enrolled["a"]["token"]}
+        b_under_c = {**edge_headers(third), "Authorization": "Bearer " + enrolled["b"]["token"]}
+        status, body = request(base + "/v1/rebind", "POST", a_under_c, {"confirm": "rebind"})
+        check(status == 200 and json.loads(body).get("rebound") is True,
+              "account a moves to a new service token", checks)
+        check(request(base + "/v1/whoami", headers=a)[0] == 401 and request(base + "/v1/whoami", headers=a_under_c)[0] == 200,
+              "after rebinding only the new service token reaches account a", checks)
+        check(request(base + "/v1/rebind", "POST", b_under_c, {"confirm": "rebind"})[0] == 409,
+              "account b cannot take account a's new service token", checks)
+        status, body = request(base + "/v1/store", headers=a_under_c)
+        plan = json.loads(body).get("plan", {}) if status == 200 else {}
+        check("plan" in health.get("features", []) and plan.get("accounts", 0) >= 2 and "oversubscribed" in plan,
+              "the store reports the shared plan and how many accounts share it", checks)
+        for name, headers in (("a", a_under_c), ("b", b)):
             check(request(base + "/v1/installations/self", "DELETE", headers)[0] == 200, f"installation {name} revokes itself", checks)
-        check(request(base + "/v1/whoami", headers=a)[0] == 401, "a revoked credential is refused", checks)
+        check(request(base + "/v1/whoami", headers=a_under_c)[0] == 401, "a revoked credential is refused", checks)
     finally:
         try:
             configure_worker(access, access.admitted() - set(temporary))

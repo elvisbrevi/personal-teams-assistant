@@ -163,6 +163,7 @@ fn stored(value: &Value) -> Option<Stored> {
             Some(text) => Some(STANDARD.decode(text).ok()?),
             None => None,
         },
+        own: value["own"].as_bool(),
     })
 }
 
