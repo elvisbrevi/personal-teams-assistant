@@ -2829,6 +2829,25 @@ async fn consumer_bindings_are_private_per_account_and_shared_accounts_run_no_pr
                 {
                     continue;
                 }
+                // The owner's portal session approves (here: a launcher that does not exist).
+                if host.state.authority.owner
+                    && transport == Browser
+                    && method == "variable_launcher_approve"
+                {
+                    let approval = invoke(
+                        host,
+                        Browser,
+                        method,
+                        json!({"id":"deploy","digest":"0".repeat(64)}),
+                    )
+                    .await;
+                    let message = approval.message.unwrap_or_default();
+                    assert!(
+                        !approval.ok && !message.contains("approves a launcher"),
+                        "{message}"
+                    );
+                    continue;
+                }
                 assert!(!denied.ok, "{method} {transport:?}");
                 if !host.state.authority.owner && transport != Machine {
                     assert!(
@@ -2848,7 +2867,11 @@ async fn consumer_bindings_are_private_per_account_and_shared_accounts_run_no_pr
         );
         let listed = invoke(host, Browser, "variable_consumer_list", json!({})).await;
         assert_eq!(listed.data["launchers_available"], false);
-        assert!(listed.data.get("launchers").is_none());
+        // The owner reviews launchers in the portal to approve them; other accounts see none.
+        assert_eq!(
+            listed.data.get("launchers").is_some(),
+            host.state.authority.owner
+        );
     }
 }
 

@@ -1501,7 +1501,7 @@ function leaveAccount() {
   clearTypedVariableValues();
   variableState = { variables: [], pending: [], error: '', sync: null };
   variableAttempt = null;
-  consumerState = { consumers: [], launchers: [], error: '' };
+  consumerState = { consumers: [], launchers: [], launchersHere: false, error: '' };
   migrationState = { review: null, error: '', choices: {}, result: null };
   for (const key of Object.keys(consumerChoice)) delete consumerChoice[key];
   for (const key of Object.keys(consumerNote)) delete consumerNote[key];
@@ -2545,7 +2545,7 @@ setInterval(() => { if (readiness?.mode === 'signed_in' && !document.hidden) loa
 // ---------------------------------------------------------------- variable consumers
 
 /** Which variable each consumer uses (name and version only) and the approved local launchers. */
-let consumerState = { consumers: [], launchers: [], error: '' };
+let consumerState = { consumers: [], launchers: [], launchersHere: false, error: '' };
 let deliveryState = { destinations: [], approveHere: false };
 /** The destination and variable whose delivery waits for a second tap. */
 let armedDelivery = null;
@@ -2559,10 +2559,10 @@ async function loadConsumers() {
   try {
     const reply = await invoke('variable_consumer_list');
     if (!adoptAccount(epoch, reply.standing)) return;
-    consumerState = { consumers: reply.consumers, launchers: reply.launchers ?? [], error: '' };
+    consumerState = { consumers: reply.consumers, launchers: reply.launchers ?? [], launchersHere: reply.launchers_available === true, error: '' };
   } catch (error) {
     if (epoch !== accountEpoch) return;
-    consumerState = { consumers: [], launchers: [], error: String(error?.message ?? error) };
+    consumerState = { consumers: [], launchers: [], launchersHere: false, error: String(error?.message ?? error) };
   }
   try {
     // Destinations belong to the installation's owner; another account simply has none.
@@ -2631,7 +2631,8 @@ function consumerRow(consumer) {
     consumerNote[id] ? el('p', { class: 'hint variable-note', role: 'status', textContent: consumerNote[id] }) : null);
 }
 
-function launcherRow(launcher) {
+/** `here`: the launcher can also be removed from this client (the machine itself, not the portal). */
+function launcherRow(launcher, here) {
   const title = el('span', { class: 'cred-name', textContent: launcher.id, translate: 'no' });
   const uses = launcher.variables.map(v => v.state === 'ok'
     ? t('{env} from {name}', { env: v.env, name: v.variable.name })
@@ -2643,9 +2644,9 @@ function launcherRow(launcher) {
     done(t('Launcher {name} removed.', { name: launcher.id }));
   });
   const status = launcher.approved ? badge(t('Approved'), 'ok') : badge(t('Waiting for your approval'), 'warn');
-  const actions = [remove];
+  const actions = here ? [remove] : [];
   if (!launcher.approved) {
-    // Only a person at this window approves; the digest names the definition shown here.
+    // Only a person at this window or the owner's portal approves; the digest names the definition shown here.
     const approve = el('button', { type: 'button', textContent: t('Approve'), 'aria-label': t('Approve launcher {name}', { name: launcher.id }) });
     approve.onclick = () => busy(approve, async () => {
       await invoke('variable_launcher_approve', { id: launcher.id, digest: launcher.digest });
@@ -2798,7 +2799,7 @@ function renderConsumers() {
   for (const consumer of consumers) list.append(consumerRow(consumer));
   for (const [reference, name] of Object.entries(current?.config?.secrets ?? {})) list.append(referenceRow(reference, name));
   $('#launchers').hidden = !launchers.length;
-  $('#launcher-list').replaceChildren(...launchers.map(launcherRow));
+  $('#launcher-list').replaceChildren(...launchers.map(l => launcherRow(l, consumerState.launchersHere)));
   $('#deliveries').hidden = !deliveryState.destinations.length;
   $('#delivery-list').replaceChildren(...deliveryState.destinations.map(deliveryRow));
 }

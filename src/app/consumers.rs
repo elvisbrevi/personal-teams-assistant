@@ -212,16 +212,20 @@ async fn run(
             }
         }
         "variable_launcher_approve" => {
-            // A person at this machine's window approves what an agent may only propose.
+            // A person approves what an agent may only propose: at this machine's window or in
+            // the owner's own portal session, never on the local channel shared with agents.
             if !invocation.scope.owner {
                 return Err(vault::Error::Conflict(authority::EXECUTION_DENIED.into()));
             }
-            if transport != authority::Transport::Window {
+            if !matches!(
+                transport,
+                authority::Transport::Window | authority::Transport::Browser
+            ) {
                 if let Ok(store) = state.store(host) {
                     store.audit("launcher_approve", None, "denied_client");
                 }
                 return Err(vault::Error::Conflict(
-                    "Only the user approves a launcher, in this machine's application window."
+                    "Only the user approves a launcher, in this machine's application window or the owner's portal."
                         .into(),
                 ));
             }
@@ -237,7 +241,12 @@ async fn run(
     }
     let store = state.store(host)?;
     match method {
-        "variable_consumer_list" => list(host, &store, invocation.scope.owner && local),
+        "variable_consumer_list" => list(
+            host,
+            &store,
+            invocation.scope.owner && (local || transport == authority::Transport::Browser),
+            invocation.scope.owner && local,
+        ),
         "variable_consumer_bind" => {
             let a: BindArgs = parse(args)?;
             let result = bind(host, &store, &a).await;
@@ -332,7 +341,14 @@ fn binding_view(binding: &vault::Binding) -> Value {
     })
 }
 
-fn list(host: &Host, store: &Store, launchers: bool) -> std::result::Result<Value, vault::Error> {
+/// `shown`: the owner reviews launchers here (window, local channel or the owner's portal);
+/// `available`: they can also run from here (this machine's window or local channel).
+fn list(
+    host: &Host,
+    store: &Store,
+    shown: bool,
+    available: bool,
+) -> std::result::Result<Value, vault::Error> {
     let bindings = store.bindings()?;
     let consumers: Vec<Value> = BUILT_IN
         .iter()
@@ -352,8 +368,8 @@ fn list(host: &Host, store: &Store, launchers: bool) -> std::result::Result<Valu
             })
         })
         .collect();
-    let mut result = json!({"consumers":consumers,"launchers_available":launchers});
-    if launchers {
+    let mut result = json!({"consumers":consumers,"launchers_available":available});
+    if shown {
         let list = host.state.variables.consumers.launchers.list()?;
         let mut views = Vec::new();
         for launcher in list {

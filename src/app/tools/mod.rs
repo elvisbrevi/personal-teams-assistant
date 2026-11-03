@@ -605,7 +605,7 @@ pub(super) const TOOLS: &[Tool] = &[
     Tool {
         name: "launcher_define",
         title: "Propose a local launcher",
-        description: "Propose one local program to receive named variables as environment variables of that one process. It runs nothing until the user approves it in the application window (Settings > Credentials > Variables); no tool can approve it, and consumer_list shows `approved`. Only on the owner's trusted machine, with a working directory inside the machine's allowed roots. Give the absolute program path, fixed arguments (never values), and an object mapping environment names to variable IDs. Protected runtime and application settings (PATH, LD_*, PTA_*, state keys...) are refused. The program's digest is recorded and a changed program does not run. Needs the user's confirmation, who should see the program, arguments and variable names.",
+        description: "Propose one local program to receive named variables as environment variables of that one process. It runs nothing until the user approves it in the application window or the owner's own portal (Settings > Credentials > Variables); no tool can approve it, and consumer_list shows `approved`. Only on the owner's trusted machine, with a working directory inside the machine's allowed roots. Give the absolute program path, fixed arguments (never values), and an object mapping environment names to variable IDs. Protected runtime and application settings (PATH, LD_*, PTA_*, state keys...) are refused. The program's digest is recorded and a changed program does not run. Needs the user's confirmation, who should see the program, arguments and variable names.",
         effect: Effect::External,
         schema: || {
             object(

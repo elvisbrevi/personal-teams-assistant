@@ -341,6 +341,7 @@ impl Portal {
             "variable_consumer_bind",
             "variable_consumer_unbind",
             "variable_consumer_check",
+            "variable_launcher_approve",
             "variable_migration_inspect",
             "variable_migration_run",
             "variable_migration_status",
