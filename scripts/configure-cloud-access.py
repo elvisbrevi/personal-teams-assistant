@@ -373,7 +373,7 @@ def connect(access, label, report):
     wait_for_configuration(access.hostname)
     wait_for_admission(access.hostname, token)
     payload = json.dumps({"client_id": token["client_id"], "client_secret": token["client_secret"]})
-    completed = subprocess.run([pta, "--json", "cloud", "connect", "--endpoint", endpoint, "--label", label],
+    completed = subprocess.run([pta, "--json", "cloud", "connect", "--endpoint", endpoint, "--label", label, "--confirmed"],
                                input=payload, capture_output=True, text=True, timeout=120)
     outcome = json.loads(completed.stdout or "{}")
     report["connect"] = {"exit_code": completed.returncode, "code": outcome.get("code"),
