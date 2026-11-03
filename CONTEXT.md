@@ -91,8 +91,20 @@ The mode in which the account store is the source of truth of the account's conf
 _Avoid_: cloud mode, online mode
 
 **Conflict** (account store):
-A configuration record changed on an installation without reaching the account store while the store accepted another version. It stays as it is locally and cannot be edited until the user adopts the store's version.
+A configuration record changed on an installation without reaching the account store while the store accepted another version. It stays as it is locally and cannot be edited until the user adopts the store's version or rolls back keeping this installation's.
 _Avoid_: merge
+
+**Migration** (account store):
+Moving an installation's records into the account store: a private backup of the profile first, then the encrypted upload, verified by reading it back, after which the mode is mirror.
+_Avoid_: sync, import
+
+**Rollback** (account store):
+Making the local profile the only source again: a backup, a last pull of the configuration when the store was primary, a verification, then mode off. Nothing local is deleted and the cloud copy stays until it is erased.
+_Avoid_: restore, undo
+
+**Erase** (account store):
+Removing an account's copy from the account store after a rollback and setting its content key aside, so a later migration uses a new key. Local data is untouched.
+_Avoid_: delete account, reset
 
 **Local replica**:
 An installation's readable copy of the account store, plus the caches derived from it; it answers while offline.

@@ -474,16 +474,35 @@ pub(super) const TOOLS: &[Tool] = &[
         },
     },
     Tool {
-        name: "cloud_mirror",
-        title: "Mirror to the account store",
-        description: "Mirror this installation's records to the account store. action plan (default) lists per collection what would be uploaded (records and bytes) and sends nothing; start creates the account content key on first use (tell the user to back it up with pta variables key backup), uploads every collection sealed on this installation (AES-256-GCM-SIV; the Worker sees only blinded IDs, revisions and digests), verifies the copy by reading it back and only then switches the mode to mirror; stop switches the mode back to off and keeps the copy. Local stays the source of truth; secrets, sessions, send nonces and runs in progress never leave. Owner only. Needs the user's confirmation.",
+        name: "cloud_migrate",
+        title: "Migrate to the account store",
+        description: "Move this installation's records into the account store. action plan (default) lists per collection what would be uploaded (records and bytes), what stays on this computer and why, and the size of the backup; it writes and sends nothing. action start first backs up this profile (every database and the settings files in a private backups/cloud-<time>/, the newest three kept), creates the account content key on first use (tell the user to back it up with pta variables key backup), uploads every collection sealed on this installation (AES-256-GCM-SIV; the Worker sees only blinded IDs, revisions and digests), verifies the copy by reading it back and only then switches the mode to mirror; run it again to continue an interrupted upload. Local stays the source of truth; secrets, sessions, send nonces and runs in progress never leave. Owner only. Needs the user's confirmation.",
         effect: Effect::External,
         schema: || {
             object(
-                json!({"action":{"type":"string","enum":["plan","start","stop"],"description":"plan (default), start or stop."},"confirmed":confirmed()}),
+                json!({"action":{"type":"string","enum":["plan","start"],"description":"plan (default) or start."},"confirmed":confirmed()}),
                 &[],
             )
         },
+    },
+    Tool {
+        name: "cloud_rollback",
+        title: "Roll back from the account store",
+        description: "Stop using the account store on this installation: back up this profile, then, when the store is the source of the configuration (primary), pull what it changed (refused on a conflict or without an answer), verify that the store holds nothing this computer lacks and switch the mode to off. Nothing local is deleted and the copy in the store stays until cloud_erase; cloud_migrate continues from it. keep_local skips the pull and the clean verification and keeps this computer's configuration exactly as it is: ask the user before using it. Owner only. Needs the user's confirmation.",
+        effect: Effect::External,
+        schema: || {
+            object(
+                json!({"keep_local":{"type":"boolean","description":"Keep this computer's configuration as it is (no last pull, no clean verification required)."},"confirmed":confirmed()}),
+                &[],
+            )
+        },
+    },
+    Tool {
+        name: "cloud_erase",
+        title: "Erase the account store copy",
+        description: "After a rollback (mode off) and with no other connected computer in the account: erase this account's records and backups in the account store, forget what was acknowledged and set the account content key aside (keys/cloud-content-retired-<time>.json), so a later migration uses a new key. This computer keeps all of its data. Cloudflare keeps a 30-day point-in-time recovery of the store that only the operator can restore and only the retired key can read; erased R2 backups cannot be recovered. Irreversible for the user: ask before calling. Owner only. Needs the user's confirmation.",
+        effect: Effect::External,
+        schema: || object(json!({"confirmed":confirmed()}), &[]),
     },
     Tool {
         name: "cloud_disconnect",
@@ -1653,7 +1672,7 @@ pub(super) async fn run(name: &str, args: &Value) -> Result<Value, String> {
         "variable_update" | "variable_rename" | "variable_usage" => ipc(name, args.clone()).await,
         "consumer_list" => ipc("variable_consumer_list", args.clone()).await,
         "cloud_status" | "cloud_verify" => ipc(name, args.clone()).await,
-        "cloud_mirror" | "cloud_disconnect" | "cloud_promote" | "cloud_pull" => {
+        "cloud_migrate" | "cloud_rollback" | "cloud_erase" | "cloud_disconnect" | "cloud_promote" | "cloud_pull" => {
             let mut args = args.clone();
             args.as_object_mut().unwrap().remove("confirmed");
             ipc(name, args).await
@@ -2003,11 +2022,16 @@ pub(super) fn confirmation(name: &str, args: &Value) -> Option<String> {
         } else {
             "Bring the configuration the account store changed into this computer now?".into()
         },
-        "cloud_mirror" => match args["action"].as_str().unwrap_or("plan") {
-            "start" => "Upload this installation's records, encrypted with the account content key, to the account store and keep it mirrored?".into(),
-            "stop" => "Stop mirroring this installation to the account store (the copy is kept)?".into(),
-            _ => "List what mirroring this installation to the account store would upload (nothing is sent)?".into(),
+        "cloud_migrate" => match args["action"].as_str().unwrap_or("plan") {
+            "start" => "Back up this profile, then upload its records encrypted with the account content key to the account store, verify the copy and keep it mirrored?".into(),
+            _ => "List what migrating this installation to the account store would upload (nothing is written or sent)?".into(),
         },
+        "cloud_rollback" => if args["keep_local"] == true {
+            "Stop using the account store on this computer, keeping this computer's configuration exactly as it is (the copy in the store stays)?".into()
+        } else {
+            "Bring the account store's configuration back to this computer, verify and stop using the account store (the copy in the store stays)?".into()
+        },
+        "cloud_erase" => "Erase this account's copy in the account store (records and backups) and set the content key aside? This computer keeps all of its data.".into(),
         "cloud_connect" => format!(
             "Enroll this installation with the account store at {}?",
             args["endpoint"].as_str().unwrap_or_default()

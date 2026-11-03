@@ -188,6 +188,9 @@ pub(super) fn check_shared_operation(request: &control::Request) -> Result<()> {
                 | "cloud_disconnect"
                 | "cloud_promote"
                 | "cloud_pull"
+                | "cloud_migrate"
+                | "cloud_rollback"
+                | "cloud_erase"
         ),
         "{EXECUTION_DENIED}"
     );

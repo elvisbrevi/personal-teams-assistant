@@ -1631,19 +1631,21 @@ for (const [label, viewport] of [['desktop', { width: 1440, height: 900 }], ['ph
   check('shared account updates panel passes axe', (await scan(page)).length === 0, JSON.stringify(await scan(page)));
   await context.close();
 }
-// Cloud storage: the encrypted copy starts only on a second tap, then offers verify and stop.
+// Cloud storage: the migration starts only on a second tap, then offers verify, promotion and
+// rollback; after a rollback the copy can be erased, again on a second tap.
 for (const [label, options] of [['desktop', {}], ['phone', { context: { viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true } }]]) {
   const { context, page, errors } = await open({ axe: true, ...options });
   await page.evaluate(() => { window.__ptaCloudToken = true; showTab('settings', 'panel-cloud'); });
   const panel = page.locator('#panel-cloud');
   await panel.locator('#cloud-mirror').waitFor();
-  const start = panel.locator('#cloud-mirror-start');
-  check(`${label}: the copy is offered with the key notice`, await start.isVisible() && (await panel.locator('#cloud-mirror-summary').innerText()).includes('pta variables key backup'));
+  const start = panel.locator('#cloud-migrate');
+  const rollback = panel.locator('#cloud-rollback');
+  check(`${label}: the migration is offered with the key notice`, await start.isVisible() && (await panel.locator('#cloud-mirror-summary').innerText()).includes('pta variables key backup') && await panel.locator('#cloud-erase-box').isHidden());
   await start.click();
-  check(`${label}: the first tap only arms the upload`, (await start.innerText()).includes('Toca de nuevo') && await page.evaluate(() => !window.__ptaCloudMirror));
+  check(`${label}: the first tap only arms the migration`, (await start.innerText()).includes('Toca de nuevo') && await page.evaluate(() => !window.__ptaCloudMirror));
   await start.click();
-  await panel.locator('#cloud-mirror-stop').waitFor();
-  check(`${label}: the second tap starts the copy and offers verify and stop`, await start.isHidden() && await panel.locator('#cloud-verify').isVisible() && (await panel.locator('#cloud-mirror-summary').innerText()).includes('al día'));
+  await rollback.waitFor();
+  check(`${label}: the second tap migrates and offers verify and rollback`, await start.isHidden() && await panel.locator('#cloud-verify').isVisible() && (await panel.locator('#cloud-mirror-summary').innerText()).includes('al día') && (await panel.locator('#cloud-mirror-summary').innerText()).includes('Último respaldo'));
   await panel.locator('#cloud-verify').click();
   await panel.locator('#cloud-verify-result').waitFor();
   check(`${label}: a verification lists changes not copied yet`, (await panel.locator('#cloud-verify-result').innerText()).includes('Mensajes'));
@@ -1655,7 +1657,7 @@ for (const [label, options] of [['desktop', {}], ['phone', { context: { viewport
   await promote.click();
   await panel.locator('#cloud-demote').waitFor();
   const replace = panel.locator('#cloud-replace');
-  check(`${label}: primary mode explains read-only and shows the conflict`, await promote.isHidden() && await panel.locator('#cloud-mirror-stop').isHidden() && await replace.isVisible() && (await panel.locator('#cloud-mirror-summary').innerText()).includes('fuente'));
+  check(`${label}: primary mode explains read-only and shows the conflict`, await promote.isHidden() && await rollback.isVisible() && await panel.locator('#cloud-rollback-local').isVisible() && await replace.isVisible() && (await panel.locator('#cloud-mirror-summary').innerText()).includes('fuente'));
   await page.evaluate(axeSource);
   check(`${label}: primary mode passes axe`, (await scan(page)).length === 0, JSON.stringify(await scan(page)));
   await replace.click();
@@ -1663,14 +1665,28 @@ for (const [label, options] of [['desktop', {}], ['phone', { context: { viewport
   await replace.click();
   await replace.waitFor({ state: 'hidden' });
   check(`${label}: replacing clears the conflict`, await page.evaluate(() => window.__ptaCloudMirror.primary.conflicts === 0));
+  check(`${label}: without a conflict the store's version is not offered`, await panel.locator('#cloud-rollback-local').isHidden());
   await panel.locator('#cloud-demote').click();
-  await panel.locator('#cloud-mirror-stop').waitFor();
-  check(`${label}: returning to the copy offers stop again`, await page.evaluate(() => window.__ptaCloudMirror.mode === 'mirror') && await panel.locator('#cloud-demote').isHidden());
+  await panel.locator('#cloud-promote').waitFor();
+  check(`${label}: returning to the copy offers the rollback again`, await page.evaluate(() => window.__ptaCloudMirror.mode === 'mirror') && await panel.locator('#cloud-demote').isHidden() && await rollback.isVisible());
   await page.evaluate(axeSource);
   check(`${label}: the cloud storage panel passes axe`, (await scan(page)).length === 0, JSON.stringify(await scan(page)));
   check(`${label}: the cloud storage panel keeps the phone boundary`, await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
   check(`${label}: an expiring service token is announced`, (await panel.locator('#cloud-details').innerText()).includes('renueve'));
   await page.screenshot({ path: `${out}/cloud-${label}.png`, fullPage: false });
+  await rollback.click();
+  check(`${label}: the first tap only arms the rollback`, (await rollback.innerText()).includes('Toca de nuevo') && await page.evaluate(() => window.__ptaCloudMirror.mode === 'mirror'));
+  await rollback.click();
+  const erase = panel.locator('#cloud-erase');
+  await erase.waitFor();
+  check(`${label}: after the rollback the copy stays and can be erased`, await rollback.isHidden() && await start.isVisible() && (await panel.locator('#cloud-mirror-summary').innerText()).includes('hasta que la borres') && (await panel.locator('#cloud-erase-box').innerText()).includes('30 días'));
+  await page.evaluate(axeSource);
+  check(`${label}: the rolled-back panel passes axe`, (await scan(page)).length === 0, JSON.stringify(await scan(page)));
+  await erase.click();
+  check(`${label}: the first tap only arms the erasure`, (await erase.innerText()).includes('Toca de nuevo') && await page.evaluate(() => !window.__ptaCloudMirror.erased_at));
+  await erase.click();
+  await panel.locator('#cloud-erase-box').waitFor({ state: 'hidden' });
+  check(`${label}: the second tap erases the copy and offers a new migration`, await start.isVisible() && (await panel.locator('#cloud-mirror-summary').innerText()).includes('clave de contenido nueva'));
   const disconnect = panel.locator('#cloud-disconnect');
   await disconnect.click();
   check(`${label}: the first tap only arms the disconnection`, (await disconnect.innerText()).includes('Toca de nuevo') && await page.evaluate(() => !window.__ptaCloudDisconnected));

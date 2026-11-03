@@ -198,6 +198,14 @@ pub(crate) struct Worker {
 }
 
 impl Worker {
+    /// `DELETE /v1/store`: every record goes, the generations stay. Returns how many went.
+    pub(crate) fn erase(&self) -> u64 {
+        let mut held = self.records.lock().unwrap();
+        let erased = held.len() as u64;
+        held.clear();
+        erased
+    }
+
     /// What writing `wire` would do, without writing it (`decide` in `account-store.ts`).
     fn decide(held: &HashMap<(Collection, String), Stored>, wire: &Wire) -> Outcome {
         let old = held.get(&(wire.collection, wire.id.clone()));
