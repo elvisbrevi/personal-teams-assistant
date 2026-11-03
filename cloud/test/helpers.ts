@@ -22,8 +22,11 @@ async function keys(): Promise<CryptoKeyPair> {
 /** Serve the synthetic team's signing keys to the Worker's JWKS fetch. */
 export async function mockAccessKeys(): Promise<void> {
   const jwk = (await crypto.subtle.exportKey("jwk", (await keys()).publicKey)) as JsonWebKey;
-  vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+  vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
     const url = input instanceof Request ? input.url : String(input);
+    // The Workers runtime accepts only these redirect modes; anything else throws in production.
+    const redirect = init?.redirect ?? (input instanceof Request ? input.redirect : "follow");
+    if (!["follow", "manual"].includes(redirect)) throw new TypeError(`Unsupported redirect mode: ${redirect}`);
     if (url === `${ISSUER}/cdn-cgi/access/certs`) {
       return Response.json({ keys: [{ ...jwk, kid: KID, alg: "RS256" }] });
     }

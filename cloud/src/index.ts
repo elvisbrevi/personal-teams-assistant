@@ -33,6 +33,7 @@ export default {
     const started = Date.now();
     const requestId = crypto.randomUUID();
     let route = "unknown";
+    let failure: string | undefined;
     let response: Response;
     try {
       const url = new URL(request.url);
@@ -40,12 +41,21 @@ export default {
       route = matched.route;
       response = await matched.handle(request, env, url);
     } catch (error) {
+      // The error's class names an unexpected failure for the log; its message may carry data.
+      if (!(error instanceof Refusal)) failure = error instanceof Error ? error.name : "unknown";
       response =
         error instanceof Refusal ? refusal(error, requestId) : refusal(new Refusal("internal", "Internal error."), requestId);
     }
     // Method, route pattern, status and duration only: never bodies, headers or identifiers.
     console.log(
-      JSON.stringify({ request: requestId, method: request.method, route, status: response.status, ms: Date.now() - started }),
+      JSON.stringify({
+        request: requestId,
+        method: request.method,
+        route,
+        status: response.status,
+        ms: Date.now() - started,
+        ...(failure ? { failure } : {}),
+      }),
     );
     response.headers.set("x-request-id", requestId);
     return response;
