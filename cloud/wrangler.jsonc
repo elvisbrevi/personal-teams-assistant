@@ -1,0 +1,53 @@
+{
+  // The account store Worker (docs/organization-and-cloud-storage.md). Production is deployed by
+  // Workers Builds (Cloudflare's Git integration) with root directory `cloud` on merges to main;
+  // non-production branch builds stay disabled because preview versions would share the
+  // production objects. The staging Worker (`--env staging`) has its own objects and bucket.
+  //
+  // Secrets, set with `wrangler secret put` (scripts/configure-cloud-access.py does it):
+  // ACCESS_TEAM_DOMAIN and ACCESS_AUD, the Access application that protects the hostname.
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "pta-cloud",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-01",
+  // Served only on the custom domain, which Access protects; no workers.dev or preview URLs.
+  "workers_dev": false,
+  "preview_urls": false,
+  "routes": [{ "pattern": "pta-cloud.elvisbrevi.cl", "custom_domain": true }],
+  "durable_objects": {
+    "bindings": [
+      { "name": "REGISTRY", "class_name": "Registry" },
+      { "name": "ACCOUNT_STORE", "class_name": "AccountStore" }
+    ]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Registry", "AccountStore"] }],
+  "r2_buckets": [{ "binding": "BACKUPS", "bucket_name": "pta-cloud-backups" }],
+  "version_metadata": { "binding": "VERSION" },
+  "vars": {
+    "ENVIRONMENT": "production",
+    "ACCOUNT_DAILY_REQUESTS": "20000",
+    "ACCOUNT_DAILY_ROWS_WRITTEN": "20000"
+  },
+  "observability": { "enabled": true },
+  "env": {
+    "staging": {
+      "name": "pta-cloud-staging",
+      "workers_dev": false,
+      "preview_urls": false,
+      "routes": [{ "pattern": "pta-cloud-staging.elvisbrevi.cl", "custom_domain": true }],
+      "durable_objects": {
+        "bindings": [
+          { "name": "REGISTRY", "class_name": "Registry" },
+          { "name": "ACCOUNT_STORE", "class_name": "AccountStore" }
+        ]
+      },
+      "r2_buckets": [{ "binding": "BACKUPS", "bucket_name": "pta-cloud-backups-staging" }],
+      "version_metadata": { "binding": "VERSION" },
+      "vars": {
+        "ENVIRONMENT": "staging",
+        "ACCOUNT_DAILY_REQUESTS": "2000",
+        "ACCOUNT_DAILY_ROWS_WRITTEN": "2000"
+      }
+    }
+  }
+}

@@ -42,26 +42,31 @@ function filter(event, files, { published = true, base = 'a'.repeat(40) } = {}) 
 
 for (const event of ['pull_request', 'push']) {
   for (const [files, expected] of [
-    [['src/main.rs'], { rust: 'true', ui: 'false' }],
-    [['desktop/ui/app.js'], { rust: 'true', ui: 'true' }],
-    [['.github/workflows/ci.yml'], { rust: 'true', ui: 'true' }],
-    [['scripts/test-ci-workflow.mjs'], { rust: 'false', ui: 'true' }],
-    [['docs/architecture.md', 'README.md'], { rust: 'false', ui: 'false' }],
+    [['src/main.rs'], { rust: 'true', ui: 'false', cloud: 'false' }],
+    [['desktop/ui/app.js'], { rust: 'true', ui: 'true', cloud: 'false' }],
+    [['.github/workflows/ci.yml'], { rust: 'true', ui: 'true', cloud: 'true' }],
+    [['scripts/test-ci-workflow.mjs'], { rust: 'false', ui: 'true', cloud: 'false' }],
+    [['docs/architecture.md', 'README.md'], { rust: 'false', ui: 'false', cloud: 'false' }],
+    [['cloud/src/index.ts'], { rust: 'false', ui: 'false', cloud: 'true' }],
   ]) {
     assert.deepEqual(filter(event, files), expected, `${event}: ${files}`);
   }
 }
-assert.deepEqual(filter('push', [], { published: false }), { rust: 'true', ui: 'true' });
-assert.deepEqual(filter('pull_request', [], { base: '' }), { rust: 'true', ui: 'true' });
+const all = { rust: 'true', ui: 'true', cloud: 'true' };
+assert.deepEqual(filter('push', [], { published: false }), all);
+assert.deepEqual(filter('pull_request', [], { base: '' }), all);
 
 for (const event of ['pull_request', 'push', 'schedule']) {
-  const outputs = { rust: 'true', ui: 'true' };
+  const outputs = { rust: 'true', ui: 'true', cloud: 'true' };
   assert(enabled(jobs.linux.if, event, outputs), `${event}: final Linux verification`);
   assert(enabled(jobs.security.if, event, outputs), `${event}: security must run`);
-  for (const id of ['ui', 'macos', 'windows']) {
+  for (const id of ['ui', 'cloud', 'macos', 'windows']) {
     assert.equal(enabled(jobs[id].if, event, outputs), event !== 'push', `${event}: ${id}`);
-    assert.equal(enabled(jobs[id].if, event, { rust: 'false', ui: 'false' }), false);
+    assert.equal(enabled(jobs[id].if, event, { rust: 'false', ui: 'false', cloud: 'false' }), false);
   }
+  // The Worker job holds no secrets and runs on a standard runner.
+  assert.equal(jobs.cloud['runs-on'], 'ubuntu-latest');
+  assert(!JSON.stringify(jobs.cloud).includes('secrets.'), 'the Worker job uses no secrets');
   const commands = jobs.linux.steps.filter(step => step.run && enabled(step.if, event, outputs))
     .map(step => step.run);
   for (const command of ['cargo test --locked', 'cargo test --locked --no-default-features', 'cargo package --locked']) {
@@ -71,15 +76,15 @@ for (const event of ['pull_request', 'push', 'schedule']) {
   assert.equal(commands.some(command => command.startsWith('cargo clippy')), event !== 'push');
 }
 
-assert.deepEqual(filter('schedule', []), { rust: 'true', ui: 'true' });
+assert.deepEqual(filter('schedule', []), all);
 assert.equal(jobs.changes.if, undefined, 'Weekly runs must reach the full matrix');
 
 assert.equal(jobs.result.if, 'always()');
 assert.equal(jobs.result.name, 'CI result');
-for (const failed of [null, 'linux', 'security', 'changes', 'ui', 'macos', 'windows']) {
+for (const failed of [null, 'linux', 'security', 'changes', 'ui', 'cloud', 'macos', 'windows']) {
   for (const outcome of ['failure', 'cancelled']) {
     const needs = Object.fromEntries(jobs.result.needs.map(id => [id, {
-      result: id === failed ? outcome : ['ui', 'macos', 'windows'].includes(id) ? 'skipped' : 'success',
+      result: id === failed ? outcome : ['ui', 'cloud', 'macos', 'windows'].includes(id) ? 'skipped' : 'success',
     }]));
     const result = spawnSync('bash', ['-e', '-c', jobs.result.steps[0].run], {
       encoding: 'utf8', env: { ...process.env, NEEDS: JSON.stringify(needs), GITHUB_STEP_SUMMARY: '/dev/null' },
@@ -87,4 +92,4 @@ for (const failed of [null, 'linux', 'security', 'changes', 'ui', 'macos', 'wind
     assert.equal(result.status, failed && failed !== 'windows' ? 1 : 0, `${failed}: ${result.stderr}`);
   }
 }
-console.log('CI policy passed: PR/full weekly matrix, main tests/package, path filters and required-job failures.');
+console.log('CI policy passed: PR/full weekly matrix, main tests/package, path filters, the Worker job and required-job failures.');

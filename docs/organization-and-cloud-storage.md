@@ -6,8 +6,9 @@ Design, 2026-11-02. Phase 1 (analysis) of the move described in §14 of the
 2026-11-02 ([sources](#sources)); re-read them before each implementation phase.
 
 Phase 1b (0.10.16) implemented the local organization layer: see §8 «Organization» and §16 of the
-architecture, and the skill's knowledge and account-configuration references. Phase 2 is under
-way: the settings store (0.10.17) is the first aggregate behind its trait (§10).
+architecture, and the skill's knowledge and account-configuration references. Phase 2 (0.10.17–0.10.22)
+put every account aggregate behind its own storage trait. Phase 3a is under way: the Worker under
+`cloud/` (0.10.23) and its delivery path ([delivery](delivery.md#account-store-worker-cloud)).
 
 ## 1. Goals and non-goals
 
@@ -142,7 +143,11 @@ is a kind of organization entry.
 
 ## 5. Cloudflare options
 
-Verified on 2026-11-02 in the official documentation ([sources](#sources)).
+Verified on 2026-11-02 in the official documentation ([sources](#sources)) and again on 2026-11-03
+before phase 3a: no limit or price in this section changed. Two details matter to the
+implementation: SQLite storage in Durable Objects is billed since January 2026 (on Free it is
+the 5 GB total below), and new Access service token secrets carry a `cfast_` prefix and accept
+tags, while the headers stay `CF-Access-Client-Id` / `CF-Access-Client-Secret`.
 
 | | D1, one database per account | Durable Objects with SQLite, one object per account | R2 | Vectorize | KV |
 | --- | --- | --- | --- | --- | --- |
@@ -309,9 +314,23 @@ and is deployed before the host release that needs it. An older host cannot load
 
 - **Code.** A TypeScript Worker under `cloud/`, outside the Cargo package like `site/` (a
   `workers-rs` crate would break the single-package rule): `src/index.ts` (routing and
-  authentication), `account-store.ts`, `organization-store.ts`, `registry.ts`, and
-  `wrangler.jsonc` with the Durable Object bindings (`new_sqlite_classes` migrations) and the R2
-  bucket.
+  `authenticate`), `access.ts` (the Access assertion), `registry.ts`, `account-store.ts`,
+  `protocol.ts` (versions, collections, limits), and `wrangler.jsonc` with the Durable Object
+  bindings (`new_sqlite_classes` migrations) and the R2 bucket. The organization is the
+  `organization` collection of the account store, revised as one record like the host's
+  `OrganizationStore`: the encrypted records need no separate object.
+- **Protocol v1.** `GET /v1/health` (no credentials: environment, Worker version, deployment,
+  protocols, schemas, whether Access is configured); `POST /v1/enroll` (Access identity only:
+  issues the installation credential `ptac_…`, 256 bits, shown once); `GET /v1/whoami`,
+  `GET /v1/installations`, `DELETE /v1/installations/{id|self}`; `GET /v1/store` (schema,
+  per-collection counts, bytes and generations, today's usage); `POST /v1/records` (1–100 sealed
+  records; the Worker checks each digest against the sealed bytes; results `created`, `updated`,
+  `unchanged`, `stale` or `conflict`); `GET /v1/records/{collection}?since=&limit=` and
+  `GET /v1/records/{collection}/{id}`; `GET|PUT|DELETE /v1/backups/{name}` and `GET /v1/backups`
+  under the account's own R2 prefix. Bodies are closed schemas: an unknown field (an account ID,
+  for instance) is refused. Each account has a daily share of requests and rows written
+  (`ACCOUNT_DAILY_*`); over it the Worker answers `quota_exhausted` (429), which the host treats
+  as being offline.
 - **Publishing.** Workers Builds connected to the repository with root directory `cloud/`, as the
   landing does: Cloudflare builds and deploys on merge to `main`, so GitHub holds no deploy secret.
   Non-production branch builds are **disabled** for this Worker (preview versions would share the
@@ -335,7 +354,7 @@ parity, the `AGENTS.md` checks, and delivery verified on crates.io and on the se
 | 1a. Cleanup (0.10.15) | Synthetic names in tests, docs, README, prompts, the GUI placeholder and catalogs; To-Do items carry `category`; the GUI decides by category; the task type listed with bugs comes from its guide (`listed_with_bugs`); the production guide is updated as data in the same delivery. | The production To-Do stops listing that type until its guide carries the field: update it right after the install, verify the list. |
 | 1b. Organization (local) — done (0.10.16) | `[organization]` in the map (name, entries, source IDs); guides shown as entries; new `organization` source kind (disabled by default) and index documents; Settings › Organization replaces the current guides editor (no duplicate control); `pta organization …` with `pta guides …` kept as its guides subcommand; MCP `organization_*`; agents receive norms and architecture as untrusted input; skill, architecture and `CONTEXT.md`. The organization, guides included, joins the account configuration's allowlist and travels with the account. | Prompt size growth for agents (bound entries per run); a second place to edit guides if the old editor is not removed in the same PR. |
 | 2. Storage abstraction — done (0.10.17–0.10.22) | One trait per account aggregate under the crate's `store/` (at the crate root, because the message pipeline uses them too), each with its local implementation as the default and a shared `contract::run` suite; no behavior change. `SettingsStore` (`store/settings.rs`, `LocalSettings`): `Config`, `KnowledgeMap` and the tunnel path, committed together with the existing journal. `NotesStore` (`store/notes.rs`, `LocalNotes`): verified notes (by ID, `updated_at` as revision), answer evaluations and approved examples (by Teams message), in `knowledge-index.db` with each record's search document in the same transaction. `AuditStore` (`store/audit.rs`, `LocalAudit`): the finished messages' audits (by Teams message, audit as revision) in `assistant.db` › `jobs`; the worker's in-flight rows, state machine and send nonces stay local. `ActivityStore` (`store/activity.rs`, `LocalActivity`): daily task snapshots and summaries (by day), finished runs (by ID) and the legacy record, in `activity-registration.db`; running runs, slot claims and recovery stay local. `ImplementationStore` (`store/implementation.rs`, `LocalImplementation`, crate-private): finished agent runs (by launch ID) and request runs (by ID) in `implementation/runs.db`; in-flight runs and requests, the change feed, the session index, remote-session access and the machine files stay local. `OrganizationStore` (`store/organization.rs`, `LocalOrganization`): the organization (name, entries by ID with `updated_at` as revision, documenting sources) and its work item guides (by ID) as one unit with one revision, kept in the map's `[organization]` and `[[work_item_guides]]` through the settings store's journaled commit; the settings editors still save it with the rest of the map in one commit. Search and ranking stay in the local index, which reads the stores' records; the pipeline reads the local stores and never waits on the cloud, whose store will keep the local replica current. In-flight state is joined with each store's finished records where a listing shows both (`audit`, activity runs, implementation runs and requests). | Broad refactor of hot paths: done store by store, each PR behavior-neutral and fully tested. |
-| 3a. Worker and authentication | `cloud/` Worker, `Registry`, `AccountStore` schema v1 (encrypted records with clear metadata), Access service token, installation credential, health; Workers Builds; host `cloud status/connect`. | Access/Workers configuration mistakes: staging Worker first, contract tests including cross-account attempts. |
+| 3a. Worker and authentication — under way (Worker: 0.10.23) | `cloud/` Worker, `Registry`, `AccountStore` schema v1 (encrypted records with clear metadata), Access service token, installation credential, health; Workers Builds; host `cloud status/connect`. | Access/Workers configuration mistakes: staging Worker first, contract tests including cross-account attempts. |
 | 3b. Mirror | Outbox for append-only records, encrypted snapshots of configuration, `cloud verify`; local stays the source of truth. | Outbox growth while offline (bounded, visible in status); latency measured here. |
 | 3c. Primary | Compare-and-swap configuration writes through the Worker; local replica; `portable_*` served from the account store. | Conflict handling regressions: reuse the portable rules and their tests. |
 | 4a. Migration | `cloud migrate/promote/rollback/erase` with backup and read-back verification; production migrated when the owner decides. | Data loss: never delete local data; rollback rehearsed on a copy of the production profile first. |
