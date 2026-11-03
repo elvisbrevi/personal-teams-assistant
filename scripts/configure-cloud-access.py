@@ -3,7 +3,7 @@
 
 Run it with CLOUDFLARE_API_TOKEN (or CLOUDFLARE_API_TOKEN_FILE, a private file) holding a token
 with the account permissions Access: Apps and Policies Write, Access: Service Tokens Write and
-Access: Organizations Read, and CLOUDFLARE_ACCOUNT_ID when the token cannot list accounts. Hostnames
+Access: Organizations Read, and CLOUDFLARE_ACCOUNT_ID (or --account) when the token cannot list accounts. Hostnames
 and Worker names come from cloud/wrangler.jsonc. Every run writes a report without secrets to
 --report.
 
@@ -471,7 +471,11 @@ def main():
     parser.add_argument("environment", choices=["staging", "production"])
     parser.add_argument("--report", type=Path, required=True, help="private JSON report without secrets")
     parser.add_argument("--label", default="server", help="installation label (production)")
+    parser.add_argument("--account", help="Cloudflare account ID (instead of CLOUDFLARE_ACCOUNT_ID)")
     args = parser.parse_args()
+    if args.account:
+        # A launcher passes fixed arguments and only the variables it names.
+        os.environ["CLOUDFLARE_ACCOUNT_ID"] = args.account
     if not re.fullmatch(r"[a-z0-9][a-z0-9 -]{0,40}", args.label):
         parser.error("--label: lowercase letters, digits, spaces and dashes")
     sys.exit(run(args))

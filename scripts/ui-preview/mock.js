@@ -591,7 +591,7 @@
       if (index >= 0) pendingVariables.splice(index, 1);
       return { request: args.request, state: 'cancelled' };
     },
-    variable_consumer_list: () => ({ standing: window.__ptaStanding ? structuredClone(window.__ptaStanding) : undefined, launchers_available: true, launchers: structuredClone(launchers), consumers: [{ id: 'deepseek', title: 'DeepSeek API',
+    variable_consumer_list: () => ({ standing: window.__ptaStanding ? structuredClone(window.__ptaStanding) : undefined, launchers_available: window.__ptaLaunchersHere !== false, launchers: structuredClone(launchers), consumers: [{ id: 'deepseek', title: 'DeepSeek API',
       summary: 'The key the assistant uses to call the DeepSeek language-model API when DeepSeek is in the model chain.', destination: 'https://api.deepseek.com', slot: 'api_key', operations: ['check'], binding: bindingView() }] }),
     variable_consumer_bind: args => {
       window.__ptaConsumerCalls.push({ method: 'bind', ...args });

@@ -1495,6 +1495,11 @@ for (const [label, ctx] of [['variables-desktop', {}], ['variables-phone', { vie
   await page.evaluate(axeSource);
   check(`${label}: consumers pass axe`, (await scan(page)).length === 0, JSON.stringify(await scan(page)));
   check(`${label}: consumers keep the phone boundary`, await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+  // The owner's portal reviews and approves a launcher; removing it stays on the machine.
+  await page.evaluate(async () => { window.__ptaLaunchersHere = false; await loadConsumers(); });
+  check(`${label}: in the portal a launcher can be approved but not removed`, await page.locator('#launcher-list').getByRole('button', { name: /^Eliminar/ }).count() === 0
+    && await page.locator('#launcher-list').getByRole('button', { name: 'Aprobar el lanzador release-tool' }).count() === 1);
+  await page.evaluate(async () => { window.__ptaLaunchersHere = true; await loadConsumers(); });
   await page.locator('#launcher-list').getByRole('button', { name: 'Aprobar el lanzador release-tool' }).click();
   await page.locator('#launcher-list .badge', { hasText: 'Aprobado' }).waitFor();
   check(`${label}: approving sends the digest of the definition shown and hides the button`, await page.evaluate(() => {

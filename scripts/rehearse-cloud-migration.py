@@ -278,7 +278,11 @@ def main():
     parser.add_argument("--report", type=Path, required=True, help="private JSON report without secrets")
     default = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / PROFILE_NAME
     parser.add_argument("--profile", type=Path, default=default, help="profile to copy (never changed)")
+    parser.add_argument("--account", help="Cloudflare account ID (instead of CLOUDFLARE_ACCOUNT_ID)")
     args = parser.parse_args()
+    if args.account:
+        # A launcher passes fixed arguments and only the variables it names.
+        os.environ["CLOUDFLARE_ACCOUNT_ID"] = args.account
     access_module = load_access()
     report = {"started_at": int(time.time()), "profile": "copy", "environment": "staging"}
     root = Path(tempfile.mkdtemp(prefix="pta-rehearsal-"))
