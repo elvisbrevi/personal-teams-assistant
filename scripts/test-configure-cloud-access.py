@@ -33,7 +33,7 @@ class CloudAccessTests(unittest.TestCase):
         for name, value in {
             "api": self.fake_api,
             "put_worker_secret": lambda environment, name, value: self.worker_secrets.__setitem__((environment, name), value),
-            "wait_for_configuration": lambda hostname, seconds=120: {"configured": True},
+            "wait_for_configuration": lambda hostname, seconds=300: {"configured": True},
             "wait_for_admission": lambda hostname, token, seconds=180: None,
         }.items():
             patcher = patch.object(setup, name, value)
@@ -169,6 +169,14 @@ class CloudAccessTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertFalse(report["ok"])
         self.assertEqual(self.tokens, {})
+
+    def test_a_named_account_needs_no_account_listing(self):
+        with patch.dict(os.environ, {"CLOUDFLARE_ACCOUNT_ID": ACCOUNT}):
+            self.assertEqual(setup.cloudflare_account(API_SECRET), ACCOUNT)
+        self.assertFalse([call for call in self.calls if call[1] == "/accounts"])
+        with patch.dict(os.environ, {"CLOUDFLARE_ACCOUNT_ID": "not-an-id"}):
+            with self.assertRaises(setup.SetupError):
+                setup.cloudflare_account(API_SECRET)
 
     def test_hostnames_come_from_the_wrangler_configuration(self):
         production = setup.worker_settings("production")

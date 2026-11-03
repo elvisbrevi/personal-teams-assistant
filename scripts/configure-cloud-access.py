@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """Configure Cloudflare Access for the account store Worker (cloud/) and enroll this installation.
 
-Run it through an approved PTA launcher that passes CLOUDFLARE_API_TOKEN (or CLOUDFLARE_API_TOKEN_FILE)
+Run it with CLOUDFLARE_API_TOKEN (or CLOUDFLARE_API_TOKEN_FILE, a private file) holding a token
 with the account permissions Access: Apps and Policies Write, Access: Service Tokens Write and
-Access: Organizations, Identity Providers, and Groups Read. Hostnames and Worker names come from
-cloud/wrangler.jsonc. Launchers do not capture output, so every run writes a report without secrets
-to --report.
+Access: Organizations Read, and CLOUDFLARE_ACCOUNT_ID when the token cannot list accounts. Hostnames
+and Worker names come from cloud/wrangler.jsonc. Every run writes a report without secrets to
+--report.
 
   staging     Access applications and Worker secrets for the staging Worker, then an end-to-end check
               with two temporary service tokens (enrollment, cross-account refusals, revocation);
@@ -43,7 +43,7 @@ HEALTH_POLICY = "Public health only"
 TOKEN_DURATION = "8760h"
 PERMISSIONS = {
     "/service_tokens": "Access: Service Tokens Write",
-    "/organizations": "Access: Organizations, Identity Providers, and Groups Read",
+    "/organizations": "Access: Organizations Read",
 }
 APP_WRITE = "Access: Apps and Policies Write"
 
@@ -126,6 +126,12 @@ def worker_settings(environment):
 
 
 def cloudflare_account(token):
+    # A token limited to Access permissions cannot list accounts: name the account instead.
+    named = os.environ.get("CLOUDFLARE_ACCOUNT_ID", "").strip()
+    if named:
+        if not re.fullmatch(r"[0-9a-f]{32}", named):
+            raise SetupError("CLOUDFLARE_ACCOUNT_ID must be the 32-character account ID.")
+        return named
     accounts = result(token, "GET", "/accounts")
     if len(accounts) != 1 or not re.fullmatch(r"[0-9a-f]{32}", accounts[0].get("id", "")):
         raise SetupError("The API token must reach exactly one Cloudflare account.")
@@ -256,7 +262,8 @@ def configure_worker(access, token_ids):
 
 def request(url, method="GET", headers=None, body=None):
     data = json.dumps(body).encode() if body is not None else None
-    headers = dict(headers or {})
+    # Cloudflare's browser integrity check refuses urllib's default User-Agent (error 1010).
+    headers = {"User-Agent": "personal-teams-assistant-setup", **(headers or {})}
     if data is not None:
         headers["Content-Type"] = "application/json"
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
@@ -286,7 +293,7 @@ def wait_for_admission(hostname, token, seconds=180):
     raise SetupError("The service token was not admitted by Access in time.")
 
 
-def wait_for_configuration(hostname, seconds=120):
+def wait_for_configuration(hostname, seconds=300):
     deadline = time.monotonic() + seconds
     while time.monotonic() < deadline:
         status, body = request(f"https://{hostname}/v1/health")

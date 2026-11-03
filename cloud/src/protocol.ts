@@ -1,5 +1,5 @@
 /** Version of this Worker's code; reported by `/v1/health`. */
-export const WORKER_VERSION = "0.1.0";
+export const WORKER_VERSION = "0.1.1";
 /** Protocol versions served. Changes inside a version are additive only. */
 export const PROTOCOLS = [1] as const;
 /** Schema versions of the Durable Objects; each applies forward-only migrations on start. */

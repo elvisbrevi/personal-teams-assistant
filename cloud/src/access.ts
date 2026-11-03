@@ -83,7 +83,8 @@ async function signingKey(issuer: string, kid: string): Promise<CryptoKey | unde
 }
 
 async function fetchKeys(issuer: string): Promise<KeySet> {
-  const response = await fetch(`${issuer}/cdn-cgi/access/certs`, { redirect: "error" });
+  // Workers support only "follow" and "manual"; a redirect is not `ok`, so it is refused below.
+  const response = await fetch(`${issuer}/cdn-cgi/access/certs`, { redirect: "manual" });
   if (!response.ok) throw new Refusal("internal", "The Access signing keys are unavailable.");
   const body = (await response.json()) as { keys?: unknown };
   const keys = new Map<string, CryptoKey>();
