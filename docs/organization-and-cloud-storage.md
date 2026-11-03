@@ -333,12 +333,17 @@ and is deployed before the host release that needs it. An older host cannot load
   `organization` collection of the account store, revised as one record like the host's
   `OrganizationStore`: the encrypted records need no separate object.
 - **Protocol v1.** `GET /v1/health` (no credentials: environment, Worker version, deployment,
-  protocols, schemas, whether Access is configured); `POST /v1/enroll` (Access identity only:
+  protocols, additive `features`, schemas, whether Access is configured); `POST /v1/enroll` (Access identity only:
   issues the installation credential `ptac_…`, 256 bits, shown once); `GET /v1/whoami`,
   `GET /v1/installations`, `DELETE /v1/installations/{id|self}`; `GET /v1/store` (schema,
   per-collection counts, bytes and generations, today's usage); `POST /v1/records` (1–100 sealed
   records; the Worker checks each digest against the sealed bytes; results `created`, `updated`,
-  `unchanged`, `stale` or `conflict`); `GET /v1/records/{collection}?since=&limit=` and
+  `unchanged`, `stale` or `conflict`). Since Worker 0.2.0 (feature `cas`, phase 3c) a record may
+  name the revision it replaces (`base_revision`, 0 for "no record yet"): it is written only over
+  exactly that revision, otherwise `conflict`, while a repeated send of the revision already held
+  stays `unchanged`; and a batch may be `atomic`, so either every record is written or none is
+  (the refused ones answer `conflict`/`stale`, the others `aborted`). Hosts that send neither
+  field see the earlier behavior; `GET /v1/records/{collection}?since=&limit=` and
   `GET /v1/records/{collection}/{id}`; `GET|PUT|DELETE /v1/backups/{name}` and `GET /v1/backups`
   under the account's own R2 prefix. Bodies are closed schemas: an unknown field (an account ID,
   for instance) is refused. Each account has a daily share of requests and rows written

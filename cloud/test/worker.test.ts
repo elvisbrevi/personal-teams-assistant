@@ -28,6 +28,7 @@ describe("health", () => {
       service: "personal-teams-assistant-cloud",
       environment: "production",
       protocols: [1],
+      features: ["cas"],
       schema: { registry: 1, account_store: 1 },
       configured: true,
     });
@@ -153,6 +154,93 @@ describe("account store", () => {
 
     const read = (await (await call("/v1/records/notes/note-1", { caller })).json()) as Record<string, unknown>;
     expect(read).toMatchObject({ revision: 3, deleted: true, sealed: null });
+  });
+
+  it("writes a record that names its base revision only over exactly that revision", async () => {
+    const caller = await enrolled(identity());
+    const write = async (records: unknown[], atomic?: boolean) =>
+      (await (
+        await call("/v1/records", { method: "POST", caller, body: atomic === undefined ? { records } : { records, atomic } })
+      ).json()) as { results: { result: string }[] };
+    const results = async (records: unknown[], atomic?: boolean) =>
+      (await write(records, atomic)).results.map((entry) => entry.result);
+
+    const first = { ...(await record("settings", "config", 1, "c1")), base_revision: 0 };
+    expect(await results([first])).toEqual(["created"]);
+    // Another writer that read "no record yet" loses.
+    expect(await results([{ ...(await record("settings", "config", 2, "theirs")), base_revision: 0 }])).toEqual(["conflict"]);
+    // A repeated send of what is held is acknowledged, not a conflict.
+    expect(await results([first])).toEqual(["unchanged"]);
+    const second = { ...(await record("settings", "config", 2, "c2")), base_revision: 1 };
+    expect(await results([second])).toEqual(["updated"]);
+    expect(await results([second])).toEqual(["unchanged"]);
+    // A writer that read revision 1 after revision 2 was written is refused, even above it.
+    expect(await results([{ ...(await record("settings", "config", 5, "late")), base_revision: 1 }])).toEqual(["conflict"]);
+    const held = (await (await call("/v1/records/settings/config", { caller })).json()) as { revision: number; sealed: string };
+    expect(held.revision).toBe(2);
+    expect(atob(held.sealed)).toBe("c2");
+    // A tombstone can be compare-and-swapped too.
+    const tombstone = { collection: "settings", id: "config", revision: 3, schema: 1, digest: EMPTY_DIGEST, deleted: true, base_revision: 2 };
+    expect(await results([tombstone])).toEqual(["updated"]);
+    // A base at or above the record's own revision is invalid.
+    const invalid = await call("/v1/records", {
+      method: "POST",
+      caller,
+      body: { records: [{ ...(await record("settings", "x", 2, "x")), base_revision: 2 }] },
+    });
+    expect(invalid.status).toBe(400);
+    const flag = await call("/v1/records", { method: "POST", caller, body: { records: [first], atomic: "yes" } });
+    expect(flag.status).toBe(400);
+  });
+
+  it("writes an atomic batch all at once or not at all", async () => {
+    const caller = await enrolled(identity());
+    const results = async (records: unknown[], atomic: boolean) =>
+      ((await (await call("/v1/records", { method: "POST", caller, body: { records, atomic } })).json()) as {
+        results: { result: string }[];
+      }).results.map((entry) => entry.result);
+    const map = { ...(await record("settings", "knowledge_map", 1, "m1")), base_revision: 0 };
+    expect(await results([map], true)).toEqual(["created"]);
+    const before = (await (await call("/v1/store", { caller })).json()) as {
+      collections: Record<string, { generation: number }>;
+    };
+
+    const config = { ...(await record("settings", "config", 1, "c1")), base_revision: 0 };
+    const staleMap = { ...(await record("settings", "knowledge_map", 2, "m2")), base_revision: 0 };
+    expect(await results([config, staleMap], true)).toEqual(["aborted", "conflict"]);
+    expect((await call("/v1/records/settings/config", { caller })).status).toBe(404);
+    const after = (await (await call("/v1/store", { caller })).json()) as {
+      collections: Record<string, { generation: number }>;
+    };
+    expect(after.collections.settings?.generation).toBe(before.collections.settings?.generation);
+
+    // Without the flag each record is decided on its own, as before.
+    expect(await results([config, staleMap], false)).toEqual(["created", "conflict"]);
+    // A batch that repeats what is held and changes the rest is not refused.
+    const nextMap = { ...(await record("settings", "knowledge_map", 2, "m2")), base_revision: 1 };
+    expect(await results([config, nextMap], true)).toEqual(["unchanged", "updated"]);
+  });
+
+  it("never lets a base revision reach another account's record", async () => {
+    const owner = await enrolled(identity());
+    const stranger = await enrolled(identity());
+    const mine = { ...(await record("settings", "config", 1, "mine")), base_revision: 0 };
+    await call("/v1/records", { method: "POST", caller: owner, body: { records: [mine] } });
+    // The stranger's store has no such record: base 1 conflicts there, and base 0 creates the
+    // stranger's own record without touching the owner's.
+    const theirs = async (base: number) =>
+      ((await (
+        await call("/v1/records", {
+          method: "POST",
+          caller: stranger,
+          body: { records: [{ ...(await record("settings", "config", 2, "theirs")), base_revision: base }], atomic: true },
+        })
+      ).json()) as { results: { result: string }[] }).results[0]?.result;
+    expect(await theirs(1)).toBe("conflict");
+    expect(await theirs(0)).toBe("created");
+    const held = (await (await call("/v1/records/settings/config", { caller: owner })).json()) as { revision: number; sealed: string };
+    expect(held.revision).toBe(1);
+    expect(atob(held.sealed)).toBe("mine");
   });
 
   it("lists changes after a generation", async () => {

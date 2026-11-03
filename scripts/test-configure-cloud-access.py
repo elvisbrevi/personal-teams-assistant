@@ -33,7 +33,7 @@ class CloudAccessTests(unittest.TestCase):
         for name, value in {
             "api": self.fake_api,
             "put_worker_secret": lambda environment, name, value: self.worker_secrets.__setitem__((environment, name), value),
-            "wait_for_configuration": lambda hostname, seconds=300: {"configured": True},
+            "wait_for_configuration": lambda hostname, seconds=300: {"configured": True, "features": ["cas"]},
             "wait_for_admission": lambda hostname, token, seconds=180: None,
         }.items():
             patcher = patch.object(setup, name, value)
@@ -145,6 +145,8 @@ class CloudAccessTests(unittest.TestCase):
             yield 200, b"{}"  # read back
             yield 404, b"{}"  # b reads a
             yield 200, json.dumps({"records": []}).encode()
+            for outcome in ("conflict", "updated", "conflict"):  # compare-and-swap
+                yield 200, json.dumps({"results": [{"result": outcome}]}).encode()
             yield 404, b"{}"  # b revokes a
             yield 200, b"{}"
             yield 200, b"{}"

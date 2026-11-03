@@ -349,6 +349,18 @@ def verify(access, report):
               "account b cannot read account a's record", checks)
         status, body = request(base + "/v1/records/notes", headers=b)
         check(status == 200 and json.loads(body)["records"] == [], "account b lists none of account a's records", checks)
+        def result(headers, revision, base, text):
+            sealed = text.encode()
+            change = {**record, "revision": revision, "base_revision": base,
+                      "digest": hashlib.sha256(sealed).hexdigest(), "sealed": base64.b64encode(sealed).decode()}
+            status, body = request(f"https://{access.hostname}/v1/records", "POST", headers, {"records": [change], "atomic": True})
+            return json.loads(body)["results"][0]["result"] if status == 200 else status
+
+        check("cas" in health.get("features", []), "the Worker offers compare-and-swap writes", checks)
+        check(result(a, 2, 0, "stale base") == "conflict", "a write naming an old revision is refused", checks)
+        check(result(a, 2, 1, "next") == "updated", "a write naming the current revision is accepted", checks)
+        check(result(b, 3, 2, "theirs") == "conflict",
+              "account b's compare-and-swap never reaches account a's record", checks)
         check(request(base + f"/v1/installations/{enrolled['a']['installation']}", "DELETE", b)[0] == 404,
               "account b cannot revoke account a's installation", checks)
         for name, headers in (("a", a), ("b", b)):

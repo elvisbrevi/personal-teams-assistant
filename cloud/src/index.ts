@@ -9,6 +9,7 @@ import {
   DEFAULT_DAILY_ROWS_WRITTEN,
   json,
   LIMITS,
+  FEATURES,
   PROTOCOLS,
   REGISTRY_SCHEMA,
   Refusal,
@@ -254,6 +255,7 @@ async function health(_request: Request, env: Env): Promise<Response> {
     version: WORKER_VERSION,
     deployment: env.VERSION?.id ?? null,
     protocols: PROTOCOLS,
+    features: FEATURES,
     schema: { registry: REGISTRY_SCHEMA, account_store: ACCOUNT_STORE_SCHEMA },
     configured: accessSettings(env) !== null,
   });
@@ -309,7 +311,10 @@ async function store(request: Request, env: Env): Promise<Response> {
 async function write(request: Request, env: Env): Promise<Response> {
   const principal = await authenticate(request, env);
   const input = await body(request);
-  closed(input, ["records"], "the batch");
+  closed(input, ["records", "atomic"], "the batch");
+  if (input.atomic !== undefined && typeof input.atomic !== "boolean") {
+    throw new Refusal("invalid_input", "Invalid atomic flag.");
+  }
   if (!Array.isArray(input.records) || input.records.length === 0 || input.records.length > LIMITS.batchRecords) {
     throw new Refusal("invalid_input", `A batch holds 1 to ${LIMITS.batchRecords} records.`);
   }
@@ -318,8 +323,8 @@ async function write(request: Request, env: Env): Promise<Response> {
   for (const raw of input.records) {
     if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Refusal("invalid_input", "Invalid record.");
     const entry = raw as Record<string, unknown>;
-    closed(entry, ["collection", "id", "revision", "digest", "schema", "deleted", "sealed"], "a record");
-    const record = {
+    closed(entry, ["collection", "id", "revision", "digest", "schema", "deleted", "sealed", "base_revision"], "a record");
+    const record: SealedRecord = {
       collection: collection(text(entry.collection, "collection", 64)),
       id: recordId(entry.id),
       revision: positive(entry.revision, "revision"),
@@ -328,6 +333,13 @@ async function write(request: Request, env: Env): Promise<Response> {
       deleted: entry.deleted === true,
       sealed: null as Uint8Array | null,
     };
+    if (entry.base_revision !== undefined) {
+      const base = entry.base_revision;
+      if (typeof base !== "number" || !Number.isSafeInteger(base) || base < 0 || base >= record.revision) {
+        throw new Refusal("invalid_input", "A base revision is below the record's revision.");
+      }
+      record.base = base;
+    }
     if (entry.deleted !== undefined && typeof entry.deleted !== "boolean") {
       throw new Refusal("invalid_input", "Invalid deleted flag.");
     }
@@ -353,7 +365,7 @@ async function write(request: Request, env: Env): Promise<Response> {
     records.push(record);
   }
   const results = charged(
-    await accountStore(env, principal).write(principal.installation, records, limits(env), now()),
+    await accountStore(env, principal).write(principal.installation, records, limits(env), now(), input.atomic === true),
   );
   return json({
     results: records.map((record, index) => ({
