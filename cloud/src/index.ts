@@ -7,6 +7,8 @@ import {
   type Collection,
   DEFAULT_DAILY_REQUESTS,
   DEFAULT_DAILY_ROWS_WRITTEN,
+  DEFAULT_PLAN_DAILY_REQUESTS,
+  DEFAULT_PLAN_DAILY_ROWS_WRITTEN,
   json,
   LIMITS,
   FEATURES,
@@ -88,6 +90,7 @@ function match(method: string, path: string): { route: string; handle: Handler }
   const [, first, second, third] = parts;
   if (first === "health" && parts.length === 2) return route("/v1/health", { GET: health });
   if (first === "enroll" && parts.length === 2) return route("/v1/enroll", { POST: enroll });
+  if (first === "rebind" && parts.length === 2) return route("/v1/rebind", { POST: rebind });
   if (first === "whoami" && parts.length === 2) return route("/v1/whoami", { GET: whoami });
   if (first === "store" && parts.length === 2) return route("/v1/store", { GET: store, DELETE: erase });
   if (first === "installations" && parts.length === 2) return route("/v1/installations", { GET: installations });
@@ -153,14 +156,30 @@ export async function authenticate(request: Request, env: Env): Promise<Principa
   return principal;
 }
 
-function limits(env: Env): Limits {
-  const parse = (value: string | undefined, fallback: number) => {
-    const number = Number(value);
-    return Number.isSafeInteger(number) && number > 0 ? number : fallback;
+function count(value: unknown, fallback: number): number {
+  const number = Number(value);
+  return Number.isSafeInteger(number) && number > 0 ? number : fallback;
+}
+
+/** The daily share of the principal's account: its own entry in `ACCOUNT_SHARES`, or the defaults. */
+function limits(env: Env, principal: Principal): Limits {
+  const defaults = {
+    requests: count(env.ACCOUNT_DAILY_REQUESTS, DEFAULT_DAILY_REQUESTS),
+    rowsWritten: count(env.ACCOUNT_DAILY_ROWS_WRITTEN, DEFAULT_DAILY_ROWS_WRITTEN),
   };
+  let shares: unknown;
+  try {
+    shares = JSON.parse(env.ACCOUNT_SHARES ?? "{}");
+  } catch {
+    return defaults;
+  }
+  if (!shares || typeof shares !== "object" || !Object.hasOwn(shares, principal.identity)) return defaults;
+  const share = (shares as Record<string, unknown>)[principal.identity];
+  if (!share || typeof share !== "object") return defaults;
+  const entry = share as Record<string, unknown>;
   return {
-    requests: parse(env.ACCOUNT_DAILY_REQUESTS, DEFAULT_DAILY_REQUESTS),
-    rowsWritten: parse(env.ACCOUNT_DAILY_ROWS_WRITTEN, DEFAULT_DAILY_ROWS_WRITTEN),
+    requests: count(entry.requests, defaults.requests),
+    rowsWritten: count(entry.rows_written, defaults.rowsWritten),
   };
 }
 
@@ -275,6 +294,30 @@ async function enroll(request: Request, env: Env): Promise<Response> {
   return json({ installation: enrolled.installation, generation: enrolled.generation, token }, 201);
 }
 
+/**
+ * Move the caller's account to the Access service token this request presents (a renewed or
+ * replaced token), proven by an active installation credential of the account. The new token must
+ * not belong to an account yet. The account, its store and installations stay; afterwards every
+ * installation presents the new token and the previous one reaches nothing.
+ */
+async function rebind(request: Request, env: Env): Promise<Response> {
+  const identity = await serviceIdentity(request, env);
+  const header = request.headers.get("authorization") ?? "";
+  const token = /^Bearer (ptac_[A-Za-z0-9_-]{43})$/.exec(header)?.[1];
+  if (!token) throw new Refusal("unauthorized", "A valid installation credential is required.");
+  const input = await body(request, 1024);
+  closed(input, ["confirm"], "the rebinding");
+  if (input.confirm !== "rebind") throw new Refusal("invalid_input", "A rebinding must be confirmed.");
+  const result = await registry(env).rebind(identity, await sha256Hex(token), now());
+  if (!result.ok) {
+    if (result.reason === "identity_in_use") {
+      throw new Refusal("conflict", "This service token already belongs to an account.");
+    }
+    throw new Refusal("unauthorized", "A valid installation credential is required.");
+  }
+  return json({ rebound: result.rebound, installation: result.principal.installation });
+}
+
 async function whoami(request: Request, env: Env): Promise<Response> {
   const principal = await authenticate(request, env);
   const account = await registry(env).account(principal.account);
@@ -305,7 +348,18 @@ async function revoke(request: Request, env: Env, id: string): Promise<Response>
 
 async function store(request: Request, env: Env): Promise<Response> {
   const principal = await authenticate(request, env);
-  return json(await accountStore(env, principal).summary(limits(env), now()));
+  const summary = await accountStore(env, principal).summary(limits(env, principal), now());
+  const share = summary.usage.limits;
+  const plan = {
+    requests: count(env.PLAN_DAILY_REQUESTS, DEFAULT_PLAN_DAILY_REQUESTS),
+    rows_written: count(env.PLAN_DAILY_ROWS_WRITTEN, DEFAULT_PLAN_DAILY_ROWS_WRITTEN),
+    accounts: await registry(env).sharing(),
+  };
+  // The shares are a ceiling, not a reservation: say when every account at its share would exceed
+  // the plan. Only counts are reported; no other account is named.
+  const oversubscribed =
+    plan.accounts * share.requests > plan.requests || plan.accounts * share.rows_written > plan.rows_written;
+  return json({ ...summary, plan: { ...plan, oversubscribed } });
 }
 
 /**
@@ -322,7 +376,7 @@ async function erase(request: Request, env: Env): Promise<Response> {
   if ((await registry(env).account(principal.account)).installations > 1) {
     throw new Refusal("conflict", "Revoke the account's other installations before erasing its store.");
   }
-  const records = charged(await accountStore(env, principal).erase(limits(env), now()));
+  const records = charged(await accountStore(env, principal).erase(limits(env, principal), now()));
   let backups = 0;
   let truncated = false;
   if (records.remaining === 0) {
@@ -391,7 +445,7 @@ async function write(request: Request, env: Env): Promise<Response> {
     records.push(record);
   }
   const results = charged(
-    await accountStore(env, principal).write(principal.installation, records, limits(env), now(), input.atomic === true),
+    await accountStore(env, principal).write(principal.installation, records, limits(env, principal), now(), input.atomic === true),
   );
   return json({
     results: records.map((record, index) => ({
@@ -415,13 +469,17 @@ async function changes(request: Request, env: Env, url: URL, name: string): Prom
   if (!Number.isSafeInteger(since) || since < 0 || !Number.isSafeInteger(limit) || limit < 1 || limit > LIMITS.pageRecords) {
     throw new Refusal("invalid_input", "Invalid since or limit.");
   }
-  const page = charged(await accountStore(env, principal).changes(target, since, limit, limits(env), now()));
+  const page = charged(
+    await accountStore(env, principal).changes(principal.installation, target, since, limit, limits(env, principal), now()),
+  );
   return json({ ...page, records: page.records.map(shown) });
 }
 
 async function read(request: Request, env: Env, name: string, id: string): Promise<Response> {
   const principal = await authenticate(request, env);
-  const record = charged(await accountStore(env, principal).read(collection(name), recordId(id), limits(env), now()));
+  const record = charged(
+    await accountStore(env, principal).read(principal.installation, collection(name), recordId(id), limits(env, principal), now()),
+  );
   if (!record) throw new Refusal("not_found", "No such record.");
   return json(shown(record));
 }
@@ -434,7 +492,7 @@ function backupKey(principal: Principal, name: string): string {
 }
 
 async function admitted(env: Env, principal: Principal): Promise<void> {
-  charged(await accountStore(env, principal).admit(limits(env), now()));
+  charged(await accountStore(env, principal).admit(limits(env, principal), now()));
 }
 
 async function backups(request: Request, env: Env): Promise<Response> {

@@ -42,6 +42,8 @@ export interface StoredRecord {
   size: number;
   generation: number;
   updated_at: number;
+  /** Whether the installation that asked wrote this revision (feature `origin`). */
+  own: boolean;
   sealed: Uint8Array | null;
 }
 
@@ -69,6 +71,7 @@ interface Row extends Record<string, SqlStorageValue> {
   size: number;
   generation: number;
   updated_at: number;
+  installation: string;
   sealed: ArrayBuffer | null;
 }
 
@@ -242,6 +245,7 @@ export class AccountStore extends DurableObject<Env> {
 
   /** Changes of a collection after a generation, oldest first, bounded by count and bytes. */
   changes(
+    installation: string,
     collection: Collection,
     since: number,
     limit: number,
@@ -252,7 +256,7 @@ export class AccountStore extends DurableObject<Env> {
     if (exhausted) return { ok: false, reason: "quota_exhausted", usage: exhausted };
     const rows = this.sql
       .exec<Row>(
-        `SELECT collection, id, revision, digest, schema, deleted, size, generation, updated_at, sealed
+        `SELECT collection, id, revision, digest, schema, deleted, size, generation, updated_at, installation, sealed
            FROM records WHERE collection = ? AND generation > ? ORDER BY generation LIMIT ?`,
         collection,
         since,
@@ -264,7 +268,7 @@ export class AccountStore extends DurableObject<Env> {
     for (const row of rows.slice(0, limit)) {
       bytes += row.size;
       if (records.length > 0 && bytes > LIMITS.pageBytes) break;
-      records.push(stored(row));
+      records.push(stored(row, installation));
     }
     return {
       ok: true,
@@ -273,18 +277,24 @@ export class AccountStore extends DurableObject<Env> {
   }
 
   /** One record (tombstones included), or null. */
-  read(collection: Collection, id: string, limits: Limits, now: number): Charged<StoredRecord | null> {
+  read(
+    installation: string,
+    collection: Collection,
+    id: string,
+    limits: Limits,
+    now: number,
+  ): Charged<StoredRecord | null> {
     const exhausted = this.charge(limits, 0, now);
     if (exhausted) return { ok: false, reason: "quota_exhausted", usage: exhausted };
     const row = this.sql
       .exec<Row>(
-        `SELECT collection, id, revision, digest, schema, deleted, size, generation, updated_at, sealed
+        `SELECT collection, id, revision, digest, schema, deleted, size, generation, updated_at, installation, sealed
            FROM records WHERE collection = ? AND id = ?`,
         collection,
         id,
       )
       .toArray()[0];
-    return { ok: true, value: row ? stored(row) : null };
+    return { ok: true, value: row ? stored(row, installation) : null };
   }
 
   private generation(collection: string): number {
@@ -330,7 +340,8 @@ export class AccountStore extends DurableObject<Env> {
   }
 }
 
-function stored(row: Row): StoredRecord {
+/** A record as listed to `installation`: which installation wrote it stays inside the Worker. */
+function stored(row: Row, installation: string): StoredRecord {
   return {
     collection: row.collection as Collection,
     id: row.id,
@@ -341,6 +352,7 @@ function stored(row: Row): StoredRecord {
     size: row.size,
     generation: row.generation,
     updated_at: row.updated_at,
+    own: row.installation === installation,
     sealed: row.sealed ? new Uint8Array(row.sealed) : null,
   };
 }

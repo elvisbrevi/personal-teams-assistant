@@ -42,6 +42,8 @@ pub(super) fn handles(method: &str) -> bool {
             | "cloud_migrate"
             | "cloud_rollback"
             | "cloud_erase"
+            | "cloud_installations"
+            | "cloud_revoke"
     )
 }
 
@@ -70,6 +72,7 @@ fn standing_of(failure: &Failure) -> &'static str {
     }
 }
 
+#[derive(Clone)]
 struct Credentials {
     client_id: String,
     client_secret: String,
@@ -183,6 +186,24 @@ pub(super) async fn operate(host: &Arc<Host>, request: &control::Request) -> Rep
                 return Reply::error("invalid_input", 2, "Invalid arguments.");
             }
             migration::operate_erase(host).await
+        }
+        "cloud_installations" => {
+            if !invocation.scope.owner || invocation.scope.shared {
+                return Reply::error("authority_denied", 6, authority::EXECUTION_DENIED);
+            }
+            if request.args != json!({}) && !request.args.is_null() {
+                return Reply::error("invalid_input", 2, "Invalid arguments.");
+            }
+            installations(host).await
+        }
+        "cloud_revoke" => {
+            if !invocation.scope.owner || invocation.scope.shared {
+                return Reply::error("authority_denied", 6, authority::EXECUTION_DENIED);
+            }
+            let Ok(args) = serde_json::from_value::<RevokeArgs>(request.args.clone()) else {
+                return Reply::error("invalid_input", 2, "Invalid arguments.");
+            };
+            revoke(host, args).await
         }
         _ => Reply::error("invalid_input", 2, "Unknown operation."),
     }
@@ -536,7 +557,7 @@ async fn connect(host: &Arc<Host>, args: ConnectArgs) -> std::result::Result<Rep
             3,
             "No Access service token is stored on this installation: give its client ID and secret.",
         ))?;
-    health(&endpoint)
+    let worker = health(&endpoint)
         .await
         .map_err(|failure| Box::new(refused(&failure)))?;
     let config = host.state.settings.config().map_err(|_| {
@@ -580,6 +601,17 @@ async fn connect(host: &Arc<Host>, args: ConnectArgs) -> std::result::Result<Rep
             let data = status(host).await.unwrap_or_default();
             return Ok(Reply::success(json!({"changed": changed, "status": data})));
         }
+    }
+    // A new service token for an enrolled installation moves the account to it (a renewal or a
+    // replacement), keeping the enrollment, the store and the mode, instead of enrolling anew.
+    if fresh
+        && origin(&config.cloud.endpoint) == endpoint
+        && enrolled(&config.cloud)
+        && offers(&worker, "rebind")
+        && let Ok(token) = security::secret(TOKEN)
+        && let Some(reply) = rebind(host, &endpoint, &credentials, token, token_expires).await?
+    {
+        return Ok(reply);
     }
     credentials.token = None;
     let enrollment = exchange(
@@ -660,6 +692,210 @@ async fn connect(host: &Arc<Host>, args: ConnectArgs) -> std::result::Result<Rep
     let data = status(host).await.unwrap_or_default();
     Ok(Reply::success(
         json!({"changed": true, "installation": installation, "status": data}),
+    ))
+}
+
+/// Whether the Worker's health lists an additive feature of protocol 1.
+fn offers(health: &Value, feature: &str) -> bool {
+    health["features"]
+        .as_array()
+        .is_some_and(|f| f.iter().any(|v| v == feature))
+}
+
+/// `POST /v1/rebind` with the new service token and this installation's credential. `None`: the
+/// Worker no longer knows this installation's credential, so the caller enrolls anew.
+async fn rebind(
+    host: &Arc<Host>,
+    endpoint: &str,
+    credentials: &Credentials,
+    token: String,
+    token_expires: Option<i64>,
+) -> std::result::Result<Option<Reply>, Box<Reply>> {
+    let presented = Credentials {
+        token: Some(token),
+        ..credentials.clone()
+    };
+    let reply = match exchange(
+        endpoint,
+        reqwest::Method::POST,
+        "/v1/rebind",
+        Some(&presented),
+        Some(json!({"confirm": "rebind"})),
+    )
+    .await
+    {
+        Ok(reply) => reply,
+        Err(Failure::Revoked) => return Ok(None),
+        Err(Failure::Refused(code)) if code == "conflict" => {
+            return Err(boxed(
+                "state_conflict",
+                6,
+                "This service token already belongs to another account in the account store. To join that account, disconnect this computer first; its data stays.",
+            ));
+        }
+        Err(failure) => return Err(Box::new(refused(&failure))),
+    };
+    let config = host.state.settings.config().map_err(|_| {
+        boxed(
+            "operation_failed",
+            1,
+            "The configuration could not be read.",
+        )
+    })?;
+    if reply["installation"] != json!(config.cloud.installation) {
+        return Err(boxed(
+            "operation_failed",
+            1,
+            "The account store answered for another installation.",
+        ));
+    }
+    for (name, value) in [
+        (ACCESS_ID, credentials.client_id.as_str()),
+        (ACCESS_SECRET, credentials.client_secret.as_str()),
+    ] {
+        security::put_desktop_secret("default", name, value).map_err(|_| {
+            boxed(
+                "operation_failed",
+                1,
+                "The account store moved to the new service token, but this computer could not keep it: connect again with it.",
+            )
+        })?;
+    }
+    {
+        let _guard = host.state.operations.lock().await;
+        let mut config = host.state.settings.config().map_err(|_| {
+            boxed(
+                "operation_failed",
+                1,
+                "The configuration could not be read.",
+            )
+        })?;
+        // A new service token without a date has no known expiry.
+        config.cloud.token_expires_at = token_expires.unwrap_or(0);
+        host.state.settings.save_config(&config).map_err(|_| {
+            boxed(
+                "operation_failed",
+                1,
+                "The configuration could not be saved.",
+            )
+        })?;
+    }
+    let data = status(host).await.unwrap_or_default();
+    Ok(Some(Reply::success(json!({
+        "changed": true,
+        "rebound": reply["rebound"] == true,
+        "installation": config.cloud.installation,
+        "status": data,
+    }))))
+}
+
+/// The account's installations in the account store, this one marked `current`.
+async fn installations(host: &Arc<Host>) -> Reply {
+    let (endpoint, credentials, _) = match linked(host) {
+        Ok(linked) => linked,
+        Err(reply) => return *reply,
+    };
+    match exchange(
+        &endpoint,
+        reqwest::Method::GET,
+        "/v1/installations",
+        Some(&credentials),
+        None,
+    )
+    .await
+    {
+        Ok(reply) => {
+            let listed: Vec<Value> = reply["installations"]
+                .as_array()
+                .map(|list| {
+                    list.iter()
+                        .map(|i| {
+                            json!({
+                                "id": i["id"],
+                                "label": i["label"],
+                                "host_version": i["host_version"],
+                                "enrolled_at": i["enrolled_at"],
+                                "last_seen_at": i["last_seen_at"],
+                                "revoked_at": i["revoked_at"],
+                                "current": i["current"] == true,
+                            })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            let active = listed.iter().filter(|i| i["revoked_at"].is_null()).count();
+            Reply::success(json!({"installations": listed, "active": active}))
+        }
+        Err(failure) => refused(&failure),
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RevokeArgs {
+    installation: String,
+}
+
+/// Revoke another installation of the account in the account store: its credential stops
+/// working at once. That computer keeps its data; it can connect again with the service token.
+async fn revoke(host: &Arc<Host>, args: RevokeArgs) -> Reply {
+    let Ok(id) = uuid::Uuid::parse_str(args.installation.trim()) else {
+        return Reply::error(
+            "invalid_input",
+            2,
+            "Give the installation's ID from cloud installations.",
+        );
+    };
+    let (endpoint, credentials, current) = match linked(host) {
+        Ok(linked) => linked,
+        Err(reply) => return *reply,
+    };
+    if id.to_string() == current {
+        return Reply::error(
+            "invalid_input",
+            2,
+            "That is this computer: disconnect it instead.",
+        );
+    }
+    match exchange(
+        &endpoint,
+        reqwest::Method::DELETE,
+        &format!("/v1/installations/{id}"),
+        Some(&credentials),
+        None,
+    )
+    .await
+    {
+        Ok(_) => Reply::success(json!({"revoked": id.to_string()})),
+        Err(Failure::Refused(code)) if code == "not_found" => {
+            Reply::error("invalid_input", 2, "The account has no such installation.")
+        }
+        Err(failure) => refused(&failure),
+    }
+}
+
+/// The endpoint, both credentials and this installation's ID of an enrolled installation.
+fn linked(host: &Arc<Host>) -> std::result::Result<(String, Credentials, String), Box<Reply>> {
+    let config = host.state.settings.config().map_err(|_| {
+        boxed(
+            "operation_failed",
+            1,
+            "The configuration could not be read.",
+        )
+    })?;
+    let credentials = stored_credentials()
+        .filter(|c| c.token.is_some() && enrolled(&config.cloud))
+        .ok_or_else(|| {
+            boxed(
+                "not_ready",
+                3,
+                "This installation is not connected to the account store.",
+            )
+        })?;
+    Ok((
+        origin(&config.cloud.endpoint),
+        credentials,
+        config.cloud.installation,
     ))
 }
 

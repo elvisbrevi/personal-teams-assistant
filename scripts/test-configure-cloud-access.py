@@ -33,7 +33,7 @@ class CloudAccessTests(unittest.TestCase):
         for name, value in {
             "api": self.fake_api,
             "put_worker_secret": lambda environment, name, value: self.worker_secrets.__setitem__((environment, name), value),
-            "wait_for_configuration": lambda hostname, seconds=300: {"configured": True, "features": ["cas", "erase"]},
+            "wait_for_configuration": lambda hostname, seconds=300: {"configured": True, "features": ["cas", "erase", "origin", "rebind", "plan"]},
             "wait_for_admission": lambda hostname, token, seconds=180: None,
         }.items():
             patcher = patch.object(setup, name, value)
@@ -150,11 +150,18 @@ class CloudAccessTests(unittest.TestCase):
             yield 200, b"{}"  # b erases its own store
             yield 200, b"{}"  # a's record survives
             yield 201, json.dumps({"installation": "inst-a2", "token": "ptac_a2"}).encode()
+            yield 200, json.dumps({"records": [{"own": True}]}).encode()  # a lists its record
+            yield 200, json.dumps({"records": [{"own": False}]}).encode()  # a2 lists it
             yield 409, b"{}"  # a cannot erase with a2 active
             yield 200, b"{}"  # a2 revokes itself
             yield 200, json.dumps({"erased": 1, "backups": 0, "more": False}).encode()
             yield 404, b"{}"  # erased record
             yield 404, b"{}"  # b revokes a
+            yield 200, json.dumps({"rebound": True, "installation": "inst-a"}).encode()  # a moves to c
+            yield 401, b"{}"  # a under its former token
+            yield 200, b"{}"  # a under c
+            yield 409, b"{}"  # b cannot take c
+            yield 200, json.dumps({"plan": {"accounts": 2, "oversubscribed": False}}).encode()
             yield 200, b"{}"
             yield 200, b"{}"
             yield 401, b"{}"  # revoked

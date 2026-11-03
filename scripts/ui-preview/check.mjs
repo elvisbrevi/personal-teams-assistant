@@ -1678,6 +1678,16 @@ for (const [label, options] of [['desktop', {}], ['phone', { context: { viewport
   check(`${label}: the cloud storage panel passes axe`, (await scan(page)).length === 0, JSON.stringify(await scan(page)));
   check(`${label}: the cloud storage panel keeps the phone boundary`, await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
   check(`${label}: an expiring service token is announced`, (await panel.locator('#cloud-details').innerText()).includes('renueve'));
+  check(`${label}: the plan's shared quota is shown and an oversubscribed plan warns`, await panel.locator('#cloud-details').innerText().then(text => text.includes('compartidos por 6 cuentas') && text.includes('reduzca las partes')));
+  const computers = panel.locator('#cloud-installation-list');
+  check(`${label}: the account's computers are listed as text, this one and the revoked one without a revoke button`, await computers.innerText().then(text => text.includes('Synthetic <b>desktop</b>') && text.includes('Este computador') && text.includes('Acceso revocado'))
+    && await computers.locator('b').count() === 0 && await computers.getByRole('button').count() === 1);
+  const revokeOther = computers.getByRole('button', { name: 'Revocar Synthetic <b>desktop</b>' });
+  await revokeOther.click();
+  check(`${label}: the first tap only arms the revocation`, await page.evaluate(() => !window.__ptaCloudRevoked) && (await revokeOther.innerText()).includes('Toca de nuevo'));
+  await revokeOther.click();
+  await computers.getByRole('button').waitFor({ state: 'detached' });
+  check(`${label}: the second tap revokes that computer by ID`, await page.evaluate(() => window.__ptaCloudRevoked === '00000000-0000-4000-8000-000000000002'));
   await page.screenshot({ path: `${out}/cloud-${label}.png`, fullPage: false });
   await rollback.click();
   check(`${label}: the first tap only arms the rollback`, (await rollback.innerText()).includes('Toca de nuevo') && await page.evaluate(() => window.__ptaCloudMirror.mode === 'mirror'));

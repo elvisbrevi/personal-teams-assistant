@@ -2037,10 +2037,55 @@ const CLOUD_STATES = {
   unconfigured: ['Store not set up', 'warn'], not_enrolled: ['Not connected yet', 'muted'], disconnected: ['Not connected yet', 'muted'],
 };
 
+/** The account's computers in the account store, read while this one is live there. */
+let cloudInstallations = [];
+/** The installation whose revocation waits for a second tap. */
+let cloudRevokeArmed = null;
+
 async function loadCloud() {
   try { cloudStatus = await invoke('cloud_status'); }
   catch { cloudStatus = null; }
+  cloudInstallations = [];
+  if (cloudStatus?.standing === 'live') {
+    try { cloudInstallations = (await invoke('cloud_installations')).installations ?? []; }
+    catch { cloudInstallations = []; }
+  }
   renderCloud();
+}
+
+/** Plain text only: labels are whatever each computer called itself. */
+function renderCloudInstallations() {
+  const list = $('#cloud-installation-list');
+  list.replaceChildren(...cloudInstallations.map(entry => {
+    const state = entry.current ? badge(t('This computer'), 'ok') : entry.revoked_at ? badge(t('Access revoked'), 'muted') : badge(t('Connected'), 'ok');
+    const seen = entry.revoked_at
+      ? t('Revoked {when}.', { when: ago(entry.revoked_at * 1000) })
+      : t('Version {version}, connected {enrolled}, last seen {seen}.', { version: entry.host_version, enrolled: ago(entry.enrolled_at * 1000), seen: ago(entry.last_seen_at * 1000) });
+    const actions = [];
+    if (!entry.current && !entry.revoked_at) {
+      const armed = cloudRevokeArmed === entry.id;
+      const revoke = el('button', { type: 'button', class: 'danger', textContent: armed ? t('Tap again to revoke') : t('Revoke'), 'aria-label': t('Revoke {name}', { name: entry.label }) });
+      revoke.onclick = () => {
+        if (!armed) {
+          cloudRevokeArmed = entry.id;
+          renderCloudInstallations();
+          setTimeout(() => { if (cloudRevokeArmed === entry.id) { cloudRevokeArmed = null; renderCloudInstallations(); } }, 4000);
+          return;
+        }
+        cloudRevokeArmed = null;
+        busy(revoke, async () => {
+          await invoke('cloud_revoke', { installation: entry.id });
+          await loadCloud();
+          done(t('{name} can no longer reach the account store. It keeps its own data.', { name: entry.label }));
+        });
+      };
+      actions.push(revoke);
+    }
+    return el('div', { class: 'row variable-row' },
+      rowText(el('span', { class: 'cred-name', textContent: entry.label, translate: 'no' }), seen, state),
+      actions.length ? el('div', { class: 'variable-actions' }, actions) : null);
+  }));
+  $('#cloud-installations').hidden = cloudInstallations.length < 2;
 }
 
 function renderCloud() {
@@ -2067,6 +2112,11 @@ function renderCloud() {
     const usage = status.store.usage;
     details.append(el('p', { class: 'hint', textContent: t('Today: {requests} of {limit} requests and {rows} of {rows_limit} records written.', { requests: usage.requests, limit: usage.limits.requests, rows: usage.rows_written, rows_limit: usage.limits.rows_written }) }));
   }
+  if (status?.store?.plan) {
+    const plan = status.store.plan;
+    details.append(el('p', { class: 'hint', textContent: tn(plan.accounts, 'That is this account\'s daily share. The plan allows {requests} requests and {rows} records written a day, shared by {n} account.', 'That is this account\'s daily share. The plan allows {requests} requests and {rows} records written a day, shared by {n} accounts.', { requests: plan.requests, rows: plan.rows_written }) }));
+    if (plan.oversubscribed) details.append(el('p', { class: 'callout warn', textContent: t('If every account used its whole share, the plan\'s daily quota would run out first. Ask whoever runs the account store to lower the shares.') }));
+  }
   if (status?.service_token?.expires_at) {
     const when = new Date(status.service_token.expires_at * 1000).toLocaleDateString(uiLocale(), { timeZone: 'UTC' });
     details.append(el('p', { class: status.service_token.renew ? 'callout warn' : 'hint', textContent: status.service_token.renew
@@ -2078,6 +2128,7 @@ function renderCloud() {
   }
   details.hidden = !details.childElementCount;
   if (status?.endpoint && !$('#cloud-endpoint').value) $('#cloud-endpoint').value = status.endpoint;
+  renderCloudInstallations();
   renderCloudMirror();
 }
 

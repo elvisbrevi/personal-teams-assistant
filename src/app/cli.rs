@@ -127,7 +127,9 @@ Account store (Cloudflare)
                            Enrolls this installation with the account store (owner only) and keeps the installation
                            credential it issues (CLOUD_STORE_TOKEN). The account's Access service token comes as JSON
                            on stdin, {client_id, client_secret}, never as arguments; without stdin the stored one is
-                           used. Keeps the mode off: nothing is uploaded. --token-expires records when the service
+                           used. Keeps the mode off: nothing is uploaded. A new service token on an enrolled installation
+                           (a renewal or a replacement) moves the account to it, keeping the enrollment, the copy and the
+                           mode; the account's other computers then need it too. --token-expires records when the service
                            token expires (status and setup status warn 30 days before); on a live installation it only
                            updates that date.
   cloud disconnect [--forget-service-token] --confirmed
@@ -154,7 +156,13 @@ Account store (Cloudflare)
                            of the store, readable only with the retired key; erased R2 backups are gone.
   cloud verify                Compares the account store's copy with this installation: per collection the counts, a
                            digest over the sorted (ID, revision, ciphertext digest) on both sides and a full decryption
-                           of every record. Local changes not sent yet are pending, not differences.
+                           of every record. Local changes not sent yet are pending, not differences. History other
+                           computers of the account wrote is counted apart (others): each verifies its own.
+  cloud installations         Owner only. The account's computers in the account store: label, host version, when each
+                           enrolled and was last seen, revoked ones and which is this one.
+  cloud installations revoke ID --confirmed
+                           Owner only. Revokes another computer of the account in the account store (its credential
+                           stops working); that computer keeps its data. This one disconnects with cloud disconnect.
   cloud promote --confirmed   Owner only, from mirror. Sends what is pending, verifies the copy, backs up this profile and only
                            when the copy is identical makes the account store the source of truth (mode primary): settings,
                            organization and notes are saved there first under compare-and-swap and pulled from it; without
@@ -642,6 +650,25 @@ async fn cloud_command(args: &[String]) -> Result<Reply> {
             call("cloud_erase", json!({}), None, true).await
         }
         Some("verify") => call("cloud_verify", json!({}), None, true).await,
+        Some("installations") => match words(args).get(2).copied() {
+            None => call("cloud_installations", json!({}), None, true).await,
+            Some("revoke") => {
+                let id = words(args)
+                    .get(3)
+                    .copied()
+                    .context("give the installation's ID")?;
+                if let Some(reply) = unconfirmed(
+                    args,
+                    format!(
+                        "Revoke installation {id} of this account in the account store? That computer keeps its data."
+                    ),
+                ) {
+                    return Ok(reply);
+                }
+                call("cloud_revoke", json!({"installation": id}), None, true).await
+            }
+            _ => anyhow::bail!("missing argument; consult --help"),
+        },
         Some("promote") => {
             if let Some(reply) = unconfirmed(
                 args,
@@ -1343,7 +1370,9 @@ fn validate_args(args: &[String]) -> Result<()> {
                     | "promote"
                     | "demote"
                     | "pull"
+                    | "installations"
             ]
+            | ["cloud", "installations", "revoke", _]
             | ["credentials", "list"]
             | ["credentials", "set" | "delete", _]
             | [
@@ -1483,6 +1512,8 @@ fn validate_args(args: &[String]) -> Result<()> {
                 || p.as_slice() == ["cloud", "promote"]
                 || p.as_slice() == ["cloud", "demote"]
                 || p.as_slice() == ["cloud", "pull"]
+                || p.as_slice()
+                    .starts_with(&["cloud", "installations", "revoke"])
                 || p.as_slice().starts_with(&["update", "stage"])
                 || p.as_slice().starts_with(&["update", "apply"])
                 || p.as_slice().starts_with(&["variables", "migrate", "run"])
@@ -1679,7 +1710,7 @@ async fn execute(mut args: Vec<String>) -> Result<Reply> {
         }
         "capabilities" => {
             return Ok(Reply::success(
-                json!({"contract":control::CONTRACT,"commands":HELP,"skill_version":env!("CARGO_PKG_VERSION"),"activity_registration_support":true,"web_support":true,"web_access_support":true,"knowledge_index_support":true,"mcp_support":true,"tools_support":true,"todo_support":true,"implementation_support":true,"machine_pairing_support":true,"machine_login_support":true,"machine_management_support":true,"account_variables_support":true,"account_portable_support":true,"account_authority_support":true,"shared_accounts_support":true,"cloud_store_support":true,"cloud_mirror_support":true,"cloud_disconnect_support":true,"cloud_primary_support":true,"cloud_migration_support":true}),
+                json!({"contract":control::CONTRACT,"commands":HELP,"skill_version":env!("CARGO_PKG_VERSION"),"activity_registration_support":true,"web_support":true,"web_access_support":true,"knowledge_index_support":true,"mcp_support":true,"tools_support":true,"todo_support":true,"implementation_support":true,"machine_pairing_support":true,"machine_login_support":true,"machine_management_support":true,"account_variables_support":true,"account_portable_support":true,"account_authority_support":true,"shared_accounts_support":true,"cloud_store_support":true,"cloud_mirror_support":true,"cloud_disconnect_support":true,"cloud_primary_support":true,"cloud_migration_support":true,"cloud_installations_support":true}),
             ));
         }
         "skill" => return crate::app::skill::command(action, args.get(2).map(String::as_str)),

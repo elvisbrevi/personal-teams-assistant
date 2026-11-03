@@ -250,6 +250,43 @@ async fn machines_and_shared_accounts_cannot_connect() {
 }
 
 #[tokio::test]
+async fn installations_need_the_owner_and_a_link_and_never_revoke_this_one() {
+    let root = tempfile::tempdir().unwrap();
+    let host = host(root.path());
+    for (method, args) in [
+        ("cloud_installations", json!({})),
+        (
+            "cloud_revoke",
+            json!({"installation": uuid::Uuid::new_v4().to_string()}),
+        ),
+    ] {
+        let machine = call(&host, Machine, method, args.clone()).await;
+        assert_eq!(machine.code, "authority_denied", "{method}");
+        assert!(authority::check_shared_operation(&control::Request::new(method)).is_err());
+        // Not connected: nothing to ask.
+        let local = call(&host, Local, method, args).await;
+        assert_eq!(local.code, "not_ready", "{method}");
+    }
+    for args in [
+        json!({"installation": "not-an-id"}),
+        json!({}),
+        json!({"installation": uuid::Uuid::new_v4().to_string(), "account": "x"}),
+    ] {
+        let reply = call(&host, Local, "cloud_revoke", args.clone()).await;
+        assert!(
+            ["invalid_input", "authority_denied"].contains(&reply.code.as_str()),
+            "{args}: {}",
+            reply.code
+        );
+    }
+    assert!(
+        !call(&host, Local, "cloud_installations", json!({"all": true}))
+            .await
+            .ok
+    );
+}
+
+#[tokio::test]
 async fn settings_editors_keep_the_stored_link() {
     let root = tempfile::tempdir().unwrap();
     let host = host(root.path());

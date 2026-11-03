@@ -28,7 +28,7 @@ describe("health", () => {
       service: "personal-teams-assistant-cloud",
       environment: "production",
       protocols: [1],
-      features: ["cas", "erase"],
+      features: ["cas", "erase", "origin", "rebind", "plan"],
       schema: { registry: 1, account_store: 1 },
       configured: true,
     });
@@ -317,6 +317,107 @@ describe("account store", () => {
     // Another account's share is untouched.
     const theirs = await call("/v1/records", { method: "POST", caller: other, body: { records: [records[0]] } });
     expect(theirs.status).toBe(200);
+  });
+});
+
+describe("origin", () => {
+  it("tells an installation which records it wrote, within its account only", async () => {
+    const name = identity();
+    const first = await enrolled(name, "first");
+    const second = await enrolled(name, "second");
+    const outsider = await enrolled(identity());
+    await call("/v1/records", { method: "POST", caller: first, body: { records: [await record("audits", "a", 1, "one")] } });
+    await call("/v1/records", { method: "POST", caller: second, body: { records: [await record("audits", "b", 1, "two")] } });
+    const listed = async (caller: Awaited<ReturnType<typeof enrolled>>) =>
+      ((await (await call("/v1/records/audits?since=0", { caller })).json()) as { records: { id: string; own: boolean }[] })
+        .records.map((entry) => [entry.id, entry.own]);
+    expect(await listed(first)).toEqual([["a", true], ["b", false]]);
+    expect(await listed(second)).toEqual([["a", false], ["b", true]]);
+    // Another account sees none of them, and no installation ID is ever listed with a record.
+    expect(await listed(outsider)).toEqual([]);
+    const one = (await (await call("/v1/records/audits/b", { caller: first })).json()) as Record<string, unknown>;
+    expect(one.own).toBe(false);
+    expect(Object.keys(one)).not.toContain("installation");
+    // The last writer owns a record: the first installation takes it over by updating it.
+    await call("/v1/records", { method: "POST", caller: first, body: { records: [await record("audits", "b", 2, "three")] } });
+    expect(await listed(first)).toEqual([["a", true], ["b", true]]);
+  });
+});
+
+describe("rebind", () => {
+  async function rebind(caller: { identity: string; token?: string }, body: unknown = { confirm: "rebind" }) {
+    return call("/v1/rebind", { method: "POST", caller, body });
+  }
+
+  it("moves the account to a new service token and keeps its store and installations", async () => {
+    const before = identity();
+    const after = identity();
+    const first = await enrolled(before, "first");
+    const second = await enrolled(before, "second");
+    await call("/v1/records", { method: "POST", caller: first, body: { records: [await record("notes", "kept", 1, "x")] } });
+    const moved = await rebind({ identity: after, token: first.token });
+    expect(moved.status).toBe(200);
+    expect(await moved.json()).toEqual({ rebound: true, installation: first.installation });
+    // Every installation now presents the new token; the previous one reaches nothing.
+    expect((await call("/v1/whoami", { caller: { identity: after, token: second.token } })).status).toBe(200);
+    expect((await call("/v1/whoami", { caller: second })).status).toBe(401);
+    expect((await call("/v1/whoami", { caller: first })).status).toBe(401);
+    const kept = await call("/v1/records/notes/kept", { caller: { identity: after, token: second.token } });
+    expect(kept.status).toBe(200);
+    // Repeating is safe.
+    expect(await (await rebind({ identity: after, token: second.token })).json()).toEqual({
+      rebound: false,
+      installation: second.installation,
+    });
+    // The previous token enrolls a new, empty account: nothing of this one.
+    const stranger = await enrolled(before, "stranger");
+    expect((await call("/v1/records/notes/kept", { caller: stranger })).status).toBe(404);
+  });
+
+  it("never takes over another account's service token", async () => {
+    const mine = await enrolled(identity());
+    const theirs = await enrolled(identity());
+    await call("/v1/records", { method: "POST", caller: theirs, body: { records: [await record("notes", "theirs", 1, "x")] } });
+    const refused = await rebind({ identity: theirs.identity, token: mine.token });
+    expect(refused.status).toBe(409);
+    expect((await call("/v1/whoami", { caller: mine })).status).toBe(200);
+    expect((await call("/v1/records/notes/theirs", { caller: theirs })).status).toBe(200);
+  });
+
+  it("needs an active installation credential and a confirmed, closed body", async () => {
+    const caller = await enrolled(identity());
+    const fresh = identity();
+    expect((await rebind({ identity: fresh })).status).toBe(401);
+    expect((await rebind({ identity: fresh, token: `ptac_${"A".repeat(43)}` })).status).toBe(401);
+    expect((await rebind({ identity: fresh, token: caller.token }, {})).status).toBe(400);
+    expect((await rebind({ identity: fresh, token: caller.token }, { confirm: "rebind", account: "x" })).status).toBe(400);
+    await call("/v1/installations/self", { method: "DELETE", caller });
+    expect((await rebind({ identity: fresh, token: caller.token })).status).toBe(401);
+  });
+});
+
+describe("plan", () => {
+  it("reports the account's share, the plan and how many accounts share it", async () => {
+    const caller = await enrolled(identity());
+    const summary = (await (await call("/v1/store", { caller })).json()) as {
+      usage: { limits: { requests: number; rows_written: number } };
+      plan: { requests: number; rows_written: number; accounts: number; oversubscribed: boolean };
+    };
+    expect(summary.usage.limits).toEqual({ requests: 50, rows_written: 40 });
+    expect(summary.plan.requests).toBe(100);
+    expect(summary.plan.rows_written).toBe(100);
+    expect(summary.plan.accounts).toBeGreaterThanOrEqual(1);
+    expect(summary.plan.oversubscribed).toBe(summary.plan.accounts * 50 > 100 || summary.plan.accounts * 40 > 100);
+  });
+
+  it("gives an account named in ACCOUNT_SHARES its own share", async () => {
+    const caller = await enrolled("synthetic-larger.access");
+    const summary = (await (await call("/v1/store", { caller })).json()) as {
+      usage: { limits: { requests: number; rows_written: number } };
+    };
+    expect(summary.usage.limits).toEqual({ requests: 60, rows_written: 3 });
+    const records = await Promise.all(Array.from({ length: 4 }, (_, i) => record("notes", `n${i}`, 1, `x${i}`)));
+    expect((await call("/v1/records", { method: "POST", caller, body: { records } })).status).toBe(429);
   });
 });
 

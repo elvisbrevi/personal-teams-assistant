@@ -321,6 +321,8 @@ impl Portal {
             "cloud_migrate",
             "cloud_rollback",
             "cloud_erase",
+            "cloud_installations",
+            "cloud_revoke",
             "setup_readiness",
             "variable_create",
             "variable_update",
