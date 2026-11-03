@@ -329,6 +329,23 @@ pub(super) async fn pull_now(
     Ok(pulled)
 }
 
+/// Adopt the account's configuration from the store over this computer's, after a private
+/// backup of this one's: for a second computer that migrates, or a signed-in one that makes the
+/// store its source. Returns what was installed.
+pub(super) async fn adopt(host: &Host, config: &Config) -> std::result::Result<Value, Box<Reply>> {
+    let backup = back_up(host).map_err(|_| {
+        Box::new(Reply::error(
+            "operation_failed",
+            1,
+            "This computer's configuration could not be backed up; nothing was adopted.",
+        ))
+    })?;
+    let pulled = pull_now(host, config, true)
+        .await
+        .map_err(|error| Box::new(pull_reply(&error)))?;
+    Ok(json!({"backup": backup, "applied": pulled.applied, "undecryptable": pulled.undecryptable}))
+}
+
 pub(super) enum PullError {
     Missing(Missing),
     Failure(Failure),
@@ -450,14 +467,29 @@ async fn promote(host: &Arc<Host>) -> std::result::Result<Reply, Box<Reply>> {
         }
         CloudMode::Mirror => {}
     }
-    if crate::app::implementation::link(&host.state)
+    // A computer signed in to a coordinator joins the store as its source only once the
+    // coordinator has made it the account's: it then reads and writes the configuration there
+    // directly instead of through the coordinator, adopting what the store holds.
+    let signed_in = crate::app::implementation::link(&host.state)
         .ok()
         .flatten()
-        .is_some()
-    {
-        return Err(refuse(
-            "This installation takes its configuration from the account's coordinator; promote the account store on the coordinator instead.",
-        ));
+        .is_some();
+    if signed_in {
+        match crate::app::implementation::coordinator_store_mode(host).await {
+            Ok(mode) if mode == "primary" => {}
+            Ok(_) => {
+                return Err(refuse(
+                    "The account's coordinator keeps the configuration itself: make the account store its source there first (pta cloud promote on the coordinator), then here.",
+                ));
+            }
+            Err(_) => {
+                return Err(Box::new(Reply::error(
+                    "dependency_or_network",
+                    5,
+                    "The coordinator could not say whether the account store is the account's source; nothing was changed.",
+                )));
+            }
+        }
     }
     let setup = open(host, &config.cloud).map_err(|m| Box::new(missing_reply(&m)))?;
     let health = setup.http.health().await.map_err(|failure| {
@@ -533,8 +565,17 @@ async fn promote(host: &Arc<Host>) -> std::result::Result<Reply, Box<Reply>> {
         .map_err(|_| fail("This profile could not be backed up; nothing was changed."))?;
     save_mode(host, CloudMode::Primary)?;
     let _ = setup.ledger.set_meta("promoted_at", &now().to_string());
-    // Pulls start from what the copy holds now.
-    let _ = pull_now(host, &host.state.settings.config().unwrap_or(config), false).await;
+    let config = host.state.settings.config().unwrap_or(config);
+    if signed_in {
+        // The account's configuration in the store is the source: adopt it before any sweep.
+        if let Err(reply) = adopt(host, &config).await {
+            save_mode(host, CloudMode::Mirror)?;
+            return Err(reply);
+        }
+    } else {
+        // Pulls start from what the copy holds now.
+        let _ = pull_now(host, &config, false).await;
+    }
     Ok(Reply::success(json!({
         "action": "promote",
         "mode": "primary",

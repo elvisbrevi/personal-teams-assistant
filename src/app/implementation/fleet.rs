@@ -205,6 +205,16 @@ pub(super) async fn operate(host: &Arc<Host>, method: &str, args: &Value) -> Res
     }
 }
 
+pub(super) async fn coordinator_store_mode(host: &Arc<Host>) -> Result<String> {
+    let connection = host
+        .state
+        .implementation
+        .connection()?
+        .context("This computer is not signed in to a coordinator.")?;
+    let reply = remote(&connection, json!({"action":"store_mode"})).await?;
+    Ok(reply["mode"].as_str().unwrap_or("off").to_owned())
+}
+
 /// Tell the coordinator this machine's installation in the account store, so revoking the machine
 /// revokes it there too.
 pub(super) async fn report_store_installation(host: &Arc<Host>, installation: &str) -> Result<()> {
@@ -423,6 +433,17 @@ pub(in crate::app) async fn protocol(host: &Arc<Host>, args: &Value) -> Result<V
                 json!({"id":c.id,"method":c.method,"args":c.args})
             });
             Ok(json!({"command":command,"session_cursor":session_cursor}))
+        }
+        // Whether the account store is the account's source here (a signed-in computer asks
+        // before it joins it as its own source).
+        "store_mode" => {
+            let mode = host
+                .state
+                .settings
+                .config()
+                .map(|config| config.cloud.mode)
+                .unwrap_or_default();
+            Ok(json!({"mode": mode}))
         }
         // The machine's installation in the account store it received at trust time.
         "store" => {

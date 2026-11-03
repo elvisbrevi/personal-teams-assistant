@@ -12,11 +12,15 @@ path and listener are rewritten to the copy, the tunnel and the `[cloud]` sectio
 its stored Microsoft tokens, subscriptions and send nonces are cleared. Its host starts headless
 without `--start`, so the Teams pipeline never runs and nothing reaches Microsoft Graph.
 
-A temporary staging service token is created and admitted (CLOUDFLARE_API_TOKEN or
+Two temporary staging service tokens are created and admitted (CLOUDFLARE_API_TOKEN or
 CLOUDFLARE_API_TOKEN_FILE, as for configure-cloud-access.py), and the copy runs connect, migrate
-(dry run, then confirmed), verify, promote, a configuration edit and a note through the store,
-pull, rollback and erase, checking that local data never shrinks and that the store ends empty.
-The token, its admission and the copy are removed afterwards. The report holds steps, codes and
+(dry run, then confirmed), verify, promote, a configuration edit and a note through the store and
+a pull with replace; then a second computer of the account (a fresh profile with the content key a
+trust confirmation hands over) is refused without adopting, adopts, verifies, joins primary and
+edits through the store, which the first pulls; another account (the second token) sees none of
+it; then rollback, an erasure refused while the second computer is connected, its revocation and
+the erasure, checking that local data never shrinks and that the store ends empty. The tokens,
+their admission, every host started and the copies are removed afterwards. The report holds steps, codes and
 counts only: no secrets and no content. Never point it at the production Worker.
 """
 import argparse
@@ -41,6 +45,8 @@ EXCLUDED = {
     "control.json", "control.lock", "host-path.txt", "launchers.json", "settings-rollback.json",
 }
 EXCLUDED_IMPLEMENTATION = {"connection.json", "installation.json", "registry.json", "requests"}
+# Every host a rehearsal starts, stopped at the end whatever happened.
+STARTED = []
 # Rows a copy must not keep: Microsoft tokens, webhook subscriptions and send nonces.
 CLEARED = {"assistant.db": ["vault", "subscriptions", "outputs"]}
 
@@ -132,6 +138,23 @@ def copy_profile(source, root, port):
     return profile, data
 
 
+def fresh_profile(root, port):
+    """An empty profile for another computer: the template configuration pointed at its own copy."""
+    profile = private_dir(root / "home" / ".config" / PROFILE_NAME)
+    data = private_dir(root / "home" / ".local" / "share" / PROFILE_NAME)
+    config = profile / "config.toml"
+    config.write_text(rewrite_config((ROOT / "config.example.toml").read_text(), profile, data, port))
+    config.chmod(0o600)
+    return profile
+
+
+def hand_over_key(source, target):
+    """The account content key a Trust this machine confirmation with the account store hands over."""
+    keys = private_dir(target / "keys")
+    shutil.copyfile(source / "keys" / "cloud-content.json", keys / "cloud-content.json")
+    (keys / "cloud-content.json").chmod(0o600)
+
+
 def free_port():
     import socket
 
@@ -143,6 +166,7 @@ def free_port():
 class Rehearsal:
     def __init__(self, binaries, root, profile):
         self.binaries = binaries
+        self.root = root
         self.home = root / "home"
         self.profile = profile
         self.env = {
@@ -179,6 +203,7 @@ class Rehearsal:
     def start(self):
         self.host = subprocess.Popen([str(self.binaries / "personal-teams-assistant"), "--headless"], env=self.env,
                                      stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        STARTED.append(self)
         for _ in range(600):
             if (self.profile / "control.json").exists():
                 return
@@ -186,7 +211,7 @@ class Rehearsal:
         raise RuntimeError("The rehearsal host did not start.")
 
     def stop(self):
-        if not self.host:
+        if not self.host or self.host.poll() is not None:
             return
         self.pta("app", "quit", timeout=60)
         try:
@@ -203,7 +228,78 @@ def counts(plan):
     return {name: entry["records"] for name, entry in (plan.get("data", {}).get("plan", {}).get("collections") or {}).items()}
 
 
-def rehearse(run, endpoint, service, label):
+def second_installation(run, endpoint, service, label, greeting):
+    """Another computer of the same account joins: it adopts the account's configuration, keeps its own
+    history and settings, and reads and writes the configuration through the store. Returns it, running."""
+    payload = json.dumps({"client_id": service["client_id"], "client_secret": service["client_secret"]})
+    root = private_dir(run.root / "second")
+    profile = fresh_profile(root, free_port())
+    hand_over_key(run.profile, profile)
+    other = Rehearsal(run.binaries, root, profile)
+    other.steps = run.steps
+    other.start()
+    r = other.pta("cloud", "connect", "--endpoint", endpoint, "--label", label + " b", "--confirmed", stdin=payload)
+    other.step("second: connect", r)
+    run.expect(r.get("ok"), "a second computer of the account enrolls")
+    r = other.pta("cloud", "status").get("data") or {}
+    run.expect(r.get("adopt") is True, "the second computer is told to adopt the account's configuration")
+    r = other.pta("cloud", "migrate", "--confirmed", timeout=1800)
+    other.step("second: migrate without adopting", r)
+    run.expect(r.get("code") == "state_conflict", "a second computer never uploads its configuration over the account's")
+    bind = other.pta("config", "get", "server.bind").get("data")
+    r = other.pta("cloud", "migrate", "--adopt", "--confirmed", timeout=1800)
+    data = r.get("data") or {}
+    differing = [{k: c.get(k) for k in ("name", "local", "remote", "pending", "missing_remote", "unknown_remote",
+                                        "differing", "undecryptable", "content_differs", "others")}
+                 for c in (data.get("verify") or {}).get("collections", []) if not c.get("ok")]
+    other.step("second: migrate --adopt", r, applied=(data.get("adopted") or {}).get("applied"), mode=data.get("mode"),
+               differing=differing)
+    run.expect(r.get("ok") and data.get("mode") == "mirror", "the second computer adopts and migrates")
+    r = other.pta("config", "get", "policy.greeting")
+    run.expect(json.dumps(greeting) in json.dumps(r.get("data")), "the second computer has the account's configuration")
+    run.expect(other.pta("config", "get", "server.bind").get("data") == bind, "the second computer keeps its own settings")
+    for who, installation in (("second", other), ("first", run)):
+        r = installation.pta("cloud", "verify", timeout=1800)
+        verify = (r.get("data") or {}).get("verify") or {}
+        others = sum(c.get("others", 0) for c in verify.get("collections", []))
+        installation.step(f"{who}: verify", r, verified=verify.get("ok"), others=others)
+        run.expect(verify.get("ok") is True and others > 0, f"the {who} computer verifies, counting the other's records apart")
+    r = run.pta("cloud", "installations")
+    run.expect((r.get("data") or {}).get("active") == 2, "the account lists both computers")
+    r = other.pta("cloud", "promote", "--confirmed", timeout=1800)
+    other.step("second: promote", r, mode=(r.get("data") or {}).get("mode"))
+    run.expect(r.get("ok") and (r.get("data") or {}).get("mode") == "primary", "the second computer uses the store as its source")
+    second = f"Rehearsal b {secrets.token_hex(3)}"
+    r = other.pta("config", "set", "policy.greeting", json.dumps(second))
+    other.step("second: config set (through the store)", r)
+    run.expect(r.get("ok"), "the second computer edits the configuration through the store")
+    r = run.pta("cloud", "pull")
+    run.step("first: pull", r, applied=((r.get("data") or {}).get("pulled") or {}).get("applied"))
+    r = run.pta("config", "get", "policy.greeting")
+    run.expect(r.get("ok") and json.dumps(second) in json.dumps(r.get("data")), "the first computer receives the second's edit")
+    return other, second
+
+
+def second_account(binaries, root, endpoint, service, label, first_records):
+    """Another account of the same Worker: its own store, which holds none of the first account's records."""
+    payload = json.dumps({"client_id": service["client_id"], "client_secret": service["client_secret"]})
+    base = private_dir(root / "account-c")
+    profile = fresh_profile(base, free_port())
+    other = Rehearsal(binaries, base, profile)
+    other.start()
+    try:
+        r = other.pta("cloud", "connect", "--endpoint", endpoint, "--label", label + " c", "--confirmed", stdin=payload)
+        other.step("other account: connect", r)
+        status = other.pta("cloud", "status").get("data") or {}
+        held = sum(v.get("records", 0) for v in ((status.get("store") or {}).get("collections") or {}).values())
+        steps = other.steps
+        return r.get("ok"), held, status.get("adopt"), steps
+    finally:
+        other.pta("cloud", "disconnect", "--forget-service-token", "--confirmed")
+        other.stop()
+
+
+def rehearse(run, endpoint, service, label, second_service=None):
     """The sequence on the copy; raises on the first failed check."""
     payload = json.dumps({"client_id": service["client_id"], "client_secret": service["client_secret"]})
     r = run.pta("cloud", "connect", "--endpoint", endpoint, "--label", label, "--confirmed", stdin=payload)
@@ -245,6 +341,11 @@ def rehearse(run, endpoint, service, label):
     run.expect(r.get("ok") and (r.get("data") or {}).get("conflicts") == 0, "the pull finds no conflict")
     run.expect(run.pta("config", "get", "server.bind").get("data") == bind,
                "the account's configuration never replaces this installation's own settings")
+    other, greeting = second_installation(run, endpoint, service, label, greeting)
+    if second_service:
+        enrolled, held, adopt, steps = second_account(run.binaries, run.root, endpoint, second_service, label, sum(local.values()))
+        run.steps.extend(steps)
+        run.expect(enrolled and held == 0 and adopt is False, "another account's store holds none of this account's records")
     store_before = ((run.pta("cloud", "status").get("data") or {}).get("store") or {}).get("collections") or {}
     r = run.pta("cloud", "rollback", "--confirmed", timeout=1800)
     data = r.get("data") or {}
@@ -262,6 +363,15 @@ def rehearse(run, endpoint, service, label):
     r = run.pta("setup", "status")
     store = next((s for s in (r.get("data") or {}).get("steps", []) if s.get("id") == "account_store"), {})
     run.step("setup status", r, account_store=store.get("state"))
+    r = run.pta("cloud", "erase", "--confirmed", timeout=1800)
+    run.step("erase while another computer is connected", r)
+    run.expect(r.get("code") == "state_conflict", "the copy is never erased while another computer uses it")
+    installations = (run.pta("cloud", "installations").get("data") or {}).get("installations") or []
+    second_id = next((i["id"] for i in installations if not i.get("current") and not i.get("revoked_at")), None)
+    r = run.pta("cloud", "installations", "revoke", str(second_id), "--confirmed")
+    run.step("revoke the second computer", r)
+    run.expect(r.get("ok"), "the first computer revokes the second in the store")
+    other.stop()
     r = run.pta("cloud", "erase", "--confirmed", timeout=1800)
     data = r.get("data") or {}
     run.step("erase", r, erased=data.get("erased"), key_retired=bool(data.get("key_retired")))
@@ -291,33 +401,38 @@ def main():
     root = Path(tempfile.mkdtemp(prefix="pta-rehearsal-"))
     root.chmod(0o700)
     run = None
-    access = service = None
+    access = service = second_service = None
     try:
         profile, _ = copy_profile(args.profile.resolve(), root, free_port())
         token = access_module.secret("CLOUDFLARE_API_TOKEN")
         access = access_module.Access(token, access_module.cloudflare_account(token), "staging")
         label = f"rehearsal {secrets.token_hex(4)}"
         service = access.create_token(label)
-        access_module.configure_worker(access, access.admitted() | {service["id"]})
+        # A second account of the same Worker, to check that the stores stay apart.
+        second_service = access.create_token(label + " c")
+        access_module.configure_worker(access, access.admitted() | {service["id"], second_service["id"]})
         access_module.wait_for_configuration(access.hostname)
         access_module.wait_for_admission(access.hostname, service)
+        access_module.wait_for_admission(access.hostname, second_service)
         run = Rehearsal(args.bin.resolve(), root, profile)
         run.start()
-        rehearse(run, f"https://{access.hostname}", service, label)
+        rehearse(run, f"https://{access.hostname}", service, label, second_service)
         report["ok"] = True
     except Exception as error:  # the report says which step failed; never the content
         report["ok"] = False
         report["error"] = str(error) if isinstance(error, (RuntimeError, access_module.SetupError)) else type(error).__name__
     finally:
+        for started in reversed(STARTED):
+            started.stop()
         if run:
-            run.stop()
             report["steps"] = run.steps
+        temporary = {t["id"] for t in (service, second_service) if t}
         try:
-            if access and service:
-                access_module.configure_worker(access, access.admitted() - {service["id"]})
+            if access and temporary:
+                access_module.configure_worker(access, access.admitted() - temporary)
         finally:
-            if access and service:
-                access.delete_token(service["id"])
+            for ident in temporary if access else ():
+                access.delete_token(ident)
             shutil.rmtree(root, ignore_errors=True)
         report["cleaned_up"] = not root.exists()
         report["finished_at"] = int(time.time())

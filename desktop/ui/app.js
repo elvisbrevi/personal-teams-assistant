@@ -2147,6 +2147,7 @@ let cloudRollbackLocalArmed = false;
 let cloudEraseArmed = false;
 let cloudDisconnectArmed = false;
 let cloudRotateArmed = false;
+let cloudAdoptArmed = false;
 let cloudPromoteArmed = false;
 let cloudReplaceArmed = false;
 
@@ -2177,9 +2178,15 @@ function renderCloudMirror() {
   if (mirror.key?.present === false && status?.mode !== 'mirror') lines.push(t('Migrating creates the account content key on this computer. Back it up right after with pta variables key backup.'));
   if (mirror.backups?.latest?.created_at) lines.push(t('Last backup of this computer {when}.', { when: ago(mirror.backups.latest.created_at * 1000) }));
   if (mirror.last_verify) lines.push(mirror.last_verify.ok ? t('Last verification {when}: the copy matches.', { when: ago(mirror.last_verify.at * 1000) }) : t('Last verification {when}: the copy differs.', { when: ago(mirror.last_verify.at * 1000) }));
+  const adoptable = status?.adopt === true && status?.mode !== 'mirror' && !primary;
+  if (adoptable) lines.push(t('This account already has a copy in the account store from another computer. Adopting backs this computer up, replaces its configuration with the account\'s (its own settings stay) and uploads only its history.'));
   $('#cloud-mirror-summary').textContent = lines.join(' ');
   const migrate = $('#cloud-migrate');
-  migrate.hidden = status?.mode === 'mirror' || primary;
+  // Another computer of the account migrated first: this one adopts the account's configuration.
+  const adopt = $('#cloud-adopt');
+  adopt.hidden = !adoptable;
+  adopt.textContent = cloudAdoptArmed ? t('Tap again to adopt and migrate') : t('Adopt the account\'s configuration');
+  migrate.hidden = status?.mode === 'mirror' || primary || !adopt.hidden;
   migrate.textContent = cloudMigrateArmed ? t('Tap again to migrate') : t('Migrate to the account store');
   const rollback = $('#cloud-rollback');
   rollback.hidden = status?.mode !== 'mirror' && !primary;
@@ -2202,6 +2209,21 @@ function renderCloudMirror() {
   rotate.hidden = status?.mode !== 'mirror' && !primary;
   rotate.textContent = cloudRotateArmed ? t('Tap again to rotate the key') : t('Rotate the content key');
 }
+
+$('#cloud-adopt').onclick = event => {
+  if (!cloudAdoptArmed) {
+    cloudAdoptArmed = true;
+    renderCloudMirror();
+    setTimeout(() => { cloudAdoptArmed = false; renderCloudMirror(); }, 4000);
+    return;
+  }
+  cloudAdoptArmed = false;
+  busy(event.currentTarget, async () => {
+    await invoke('cloud_migrate', { action: 'start', adopt: true });
+    await loadCloud();
+    done(t('This computer adopted the account\'s configuration and keeps its history in the account store.'));
+  });
+};
 
 // For a lost computer, after revoking it: a new key, and the whole copy sealed again with it.
 $('#cloud-rotate').onclick = event => {

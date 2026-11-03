@@ -780,6 +780,10 @@ fn back_up(state: &DesktopState, config: &Config, map: &KnowledgeMap, notes: &[N
 /// `reset`.
 async fn synchronize(host: &Arc<Host>, link: &Link, reset: bool, mode: Mode) -> Reply {
     let state = &host.state;
+    // Joined to the account store as its source: the configuration comes from there.
+    if cloud::primary::active(state) {
+        return Reply::success(json!({"sync": {"source": "account_store", "changed": false}}));
+    }
     let portable = &state.portable;
     let _gate = match mode {
         Mode::Explicit => portable.gate.lock().await,
@@ -916,6 +920,10 @@ pub(in crate::app) fn auto(host: &Arc<Host>) {
     let Ok(Some(link)) = implementation::link(&host.state) else {
         return;
     };
+    // Joined to the account store as its source: its loop pulls the configuration from there.
+    if cloud::primary::active(&host.state) {
+        return;
+    }
     {
         let mut status = host.state.portable.status();
         if status
@@ -1123,6 +1131,13 @@ pub(super) async fn operate(host: &Arc<Host>, request: &control::Request) -> Rep
                     "standing": host.state.standing.view(Some(&link)),
                 }));
             }
+            // Joined to the account store as its source: the configuration comes from there.
+            if cloud::primary::active(&host.state) {
+                return Reply::success(json!({
+                    "sync": {"source": "account_store", "next": "pta cloud pull brings what the account store changed."},
+                    "standing": host.state.standing.view(Some(&link)),
+                }));
+            }
             synchronize(host, &link, args.reset, Mode::Explicit).await
         }
         "portable_records" => {
@@ -1242,6 +1257,10 @@ pub(super) async fn before_save(
     let Some(link) = implementation::link(state).map_err(fail)? else {
         return Ok(None);
     };
+    // Joined to the account store as its source: the edit goes through the store instead.
+    if cloud::primary::active(state) {
+        return Ok(None);
+    }
     let patch = Patch::between(
         &Document::project(previous.0, previous.1),
         &Document::project(next.0, next.1),
@@ -1322,7 +1341,10 @@ pub(super) async fn note_save(
     args: &Value,
 ) -> std::result::Result<Value, String> {
     let state = &host.state;
-    let Some(link) = implementation::link(state).map_err(fail)? else {
+    let Some(link) = implementation::link(state)
+        .map_err(fail)?
+        .filter(|_| !cloud::primary::active(state))
+    else {
         return notes::save_shared(host, args).await;
     };
     let note: Note = serde_json::from_value(args.get("note").cloned().unwrap_or(Value::Null))
@@ -1370,7 +1392,10 @@ pub(super) async fn note_remove(
     args: &Value,
 ) -> std::result::Result<Value, String> {
     let state = &host.state;
-    let Some(link) = implementation::link(state).map_err(fail)? else {
+    let Some(link) = implementation::link(state)
+        .map_err(fail)?
+        .filter(|_| !cloud::primary::active(state))
+    else {
         return notes::remove_shared(host, args).await;
     };
     let id = args

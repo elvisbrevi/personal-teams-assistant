@@ -165,14 +165,40 @@ pub(in crate::app::cloud) struct MigrateArgs {
     /// `plan` (what would move, nothing is written) or `start`.
     #[serde(default = "plan")]
     action: String,
+    /// Another computer of the account migrated first: adopt the account's configuration from
+    /// the store (after a private backup of this one's) instead of uploading this computer's.
+    #[serde(default)]
+    adopt: bool,
 }
 
 impl MigrateArgs {
     pub(in crate::app::cloud) fn new(action: &str) -> Self {
         Self {
             action: action.into(),
+            adopt: false,
         }
     }
+}
+
+const ADOPT: &str = "The account store already holds this account's configuration from another computer. Adopt it here (pta cloud migrate --adopt --confirmed): this computer's configuration is backed up privately, then replaced by the account's, and its own history is uploaded. Nothing was uploaded.";
+const NEED_KEY: &str = "The account store already holds this account's copy, sealed with a content key this computer does not have. Give it the key first (Trust this machine with the account store from the coordinator, or pta variables key restore). Nothing was uploaded.";
+
+/// Whether the store already holds configuration this installation never acknowledged: another
+/// computer of the account migrated first. A computer signed in to a coordinator keeps only its
+/// history in the store, so it never adopts here.
+async fn held_elsewhere(host: &Host, worker: &Remote) -> std::result::Result<bool, Failure> {
+    if !HostLocal(host).configuration() {
+        return Ok(false);
+    }
+    let page = worker.page(Collection::Settings, 0, 1).await?;
+    if page.records.is_empty() {
+        return Ok(false);
+    }
+    let acknowledged = Ledger::open(&ledger_path(host))
+        .ok()
+        .and_then(|ledger| ledger.rows(Collection::Settings).ok())
+        .is_some_and(|rows| rows.iter().any(|r| r.acked_revision > 0));
+    Ok(!acknowledged)
 }
 
 #[derive(Deserialize, Default)]
@@ -186,7 +212,9 @@ pub(in crate::app::cloud) struct RollbackArgs {
 pub(in crate::app::cloud) async fn operate_migrate(host: &Arc<Host>, args: MigrateArgs) -> Reply {
     match args.action.as_str() {
         "plan" => dry_run(host),
-        "start" => migrate(host).await.unwrap_or_else(|reply| *reply),
+        "start" => migrate(host, args.adopt)
+            .await
+            .unwrap_or_else(|reply| *reply),
         _ => Reply::error("invalid_input", 2, "Unknown migration action."),
     }
 }
@@ -221,7 +249,7 @@ fn dry_run(host: &Host) -> Reply {
     }))
 }
 
-async fn migrate(host: &Arc<Host>) -> std::result::Result<Reply, Box<Reply>> {
+async fn migrate(host: &Arc<Host>, adopt: bool) -> std::result::Result<Reply, Box<Reply>> {
     let config = host.state.settings.config().map_err(|_| {
         Box::new(Reply::error(
             "operation_failed",
@@ -235,7 +263,17 @@ async fn migrate(host: &Arc<Host>) -> std::result::Result<Reply, Box<Reply>> {
             "next": "This account is already migrated and the account store is its source; pta cloud verify compares the copy.",
         })));
     }
-    remote(host, &config.cloud).map_err(|m| Box::new(missing_reply(&m)))?;
+    let worker = remote(host, &config.cloud).map_err(|m| Box::new(missing_reply(&m)))?;
+    let elsewhere = held_elsewhere(host, &worker).await.map_err(|failure| {
+        observe(host, &config.cloud, Some(&failure));
+        Box::new(failure_reply(&failure))
+    })?;
+    if elsewhere && !adopt {
+        return Err(Box::new(Reply::error("state_conflict", 6, ADOPT)));
+    }
+    if elsewhere && !matches!(key::load(&keys_dir(host)), Ok(Some(_))) {
+        return Err(Box::new(Reply::error("not_ready", 3, NEED_KEY)));
+    }
     let backup = back_up_data(host, "migrate").map_err(|_| {
         Box::new(Reply::error(
             "operation_failed",
@@ -243,6 +281,17 @@ async fn migrate(host: &Arc<Host>) -> std::result::Result<Reply, Box<Reply>> {
             "This profile could not be backed up; nothing was uploaded.",
         ))
     })?;
+    let mut adopted = Value::Null;
+    if elsewhere {
+        // The account's configuration replaces this computer's, which the backups keep.
+        let replaced = super::primary::adopt(host, &config)
+            .await
+            .map_err(|mut reply| {
+                reply.data = json!({"backup": backup.clone()});
+                reply
+            })?;
+        adopted = replaced;
+    }
     let mut reply = match start(host).await {
         Ok(reply) => reply,
         Err(mut reply) => {
@@ -251,6 +300,9 @@ async fn migrate(host: &Arc<Host>) -> std::result::Result<Reply, Box<Reply>> {
         }
     };
     reply.data["backup"] = backup;
+    if !adopted.is_null() {
+        reply.data["adopted"] = adopted;
+    }
     Ok(reply)
 }
 

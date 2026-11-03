@@ -149,6 +149,12 @@ Account store (Cloudflare)
                            (AES-256-GCM-SIV in this installation; the Worker sees only blinded IDs, revisions and
                            digests), verifies the copy by reading it back and only then switches the mode to mirror.
                            Local stays the source of truth; afterwards an outbox sends each change. Run again to resume.
+  cloud migrate --adopt --confirmed
+                           For a second computer of the account (the store already holds the account's
+                           configuration, and this computer has the content key): backs up this profile, replaces
+                           this computer's configuration with the account's (its own settings stay) and uploads only
+                           its history. Signed in to a coordinator, cloud promote joins the store as its source once
+                           the coordinator has, reading and writing the configuration there directly.
   cloud rollback [--keep-local] --confirmed
                            Owner or enabled portal account. Backs up this profile, then, in primary, pulls what the account store changed
                            (refused on a conflict or without an answer), verifies that the store holds nothing this
@@ -622,13 +628,24 @@ async fn cloud_command(args: &[String]) -> Result<Reply> {
             if args.iter().any(|a| a == "--dry-run") {
                 return call("cloud_migrate", json!({"action": "plan"}), None, true).await;
             }
+            let adopt = args.iter().any(|a| a == "--adopt");
             if let Some(reply) = unconfirmed(
                 args,
-                "Back up this profile, then upload its records encrypted with the account content key to the account store, verify the copy and keep it mirrored?".into(),
+                if adopt {
+                    "Back up this profile, replace this computer's configuration with the account's from the account store, upload this computer's history encrypted, verify and keep it mirrored?".into()
+                } else {
+                    "Back up this profile, then upload its records encrypted with the account content key to the account store, verify the copy and keep it mirrored?".into()
+                },
             ) {
                 return Ok(reply);
             }
-            call("cloud_migrate", json!({"action": "start"}), None, true).await
+            call(
+                "cloud_migrate",
+                json!({"action": "start", "adopt": adopt}),
+                None,
+                true,
+            )
+            .await
         }
         Some("rollback") => {
             let keep_local = args.iter().any(|a| a == "--keep-local");
@@ -1186,6 +1203,7 @@ fn validate_args(args: &[String]) -> Result<()> {
             | "--replace"
             | "--dry-run"
             | "--keep-local"
+            | "--adopt"
             | "--forget-service-token" => {}
             "--destination" | "--name" | "--existing" | "--to" | "--target" | "--label"
             | "--token-expires" => {
@@ -1556,6 +1574,7 @@ fn validate_args(args: &[String]) -> Result<()> {
                     .starts_with(&["web", "users", "cloud", "enable"]),
         ),
         ("--dry-run", p.as_slice() == ["cloud", "migrate"]),
+        ("--adopt", p.as_slice() == ["cloud", "migrate"]),
         (
             "--token-expires",
             p.as_slice() == ["cloud", "connect"]
