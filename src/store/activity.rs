@@ -43,11 +43,69 @@ impl<'a> LocalActivity<'a> {
     pub fn new(db: &'a Database) -> Self {
         Self { db }
     }
+
+    /// The daily task snapshots, by day, as the account store mirrors them.
+    pub fn export_days(&self) -> Result<Vec<crate::mirror::Exported>> {
+        self.export_table("SELECT day,payload FROM task_days ORDER BY day")
+    }
+
+    /// The days' summaries, by day, as the account store mirrors them.
+    pub fn export_summaries(&self) -> Result<Vec<crate::mirror::Exported>> {
+        self.export_table("SELECT day,summary FROM totals ORDER BY day")
+    }
+
+    /// Every finished run, by ID, as the account store mirrors them (not a page of the newest).
+    pub fn export_runs(&self) -> Result<Vec<crate::mirror::Exported>> {
+        let db = self.db.connection();
+        let mut stmt = db.prepare("SELECT id,day,status,summary,created_at,diagnostics FROM runs WHERE status<>'running' ORDER BY id")?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, i64>(4)?,
+                r.get::<_, String>(5)?,
+            ))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (id, day, status, summary, created_at, diagnostics) = row?;
+            out.push(crate::mirror::Exported {
+                id: id.clone(),
+                value: json!({
+                    "id": id,
+                    "day": day,
+                    "status": status,
+                    "created_at": created_at,
+                    "summary": serde_json::from_str::<Value>(&summary)?,
+                    "diagnostics": serde_json::from_str::<Value>(&diagnostics)?,
+                }),
+            });
+        }
+        Ok(out)
+    }
+
+    fn export_table(&self, sql: &str) -> Result<Vec<crate::mirror::Exported>> {
+        let db = self.db.connection();
+        let mut stmt = db.prepare(sql)?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (id, payload) = row?;
+            out.push(crate::mirror::Exported {
+                id,
+                value: serde_json::from_str(&payload)?,
+            });
+        }
+        Ok(out)
+    }
 }
 
 impl ActivityStore for LocalActivity<'_> {
     fn save_day(&self, day: &Day) -> Result<()> {
         self.db.connection().execute("INSERT INTO task_days(day,payload) VALUES(?1,?2) ON CONFLICT(day) DO UPDATE SET payload=excluded.payload", params![day.day, serde_json::to_string(day)?])?;
+        crate::mirror::wake();
         Ok(())
     }
 
@@ -115,6 +173,7 @@ impl ActivityStore for LocalActivity<'_> {
 
     fn save_summary(&self, day: &str, summary: &Summary) -> Result<()> {
         self.db.connection().execute("INSERT INTO totals(day,summary) VALUES(?1,?2) ON CONFLICT(day) DO UPDATE SET summary=excluded.summary",params![day,serde_json::to_string(summary)?])?;
+        crate::mirror::wake();
         Ok(())
     }
 
@@ -161,6 +220,7 @@ impl ActivityStore for LocalActivity<'_> {
                 Utc::now().timestamp(),
             ],
         )?;
+        crate::mirror::wake();
         Ok(())
     }
 

@@ -96,6 +96,33 @@ impl LocalSettings {
     pub(crate) fn profile(&self) -> &Path {
         self.config.parent().unwrap()
     }
+
+    /// The configuration and the knowledge map as the account store mirrors them: two records.
+    /// What stays on this installation never leaves it: the `[secrets]` references and the
+    /// account store link; the organization and the guides travel in their own record.
+    pub(crate) fn export(&self) -> Result<Vec<crate::mirror::Exported>> {
+        let mut config = serde_json::to_value(self.config()?)?;
+        if let Some(object) = config.as_object_mut() {
+            object.remove("secrets");
+            object.remove("cloud");
+        }
+        let mut map = serde_json::to_value(self.map()?)?;
+        if let Some(object) = map.as_object_mut() {
+            object.remove("organization");
+            object.remove("work_item_guides");
+        }
+        Ok(vec![
+            crate::mirror::Exported {
+                id: "config".into(),
+                value: config,
+            },
+            crate::mirror::Exported {
+                id: "knowledge_map".into(),
+                value: map,
+            },
+        ])
+    }
+
     pub(crate) fn config_path(&self) -> &Path {
         &self.config
     }
@@ -147,13 +174,18 @@ impl SettingsStore for LocalSettings {
             }
         }
         fs::remove_file(journal)?;
+        crate::mirror::wake();
         Ok(())
     }
     fn save_config(&self, config: &Config) -> Result<()> {
-        write_private(&self.config, &toml::to_string_pretty(config)?)
+        write_private(&self.config, &toml::to_string_pretty(config)?)?;
+        crate::mirror::wake();
+        Ok(())
     }
     fn save_map(&self, map: &KnowledgeMap) -> Result<()> {
-        write_private(&self.map, &toml::to_string_pretty(map)?)
+        write_private(&self.map, &toml::to_string_pretty(map)?)?;
+        crate::mirror::wake();
+        Ok(())
     }
     fn revision(&self) -> Result<String> {
         let mut hash = Sha256::new();

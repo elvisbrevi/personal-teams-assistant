@@ -12,8 +12,12 @@ use super::{
     *,
 };
 use crate::config::{Cloud, CloudMode};
+use crate::mirror::engine::Failure;
 use serde_json::{Value, json};
 use std::time::Duration;
+
+mod mirror;
+pub(in crate::app) use mirror::{State, run};
 
 pub(super) const ACCESS_ID: &str = "CLOUD_ACCESS_CLIENT_ID";
 pub(super) const ACCESS_SECRET: &str = "CLOUD_ACCESS_CLIENT_SECRET";
@@ -25,7 +29,10 @@ const PROTOCOL: u64 = 1;
 const LABEL_CHARS: usize = 80;
 
 pub(super) fn handles(method: &str) -> bool {
-    matches!(method, "cloud_status" | "cloud_connect")
+    matches!(
+        method,
+        "cloud_status" | "cloud_connect" | "cloud_mirror" | "cloud_verify"
+    )
 }
 
 #[derive(Deserialize)]
@@ -41,29 +48,12 @@ struct ConnectArgs {
     client_secret: Option<String>,
 }
 
-/// Why an exchange with the Worker did not answer what was asked.
-#[derive(Debug, PartialEq)]
-enum Failure {
-    /// Network, timeout or a server error: the link is offline, nothing is lost.
-    Offline,
-    /// Access or the Worker refused the credentials.
-    Revoked,
-    /// The account's daily share is used up; behaves like being offline.
-    Quota,
-    /// The Worker has no Access settings yet.
-    Unconfigured,
-    /// Anything else the Worker refused, with its error code.
-    Refused(String),
-}
-
-impl Failure {
-    fn standing(&self) -> &'static str {
-        match self {
-            Failure::Offline | Failure::Quota => "offline",
-            Failure::Revoked => "revoked",
-            Failure::Unconfigured => "unconfigured",
-            Failure::Refused(_) => "offline",
-        }
+fn standing_of(failure: &Failure) -> &'static str {
+    match failure {
+        Failure::Offline | Failure::Quota => "offline",
+        Failure::Revoked => "revoked",
+        Failure::Unconfigured => "unconfigured",
+        Failure::Refused(_) => "offline",
     }
 }
 
@@ -105,6 +95,25 @@ pub(super) async fn operate(host: &Arc<Host>, request: &control::Request) -> Rep
             };
             connect(host, args).await.unwrap_or_else(|reply| *reply)
         }
+        "cloud_mirror" => {
+            if !invocation.scope.owner || invocation.scope.shared {
+                return Reply::error("authority_denied", 6, authority::EXECUTION_DENIED);
+            }
+            let Ok(args) = serde_json::from_value::<mirror::MirrorArgs>(request.args.clone())
+            else {
+                return Reply::error("invalid_input", 2, "Invalid arguments.");
+            };
+            mirror::operate_mirror(host, args).await
+        }
+        "cloud_verify" => {
+            if !invocation.scope.owner || invocation.scope.shared {
+                return Reply::error("authority_denied", 6, authority::EXECUTION_DENIED);
+            }
+            if request.args != json!({}) && !request.args.is_null() {
+                return Reply::error("invalid_input", 2, "Invalid arguments.");
+            }
+            mirror::operate_verify(host).await
+        }
         _ => Reply::error("invalid_input", 2, "Unknown operation."),
     }
 }
@@ -132,6 +141,18 @@ async fn exchange(
     credentials: Option<&Credentials>,
     body: Option<Value>,
 ) -> std::result::Result<Value, Failure> {
+    exchange_limited(endpoint, method, path, credentials, body, 2_000_000).await
+}
+
+/// Like `exchange`, reading at most `max_bytes` of the reply (record pages are large).
+async fn exchange_limited(
+    endpoint: &str,
+    method: reqwest::Method,
+    path: &str,
+    credentials: Option<&Credentials>,
+    body: Option<Value>,
+    max_bytes: usize,
+) -> std::result::Result<Value, Failure> {
     let client = client().map_err(|_| Failure::Offline)?;
     let mut request = client.request(method, format!("{endpoint}{path}"));
     if let Some(credentials) = credentials {
@@ -153,7 +174,7 @@ async fn exchange(
         .is_some_and(|v| v.to_str().is_ok_and(|v| v.starts_with("application/json")));
     // Access answers its own refusals (401/403, HTML); the Worker answers JSON.
     let value: Value = if json {
-        crate::adapters::bounded_json(response, 2_000_000)
+        crate::adapters::bounded_json(response, max_bytes)
             .await
             .map_err(|_| Failure::Offline)?
     } else {
@@ -232,10 +253,16 @@ async fn status(host: &Arc<Host>) -> Result<Value> {
         "installation": (!cloud.installation.is_empty()).then_some(&cloud.installation),
         "checked_at": checked_at,
     });
-    let health = match health(&endpoint).await {
+    view["mirror"] = mirror::describe(host, cloud);
+    let mut latency = serde_json::Map::new();
+    let started = std::time::Instant::now();
+    let health = health(&endpoint).await;
+    latency.insert("health".into(), json!(started.elapsed().as_millis() as u64));
+    view["latency_ms"] = Value::Object(latency.clone());
+    let health = match health {
         Ok(health) => health,
         Err(failure) => {
-            view["standing"] = json!(failure.standing());
+            view["standing"] = json!(standing_of(&failure));
             view["problem"] = json!(problem(&failure));
             return Ok(view);
         }
@@ -252,6 +279,7 @@ async fn status(host: &Arc<Host>) -> Result<Value> {
         view["standing"] = json!("not_enrolled");
         return Ok(view);
     };
+    let started = std::time::Instant::now();
     let whoami = exchange(
         &endpoint,
         reqwest::Method::GET,
@@ -260,6 +288,8 @@ async fn status(host: &Arc<Host>) -> Result<Value> {
         None,
     )
     .await;
+    latency.insert("whoami".into(), json!(started.elapsed().as_millis() as u64));
+    let started = std::time::Instant::now();
     let store = exchange(
         &endpoint,
         reqwest::Method::GET,
@@ -268,6 +298,8 @@ async fn status(host: &Arc<Host>) -> Result<Value> {
         None,
     )
     .await;
+    latency.insert("store".into(), json!(started.elapsed().as_millis() as u64));
+    view["latency_ms"] = Value::Object(latency);
     match (whoami, store) {
         (Ok(whoami), Ok(store)) => {
             let same = whoami["installation"]["id"] == json!(cloud.installation);
@@ -280,7 +312,7 @@ async fn status(host: &Arc<Host>) -> Result<Value> {
             view["store"] = store;
         }
         (Err(failure), _) | (_, Err(failure)) => {
-            view["standing"] = json!(failure.standing());
+            view["standing"] = json!(standing_of(&failure));
             view["problem"] = json!(problem(&failure));
         }
     }

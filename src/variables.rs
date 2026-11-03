@@ -188,6 +188,9 @@ pub struct Rotation {
 pub struct KeyBackup {
     pub format: String,
     pub masters: BTreeMap<u32, String>,
+    /// The installation's account content key for the cloud mirror, when it has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cloud_content: Option<crate::mirror::key::ContentBackup>,
 }
 impl fmt::Debug for KeyBackup {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -1164,6 +1167,7 @@ impl Store {
         Ok(KeyBackup {
             format: BACKUP_FORMAT.into(),
             masters,
+            cloud_content: None,
         })
     }
 

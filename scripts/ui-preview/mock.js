@@ -468,12 +468,24 @@
       agent: { skill_version: '0.9.13' } }),
     // Synthetic account store link: connected, nothing uploaded.
     cloud_status: () => ({
-      mode: 'off', endpoint: 'https://store.example.com', enrolled: true, installation: '00000000-0000-4000-8000-000000000001',
+      mode: window.__ptaCloudMirror?.mode ?? 'off', endpoint: 'https://store.example.com', enrolled: true, installation: '00000000-0000-4000-8000-000000000001',
       standing: 'live', checked_at: Math.floor(Date.now() / 1000) - 30,
       worker: { environment: 'production', version: '0.1.0', deployment: null, protocols: [1], schema: { registry: 1, account_store: 1 } },
       principal: { label: 'Synthetic laptop', enrolled_at: Math.floor(Date.now() / 1000) - 86400, account_installations: 2 },
       store: { schema: 1, collections: {}, usage: { day: '2026-01-01', requests: 12, rows_written: 0, limits: { requests: 20000, rows_written: 20000 } } },
+      latency_ms: { health: 41, whoami: 152, store: 148 },
+      mirror: window.__ptaCloudMirror ? structuredClone(window.__ptaCloudMirror) : { key: { present: false }, mode: 'off' },
     }),
+    // Synthetic mirror: the start uploads and verifies, the verification matches.
+    cloud_mirror: args => {
+      if (args?.action === 'start') {
+        window.__ptaCloudMirror = { key: { present: true, active: 1, versions: [1], fingerprint: '0123456789ab' }, mode: 'mirror', outbox: { pending: 0, blocked: 0, retrying: 0, synced: 42, oldest_seconds: null }, initial_verified_at: secs(NOW), last_success_at: secs(NOW), last_verify: { at: secs(NOW), ok: true } };
+        return { action: 'start', mode: 'mirror', complete: true, key_created: true, uploaded: 42, verify: { ok: true, collections: [] } };
+      }
+      if (args?.action === 'stop' && window.__ptaCloudMirror) window.__ptaCloudMirror.mode = 'off';
+      return { action: args?.action ?? 'plan' };
+    },
+    cloud_verify: () => ({ ok: true, verify: { ok: true, collections: [{ name: 'audits', ok: true, pending: 2, local: 30, remote: 28 }] } }),
     portable_status: () => ({ standing: window.__ptaStanding ? structuredClone(window.__ptaStanding) : undefined, sync: structuredClone(window.__ptaAccountConfig || { mode: 'authoritative', state: 'authoritative', revision: { generation: 3, digest: 'abcdef012345' } }) }),
     portable_sync: args => {
       const sync = window.__ptaAccountConfig;

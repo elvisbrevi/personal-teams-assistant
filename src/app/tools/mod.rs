@@ -474,6 +474,25 @@ pub(super) const TOOLS: &[Tool] = &[
         },
     },
     Tool {
+        name: "cloud_mirror",
+        title: "Mirror to the account store",
+        description: "Mirror this installation's records to the account store. action plan (default) lists per collection what would be uploaded (records and bytes) and sends nothing; start creates the account content key on first use (tell the user to back it up with pta variables key backup), uploads every collection sealed on this installation (AES-256-GCM-SIV; the Worker sees only blinded IDs, revisions and digests), verifies the copy by reading it back and only then switches the mode to mirror; stop switches the mode back to off and keeps the copy. Local stays the source of truth; secrets, sessions, send nonces and runs in progress never leave. Owner only. Needs the user's confirmation.",
+        effect: Effect::External,
+        schema: || {
+            object(
+                json!({"action":{"type":"string","enum":["plan","start","stop"],"description":"plan (default), start or stop."},"confirmed":confirmed()}),
+                &[],
+            )
+        },
+    },
+    Tool {
+        name: "cloud_verify",
+        title: "Verify the account store copy",
+        description: "Compare the account store's copy with this installation: per collection the local and remote counts, a digest over the sorted (ID, revision, ciphertext digest) computed from the ledger and from the Worker's listing, and a full decryption of every record checked against what was sent. ok is false on any missing, unknown, differing, undecryptable or inconsistent record; local changes not sent yet are counted as pending. Owner only; reads only.",
+        effect: Effect::Read,
+        schema: none,
+    },
+    Tool {
         name: "update_apply",
         title: "Install a prepared update",
         description: "Install the prepared version (shown by update_status as staged): wait while an answer, a send, an implementation, a creation or a migration is in progress (it is never interrupted; update_status then reports `deferred` with the reasons), then replace the application and pta together, restart the application the way it was running, restore the assistant and check health. If the new version does not start and report healthy, the previous pair is restored automatically. The application restarts, so the tool returns while the update continues: poll update_status, which reads the update journal while the application is down. `apply.state` is `success` only after the health check; `rolled_back` and `failed` carry the reason. Needs the user's confirmation and the owner of this computer. Afterwards MCP clients must reconnect to read the new tool catalog.",
@@ -1597,7 +1616,12 @@ pub(super) async fn run(name: &str, args: &Value) -> Result<Value, String> {
         "variable_entry_request" => ipc("variable_entry_start", args.clone()).await,
         "variable_update" | "variable_rename" | "variable_usage" => ipc(name, args.clone()).await,
         "consumer_list" => ipc("variable_consumer_list", args.clone()).await,
-        "cloud_status" => ipc(name, args.clone()).await,
+        "cloud_status" | "cloud_verify" => ipc(name, args.clone()).await,
+        "cloud_mirror" => {
+            let mut args = args.clone();
+            args.as_object_mut().unwrap().remove("confirmed");
+            ipc(name, args).await
+        }
         "cloud_connect" => {
             let mut args = args.clone();
             args.as_object_mut().unwrap().remove("confirmed");
@@ -1928,6 +1952,11 @@ pub(super) fn confirmation(name: &str, args: &Value) -> Option<String> {
             )
         }
         "variable_delete" => "Delete this stored variable? Its value cannot be recovered.".into(),
+        "cloud_mirror" => match args["action"].as_str().unwrap_or("plan") {
+            "start" => "Upload this installation's records, encrypted with the account content key, to the account store and keep it mirrored?".into(),
+            "stop" => "Stop mirroring this installation to the account store (the copy is kept)?".into(),
+            _ => "List what mirroring this installation to the account store would upload (nothing is sent)?".into(),
+        },
         "cloud_connect" => format!(
             "Enroll this installation with the account store at {}?",
             args["endpoint"].as_str().unwrap_or_default()

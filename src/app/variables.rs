@@ -409,6 +409,13 @@ fn mutate(store: &Store, method: &str, args: &Value) -> std::result::Result<Valu
     }
 }
 
+/// The directory of the cloud mirror's content key, for the owner of an unshared profile only.
+fn cloud_keys(host: &Host) -> Option<PathBuf> {
+    authority::invocation(&host.state)
+        .is_ok_and(|i| i.scope.owner && !i.scope.shared)
+        .then(|| host.state.settings.profile().join("keys"))
+}
+
 fn run(host: &Host, method: &str, args: &Value) -> std::result::Result<Value, vault::Error> {
     let invocation = authority::invocation(&host.state)
         .map_err(|_| vault::Error::Conflict(authority::ACCOUNT_UNAVAILABLE.into()))?;
@@ -651,8 +658,17 @@ fn run(host: &Host, method: &str, args: &Value) -> std::result::Result<Value, va
                     "Use an absolute private output path.".into(),
                 ));
             }
-            let backup = store.export_keys()?;
+            let mut backup = store.export_keys()?;
             let versions: Vec<u32> = backup.masters.keys().copied().collect();
+            // The owner's installation also keeps the account content key of the cloud mirror.
+            if let Some(keys) = cloud_keys(host) {
+                backup.cloud_content = crate::mirror::key::load(&keys)
+                    .map_err(|_| {
+                        vault::Error::Key("The account content key could not be read.".into())
+                    })?
+                    .map(|content| content.backup());
+            }
+            let cloud_content = backup.cloud_content.is_some();
             vault::write_new_private(
                 &output,
                 &serde_json::to_string(&backup).map_err(|_| {
@@ -660,15 +676,39 @@ fn run(host: &Host, method: &str, args: &Value) -> std::result::Result<Value, va
                 })?,
             )?;
             Ok(
-                json!({"path":output,"master_versions":versions,"contains":"master keys only; keep the file apart from the profile and its backups"}),
+                json!({"path":output,"master_versions":versions,"cloud_content_key":cloud_content,"contains":"master keys only; keep the file apart from the profile and its backups"}),
             )
         }
         "variable_key_restore" => {
             let RestoreArgs { backup } = parse(args)?;
+            let cloud = match (&backup.cloud_content, cloud_keys(host)) {
+                (Some(content), Some(keys)) => {
+                    // Checked before anything is written, so a conflict changes nothing.
+                    if let Ok(Some(current)) = crate::mirror::key::load(&keys)
+                        && current.backup() != *content
+                    {
+                        return Err(vault::Error::Conflict(
+                            "A different account content key is already installed; nothing was restored.".into(),
+                        ));
+                    }
+                    Some((content.clone(), keys))
+                }
+                (Some(_), None) => {
+                    return Err(vault::Error::Input(
+                        "This backup holds an account content key, which only the owner's installation restores.".into(),
+                    ));
+                }
+                _ => None,
+            };
             let restored = store.import_keys(&backup)?;
+            let cloud_restored = match cloud {
+                Some((content, keys)) => crate::mirror::key::import(&keys, &content)
+                    .map_err(|e| vault::Error::Conflict(e.to_string()))?,
+                None => false,
+            };
             let report = store.verify()?;
             Ok(
-                json!({"restored":restored,"checked":report.checked,"failed":report.failed,"ok":report.failed.is_empty()}),
+                json!({"restored":restored,"cloud_content_key_restored":cloud_restored,"checked":report.checked,"failed":report.failed,"ok":report.failed.is_empty()}),
             )
         }
         "variable_key_rotate" => {

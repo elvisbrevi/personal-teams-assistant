@@ -55,6 +55,34 @@ impl<'a> LocalAudit<'a> {
     pub fn new(store: &'a Store) -> Self {
         Self { store }
     }
+
+    /// Every finished message as the account store mirrors it, by resource: its status, when it
+    /// was received and its audit as written.
+    pub fn export(&self) -> Result<Vec<crate::mirror::Exported>> {
+        let db = self.store.connection();
+        let mut stmt = db.prepare("SELECT resource,status,audit,created_at FROM jobs WHERE status NOT IN ('pending','processing','refining','sending') AND audit IS NOT NULL ORDER BY resource")?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, i64>(3)?,
+            ))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (resource, status, audit, created_at) = row?;
+            out.push(crate::mirror::Exported {
+                id: resource,
+                value: serde_json::json!({
+                    "status": status,
+                    "created_at": created_at,
+                    "audit": crate::state::audit_value(Some(&audit))?,
+                }),
+            });
+        }
+        Ok(out)
+    }
 }
 
 impl AuditStore for LocalAudit<'_> {
@@ -67,6 +95,7 @@ impl AuditStore for LocalAudit<'_> {
             "INSERT INTO jobs(resource,status,audit) VALUES (?1,?2,?3) ON CONFLICT(resource) DO UPDATE SET status=excluded.status,audit=excluded.audit",
             params![resource, audit.status, serde_json::to_string(audit)?],
         )?;
+        crate::mirror::wake();
         Ok(())
     }
 
@@ -99,6 +128,7 @@ impl AuditStore for LocalAudit<'_> {
             "UPDATE jobs SET audit=CASE WHEN ?2 IS NULL THEN json_remove(audit,'$.feedback') ELSE json_set(audit,'$.feedback',json(?2)) END WHERE resource=?1 AND audit IS NOT NULL AND status NOT IN ('pending','processing','refining','sending')",
             params![resource, feedback.map(serde_json::to_string).transpose()?],
         )?;
+        crate::mirror::wake();
         Ok(changed > 0)
     }
 
@@ -108,6 +138,7 @@ impl AuditStore for LocalAudit<'_> {
             changed == 1,
             "message changed while associating the question"
         );
+        crate::mirror::wake();
         Ok(())
     }
 }

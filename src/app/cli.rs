@@ -117,15 +117,26 @@ Account configuration
   account records status|history [DAY|FROM..TO]  Reads the coordinator's saved daily task record (read-only).
 
 Account store (Cloudflare)
-  cloud status                This installation's link to the account store Worker: endpoint, mode (off until a
-                           migration), enrollment, the Worker's version and protocols, and, when enrolled, the live
-                           principal, the store's per-collection counts and today's usage. Standing: disconnected,
-                           not_enrolled, live, offline, revoked or unconfigured. Uploads nothing.
+  cloud status                This installation's link to the account store Worker: endpoint, mode (off or mirror),
+                           enrollment, the Worker's version and protocols, and, when enrolled, the live principal, the
+                           store's per-collection counts and today's usage, the round-trip latency of each check and the
+                           mirror (content key fingerprint, outbox by collection, last pass and verification). Standing:
+                           disconnected, not_enrolled, live, offline, revoked or unconfigured. Uploads nothing.
   cloud connect --endpoint URL [--label TEXT] --confirmed
                            Enrolls this installation with the account store (owner only) and keeps the installation
                            credential it issues (CLOUD_STORE_TOKEN). The account's Access service token comes as JSON
                            on stdin, {client_id, client_secret}, never as arguments; without stdin the stored one is
                            used. Keeps the mode off: nothing is uploaded.
+  cloud mirror --dry-run      Lists per collection what mirroring would upload (records and bytes); sends nothing.
+  cloud mirror --confirmed    Owner only. Creates the account content key on first use (back it up with
+                           pta variables key backup), uploads every collection sealed with it (AES-256-GCM-SIV in this
+                           installation; the Worker sees only blinded IDs, revisions and digests), verifies the copy by
+                           reading it back and only then switches the mode to mirror. Local stays the source of truth;
+                           afterwards an outbox sends each change. Run again to resume an interrupted upload.
+  cloud mirror --stop         Switches the mode back to off; the copy and the outbox stay as they are.
+  cloud verify                Compares the account store's copy with this installation: per collection the counts, a
+                           digest over the sorted (ID, revision, ciphertext digest) on both sides and a full decryption
+                           of every record. Local changes not sent yet are pending, not differences.
 
 Account variables
   variables list [--limit N]  Names, descriptions and versions of this account's stored variables; never values.
@@ -559,6 +570,25 @@ async fn cloud_command(args: &[String]) -> Result<Reply> {
             }
             call("cloud_connect", body, None, true).await
         }
+        Some("mirror") => {
+            let dry_run = args.iter().any(|a| a == "--dry-run");
+            let stop = args.iter().any(|a| a == "--stop");
+            ensure!(!(dry_run && stop), "use --dry-run or --stop, not both");
+            if dry_run {
+                return call("cloud_mirror", json!({"action": "plan"}), None, true).await;
+            }
+            if stop {
+                return call("cloud_mirror", json!({"action": "stop"}), None, true).await;
+            }
+            if let Some(reply) = unconfirmed(
+                args,
+                "Upload this installation's records, encrypted with the account content key, to the account store and keep it mirrored?".into(),
+            ) {
+                return Ok(reply);
+            }
+            call("cloud_mirror", json!({"action": "start"}), None, true).await
+        }
+        Some("verify") => call("cloud_verify", json!({}), None, true).await,
         _ => anyhow::bail!("missing argument; consult --help"),
     }
 }
@@ -992,7 +1022,8 @@ fn validate_args(args: &[String]) -> Result<()> {
         match a {
             "--json" | "--non-interactive" | "--offline" | "--no-browser" | "--wait"
             | "--content" | "--current-profile" | "--context-stdin" | "--value" | "--confirmed"
-            | "--reset" | "--bind" | "--settings" | "--replace-settings" => {}
+            | "--reset" | "--bind" | "--settings" | "--replace-settings" | "--dry-run"
+            | "--stop" => {}
             "--destination" | "--name" | "--existing" | "--to" | "--target" | "--label" => {
                 i += 1;
                 ensure!(
@@ -1182,7 +1213,7 @@ fn validate_args(args: &[String]) -> Result<()> {
                 "status" | "pending" | "run" | "history" | "open"
             ]
             | ["activity", "run" | "history" | "open" | "resolve", _]
-            | ["cloud", "status" | "connect"]
+            | ["cloud", "status" | "connect" | "mirror" | "verify"]
             | ["credentials", "list"]
             | ["credentials", "set" | "delete", _]
             | [
@@ -1315,6 +1346,7 @@ fn validate_args(args: &[String]) -> Result<()> {
         (
             "--confirmed",
             p.as_slice() == ["cloud", "connect"]
+                || p.as_slice() == ["cloud", "mirror"]
                 || p.as_slice().starts_with(&["update", "stage"])
                 || p.as_slice().starts_with(&["update", "apply"])
                 || p.as_slice().starts_with(&["variables", "migrate", "run"])
@@ -1329,6 +1361,8 @@ fn validate_args(args: &[String]) -> Result<()> {
         ),
         ("--to", p.as_slice().starts_with(&["variables", "deliver"])),
         ("--endpoint", p.as_slice() == ["cloud", "connect"]),
+        ("--dry-run", p.as_slice() == ["cloud", "mirror"]),
+        ("--stop", p.as_slice() == ["cloud", "mirror"]),
         ("--label", p.as_slice() == ["cloud", "connect"]),
         (
             "--target",
@@ -1503,7 +1537,7 @@ async fn execute(mut args: Vec<String>) -> Result<Reply> {
         }
         "capabilities" => {
             return Ok(Reply::success(
-                json!({"contract":control::CONTRACT,"commands":HELP,"skill_version":env!("CARGO_PKG_VERSION"),"activity_registration_support":true,"web_support":true,"web_access_support":true,"knowledge_index_support":true,"mcp_support":true,"tools_support":true,"todo_support":true,"implementation_support":true,"machine_pairing_support":true,"machine_login_support":true,"machine_management_support":true,"account_variables_support":true,"account_portable_support":true,"account_authority_support":true,"shared_accounts_support":true,"cloud_store_support":true}),
+                json!({"contract":control::CONTRACT,"commands":HELP,"skill_version":env!("CARGO_PKG_VERSION"),"activity_registration_support":true,"web_support":true,"web_access_support":true,"knowledge_index_support":true,"mcp_support":true,"tools_support":true,"todo_support":true,"implementation_support":true,"machine_pairing_support":true,"machine_login_support":true,"machine_management_support":true,"account_variables_support":true,"account_portable_support":true,"account_authority_support":true,"shared_accounts_support":true,"cloud_store_support":true,"cloud_mirror_support":true}),
             ));
         }
         "skill" => return crate::app::skill::command(action, args.get(2).map(String::as_str)),
@@ -2734,6 +2768,10 @@ mod help_tests {
             &["setup", "status"],
             &["setup", "status", "--expect", "DEPLOY_ENDPOINT"],
             &["cloud", "status"],
+            &["cloud", "verify"],
+            &["cloud", "mirror", "--dry-run"],
+            &["cloud", "mirror", "--stop"],
+            &["cloud", "mirror", "--confirmed"],
             &[
                 "cloud",
                 "connect",

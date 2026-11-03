@@ -430,10 +430,20 @@
           </div>
           <div class="panel" id="panel-cloud">
             <div class="panel-head"><h2>Cloud storage</h2><span id="cloud-state" class="badge muted"></span><button id="cloud-refresh" type="button" class="secondary">Check now</button></div>
-            <p class="hint">Your account's encrypted copy in Cloudflare. For now this computer only connects and checks the link: nothing is uploaded, and everything keeps working from this computer's own data.</p>
+            <p class="hint">Your account's encrypted copy in Cloudflare. Records are sealed on this computer with the account's content key, which never leaves it; everything keeps working from this computer's own data, which stays the source.</p>
             <p id="cloud-summary" class="hint" role="status"></p>
             <p id="cloud-problem" class="callout warn" role="status" hidden></p>
             <div id="cloud-details" class="list" hidden></div>
+            <div id="cloud-mirror" hidden>
+              <h3>Encrypted copy</h3>
+              <p id="cloud-mirror-summary" class="hint" role="status"></p>
+              <div id="cloud-verify-result" class="list" role="status" hidden></div>
+              <div class="actions">
+                <button id="cloud-mirror-start" type="button">Start the encrypted copy</button>
+                <button id="cloud-verify" type="button" class="secondary">Verify the copy</button>
+                <button id="cloud-mirror-stop" type="button" class="secondary">Stop the copy</button>
+              </div>
+            </div>
             <details class="fold" id="cloud-connect-fold">
               <summary>Connect this computer <small>Advanced</small></summary>
               <p class="hint">The address and the Access service token come from whoever runs your account store. The client secret is kept only on this computer.</p>

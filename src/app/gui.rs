@@ -307,6 +307,7 @@ fn start_host(app: &tauri::App, host_lock: fs::File) -> Result<Arc<Host>> {
         shell: Box::new(TauriShell(app.handle().clone())),
     });
     consumers::install(&host);
+    tauri::async_runtime::spawn(cloud::run(host.clone()));
     tauri::async_runtime::spawn(control::launch(host.clone(), host_lock)?);
     Ok(host)
 }

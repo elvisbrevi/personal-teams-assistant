@@ -313,6 +313,8 @@ impl Portal {
             "account_sync",
             "cloud_status",
             "cloud_connect",
+            "cloud_mirror",
+            "cloud_verify",
             "setup_readiness",
             "variable_create",
             "variable_update",

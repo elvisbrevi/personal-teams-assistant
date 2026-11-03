@@ -44,6 +44,54 @@ impl<'a> LocalImplementation<'a> {
     pub(crate) fn new(db: &'a Database) -> Self {
         Self { db }
     }
+
+    /// Every finished agent run, by launch ID, as the account store mirrors them.
+    pub(crate) fn export_runs(&self) -> Result<Vec<crate::mirror::Exported>> {
+        let db = self.db.connection();
+        let mut stmt = db.prepare("SELECT id,state,finished_at,payload FROM agent_runs WHERE state NOT IN ('running','planning') ORDER BY id")?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, Option<String>>(2)?,
+                r.get::<_, String>(3)?,
+            ))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (id, state, finished_at, payload) = row?;
+            out.push(crate::mirror::Exported {
+                id,
+                value: json!({
+                    "state": state,
+                    "finished_at": finished_at,
+                    "run": serde_json::from_str::<Value>(&payload)?,
+                }),
+            });
+        }
+        Ok(out)
+    }
+
+    /// Every finished request run, by ID, as the account store mirrors them.
+    pub(crate) fn export_requests(&self) -> Result<Vec<crate::mirror::Exported>> {
+        let db = self.db.connection();
+        let mut stmt = db.prepare("SELECT id,state,payload FROM request_runs WHERE state NOT IN ('generating','sending') ORDER BY id")?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (id, state, payload) = row?;
+            let mut value: Value = serde_json::from_str(&payload)?;
+            value["state"] = json!(state);
+            out.push(crate::mirror::Exported { id, value });
+        }
+        Ok(out)
+    }
 }
 
 impl ImplementationStore for LocalImplementation<'_> {
@@ -60,6 +108,7 @@ impl ImplementationStore for LocalImplementation<'_> {
         let tx = db.transaction()?;
         if tx.execute("UPDATE agent_runs SET state=?2,finished_at=?3,payload=?4 WHERE id=?1 AND state IN ('running','planning')",params![id,state,finished,serde_json::to_string(&run)?])?>0 { tx.execute("INSERT INTO agent_run_events(run_id) VALUES (?1)",[id])?; }
         tx.commit()?;
+        crate::mirror::wake();
         Ok(())
     }
 
@@ -94,6 +143,7 @@ impl ImplementationStore for LocalImplementation<'_> {
             params![id, value["state"].as_str(), value.to_string()],
         )?;
         tx.commit()?;
+        crate::mirror::wake();
         Ok(())
     }
 

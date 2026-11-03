@@ -1,0 +1,713 @@
+use super::{
+    Collection, Exported, canonical,
+    engine::{Engine, Failure, Limits, Local, Outcome, Page, SEALED_MAX, Stored, Transport, Wire},
+    hex_sha256,
+    key::{self, Content},
+    ledger::Ledger,
+    seal,
+};
+use serde_json::{Value, json};
+use std::{
+    collections::{BTreeMap, HashMap},
+    sync::Mutex,
+};
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+#[test]
+fn hmac_matches_the_rfc_4231_vectors() {
+    assert_eq!(
+        hex(&seal::hmac_sha256(&[0x0b; 20], &[b"Hi There"])),
+        "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7"
+    );
+    assert_eq!(
+        hex(&seal::hmac_sha256(
+            b"Jefe",
+            &[b"what do ya want ", b"for nothing?"]
+        )),
+        "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843"
+    );
+    // A key longer than the block is hashed first (RFC 4231 test case 6).
+    assert_eq!(
+        hex(&seal::hmac_sha256(
+            &[0xaa; 131],
+            &[b"Test Using Larger Than Block-Size Key - Hash Key First"]
+        )),
+        "60e431591ee0b67f0d8a26aacbf5b77f8e0bc6213728c5140546040f0ee37f54"
+    );
+}
+
+#[test]
+fn canonical_bytes_do_not_depend_on_key_order() {
+    let a: Value = serde_json::from_str(r#"{"b":[1,{"z":1,"a":2}],"a":"x"}"#).unwrap();
+    let b: Value = serde_json::from_str(r#"{"a":"x","b":[1,{"a":2,"z":1}]}"#).unwrap();
+    assert_eq!(canonical(&a), canonical(&b));
+    assert_eq!(
+        String::from_utf8(canonical(&a)).unwrap(),
+        r#"{"a":"x","b":[1,{"a":2,"z":1}]}"#
+    );
+}
+
+#[test]
+fn sealed_records_authenticate_only_for_their_exact_place() {
+    let content = Content::generate();
+    let id = seal::blind_id(&content, Collection::Notes, "note-1");
+    let sealed = seal::seal(&content, Collection::Notes, &id, 3, b"secret text").unwrap();
+    assert!(!sealed.windows(11).any(|w| w == b"secret text"));
+    let open = |content: &Content, c, id: &str, revision, schema| {
+        seal::open(content, c, id, revision, schema, &sealed)
+    };
+    assert_eq!(
+        open(&content, Collection::Notes, &id, 3, 1).as_deref(),
+        Some(&b"secret text"[..])
+    );
+    assert!(open(&content, Collection::Notes, &id, 4, 1).is_none());
+    assert!(open(&content, Collection::Notes, &id, 3, 2).is_none());
+    assert!(open(&content, Collection::Audits, &id, 3, 1).is_none());
+    assert!(open(&content, Collection::Notes, "other", 3, 1).is_none());
+    // Another account with the same key bytes still fails: the content account is bound.
+    let mut other = content.clone();
+    other.account = uuid::Uuid::new_v4().to_string();
+    assert!(open(&other, Collection::Notes, &id, 3, 1).is_none());
+    assert!(open(&Content::generate(), Collection::Notes, &id, 3, 1).is_none());
+    // The version prefix is authenticated too.
+    let mut tampered = sealed.clone();
+    tampered[3] ^= 1;
+    assert!(seal::open(&content, Collection::Notes, &id, 3, 1, &tampered).is_none());
+    // Sealing the same record at the same revision is repeatable; another revision differs.
+    assert_eq!(
+        sealed,
+        seal::seal(&content, Collection::Notes, &id, 3, b"secret text").unwrap()
+    );
+    assert_ne!(
+        sealed,
+        seal::seal(&content, Collection::Notes, &id, 4, b"secret text").unwrap()
+    );
+}
+
+#[test]
+fn blinded_ids_hide_the_natural_id_and_are_stable() {
+    let content = Content::generate();
+    let a = seal::blind_id(
+        &content,
+        Collection::Audits,
+        "chats('19:abc')/messages('1')",
+    );
+    assert_eq!(a.len(), 64);
+    assert_eq!(
+        a,
+        seal::blind_id(
+            &content,
+            Collection::Audits,
+            "chats('19:abc')/messages('1')"
+        )
+    );
+    assert_ne!(
+        a,
+        seal::blind_id(&content, Collection::Notes, "chats('19:abc')/messages('1')")
+    );
+    assert_ne!(
+        a,
+        seal::blind_id(
+            &Content::generate(),
+            Collection::Audits,
+            "chats('19:abc')/messages('1')"
+        )
+    );
+}
+
+#[test]
+fn the_content_key_is_created_once_and_restored_without_replacing() {
+    let dir = tempfile::tempdir().unwrap();
+    let keys = dir.path().join("keys");
+    assert!(key::load(&keys).unwrap().is_none());
+    let created = key::create(&keys).unwrap();
+    assert!(key::create(&keys).is_err());
+    let loaded = key::load(&keys).unwrap().unwrap();
+    assert_eq!(loaded.backup(), created.backup());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(keys.join(key::FILE))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
+    let other = tempfile::tempdir().unwrap();
+    let restored = other.path().join("keys");
+    assert!(key::import(&restored, &created.backup()).unwrap());
+    assert!(!key::import(&restored, &created.backup()).unwrap());
+    assert!(key::import(&keys, &Content::generate().backup()).is_err());
+    let mut broken = created.backup();
+    broken.format = "other".into();
+    assert!(key::import(&other.path().join("again"), &broken).is_err());
+    let debug = format!("{created:?}");
+    assert!(!debug.contains(&created.backup().keys[&1]));
+}
+
+// --- the engine against an in-memory Worker -------------------------------------------------
+
+#[derive(Default)]
+struct Records(Mutex<BTreeMap<Collection, Vec<Exported>>>);
+
+impl Records {
+    fn set(&self, collection: Collection, id: &str, value: Value) {
+        let mut all = self.0.lock().unwrap();
+        let list = all.entry(collection).or_default();
+        list.retain(|e| e.id != id);
+        list.push(Exported {
+            id: id.into(),
+            value,
+        });
+    }
+    fn remove(&self, collection: Collection, id: &str) {
+        self.0
+            .lock()
+            .unwrap()
+            .entry(collection)
+            .or_default()
+            .retain(|e| e.id != id);
+    }
+}
+
+impl Local for Records {
+    fn collect(&self, collection: Collection) -> anyhow::Result<Vec<Exported>> {
+        Ok(self
+            .0
+            .lock()
+            .unwrap()
+            .get(&collection)
+            .cloned()
+            .unwrap_or_default())
+    }
+}
+
+/// The Worker's write rules for one account (`cloud/src/account-store.ts`).
+#[derive(Default)]
+pub(crate) struct Worker {
+    pub(crate) records: Mutex<HashMap<(Collection, String), Stored>>,
+    generations: Mutex<HashMap<Collection, u64>>,
+    /// A failure to answer with instead of storing, for the next write.
+    pub(crate) refuse: Mutex<Option<Failure>>,
+    /// Store the next write but lose its answer.
+    lose_answer: Mutex<bool>,
+    writes: Mutex<u64>,
+}
+
+impl Transport for Worker {
+    async fn write(&self, records: &[Wire]) -> Result<Vec<Outcome>, Failure> {
+        if let Some(failure) = self.refuse.lock().unwrap().take() {
+            return Err(failure);
+        }
+        assert!((1..=100).contains(&records.len()));
+        *self.writes.lock().unwrap() += 1;
+        let mut held = self.records.lock().unwrap();
+        let mut outcomes = Vec::new();
+        for wire in records {
+            let key = (wire.collection, wire.id.clone());
+            let outcome = match held.get(&key) {
+                Some(old) if old.revision > wire.revision => Outcome::Stale,
+                Some(old) if old.revision == wire.revision => {
+                    if old.digest == wire.digest && old.deleted == wire.deleted {
+                        Outcome::Unchanged
+                    } else {
+                        Outcome::Conflict
+                    }
+                }
+                existing => {
+                    let outcome = if existing.is_some() {
+                        Outcome::Updated
+                    } else {
+                        Outcome::Created
+                    };
+                    if let Some(sealed) = &wire.sealed {
+                        assert_eq!(hex_sha256(sealed), wire.digest);
+                    }
+                    let mut generations = self.generations.lock().unwrap();
+                    let generation = generations.entry(wire.collection).or_default();
+                    *generation += 1;
+                    held.insert(
+                        key,
+                        Stored {
+                            collection: wire.collection,
+                            id: wire.id.clone(),
+                            revision: wire.revision,
+                            digest: wire.digest.clone(),
+                            schema: wire.schema,
+                            deleted: wire.deleted,
+                            generation: *generation,
+                            sealed: wire.sealed.clone(),
+                        },
+                    );
+                    outcome
+                }
+            };
+            outcomes.push(outcome);
+        }
+        if std::mem::take(&mut *self.lose_answer.lock().unwrap()) {
+            return Err(Failure::Offline);
+        }
+        Ok(outcomes)
+    }
+
+    async fn page(
+        &self,
+        collection: Collection,
+        since: u64,
+        limit: usize,
+    ) -> Result<Page, Failure> {
+        let held = self.records.lock().unwrap();
+        let mut found: Vec<Stored> = held
+            .values()
+            .filter(|s| s.collection == collection && s.generation > since)
+            .cloned()
+            .collect();
+        found.sort_by_key(|s| s.generation);
+        let more = found.len() > limit;
+        found.truncate(limit);
+        Ok(Page {
+            records: found,
+            more,
+        })
+    }
+
+    async fn get(&self, collection: Collection, id: &str) -> Result<Option<Stored>, Failure> {
+        Ok(self
+            .records
+            .lock()
+            .unwrap()
+            .get(&(collection, id.to_owned()))
+            .cloned())
+    }
+}
+
+struct Fixture {
+    _dir: tempfile::TempDir,
+    local: Records,
+    worker: Worker,
+    ledger: Ledger,
+    content: Content,
+}
+
+impl Fixture {
+    fn new() -> Self {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger = Ledger::open(&dir.path().join("cloud").join("mirror.db")).unwrap();
+        Self {
+            _dir: dir,
+            local: Records::default(),
+            worker: Worker::default(),
+            ledger,
+            content: Content::generate(),
+        }
+    }
+    fn engine(&self) -> Engine<'_, Records, Worker> {
+        Engine {
+            local: &self.local,
+            transport: &self.worker,
+            ledger: &self.ledger,
+            content: &self.content,
+        }
+    }
+    async fn flush(&self, now: i64) -> super::engine::Flushed {
+        self.engine().flush(now, Limits::default()).await.unwrap()
+    }
+    async fn verify(&self) -> super::engine::Report {
+        self.engine().verify().await.unwrap().unwrap()
+    }
+    fn filled(&self) {
+        self.local
+            .set(Collection::Notes, "n1", json!({"title": "one"}));
+        self.local
+            .set(Collection::Notes, "n2", json!({"title": "two"}));
+        self.local.set(
+            Collection::Audits,
+            "chats('x')/messages('1')",
+            json!({"status": "sent", "audit": {"proposed": "hello"}}),
+        );
+        self.local.set(
+            Collection::Settings,
+            "config",
+            json!({"llm": {"language": "es"}}),
+        );
+    }
+}
+
+fn collection<'a>(
+    report: &'a super::engine::Report,
+    name: &str,
+) -> &'a super::engine::CollectionReport {
+    report.collections.iter().find(|c| c.name == name).unwrap()
+}
+
+#[tokio::test]
+async fn the_first_pass_uploads_everything_and_verifies() {
+    let f = Fixture::new();
+    f.filled();
+    let flushed = f.flush(100).await;
+    assert_eq!(
+        (flushed.sent, flushed.refused, flushed.failure),
+        (4, 0, None)
+    );
+    assert_eq!(f.ledger.outbox(None, 100).unwrap().pending, 0);
+    assert_eq!(f.ledger.outbox(None, 100).unwrap().synced, 4);
+    let report = f.verify().await;
+    assert!(report.ok, "{report:?}");
+    let notes = collection(&report, "notes");
+    assert_eq!((notes.local, notes.remote, notes.pending), (2, 2, 0));
+    assert_eq!(notes.local_digest, notes.remote_digest);
+    // Nothing the Worker holds is readable without the key, and no natural ID reaches it.
+    let held = f.worker.records.lock().unwrap();
+    for stored in held.values() {
+        assert_eq!(stored.id.len(), 64);
+        let sealed = stored.sealed.as_ref().unwrap();
+        assert!(!sealed.windows(5).any(|w| w == b"hello" || w == b"chats"));
+    }
+}
+
+#[tokio::test]
+async fn an_unchanged_store_sends_nothing_and_a_change_sends_the_next_revision() {
+    let f = Fixture::new();
+    f.filled();
+    f.flush(100).await;
+    let writes = *f.worker.writes.lock().unwrap();
+    let again = f.flush(200).await;
+    assert_eq!((again.sent, again.batches), (0, 0));
+    assert_eq!(*f.worker.writes.lock().unwrap(), writes);
+    f.local
+        .set(Collection::Notes, "n1", json!({"title": "one, edited"}));
+    assert_eq!(f.engine().plan(300).unwrap(), 1);
+    assert_eq!(f.ledger.outbox(None, 330).unwrap().oldest_seconds, Some(30));
+    let sent = f.flush(300).await;
+    assert_eq!(sent.sent, 1);
+    let row = f.ledger.get(Collection::Notes, "n1").unwrap().unwrap();
+    assert_eq!((row.acked_revision, row.revision), (2, 2));
+    assert!(f.verify().await.ok);
+}
+
+#[tokio::test]
+async fn a_removed_record_becomes_a_tombstone_and_a_never_sent_one_is_forgotten() {
+    let f = Fixture::new();
+    f.filled();
+    f.flush(100).await;
+    f.local.remove(Collection::Notes, "n2");
+    f.local
+        .set(Collection::Notes, "n3", json!({"title": "three"}));
+    f.local.remove(Collection::Notes, "n3");
+    f.flush(200).await;
+    let report = f.verify().await;
+    assert!(report.ok, "{report:?}");
+    let notes = collection(&report, "notes");
+    assert_eq!((notes.local, notes.remote, notes.tombstones), (1, 1, 1));
+    assert!(f.ledger.get(Collection::Notes, "n3").unwrap().is_none());
+    // The record comes back: it continues above the tombstone's revision.
+    f.local
+        .set(Collection::Notes, "n2", json!({"title": "two"}));
+    f.flush(300).await;
+    let row = f.ledger.get(Collection::Notes, "n2").unwrap().unwrap();
+    assert_eq!(row.acked_revision, 3);
+    assert!(f.verify().await.ok);
+}
+
+#[tokio::test]
+async fn an_unreachable_worker_keeps_the_records_pending_and_nothing_is_lost() {
+    let f = Fixture::new();
+    f.filled();
+    *f.worker.refuse.lock().unwrap() = Some(Failure::Offline);
+    let flushed = f.flush(100).await;
+    assert_eq!(
+        (flushed.sent, flushed.failure.as_deref()),
+        (0, Some("offline"))
+    );
+    assert_eq!(f.ledger.outbox(None, 100).unwrap().pending, 4);
+    assert_eq!(f.ledger.outbox(None, 100).unwrap().retrying, 4);
+    let flushed = f.flush(160).await;
+    assert_eq!((flushed.sent, flushed.failure), (4, None));
+    assert!(f.verify().await.ok);
+    *f.worker.refuse.lock().unwrap() = Some(Failure::Quota);
+    f.local
+        .set(Collection::Notes, "n1", json!({"title": "later"}));
+    let flushed = f.flush(200).await;
+    assert_eq!(flushed.failure.as_deref(), Some("quota"));
+    assert_eq!(f.ledger.outbox(None, 200).unwrap().pending, 1);
+}
+
+#[tokio::test]
+async fn a_refused_batch_backs_off_and_is_retried() {
+    let f = Fixture::new();
+    f.filled();
+    *f.worker.refuse.lock().unwrap() = Some(Failure::Refused("invalid_input".into()));
+    let flushed = f.flush(100).await;
+    assert_eq!((flushed.sent, flushed.refused), (0, 4));
+    // Still inside the backoff: nothing is sent.
+    assert_eq!(f.flush(110).await.batches, 0);
+    assert_eq!(f.flush(100 + 61).await.sent, 4);
+    assert!(f.verify().await.ok);
+}
+
+#[tokio::test]
+async fn a_send_whose_answer_was_lost_is_repeated_with_the_same_bytes() {
+    let f = Fixture::new();
+    f.local
+        .set(Collection::Notes, "n1", json!({"title": "one"}));
+    *f.worker.lose_answer.lock().unwrap() = true;
+    let flushed = f.flush(100).await;
+    assert_eq!(flushed.failure.as_deref(), Some("offline"));
+    let first = f
+        .worker
+        .records
+        .lock()
+        .unwrap()
+        .values()
+        .next()
+        .cloned()
+        .unwrap();
+    let flushed = f.flush(200).await;
+    assert_eq!(
+        (flushed.sent, flushed.refused, flushed.failure),
+        (1, 0, None)
+    );
+    let second = f
+        .worker
+        .records
+        .lock()
+        .unwrap()
+        .values()
+        .next()
+        .cloned()
+        .unwrap();
+    assert_eq!(first, second);
+    assert_eq!(second.revision, 1);
+    // Content that changed in between goes out as the next revision.
+    let g = Fixture::new();
+    g.local
+        .set(Collection::Notes, "n1", json!({"title": "one"}));
+    *g.worker.lose_answer.lock().unwrap() = true;
+    g.flush(100).await;
+    g.local
+        .set(Collection::Notes, "n1", json!({"title": "edited"}));
+    g.flush(200).await;
+    let row = g.ledger.get(Collection::Notes, "n1").unwrap().unwrap();
+    assert_eq!(row.acked_revision, 2);
+    assert!(g.verify().await.ok);
+}
+
+#[tokio::test]
+async fn a_worker_ahead_of_the_ledger_is_followed() {
+    let f = Fixture::new();
+    f.local
+        .set(Collection::Notes, "n1", json!({"title": "one"}));
+    f.flush(100).await;
+    f.local
+        .set(Collection::Notes, "n1", json!({"title": "two"}));
+    f.flush(200).await;
+    // The ledger is lost (a restored profile): the Worker holds revision 2.
+    f.ledger.forget(Collection::Notes, "n1").unwrap();
+    let flushed = f.flush(300).await;
+    assert_eq!(flushed.refused, 1);
+    let flushed = f.flush(300).await;
+    assert_eq!(flushed.sent, 1);
+    let row = f.ledger.get(Collection::Notes, "n1").unwrap().unwrap();
+    assert_eq!(row.acked_revision, 3);
+    assert!(f.verify().await.ok);
+}
+
+#[tokio::test]
+async fn a_record_too_large_for_the_worker_is_blocked_visibly() {
+    let f = Fixture::new();
+    f.filled();
+    f.local.set(
+        Collection::Notes,
+        "big",
+        json!({"text": "x".repeat(SEALED_MAX + 10)}),
+    );
+    let flushed = f.flush(100).await;
+    assert_eq!(flushed.sent, 4);
+    let outbox = f.ledger.outbox(None, 100).unwrap();
+    assert_eq!((outbox.pending, outbox.blocked), (1, 1));
+    assert_eq!(f.flush(100_000).await.batches, 0);
+    // Shrinking it unblocks it.
+    f.local
+        .set(Collection::Notes, "big", json!({"text": "small"}));
+    assert_eq!(f.flush(100_001).await.sent, 1);
+    assert_eq!(f.ledger.outbox(None, 100_001).unwrap().blocked, 0);
+}
+
+#[tokio::test]
+async fn batches_respect_the_record_and_byte_limits() {
+    let f = Fixture::new();
+    for n in 0..250 {
+        f.local
+            .set(Collection::Notes, &format!("n{n}"), json!({"n": n}));
+    }
+    let flushed = f
+        .engine()
+        .flush(
+            100,
+            Limits {
+                records: 500,
+                batch_records: 100,
+                batch_bytes: 1_000_000,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!((flushed.sent, flushed.batches), (250, 3));
+    for n in 0..4 {
+        f.local.set(
+            Collection::Evaluations,
+            &format!("e{n}"),
+            json!({"t": "y".repeat(400_000)}),
+        );
+    }
+    let flushed = f
+        .engine()
+        .flush(
+            200,
+            Limits {
+                records: 500,
+                batch_records: 100,
+                batch_bytes: 1_000_000,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!((flushed.sent, flushed.batches), (4, 2));
+    // A pass sends at most `records` and the rest waits for the next one.
+    for n in 0..30 {
+        f.local
+            .set(Collection::Examples, &format!("x{n}"), json!({"n": n}));
+    }
+    let flushed = f
+        .engine()
+        .flush(
+            300,
+            Limits {
+                records: 20,
+                ..Limits::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(flushed.sent, 20);
+    assert_eq!(f.ledger.outbox(None, 300).unwrap().pending, 10);
+}
+
+#[tokio::test]
+async fn verification_finds_every_kind_of_difference() {
+    let f = Fixture::new();
+    f.filled();
+    f.flush(100).await;
+    let blind = seal::blind_id(&f.content, Collection::Notes, "n1");
+    let key = (Collection::Notes, blind.clone());
+    // 1. Ciphertext that does not authenticate for its place.
+    {
+        let mut held = f.worker.records.lock().unwrap();
+        let stored = held.get_mut(&key).unwrap();
+        let mut sealed = stored.sealed.clone().unwrap();
+        *sealed.last_mut().unwrap() ^= 1;
+        stored.digest = hex_sha256(&sealed);
+        stored.sealed = Some(sealed);
+    }
+    let report = f.verify().await;
+    assert!(!report.ok);
+    assert_eq!(collection(&report, "notes").differing, 1);
+    // Repair the digest bookkeeping the way the ledger sees it: now it is only undecryptable.
+    let mut row = f.ledger.get(Collection::Notes, "n1").unwrap().unwrap();
+    row.acked_digest = f.worker.records.lock().unwrap()[&key].digest.clone();
+    f.ledger.put(&row).unwrap();
+    let report = f.verify().await;
+    assert_eq!(collection(&report, "notes").undecryptable, 1);
+    assert!(!report.ok);
+    // 2. A record the Worker lost.
+    f.worker.records.lock().unwrap().remove(&key);
+    let report = f.verify().await;
+    assert_eq!(collection(&report, "notes").missing_remote, 1);
+    // 3. A record the ledger does not know.
+    f.worker.records.lock().unwrap().insert(
+        (Collection::Examples, "f".repeat(64)),
+        Stored {
+            collection: Collection::Examples,
+            id: "f".repeat(64),
+            revision: 1,
+            digest: hex_sha256(b"x"),
+            schema: 1,
+            deleted: false,
+            generation: 99,
+            sealed: Some(b"x".to_vec()),
+        },
+    );
+    let report = f.verify().await;
+    assert_eq!(collection(&report, "examples").unknown_remote, 1);
+    // 4. Content sealed for another record under a valid place: the payload names another ID.
+    let other = seal::blind_id(&f.content, Collection::Settings, "config");
+    let wrong = {
+        let plain = super::plaintext("not-config", &json!({"llm": {}}));
+        seal::seal(&f.content, Collection::Settings, &other, 1, &plain).unwrap()
+    };
+    {
+        let mut held = f.worker.records.lock().unwrap();
+        let stored = held
+            .get_mut(&(Collection::Settings, other.clone()))
+            .unwrap();
+        stored.digest = hex_sha256(&wrong);
+        stored.sealed = Some(wrong.clone());
+    }
+    let mut row = f
+        .ledger
+        .get(Collection::Settings, "config")
+        .unwrap()
+        .unwrap();
+    row.acked_digest = hex_sha256(&wrong);
+    f.ledger.put(&row).unwrap();
+    let report = f.verify().await;
+    assert_eq!(collection(&report, "settings").content_differs, 1);
+}
+
+#[tokio::test]
+async fn local_changes_since_the_upload_are_pending_not_differences() {
+    let f = Fixture::new();
+    f.filled();
+    f.flush(100).await;
+    f.local
+        .set(Collection::Notes, "n1", json!({"title": "newer"}));
+    f.local.remove(Collection::Notes, "n2");
+    f.local
+        .set(Collection::Notes, "n9", json!({"title": "brand new"}));
+    let report = f.verify().await;
+    assert!(report.ok, "{report:?}");
+    assert_eq!(collection(&report, "notes").pending, 3);
+}
+
+#[tokio::test]
+async fn another_accounts_key_cannot_read_the_copy() {
+    let f = Fixture::new();
+    f.filled();
+    f.flush(100).await;
+    let stranger = Content::generate();
+    let engine = Engine {
+        local: &f.local,
+        transport: &f.worker,
+        ledger: &f.ledger,
+        content: &stranger,
+    };
+    let report = engine.verify().await.unwrap().unwrap();
+    assert!(!report.ok);
+    let held = f.worker.records.lock().unwrap();
+    for stored in held.values() {
+        assert!(
+            seal::open(
+                &stranger,
+                stored.collection,
+                &stored.id,
+                stored.revision,
+                stored.schema,
+                stored.sealed.as_ref().unwrap()
+            )
+            .is_none()
+        );
+    }
+}

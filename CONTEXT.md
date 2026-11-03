@@ -78,6 +78,14 @@ _Avoid_: profile (the profile is one computer's whole set of files), settings sy
 Where an account's configuration, knowledge and history are kept: the local profile, or the account's cloud database with the local profile as its replica.
 _Avoid_: cloud sync, backup
 
+**Content key**:
+The account's random key that seals every record on an installation before it goes to the account store; Cloudflare never receives it. Losing it makes the cloud copy unreadable, not the local data.
+_Avoid_: encryption password, master key (the variables' own keys)
+
+**Mirror**:
+The mode in which the account store holds an encrypted copy of an installation's records, kept current by an outbox, while the local profile stays the source of truth.
+_Avoid_: backup, cloud sync
+
 **Local replica**:
 An installation's readable copy of the account store, plus the caches derived from it; it answers while offline.
 _Avoid_: offline mode
