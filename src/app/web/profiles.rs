@@ -315,6 +315,7 @@ impl Portal {
             "cloud_connect",
             "cloud_mirror",
             "cloud_verify",
+            "cloud_disconnect",
             "setup_readiness",
             "variable_create",
             "variable_update",

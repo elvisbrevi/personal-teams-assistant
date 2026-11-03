@@ -2067,6 +2067,12 @@ function renderCloud() {
     const usage = status.store.usage;
     details.append(el('p', { class: 'hint', textContent: t('Today: {requests} of {limit} requests and {rows} of {rows_limit} records written.', { requests: usage.requests, limit: usage.limits.requests, rows: usage.rows_written, rows_limit: usage.limits.rows_written }) }));
   }
+  if (status?.service_token?.expires_at) {
+    const when = new Date(status.service_token.expires_at * 1000).toLocaleDateString(uiLocale(), { timeZone: 'UTC' });
+    details.append(el('p', { class: status.service_token.renew ? 'callout warn' : 'hint', textContent: status.service_token.renew
+      ? t('The service token expires on {date}. Ask whoever runs the account store to renew it, then connect again with the new date.', { date: when })
+      : t('The service token expires on {date}.', { date: when }) }));
+  }
   if (status?.latency_ms?.store !== undefined) {
     details.append(el('p', { class: 'hint', textContent: t('Round trip to the account store: {ms} ms.', { ms: status.latency_ms.store }) }));
   }
@@ -2076,6 +2082,7 @@ function renderCloud() {
 }
 
 let cloudMirrorArmed = false;
+let cloudDisconnectArmed = false;
 
 function renderCloudMirror() {
   const status = cloudStatus;
@@ -2100,7 +2107,25 @@ function renderCloudMirror() {
   start.textContent = cloudMirrorArmed ? t('Tap again to upload') : t('Start the encrypted copy');
   $('#cloud-mirror-stop').hidden = status?.mode !== 'mirror';
   $('#cloud-verify').hidden = !mirror.key?.present;
+  $('#cloud-disconnect').textContent = cloudDisconnectArmed ? t('Tap again to disconnect') : t('Disconnect this computer');
 }
+
+$('#cloud-disconnect').onclick = event => {
+  if (!cloudDisconnectArmed) {
+    cloudDisconnectArmed = true;
+    renderCloudMirror();
+    setTimeout(() => { cloudDisconnectArmed = false; renderCloudMirror(); }, 4000);
+    return;
+  }
+  cloudDisconnectArmed = false;
+  busy(event.currentTarget, async () => {
+    const reply = await invoke('cloud_disconnect', {});
+    await loadCloud();
+    done(reply.store_notified === false
+      ? t('This computer is disconnected. The account store did not answer, so it may still list this computer until another one revokes it. The copy and the key were kept.')
+      : t('This computer is disconnected from the account store. The copy and the key were kept.'));
+  });
+};
 
 const CLOUD_COLLECTIONS = {
   settings: () => t('Settings'), organization: () => t('Organization'), notes: () => t('Verified notes'),
@@ -2189,6 +2214,7 @@ const READINESS_STEPS = {
   providers: ['panel-llm', () => t('Model providers')],
   roots: ['panel-machines', () => t('Directories for coding agents')],
   teams: ['panel-teams', () => t('Microsoft Teams')],
+  account_store: ['panel-cloud', () => t('Encrypted copy in the account store')],
   versions: ['panel-updates', () => t('Versions')],
 };
 const READINESS_STATES = {

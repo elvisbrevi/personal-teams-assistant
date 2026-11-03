@@ -1634,7 +1634,7 @@ for (const [label, viewport] of [['desktop', { width: 1440, height: 900 }], ['ph
 // Cloud storage: the encrypted copy starts only on a second tap, then offers verify and stop.
 for (const [label, options] of [['desktop', {}], ['phone', { context: { viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true } }]]) {
   const { context, page, errors } = await open({ axe: true, ...options });
-  await page.evaluate(() => showTab('settings', 'panel-cloud'));
+  await page.evaluate(() => { window.__ptaCloudToken = true; showTab('settings', 'panel-cloud'); });
   const panel = page.locator('#panel-cloud');
   await panel.locator('#cloud-mirror').waitFor();
   const start = panel.locator('#cloud-mirror-start');
@@ -1650,7 +1650,14 @@ for (const [label, options] of [['desktop', {}], ['phone', { context: { viewport
   await page.evaluate(axeSource);
   check(`${label}: the cloud storage panel passes axe`, (await scan(page)).length === 0, JSON.stringify(await scan(page)));
   check(`${label}: the cloud storage panel keeps the phone boundary`, await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+  check(`${label}: an expiring service token is announced`, (await panel.locator('#cloud-details').innerText()).includes('renueve'));
   await page.screenshot({ path: `${out}/cloud-${label}.png`, fullPage: false });
+  const disconnect = panel.locator('#cloud-disconnect');
+  await disconnect.click();
+  check(`${label}: the first tap only arms the disconnection`, (await disconnect.innerText()).includes('Toca de nuevo') && await page.evaluate(() => !window.__ptaCloudDisconnected));
+  await disconnect.click();
+  await panel.locator('#cloud-mirror').waitFor({ state: 'hidden' });
+  check(`${label}: the second tap disconnects and hides the copy`, await page.evaluate(() => window.__ptaCloudDisconnected === true));
   check(`${label}: cloud storage has no browser errors`, errors.length === 0, errors.join('; '));
   await context.close();
 }

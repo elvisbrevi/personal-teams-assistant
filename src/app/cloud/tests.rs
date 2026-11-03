@@ -166,6 +166,7 @@ fn the_cloud_section_is_omitted_until_connected_and_checked() {
         endpoint: "https://store.example.com".into(),
         installation: uuid::Uuid::new_v4().to_string(),
         mode: CloudMode::Off,
+        token_expires_at: 0,
     };
     config.cloud.validate().unwrap();
     let text = toml::to_string(&config).unwrap();
@@ -257,6 +258,7 @@ async fn settings_editors_keep_the_stored_link() {
         endpoint: "https://store.example.com".into(),
         installation: uuid::Uuid::new_v4().to_string(),
         mode: CloudMode::Off,
+        token_expires_at: 0,
     };
     host.state.settings.save_config(&config).unwrap();
     let stored = config.cloud.clone();
@@ -268,4 +270,187 @@ async fn settings_editors_keep_the_stored_link() {
         .await
         .unwrap();
     assert_eq!(host.state.settings.config().unwrap().cloud, stored);
+}
+
+#[test]
+fn the_account_store_link_is_a_standing_of_its_own() {
+    let root = tempfile::tempdir().unwrap();
+    let host = host(root.path());
+    let standing = &host.state.standing;
+    let cloud = Cloud {
+        endpoint: "https://store.example.com".into(),
+        installation: uuid::Uuid::new_v4().to_string(),
+        ..Cloud::default()
+    };
+    assert_eq!(
+        standing.store_view(&Cloud::default(), false)["state"],
+        "disconnected"
+    );
+    assert_eq!(standing.store_view(&cloud, false)["state"], "not_enrolled");
+    assert_eq!(standing.store_view(&cloud, true)["state"], "unknown");
+    standing.observe_store(&cloud, None);
+    let live = standing.store_view(&cloud, true);
+    assert_eq!(
+        (live["kind"].as_str(), live["state"].as_str()),
+        (Some("account_store"), Some("live"))
+    );
+    assert!(live["last_live_at"].is_i64());
+    // An operation refusal says nothing about the link.
+    standing.observe_store(&cloud, Some(&Failure::Refused("invalid_input".into())));
+    assert_eq!(standing.store_view(&cloud, true)["state"], "live");
+    standing.observe_store(&cloud, Some(&Failure::Quota));
+    let offline = standing.store_view(&cloud, true);
+    assert_eq!(offline["state"], "offline");
+    assert_eq!(offline["last_live_at"], live["last_live_at"]);
+    standing.observe_store(&cloud, Some(&Failure::Revoked));
+    assert_eq!(standing.store_view(&cloud, true)["state"], "revoked");
+    // Another installation's record is never shown for this one.
+    let other = Cloud {
+        installation: uuid::Uuid::new_v4().to_string(),
+        ..cloud.clone()
+    };
+    assert_eq!(standing.store_view(&other, true)["state"], "unknown");
+    assert_ne!(
+        standing.store_view(&other, true)["account_key"],
+        standing.store_view(&cloud, true)["account_key"]
+    );
+    assert!(
+        !standing
+            .store_view(&cloud, true)
+            .to_string()
+            .contains(&cloud.installation)
+    );
+    standing.reset_store();
+    assert_eq!(standing.store_view(&cloud, true)["state"], "unknown");
+    // The coordinator's standing names its kind too.
+    assert_eq!(standing.view(None)["kind"], "coordinator");
+}
+
+#[test]
+fn the_service_token_expiry_is_a_date_and_warns_ahead() {
+    assert_eq!(expiry("2027-11-03"), Some(1_825_200_000));
+    for bad in ["2027-13-01", "03-11-2027", "1825286400", "1999-01-01", ""] {
+        assert_eq!(expiry(bad), None, "{bad}");
+    }
+    let cloud = Cloud {
+        token_expires_at: 1_825_200_000,
+        ..Cloud::default()
+    };
+    let far = token_view(&cloud, 1_825_200_000 - 90 * 86_400).unwrap();
+    assert_eq!(
+        (far["days_left"].as_i64(), far["renew"].as_bool()),
+        (Some(90), Some(false))
+    );
+    let near = token_view(&cloud, 1_825_200_000 - 10 * 86_400).unwrap();
+    assert_eq!(near["renew"], true);
+    assert!(token_view(&Cloud::default(), 0).is_none());
+    let text = toml::to_string(&Config {
+        cloud: Cloud {
+            endpoint: "https://store.example.com".into(),
+            ..cloud.clone()
+        },
+        ..Config::desktop_template().unwrap()
+    })
+    .unwrap();
+    assert!(text.contains("token_expires_at = 1825200000"));
+    assert!(
+        !toml::to_string(&Cloud {
+            endpoint: "https://store.example.com".into(),
+            ..Cloud::default()
+        })
+        .unwrap()
+        .contains("token_expires_at")
+    );
+    assert!(
+        Cloud {
+            token_expires_at: 1_825_200_000_000,
+            ..Cloud::default()
+        }
+        .validate()
+        .is_err()
+    );
+}
+
+#[tokio::test]
+async fn disconnect_is_local_safe_to_repeat_and_keeps_the_copy() {
+    let root = tempfile::tempdir().unwrap();
+    let host = host(root.path());
+    for name in ["cloud_disconnect"] {
+        assert_eq!(
+            call(&host, Machine, name, json!({})).await.code,
+            "authority_denied"
+        );
+        assert!(authority::check_shared_operation(&control::Request::new(name)).is_err());
+    }
+    let mut config = host.state.settings.config().unwrap();
+    config.cloud = Cloud {
+        endpoint: "https://store.example.com".into(),
+        installation: uuid::Uuid::new_v4().to_string(),
+        mode: CloudMode::Mirror,
+        token_expires_at: 1_825_200_000,
+    };
+    host.state.settings.save_config(&config).unwrap();
+    let key = crate::mirror::key::create(&host.state.settings.profile().join("keys")).unwrap();
+    // No stored credential: nothing to tell the Worker, and the link is still removed here.
+    let reply = call(&host, Local, "cloud_disconnect", json!({})).await;
+    assert!(reply.ok, "{:?}", reply.message);
+    assert_eq!(reply.data["changed"], true);
+    assert_eq!(reply.data["store_notified"], Value::Null);
+    let cloud = host.state.settings.config().unwrap().cloud;
+    assert_eq!(cloud.mode, CloudMode::Off);
+    assert!(cloud.installation.is_empty());
+    assert_eq!(cloud.endpoint, "https://store.example.com");
+    assert_eq!(cloud.token_expires_at, 1_825_200_000);
+    assert_eq!(
+        crate::mirror::key::load(&host.state.settings.profile().join("keys"))
+            .unwrap()
+            .unwrap()
+            .backup(),
+        key.backup(),
+        "the content key stays"
+    );
+    let again = call(&host, Local, "cloud_disconnect", json!({})).await;
+    assert!(again.ok);
+    assert_eq!(again.data["changed"], false);
+    let forget = call(
+        &host,
+        Local,
+        "cloud_disconnect",
+        json!({"forget_service_token": true}),
+    )
+    .await;
+    assert!(forget.ok);
+    assert!(host.state.settings.config().unwrap().cloud.is_default());
+    let bad = call(
+        &host,
+        Local,
+        "cloud_disconnect",
+        json!({"account": "other"}),
+    )
+    .await;
+    assert!(!bad.ok);
+}
+
+#[tokio::test]
+async fn setup_status_reports_the_account_store_step() {
+    let root = tempfile::tempdir().unwrap();
+    let host = host(root.path());
+    let reply = call(&host, Local, "setup_readiness", json!({})).await;
+    assert!(reply.ok, "{:?}", reply.message);
+    let step = reply.data["steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["id"] == "account_store")
+        .cloned()
+        .unwrap();
+    assert_eq!(
+        (
+            step["state"].as_str(),
+            step["scope"].as_str(),
+            step["required"].as_bool()
+        ),
+        (Some("not_applicable"), Some("this_machine"), Some(false))
+    );
+    assert_eq!(step["facts"]["standing"], "disconnected");
 }

@@ -468,12 +468,13 @@
       agent: { skill_version: '0.9.13' } }),
     // Synthetic account store link: connected, nothing uploaded.
     cloud_status: () => ({
-      mode: window.__ptaCloudMirror?.mode ?? 'off', endpoint: 'https://store.example.com', enrolled: true, installation: '00000000-0000-4000-8000-000000000001',
+      mode: window.__ptaCloudMirror?.mode ?? 'off', endpoint: 'https://store.example.com', enrolled: !window.__ptaCloudDisconnected, installation: '00000000-0000-4000-8000-000000000001',
       standing: 'live', checked_at: Math.floor(Date.now() / 1000) - 30,
       worker: { environment: 'production', version: '0.1.0', deployment: null, protocols: [1], schema: { registry: 1, account_store: 1 } },
       principal: { label: 'Synthetic laptop', enrolled_at: Math.floor(Date.now() / 1000) - 86400, account_installations: 2 },
       store: { schema: 1, collections: {}, usage: { day: '2026-01-01', requests: 12, rows_written: 0, limits: { requests: 20000, rows_written: 20000 } } },
       latency_ms: { health: 41, whoami: 152, store: 148 },
+      ...(window.__ptaCloudToken ? { service_token: { expires_at: Math.floor(Date.now() / 1000) + 20 * 86400, days_left: 20, renew: true } } : {}),
       mirror: window.__ptaCloudMirror ? structuredClone(window.__ptaCloudMirror) : { key: { present: false }, mode: 'off' },
     }),
     // Synthetic mirror: the start uploads and verifies, the verification matches.
@@ -485,6 +486,7 @@
       if (args?.action === 'stop' && window.__ptaCloudMirror) window.__ptaCloudMirror.mode = 'off';
       return { action: args?.action ?? 'plan' };
     },
+    cloud_disconnect: () => { window.__ptaCloudDisconnected = true; if (window.__ptaCloudMirror) window.__ptaCloudMirror.mode = 'off'; return { changed: true, store_notified: true }; },
     cloud_verify: () => ({ ok: true, verify: { ok: true, collections: [{ name: 'audits', ok: true, pending: 2, local: 30, remote: 28 }] } }),
     portable_status: () => ({ standing: window.__ptaStanding ? structuredClone(window.__ptaStanding) : undefined, sync: structuredClone(window.__ptaAccountConfig || { mode: 'authoritative', state: 'authoritative', revision: { generation: 3, digest: 'abcdef012345' } }) }),
     portable_sync: args => {
