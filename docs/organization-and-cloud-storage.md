@@ -313,7 +313,8 @@ Optional, per account, reversible, with a prior backup and no loss of history.
 4. `mirror` keeps local as the source of truth and pushes every change. Phase 3b (0.10.26) does the
    upload, the read-back verification and the switch as `pta cloud mirror` (GUI Settings › Advanced ›
    Cloud storage, MCP `cloud_mirror`); `migrate` adds the backup and the dry-run report in 4a. `pta cloud verify`
-   compares at any time. `pta cloud promote` switches to `primary` after a clean verification.
+   compares at any time. `pta cloud promote` switches to `primary` after a clean verification and
+   `pta cloud demote` back to `mirror` (phase 3c, 0.10.29).
 5. `pta cloud rollback` pulls everything to local, verifies, switches to `off` and leaves the cloud
    copy untouched until an explicit `pta cloud erase`.
 
@@ -374,7 +375,7 @@ parity, the `AGENTS.md` checks, and delivery verified on crates.io and on the se
 | 2. Storage abstraction — done (0.10.17–0.10.22) | One trait per account aggregate under the crate's `store/` (at the crate root, because the message pipeline uses them too), each with its local implementation as the default and a shared `contract::run` suite; no behavior change. `SettingsStore` (`store/settings.rs`, `LocalSettings`): `Config`, `KnowledgeMap` and the tunnel path, committed together with the existing journal. `NotesStore` (`store/notes.rs`, `LocalNotes`): verified notes (by ID, `updated_at` as revision), answer evaluations and approved examples (by Teams message), in `knowledge-index.db` with each record's search document in the same transaction. `AuditStore` (`store/audit.rs`, `LocalAudit`): the finished messages' audits (by Teams message, audit as revision) in `assistant.db` › `jobs`; the worker's in-flight rows, state machine and send nonces stay local. `ActivityStore` (`store/activity.rs`, `LocalActivity`): daily task snapshots and summaries (by day), finished runs (by ID) and the legacy record, in `activity-registration.db`; running runs, slot claims and recovery stay local. `ImplementationStore` (`store/implementation.rs`, `LocalImplementation`, crate-private): finished agent runs (by launch ID) and request runs (by ID) in `implementation/runs.db`; in-flight runs and requests, the change feed, the session index, remote-session access and the machine files stay local. `OrganizationStore` (`store/organization.rs`, `LocalOrganization`): the organization (name, entries by ID with `updated_at` as revision, documenting sources) and its work item guides (by ID) as one unit with one revision, kept in the map's `[organization]` and `[[work_item_guides]]` through the settings store's journaled commit; the settings editors still save it with the rest of the map in one commit. Search and ranking stay in the local index, which reads the stores' records; the pipeline reads the local stores and never waits on the cloud, whose store will keep the local replica current. In-flight state is joined with each store's finished records where a listing shows both (`audit`, activity runs, implementation runs and requests). | Broad refactor of hot paths: done store by store, each PR behavior-neutral and fully tested. |
 | 3a. Worker and authentication — under way (Worker: 0.10.23; host link: 0.10.25) | `cloud/` Worker, `Registry`, `AccountStore` schema v1 (encrypted records with clear metadata), Access service token, installation credential, health; Workers Builds; host `cloud status/connect`. | Access/Workers configuration mistakes: staging Worker first, contract tests including cross-account attempts. |
 | 3b. Mirror — done (0.10.26) | Content key, sealing and blinded IDs; the ledger as outbox for every collection (finished records and configuration snapshots); `cloud mirror` (plan, verified initial upload, then mode `mirror`; stop) and `cloud verify`; key in the operator key backup; latency in `cloud status` (0.10.26). The link as a standing kind, the `account_store` step of `setup_status`, `cloud disconnect` and the service token's expiry (0.10.27). Local stays the source of truth. | Outbox growth while offline (bounded by the local records, visible in status); latency measured here (§5). |
-| 3c. Primary | Compare-and-swap configuration writes through the Worker; local replica; `portable_*` served from the account store. | Conflict handling regressions: reuse the portable rules and their tests. |
+| 3c. Primary — done (Worker 0.2.0 with 0.10.28; host 0.10.29) | Compare-and-swap (`base_revision`, `atomic`, feature `cas`) in the Worker; mode `primary` (`cloud promote|demote`, after a clean verification): every configuration edit is written to the store first and saved locally once accepted, read-only without an answer; the loop pulls the configuration into the local replica; conflicts stay local until `cloud pull --replace`; the coordinator serves `portable_*` from the replica it pulls. Primary scope: the whole `config` (but `[secrets]`/`[cloud]`), the map, the organization and the notes (decision 10). | Conflict handling regressions: reuse the portable rules and their tests. |
 | 4a. Migration | `cloud migrate/promote/rollback/erase` with backup and read-back verification; production migrated when the owner decides. | Data loss: never delete local data; rollback rehearsed on a copy of the production profile first. |
 | 4b. Other users | Every portal account gets its own cloud account store: the operator enables it per account, each with its own content key, installation credentials and quota share; the owner's account is not special in the Worker. | Authorization bugs between accounts (cross-account contract tests); the shared Free quota (per-account shares, §5). |
 
@@ -412,6 +413,21 @@ Taken before phase 3b (2026-11-03):
    `[cloud]`), so verification covers everything phase 3c needs.
 9. **Key delivery.** Only the operator key backup and restore in this phase; delivery at the «Trust
    this machine» confirmation waits for phase 4b, when a second installation uploads.
+
+Taken before phase 3c (2026-11-03):
+
+10. **What is primary.** The whole configuration (all of `config` except `[secrets]` and `[cloud]`,
+    the knowledge map with people and prompts), the organization with its guides and the notes;
+    history keeps being mirrored. Installation-local settings inside it are split per installation
+    in phase 4b.
+11. **The coordinator.** The account store is the authority; the coordinator writes through it (its
+    own edits and the `portable_apply` of the account's other computers, whose protocol does not
+    change) and serves `portable_*` from the replica it pulls. Without an answer from the store the
+    configuration is read-only on the coordinator too.
+12. **Protocol.** Compare-and-swap is an additive change of protocol v1 (`base_revision`, `atomic`,
+    feature `cas`), not a v2.
+13. **Production.** Stays in `mirror` until the phase 4a rehearsal; `promote` is tested against
+    staging and copies.
 
 ## Sources
 

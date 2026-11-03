@@ -86,6 +86,14 @@ _Avoid_: encryption password, master key (the variables' own keys)
 The mode in which the account store holds an encrypted copy of an installation's records, kept current by an outbox, while the local profile stays the source of truth.
 _Avoid_: backup, cloud sync
 
+**Primary**:
+The mode in which the account store is the source of truth of the account's configuration: a change is written there first under compare-and-swap and saved locally only once accepted, and the local profile is its replica. Without an answer from the store the configuration is read-only; history keeps being mirrored.
+_Avoid_: cloud mode, online mode
+
+**Conflict** (account store):
+A configuration record changed on an installation without reaching the account store while the store accepted another version. It stays as it is locally and cannot be edited until the user adopts the store's version.
+_Avoid_: merge
+
 **Local replica**:
 An installation's readable copy of the account store, plus the caches derived from it; it answers while offline.
 _Avoid_: offline mode

@@ -65,6 +65,9 @@ pub struct Wire {
     pub schema: u32,
     pub deleted: bool,
     pub sealed: Option<Vec<u8>>,
+    /// The revision this write replaces (compare-and-swap, Worker feature `cas`); `None` for a
+    /// plain upsert.
+    pub base: Option<u64>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -74,6 +77,8 @@ pub enum Outcome {
     Unchanged,
     Stale,
     Conflict,
+    /// An atomic batch wrote nothing because another of its records was refused.
+    Aborted,
 }
 
 /// One record as the Worker keeps it.
@@ -96,8 +101,9 @@ pub struct Page {
 
 #[allow(async_fn_in_trait)]
 pub trait Transport {
-    /// Upsert 1 to 100 records; the outcomes come in the same order.
-    async fn write(&self, records: &[Wire]) -> Result<Vec<Outcome>, Failure>;
+    /// Upsert 1 to 100 records; the outcomes come in the same order. An `atomic` batch is
+    /// written all at once or not at all.
+    async fn write(&self, records: &[Wire], atomic: bool) -> Result<Vec<Outcome>, Failure>;
     /// The records of a collection that changed after generation `since`, oldest first.
     async fn page(&self, collection: Collection, since: u64, limit: usize)
     -> Result<Page, Failure>;
@@ -136,6 +142,9 @@ pub struct Flushed {
     pub batches: u64,
     /// Records the Worker refused (retried later with a backoff).
     pub refused: u64,
+    /// Configuration records the account store holds in another version (primary mode): they
+    /// wait for a pull or for the user to choose.
+    pub conflicts: u64,
     /// Round-trip milliseconds of each batch.
     pub batch_millis: Vec<u64>,
     pub failure: Option<String>,
@@ -146,9 +155,35 @@ pub struct Engine<'a, L: Local, T: Transport> {
     pub transport: &'a T,
     pub ledger: &'a Ledger,
     pub content: &'a Content,
+    /// The account store is the source of truth of the configuration (mode `primary`): its
+    /// records are sent naming the revision they replace, and one the store holds in another
+    /// version is a conflict instead of a revision to continue above.
+    pub cas: bool,
 }
 
-fn hash(id: &str, value: &Value) -> String {
+/// What a row for a record that was never sent starts as.
+pub(super) fn fresh(content: &Content, collection: Collection, id: &str) -> Row {
+    Row {
+        collection,
+        blind: seal::blind_id(content, collection, id),
+        natural: id.into(),
+        revision: 0,
+        floor: 0,
+        acked_revision: 0,
+        acked_hash: String::new(),
+        acked_digest: String::new(),
+        target_hash: String::new(),
+        pending_since: None,
+        attempts: 0,
+        next_at: 0,
+        error: String::new(),
+    }
+}
+
+/// The error of a configuration row the account store holds in another version.
+pub const CONFLICT: &str = "conflict";
+
+pub(super) fn hash(id: &str, value: &Value) -> String {
     hex_sha256(&plaintext(id, value))
 }
 
@@ -162,8 +197,8 @@ fn retarget(row: &mut Row, desired: &str, now: i64) -> bool {
     if row.target_hash == desired {
         return false;
     }
-    if row.target_hash.is_empty() && row.acked_hash == desired && row.revision == row.acked_revision
-    {
+    // Acknowledged already; a revision allocated for a send that never settled stays unused.
+    if row.target_hash.is_empty() && row.acked_hash == desired {
         return false;
     }
     row.revision = row.revision.max(row.acked_revision).max(row.floor) + 1;
@@ -192,21 +227,9 @@ impl<L: Local, T: Transport> Engine<'_, L, T> {
             let mut present = BTreeSet::new();
             for Exported { id, value } in exported {
                 let desired = hash(&id, &value);
-                let mut row = held.remove(&id).unwrap_or_else(|| Row {
-                    collection,
-                    blind: seal::blind_id(self.content, collection, &id),
-                    natural: id.clone(),
-                    revision: 0,
-                    floor: 0,
-                    acked_revision: 0,
-                    acked_hash: String::new(),
-                    acked_digest: String::new(),
-                    target_hash: String::new(),
-                    pending_since: None,
-                    attempts: 0,
-                    next_at: 0,
-                    error: String::new(),
-                });
+                let mut row = held
+                    .remove(&id)
+                    .unwrap_or_else(|| fresh(self.content, collection, &id));
                 if retarget(&mut row, &desired, now) {
                     changed.push(row.clone());
                 }
@@ -264,6 +287,8 @@ impl<L: Local, T: Transport> Engine<'_, L, T> {
         let mut bytes = 0usize;
         let mut batches: Vec<Vec<(Row, Wire)>> = Vec::new();
         for Pending { mut row, value } in eligible {
+            let base =
+                (self.cas && row.collection.is_configuration()).then_some(row.acked_revision);
             let wire = match value {
                 None => Wire {
                     collection: row.collection,
@@ -273,6 +298,7 @@ impl<L: Local, T: Transport> Engine<'_, L, T> {
                     schema: row.collection.schema(),
                     deleted: true,
                     sealed: None,
+                    base,
                 },
                 Some(value) => {
                     let bytes = plaintext(&row.natural, &value);
@@ -297,6 +323,7 @@ impl<L: Local, T: Transport> Engine<'_, L, T> {
                         schema: row.collection.schema(),
                         deleted: false,
                         sealed: Some(sealed),
+                        base,
                     }
                 }
             };
@@ -316,7 +343,7 @@ impl<L: Local, T: Transport> Engine<'_, L, T> {
         for batch in batches {
             let wires: Vec<Wire> = batch.iter().map(|(_, w)| w.clone()).collect();
             let started = Instant::now();
-            let reply = self.transport.write(&wires).await;
+            let reply = self.transport.write(&wires, false).await;
             flushed.batches += 1;
             flushed
                 .batch_millis
@@ -330,7 +357,7 @@ impl<L: Local, T: Transport> Engine<'_, L, T> {
                                 acknowledge(&mut row, &wire);
                                 flushed.sent += 1;
                             }
-                            Outcome::Stale | Outcome::Conflict => {
+                            Outcome::Stale | Outcome::Conflict | Outcome::Aborted => {
                                 // The Worker holds another revision of this record (a restored
                                 // ledger or database): continue above it, or accept an identical one.
                                 match self.transport.get(row.collection, &row.blind).await {
@@ -341,6 +368,14 @@ impl<L: Local, T: Transport> Engine<'_, L, T> {
                                     {
                                         acknowledge(&mut row, &wire);
                                         flushed.sent += 1;
+                                    }
+                                    Ok(held) if wire.base.is_some() => {
+                                        // The store's copy is the source of truth: wait for a
+                                        // pull to bring it here, or for the user to choose.
+                                        row.floor = row.floor.max(held.map_or(0, |h| h.revision));
+                                        row.error = CONFLICT.into();
+                                        row.next_at = i64::MAX;
+                                        flushed.conflicts += 1;
                                     }
                                     Ok(held) => {
                                         row.floor = row.floor.max(held.map_or(0, |h| h.revision));
@@ -384,9 +419,11 @@ impl<L: Local, T: Transport> Engine<'_, L, T> {
                 }
             }
         }
-        if flushed.refused == 0 {
+        if flushed.refused == 0 && flushed.conflicts == 0 {
             self.ledger.set_meta("last_success_at", &now.to_string())?;
             self.ledger.clear_meta("last_error")?;
+        } else if flushed.refused == 0 {
+            self.ledger.set_meta("last_error", CONFLICT)?;
         } else {
             self.ledger.set_meta("last_error", "refused")?;
         }
@@ -575,7 +612,7 @@ impl<L: Local, T: Transport> Engine<'_, L, T> {
     }
 }
 
-fn acknowledge(row: &mut Row, wire: &Wire) {
+pub(super) fn acknowledge(row: &mut Row, wire: &Wire) {
     row.acked_revision = wire.revision;
     row.acked_hash = row.target_hash.clone();
     row.acked_digest = wire.digest.clone();

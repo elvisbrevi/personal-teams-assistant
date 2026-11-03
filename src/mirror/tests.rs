@@ -197,60 +197,81 @@ pub(crate) struct Worker {
     writes: Mutex<u64>,
 }
 
+impl Worker {
+    /// What writing `wire` would do, without writing it (`decide` in `account-store.ts`).
+    fn decide(held: &HashMap<(Collection, String), Stored>, wire: &Wire) -> Outcome {
+        let old = held.get(&(wire.collection, wire.id.clone()));
+        if let Some(old) = old.filter(|o| o.revision == wire.revision) {
+            return if old.digest == wire.digest && old.deleted == wire.deleted {
+                Outcome::Unchanged
+            } else {
+                Outcome::Conflict
+            };
+        }
+        if wire
+            .base
+            .is_some_and(|base| old.map_or(0, |o| o.revision) != base)
+        {
+            return Outcome::Conflict;
+        }
+        match old {
+            Some(old) if old.revision > wire.revision => Outcome::Stale,
+            Some(_) => Outcome::Updated,
+            None => Outcome::Created,
+        }
+    }
+}
+
 impl Transport for Worker {
-    async fn write(&self, records: &[Wire]) -> Result<Vec<Outcome>, Failure> {
+    async fn write(&self, records: &[Wire], atomic: bool) -> Result<Vec<Outcome>, Failure> {
         if let Some(failure) = self.refuse.lock().unwrap().take() {
             return Err(failure);
         }
         assert!((1..=100).contains(&records.len()));
         *self.writes.lock().unwrap() += 1;
         let mut held = self.records.lock().unwrap();
-        let mut outcomes = Vec::new();
-        for wire in records {
-            let key = (wire.collection, wire.id.clone());
-            let outcome = match held.get(&key) {
-                Some(old) if old.revision > wire.revision => Outcome::Stale,
-                Some(old) if old.revision == wire.revision => {
-                    if old.digest == wire.digest && old.deleted == wire.deleted {
-                        Outcome::Unchanged
-                    } else {
-                        Outcome::Conflict
-                    }
-                }
-                existing => {
-                    let outcome = if existing.is_some() {
-                        Outcome::Updated
-                    } else {
-                        Outcome::Created
-                    };
-                    if let Some(sealed) = &wire.sealed {
-                        assert_eq!(hex_sha256(sealed), wire.digest);
-                    }
-                    let mut generations = self.generations.lock().unwrap();
-                    let generation = generations.entry(wire.collection).or_default();
-                    *generation += 1;
-                    held.insert(
-                        key,
-                        Stored {
-                            collection: wire.collection,
-                            id: wire.id.clone(),
-                            revision: wire.revision,
-                            digest: wire.digest.clone(),
-                            schema: wire.schema,
-                            deleted: wire.deleted,
-                            generation: *generation,
-                            sealed: wire.sealed.clone(),
-                        },
-                    );
-                    outcome
-                }
-            };
-            outcomes.push(outcome);
+        let decided: Vec<Outcome> = records.iter().map(|w| Self::decide(&held, w)).collect();
+        if atomic
+            && decided
+                .iter()
+                .any(|o| matches!(o, Outcome::Stale | Outcome::Conflict))
+        {
+            return Ok(decided
+                .into_iter()
+                .map(|o| match o {
+                    Outcome::Created | Outcome::Updated => Outcome::Aborted,
+                    other => other,
+                })
+                .collect());
+        }
+        for (wire, outcome) in records.iter().zip(&decided) {
+            if !matches!(outcome, Outcome::Created | Outcome::Updated) {
+                continue;
+            }
+            if let Some(sealed) = &wire.sealed {
+                assert_eq!(hex_sha256(sealed), wire.digest);
+            }
+            let mut generations = self.generations.lock().unwrap();
+            let generation = generations.entry(wire.collection).or_default();
+            *generation += 1;
+            held.insert(
+                (wire.collection, wire.id.clone()),
+                Stored {
+                    collection: wire.collection,
+                    id: wire.id.clone(),
+                    revision: wire.revision,
+                    digest: wire.digest.clone(),
+                    schema: wire.schema,
+                    deleted: wire.deleted,
+                    generation: *generation,
+                    sealed: wire.sealed.clone(),
+                },
+            );
         }
         if std::mem::take(&mut *self.lose_answer.lock().unwrap()) {
             return Err(Failure::Offline);
         }
-        Ok(outcomes)
+        Ok(decided)
     }
 
     async fn page(
@@ -310,6 +331,7 @@ impl Fixture {
             transport: &self.worker,
             ledger: &self.ledger,
             content: &self.content,
+            cas: false,
         }
     }
     async fn flush(&self, now: i64) -> super::engine::Flushed {
@@ -693,6 +715,7 @@ async fn another_accounts_key_cannot_read_the_copy() {
         transport: &f.worker,
         ledger: &f.ledger,
         content: &stranger,
+        cas: false,
     };
     let report = engine.verify().await.unwrap().unwrap();
     assert!(!report.ok);
@@ -710,4 +733,431 @@ async fn another_accounts_key_cannot_read_the_copy() {
             .is_none()
         );
     }
+}
+
+// --- primary mode: the account store as the source of truth of the configuration -----------
+
+impl super::primary::Apply for Records {
+    fn apply(
+        &self,
+        collection: Collection,
+        changes: &[(String, Option<Value>)],
+    ) -> anyhow::Result<()> {
+        for (id, value) in changes {
+            match value {
+                Some(value) => self.set(collection, id, value.clone()),
+                None => self.remove(collection, id),
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Another installation of the same account: its own stores and ledger, the same key and Worker.
+struct Installation {
+    _dir: tempfile::TempDir,
+    local: Records,
+    ledger: Ledger,
+}
+
+impl Installation {
+    fn new() -> Self {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger = Ledger::open(&dir.path().join("mirror.db")).unwrap();
+        Self {
+            _dir: dir,
+            local: Records::default(),
+            ledger,
+        }
+    }
+    fn engine<'a>(&'a self, f: &'a Fixture) -> Engine<'a, Records, Worker> {
+        Engine {
+            local: &self.local,
+            transport: &f.worker,
+            ledger: &self.ledger,
+            content: &f.content,
+            cas: true,
+        }
+    }
+}
+
+impl Fixture {
+    fn primary(&self) -> Engine<'_, Records, Worker> {
+        Engine {
+            cas: true,
+            ..self.engine()
+        }
+    }
+    async fn pull(&self, replace: bool) -> super::primary::Pulled {
+        self.primary()
+            .pull(&self.local, replace)
+            .await
+            .unwrap()
+            .unwrap()
+    }
+    fn value(&self, collection: Collection, id: &str) -> Option<Value> {
+        self.local
+            .collect(collection)
+            .unwrap()
+            .into_iter()
+            .find(|e| e.id == id)
+            .map(|e| e.value)
+    }
+}
+
+use super::primary::{Change, Refusal};
+
+fn change(collection: Collection, id: &str, value: Option<Value>) -> Change {
+    Change {
+        collection,
+        id: id.into(),
+        value,
+    }
+}
+
+#[tokio::test]
+async fn a_configuration_write_reaches_the_store_first_and_settles_after_the_local_save() {
+    let f = Fixture::new();
+    f.local
+        .set(Collection::Settings, "config", json!({"language": "es"}));
+    f.flush(100).await;
+    let next = json!({"language": "en"});
+    let accepted = f
+        .primary()
+        .write(&[change(Collection::Settings, "config", Some(next.clone()))])
+        .await
+        .unwrap()
+        .unwrap();
+    // The store has it before the local stores do; the ledger agrees only once settled.
+    assert_eq!(accepted.rows.len(), 1);
+    f.local.set(Collection::Settings, "config", next);
+    accepted.settle(&f.ledger).unwrap();
+    assert_eq!(f.ledger.outbox(None, 200).unwrap().pending, 0);
+    assert!(f.verify().await.ok);
+    // Writing the same content again sends nothing.
+    let again = f
+        .primary()
+        .write(&[change(
+            Collection::Settings,
+            "config",
+            Some(json!({"language": "en"})),
+        )])
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(again.rows.is_empty());
+}
+
+#[tokio::test]
+async fn a_write_based_on_an_old_revision_is_a_conflict_and_changes_nothing() {
+    let f = Fixture::new();
+    f.local
+        .set(Collection::Settings, "config", json!({"language": "es"}));
+    f.local.set(
+        Collection::Settings,
+        "knowledge_map",
+        json!({"contexts": []}),
+    );
+    f.flush(100).await;
+    // Another installation pulls the same state, then changes the configuration first.
+    let other = Installation::new();
+    other
+        .engine(&f)
+        .pull(&other.local, false)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        other.local.collect(Collection::Settings).unwrap().len(),
+        2,
+        "a fresh installation receives the account's configuration"
+    );
+    let theirs = other
+        .engine(&f)
+        .write(&[change(
+            Collection::Settings,
+            "config",
+            Some(json!({"language": "pt"})),
+        )])
+        .await
+        .unwrap()
+        .unwrap();
+    other
+        .local
+        .set(Collection::Settings, "config", json!({"language": "pt"}));
+    theirs.settle(&other.ledger).unwrap();
+
+    // This installation still holds the old revision: its write is refused as a whole, the map
+    // included, and the store keeps the other installation's change.
+    let before = f.worker.records.lock().unwrap().len();
+    let refused = f
+        .primary()
+        .write(&[
+            change(
+                Collection::Settings,
+                "config",
+                Some(json!({"language": "en"})),
+            ),
+            change(
+                Collection::Settings,
+                "knowledge_map",
+                Some(json!({"contexts": ["x"]})),
+            ),
+        ])
+        .await
+        .unwrap();
+    assert_eq!(refused.unwrap_err(), Refusal::Conflict);
+    assert_eq!(f.worker.records.lock().unwrap().len(), before);
+    // Synchronizing brings the newer configuration; the change can then be repeated.
+    let pulled = f.pull(false).await;
+    assert_eq!(pulled.applied, 1);
+    assert_eq!(
+        f.value(Collection::Settings, "config"),
+        Some(json!({"language": "pt"}))
+    );
+    let accepted = f
+        .primary()
+        .write(&[change(
+            Collection::Settings,
+            "knowledge_map",
+            Some(json!({"contexts": ["x"]})),
+        )])
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(accepted.rows.len(), 1);
+}
+
+#[tokio::test]
+async fn a_local_change_the_store_never_acknowledged_is_never_overwritten_by_a_pull() {
+    let f = Fixture::new();
+    f.local
+        .set(Collection::Notes, "n1", json!({"title": "one"}));
+    f.flush(100).await;
+    let other = Installation::new();
+    other
+        .engine(&f)
+        .pull(&other.local, false)
+        .await
+        .unwrap()
+        .unwrap();
+    let theirs = other
+        .engine(&f)
+        .write(&[change(
+            Collection::Notes,
+            "n1",
+            Some(json!({"title": "theirs"})),
+        )])
+        .await
+        .unwrap()
+        .unwrap();
+    theirs.settle(&other.ledger).unwrap();
+
+    // Here the note was edited without reaching the store (a hand edit while offline).
+    f.local
+        .set(Collection::Notes, "n1", json!({"title": "mine"}));
+    let pulled = f.pull(false).await;
+    assert_eq!(pulled.conflicts, 1);
+    assert_eq!(
+        f.value(Collection::Notes, "n1"),
+        Some(json!({"title": "mine"}))
+    );
+    assert_eq!(f.ledger.conflicts().unwrap(), 1);
+    // The outbox does not push it over the store's version, and a write-through waits too.
+    let flushed = f.primary().flush(200, Limits::default()).await.unwrap();
+    assert_eq!(flushed.sent, 0);
+    let refused = f
+        .primary()
+        .write(&[change(
+            Collection::Notes,
+            "n1",
+            Some(json!({"title": "again"})),
+        )])
+        .await
+        .unwrap();
+    assert_eq!(refused.unwrap_err(), Refusal::Unresolved);
+
+    // Replacing adopts the store's version and clears the conflict.
+    let replaced = f.pull(true).await;
+    assert_eq!(replaced.applied, 1);
+    assert_eq!(
+        f.value(Collection::Notes, "n1"),
+        Some(json!({"title": "theirs"}))
+    );
+    assert_eq!(f.ledger.conflicts().unwrap(), 0);
+    assert!(f.verify().await.ok);
+}
+
+#[tokio::test]
+async fn the_outbox_sends_configuration_naming_its_base_and_stops_at_a_conflict() {
+    let f = Fixture::new();
+    f.local.set(
+        Collection::Organization,
+        "organization",
+        json!({"name": "a"}),
+    );
+    f.flush(100).await;
+    let other = Installation::new();
+    other
+        .engine(&f)
+        .pull(&other.local, false)
+        .await
+        .unwrap()
+        .unwrap();
+    other
+        .engine(&f)
+        .write(&[change(
+            Collection::Organization,
+            "organization",
+            Some(json!({"name": "b"})),
+        )])
+        .await
+        .unwrap()
+        .unwrap()
+        .settle(&other.ledger)
+        .unwrap();
+    // A local change found by the sweep (not written through) meets the newer store copy.
+    f.local.set(
+        Collection::Organization,
+        "organization",
+        json!({"name": "c"}),
+    );
+    let flushed = f.primary().flush(200, Limits::default()).await.unwrap();
+    assert_eq!((flushed.sent, flushed.conflicts), (0, 1));
+    let revision = f
+        .worker
+        .records
+        .lock()
+        .unwrap()
+        .values()
+        .find(|s| s.collection == Collection::Organization)
+        .unwrap()
+        .revision;
+    assert_eq!(
+        revision, 2,
+        "the store keeps the other installation's version"
+    );
+    // Further passes do not hammer the store.
+    let again = f.primary().flush(300, Limits::default()).await.unwrap();
+    assert_eq!(again.batches, 0);
+    // Other collections are still mirrored as before.
+    f.local
+        .set(Collection::Audits, "m1", json!({"status": "sent"}));
+    let mirrored = f.primary().flush(400, Limits::default()).await.unwrap();
+    assert_eq!(mirrored.sent, 1);
+}
+
+#[tokio::test]
+async fn a_write_whose_answer_was_lost_appears_here_after_the_next_pull() {
+    let f = Fixture::new();
+    f.local
+        .set(Collection::Settings, "config", json!({"language": "es"}));
+    f.flush(100).await;
+    *f.worker.lose_answer.lock().unwrap() = true;
+    let lost = f
+        .primary()
+        .write(&[change(
+            Collection::Settings,
+            "config",
+            Some(json!({"language": "en"})),
+        )])
+        .await
+        .unwrap();
+    assert_eq!(lost.unwrap_err(), Refusal::Failure(Failure::Offline));
+    // Nothing was saved here, but the store received it: it is the source of truth.
+    assert_eq!(
+        f.value(Collection::Settings, "config"),
+        Some(json!({"language": "es"}))
+    );
+    assert_eq!(f.pull(false).await.applied, 1);
+    assert_eq!(
+        f.value(Collection::Settings, "config"),
+        Some(json!({"language": "en"}))
+    );
+    assert!(f.verify().await.ok);
+}
+
+#[tokio::test]
+async fn removing_a_configuration_record_is_a_compare_and_swap_tombstone() {
+    let f = Fixture::new();
+    f.local
+        .set(Collection::Notes, "n1", json!({"title": "one"}));
+    f.local
+        .set(Collection::Notes, "n2", json!({"title": "two"}));
+    f.flush(100).await;
+    let other = Installation::new();
+    other
+        .engine(&f)
+        .pull(&other.local, false)
+        .await
+        .unwrap()
+        .unwrap();
+    let accepted = f
+        .primary()
+        .write(&[change(Collection::Notes, "n1", None)])
+        .await
+        .unwrap()
+        .unwrap();
+    f.local.remove(Collection::Notes, "n1");
+    accepted.settle(&f.ledger).unwrap();
+    // The other installation removes it on its next pull; an old copy cannot bring it back.
+    let pulled = other
+        .engine(&f)
+        .pull(&other.local, false)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(pulled.applied, 1);
+    assert_eq!(other.local.collect(Collection::Notes).unwrap().len(), 1);
+    let resurrect = other
+        .engine(&f)
+        .write(&[change(
+            Collection::Notes,
+            "n1",
+            Some(json!({"title": "one"})),
+        )])
+        .await
+        .unwrap()
+        .unwrap();
+    // It is a new version the user wrote, not an old copy: the store accepts it above the tombstone.
+    assert_eq!(resurrect.rows[0].acked_revision, 3);
+    // Removing a note the store never had sends nothing.
+    let nothing = f
+        .primary()
+        .write(&[change(Collection::Notes, "never", None)])
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(nothing.rows.is_empty());
+}
+
+#[tokio::test]
+async fn only_configuration_is_pulled_and_records_of_another_key_are_not_applied() {
+    let f = Fixture::new();
+    f.filled();
+    f.flush(100).await;
+    let other = Installation::new();
+    let pulled = other
+        .engine(&f)
+        .pull(&other.local, false)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        pulled.applied, 3,
+        "the notes and the settings, never the audits"
+    );
+    assert!(other.local.collect(Collection::Audits).unwrap().is_empty());
+    let stranger = Content::generate();
+    let foreign = Installation::new();
+    let engine = Engine {
+        local: &foreign.local,
+        transport: &f.worker,
+        ledger: &foreign.ledger,
+        content: &stranger,
+        cas: true,
+    };
+    let pulled = engine.pull(&foreign.local, false).await.unwrap().unwrap();
+    assert_eq!((pulled.applied, pulled.undecryptable), (0, 3));
+    assert!(foreign.local.collect(Collection::Notes).unwrap().is_empty());
 }

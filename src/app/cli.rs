@@ -117,10 +117,11 @@ Account configuration
   account records status|history [DAY|FROM..TO]  Reads the coordinator's saved daily task record (read-only).
 
 Account store (Cloudflare)
-  cloud status                This installation's link to the account store Worker: endpoint, mode (off or mirror),
+  cloud status                This installation's link to the account store Worker: endpoint, mode (off, mirror, primary),
                            enrollment, the Worker's version and protocols, and, when enrolled, the live principal, the
                            store's per-collection counts and today's usage, the round-trip latency of each check and the
-                           mirror (content key fingerprint, outbox by collection, last pass and verification). Standing:
+                           mirror (content key fingerprint, outbox by collection, last pass and verification; in primary
+                           mode the last pull and the conflicts). Standing:
                            disconnected, not_enrolled, live, offline, revoked or unconfigured. Uploads nothing.
   cloud connect --endpoint URL [--label TEXT] [--token-expires YYYY-MM-DD] --confirmed
                            Enrolls this installation with the account store (owner only) and keeps the installation
@@ -143,6 +144,15 @@ Account store (Cloudflare)
   cloud verify                Compares the account store's copy with this installation: per collection the counts, a
                            digest over the sorted (ID, revision, ciphertext digest) on both sides and a full decryption
                            of every record. Local changes not sent yet are pending, not differences.
+  cloud promote --confirmed   Owner only, from mirror. Sends what is pending, verifies the copy and only when it is identical
+                           makes the account store the source of truth of the configuration (mode primary): settings,
+                           organization and notes are saved there first under compare-and-swap and pulled from it; without
+                           its answer the configuration is read-only. Not for an installation signed in to a coordinator.
+  cloud demote --confirmed    Back to mirror: this computer's configuration is the source of truth again. Changes nothing else.
+  cloud pull [--replace --confirmed]
+                           Primary mode: brings the configuration the account store changed into this computer now (the
+                           host also does it on its own). --replace adopts the store's version where this computer changed
+                           the same record (a conflict), after a private backup in cloud/backups/.
 
 Account variables
   variables list [--limit N]  Names, descriptions and versions of this account's stored variables; never values.
@@ -598,6 +608,36 @@ async fn cloud_command(args: &[String]) -> Result<Reply> {
             call("cloud_mirror", json!({"action": "start"}), None, true).await
         }
         Some("verify") => call("cloud_verify", json!({}), None, true).await,
+        Some("promote") => {
+            if let Some(reply) = unconfirmed(
+                args,
+                "Make the account store the source of truth of this account's configuration (changes are saved there first; without it the configuration is read-only)?".into(),
+            ) {
+                return Ok(reply);
+            }
+            call("cloud_promote", json!({"action": "promote"}), None, true).await
+        }
+        Some("demote") => {
+            if let Some(reply) = unconfirmed(
+                args,
+                "Make this computer's configuration the source of truth again, keeping the account store as its mirror?".into(),
+            ) {
+                return Ok(reply);
+            }
+            call("cloud_promote", json!({"action": "demote"}), None, true).await
+        }
+        Some("pull") => {
+            let replace = args.iter().any(|a| a == "--replace");
+            if replace
+                && let Some(reply) = unconfirmed(
+                    args,
+                    "Replace this computer's configuration changes that conflict with the account store's (a private backup is kept first)?".into(),
+                )
+            {
+                return Ok(reply);
+            }
+            call("cloud_pull", json!({"replace": replace}), None, true).await
+        }
         Some("disconnect") => {
             let forget = args.iter().any(|a| a == "--forget-service-token");
             if let Some(reply) = unconfirmed(
@@ -1063,6 +1103,7 @@ fn validate_args(args: &[String]) -> Result<()> {
             | "--bind"
             | "--settings"
             | "--replace-settings"
+            | "--replace"
             | "--dry-run"
             | "--stop"
             | "--forget-service-token" => {}
@@ -1258,7 +1299,14 @@ fn validate_args(args: &[String]) -> Result<()> {
             | ["activity", "run" | "history" | "open" | "resolve", _]
             | [
                 "cloud",
-                "status" | "connect" | "mirror" | "verify" | "disconnect"
+                "status"
+                    | "connect"
+                    | "mirror"
+                    | "verify"
+                    | "disconnect"
+                    | "promote"
+                    | "demote"
+                    | "pull"
             ]
             | ["credentials", "list"]
             | ["credentials", "set" | "delete", _]
@@ -1394,6 +1442,9 @@ fn validate_args(args: &[String]) -> Result<()> {
             p.as_slice() == ["cloud", "connect"]
                 || p.as_slice() == ["cloud", "mirror"]
                 || p.as_slice() == ["cloud", "disconnect"]
+                || p.as_slice() == ["cloud", "promote"]
+                || p.as_slice() == ["cloud", "demote"]
+                || p.as_slice() == ["cloud", "pull"]
                 || p.as_slice().starts_with(&["update", "stage"])
                 || p.as_slice().starts_with(&["update", "apply"])
                 || p.as_slice().starts_with(&["variables", "migrate", "run"])
@@ -1415,6 +1466,7 @@ fn validate_args(args: &[String]) -> Result<()> {
             p.as_slice() == ["cloud", "disconnect"],
         ),
         ("--stop", p.as_slice() == ["cloud", "mirror"]),
+        ("--replace", p.as_slice() == ["cloud", "pull"]),
         ("--label", p.as_slice() == ["cloud", "connect"]),
         (
             "--target",
@@ -1589,7 +1641,7 @@ async fn execute(mut args: Vec<String>) -> Result<Reply> {
         }
         "capabilities" => {
             return Ok(Reply::success(
-                json!({"contract":control::CONTRACT,"commands":HELP,"skill_version":env!("CARGO_PKG_VERSION"),"activity_registration_support":true,"web_support":true,"web_access_support":true,"knowledge_index_support":true,"mcp_support":true,"tools_support":true,"todo_support":true,"implementation_support":true,"machine_pairing_support":true,"machine_login_support":true,"machine_management_support":true,"account_variables_support":true,"account_portable_support":true,"account_authority_support":true,"shared_accounts_support":true,"cloud_store_support":true,"cloud_mirror_support":true,"cloud_disconnect_support":true}),
+                json!({"contract":control::CONTRACT,"commands":HELP,"skill_version":env!("CARGO_PKG_VERSION"),"activity_registration_support":true,"web_support":true,"web_access_support":true,"knowledge_index_support":true,"mcp_support":true,"tools_support":true,"todo_support":true,"implementation_support":true,"machine_pairing_support":true,"machine_login_support":true,"machine_management_support":true,"account_variables_support":true,"account_portable_support":true,"account_authority_support":true,"shared_accounts_support":true,"cloud_store_support":true,"cloud_mirror_support":true,"cloud_disconnect_support":true,"cloud_primary_support":true}),
             ));
         }
         "skill" => return crate::app::skill::command(action, args.get(2).map(String::as_str)),
@@ -2828,6 +2880,10 @@ mod help_tests {
                 "--forget-service-token",
                 "--confirmed",
             ],
+            &["cloud", "promote", "--confirmed"],
+            &["cloud", "demote", "--confirmed"],
+            &["cloud", "pull"],
+            &["cloud", "pull", "--replace", "--confirmed"],
             &["cloud", "mirror", "--dry-run"],
             &["cloud", "mirror", "--stop"],
             &["cloud", "mirror", "--confirmed"],

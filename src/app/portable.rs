@@ -345,6 +345,10 @@ pub(in crate::app) async fn machine_call(
                 offset,
                 limit,
             } = parse(args)?;
+            // With the account store as the source of truth, serve what it holds now.
+            if section == "config" {
+                cloud::primary::refresh(host).await;
+            }
             let (_, _, notes, document, revision) = account_view(state)?;
             document.check().map_err(|e| {
                 invalid(format!(
@@ -417,8 +421,17 @@ pub(in crate::app) async fn machine_call(
             validate_local(&next_config, &next_map).map_err(|_| {
                 invalid("The change is invalid for the account's own installation.")
             })?;
+            let accepted = cloud::primary::before_save(host, &next_config, &next_map)
+                .await
+                .map_err(|message| match message.strip_prefix("[conflict] ") {
+                    Some(text) => conflict(text),
+                    None => anyhow::anyhow!(message),
+                })?;
             let tunnel = state.settings.tunnel().unwrap_or_default();
             state.settings.commit(&next_config, &next_map, &tunnel)?;
+            if let Some(accepted) = accepted {
+                accepted.settle();
+            }
             forget_removed_sources(&next_config, &next_map);
             *state.activity_graph.lock().await = None;
             let (_, _, _, _, after) = account_view(state)?;
@@ -448,8 +461,12 @@ pub(in crate::app) async fn machine_call(
                     "The note changed elsewhere. Synchronize, read it again and repeat the change.",
                 ));
             }
-            let saved = notes::save(state, &json!({"note": note}))
-                .map_err(|m| invalid(m.split_once("] ").map_or(m.as_str(), |(_, text)| text)))?;
+            let saved = notes::save_shared(host, &json!({"note": note}))
+                .await
+                .map_err(|m| match m.strip_prefix("[conflict] ") {
+                    Some(text) => conflict(text),
+                    None => invalid(m.split_once("] ").map_or(m.as_str(), |(_, text)| text)),
+                })?;
             let (_, _, _, _, after) = account_view(state)?;
             Ok(json!({"note": saved, "previous": before, "revision": after}))
         }
@@ -466,8 +483,12 @@ pub(in crate::app) async fn machine_call(
                     "The note changed elsewhere. Synchronize, read it again and repeat the change.",
                 ));
             }
-            notes::remove(state, &json!({"id": id}))
-                .map_err(|m| invalid(m.split_once("] ").map_or(m.as_str(), |(_, text)| text)))?;
+            notes::remove_shared(host, &json!({"id": id}))
+                .await
+                .map_err(|m| match m.strip_prefix("[conflict] ") {
+                    Some(text) => conflict(text),
+                    None => invalid(m.split_once("] ").map_or(m.as_str(), |(_, text)| text)),
+                })?;
             let (_, _, _, _, after) = account_view(state)?;
             Ok(json!({"removed": id, "previous": before, "revision": after}))
         }
@@ -1297,11 +1318,12 @@ fn settle(state: &DesktopState, forwarded: &Forwarded) {
 
 /// A note saved on a connected installation is decided by the coordinator, then kept here.
 pub(super) async fn note_save(
-    state: &DesktopState,
+    host: &Arc<Host>,
     args: &Value,
 ) -> std::result::Result<Value, String> {
+    let state = &host.state;
     let Some(link) = implementation::link(state).map_err(fail)? else {
-        return notes::save(state, args);
+        return notes::save_shared(host, args).await;
     };
     let note: Note = serde_json::from_value(args.get("note").cloned().unwrap_or(Value::Null))
         .map_err(|_| "[invalid_input] A note needs title and text, and optionally contexts, keywords, origin and reference.".to_owned())?;
@@ -1344,11 +1366,12 @@ pub(super) async fn note_save(
 }
 
 pub(super) async fn note_remove(
-    state: &DesktopState,
+    host: &Arc<Host>,
     args: &Value,
 ) -> std::result::Result<Value, String> {
+    let state = &host.state;
     let Some(link) = implementation::link(state).map_err(fail)? else {
-        return notes::remove(state, args);
+        return notes::remove_shared(host, args).await;
     };
     let id = args
         .get("id")

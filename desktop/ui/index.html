@@ -430,7 +430,7 @@
           </div>
           <div class="panel" id="panel-cloud">
             <div class="panel-head"><h2>Cloud storage</h2><span id="cloud-state" class="badge muted"></span><button id="cloud-refresh" type="button" class="secondary">Check now</button></div>
-            <p class="hint">Your account's encrypted copy in Cloudflare. Records are sealed on this computer with the account's content key, which never leaves it; everything keeps working from this computer's own data, which stays the source.</p>
+            <p class="hint">Your account's encrypted copy in Cloudflare. Records are sealed on this computer with the account's content key, which never leaves it; everything keeps working from this computer's own data.</p>
             <p id="cloud-summary" class="hint" role="status"></p>
             <p id="cloud-problem" class="callout warn" role="status" hidden></p>
             <div id="cloud-details" class="list" hidden></div>
@@ -441,6 +441,9 @@
               <div class="actions">
                 <button id="cloud-mirror-start" type="button">Start the encrypted copy</button>
                 <button id="cloud-verify" type="button" class="secondary">Verify the copy</button>
+                <button id="cloud-promote" type="button" class="secondary">Make the account store the source</button>
+                <button id="cloud-replace" type="button">Replace with the account store's</button>
+                <button id="cloud-demote" type="button" class="secondary">Make this computer the source again</button>
                 <button id="cloud-mirror-stop" type="button" class="secondary">Stop the copy</button>
                 <button id="cloud-disconnect" type="button" class="secondary">Disconnect this computer</button>
               </div>

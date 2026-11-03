@@ -24,6 +24,7 @@ pub fn wake() {
 pub mod engine;
 pub mod key;
 pub mod ledger;
+pub mod primary;
 pub mod seal;
 
 /// The collections of the account store (`cloud/src/protocol.ts`).
@@ -75,6 +76,13 @@ impl Collection {
 
     pub fn parse(name: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|c| c.name() == name)
+    }
+
+    /// The account's shared configuration: with the account store as the source of truth
+    /// (mode `primary`), these are written there first, under compare-and-swap, and pulled from
+    /// it; every other collection keeps being mirrored from the local stores.
+    pub fn is_configuration(self) -> bool {
+        matches!(self, Self::Settings | Self::Organization | Self::Notes)
     }
 
     /// The version of the record's payload format, bound into the sealed record.

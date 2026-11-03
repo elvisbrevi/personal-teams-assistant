@@ -121,6 +121,7 @@ async fn the_profile_mirrors_and_verifies_against_a_worker() {
         transport: &worker,
         ledger: &ledger,
         content: &content,
+        cas: false,
     };
     let flushed = engine.flush(now(), Limits::default()).await.unwrap();
     assert_eq!(flushed.sent, 6, "{flushed:?}");
@@ -191,6 +192,7 @@ fn wire(id: &str) -> Wire {
         schema: 1,
         deleted: false,
         sealed: Some(b"sealed".to_vec()),
+        base: None,
     }
 }
 
@@ -222,18 +224,38 @@ async fn the_protocol_is_read_strictly() {
         .await;
     let http = http(&server);
     assert_eq!(
-        http.write(&[wire("a"), wire("b")]).await.unwrap(),
+        http.write(&[wire("a"), wire("b")], false).await.unwrap(),
         [Outcome::Created, Outcome::Stale]
     );
     // An answer about other records than the ones sent is not an answer.
     assert_eq!(
-        http.write(&[wire("x"), wire("b")]).await,
+        http.write(&[wire("x"), wire("b")], false).await,
         Err(Failure::Refused("bad_reply".into()))
     );
     assert_eq!(
-        http.write(&[wire("a")]).await,
+        http.write(&[wire("a")], false).await,
         Err(Failure::Refused("bad_reply".into()))
     );
+    // Compare-and-swap fields go only when used, so older Workers keep accepting the mirror.
+    let based = Wire {
+        base: Some(1),
+        ..wire("a")
+    };
+    http.write(&[based, wire("b")], true).await.unwrap();
+    let bodies: Vec<Value> = server
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .filter(|r| r.method.as_str() == "POST")
+        .map(|r| serde_json::from_slice(&r.body).unwrap())
+        .collect();
+    assert!(bodies[0].get("atomic").is_none());
+    assert!(bodies[0]["records"][0].get("base_revision").is_none());
+    let last = bodies.last().unwrap();
+    assert_eq!(last["atomic"], json!(true));
+    assert_eq!(last["records"][0]["base_revision"], json!(1));
+    assert!(last["records"][1].get("base_revision").is_none());
     let page = http.page(Collection::Notes, 0, 500).await.unwrap();
     assert_eq!(page.records.len(), 2);
     assert_eq!(page.records[0].sealed.as_deref(), Some(&b"sealed"[..]));

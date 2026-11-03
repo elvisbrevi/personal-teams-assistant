@@ -96,6 +96,8 @@ const STORE_NOT_ENROLLED: &str =
     "This computer is not enrolled in the account store. Connect it again.";
 const STORE_OFF: &str = "Connected to the account store. Start the encrypted copy when you want one; nothing is uploaded until then.";
 const STORE_MIRROR: &str = "The encrypted copy is up to date.";
+const STORE_PRIMARY: &str = "The account store is the source of truth of this account's configuration, and this computer is up to date with it.";
+const STORE_CONFLICT: &str = "This computer and the account store changed the same configuration. Review it and replace this computer's version with the account store's; until then those records cannot be edited.";
 const STORE_PENDING: &str =
     "Changes are waiting to be copied to the account store; they are sent in the background.";
 const STORE_BLOCKED: &str = "Some records are too large for the account store and are not copied.";
@@ -724,6 +726,7 @@ async fn account_store(host: &Arc<Host>, shared: bool) -> Step {
         "standing": view["standing"], "mode": view["mode"], "last_live_at": view["link"]["last_live_at"],
         "pending": outbox["pending"], "blocked": outbox["blocked"],
         "last_verify_ok": mirror["last_verify"]["ok"],
+        "conflicts": mirror["primary"]["conflicts"],
         "token_expires_at": view["service_token"]["expires_at"],
     }));
     let place = gui("Settings > Advanced > Cloud storage");
@@ -758,7 +761,14 @@ async fn account_store(host: &Arc<Host>, shared: bool) -> Step {
     if view["service_token"]["renew"] == true {
         return step.is("attention", STORE_TOKEN).act(place);
     }
-    if view["mode"] != "mirror" {
+    let primary = view["mode"] == "primary";
+    if primary && mirror["primary"]["conflicts"].as_u64().unwrap_or(0) > 0 {
+        return step
+            .is("attention", STORE_CONFLICT)
+            .act(place)
+            .act(cli("pta cloud pull --replace --confirmed"));
+    }
+    if view["mode"] != "mirror" && !primary {
         return step
             .is("optional", STORE_OFF)
             .act(place)
@@ -779,6 +789,9 @@ async fn account_store(host: &Arc<Host>, shared: bool) -> Step {
         return step
             .is("waiting", STORE_PENDING)
             .act(cli("pta cloud status"));
+    }
+    if primary {
+        return step.is("done", STORE_PRIMARY).act(cli("pta cloud verify"));
     }
     step.is("done", STORE_MIRROR).act(cli("pta cloud verify"))
 }
