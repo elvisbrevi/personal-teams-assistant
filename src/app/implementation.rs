@@ -68,6 +68,12 @@ pub(super) struct Link {
     pub machine: String,
 }
 /// The coordinator connection of this installation, if it has one.
+/// The coordinator's account store mode (`off`, `mirror` or `primary`), asked over the machine
+/// protocol: a signed-in computer joins the store as its source only when the coordinator has.
+pub(super) async fn coordinator_store_mode(host: &Arc<Host>) -> Result<String> {
+    fleet::coordinator_store_mode(host).await
+}
+
 pub(super) fn link(state: &DesktopState) -> Result<Option<Link>> {
     Ok(state.implementation.connection()?.map(|c| Link {
         origin: c.url,

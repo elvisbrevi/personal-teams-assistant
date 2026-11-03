@@ -501,14 +501,15 @@ impl<L: Local, T: Transport> Engine<'_, L, T> {
         if !collection.is_configuration() {
             remote.retain(|s| s.own != Some(false));
         }
-        // Another installation's own settings are kept for it alone.
+        // Another installation's own settings are kept for it alone, and a tombstone of a record
+        // this installation never had (one removed before it joined) has nothing to compare.
         let known: BTreeSet<String> = self
             .ledger
             .rows(collection)?
             .into_iter()
             .map(|r| r.blind)
             .collect();
-        remote.retain(|s| known.contains(&s.id) || !self.foreign(collection, s));
+        remote.retain(|s| known.contains(&s.id) || (!s.deleted && !self.foreign(collection, s)));
         let others = (held - remote.len()) as u64;
         let local: BTreeMap<String, String> = self
             .local

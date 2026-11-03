@@ -1729,6 +1729,20 @@ for (const [label, options] of [['desktop', {}], ['phone', { context: { viewport
   check(`${label}: an enabled portal account connects to the operator's store without asking for a token`, await page.evaluate(() =>
     !document.querySelector('#cloud-connect-fold').hidden && document.querySelector('#cloud-client-id-field').hidden && document.querySelector('#cloud-client-secret-field').hidden
     && !document.querySelector('#cloud-connect-granted').hidden && document.querySelector('#cloud-endpoint').value === 'https://store.example.com' && document.querySelector('#cloud-endpoint').readOnly));
+  // A second computer of the account: it adopts the account's configuration instead of migrating its own.
+  await page.evaluate(async () => {
+    window.__ptaCloudGranted = undefined; window.__ptaCloudDisconnected = false; window.__ptaCloudAdopt = true;
+    window.__ptaCloudMirror = { key: { present: true }, mode: 'off' };
+    await loadCloud();
+  });
+  const adoptButton = panel.locator('#cloud-adopt');
+  check(`${label}: a second computer is offered to adopt the account's configuration, not to migrate its own`, await adoptButton.isVisible()
+    && await panel.locator('#cloud-migrate').isHidden() && (await panel.locator('#cloud-mirror-summary').innerText()).includes('otro computador'));
+  await adoptButton.click();
+  check(`${label}: the first tap only arms the adoption`, (await adoptButton.innerText()).includes('Toca de nuevo') && await page.evaluate(() => window.__ptaCloudMigrateArgs?.adopt !== true));
+  await adoptButton.click();
+  await page.waitForFunction(() => window.__ptaCloudMigrateArgs?.adopt === true);
+  check(`${label}: the second tap migrates adopting the account's configuration`, await page.evaluate(() => window.__ptaCloudMigrateArgs.action === 'start'));
   check(`${label}: cloud storage has no browser errors`, errors.length === 0, errors.join('; '));
   await context.close();
 }

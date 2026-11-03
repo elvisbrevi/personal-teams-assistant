@@ -480,7 +480,7 @@ pub(super) const TOOLS: &[Tool] = &[
         effect: Effect::External,
         schema: || {
             object(
-                json!({"action":{"type":"string","enum":["plan","start"],"description":"plan (default) or start."},"confirmed":confirmed()}),
+                json!({"action":{"type":"string","enum":["plan","start"],"description":"plan (default) or start."},"adopt":{"type":"boolean","description":"With start, on a second computer of the account (the store already holds its configuration): replace this computer's configuration with the account's, after a private backup, and upload only its history. Ask the user first."},"confirmed":confirmed()}),
                 &[],
             )
         },
@@ -2049,6 +2049,7 @@ pub(super) fn confirmation(name: &str, args: &Value) -> Option<String> {
             "Bring the configuration the account store changed into this computer now?".into()
         },
         "cloud_migrate" => match args["action"].as_str().unwrap_or("plan") {
+            "start" if args["adopt"] == true => "Back up this profile, replace this computer's configuration with the account's from the account store, upload this computer's history encrypted, verify and keep it mirrored?".into(),
             "start" => "Back up this profile, then upload its records encrypted with the account content key to the account store, verify the copy and keep it mirrored?".into(),
             _ => "List what migrating this installation to the account store would upload (nothing is written or sent)?".into(),
         },

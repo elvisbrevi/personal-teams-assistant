@@ -495,6 +495,11 @@ async fn linked_status(host: &Arc<Host>) -> Result<Value> {
                 "enrolled_at": whoami["installation"]["enrolled_at"],
                 "account_installations": whoami["account"]["installations"],
             });
+            // Another computer migrated first: migrating here adopts the account's configuration.
+            let held = store["collections"]["settings"]["records"]
+                .as_u64()
+                .unwrap_or(0);
+            view["adopt"] = json!(held > 0 && mirror::adopts(host));
             view["store"] = store;
         }
         (Err(failure), _) | (_, Err(failure)) => {

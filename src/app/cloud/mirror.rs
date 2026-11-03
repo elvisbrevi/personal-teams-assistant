@@ -67,8 +67,10 @@ impl Local for HostLocal<'_> {
     }
 
     fn configuration(&self) -> bool {
-        // Signed in to a coordinator: the account's configuration comes from it.
+        // Signed in to a coordinator: the account's configuration comes from it, unless this
+        // computer joined the account store as its source (primary).
         !matches!(crate::app::implementation::link(&self.0.state), Ok(Some(_)))
+            || primary::active(&self.0.state)
     }
 
     fn collect(&self, collection: Collection) -> Result<Vec<Exported>> {
@@ -416,6 +418,17 @@ fn open(host: &Host, cloud: &Cloud) -> std::result::Result<Setup, Missing> {
         content,
         ledger,
     })
+}
+
+/// Whether this installation would adopt the account's configuration when it migrates: it keeps
+/// the configuration in the store and never acknowledged any of it (another computer migrated
+/// first, when the store holds some). For `cloud_status`.
+pub(super) fn adopts(host: &Host) -> bool {
+    HostLocal(host).configuration()
+        && !Ledger::open(&ledger_path(host))
+            .ok()
+            .and_then(|ledger| ledger.rows(Collection::Settings).ok())
+            .is_some_and(|rows| rows.iter().any(|r| r.acked_revision > 0))
 }
 
 fn median(values: &mut [u64]) -> u64 {

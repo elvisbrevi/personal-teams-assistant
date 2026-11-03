@@ -472,6 +472,7 @@
       problem: 'The portal operator has not enabled the account store for this account.', checked_at: Math.floor(Date.now() / 1000), mirror: { key: { present: false }, mode: 'off' },
     }) : ({
       ...(window.__ptaCloudGranted ? { enabled: true, granted_endpoint: window.__ptaCloudGranted } : {}),
+      ...(window.__ptaCloudAdopt ? { adopt: true } : {}),
       mode: window.__ptaCloudMirror?.mode ?? 'off', endpoint: 'https://store.example.com', enrolled: !window.__ptaCloudDisconnected, installation: '00000000-0000-4000-8000-000000000001',
       standing: 'live', checked_at: Math.floor(Date.now() / 1000) - 30,
       worker: { environment: 'production', version: '0.1.0', deployment: null, protocols: [1], schema: { registry: 1, account_store: 1 } },
@@ -483,7 +484,9 @@
     }),
     // Synthetic migration: a backup first, then the upload and a matching verification.
     cloud_migrate: args => {
+      window.__ptaCloudMigrateArgs = structuredClone(args);
       if (args?.action === 'start') {
+        window.__ptaCloudAdopt = false;
         const backups = { count: 1, latest: { path: '/profile/backups/cloud-1', created_at: secs(NOW), reason: 'migrate', bytes: 4096 } };
         window.__ptaCloudMirror = { key: { present: true, active: 1, versions: [1], fingerprint: '0123456789ab' }, mode: 'mirror', backups, outbox: { pending: 0, blocked: 0, retrying: 0, synced: 42, oldest_seconds: null }, initial_verified_at: secs(NOW), last_success_at: secs(NOW), last_verify: { at: secs(NOW), ok: true } };
         return { action: 'start', mode: 'mirror', complete: true, key_created: true, uploaded: 42, backup: backups.latest, verify: { ok: true, collections: [] } };

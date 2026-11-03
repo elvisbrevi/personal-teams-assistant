@@ -320,3 +320,48 @@ async fn erasing_needs_a_rollback_and_then_empties_the_store_but_nothing_local()
         true
     );
 }
+
+#[tokio::test]
+async fn a_second_computer_adopts_the_accounts_configuration_instead_of_uploading_its_own() {
+    let (one, two, three) = (
+        tempfile::tempdir().unwrap(),
+        tempfile::tempdir().unwrap(),
+        tempfile::tempdir().unwrap(),
+    );
+    let worker = Arc::new(Worker::default());
+    let first = connected(one.path(), &worker);
+    let migrated = call(&first, "cloud_migrate", json!({"action": "start"})).await;
+    assert!(migrated.ok, "{:?}", migrated.message);
+    // Another computer of the account, with its own configuration and the key handed over to it.
+    let second = connected(two.path(), &worker);
+    assert!(save_greeting(&second, "pt").await.ok);
+    let bind = second.state.settings.config().unwrap().server.bind;
+    let key = key::load(&keys_dir(&first)).unwrap().unwrap();
+    key::import(&keys_dir(&second), &key.backup()).unwrap();
+    *worker.installation.lock().unwrap() = 2;
+    let refused = call(&second, "cloud_migrate", json!({"action": "start"})).await;
+    assert_eq!(refused.code, "state_conflict", "{:?}", refused.message);
+    assert!(backups(&second).is_empty(), "refused before anything");
+    let adopted = call(
+        &second,
+        "cloud_migrate",
+        json!({"action": "start", "adopt": true}),
+    )
+    .await;
+    assert!(adopted.ok, "{:?}", adopted.message);
+    assert_eq!(adopted.data["mode"], "mirror");
+    assert!(adopted.data["adopted"]["applied"].as_u64().unwrap() > 0);
+    let config = second.state.settings.config().unwrap();
+    assert_eq!(config.policy.greeting, "en", "the account's configuration");
+    assert_eq!(config.server.bind, bind, "its own settings stay");
+    // A third computer without the key is told to get it first.
+    let third = connected(three.path(), &worker);
+    let without = call(
+        &third,
+        "cloud_migrate",
+        json!({"action": "start", "adopt": true}),
+    )
+    .await;
+    assert_eq!(without.code, "not_ready", "{:?}", without.message);
+    assert!(key::load(&keys_dir(&third)).unwrap().is_none());
+}
