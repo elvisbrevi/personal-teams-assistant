@@ -222,6 +222,118 @@ pub(super) fn authorize_machine(
     save_pairings(root, &entries)?;
     Ok(json!({"machine_id":machine_id,"expires_at":expires_at,"private_file":output}))
 }
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct ServiceToken {
+    pub client_id: String,
+    pub client_secret: String,
+}
+
+/// Enable or disable the account store for a portal account (`pta web users cloud enable|disable
+/// USER`). Enabling stores the account's Access service token (JSON on stdin) in that account's
+/// own credential store and writes the grant the account's host reads; the account then connects,
+/// migrates, rolls back or erases its own copy. Disabling removes both, so its host stops using
+/// the store; its local data and the copy stay. The owner's own profile uses `pta cloud connect`.
+fn cloud_grant(root: &Path, args: &[String]) -> Result<Value> {
+    let enable = args.iter().any(|a| a == "enable");
+    apply_cloud_grant(
+        root,
+        args,
+        enable.then(json_stdin::<ServiceToken>).transpose()?,
+    )
+}
+
+/// `cloud_grant` with the service token already read (`None` to disable).
+pub(super) fn apply_cloud_grant(
+    root: &Path,
+    args: &[String],
+    token: Option<ServiceToken>,
+) -> Result<Value> {
+    use super::super::cloud;
+    // Positional words, wherever the flags and their values appear.
+    let mut words = Vec::new();
+    let mut flags = args.iter();
+    while let Some(arg) = flags.next() {
+        if matches!(arg.as_str(), "--endpoint" | "--token-expires") {
+            flags.next();
+        } else if !arg.starts_with("--") {
+            words.push(arg.as_str());
+        }
+    }
+    let action = words.get(3).copied().unwrap_or("");
+    let name = username(words.get(4).context("missing username")?)?;
+    let settings = settings(root)?;
+    let entry = accounts(root)?
+        .into_iter()
+        .find(|e| e.username == name)
+        .context("unknown username")?;
+    ensure!(
+        !entry.current_profile && !settings.owns(&entry),
+        "The owner's own profile connects with pta cloud connect."
+    );
+    let profile = profile_dir(root, &entry);
+    let credentials = profile.join("credentials");
+    match action {
+        "enable" => {
+            ensure!(
+                entry.authorized,
+                "Authorize this account locally before enabling the account store for it."
+            );
+            let option = |flag: &str| {
+                args.iter()
+                    .position(|a| a == flag)
+                    .and_then(|i| args.get(i + 1))
+                    .cloned()
+            };
+            let endpoint = option("--endpoint").context("--endpoint is required")?;
+            let endpoint = crate::config::Cloud::check_endpoint(endpoint.trim())
+                .map_err(|_| anyhow::anyhow!("invalid input: --endpoint must be an HTTPS origin"))?
+                .as_str()
+                .trim_end_matches('/')
+                .to_owned();
+            let token_expires_at = match option("--token-expires") {
+                None => 0,
+                Some(text) => cloud::expiry(&text)
+                    .context("invalid input: --token-expires is a date, like 2027-11-03")?,
+            };
+            let token = token.context("the service token is required on stdin")?;
+            let (id, secret) = (token.client_id.trim(), token.client_secret.trim());
+            ensure!(
+                cloud::valid_client_id(id) && cloud::valid_client_secret(secret),
+                "invalid input: the service token's client ID or secret is malformed"
+            );
+            // The token first: a grant without it reads as not connected, never the reverse.
+            security::put_file_secret(&credentials, "default", cloud::ACCESS_ID, id)?;
+            security::put_file_secret(&credentials, "default", cloud::ACCESS_SECRET, secret)?;
+            let grant = cloud::Grant {
+                endpoint: endpoint.clone(),
+                granted_at: access::now() as i64,
+                token_expires_at,
+            };
+            write_private(
+                &profile.join(cloud::GRANT_FILE),
+                &serde_json::to_string(&grant)?,
+            )?;
+            Ok(
+                json!({"username": entry.username, "enabled": true, "endpoint": endpoint,
+                "token_expires_at": (token_expires_at > 0).then_some(token_expires_at),
+                "next": "The account connects from its Settings > Advanced > Cloud storage (or pta cloud connect --endpoint with no stdin) and then migrates its own data."}),
+            )
+        }
+        "disable" => {
+            let grant = profile.join(cloud::GRANT_FILE);
+            if grant.exists() {
+                fs::remove_file(&grant)?;
+            }
+            security::delete_file_secret(&credentials, "default", cloud::ACCESS_ID)?;
+            security::delete_file_secret(&credentials, "default", cloud::ACCESS_SECRET)?;
+            Ok(json!({"username": entry.username, "enabled": false,
+                "next": "Delete the account's service token in Cloudflare Access. The account's local data and its copy in the store stay; it can no longer reach the store."}))
+        }
+        _ => anyhow::bail!("use: pta web users cloud enable|disable USER"),
+    }
+}
+
 pub(super) fn consume_pairing(
     root: &Path,
     config: &Settings,
@@ -258,7 +370,8 @@ pub(super) fn admin(args: &[String]) -> Result<control::Reply> {
     let public_account = |account: &Account| {
         json!({"id":account.id,"username":account.username,
         "enabled":account.enabled,"current_profile":account.current_profile,
-        "authorized":account.authorized,"access_binding":account.access_binding,"profile":profile_dir(&root, account)})
+        "authorized":account.authorized,"access_binding":account.access_binding,"profile":profile_dir(&root, account),
+        "cloud_enabled":profile_dir(&root, account).join(super::super::cloud::GRANT_FILE).is_file()})
     };
     let data = match action {
         "status" => {
@@ -298,7 +411,9 @@ pub(super) fn admin(args: &[String]) -> Result<control::Reply> {
         }
         "users" => {
             let operation = args.get(2).map(String::as_str).unwrap_or("");
-            if operation == "list" {
+            if operation == "cloud" {
+                cloud_grant(&root, args)?
+            } else if operation == "list" {
                 json!(
                     accounts(&root)?
                         .iter()

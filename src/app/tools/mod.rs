@@ -464,7 +464,7 @@ pub(super) const TOOLS: &[Tool] = &[
     Tool {
         name: "cloud_connect",
         title: "Connect to the account store",
-        description: "Enroll this installation with the account store Worker at the given HTTPS origin, using the Access service token already stored on this installation (the user gives a new one only through pta cloud connect on stdin or the application's Settings, never through this tool), and keep the installation credential the Worker issues. Owner only. If the installation is already enrolled and live it changes nothing. The mode stays off: nothing is uploaded. Needs the user's confirmation.",
+        description: "Enroll this installation with the account store Worker at the given HTTPS origin, using the Access service token already stored on this installation (the user gives a new one only through pta cloud connect on stdin or the application's Settings, never through this tool), and keep the installation credential the Worker issues. Owner, or a portal account the operator enabled the account store for. If the installation is already enrolled and live it changes nothing. The mode stays off: nothing is uploaded. Needs the user's confirmation.",
         effect: Effect::External,
         schema: || {
             object(
@@ -476,7 +476,7 @@ pub(super) const TOOLS: &[Tool] = &[
     Tool {
         name: "cloud_migrate",
         title: "Migrate to the account store",
-        description: "Move this installation's records into the account store. action plan (default) lists per collection what would be uploaded (records and bytes), what stays on this computer and why, and the size of the backup; it writes and sends nothing. action start first backs up this profile (every database and the settings files in a private backups/cloud-<time>/, the newest three kept), creates the account content key on first use (tell the user to back it up with pta variables key backup), uploads every collection sealed on this installation (AES-256-GCM-SIV; the Worker sees only blinded IDs, revisions and digests), verifies the copy by reading it back and only then switches the mode to mirror; run it again to continue an interrupted upload. Local stays the source of truth; secrets, sessions, send nonces and runs in progress never leave. Owner only. Needs the user's confirmation.",
+        description: "Move this installation's records into the account store. action plan (default) lists per collection what would be uploaded (records and bytes), what stays on this computer and why, and the size of the backup; it writes and sends nothing. action start first backs up this profile (every database and the settings files in a private backups/cloud-<time>/, the newest three kept), creates the account content key on first use (tell the user to back it up with pta variables key backup), uploads every collection sealed on this installation (AES-256-GCM-SIV; the Worker sees only blinded IDs, revisions and digests), verifies the copy by reading it back and only then switches the mode to mirror; run it again to continue an interrupted upload. Local stays the source of truth; secrets, sessions, send nonces and runs in progress never leave. Owner, or a portal account the operator enabled the account store for. Needs the user's confirmation.",
         effect: Effect::External,
         schema: || {
             object(
@@ -488,7 +488,7 @@ pub(super) const TOOLS: &[Tool] = &[
     Tool {
         name: "cloud_rollback",
         title: "Roll back from the account store",
-        description: "Stop using the account store on this installation: back up this profile, then, when the store is the source of the configuration (primary), pull what it changed (refused on a conflict or without an answer), verify that the store holds nothing this computer lacks and switch the mode to off. Nothing local is deleted and the copy in the store stays until cloud_erase; cloud_migrate continues from it. keep_local skips the pull and the clean verification and keeps this computer's configuration exactly as it is: ask the user before using it. Owner only. Needs the user's confirmation.",
+        description: "Stop using the account store on this installation: back up this profile, then, when the store is the source of the configuration (primary), pull what it changed (refused on a conflict or without an answer), verify that the store holds nothing this computer lacks and switch the mode to off. Nothing local is deleted and the copy in the store stays until cloud_erase; cloud_migrate continues from it. keep_local skips the pull and the clean verification and keeps this computer's configuration exactly as it is: ask the user before using it. Owner, or a portal account the operator enabled the account store for. Needs the user's confirmation.",
         effect: Effect::External,
         schema: || {
             object(
@@ -500,21 +500,21 @@ pub(super) const TOOLS: &[Tool] = &[
     Tool {
         name: "cloud_erase",
         title: "Erase the account store copy",
-        description: "After a rollback (mode off) and with no other connected computer in the account: erase this account's records and backups in the account store, forget what was acknowledged and set the account content key aside (keys/cloud-content-retired-<time>.json), so a later migration uses a new key. This computer keeps all of its data. Cloudflare keeps a 30-day point-in-time recovery of the store that only the operator can restore and only the retired key can read; erased R2 backups cannot be recovered. Irreversible for the user: ask before calling. Owner only. Needs the user's confirmation.",
+        description: "After a rollback (mode off) and with no other connected computer in the account: erase this account's records and backups in the account store, forget what was acknowledged and set the account content key aside (keys/cloud-content-retired-<time>.json), so a later migration uses a new key. This computer keeps all of its data. Cloudflare keeps a 30-day point-in-time recovery of the store that only the operator can restore and only the retired key can read; erased R2 backups cannot be recovered. Irreversible for the user: ask before calling. Owner, or a portal account the operator enabled the account store for. Needs the user's confirmation.",
         effect: Effect::External,
         schema: || object(json!({"confirmed":confirmed()}), &[]),
     },
     Tool {
         name: "cloud_installations",
         title: "Account store installations",
-        description: "The account's computers in the account store: ID, label, host version, when each enrolled and was last seen, whether it was revoked and which one is this computer (current). Read-only. Owner only.",
+        description: "The account's computers in the account store: ID, label, host version, when each enrolled and was last seen, whether it was revoked and which one is this computer (current). Read-only. Owner, or a portal account the operator enabled the account store for.",
         effect: Effect::Read,
         schema: none,
     },
     Tool {
         name: "cloud_revoke",
         title: "Revoke an account store installation",
-        description: "Revoke another computer of the account in the account store, by the ID cloud_installations lists: its credential stops working at once, and it keeps its own data. Use it for a lost or retired computer, or before cloud_erase, which needs a single connected computer. This computer disconnects with cloud_disconnect instead. Owner only. Needs the user's confirmation.",
+        description: "Revoke another computer of the account in the account store, by the ID cloud_installations lists: its credential stops working at once, and it keeps its own data. Use it for a lost or retired computer, or before cloud_erase, which needs a single connected computer. This computer disconnects with cloud_disconnect instead. Owner, or a portal account the operator enabled the account store for. Needs the user's confirmation.",
         effect: Effect::External,
         schema: || {
             object(
@@ -526,7 +526,7 @@ pub(super) const TOOLS: &[Tool] = &[
     Tool {
         name: "cloud_disconnect",
         title: "Disconnect from the account store",
-        description: "Disconnect this installation from the account store: revoke its installation credential in the Worker when it answers (store_notified), remove CLOUD_STORE_TOKEN and set the mode to off. forget_service_token also removes the account's Access service token and the endpoint from this installation. The encrypted copy, the account content key and the outbox are kept, so connecting again continues. Owner only. Needs the user's confirmation.",
+        description: "Disconnect this installation from the account store: revoke its installation credential in the Worker when it answers (store_notified), remove CLOUD_STORE_TOKEN and set the mode to off. forget_service_token also removes the account's Access service token and the endpoint from this installation. The encrypted copy, the account content key and the outbox are kept, so connecting again continues. Owner, or a portal account the operator enabled the account store for. Needs the user's confirmation.",
         effect: Effect::External,
         schema: || {
             object(
@@ -538,7 +538,7 @@ pub(super) const TOOLS: &[Tool] = &[
     Tool {
         name: "cloud_promote",
         title: "Make the account store the source of truth",
-        description: "action promote: from mirror, send what is pending, verify the copy and only when it is identical make the account store the source of truth of the account's configuration (mode primary): all of the configuration except [secrets] and [cloud], the knowledge map, the organization with its guides and the notes are then written there first under compare-and-swap and pulled from it; without its answer the configuration is read-only (nothing is queued), while Teams and every read keep working locally. Needs a Worker with the cas feature; refused on an installation signed in to a coordinator. action demote: back to mirror, this computer's configuration is the source of truth again. Owner only. Needs the user's confirmation.",
+        description: "action promote: from mirror, send what is pending, verify the copy and only when it is identical make the account store the source of truth of the account's configuration (mode primary): all of the configuration except [secrets] and [cloud], the knowledge map, the organization with its guides and the notes are then written there first under compare-and-swap and pulled from it; without its answer the configuration is read-only (nothing is queued), while Teams and every read keep working locally. Needs a Worker with the cas feature; refused on an installation signed in to a coordinator. action demote: back to mirror, this computer's configuration is the source of truth again. Owner, or a portal account the operator enabled the account store for. Needs the user's confirmation.",
         effect: Effect::External,
         schema: || {
             object(
@@ -550,7 +550,7 @@ pub(super) const TOOLS: &[Tool] = &[
     Tool {
         name: "cloud_pull",
         title: "Pull the configuration from the account store",
-        description: "Primary mode: bring what the account store changed in the configuration into this computer now (the host also does it on its own). A record changed both here (never accepted by the store) and in the store is a conflict and stays as it is here; replace adopts the store's version for those after a private backup in cloud/backups/. Ask the user before replacing. Owner only. Needs the user's confirmation.",
+        description: "Primary mode: bring what the account store changed in the configuration into this computer now (the host also does it on its own). A record changed both here (never accepted by the store) and in the store is a conflict and stays as it is here; replace adopts the store's version for those after a private backup in cloud/backups/. Ask the user before replacing. Owner, or a portal account the operator enabled the account store for. Needs the user's confirmation.",
         effect: Effect::External,
         schema: || {
             object(

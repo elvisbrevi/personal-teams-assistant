@@ -2711,6 +2711,143 @@ async fn account_variables_are_private_to_each_account_and_never_leave_as_values
 }
 
 #[tokio::test]
+async fn the_operator_enables_the_account_store_per_portal_account() {
+    use authority::Transport::{Browser, Machine};
+    let (_dir, portal, entries, _issuer) = configured_fixture().await;
+    let hosts: Vec<_> = entries
+        .iter()
+        .map(|account| {
+            let profile = profile_dir(&portal.root, account);
+            Arc::new(Host {
+                state: init_state(&profile, &profile.join("data")).unwrap(),
+                shell: Box::new(NativeShell),
+            })
+        })
+        .collect();
+    async fn invoke(
+        host: &Arc<Host>,
+        transport: authority::Transport,
+        method: &str,
+        args: Value,
+    ) -> control::Reply {
+        let mut request = control::Request::new(method);
+        request.args = args;
+        authority::within(
+            authority::Invocation {
+                scope: host.state.authority.clone(),
+                transport,
+            },
+            control::dispatch(host, request),
+        )
+        .await
+    }
+    let plan = json!({"action": "plan"});
+    let (index, host) = hosts
+        .iter()
+        .enumerate()
+        .find(|(_, h)| h.state.authority.shared && !h.state.authority.owner)
+        .unwrap();
+    let account = &entries[index];
+    let words = |action: &str| -> Vec<String> {
+        [
+            "web",
+            "users",
+            "cloud",
+            action,
+            account.username.as_str(),
+            "--endpoint",
+            "https://store.example.com",
+        ]
+        .iter()
+        .map(|w| w.to_string())
+        .collect()
+    };
+    let token = || {
+        Some(store::ServiceToken {
+            client_id: "synthetic-account.access".into(),
+            client_secret: "synthetic-account-client-secret".into(),
+        })
+    };
+    // Until the operator enables it, the account sees why and reaches nothing.
+    let status = invoke(host, Browser, "cloud_status", json!({})).await;
+    assert!(
+        status.ok && status.data["enabled"] == false,
+        "{:?}",
+        status.message
+    );
+    let denied = invoke(host, Browser, "cloud_migrate", plan.clone()).await;
+    assert_eq!(denied.code, "authority_denied");
+    assert!(denied.message.unwrap_or_default().contains("operator"));
+
+    let enabled = store::apply_cloud_grant(&portal.root, &words("enable"), token()).unwrap();
+    assert_eq!(enabled["enabled"], true);
+    let profile = profile_dir(&portal.root, account);
+    let stored = profile
+        .join("credentials")
+        .join("default")
+        .join("CLOUD_ACCESS_CLIENT_SECRET");
+    assert_eq!(
+        fs::read_to_string(&stored).unwrap(),
+        "synthetic-account-client-secret"
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            fs::metadata(&stored).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+    // The account now plans its own migration; a machine credential still cannot.
+    let planned = invoke(host, Browser, "cloud_migrate", plan.clone()).await;
+    assert!(planned.ok, "{:?}", planned.message);
+    assert_eq!(
+        invoke(host, Machine, "cloud_migrate", plan.clone())
+            .await
+            .code,
+        "authority_denied"
+    );
+    let status = invoke(host, Browser, "cloud_status", json!({})).await;
+    assert_eq!(status.data["enabled"], true);
+    assert_eq!(status.data["granted_endpoint"], "https://store.example.com");
+    // It uses the operator's token and store, never its own.
+    for args in [
+        json!({"endpoint":"https://store.example.com","client_id":"other.access","client_secret":"synthetic-other-client-secret"}),
+        json!({"endpoint":"https://elsewhere.example.com"}),
+    ] {
+        let refused = invoke(host, Browser, "cloud_connect", args).await;
+        assert_eq!(refused.code, "invalid_input", "{:?}", refused.message);
+    }
+    // Every other account stays without it, and the owner's own profile is never granted here.
+    for (other, entry) in hosts.iter().zip(&entries) {
+        if entry.id == account.id {
+            continue;
+        }
+        if other.state.authority.shared {
+            assert_eq!(
+                invoke(other, Browser, "cloud_migrate", plan.clone())
+                    .await
+                    .code,
+                "authority_denied"
+            );
+        }
+        let mut words = words("enable");
+        words[4] = entry.username.clone();
+        if portal.settings.owns(entry) || entry.current_profile {
+            assert!(store::apply_cloud_grant(&portal.root, &words, token()).is_err());
+        }
+    }
+
+    let disabled = store::apply_cloud_grant(&portal.root, &words("disable"), None).unwrap();
+    assert_eq!(disabled["enabled"], false);
+    assert!(!stored.exists());
+    assert_eq!(
+        invoke(host, Browser, "cloud_migrate", plan).await.code,
+        "authority_denied"
+    );
+}
+
+#[tokio::test]
 async fn consumer_bindings_are_private_per_account_and_shared_accounts_run_no_processes() {
     use crate::security::AccountSecrets;
     use authority::Transport::{Browser, Local, Machine};

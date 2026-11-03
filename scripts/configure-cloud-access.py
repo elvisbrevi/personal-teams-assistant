@@ -13,7 +13,9 @@ and Worker names come from cloud/wrangler.jsonc. Every run writes a report witho
               removed afterwards.
   production  Access applications and Worker secrets for the production Worker, then one service
               token for this account, whose client ID and secret go only to `pta cloud connect` on
-              standard input.
+              standard input. With --portal-user USER the token is that portal account's instead:
+              it goes only to `pta web users cloud enable USER` on standard input (a token that
+              account already had is replaced; the account moves to the new one when it connects).
 
 Each hostname gets a self-hosted application whose only policy is Service Auth for the listed service
 tokens, plus an exact Bypass application for /v1/health. Applications this script did not create are
@@ -42,6 +44,7 @@ APP_PREFIX = "pta-cloud"
 SERVICE_POLICY = "Assistant installations"
 HEALTH_POLICY = "Public health only"
 TOKEN_DURATION = "8760h"
+TOKEN_SECONDS = 8760 * 3600
 PERMISSIONS = {
     "/service_tokens": "Access: Service Tokens Write",
     "/organizations": "Access: Organizations Read",
@@ -456,13 +459,7 @@ def connect(access, label, report):
     if current.get("endpoint") == endpoint and current.get("enrolled"):
         report["connect"] = "already connected"
         return
-    token = access.create_token(label)
-    previous = [t["id"] for t in access.tokens() if t["id"] != token["id"] and t.get("name") == token.get("name")]
-    configure_worker(access, (access.admitted() - set(previous)) | {token["id"]})
-    for ident in previous:
-        access.delete_token(ident)
-    wait_for_configuration(access.hostname)
-    wait_for_admission(access.hostname, token)
+    token, _ = replace_token(access, label)
     payload = json.dumps({"client_id": token["client_id"], "client_secret": token["client_secret"]})
     completed = subprocess.run([pta, "--json", "cloud", "connect", "--endpoint", endpoint, "--label", label, "--confirmed"],
                                input=payload, capture_output=True, text=True, timeout=120)
@@ -471,6 +468,34 @@ def connect(access, label, report):
                          "installation": (outcome.get("data") or {}).get("installation")}
     if completed.returncode != 0:
         raise SetupError("`pta cloud connect` did not complete; see the report.")
+
+
+def replace_token(access, label):
+    """A new service token named for `label`, admitted in place of the previous one of that name."""
+    token = access.create_token(label)
+    previous = [t["id"] for t in access.tokens() if t["id"] != token["id"] and t.get("name") == token.get("name")]
+    configure_worker(access, (access.admitted() - set(previous)) | {token["id"]})
+    for ident in previous:
+        access.delete_token(ident)
+    wait_for_configuration(access.hostname)
+    wait_for_admission(access.hostname, token)
+    return token, bool(previous)
+
+
+def enable_portal_user(access, user, report):
+    """A service token for a portal account; its secret goes only to `pta web users cloud enable`."""
+    pta = shutil.which("pta") or str(Path.home() / ".cargo" / "bin" / "pta")
+    token, replaced = replace_token(access, f"portal {user}")
+    expires = time.strftime("%Y-%m-%d", time.gmtime(time.time() + TOKEN_SECONDS))
+    payload = json.dumps({"client_id": token["client_id"], "client_secret": token["client_secret"]})
+    completed = subprocess.run([pta, "--json", "web", "users", "cloud", "enable", user,
+                                "--endpoint", f"https://{access.hostname}", "--token-expires", expires],
+                               input=payload, capture_output=True, text=True, timeout=120)
+    outcome = json.loads(completed.stdout or "{}")
+    report["portal_user"] = {"exit_code": completed.returncode, "code": outcome.get("code"),
+                             "replaced": replaced, "token_expires": expires}
+    if completed.returncode != 0:
+        raise SetupError("`pta web users cloud enable` did not complete; see the report.")
 
 
 def private_json(path, value):
@@ -502,7 +527,10 @@ def run(args):
             team = configure_worker(access, access.admitted())
             report["team_domain"] = team
             report["health"] = wait_for_configuration(access.hostname)
-            connect(access, args.label, report)
+            if args.portal_user:
+                enable_portal_user(access, args.portal_user, report)
+            else:
+                connect(access, args.label, report)
         report["ok"] = True
     except (SetupError, OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
         report["ok"] = False
@@ -517,6 +545,7 @@ def main():
     parser.add_argument("environment", choices=["staging", "production"])
     parser.add_argument("--report", type=Path, required=True, help="private JSON report without secrets")
     parser.add_argument("--label", default="server", help="installation label (production)")
+    parser.add_argument("--portal-user", help="portal account to enable the account store for (production)")
     parser.add_argument("--account", help="Cloudflare account ID (instead of CLOUDFLARE_ACCOUNT_ID)")
     args = parser.parse_args()
     if args.account:
@@ -524,6 +553,8 @@ def main():
         os.environ["CLOUDFLARE_ACCOUNT_ID"] = args.account
     if not re.fullmatch(r"[a-z0-9][a-z0-9 -]{0,40}", args.label):
         parser.error("--label: lowercase letters, digits, spaces and dashes")
+    if args.portal_user is not None and (args.environment != "production" or not re.fullmatch(r"[a-z0-9][a-z0-9._@-]{0,63}", args.portal_user)):
+        parser.error("--portal-user: a portal username, for production only")
     sys.exit(run(args))
 
 

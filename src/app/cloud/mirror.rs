@@ -416,6 +416,10 @@ fn median(values: &mut [u64]) -> u64 {
 /// One sweep and upload of what changed, after a pull in primary mode. Used by the loop; the
 /// engine does the work.
 async fn pass(host: &Arc<Host>) -> std::result::Result<Option<String>, ()> {
+    // A portal account whose operator disabled the account store sends and pulls nothing.
+    if host.state.authority.shared && super::grant(host.state.settings.profile()).is_none() {
+        return Ok(None);
+    }
     // A pull that fails stops the pass: configuration is never pushed over what the store holds.
     match primary::pass_pull(host).await {
         Ok(()) => {}

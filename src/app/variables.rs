@@ -409,11 +409,16 @@ fn mutate(store: &Store, method: &str, args: &Value) -> std::result::Result<Valu
     }
 }
 
-/// The directory of the cloud mirror's content key, for the owner of an unshared profile only.
+/// The directory of the cloud mirror's content key: for the owner of an unshared profile, or a
+/// portal account the operator enabled the account store for (key custody stays operator-local).
 fn cloud_keys(host: &Host) -> Option<PathBuf> {
+    let profile = host.state.settings.profile();
     authority::invocation(&host.state)
-        .is_ok_and(|i| i.scope.owner && !i.scope.shared)
-        .then(|| host.state.settings.profile().join("keys"))
+        .is_ok_and(|i| {
+            (i.scope.owner && !i.scope.shared)
+                || (i.scope.shared && super::cloud::grant(profile).is_some())
+        })
+        .then(|| profile.join("keys"))
 }
 
 fn run(host: &Host, method: &str, args: &Value) -> std::result::Result<Value, vault::Error> {

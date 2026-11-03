@@ -1708,6 +1708,15 @@ for (const [label, options] of [['desktop', {}], ['phone', { context: { viewport
   await disconnect.click();
   await panel.locator('#cloud-mirror').waitFor({ state: 'hidden' });
   check(`${label}: the second tap disconnects and hides the copy`, await page.evaluate(() => window.__ptaCloudDisconnected === true));
+  // A portal account: first without the operator's permission, then with it.
+  await page.evaluate(async () => { window.__ptaCloudEnabled = false; await loadCloud(); });
+  check(`${label}: a portal account the operator did not enable says so and offers no connection`, await panel.locator('#cloud-connect-fold').isHidden()
+    && (await panel.locator('#cloud-problem').innerText()).includes('operador del portal'));
+  await page.evaluate(async () => { window.__ptaCloudEnabled = true; window.__ptaCloudGranted = 'https://store.example.com'; await loadCloud(); });
+  // The connection form is folded; what it offers is read from the elements themselves.
+  check(`${label}: an enabled portal account connects to the operator's store without asking for a token`, await page.evaluate(() =>
+    !document.querySelector('#cloud-connect-fold').hidden && document.querySelector('#cloud-client-id-field').hidden && document.querySelector('#cloud-client-secret-field').hidden
+    && !document.querySelector('#cloud-connect-granted').hidden && document.querySelector('#cloud-endpoint').value === 'https://store.example.com' && document.querySelector('#cloud-endpoint').readOnly));
   check(`${label}: cloud storage has no browser errors`, errors.length === 0, errors.join('; '));
   await context.close();
 }

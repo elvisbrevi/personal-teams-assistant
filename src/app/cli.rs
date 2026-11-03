@@ -41,6 +41,11 @@ Web portal
   web users bind USER     Verified Access get-identity JSON on stdin; associates the GitHub provider subject.
   web users unbind|revoke USER  Removes the association or revokes all local sessions; preserves the profile.
   web users disable|enable USER  Revokes sessions and disables or enables web access; preserves data.
+  web users cloud enable USER --endpoint URL [--token-expires YYYY-MM-DD]
+                           Enables the account store for a portal account: its Access service token comes as
+                           JSON on stdin, {client_id, client_secret}, and is kept only in that account's own
+                           credential store. The account then connects and migrates its own data.
+  web users cloud disable USER  Removes that permission and the token; the account's data and copy stay.
                            Run the portal with personal-teams-assistant --web; no public registration.
 
 Configuration
@@ -124,7 +129,7 @@ Account store (Cloudflare)
                            mode the last pull and the conflicts). Standing:
                            disconnected, not_enrolled, live, offline, revoked or unconfigured. Uploads nothing.
   cloud connect --endpoint URL [--label TEXT] [--token-expires YYYY-MM-DD] --confirmed
-                           Enrolls this installation with the account store (owner only) and keeps the installation
+                           Enrolls this installation with the account store (owner or enabled portal account) and keeps the installation
                            credential it issues (CLOUD_STORE_TOKEN). The account's Access service token comes as JSON
                            on stdin, {client_id, client_secret}, never as arguments; without stdin the stored one is
                            used. Keeps the mode off: nothing is uploaded. A new service token on an enrolled installation
@@ -133,23 +138,23 @@ Account store (Cloudflare)
                            token expires (status and setup status warn 30 days before); on a live installation it only
                            updates that date.
   cloud disconnect [--forget-service-token] --confirmed
-                           Owner only. Revokes this installation in the account store when it answers, removes
+                           Owner or enabled portal account. Revokes this installation in the account store when it answers, removes
                            CLOUD_STORE_TOKEN and sets the mode to off; with --forget-service-token also the Access
                            service token and the endpoint. The encrypted copy, the content key and the outbox stay.
   cloud migrate --dry-run     Lists per collection what migrating would upload (records and bytes), what stays on this
                            computer and why, and the size of the backup; writes and sends nothing.
-  cloud migrate --confirmed   Owner only. Backs up this profile first (every database and the settings files, in a private
+  cloud migrate --confirmed   Owner or enabled portal account. Backs up this profile first (every database and the settings files, in a private
                            backups/cloud-<time>/; the newest three are kept), creates the account content key on first
                            use (back it up with pta variables key backup), uploads every collection sealed with it
                            (AES-256-GCM-SIV in this installation; the Worker sees only blinded IDs, revisions and
                            digests), verifies the copy by reading it back and only then switches the mode to mirror.
                            Local stays the source of truth; afterwards an outbox sends each change. Run again to resume.
   cloud rollback [--keep-local] --confirmed
-                           Owner only. Backs up this profile, then, in primary, pulls what the account store changed
+                           Owner or enabled portal account. Backs up this profile, then, in primary, pulls what the account store changed
                            (refused on a conflict or without an answer), verifies that the store holds nothing this
                            computer lacks and switches the mode to off. Nothing local is deleted and the copy in the
                            store stays until cloud erase. --keep-local keeps this computer's configuration as it is.
-  cloud erase --confirmed     Owner only, after a rollback (mode off), with no other connected computer. Erases this
+  cloud erase --confirmed     Owner or enabled portal account, after a rollback (mode off), with no other connected computer. Erases this
                            account's records and backups in the account store, forgets what was acknowledged and sets
                            the content key aside (keys/cloud-content-retired-<time>.json), so a new migration uses a new
                            key. This computer keeps all of its data. Cloudflare keeps a 30-day point-in-time recovery
@@ -158,12 +163,12 @@ Account store (Cloudflare)
                            digest over the sorted (ID, revision, ciphertext digest) on both sides and a full decryption
                            of every record. Local changes not sent yet are pending, not differences. History other
                            computers of the account wrote is counted apart (others): each verifies its own.
-  cloud installations         Owner only. The account's computers in the account store: label, host version, when each
+  cloud installations         Owner or enabled portal account. The account's computers in the account store: label, host version, when each
                            enrolled and was last seen, revoked ones and which is this one.
   cloud installations revoke ID --confirmed
-                           Owner only. Revokes another computer of the account in the account store (its credential
+                           Owner or enabled portal account. Revokes another computer of the account in the account store (its credential
                            stops working); that computer keeps its data. This one disconnects with cloud disconnect.
-  cloud promote --confirmed   Owner only, from mirror. Sends what is pending, verifies the copy, backs up this profile and only
+  cloud promote --confirmed   Owner or enabled portal account, from mirror. Sends what is pending, verifies the copy, backs up this profile and only
                            when the copy is identical makes the account store the source of truth (mode primary): settings,
                            organization and notes are saved there first under compare-and-swap and pulled from it; without
                            its answer the configuration is read-only. Not for an installation signed in to a coordinator.
@@ -1344,6 +1349,7 @@ fn validate_args(args: &[String]) -> Result<()> {
                 "add" | "authorize" | "bind" | "unbind" | "revoke" | "disable" | "enable",
                 _
             ]
+            | ["web", "users", "cloud", "enable" | "disable", _]
             | ["skill", "show" | "path"]
             | ["skill", "install", _]
             | ["config", "show" | "apply" | "validate"]
@@ -1527,9 +1533,19 @@ fn validate_args(args: &[String]) -> Result<()> {
                     .starts_with(&["variables", "destination", "define"]),
         ),
         ("--to", p.as_slice().starts_with(&["variables", "deliver"])),
-        ("--endpoint", p.as_slice() == ["cloud", "connect"]),
+        (
+            "--endpoint",
+            p.as_slice() == ["cloud", "connect"]
+                || p.as_slice()
+                    .starts_with(&["web", "users", "cloud", "enable"]),
+        ),
         ("--dry-run", p.as_slice() == ["cloud", "migrate"]),
-        ("--token-expires", p.as_slice() == ["cloud", "connect"]),
+        (
+            "--token-expires",
+            p.as_slice() == ["cloud", "connect"]
+                || p.as_slice()
+                    .starts_with(&["web", "users", "cloud", "enable"]),
+        ),
         (
             "--forget-service-token",
             p.as_slice() == ["cloud", "disconnect"],

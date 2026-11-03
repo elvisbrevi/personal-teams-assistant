@@ -25,8 +25,53 @@ pub(super) const ACCESS_SECRET: &str = "CLOUD_ACCESS_CLIENT_SECRET";
 pub(super) const TOKEN: &str = "CLOUD_STORE_TOKEN";
 /// The installation-local credentials of the link, listed (never required) by `credentials list`.
 pub(super) const CREDENTIALS: [&str; 3] = [ACCESS_ID, ACCESS_SECRET, TOKEN];
+/// The operator's permission for a portal account to use the account store, in its profile.
+pub(in crate::app) const GRANT_FILE: &str = "cloud-grant.json";
 /// The protocol version this host speaks.
 const PROTOCOL: u64 = 1;
+
+/// What the operator enabled for a portal account (`pta web users cloud enable`): the account
+/// store it may use. Only operator-local administration writes it, next to the Access service
+/// token it stored in the account's own credential store; the account's host only reads it.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub(in crate::app) struct Grant {
+    pub endpoint: String,
+    pub granted_at: i64,
+    /// When the service token expires, as the operator gave it (0: unknown).
+    #[serde(default)]
+    pub token_expires_at: i64,
+}
+
+/// The operator's grant in a profile, if any and readable.
+pub(in crate::app) fn grant(profile: &Path) -> Option<Grant> {
+    let text = std::fs::read_to_string(profile.join(GRANT_FILE)).ok()?;
+    let grant: Grant = serde_json::from_str(&text).ok()?;
+    Cloud::check_endpoint(&grant.endpoint).ok()?;
+    Some(grant)
+}
+
+/// Who may use the account store from here: the owner of an unshared profile, or a portal
+/// account the operator enabled it for. Never a machine credential. The refusal, if any.
+fn refused_here(host: &Host, invocation: &authority::Invocation) -> Option<Reply> {
+    let scope = &invocation.scope;
+    if invocation.transport == authority::Transport::Machine {
+        return Some(Reply::error(
+            "authority_denied",
+            6,
+            "This operation is not available from this client.",
+        ));
+    }
+    if (scope.owner && !scope.shared)
+        || (scope.shared && grant(host.state.settings.profile()).is_some())
+    {
+        return None;
+    }
+    Some(Reply::error("authority_denied", 6, NOT_ENABLED))
+}
+
+pub(in crate::app) const NOT_ENABLED: &str =
+    "The portal operator has not enabled the account store for this account.";
 const LABEL_CHARS: usize = 80;
 
 pub(super) fn handles(method: &str) -> bool {
@@ -102,9 +147,8 @@ pub(super) async fn operate(host: &Arc<Host>, request: &control::Request) -> Rep
             }
         }
         "cloud_connect" => {
-            // Phase 4b opens the account store to other accounts; until then only the owner.
-            if !invocation.scope.owner || invocation.scope.shared {
-                return Reply::error("authority_denied", 6, authority::EXECUTION_DENIED);
+            if let Some(reply) = refused_here(host, &invocation) {
+                return reply;
             }
             let Ok(args) = serde_json::from_value::<ConnectArgs>(request.args.clone()) else {
                 return Reply::error("invalid_input", 2, "Invalid arguments.");
@@ -112,8 +156,8 @@ pub(super) async fn operate(host: &Arc<Host>, request: &control::Request) -> Rep
             connect(host, args).await.unwrap_or_else(|reply| *reply)
         }
         "cloud_mirror" => {
-            if !invocation.scope.owner || invocation.scope.shared {
-                return Reply::error("authority_denied", 6, authority::EXECUTION_DENIED);
+            if let Some(reply) = refused_here(host, &invocation) {
+                return reply;
             }
             let Ok(args) = serde_json::from_value::<mirror::MirrorArgs>(request.args.clone())
             else {
@@ -122,8 +166,8 @@ pub(super) async fn operate(host: &Arc<Host>, request: &control::Request) -> Rep
             mirror::operate_mirror(host, args).await
         }
         "cloud_disconnect" => {
-            if !invocation.scope.owner || invocation.scope.shared {
-                return Reply::error("authority_denied", 6, authority::EXECUTION_DENIED);
+            if let Some(reply) = refused_here(host, &invocation) {
+                return reply;
             }
             let Ok(args) = serde_json::from_value::<DisconnectArgs>(request.args.clone()) else {
                 return Reply::error("invalid_input", 2, "Invalid arguments.");
@@ -131,8 +175,8 @@ pub(super) async fn operate(host: &Arc<Host>, request: &control::Request) -> Rep
             disconnect(host, args).await
         }
         "cloud_verify" => {
-            if !invocation.scope.owner || invocation.scope.shared {
-                return Reply::error("authority_denied", 6, authority::EXECUTION_DENIED);
+            if let Some(reply) = refused_here(host, &invocation) {
+                return reply;
             }
             if request.args != json!({}) && !request.args.is_null() {
                 return Reply::error("invalid_input", 2, "Invalid arguments.");
@@ -140,8 +184,8 @@ pub(super) async fn operate(host: &Arc<Host>, request: &control::Request) -> Rep
             mirror::operate_verify(host).await
         }
         "cloud_promote" => {
-            if !invocation.scope.owner || invocation.scope.shared {
-                return Reply::error("authority_denied", 6, authority::EXECUTION_DENIED);
+            if let Some(reply) = refused_here(host, &invocation) {
+                return reply;
             }
             let Ok(args) = serde_json::from_value::<primary::PromoteArgs>(request.args.clone())
             else {
@@ -150,8 +194,8 @@ pub(super) async fn operate(host: &Arc<Host>, request: &control::Request) -> Rep
             primary::operate_promote(host, args).await
         }
         "cloud_pull" => {
-            if !invocation.scope.owner || invocation.scope.shared {
-                return Reply::error("authority_denied", 6, authority::EXECUTION_DENIED);
+            if let Some(reply) = refused_here(host, &invocation) {
+                return reply;
             }
             let Ok(args) = serde_json::from_value::<primary::PullArgs>(request.args.clone()) else {
                 return Reply::error("invalid_input", 2, "Invalid arguments.");
@@ -159,8 +203,8 @@ pub(super) async fn operate(host: &Arc<Host>, request: &control::Request) -> Rep
             primary::operate_pull(host, args).await
         }
         "cloud_migrate" => {
-            if !invocation.scope.owner || invocation.scope.shared {
-                return Reply::error("authority_denied", 6, authority::EXECUTION_DENIED);
+            if let Some(reply) = refused_here(host, &invocation) {
+                return reply;
             }
             let Ok(args) = serde_json::from_value::<migration::MigrateArgs>(request.args.clone())
             else {
@@ -169,8 +213,8 @@ pub(super) async fn operate(host: &Arc<Host>, request: &control::Request) -> Rep
             migration::operate_migrate(host, args).await
         }
         "cloud_rollback" => {
-            if !invocation.scope.owner || invocation.scope.shared {
-                return Reply::error("authority_denied", 6, authority::EXECUTION_DENIED);
+            if let Some(reply) = refused_here(host, &invocation) {
+                return reply;
             }
             let Ok(args) = serde_json::from_value::<migration::RollbackArgs>(request.args.clone())
             else {
@@ -179,8 +223,8 @@ pub(super) async fn operate(host: &Arc<Host>, request: &control::Request) -> Rep
             migration::operate_rollback(host, args).await
         }
         "cloud_erase" => {
-            if !invocation.scope.owner || invocation.scope.shared {
-                return Reply::error("authority_denied", 6, authority::EXECUTION_DENIED);
+            if let Some(reply) = refused_here(host, &invocation) {
+                return reply;
             }
             if request.args != json!({}) && !request.args.is_null() {
                 return Reply::error("invalid_input", 2, "Invalid arguments.");
@@ -188,8 +232,8 @@ pub(super) async fn operate(host: &Arc<Host>, request: &control::Request) -> Rep
             migration::operate_erase(host).await
         }
         "cloud_installations" => {
-            if !invocation.scope.owner || invocation.scope.shared {
-                return Reply::error("authority_denied", 6, authority::EXECUTION_DENIED);
+            if let Some(reply) = refused_here(host, &invocation) {
+                return reply;
             }
             if request.args != json!({}) && !request.args.is_null() {
                 return Reply::error("invalid_input", 2, "Invalid arguments.");
@@ -197,8 +241,8 @@ pub(super) async fn operate(host: &Arc<Host>, request: &control::Request) -> Rep
             installations(host).await
         }
         "cloud_revoke" => {
-            if !invocation.scope.owner || invocation.scope.shared {
-                return Reply::error("authority_denied", 6, authority::EXECUTION_DENIED);
+            if let Some(reply) = refused_here(host, &invocation) {
+                return reply;
             }
             let Ok(args) = serde_json::from_value::<RevokeArgs>(request.args.clone()) else {
                 return Reply::error("invalid_input", 2, "Invalid arguments.");
@@ -322,6 +366,33 @@ fn origin(endpoint: &str) -> String {
 
 /// What this installation knows about its link, checked live against the Worker.
 pub(super) async fn status(host: &Arc<Host>) -> Result<Value> {
+    // A portal account says whether its operator enabled the account store for it; without that
+    // nothing is asked of the Worker.
+    let enabled = !host.state.authority.shared || grant(host.state.settings.profile()).is_some();
+    if !enabled {
+        let config = host.state.settings.config()?;
+        return Ok(json!({
+            "mode": config.cloud.mode,
+            "endpoint": null,
+            "enrolled": false,
+            "installation": null,
+            "enabled": false,
+            "standing": "disconnected",
+            "problem": NOT_ENABLED,
+            "checked_at": now(),
+            "link": host.state.standing.store_view(&config.cloud, false),
+            "mirror": mirror::describe(host, &config.cloud),
+        }));
+    }
+    let mut view = linked_status(host).await?;
+    view["enabled"] = json!(true);
+    if let Some(grant) = grant(host.state.settings.profile()) {
+        view["granted_endpoint"] = json!(origin(&grant.endpoint));
+    }
+    Ok(view)
+}
+
+async fn linked_status(host: &Arc<Host>) -> Result<Value> {
     let config = host.state.settings.config()?;
     let cloud = &config.cloud;
     let checked_at = now();
@@ -443,7 +514,7 @@ fn token_view(cloud: &Cloud, now: i64) -> Option<Value> {
 }
 
 /// A date the user typed (`YYYY-MM-DD`) as Unix seconds at 00:00 UTC.
-fn expiry(text: &str) -> Option<i64> {
+pub(in crate::app) fn expiry(text: &str) -> Option<i64> {
     let date = chrono::NaiveDate::parse_from_str(text.trim(), "%Y-%m-%d").ok()?;
     let at = date.and_hms_opt(0, 0, 0)?.and_utc().timestamp();
     Cloud {
@@ -493,14 +564,14 @@ fn refused(failure: &Failure) -> Reply {
     }
 }
 
-fn valid_client_id(value: &str) -> bool {
+pub(in crate::app) fn valid_client_id(value: &str) -> bool {
     (1..=128).contains(&value.len())
         && value
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
 }
 
-fn valid_client_secret(value: &str) -> bool {
+pub(in crate::app) fn valid_client_secret(value: &str) -> bool {
     (16..=512).contains(&value.len()) && value.chars().all(|c| c.is_ascii_graphic())
 }
 
@@ -549,6 +620,24 @@ async fn connect(host: &Arc<Host>, args: ConnectArgs) -> std::result::Result<Rep
             ));
         }
     };
+    // A portal account uses the account store and the service token its operator enabled.
+    let mut token_expires = token_expires;
+    if host.state.authority.shared {
+        let grant = grant(host.state.settings.profile())
+            .ok_or_else(|| boxed("authority_denied", 6, NOT_ENABLED))?;
+        if given.is_some() {
+            return Err(invalid(
+                "The portal operator manages this account's service token.",
+            ));
+        }
+        if origin(&grant.endpoint) != endpoint {
+            return Err(invalid(
+                "Use the account store the portal operator enabled for this account.",
+            ));
+        }
+        token_expires =
+            token_expires.or((grant.token_expires_at > 0).then_some(grant.token_expires_at));
+    }
     let fresh = given.is_some();
     let mut credentials = given
         .or_else(stored_credentials)
@@ -602,10 +691,10 @@ async fn connect(host: &Arc<Host>, args: ConnectArgs) -> std::result::Result<Rep
             return Ok(Reply::success(json!({"changed": changed, "status": data})));
         }
     }
-    // A new service token for an enrolled installation moves the account to it (a renewal or a
-    // replacement), keeping the enrollment, the store and the mode, instead of enrolling anew.
-    if fresh
-        && origin(&config.cloud.endpoint) == endpoint
+    // A new service token for an enrolled installation (given now, or stored by the portal
+    // operator) moves the account to it, a renewal or a replacement, keeping the enrollment, the
+    // store and the mode, instead of enrolling anew.
+    if origin(&config.cloud.endpoint) == endpoint
         && enrolled(&config.cloud)
         && offers(&worker, "rebind")
         && let Ok(token) = security::secret(TOKEN)
