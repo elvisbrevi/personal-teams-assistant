@@ -895,6 +895,8 @@ async fn save_settings(
     );
     let forwarded =
         portable::before_save(state, (&previous, &previous_map), (&config, &map)).await?;
+    // With the account store as the source of truth, it accepts the configuration first.
+    let accepted = cloud::primary::before_save(host, &config, &map).await?;
     variables::identity::save(host, &previous, &config).await?;
     let was_running = state.running.lock().await.is_some();
     if was_running {
@@ -904,6 +906,9 @@ async fn save_settings(
         .settings
         .commit(&config, &map, tunnel_config.trim())
         .map_err(fail)?;
+    if let Some(accepted) = accepted {
+        accepted.settle();
+    }
     portable::after_save(state, forwarded);
     forget_removed_sources(&config, &map);
     *state.activity_graph.lock().await = None;

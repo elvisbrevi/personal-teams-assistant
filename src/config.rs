@@ -42,8 +42,9 @@ pub struct Cloud {
     /// The installation the Worker enrolled; its credential is `CLOUD_STORE_TOKEN`.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub installation: String,
-    /// What the account store is for this installation: `off`, or `mirror` once a verified
-    /// upload made the copy (phase 3b).
+    /// What the account store is for this installation: `off`, `mirror` once a verified upload
+    /// made the copy (phase 3b), or `primary` once it became the source of truth of the
+    /// configuration (phase 3c).
     #[serde(default)]
     pub mode: CloudMode,
     /// When the account's Access service token expires (Unix seconds), as the user gave it;

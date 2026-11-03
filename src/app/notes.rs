@@ -83,8 +83,36 @@ pub(super) fn list(state: &DesktopState, args: &Value) -> Reply {
     }
 }
 
-/// Create (without `id`) or replace a note. Sensitive data is refused, like in an answer.
-pub(super) fn save(state: &DesktopState, args: &Value) -> Reply {
+/// Create (without `id`) or replace a note. Sensitive data is refused, like in an answer. With
+/// the account store as the source of truth, it accepts the note first.
+pub(super) async fn save_shared(host: &Arc<Host>, args: &Value) -> Reply {
+    if !super::cloud::primary::active(&host.state) {
+        return save(&host.state, args);
+    }
+    let (note, index) = checked(&host.state, args)?;
+    Ok(json!(
+        super::cloud::primary::save_note(host, &index, note).await?
+    ))
+}
+
+/// Remove a note; with the account store as the source of truth, it accepts the removal first.
+pub(super) async fn remove_shared(host: &Arc<Host>, args: &Value) -> Reply {
+    if !super::cloud::primary::active(&host.state) {
+        return remove(&host.state, args);
+    }
+    let (_, _, index) = open(&host.state)?;
+    let id = args
+        .get("id")
+        .and_then(Value::as_str)
+        .ok_or("[invalid_input] A note ID is required.")?;
+    if !super::cloud::primary::remove_note(host, &index, id).await? {
+        return Err("[invalid_input] Unknown note.".into());
+    }
+    Ok(json!({"removed": id}))
+}
+
+/// A note that may be saved, with the index it goes to.
+fn checked(state: &DesktopState, args: &Value) -> std::result::Result<(Note, Index), String> {
     let (config, map, index) = open(state)?;
     let note: Note = serde_json::from_value(args.get("note").cloned().unwrap_or(Value::Null))
         .map_err(|_| "[invalid_input] A note needs title and text, and optionally contexts, keywords, origin and reference.".to_owned())?;
@@ -100,14 +128,25 @@ pub(super) fn save(state: &DesktopState, args: &Value) -> Reply {
     if texts.into_iter().any(|t| !redactor.clean(t)) {
         return Err("[invalid_input] The note contains sensitive data (a secret, an email, a phone number or an ID); remove it and save again.".into());
     }
-    let records = LocalNotes::new(&index);
-    if !note.id.is_empty() && records.note(&note.id).map_err(fail)?.is_none() {
+    if !note.id.is_empty()
+        && LocalNotes::new(&index)
+            .note(&note.id)
+            .map_err(fail)?
+            .is_none()
+    {
         return Err("[invalid_input] Unknown note.".into());
     }
-    Ok(json!(records.save_note(note).map_err(fail)?))
+    Ok((note, index))
 }
 
-pub(super) fn remove(state: &DesktopState, args: &Value) -> Reply {
+fn save(state: &DesktopState, args: &Value) -> Reply {
+    let (note, index) = checked(state, args)?;
+    Ok(json!(
+        LocalNotes::new(&index).save_note(note).map_err(fail)?
+    ))
+}
+
+fn remove(state: &DesktopState, args: &Value) -> Reply {
     let (_, _, index) = open(state)?;
     let id = args
         .get("id")

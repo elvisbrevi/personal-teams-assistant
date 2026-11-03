@@ -457,7 +457,7 @@ pub(super) const TOOLS: &[Tool] = &[
     Tool {
         name: "cloud_status",
         title: "Account store link",
-        description: "This installation's link to the account store in Cloudflare: endpoint, mode (off until a migration; nothing is uploaded in this phase), whether it is enrolled, the Worker's environment, version and protocols, and, when enrolled, the live principal (installation label, enrollment time, active installations of the account), the store's per-collection record counts, bytes and generations, and today's usage against the account's daily share. standing is disconnected, not_enrolled, live, offline (network or the daily share used up: the installation keeps working locally), revoked (connect again) or unconfigured (the Worker's Access settings are missing). Never returns credentials.",
+        description: "This installation's link to the account store in Cloudflare: endpoint, mode (off, mirror while an encrypted copy is kept, primary while the account store is the source of truth of the configuration, with its conflicts and last pull), whether it is enrolled, the Worker's environment, version and protocols, and, when enrolled, the live principal (installation label, enrollment time, active installations of the account), the store's per-collection record counts, bytes and generations, and today's usage against the account's daily share. standing is disconnected, not_enrolled, live, offline (network or the daily share used up: the installation keeps working locally), revoked (connect again) or unconfigured (the Worker's Access settings are missing). Never returns credentials.",
         effect: Effect::Read,
         schema: none,
     },
@@ -493,6 +493,30 @@ pub(super) const TOOLS: &[Tool] = &[
         schema: || {
             object(
                 json!({"forget_service_token":{"type":"boolean","description":"Also remove the Access service token and the endpoint."},"confirmed":confirmed()}),
+                &[],
+            )
+        },
+    },
+    Tool {
+        name: "cloud_promote",
+        title: "Make the account store the source of truth",
+        description: "action promote: from mirror, send what is pending, verify the copy and only when it is identical make the account store the source of truth of the account's configuration (mode primary): all of the configuration except [secrets] and [cloud], the knowledge map, the organization with its guides and the notes are then written there first under compare-and-swap and pulled from it; without its answer the configuration is read-only (nothing is queued), while Teams and every read keep working locally. Needs a Worker with the cas feature; refused on an installation signed in to a coordinator. action demote: back to mirror, this computer's configuration is the source of truth again. Owner only. Needs the user's confirmation.",
+        effect: Effect::External,
+        schema: || {
+            object(
+                json!({"action":{"type":"string","enum":["promote","demote"],"description":"promote or demote."},"confirmed":confirmed()}),
+                &["action"],
+            )
+        },
+    },
+    Tool {
+        name: "cloud_pull",
+        title: "Pull the configuration from the account store",
+        description: "Primary mode: bring what the account store changed in the configuration into this computer now (the host also does it on its own). A record changed both here (never accepted by the store) and in the store is a conflict and stays as it is here; replace adopts the store's version for those after a private backup in cloud/backups/. Ask the user before replacing. Owner only. Needs the user's confirmation.",
+        effect: Effect::External,
+        schema: || {
+            object(
+                json!({"replace":{"type":"boolean","description":"Adopt the account store's version of conflicting records (a backup is kept)."},"confirmed":confirmed()}),
                 &[],
             )
         },
@@ -1629,7 +1653,7 @@ pub(super) async fn run(name: &str, args: &Value) -> Result<Value, String> {
         "variable_update" | "variable_rename" | "variable_usage" => ipc(name, args.clone()).await,
         "consumer_list" => ipc("variable_consumer_list", args.clone()).await,
         "cloud_status" | "cloud_verify" => ipc(name, args.clone()).await,
-        "cloud_mirror" | "cloud_disconnect" => {
+        "cloud_mirror" | "cloud_disconnect" | "cloud_promote" | "cloud_pull" => {
             let mut args = args.clone();
             args.as_object_mut().unwrap().remove("confirmed");
             ipc(name, args).await
@@ -1968,6 +1992,16 @@ pub(super) fn confirmation(name: &str, args: &Value) -> Option<String> {
             "Disconnect this installation from the account store and remove the account's service token from it?".into()
         } else {
             "Disconnect this installation from the account store?".into()
+        },
+        "cloud_promote" => if args["action"] == "demote" {
+            "Make this computer's configuration the source of truth again, keeping the account store as its mirror?".into()
+        } else {
+            "Make the account store the source of truth of this account's configuration (changes are saved there first; without it the configuration is read-only)?".into()
+        },
+        "cloud_pull" => if args["replace"] == true {
+            "Replace this computer's configuration changes that conflict with the account store's (a private backup is kept first)?".into()
+        } else {
+            "Bring the configuration the account store changed into this computer now?".into()
         },
         "cloud_mirror" => match args["action"].as_str().unwrap_or("plan") {
             "start" => "Upload this installation's records, encrypted with the account content key, to the account store and keep it mirrored?".into(),

@@ -98,6 +98,8 @@ struct Endpoint {
     cloud_mirror_support: bool,
     #[serde(default)]
     cloud_disconnect_support: bool,
+    #[serde(default)]
+    cloud_primary_support: bool,
     contract: u32,
     port: u16,
     token: String,
@@ -487,6 +489,11 @@ async fn client_with_transport(
             endpoint.cloud_disconnect_support || request.method != "cloud_disconnect",
             "Incompatible account store host: update the host and CLI together before disconnecting from the account store."
         );
+        ensure!(
+            endpoint.cloud_primary_support
+                || !matches!(request.method.as_str(), "cloud_promote" | "cloud_pull"),
+            "Incompatible account store host: update the host and CLI together before making the account store the source of truth."
+        );
         ensure!(endpoint.contract == CONTRACT, "incompatible host contract");
         ensure!(
             endpoint.web_support
@@ -594,6 +601,7 @@ pub(crate) fn launch(
             cloud_store_support: true,
             cloud_mirror_support: true,
             cloud_disconnect_support: true,
+            cloud_primary_support: true,
             contract: CONTRACT,
             port: listener.local_addr()?.port(),
             token: token.clone(),
@@ -1310,8 +1318,8 @@ async fn operate(
         "question_associate" => super::notes::associate(host, args).await?,
         "answer_feedback" => super::notes::feedback(state, args)?,
         "notes_list" => super::notes::list(state, args)?,
-        "notes_save" => portable::note_save(state, args).await?,
-        "notes_remove" => portable::note_remove(state, args).await?,
+        "notes_save" => portable::note_save(host, args).await?,
+        "notes_remove" => portable::note_remove(host, args).await?,
         "knowledge_search" => super::notes::search(state, args)?,
         "index_status" => super::notes::status(state)?,
         "index_refresh" => super::notes::refresh(state, args).await?,
@@ -1456,6 +1464,7 @@ mod tests {
                 cloud_store_support: true,
                 cloud_mirror_support: true,
                 cloud_disconnect_support: true,
+                cloud_primary_support: true,
                 account_authority_support: true,
                 shared_accounts_support: true,
                 account_binding: None,
@@ -1488,6 +1497,7 @@ mod tests {
                 cloud_store_support: true,
                 cloud_mirror_support: true,
                 cloud_disconnect_support: true,
+                cloud_primary_support: true,
                 account_authority_support: true,
                 shared_accounts_support: true,
                 account_binding: None,
@@ -1535,6 +1545,7 @@ mod tests {
                     cloud_store_support: true,
                     cloud_mirror_support: true,
                     cloud_disconnect_support: true,
+                    cloud_primary_support: true,
                     account_authority_support: true,
                     shared_accounts_support: true,
                     account_binding: None,

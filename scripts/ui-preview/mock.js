@@ -479,6 +479,7 @@
     }),
     // Synthetic mirror: the start uploads and verifies, the verification matches.
     cloud_mirror: args => {
+      if (args?.action === 'stop' && window.__ptaCloudMirror?.mode === 'primary') window.__ptaCloudMirror.mode = 'off';
       if (args?.action === 'start') {
         window.__ptaCloudMirror = { key: { present: true, active: 1, versions: [1], fingerprint: '0123456789ab' }, mode: 'mirror', outbox: { pending: 0, blocked: 0, retrying: 0, synced: 42, oldest_seconds: null }, initial_verified_at: secs(NOW), last_success_at: secs(NOW), last_verify: { at: secs(NOW), ok: true } };
         return { action: 'start', mode: 'mirror', complete: true, key_created: true, uploaded: 42, verify: { ok: true, collections: [] } };
@@ -488,6 +489,20 @@
     },
     cloud_disconnect: () => { window.__ptaCloudDisconnected = true; if (window.__ptaCloudMirror) window.__ptaCloudMirror.mode = 'off'; return { changed: true, store_notified: true }; },
     cloud_verify: () => ({ ok: true, verify: { ok: true, collections: [{ name: 'audits', ok: true, pending: 2, local: 30, remote: 28 }] } }),
+    // Synthetic primary mode: promoting switches the mode; a conflict waits for a replace.
+    cloud_promote: args => {
+      const mirror = window.__ptaCloudMirror;
+      if (args?.action === 'demote') { mirror.mode = 'mirror'; return { action: 'demote', mode: 'mirror', changed: true }; }
+      mirror.mode = 'primary';
+      mirror.primary = { promoted_at: secs(NOW), conflicts: window.__ptaCloudConflicts ?? 0, last_pull: { at: secs(NOW), applied: 0, conflicts: 0 } };
+      return { action: 'promote', mode: 'primary', changed: true, verify: { ok: true, collections: [] } };
+    },
+    cloud_pull: args => {
+      const primary = window.__ptaCloudMirror.primary;
+      const resolved = args?.replace ? primary.conflicts : 0;
+      if (args?.replace) primary.conflicts = 0;
+      return { replace: !!args?.replace, pulled: { applied: resolved, acknowledged: 0, conflicts: 0, undecryptable: 0 }, conflicts: primary.conflicts, backup: args?.replace ? '/profile/cloud/backups/replaced-1.json' : null };
+    },
     portable_status: () => ({ standing: window.__ptaStanding ? structuredClone(window.__ptaStanding) : undefined, sync: structuredClone(window.__ptaAccountConfig || { mode: 'authoritative', state: 'authoritative', revision: { generation: 3, digest: 'abcdef012345' } }) }),
     portable_sync: args => {
       const sync = window.__ptaAccountConfig;

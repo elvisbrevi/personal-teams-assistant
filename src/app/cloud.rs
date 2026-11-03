@@ -1,6 +1,6 @@
 //! This installation's link to the account store Worker (`cloud/`, phase 3a of the cloud storage
-//! design): enrollment and status. Nothing is uploaded yet and the mode stays `off`; the outbox
-//! (phase 3b) and the migration (phase 4a) use this link.
+//! design): enrollment and status. The mirror (phase 3b, `mirror`) and the account store as the
+//! source of truth of the configuration (phase 3c, `mirror::primary`) use this link.
 //!
 //! Two credentials reach the Worker: the account's Access service token at the edge
 //! (`CLOUD_ACCESS_CLIENT_ID` / `CLOUD_ACCESS_CLIENT_SECRET`) and the installation credential the
@@ -17,7 +17,7 @@ use serde_json::{Value, json};
 use std::time::Duration;
 
 mod mirror;
-pub(in crate::app) use mirror::{State, run};
+pub(in crate::app) use mirror::{State, primary, run};
 
 pub(super) const ACCESS_ID: &str = "CLOUD_ACCESS_CLIENT_ID";
 pub(super) const ACCESS_SECRET: &str = "CLOUD_ACCESS_CLIENT_SECRET";
@@ -31,7 +31,13 @@ const LABEL_CHARS: usize = 80;
 pub(super) fn handles(method: &str) -> bool {
     matches!(
         method,
-        "cloud_status" | "cloud_connect" | "cloud_mirror" | "cloud_verify" | "cloud_disconnect"
+        "cloud_status"
+            | "cloud_connect"
+            | "cloud_mirror"
+            | "cloud_verify"
+            | "cloud_disconnect"
+            | "cloud_promote"
+            | "cloud_pull"
     )
 }
 
@@ -125,6 +131,25 @@ pub(super) async fn operate(host: &Arc<Host>, request: &control::Request) -> Rep
                 return Reply::error("invalid_input", 2, "Invalid arguments.");
             }
             mirror::operate_verify(host).await
+        }
+        "cloud_promote" => {
+            if !invocation.scope.owner || invocation.scope.shared {
+                return Reply::error("authority_denied", 6, authority::EXECUTION_DENIED);
+            }
+            let Ok(args) = serde_json::from_value::<primary::PromoteArgs>(request.args.clone())
+            else {
+                return Reply::error("invalid_input", 2, "Invalid arguments.");
+            };
+            primary::operate_promote(host, args).await
+        }
+        "cloud_pull" => {
+            if !invocation.scope.owner || invocation.scope.shared {
+                return Reply::error("authority_denied", 6, authority::EXECUTION_DENIED);
+            }
+            let Ok(args) = serde_json::from_value::<primary::PullArgs>(request.args.clone()) else {
+                return Reply::error("invalid_input", 2, "Invalid arguments.");
+            };
+            primary::operate_pull(host, args).await
         }
         _ => Reply::error("invalid_input", 2, "Unknown operation."),
     }
@@ -293,6 +318,7 @@ pub(super) async fn status(host: &Arc<Host>) -> Result<Value> {
         "version": health["version"],
         "deployment": health["deployment"],
         "protocols": health["protocols"],
+        "features": health["features"].as_array().cloned().unwrap_or_default(),
         "schema": health["schema"],
     });
     let credentials = stored_credentials().filter(|c| c.token.is_some());
@@ -623,6 +649,8 @@ async fn disconnect(host: &Arc<Host>, args: DisconnectArgs) -> Reply {
             "The configuration could not be saved.",
         )
     };
+    // Always the operations lock before the pass gate, as the loop takes them.
+    let _operations = host.state.operations.lock().await;
     let _gate = mirror::hold(host).await;
     let Ok(config) = host.state.settings.config() else {
         return fail();
@@ -664,7 +692,6 @@ async fn disconnect(host: &Arc<Host>, args: DisconnectArgs) -> Reply {
         }
     }
     {
-        let _guard = host.state.operations.lock().await;
         let Ok(mut config) = host.state.settings.config() else {
             return fail();
         };

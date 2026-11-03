@@ -101,26 +101,7 @@ impl LocalSettings {
     /// What stays on this installation never leaves it: the `[secrets]` references and the
     /// account store link; the organization and the guides travel in their own record.
     pub(crate) fn export(&self) -> Result<Vec<crate::mirror::Exported>> {
-        let mut config = serde_json::to_value(self.config()?)?;
-        if let Some(object) = config.as_object_mut() {
-            object.remove("secrets");
-            object.remove("cloud");
-        }
-        let mut map = serde_json::to_value(self.map()?)?;
-        if let Some(object) = map.as_object_mut() {
-            object.remove("organization");
-            object.remove("work_item_guides");
-        }
-        Ok(vec![
-            crate::mirror::Exported {
-                id: "config".into(),
-                value: config,
-            },
-            crate::mirror::Exported {
-                id: "knowledge_map".into(),
-                value: map,
-            },
-        ])
+        records(self.config()?, self.map()?)
     }
 
     pub(crate) fn config_path(&self) -> &Path {
@@ -136,6 +117,39 @@ impl LocalSettings {
     fn journal(&self) -> PathBuf {
         self.config.with_file_name(JOURNAL_FILE)
     }
+}
+
+/// The configuration and the map exactly as this store would read them back after committing
+/// them, so a record computed before a commit is the record the stores export after it.
+pub(crate) fn read_back(config: &Config, map: &KnowledgeMap) -> Result<(Config, KnowledgeMap)> {
+    let config: Config = toml::from_str(&toml::to_string_pretty(config)?)?;
+    let mut map = KnowledgeMap::parse(&toml::to_string_pretty(map)?)?;
+    map.initialize_questions();
+    Ok((config, map))
+}
+
+/// The two settings records of a configuration and its map (see [`LocalSettings::export`]).
+pub(crate) fn records(config: Config, map: KnowledgeMap) -> Result<Vec<crate::mirror::Exported>> {
+    let mut config = serde_json::to_value(config)?;
+    if let Some(object) = config.as_object_mut() {
+        object.remove("secrets");
+        object.remove("cloud");
+    }
+    let mut map = serde_json::to_value(map)?;
+    if let Some(object) = map.as_object_mut() {
+        object.remove("organization");
+        object.remove("work_item_guides");
+    }
+    Ok(vec![
+        crate::mirror::Exported {
+            id: "config".into(),
+            value: config,
+        },
+        crate::mirror::Exported {
+            id: "knowledge_map".into(),
+            value: map,
+        },
+    ])
 }
 
 impl SettingsStore for LocalSettings {

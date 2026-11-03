@@ -1,7 +1,8 @@
 //! The host's side of the mirror (phase 3b): reading the local stores for the engine, talking to
 //! the Worker, the background loop that keeps the copy current, and the operations `cloud_mirror`
 //! (plan, start, stop) and `cloud_verify`. The Teams pipeline never waits on any of it: the loop
-//! is its own task and only reads the stores.
+//! is its own task. In primary mode (phase 3c, [`primary`]) the loop also pulls the account's
+//! configuration from the store into the local stores before each upload.
 
 use super::*;
 use crate::{
@@ -36,9 +37,13 @@ const PAGE_BYTES: usize = 16_000_000;
 pub(in crate::app) struct State {
     /// One pass, upload or verification at a time.
     gate: tokio::sync::Mutex<()>,
+    /// Tests reach an in-memory Worker instead of the network.
+    #[cfg(test)]
+    memory: std::sync::Mutex<Option<Arc<crate::mirror::tests::Worker>>>,
 }
 
-/// Wait for the pass, upload or verification in progress, and keep the next one out.
+/// Wait for the pass, upload or verification in progress, and keep the next one out. A caller
+/// that also needs the operations lock takes it first: the loop's pull in primary mode does.
 pub(super) async fn hold(host: &Host) -> tokio::sync::MutexGuard<'_, ()> {
     host.state.cloud.gate.lock().await
 }
@@ -162,16 +167,34 @@ fn stored(value: &Value) -> Option<Stored> {
 }
 
 impl Transport for Http {
-    async fn write(&self, records: &[Wire]) -> std::result::Result<Vec<Outcome>, Failure> {
-        let body = json!({"records": records.iter().map(|r| json!({
-            "collection": r.collection.name(),
-            "id": r.id,
-            "revision": r.revision,
-            "digest": r.digest,
-            "schema": r.schema,
-            "deleted": r.deleted,
-            "sealed": r.sealed.as_ref().map(|s| STANDARD.encode(s)),
-        })).collect::<Vec<_>>()});
+    async fn write(
+        &self,
+        records: &[Wire],
+        atomic: bool,
+    ) -> std::result::Result<Vec<Outcome>, Failure> {
+        let records_json: Vec<Value> = records
+            .iter()
+            .map(|r| {
+                let mut record = json!({
+                    "collection": r.collection.name(),
+                    "id": r.id,
+                    "revision": r.revision,
+                    "digest": r.digest,
+                    "schema": r.schema,
+                    "deleted": r.deleted,
+                    "sealed": r.sealed.as_ref().map(|s| STANDARD.encode(s)),
+                });
+                // Older Workers refuse unknown fields: these go only when used.
+                if let Some(base) = r.base {
+                    record["base_revision"] = json!(base);
+                }
+                record
+            })
+            .collect();
+        let mut body = json!({ "records": records_json });
+        if atomic {
+            body["atomic"] = json!(true);
+        }
         let reply = self
             .call(reqwest::Method::POST, "/v1/records", Some(body))
             .await?;
@@ -192,6 +215,7 @@ impl Transport for Http {
                     (true, Some("unchanged")) => Ok(Outcome::Unchanged),
                     (true, Some("stale")) => Ok(Outcome::Stale),
                     (true, Some("conflict")) => Ok(Outcome::Conflict),
+                    (true, Some("aborted")) => Ok(Outcome::Aborted),
                     _ => Err(Failure::Refused("bad_reply".into())),
                 }
             })
@@ -248,9 +272,67 @@ impl Transport for Http {
     }
 }
 
+/// The Worker a pass talks to: always over HTTPS, except an in-memory one in tests.
+enum Remote {
+    Http(Http),
+    #[cfg(test)]
+    Memory(Arc<crate::mirror::tests::Worker>),
+}
+
+impl Remote {
+    async fn health(&self) -> std::result::Result<Value, Failure> {
+        match self {
+            Remote::Http(http) => health(&http.endpoint).await,
+            #[cfg(test)]
+            Remote::Memory(_) => {
+                Ok(json!({"configured": true, "protocols": [1], "features": ["cas"]}))
+            }
+        }
+    }
+}
+
+impl Transport for Remote {
+    async fn write(
+        &self,
+        records: &[Wire],
+        atomic: bool,
+    ) -> std::result::Result<Vec<Outcome>, Failure> {
+        match self {
+            Remote::Http(http) => http.write(records, atomic).await,
+            #[cfg(test)]
+            Remote::Memory(worker) => worker.write(records, atomic).await,
+        }
+    }
+
+    async fn page(
+        &self,
+        collection: Collection,
+        since: u64,
+        limit: usize,
+    ) -> std::result::Result<Page, Failure> {
+        match self {
+            Remote::Http(http) => http.page(collection, since, limit).await,
+            #[cfg(test)]
+            Remote::Memory(worker) => worker.page(collection, since, limit).await,
+        }
+    }
+
+    async fn get(
+        &self,
+        collection: Collection,
+        id: &str,
+    ) -> std::result::Result<Option<Stored>, Failure> {
+        match self {
+            Remote::Http(http) => http.get(collection, id).await,
+            #[cfg(test)]
+            Remote::Memory(worker) => worker.get(collection, id).await,
+        }
+    }
+}
+
 /// Everything a pass needs, or why there is nothing to do.
 struct Setup {
-    http: Http,
+    http: Remote,
     content: Content,
     ledger: Ledger,
 }
@@ -275,6 +357,18 @@ fn ledger_path(host: &Host) -> PathBuf {
 }
 
 fn open(host: &Host, cloud: &Cloud) -> std::result::Result<Setup, Missing> {
+    #[cfg(test)]
+    if let Some(worker) = host.state.cloud.memory.lock().unwrap().clone() {
+        let content = key::load(&keys_dir(host))
+            .map_err(|_| Missing::Broken)?
+            .ok_or(Missing::NoKey)?;
+        let ledger = Ledger::open(&ledger_path(host)).map_err(|_| Missing::Broken)?;
+        return Ok(Setup {
+            http: Remote::Memory(worker),
+            content,
+            ledger,
+        });
+    }
     if cloud.endpoint.is_empty() || !enrolled(cloud) {
         return Err(Missing::NotLinked);
     }
@@ -286,10 +380,10 @@ fn open(host: &Host, cloud: &Cloud) -> std::result::Result<Setup, Missing> {
         .ok_or(Missing::NoKey)?;
     let ledger = Ledger::open(&ledger_path(host)).map_err(|_| Missing::Broken)?;
     Ok(Setup {
-        http: Http {
+        http: Remote::Http(Http {
             endpoint: origin(&cloud.endpoint),
             credentials,
-        },
+        }),
         content,
         ledger,
     })
@@ -300,8 +394,15 @@ fn median(values: &mut [u64]) -> u64 {
     values.get(values.len() / 2).copied().unwrap_or(0)
 }
 
-/// One sweep and upload of what changed. Used by the loop; the engine does the work.
+/// One sweep and upload of what changed, after a pull in primary mode. Used by the loop; the
+/// engine does the work.
 async fn pass(host: &Arc<Host>) -> std::result::Result<Option<String>, ()> {
+    // A pull that fails stops the pass: configuration is never pushed over what the store holds.
+    match primary::pass_pull(host).await {
+        Ok(()) => {}
+        Err(Some(code)) => return Ok(Some(code)),
+        Err(None) => return Err(()),
+    }
     let _gate = hold(host).await;
     let Ok(config) = host.state.settings.config() else {
         return Err(());
@@ -318,6 +419,7 @@ async fn pass(host: &Arc<Host>) -> std::result::Result<Option<String>, ()> {
         transport: &setup.http,
         ledger: &setup.ledger,
         content: &setup.content,
+        cas: config.cloud.mode == CloudMode::Primary,
     };
     let at = now();
     let Ok(flushed) = engine.flush(at, Limits::default()).await else {
@@ -334,7 +436,7 @@ async fn pass(host: &Arc<Host>) -> std::result::Result<Option<String>, ()> {
         let mut millis = flushed.batch_millis.clone();
         let _ = setup.ledger.set_meta(
             "last_pass",
-            &json!({"at": at, "sent": flushed.sent, "refused": flushed.refused, "batches": flushed.batches,
+            &json!({"at": at, "sent": flushed.sent, "refused": flushed.refused, "conflicts": flushed.conflicts, "batches": flushed.batches,
                 "batch_ms_median": median(&mut millis), "batch_ms_max": flushed.batch_millis.iter().max()})
             .to_string(),
         );
@@ -506,7 +608,7 @@ async fn start(host: &Arc<Host>) -> std::result::Result<Reply, Box<Reply>> {
     }
     let setup = open(host, &config.cloud).map_err(|m| Box::new(missing_reply(&m)))?;
     // The Worker must be reachable and speak this protocol before anything is queued.
-    health(&setup.http.endpoint).await.map_err(|failure| {
+    setup.http.health().await.map_err(|failure| {
         observe(host, &config.cloud, Some(&failure));
         Box::new(failure_reply(&failure))
     })?;
@@ -516,6 +618,7 @@ async fn start(host: &Arc<Host>) -> std::result::Result<Reply, Box<Reply>> {
         transport: &setup.http,
         ledger: &setup.ledger,
         content: &setup.content,
+        cas: false,
     };
     let internal = |_| {
         Box::new(Reply::error(
@@ -605,6 +708,7 @@ pub(super) async fn operate_verify(host: &Arc<Host>) -> Reply {
         transport: &setup.http,
         ledger: &setup.ledger,
         content: &setup.content,
+        cas: false,
     };
     let started = Instant::now();
     let report = match engine.verify().await {
@@ -679,8 +783,13 @@ pub(super) fn describe(host: &Host, cloud: &Cloud) -> Value {
         .map_or(Value::Null, Value::String);
     view["last_pass"] = meta("last_pass");
     view["last_verify"] = meta("last_verify");
+    if cloud.mode == CloudMode::Primary || ledger.meta("promoted_at").ok().flatten().is_some() {
+        view["primary"] = primary::describe(&ledger);
+    }
     view
 }
+
+pub(in crate::app) mod primary;
 
 #[cfg(test)]
 mod tests;

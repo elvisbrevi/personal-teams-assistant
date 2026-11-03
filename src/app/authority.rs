@@ -186,6 +186,8 @@ pub(super) fn check_shared_operation(request: &control::Request) -> Result<()> {
                 | "cloud_mirror"
                 | "cloud_verify"
                 | "cloud_disconnect"
+                | "cloud_promote"
+                | "cloud_pull"
         ),
         "{EXECUTION_DENIED}"
     );

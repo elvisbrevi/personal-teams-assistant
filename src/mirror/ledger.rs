@@ -201,6 +201,18 @@ impl Ledger {
     }
 }
 
+impl Ledger {
+    /// Configuration records the account store holds in another version than this
+    /// installation's unacknowledged change (primary mode).
+    pub fn conflicts(&self) -> Result<u64> {
+        Ok(self.lock().query_row(
+            "SELECT COUNT(*) FROM records WHERE error=?1",
+            [super::engine::CONFLICT],
+            |r| r.get::<_, i64>(0).map(|n| n as u64),
+        )?)
+    }
+}
+
 /// Counts of the outbox, per collection and in total.
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize)]
 pub struct Outbox {

@@ -2083,14 +2083,23 @@ function renderCloud() {
 
 let cloudMirrorArmed = false;
 let cloudDisconnectArmed = false;
+let cloudPromoteArmed = false;
+let cloudReplaceArmed = false;
 
 function renderCloudMirror() {
   const status = cloudStatus;
   const mirror = status?.mirror ?? {};
   $('#cloud-mirror').hidden = !status?.enrolled;
   const outbox = mirror.outbox;
+  const primary = status?.mode === 'primary';
+  const conflicts = mirror.primary?.conflicts ?? 0;
   const lines = [];
-  if (status?.mode === 'mirror') {
+  if (primary) {
+    lines.push(t('The account store is the source of this account\'s configuration: changes are saved there first, and while it does not answer the configuration cannot be changed.'));
+    if (conflicts) lines.push(tn(conflicts, '{n} record was changed both here and in the account store; it cannot be edited until you replace it with the account store\'s.', '{n} records were changed both here and in the account store; they cannot be edited until you replace them with the account store\'s.'));
+    if (mirror.primary?.last_pull?.at) lines.push(t('Last synchronized {when}.', { when: ago(mirror.primary.last_pull.at * 1000) }));
+    if (outbox?.pending) lines.push(tn(outbox.pending, '{n} change waits to be copied.', '{n} changes wait to be copied.'));
+  } else if (status?.mode === 'mirror') {
     lines.push(outbox?.pending
       ? tn(outbox.pending, '{n} change waits to be copied.', '{n} changes wait to be copied.')
       : t('The copy is up to date.'));
@@ -2103,9 +2112,16 @@ function renderCloudMirror() {
   if (mirror.last_verify) lines.push(mirror.last_verify.ok ? t('Last verification {when}: the copy matches.', { when: ago(mirror.last_verify.at * 1000) }) : t('Last verification {when}: the copy differs.', { when: ago(mirror.last_verify.at * 1000) }));
   $('#cloud-mirror-summary').textContent = lines.join(' ');
   const start = $('#cloud-mirror-start');
-  start.hidden = status?.mode === 'mirror';
+  start.hidden = status?.mode === 'mirror' || primary;
   start.textContent = cloudMirrorArmed ? t('Tap again to upload') : t('Start the encrypted copy');
   $('#cloud-mirror-stop').hidden = status?.mode !== 'mirror';
+  const promote = $('#cloud-promote');
+  promote.hidden = status?.mode !== 'mirror' || !mirror.initial_verified_at;
+  promote.textContent = cloudPromoteArmed ? t('Tap again to make it the source') : t('Make the account store the source');
+  const replace = $('#cloud-replace');
+  replace.hidden = !primary || !conflicts;
+  replace.textContent = cloudReplaceArmed ? t('Tap again to replace') : t('Replace with the account store\'s');
+  $('#cloud-demote').hidden = !primary;
   $('#cloud-verify').hidden = !mirror.key?.present;
   $('#cloud-disconnect').textContent = cloudDisconnectArmed ? t('Tap again to disconnect') : t('Disconnect this computer');
 }
@@ -2171,6 +2187,43 @@ $('#cloud-verify').onclick = event => busy(event.currentTarget, async () => {
   await loadCloud();
   if (!reply.ok) throw t('The copy differs from this computer. Start the encrypted copy again to repair it.');
   done(t('The copy matches this computer.'));
+});
+
+$('#cloud-promote').onclick = event => {
+  if (!cloudPromoteArmed) {
+    cloudPromoteArmed = true;
+    renderCloudMirror();
+    setTimeout(() => { cloudPromoteArmed = false; renderCloudMirror(); }, 4000);
+    return;
+  }
+  cloudPromoteArmed = false;
+  busy(event.currentTarget, async () => {
+    const reply = await invoke('cloud_promote', { action: 'promote' });
+    renderCloudVerify(reply.verify);
+    await loadCloud();
+    done(t('The account store is now the source of this account\'s configuration.'));
+  });
+};
+
+$('#cloud-replace').onclick = event => {
+  if (!cloudReplaceArmed) {
+    cloudReplaceArmed = true;
+    renderCloudMirror();
+    setTimeout(() => { cloudReplaceArmed = false; renderCloudMirror(); }, 4000);
+    return;
+  }
+  cloudReplaceArmed = false;
+  busy(event.currentTarget, async () => {
+    await invoke('cloud_pull', { replace: true });
+    await loadCloud();
+    done(t('This computer now has the account store\'s configuration. The replaced version was kept in a private backup.'));
+  });
+};
+
+$('#cloud-demote').onclick = event => busy(event.currentTarget, async () => {
+  await invoke('cloud_promote', { action: 'demote' });
+  await loadCloud();
+  done(t('This computer\'s configuration is the source again; the account store keeps its copy up to date.'));
 });
 
 $('#cloud-mirror-stop').onclick = event => busy(event.currentTarget, async () => {
