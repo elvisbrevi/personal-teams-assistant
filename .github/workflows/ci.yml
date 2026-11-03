@@ -149,6 +149,7 @@ jobs:
           bun scripts/test-ci-workflow.mjs
           python3 scripts/test-configure-web-access.py
           python3 scripts/test-configure-cloud-access.py
+          python3 scripts/test-rehearse-cloud-migration.py
           python3 scripts/test-vps-update.py
       # Playwright and axe-core stay outside the repository, as in docs/ui-design-conventions.md.
       - name: Playwright Chromium and axe-core

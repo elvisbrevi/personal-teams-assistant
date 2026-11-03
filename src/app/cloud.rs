@@ -1,6 +1,7 @@
 //! This installation's link to the account store Worker (`cloud/`, phase 3a of the cloud storage
-//! design): enrollment and status. The mirror (phase 3b, `mirror`) and the account store as the
-//! source of truth of the configuration (phase 3c, `mirror::primary`) use this link.
+//! design): enrollment and status. The mirror (phase 3b, `mirror`), the account store as the
+//! source of truth of the configuration (phase 3c, `mirror::primary`) and the migration, rollback
+//! and erasure (phase 4a, `mirror::migration`) use this link.
 //!
 //! Two credentials reach the Worker: the account's Access service token at the edge
 //! (`CLOUD_ACCESS_CLIENT_ID` / `CLOUD_ACCESS_CLIENT_SECRET`) and the installation credential the
@@ -17,7 +18,7 @@ use serde_json::{Value, json};
 use std::time::Duration;
 
 mod mirror;
-pub(in crate::app) use mirror::{State, primary, run};
+pub(in crate::app) use mirror::{State, migration, primary, run};
 
 pub(super) const ACCESS_ID: &str = "CLOUD_ACCESS_CLIENT_ID";
 pub(super) const ACCESS_SECRET: &str = "CLOUD_ACCESS_CLIENT_SECRET";
@@ -38,6 +39,9 @@ pub(super) fn handles(method: &str) -> bool {
             | "cloud_disconnect"
             | "cloud_promote"
             | "cloud_pull"
+            | "cloud_migrate"
+            | "cloud_rollback"
+            | "cloud_erase"
     )
 }
 
@@ -150,6 +154,35 @@ pub(super) async fn operate(host: &Arc<Host>, request: &control::Request) -> Rep
                 return Reply::error("invalid_input", 2, "Invalid arguments.");
             };
             primary::operate_pull(host, args).await
+        }
+        "cloud_migrate" => {
+            if !invocation.scope.owner || invocation.scope.shared {
+                return Reply::error("authority_denied", 6, authority::EXECUTION_DENIED);
+            }
+            let Ok(args) = serde_json::from_value::<migration::MigrateArgs>(request.args.clone())
+            else {
+                return Reply::error("invalid_input", 2, "Invalid arguments.");
+            };
+            migration::operate_migrate(host, args).await
+        }
+        "cloud_rollback" => {
+            if !invocation.scope.owner || invocation.scope.shared {
+                return Reply::error("authority_denied", 6, authority::EXECUTION_DENIED);
+            }
+            let Ok(args) = serde_json::from_value::<migration::RollbackArgs>(request.args.clone())
+            else {
+                return Reply::error("invalid_input", 2, "Invalid arguments.");
+            };
+            migration::operate_rollback(host, args).await
+        }
+        "cloud_erase" => {
+            if !invocation.scope.owner || invocation.scope.shared {
+                return Reply::error("authority_denied", 6, authority::EXECUTION_DENIED);
+            }
+            if request.args != json!({}) && !request.args.is_null() {
+                return Reply::error("invalid_input", 2, "Invalid arguments.");
+            }
+            migration::operate_erase(host).await
         }
         _ => Reply::error("invalid_input", 2, "Unknown operation."),
     }

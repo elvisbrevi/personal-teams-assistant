@@ -134,18 +134,29 @@ Account store (Cloudflare)
                            Owner only. Revokes this installation in the account store when it answers, removes
                            CLOUD_STORE_TOKEN and sets the mode to off; with --forget-service-token also the Access
                            service token and the endpoint. The encrypted copy, the content key and the outbox stay.
-  cloud mirror --dry-run      Lists per collection what mirroring would upload (records and bytes); sends nothing.
-  cloud mirror --confirmed    Owner only. Creates the account content key on first use (back it up with
-                           pta variables key backup), uploads every collection sealed with it (AES-256-GCM-SIV in this
-                           installation; the Worker sees only blinded IDs, revisions and digests), verifies the copy by
-                           reading it back and only then switches the mode to mirror. Local stays the source of truth;
-                           afterwards an outbox sends each change. Run again to resume an interrupted upload.
-  cloud mirror --stop         Switches the mode back to off; the copy and the outbox stay as they are.
+  cloud migrate --dry-run     Lists per collection what migrating would upload (records and bytes), what stays on this
+                           computer and why, and the size of the backup; writes and sends nothing.
+  cloud migrate --confirmed   Owner only. Backs up this profile first (every database and the settings files, in a private
+                           backups/cloud-<time>/; the newest three are kept), creates the account content key on first
+                           use (back it up with pta variables key backup), uploads every collection sealed with it
+                           (AES-256-GCM-SIV in this installation; the Worker sees only blinded IDs, revisions and
+                           digests), verifies the copy by reading it back and only then switches the mode to mirror.
+                           Local stays the source of truth; afterwards an outbox sends each change. Run again to resume.
+  cloud rollback [--keep-local] --confirmed
+                           Owner only. Backs up this profile, then, in primary, pulls what the account store changed
+                           (refused on a conflict or without an answer), verifies that the store holds nothing this
+                           computer lacks and switches the mode to off. Nothing local is deleted and the copy in the
+                           store stays until cloud erase. --keep-local keeps this computer's configuration as it is.
+  cloud erase --confirmed     Owner only, after a rollback (mode off), with no other connected computer. Erases this
+                           account's records and backups in the account store, forgets what was acknowledged and sets
+                           the content key aside (keys/cloud-content-retired-<time>.json), so a new migration uses a new
+                           key. This computer keeps all of its data. Cloudflare keeps a 30-day point-in-time recovery
+                           of the store, readable only with the retired key; erased R2 backups are gone.
   cloud verify                Compares the account store's copy with this installation: per collection the counts, a
                            digest over the sorted (ID, revision, ciphertext digest) on both sides and a full decryption
                            of every record. Local changes not sent yet are pending, not differences.
-  cloud promote --confirmed   Owner only, from mirror. Sends what is pending, verifies the copy and only when it is identical
-                           makes the account store the source of truth of the configuration (mode primary): settings,
+  cloud promote --confirmed   Owner only, from mirror. Sends what is pending, verifies the copy, backs up this profile and only
+                           when the copy is identical makes the account store the source of truth (mode primary): settings,
                            organization and notes are saved there first under compare-and-swap and pulled from it; without
                            its answer the configuration is read-only. Not for an installation signed in to a coordinator.
   cloud demote --confirmed    Back to mirror: this computer's configuration is the source of truth again. Changes nothing else.
@@ -589,23 +600,46 @@ async fn cloud_command(args: &[String]) -> Result<Reply> {
             }
             call("cloud_connect", body, None, true).await
         }
-        Some("mirror") => {
-            let dry_run = args.iter().any(|a| a == "--dry-run");
-            let stop = args.iter().any(|a| a == "--stop");
-            ensure!(!(dry_run && stop), "use --dry-run or --stop, not both");
-            if dry_run {
-                return call("cloud_mirror", json!({"action": "plan"}), None, true).await;
-            }
-            if stop {
-                return call("cloud_mirror", json!({"action": "stop"}), None, true).await;
+        Some("migrate") => {
+            if args.iter().any(|a| a == "--dry-run") {
+                return call("cloud_migrate", json!({"action": "plan"}), None, true).await;
             }
             if let Some(reply) = unconfirmed(
                 args,
-                "Upload this installation's records, encrypted with the account content key, to the account store and keep it mirrored?".into(),
+                "Back up this profile, then upload its records encrypted with the account content key to the account store, verify the copy and keep it mirrored?".into(),
             ) {
                 return Ok(reply);
             }
-            call("cloud_mirror", json!({"action": "start"}), None, true).await
+            call("cloud_migrate", json!({"action": "start"}), None, true).await
+        }
+        Some("rollback") => {
+            let keep_local = args.iter().any(|a| a == "--keep-local");
+            if let Some(reply) = unconfirmed(
+                args,
+                if keep_local {
+                    "Stop using the account store on this computer, keeping this computer's configuration exactly as it is (the copy in the store stays)?".into()
+                } else {
+                    "Bring the account store's configuration back to this computer, verify and stop using the account store (the copy in the store stays)?".into()
+                },
+            ) {
+                return Ok(reply);
+            }
+            call(
+                "cloud_rollback",
+                json!({"keep_local": keep_local}),
+                None,
+                true,
+            )
+            .await
+        }
+        Some("erase") => {
+            if let Some(reply) = unconfirmed(
+                args,
+                "Erase this account's copy in the account store (records and backups) and set the content key aside? This computer keeps all of its data.".into(),
+            ) {
+                return Ok(reply);
+            }
+            call("cloud_erase", json!({}), None, true).await
         }
         Some("verify") => call("cloud_verify", json!({}), None, true).await,
         Some("promote") => {
@@ -1105,7 +1139,7 @@ fn validate_args(args: &[String]) -> Result<()> {
             | "--replace-settings"
             | "--replace"
             | "--dry-run"
-            | "--stop"
+            | "--keep-local"
             | "--forget-service-token" => {}
             "--destination" | "--name" | "--existing" | "--to" | "--target" | "--label"
             | "--token-expires" => {
@@ -1301,7 +1335,9 @@ fn validate_args(args: &[String]) -> Result<()> {
                 "cloud",
                 "status"
                     | "connect"
-                    | "mirror"
+                    | "migrate"
+                    | "rollback"
+                    | "erase"
                     | "verify"
                     | "disconnect"
                     | "promote"
@@ -1440,7 +1476,9 @@ fn validate_args(args: &[String]) -> Result<()> {
         (
             "--confirmed",
             p.as_slice() == ["cloud", "connect"]
-                || p.as_slice() == ["cloud", "mirror"]
+                || p.as_slice() == ["cloud", "migrate"]
+                || p.as_slice() == ["cloud", "rollback"]
+                || p.as_slice() == ["cloud", "erase"]
                 || p.as_slice() == ["cloud", "disconnect"]
                 || p.as_slice() == ["cloud", "promote"]
                 || p.as_slice() == ["cloud", "demote"]
@@ -1459,13 +1497,13 @@ fn validate_args(args: &[String]) -> Result<()> {
         ),
         ("--to", p.as_slice().starts_with(&["variables", "deliver"])),
         ("--endpoint", p.as_slice() == ["cloud", "connect"]),
-        ("--dry-run", p.as_slice() == ["cloud", "mirror"]),
+        ("--dry-run", p.as_slice() == ["cloud", "migrate"]),
         ("--token-expires", p.as_slice() == ["cloud", "connect"]),
         (
             "--forget-service-token",
             p.as_slice() == ["cloud", "disconnect"],
         ),
-        ("--stop", p.as_slice() == ["cloud", "mirror"]),
+        ("--keep-local", p.as_slice() == ["cloud", "rollback"]),
         ("--replace", p.as_slice() == ["cloud", "pull"]),
         ("--label", p.as_slice() == ["cloud", "connect"]),
         (
@@ -1641,7 +1679,7 @@ async fn execute(mut args: Vec<String>) -> Result<Reply> {
         }
         "capabilities" => {
             return Ok(Reply::success(
-                json!({"contract":control::CONTRACT,"commands":HELP,"skill_version":env!("CARGO_PKG_VERSION"),"activity_registration_support":true,"web_support":true,"web_access_support":true,"knowledge_index_support":true,"mcp_support":true,"tools_support":true,"todo_support":true,"implementation_support":true,"machine_pairing_support":true,"machine_login_support":true,"machine_management_support":true,"account_variables_support":true,"account_portable_support":true,"account_authority_support":true,"shared_accounts_support":true,"cloud_store_support":true,"cloud_mirror_support":true,"cloud_disconnect_support":true,"cloud_primary_support":true}),
+                json!({"contract":control::CONTRACT,"commands":HELP,"skill_version":env!("CARGO_PKG_VERSION"),"activity_registration_support":true,"web_support":true,"web_access_support":true,"knowledge_index_support":true,"mcp_support":true,"tools_support":true,"todo_support":true,"implementation_support":true,"machine_pairing_support":true,"machine_login_support":true,"machine_management_support":true,"account_variables_support":true,"account_portable_support":true,"account_authority_support":true,"shared_accounts_support":true,"cloud_store_support":true,"cloud_mirror_support":true,"cloud_disconnect_support":true,"cloud_primary_support":true,"cloud_migration_support":true}),
             ));
         }
         "skill" => return crate::app::skill::command(action, args.get(2).map(String::as_str)),
@@ -2884,9 +2922,11 @@ mod help_tests {
             &["cloud", "demote", "--confirmed"],
             &["cloud", "pull"],
             &["cloud", "pull", "--replace", "--confirmed"],
-            &["cloud", "mirror", "--dry-run"],
-            &["cloud", "mirror", "--stop"],
-            &["cloud", "mirror", "--confirmed"],
+            &["cloud", "migrate", "--dry-run"],
+            &["cloud", "migrate", "--confirmed"],
+            &["cloud", "rollback", "--confirmed"],
+            &["cloud", "rollback", "--keep-local", "--confirmed"],
+            &["cloud", "erase", "--confirmed"],
             &[
                 "cloud",
                 "connect",

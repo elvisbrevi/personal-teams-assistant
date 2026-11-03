@@ -1,6 +1,6 @@
 //! The host's side of the mirror (phase 3b): reading the local stores for the engine, talking to
-//! the Worker, the background loop that keeps the copy current, and the operations `cloud_mirror`
-//! (plan, start, stop) and `cloud_verify`. The Teams pipeline never waits on any of it: the loop
+//! the Worker, the background loop that keeps the copy current, the verified upload that
+//! `cloud_migrate` runs after its backup ([`migration`], phase 4a) and `cloud_verify`. The Teams pipeline never waits on any of it: the loop
 //! is its own task. In primary mode (phase 3c, [`primary`]) the loop also pulls the account's
 //! configuration from the store into the local stores before each upload.
 
@@ -285,7 +285,25 @@ impl Remote {
             Remote::Http(http) => health(&http.endpoint).await,
             #[cfg(test)]
             Remote::Memory(_) => {
-                Ok(json!({"configured": true, "protocols": [1], "features": ["cas"]}))
+                Ok(json!({"configured": true, "protocols": [1], "features": ["cas", "erase"]}))
+            }
+        }
+    }
+
+    /// One `DELETE /v1/store`: `{erased, backups, more}`.
+    async fn erase(&self) -> std::result::Result<Value, Failure> {
+        match self {
+            Remote::Http(http) => {
+                http.call(
+                    reqwest::Method::DELETE,
+                    "/v1/store",
+                    Some(json!({"confirm": "erase"})),
+                )
+                .await
+            }
+            #[cfg(test)]
+            Remote::Memory(worker) => {
+                Ok(json!({"erased": worker.erase(), "backups": 0, "more": false}))
             }
         }
     }
@@ -356,34 +374,34 @@ fn ledger_path(host: &Host) -> PathBuf {
         .join("mirror.db")
 }
 
-fn open(host: &Host, cloud: &Cloud) -> std::result::Result<Setup, Missing> {
+/// The Worker of an enrolled installation, with both credentials; no key needed.
+fn remote(host: &Host, cloud: &Cloud) -> std::result::Result<Remote, Missing> {
     #[cfg(test)]
     if let Some(worker) = host.state.cloud.memory.lock().unwrap().clone() {
-        let content = key::load(&keys_dir(host))
-            .map_err(|_| Missing::Broken)?
-            .ok_or(Missing::NoKey)?;
-        let ledger = Ledger::open(&ledger_path(host)).map_err(|_| Missing::Broken)?;
-        return Ok(Setup {
-            http: Remote::Memory(worker),
-            content,
-            ledger,
-        });
+        return Ok(Remote::Memory(worker));
     }
+    #[cfg(not(test))]
+    let _ = host;
     if cloud.endpoint.is_empty() || !enrolled(cloud) {
         return Err(Missing::NotLinked);
     }
     let credentials = stored_credentials()
         .filter(|c| c.token.is_some())
         .ok_or(Missing::NotLinked)?;
+    Ok(Remote::Http(Http {
+        endpoint: origin(&cloud.endpoint),
+        credentials,
+    }))
+}
+
+fn open(host: &Host, cloud: &Cloud) -> std::result::Result<Setup, Missing> {
+    let http = remote(host, cloud)?;
     let content = key::load(&keys_dir(host))
         .map_err(|_| Missing::Broken)?
         .ok_or(Missing::NoKey)?;
     let ledger = Ledger::open(&ledger_path(host)).map_err(|_| Missing::Broken)?;
     Ok(Setup {
-        http: Remote::Http(Http {
-            endpoint: origin(&cloud.endpoint),
-            credentials,
-        }),
+        http,
         content,
         ledger,
     })
@@ -497,7 +515,7 @@ fn missing_reply(missing: &Missing) -> Reply {
         Missing::NoKey => Reply::error(
             "not_ready",
             3,
-            "There is no account content key on this installation: run pta cloud mirror to create it, or restore it from the key backup.",
+            "There is no account content key on this installation: run pta cloud migrate to create it, or restore it from the key backup.",
         ),
         Missing::Broken => Reply::error(
             "operation_failed",
@@ -507,10 +525,11 @@ fn missing_reply(missing: &Missing) -> Reply {
     }
 }
 
+/// `cloud_mirror`, kept for clients older than `cloud_migrate`: `plan` and `start` are the
+/// migration's (so no path skips its backup) and `stop` is a rollback.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct MirrorArgs {
-    /// `plan` (what would be uploaded), `start` (upload, verify, then mirror) or `stop`.
     #[serde(default = "plan")]
     action: String,
 }
@@ -558,27 +577,16 @@ fn preview(host: &Host) -> Result<Value> {
 
 pub(super) async fn operate_mirror(host: &Arc<Host>, args: MirrorArgs) -> Reply {
     match args.action.as_str() {
-        "plan" => match preview(host) {
-            Ok(plan) => {
-                let key = key::load(&keys_dir(host)).ok().flatten().is_some();
-                Reply::success(json!({"action": "plan", "key": key, "plan": plan,
-                    "excluded": "Secrets, credentials, sessions, send nonces and runs still in progress never leave this installation."}))
-            }
-            Err(_) => Reply::error(
-                "operation_failed",
-                1,
-                "The local records could not be read.",
-            ),
-        },
-        "stop" => match save_mode(host, CloudMode::Off) {
-            Ok(()) => Reply::success(json!({"action": "stop", "mode": "off"})),
-            Err(reply) => *reply,
-        },
-        "start" => start(host).await.unwrap_or_else(|reply| *reply),
+        "plan" | "start" => {
+            migration::operate_migrate(host, migration::MigrateArgs::new(&args.action)).await
+        }
+        "stop" => migration::operate_rollback(host, migration::RollbackArgs::default()).await,
         _ => Reply::error("invalid_input", 2, "Unknown mirror action."),
     }
 }
 
+/// Upload what is pending, verify by reading back and, when clean, switch to mirror. The
+/// migration runs it after its backup.
 async fn start(host: &Arc<Host>) -> std::result::Result<Reply, Box<Reply>> {
     let _gate = host.state.cloud.gate.lock().await;
     let config = host.state.settings.config().map_err(|_| {
@@ -588,9 +596,7 @@ async fn start(host: &Arc<Host>) -> std::result::Result<Reply, Box<Reply>> {
             "The configuration could not be read.",
         ))
     })?;
-    if config.cloud.endpoint.is_empty() || !enrolled(&config.cloud) {
-        return Err(Box::new(missing_reply(&Missing::NotLinked)));
-    }
+    remote(host, &config.cloud).map_err(|m| Box::new(missing_reply(&m)))?;
     let mut key_created = false;
     match key::load(&keys_dir(host)) {
         Ok(Some(_)) => {}
@@ -684,7 +690,7 @@ async fn start(host: &Arc<Host>) -> std::result::Result<Reply, Box<Reply>> {
         } else if complete {
             "The account store now mirrors this installation; local stays the source of truth."
         } else {
-            "The copy is not complete yet: run pta cloud mirror again (the outbox continues where it stopped)."
+            "The copy is not complete yet: run pta cloud migrate --confirmed again (the outbox continues where it stopped)."
         },
     })))
 }
@@ -750,7 +756,8 @@ pub(super) fn describe(host: &Host, cloud: &Cloud) -> Value {
         Err(_) => json!({"present": false, "damaged": true}),
     };
     let path = ledger_path(host);
-    let mut view = json!({"key": key_view, "mode": cloud.mode});
+    let mut view =
+        json!({"key": key_view, "mode": cloud.mode, "backups": migration::latest_backup(host)});
     if !path.exists() {
         return view;
     }
@@ -783,12 +790,15 @@ pub(super) fn describe(host: &Host, cloud: &Cloud) -> Value {
         .map_or(Value::Null, Value::String);
     view["last_pass"] = meta("last_pass");
     view["last_verify"] = meta("last_verify");
+    view["rolled_back_at"] = meta("rolled_back_at");
+    view["erased_at"] = meta("erased_at");
     if cloud.mode == CloudMode::Primary || ledger.meta("promoted_at").ok().flatten().is_some() {
         view["primary"] = primary::describe(&ledger);
     }
     view
 }
 
+pub(in crate::app) mod migration;
 pub(in crate::app) mod primary;
 
 #[cfg(test)]

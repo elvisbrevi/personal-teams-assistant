@@ -297,7 +297,7 @@ fn commit(state: &DesktopState, config: &Config, map: &KnowledgeMap) -> Result<(
 }
 
 /// One pull with the locks a settings change takes (operations, then the pass gate).
-async fn pull_now(
+pub(super) async fn pull_now(
     host: &Host,
     config: &Config,
     replace: bool,
@@ -329,14 +329,14 @@ async fn pull_now(
     Ok(pulled)
 }
 
-enum PullError {
+pub(super) enum PullError {
     Missing(Missing),
     Failure(Failure),
     /// A pulled record could not be installed here (it fails this installation's checks).
     Apply,
 }
 
-fn pull_reply(error: &PullError) -> Reply {
+pub(super) fn pull_reply(error: &PullError) -> Reply {
     match error {
         PullError::Missing(missing) => missing_reply(missing),
         PullError::Failure(failure) => failure_reply(failure),
@@ -445,7 +445,7 @@ async fn promote(host: &Arc<Host>) -> std::result::Result<Reply, Box<Reply>> {
         }
         CloudMode::Off => {
             return Err(refuse(
-                "Mirror this installation first (pta cloud mirror --confirmed); only a verified copy can become the source of truth.",
+                "Migrate this installation first (pta cloud migrate --confirmed); only a verified copy can become the source of truth.",
             ));
         }
         CloudMode::Mirror => {}
@@ -528,6 +528,9 @@ async fn promote(host: &Arc<Host>) -> std::result::Result<Reply, Box<Reply>> {
         }));
     }
     observe(host, &config.cloud, None);
+    // A way back to exactly this profile before the store becomes its source.
+    let backup = migration::back_up_data(host, "promote")
+        .map_err(|_| fail("This profile could not be backed up; nothing was changed."))?;
     save_mode(host, CloudMode::Primary)?;
     let _ = setup.ledger.set_meta("promoted_at", &now().to_string());
     // Pulls start from what the copy holds now.
@@ -537,6 +540,7 @@ async fn promote(host: &Arc<Host>) -> std::result::Result<Reply, Box<Reply>> {
         "mode": "primary",
         "changed": true,
         "verify": report,
+        "backup": backup,
         "next": "The account store is now the source of truth of this account's configuration: changes are saved there first, and without an answer from it the configuration is read-only. pta cloud demote --confirmed returns to mirror.",
     })))
 }

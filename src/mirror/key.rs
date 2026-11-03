@@ -182,3 +182,22 @@ pub fn import(keys: &Path, backup: &ContentBackup) -> Result<bool> {
         }
     }
 }
+
+/// Set the key aside after the account store's copy was erased: the file is renamed to
+/// `cloud-content-retired-<at>.json` (still private), so the next upload creates a new key and
+/// what Cloudflare may still hold sealed with this one (point-in-time recovery) stays unreadable
+/// without it. Returns the new path, or `None` when there was no key.
+pub fn retire(keys: &Path, at: i64) -> Result<Option<std::path::PathBuf>> {
+    let current = path(keys);
+    if !current.exists() {
+        return Ok(None);
+    }
+    let mut retired = keys.join(format!("cloud-content-retired-{at}.json"));
+    let mut n = 1;
+    while retired.exists() {
+        retired = keys.join(format!("cloud-content-retired-{at}-{n}.json"));
+        n += 1;
+    }
+    std::fs::rename(&current, &retired)?;
+    Ok(Some(retired))
+}

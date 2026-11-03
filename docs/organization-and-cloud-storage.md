@@ -302,21 +302,31 @@ Optional, per account, reversible, with a prior backup and no loss of history.
    `cloud_connect`) enrolls the installation and shows the mode: `off` (default), `mirror` or
    `primary`, kept in an installation-local `[cloud]` section of `Config` (`#[serde(default)]`,
    not portable). Done in phase 3a (0.10.25); see «Account store link» in the architecture.
-2. `pta cloud migrate --dry-run` lists per collection what would be uploaded (counts, sizes) and
-   what stays local and why.
-3. `pta cloud migrate` takes a **backup** first (SQLite online backup of each database plus the
-   profile files into a private `backups/cloud-<time>/`, reusing the data-safety copies of the
-   updater), uploads every collection encrypted, then **verifies by reading back**: per
-   collection, the record count and a digest over sorted `(id, revision, ciphertext digest)`
-   computed on both sides, plus a full decryption and comparison of every record. Only then does
-   the mode become `mirror`. Local stores are never deleted.
-4. `mirror` keeps local as the source of truth and pushes every change. Phase 3b (0.10.26) does the
-   upload, the read-back verification and the switch as `pta cloud mirror` (GUI Settings › Advanced ›
-   Cloud storage, MCP `cloud_mirror`); `migrate` adds the backup and the dry-run report in 4a. `pta cloud verify`
-   compares at any time. `pta cloud promote` switches to `primary` after a clean verification and
-   `pta cloud demote` back to `mirror` (phase 3c, 0.10.29).
-5. `pta cloud rollback` pulls everything to local, verifies, switches to `off` and leaves the cloud
-   copy untouched until an explicit `pta cloud erase`.
+2. `pta cloud migrate --dry-run` lists per collection what would be uploaded (counts, sizes),
+   what stays local and why, and the size of the backup. Done in phase 4a (0.10.31).
+3. `pta cloud migrate --confirmed` takes a **backup** first (SQLite online backup of each database
+   plus the profile files into a private `backups/cloud-<time>/` with a manifest, reusing the
+   data-safety copies of the updater; the newest three are kept), uploads every collection
+   encrypted, then **verifies by reading back**: per collection, the record count and a digest over
+   sorted `(id, revision, ciphertext digest)` computed on both sides, plus a full decryption and
+   comparison of every record. Only then does the mode become `mirror`. Local stores are never
+   deleted. It replaces phase 3b's `pta cloud mirror` (decision 14).
+4. `mirror` keeps local as the source of truth and pushes every change. `pta cloud verify`
+   compares at any time. `pta cloud promote` switches to `primary` after a clean verification and a
+   new backup, and `pta cloud demote` back to `mirror` (phase 3c, 0.10.29).
+5. `pta cloud rollback` backs up, pulls the configuration once when the store is primary (refused
+   on a conflict or without an answer, unless `--keep-local`), verifies that the store holds nothing
+   the installation lacks, switches to `off` and leaves the cloud copy untouched (decision 15).
+6. `pta cloud erase`, only in `off` and with no other active installation, removes the copy from
+   the Worker (`DELETE /v1/store`: the records, then the account's R2 prefix), clears the ledger and
+   sets the content key aside, so a new migration uses a new key; Cloudflare's 30-day point-in-time
+   recovery is the only way back (decision 16).
+7. The rehearsal (`scripts/rehearse-cloud-migration.py`) runs migrate, promote, edits, rollback and
+   erase on a copy of a real profile without its credentials, against staging with a temporary
+   service token. Rehearsed on 2026-11-03 with a copy of the production profile (1,278 records):
+   the backup held 10 files, the upload and its verification passed (verification 5.4 s), the
+   edit and the note went through the store, the rollback kept every local record and the edit
+   made in `primary`, and the erasure emptied the store and deleted nothing local.
 
 Versions: the Worker exposes `/v1/…` with additive changes and reports its protocol and schema
 versions; hosts advertise additive `cloud_store_support`, and a CLI or portal refuses `cloud_*`
@@ -382,7 +392,7 @@ parity, the `AGENTS.md` checks, and delivery verified on crates.io and on the se
 | 3a. Worker and authentication — under way (Worker: 0.10.23; host link: 0.10.25) | `cloud/` Worker, `Registry`, `AccountStore` schema v1 (encrypted records with clear metadata), Access service token, installation credential, health; Workers Builds; host `cloud status/connect`. | Access/Workers configuration mistakes: staging Worker first, contract tests including cross-account attempts. |
 | 3b. Mirror — done (0.10.26) | Content key, sealing and blinded IDs; the ledger as outbox for every collection (finished records and configuration snapshots); `cloud mirror` (plan, verified initial upload, then mode `mirror`; stop) and `cloud verify`; key in the operator key backup; latency in `cloud status` (0.10.26). The link as a standing kind, the `account_store` step of `setup_status`, `cloud disconnect` and the service token's expiry (0.10.27). Local stays the source of truth. | Outbox growth while offline (bounded by the local records, visible in status); latency measured here (§5). |
 | 3c. Primary — done (Worker 0.2.0 with 0.10.28; host 0.10.29) | Compare-and-swap (`base_revision`, `atomic`, feature `cas`) in the Worker; mode `primary` (`cloud promote|demote`, after a clean verification): every configuration edit is written to the store first and saved locally once accepted, read-only without an answer; the loop pulls the configuration into the local replica; conflicts stay local until `cloud pull --replace`; the coordinator serves `portable_*` from the replica it pulls. Primary scope: the whole `config` (but `[secrets]`/`[cloud]`), the map, the organization and the notes (decision 10). | Conflict handling regressions: reuse the portable rules and their tests. |
-| 4a. Migration — under way (Worker 0.3.0 with 0.10.30) | `cloud migrate/promote/rollback/erase` with backup and read-back verification; production migrated when the owner decides. | Data loss: never delete local data; rollback rehearsed on a copy of the production profile first. |
+| 4a. Migration — done (Worker 0.3.0 with 0.10.30; host 0.10.31) | `cloud migrate/promote/rollback/erase` with backup and read-back verification, the rehearsal script, and the rehearsal on a copy of the production profile against staging; production migrated when the owner decides. | Data loss: never delete local data; rollback rehearsed on a copy of the production profile first. |
 | 4b. Other users | Every portal account gets its own cloud account store: the operator enables it per account, each with its own content key, installation credentials and quota share; the owner's account is not special in the Worker. | Authorization bugs between accounts (cross-account contract tests); the shared Free quota (per-account shares, §5). |
 
 ## 11. Decisions
@@ -434,6 +444,20 @@ Taken before phase 3c (2026-11-03):
     feature `cas`), not a v2.
 13. **Production.** Stays in `mirror` until the phase 4a rehearsal; `promote` is tested against
     staging and copies.
+
+Taken before phase 4a (2026-11-03):
+
+14. **`migrate` replaces `mirror`.** `pta cloud migrate --dry-run|--confirmed` and `rollback` are the
+    only path in the CLI, the MCP, the GUI (one «Migrate» button) and the skill; the host keeps
+    accepting `cloud_mirror` for older clients, routed to the migration (with its backup) and the
+    rollback.
+15. **Rollback of the configuration in primary.** A last pull, so what the store accepted stays;
+    refused on a conflict or without an answer, with `--keep-local` to keep the installation's
+    configuration as it is. History is verified, never pulled: it is local first.
+16. **Erase.** Immediate after a rollback, confirmed twice (two taps or `--confirmed`), refused while
+    another installation is active; removes the records and the account's R2 prefix, keeps the
+    enrollment, clears the ledger and sets the content key aside. No grace period of its own: the
+    30-day point-in-time recovery is the grace, readable only with the retired key.
 
 ## Sources
 

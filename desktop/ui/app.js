@@ -2081,7 +2081,10 @@ function renderCloud() {
   renderCloudMirror();
 }
 
-let cloudMirrorArmed = false;
+let cloudMigrateArmed = false;
+let cloudRollbackArmed = false;
+let cloudRollbackLocalArmed = false;
+let cloudEraseArmed = false;
 let cloudDisconnectArmed = false;
 let cloudPromoteArmed = false;
 let cloudReplaceArmed = false;
@@ -2106,15 +2109,25 @@ function renderCloudMirror() {
     if (outbox?.blocked) lines.push(tn(outbox.blocked, '{n} record is too large for the account store and is not copied.', '{n} records are too large for the account store and are not copied.'));
     if (mirror.last_success_at) lines.push(t('Last copied {when}.', { when: ago(mirror.last_success_at * 1000) }));
   } else {
-    lines.push(mirror.initial_verified_at ? t('The copy is stopped; the account store keeps what it has.') : t('Nothing is copied yet. Starting uploads every record, verifies the copy and then keeps it up to date.'));
+    lines.push(mirror.rolled_back_at ? t('This computer no longer uses the account store; the copy stays there until you erase it.')
+      : mirror.erased_at ? t('The account store\'s copy was erased. Migrating again starts a new copy with a new content key.')
+      : t('Nothing is copied yet. Migrating backs up this computer first, uploads every record, verifies the copy and then keeps it up to date.'));
   }
-  if (mirror.key?.present === false && status?.mode !== 'mirror') lines.push(t('Starting creates the account content key on this computer. Back it up right after with pta variables key backup.'));
+  if (mirror.key?.present === false && status?.mode !== 'mirror') lines.push(t('Migrating creates the account content key on this computer. Back it up right after with pta variables key backup.'));
+  if (mirror.backups?.latest?.created_at) lines.push(t('Last backup of this computer {when}.', { when: ago(mirror.backups.latest.created_at * 1000) }));
   if (mirror.last_verify) lines.push(mirror.last_verify.ok ? t('Last verification {when}: the copy matches.', { when: ago(mirror.last_verify.at * 1000) }) : t('Last verification {when}: the copy differs.', { when: ago(mirror.last_verify.at * 1000) }));
   $('#cloud-mirror-summary').textContent = lines.join(' ');
-  const start = $('#cloud-mirror-start');
-  start.hidden = status?.mode === 'mirror' || primary;
-  start.textContent = cloudMirrorArmed ? t('Tap again to upload') : t('Start the encrypted copy');
-  $('#cloud-mirror-stop').hidden = status?.mode !== 'mirror';
+  const migrate = $('#cloud-migrate');
+  migrate.hidden = status?.mode === 'mirror' || primary;
+  migrate.textContent = cloudMigrateArmed ? t('Tap again to migrate') : t('Migrate to the account store');
+  const rollback = $('#cloud-rollback');
+  rollback.hidden = status?.mode !== 'mirror' && !primary;
+  rollback.textContent = cloudRollbackArmed ? t('Tap again to bring it back') : t('Bring everything back to this computer');
+  const keepLocal = $('#cloud-rollback-local');
+  keepLocal.hidden = !primary || (!conflicts && status?.standing === 'live');
+  keepLocal.textContent = cloudRollbackLocalArmed ? t('Tap again to keep this computer\'s') : t('Bring it back keeping this computer\'s');
+  $('#cloud-erase-box').hidden = status?.mode !== 'off' || !mirror.rolled_back_at;
+  $('#cloud-erase').textContent = cloudEraseArmed ? t('Tap again to erase the copy') : t('Erase the account store\'s copy');
   const promote = $('#cloud-promote');
   promote.hidden = status?.mode !== 'mirror' || !mirror.initial_verified_at;
   promote.textContent = cloudPromoteArmed ? t('Tap again to make it the source') : t('Make the account store the source');
@@ -2162,30 +2175,51 @@ function renderCloudVerify(report) {
   box.hidden = !box.childElementCount;
 }
 
-$('#cloud-mirror-start').onclick = event => {
-  if (!cloudMirrorArmed) {
-    cloudMirrorArmed = true;
-    renderCloudMirror();
-    setTimeout(() => { cloudMirrorArmed = false; renderCloudMirror(); }, 4000);
-    return;
-  }
-  cloudMirrorArmed = false;
-  busy(event.currentTarget, async () => {
-    const reply = await invoke('cloud_mirror', { action: 'start' });
-    renderCloudVerify(reply.verify);
-    await loadCloud();
-    if (!reply.complete) throw t('The copy is not complete yet. Start it again to continue where it stopped.');
-    done(reply.key_created
-      ? t('The encrypted copy is up to date. Back up the new account content key now with pta variables key backup.')
-      : t('The encrypted copy is up to date.'));
-  });
-};
+/** A two-tap action of the cloud panel: the first tap arms it for four seconds. */
+function cloudTwoTaps(id, armed, setArmed, run) {
+  $(id).onclick = event => {
+    if (!armed()) {
+      setArmed(true);
+      renderCloudMirror();
+      setTimeout(() => { setArmed(false); renderCloudMirror(); }, 4000);
+      return;
+    }
+    setArmed(false);
+    busy(event.currentTarget, run);
+  };
+}
+
+cloudTwoTaps('#cloud-migrate', () => cloudMigrateArmed, v => { cloudMigrateArmed = v; }, async () => {
+  const reply = await invoke('cloud_migrate', { action: 'start' });
+  renderCloudVerify(reply.verify);
+  await loadCloud();
+  if (!reply.complete) throw t('The copy is not complete yet. Migrate again to continue where it stopped.');
+  done(reply.key_created
+    ? t('The encrypted copy is up to date, and a backup of this computer was kept first. Back up the new account content key now with pta variables key backup.')
+    : t('The encrypted copy is up to date, and a backup of this computer was kept first.'));
+});
+
+async function cloudRollback(keepLocal) {
+  const reply = await invoke('cloud_rollback', { keep_local: keepLocal });
+  renderCloudVerify(reply.verify);
+  await loadCloud();
+  done(t('This computer is the only source again. Nothing was deleted, and the account store keeps its copy until you erase it.'));
+}
+
+cloudTwoTaps('#cloud-rollback', () => cloudRollbackArmed, v => { cloudRollbackArmed = v; }, () => cloudRollback(false));
+cloudTwoTaps('#cloud-rollback-local', () => cloudRollbackLocalArmed, v => { cloudRollbackLocalArmed = v; }, () => cloudRollback(true));
+
+cloudTwoTaps('#cloud-erase', () => cloudEraseArmed, v => { cloudEraseArmed = v; }, async () => {
+  await invoke('cloud_erase', {});
+  await loadCloud();
+  done(t('The account store\'s copy was erased. This computer keeps all of its data; migrating again uses a new content key.'));
+});
 
 $('#cloud-verify').onclick = event => busy(event.currentTarget, async () => {
   const reply = await invoke('cloud_verify');
   renderCloudVerify(reply.verify);
   await loadCloud();
-  if (!reply.ok) throw t('The copy differs from this computer. Start the encrypted copy again to repair it.');
+  if (!reply.ok) throw t('The copy differs from this computer. Migrate again to repair it.');
   done(t('The copy matches this computer.'));
 });
 
@@ -2224,12 +2258,6 @@ $('#cloud-demote').onclick = event => busy(event.currentTarget, async () => {
   await invoke('cloud_promote', { action: 'demote' });
   await loadCloud();
   done(t('This computer\'s configuration is the source again; the account store keeps its copy up to date.'));
-});
-
-$('#cloud-mirror-stop').onclick = event => busy(event.currentTarget, async () => {
-  await invoke('cloud_mirror', { action: 'stop' });
-  await loadCloud();
-  done(t('The copy is stopped. Nothing was deleted.'));
 });
 
 $('#cloud-refresh').onclick = event => busy(event.currentTarget, loadCloud);

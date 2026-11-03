@@ -439,13 +439,18 @@
               <p id="cloud-mirror-summary" class="hint" role="status"></p>
               <div id="cloud-verify-result" class="list" role="status" hidden></div>
               <div class="actions">
-                <button id="cloud-mirror-start" type="button">Start the encrypted copy</button>
+                <button id="cloud-migrate" type="button">Migrate to the account store</button>
                 <button id="cloud-verify" type="button" class="secondary">Verify the copy</button>
                 <button id="cloud-promote" type="button" class="secondary">Make the account store the source</button>
                 <button id="cloud-replace" type="button">Replace with the account store's</button>
                 <button id="cloud-demote" type="button" class="secondary">Make this computer the source again</button>
-                <button id="cloud-mirror-stop" type="button" class="secondary">Stop the copy</button>
+                <button id="cloud-rollback" type="button" class="secondary">Bring everything back to this computer</button>
+                <button id="cloud-rollback-local" type="button" class="secondary">Bring it back keeping this computer's</button>
                 <button id="cloud-disconnect" type="button" class="secondary">Disconnect this computer</button>
+              </div>
+              <div id="cloud-erase-box" hidden>
+                <p class="hint">Erasing removes this account's records and backups from the account store and sets the content key aside; this computer keeps all of its data. Cloudflare keeps a 30-day point-in-time recovery of the store that only its operator can restore and only the set-aside key can read.</p>
+                <div class="actions"><button id="cloud-erase" type="button" class="danger">Erase the account store's copy</button></div>
               </div>
             </div>
             <details class="fold" id="cloud-connect-fold">

@@ -179,6 +179,14 @@ impl Ledger {
         Ok(())
     }
 
+    /// Forget every record and every note: the account store's copy was erased, so the next
+    /// upload starts from revision 1 with nothing acknowledged.
+    pub fn clear(&self) -> Result<()> {
+        self.lock()
+            .execute_batch("BEGIN; DELETE FROM records; DELETE FROM meta; COMMIT;")?;
+        Ok(())
+    }
+
     pub fn meta(&self, key: &str) -> Result<Option<String>> {
         Ok(self
             .lock()

@@ -94,14 +94,17 @@ const FAILED_READ: &str = "This could not be read right now.";
 const STORE_NONE: &str = "Optional: keep an encrypted copy of this account in Cloudflare. Connect this computer to the account store first.";
 const STORE_NOT_ENROLLED: &str =
     "This computer is not enrolled in the account store. Connect it again.";
-const STORE_OFF: &str = "Connected to the account store. Start the encrypted copy when you want one; nothing is uploaded until then.";
+const STORE_OFF: &str = "Connected to the account store. Migrate when you want an encrypted copy; nothing is uploaded until then.";
+const STORE_ROLLED_BACK: &str =
+    "This computer no longer uses the account store; the copy stays there until you erase it.";
 const STORE_MIRROR: &str = "The encrypted copy is up to date.";
 const STORE_PRIMARY: &str = "The account store is the source of truth of this account's configuration, and this computer is up to date with it.";
 const STORE_CONFLICT: &str = "This computer and the account store changed the same configuration. Review it and replace this computer's version with the account store's; until then those records cannot be edited.";
 const STORE_PENDING: &str =
     "Changes are waiting to be copied to the account store; they are sent in the background.";
 const STORE_BLOCKED: &str = "Some records are too large for the account store and are not copied.";
-const STORE_DIFFERS: &str = "The last verification found differences in the encrypted copy. Start the copy again to repair it.";
+const STORE_DIFFERS: &str =
+    "The last verification found differences in the encrypted copy. Migrate again to repair it.";
 const STORE_TOKEN: &str = "The account store's service token expires within 30 days. Ask whoever runs the account store to renew it, then connect again with the new expiry.";
 const STORE_SHARED: &str = "The account store is not available to this account yet.";
 const STORE_UNCONFIGURED: &str =
@@ -769,16 +772,22 @@ async fn account_store(host: &Arc<Host>, shared: bool) -> Step {
             .act(cli("pta cloud pull --replace --confirmed"));
     }
     if view["mode"] != "mirror" && !primary {
+        if mirror["rolled_back_at"].is_number() {
+            return step
+                .is("optional", STORE_ROLLED_BACK)
+                .act(place)
+                .act(cli("pta cloud migrate --dry-run"));
+        }
         return step
             .is("optional", STORE_OFF)
             .act(place)
-            .act(cli("pta cloud mirror --dry-run"));
+            .act(cli("pta cloud migrate --dry-run"));
     }
     if mirror["last_verify"]["ok"] == false {
         return step
             .is("attention", STORE_DIFFERS)
             .act(place)
-            .act(cli("pta cloud mirror --confirmed"));
+            .act(cli("pta cloud migrate --confirmed"));
     }
     if outbox["blocked"].as_u64().unwrap_or(0) > 0 {
         return step

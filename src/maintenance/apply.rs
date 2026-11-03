@@ -423,6 +423,33 @@ pub fn protected_files(profiles: &[Profile]) -> Vec<(PathBuf, bool)> {
     found
 }
 
+/// Copy `files` into the private directory `base` as `0000`, `0001`…: an online `VACUUM INTO`
+/// for each database (consistent while it is in use) and a plain copy for the rest. `before` runs
+/// before each file. The updater's safety copy and the cloud migration's backup both use it.
+pub fn copy_data(
+    files: Vec<(PathBuf, bool)>,
+    base: &Path,
+    mut before: impl FnMut() -> Result<()>,
+) -> Result<Vec<Saved>> {
+    let mut saved = Vec::new();
+    for (n, (from, sqlite)) in files.into_iter().enumerate() {
+        before()?;
+        let file = format!("{n:04}");
+        let target = base.join(&file);
+        if sqlite {
+            let db = rusqlite::Connection::open(&from)?;
+            db.busy_timeout(Duration::from_secs(10))?;
+            let text = target.to_str().context("The backup path is not text.")?;
+            db.execute("VACUUM INTO ?1", [text])?;
+        } else {
+            fs::copy(&from, &target)?;
+        }
+        crate::security::protect_file(&target)?;
+        saved.push(Saved { from, file, sqlite });
+    }
+    Ok(saved)
+}
+
 fn size_with_sidecars(path: &Path) -> u64 {
     ["", "-wal"]
         .iter()
@@ -634,21 +661,10 @@ impl Apply {
         }
         let files = protected_files(&self.journal.profiles);
         self.journal.saved.clear();
-        for (n, (from, sqlite)) in files.into_iter().enumerate() {
-            self.at("backup:data")?;
-            let file = format!("{n:04}");
-            let target = base.join(&file);
-            if sqlite {
-                let db = rusqlite::Connection::open(&from)?;
-                db.busy_timeout(Duration::from_secs(10))?;
-                let text = target.to_str().context("The backup path is not text.")?;
-                db.execute("VACUUM INTO ?1", [text])?;
-            } else {
-                fs::copy(&from, &target)?;
-            }
-            crate::security::protect_file(&target)?;
-            self.journal.saved.push(Saved { from, file, sqlite });
-        }
+        let hook = &self.hook;
+        self.journal.saved = copy_data(files, &base, || {
+            hook("backup:data").map_err(|error| anyhow!("backup:data: {error}"))
+        })?;
         self.step("backup")
     }
 

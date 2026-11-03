@@ -477,15 +477,25 @@
       ...(window.__ptaCloudToken ? { service_token: { expires_at: Math.floor(Date.now() / 1000) + 20 * 86400, days_left: 20, renew: true } } : {}),
       mirror: window.__ptaCloudMirror ? structuredClone(window.__ptaCloudMirror) : { key: { present: false }, mode: 'off' },
     }),
-    // Synthetic mirror: the start uploads and verifies, the verification matches.
-    cloud_mirror: args => {
-      if (args?.action === 'stop' && window.__ptaCloudMirror?.mode === 'primary') window.__ptaCloudMirror.mode = 'off';
+    // Synthetic migration: a backup first, then the upload and a matching verification.
+    cloud_migrate: args => {
       if (args?.action === 'start') {
-        window.__ptaCloudMirror = { key: { present: true, active: 1, versions: [1], fingerprint: '0123456789ab' }, mode: 'mirror', outbox: { pending: 0, blocked: 0, retrying: 0, synced: 42, oldest_seconds: null }, initial_verified_at: secs(NOW), last_success_at: secs(NOW), last_verify: { at: secs(NOW), ok: true } };
-        return { action: 'start', mode: 'mirror', complete: true, key_created: true, uploaded: 42, verify: { ok: true, collections: [] } };
+        const backups = { count: 1, latest: { path: '/profile/backups/cloud-1', created_at: secs(NOW), reason: 'migrate', bytes: 4096 } };
+        window.__ptaCloudMirror = { key: { present: true, active: 1, versions: [1], fingerprint: '0123456789ab' }, mode: 'mirror', backups, outbox: { pending: 0, blocked: 0, retrying: 0, synced: 42, oldest_seconds: null }, initial_verified_at: secs(NOW), last_success_at: secs(NOW), last_verify: { at: secs(NOW), ok: true } };
+        return { action: 'start', mode: 'mirror', complete: true, key_created: true, uploaded: 42, backup: backups.latest, verify: { ok: true, collections: [] } };
       }
-      if (args?.action === 'stop' && window.__ptaCloudMirror) window.__ptaCloudMirror.mode = 'off';
-      return { action: args?.action ?? 'plan' };
+      return { action: 'plan' };
+    },
+    // Synthetic rollback: off, the copy stays; the erase then empties it and sets the key aside.
+    cloud_rollback: args => {
+      const mirror = window.__ptaCloudMirror;
+      mirror.mode = 'off';
+      mirror.rolled_back_at = secs(NOW);
+      return { action: 'rollback', mode: 'off', changed: true, kept_local: !!args?.keep_local, verify: { ok: true, collections: [] } };
+    },
+    cloud_erase: () => {
+      window.__ptaCloudMirror = { key: { present: false }, mode: 'off', erased_at: secs(NOW), backups: window.__ptaCloudMirror.backups };
+      return { action: 'erase', erased: 42, backups: 0, key_retired: '/profile/keys/cloud-content-retired-1.json' };
     },
     cloud_disconnect: () => { window.__ptaCloudDisconnected = true; if (window.__ptaCloudMirror) window.__ptaCloudMirror.mode = 'off'; return { changed: true, store_notified: true }; },
     cloud_verify: () => ({ ok: true, verify: { ok: true, collections: [{ name: 'audits', ok: true, pending: 2, local: 30, remote: 28 }] } }),
