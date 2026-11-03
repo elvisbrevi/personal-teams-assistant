@@ -30,6 +30,7 @@ class CloudAccessTests(unittest.TestCase):
         env = patch.dict(os.environ, {"CLOUDFLARE_API_TOKEN": API_SECRET}, clear=True)
         env.start()
         self.addCleanup(env.stop)
+        self.real_put_worker_secret = setup.put_worker_secret
         for name, value in {
             "api": self.fake_api,
             "put_worker_secret": lambda environment, name, value: self.worker_secrets.__setitem__((environment, name), value),
@@ -119,6 +120,20 @@ class CloudAccessTests(unittest.TestCase):
         self.assertEqual(self.worker_secrets[("production", "ACCESS_AUD")], "b" * 64)
         self.assertEqual(self.worker_secrets[("production", "ACCESS_TEAM_DOMAIN")], "https://synthetic.cloudflareaccess.com")
         self.assertEqual(report["connect"]["installation"], "i-1")
+
+    def test_wrangler_never_receives_the_access_api_token(self):
+        seen = []
+
+        def fake_run(command, **kwargs):
+            seen.append(kwargs.get("env"))
+            return setup.subprocess.CompletedProcess(command, 0, "", "")
+
+        with patch.object(setup, "put_worker_secret", self.real_put_worker_secret), patch.object(setup, "wrangler", lambda: ["wrangler"]), \
+                patch.object(setup.subprocess, "run", fake_run):
+            setup.put_worker_secret("staging", "ACCESS_AUD", "synthetic-audience")
+        self.assertEqual(len(seen), 1)
+        self.assertNotIn("CLOUDFLARE_API_TOKEN", seen[0])
+        self.assertEqual(os.environ["CLOUDFLARE_API_TOKEN"], API_SECRET)
 
     def test_unmanaged_applications_on_the_hostname_are_never_changed(self):
         _, hostname = setup.worker_settings("staging")

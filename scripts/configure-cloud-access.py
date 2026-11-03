@@ -234,10 +234,29 @@ class Access:
         result(self.token, "DELETE", f"{self.base}/service_tokens/{ident}")
 
 
+def node():
+    """The first Node.js on PATH that wrangler accepts (22 or newer), or None.
+
+    A launcher puts its program's folder first on PATH, which may hold an older system Node."""
+    for folder in os.environ.get("PATH", "").split(os.pathsep):
+        candidate = Path(folder) / "node"
+        if not folder or not candidate.is_file() or not os.access(candidate, os.X_OK):
+            continue
+        try:
+            version = subprocess.run([str(candidate), "--version"], capture_output=True, text=True, timeout=10).stdout
+        except (OSError, subprocess.SubprocessError):
+            continue
+        major = re.match(r"v(\d+)\.", version.strip())
+        if major and int(major.group(1)) >= 22:
+            return str(candidate)
+    return None
+
+
 def wrangler():
     local = CLOUD / "node_modules" / ".bin" / "wrangler"
     if local.exists():
-        return [str(local)]
+        runtime = node()
+        return [runtime, str(local.resolve())] if runtime else [str(local)]
     npx = shutil.which("npx")
     if not npx:
         raise SetupError("wrangler is unavailable: run `bun install` in cloud/.")
@@ -248,7 +267,10 @@ def put_worker_secret(environment, name, value):
     command = wrangler() + ["secret", "put", name]
     if environment != "production":
         command += ["--env", environment]
-    completed = subprocess.run(command, input=value, text=True, cwd=CLOUD, capture_output=True, timeout=120)
+    # wrangler prefers CLOUDFLARE_API_TOKEN over the maintainer's login; the Access token a launcher
+    # passes in it has no Workers permission, so wrangler never sees it.
+    env = {key: value for key, value in os.environ.items() if key not in ("CLOUDFLARE_API_TOKEN", "CLOUDFLARE_API_TOKEN_FILE")}
+    completed = subprocess.run(command, input=value, text=True, cwd=CLOUD, capture_output=True, timeout=120, env=env)
     if completed.returncode != 0:
         raise SetupError(f"wrangler could not set the Worker secret {name}; check the maintainer's wrangler login.")
 
