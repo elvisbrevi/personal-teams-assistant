@@ -311,6 +311,8 @@ impl Portal {
             "portable_sync",
             "portable_status",
             "account_sync",
+            "cloud_status",
+            "cloud_connect",
             "setup_readiness",
             "variable_create",
             "variable_update",

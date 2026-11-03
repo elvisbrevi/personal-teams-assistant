@@ -466,6 +466,14 @@
       ready: true, mode: 'standalone', client: 'window', local_owner: true, coordinating: true, coordinator: null, next: null,
       steps: [{ id: 'coordinator', scope: 'coordinator', required: false, state: 'optional', detail: 'This installation works on its own. To use it with your assistant account, choose your coordinator and sign in once.', facts: {}, actions: [] }],
       agent: { skill_version: '0.9.13' } }),
+    // Synthetic account store link: connected, nothing uploaded.
+    cloud_status: () => ({
+      mode: 'off', endpoint: 'https://store.example.com', enrolled: true, installation: '00000000-0000-4000-8000-000000000001',
+      standing: 'live', checked_at: Math.floor(Date.now() / 1000) - 30,
+      worker: { environment: 'production', version: '0.1.0', deployment: null, protocols: [1], schema: { registry: 1, account_store: 1 } },
+      principal: { label: 'Synthetic laptop', enrolled_at: Math.floor(Date.now() / 1000) - 86400, account_installations: 2 },
+      store: { schema: 1, collections: {}, usage: { day: '2026-01-01', requests: 12, rows_written: 0, limits: { requests: 20000, rows_written: 20000 } } },
+    }),
     portable_status: () => ({ standing: window.__ptaStanding ? structuredClone(window.__ptaStanding) : undefined, sync: structuredClone(window.__ptaAccountConfig || { mode: 'authoritative', state: 'authoritative', revision: { generation: 3, digest: 'abcdef012345' } }) }),
     portable_sync: args => {
       const sync = window.__ptaAccountConfig;

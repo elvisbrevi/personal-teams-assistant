@@ -428,6 +428,24 @@
             <div id="migration-result" class="list" role="status" hidden></div>
             <p id="migration-local" class="hint" hidden></p>
           </div>
+          <div class="panel" id="panel-cloud">
+            <div class="panel-head"><h2>Cloud storage</h2><span id="cloud-state" class="badge muted"></span><button id="cloud-refresh" type="button" class="secondary">Check now</button></div>
+            <p class="hint">Your account's encrypted copy in Cloudflare. For now this computer only connects and checks the link: nothing is uploaded, and everything keeps working from this computer's own data.</p>
+            <p id="cloud-summary" class="hint" role="status"></p>
+            <p id="cloud-problem" class="callout warn" role="status" hidden></p>
+            <div id="cloud-details" class="list" hidden></div>
+            <details class="fold" id="cloud-connect-fold">
+              <summary>Connect this computer <small>Advanced</small></summary>
+              <p class="hint">The address and the Access service token come from whoever runs your account store. The client secret is kept only on this computer.</p>
+              <div class="grid">
+                <label>Account store address<input id="cloud-endpoint" type="url" inputmode="url" spellcheck="false" autocomplete="off" placeholder="https://store.example.com"></label>
+                <label>Name of this computer <small>Shown in the account store.</small><input id="cloud-label" maxlength="80" autocomplete="off"></label>
+                <label>Access client ID<input id="cloud-client-id" spellcheck="false" autocomplete="off"></label>
+                <label>Access client secret <small>Empty uses the one this computer already has.</small><input id="cloud-client-secret" type="password" spellcheck="false" autocomplete="off"></label>
+              </div>
+              <div class="actions"><button id="cloud-connect" type="button">Connect to the account store</button></div>
+            </details>
+          </div>
           <div class="panel" id="panel-updates">
             <div class="panel-head"><h2>Updates</h2><span id="update-state" class="badge muted"></span><button id="update-check" type="button" class="secondary">Check now</button></div>
             <p id="update-intro" class="hint">Checks the public package registry for a newer stable release. Preparing an update builds it with Cargo next to the installed one and verifies it; nothing is installed or replaced, and the installed version keeps running. Installing a prepared update waits for work in progress, replaces the application and pta together, restarts the application and restores the previous version if the new one is not healthy.</p>
