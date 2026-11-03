@@ -26,6 +26,10 @@ const PAGE: usize = 500;
 /// The local records a mirror reads: every finished record of a collection, not a page of them.
 pub trait Local {
     fn collect(&self, collection: Collection) -> Result<Vec<Exported>>;
+    /// This installation's ID in the account store, which names its own settings record.
+    fn installation(&self) -> Option<String> {
+        None
+    }
 }
 
 /// Why an exchange with the Worker did not answer what was asked.
@@ -484,6 +488,14 @@ impl<L: Local, T: Transport> Engine<'_, L, T> {
         if !collection.is_configuration() {
             remote.retain(|s| s.own != Some(false));
         }
+        // Another installation's own settings are kept for it alone.
+        let known: BTreeSet<String> = self
+            .ledger
+            .rows(collection)?
+            .into_iter()
+            .map(|r| r.blind)
+            .collect();
+        remote.retain(|s| known.contains(&s.id) || !self.foreign(collection, s));
         let others = (held - remote.len()) as u64;
         let local: BTreeMap<String, String> = self
             .local
@@ -620,6 +632,39 @@ impl<L: Local, T: Transport> Engine<'_, L, T> {
             && report.content_differs == 0
             && report.local_digest == report.remote_digest;
         Ok(report)
+    }
+}
+
+impl<L: Local, T: Transport> Engine<'_, L, T> {
+    /// Whether a held `settings` record this installation never acknowledged is another
+    /// installation's own settings: opened to read its natural ID, or, for a tombstone (the shared
+    /// settings are never removed), one another installation wrote.
+    pub(super) fn foreign(&self, collection: Collection, held: &Stored) -> bool {
+        if collection != Collection::Settings || held.own == Some(true) {
+            return false;
+        }
+        if held.deleted {
+            return held.own == Some(false);
+        }
+        let Some(sealed) = held.sealed.as_deref() else {
+            return false;
+        };
+        let Some(plain) = seal::open(
+            self.content,
+            collection,
+            &held.id,
+            held.revision,
+            held.schema,
+            sealed,
+        ) else {
+            return false;
+        };
+        serde_json::from_slice::<Value>(&plain)
+            .ok()
+            .and_then(|v| v["id"].as_str().map(str::to_owned))
+            .is_some_and(|id| {
+                super::foreign_installation(&id, self.local.installation().as_deref())
+            })
     }
 }
 

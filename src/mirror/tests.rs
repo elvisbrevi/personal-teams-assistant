@@ -150,8 +150,12 @@ fn the_content_key_is_created_once_and_restored_without_replacing() {
 
 // --- the engine against an in-memory Worker -------------------------------------------------
 
+/// The local records of an installation, and its ID in the account store.
 #[derive(Default)]
-struct Records(Mutex<BTreeMap<Collection, Vec<Exported>>>);
+struct Records(
+    Mutex<BTreeMap<Collection, Vec<Exported>>>,
+    Mutex<Option<String>>,
+);
 
 impl Records {
     fn set(&self, collection: Collection, id: &str, value: Value) {
@@ -174,6 +178,10 @@ impl Records {
 }
 
 impl Local for Records {
+    fn installation(&self) -> Option<String> {
+        self.1.lock().unwrap().clone()
+    }
+
     fn collect(&self, collection: Collection) -> anyhow::Result<Vec<Exported>> {
         Ok(self
             .0
@@ -873,6 +881,76 @@ impl Fixture {
             .find(|e| e.id == id)
             .map(|e| e.value)
     }
+}
+
+#[tokio::test]
+async fn another_installations_own_settings_are_kept_for_it_alone() {
+    let f = Fixture::new();
+    *f.local.1.lock().unwrap() = Some("a".into());
+    f.local
+        .set(Collection::Settings, "config", json!({"language": "es"}));
+    f.local.set(
+        Collection::Settings,
+        "installation/a",
+        json!({"server": {"bind": "a"}}),
+    );
+    f.flush(100).await;
+    let other = Installation::new();
+    *other.local.1.lock().unwrap() = Some("b".into());
+    *f.worker.installation.lock().unwrap() = 2;
+    other
+        .engine(&f)
+        .pull(&other.local, false)
+        .await
+        .unwrap()
+        .unwrap();
+    let ids = |local: &Records| -> Vec<String> {
+        local
+            .collect(Collection::Settings)
+            .unwrap()
+            .into_iter()
+            .map(|e| e.id)
+            .collect()
+    };
+    assert_eq!(
+        ids(&other.local),
+        ["config"],
+        "never another's own settings"
+    );
+    other.local.set(
+        Collection::Settings,
+        "installation/b",
+        json!({"server": {"bind": "b"}}),
+    );
+    other
+        .engine(&f)
+        .flush(200, Limits::default())
+        .await
+        .unwrap();
+    let held = |id: &str| {
+        f.worker
+            .records
+            .lock()
+            .unwrap()
+            .get(&(
+                Collection::Settings,
+                seal::blind_id(&f.content, Collection::Settings, id),
+            ))
+            .is_some_and(|s| !s.deleted)
+    };
+    assert!(held("installation/a") && held("installation/b"));
+    let theirs = other.engine(&f).verify().await.unwrap().unwrap();
+    assert!(theirs.ok, "{theirs:?}");
+    assert_eq!(collection(&theirs, "settings").others, 1);
+    // Back on the first installation: the second's settings are neither installed nor removed.
+    *f.worker.installation.lock().unwrap() = 0;
+    assert_eq!(f.pull(false).await.applied, 0);
+    assert_eq!(ids(&f.local), ["config", "installation/a"]);
+    f.flush(300).await;
+    assert!(held("installation/b"));
+    let mine = f.verify().await;
+    assert!(mine.ok, "{mine:?}");
+    assert_eq!(collection(&mine, "settings").others, 1);
 }
 
 use super::primary::{Change, Refusal};

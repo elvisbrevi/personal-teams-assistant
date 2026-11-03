@@ -61,6 +61,11 @@ fn exists(path: &std::path::Path) -> bool {
 }
 
 impl Local for HostLocal<'_> {
+    fn installation(&self) -> Option<String> {
+        let config = self.0.state.settings.config().ok()?;
+        (!config.cloud.installation.is_empty()).then_some(config.cloud.installation)
+    }
+
     fn collect(&self, collection: Collection) -> Result<Vec<Exported>> {
         let state = &self.0.state;
         let config = state.settings.config()?;
