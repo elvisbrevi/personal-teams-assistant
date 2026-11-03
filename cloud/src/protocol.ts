@@ -1,7 +1,12 @@
 /** Version of this Worker's code; reported by `/v1/health`. */
-export const WORKER_VERSION = "0.1.1";
+export const WORKER_VERSION = "0.2.0";
 /** Protocol versions served. Changes inside a version are additive only. */
 export const PROTOCOLS = [1] as const;
+/**
+ * Additive capabilities of protocol 1 that a host checks before relying on them. `cas`: a record
+ * may name the revision it replaces (`base_revision`) and a batch may be `atomic`.
+ */
+export const FEATURES = ["cas"] as const;
 /** Schema versions of the Durable Objects; each applies forward-only migrations on start. */
 export const REGISTRY_SCHEMA = 1;
 export const ACCOUNT_STORE_SCHEMA = 1;

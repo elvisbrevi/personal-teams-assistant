@@ -9,7 +9,9 @@ import { ACCOUNT_STORE_SCHEMA, COLLECTIONS, type Collection, LIMITS } from "./pr
  * which never reaches Cloudflare) with their synchronization metadata in clear: collection, ID,
  * revision, the SHA-256 of the sealed bytes, size, record schema and the collection generation of
  * the last change. Deleting writes a tombstone so an older replica cannot resurrect the record.
- * Writes are idempotent upserts keyed by collection, ID and revision.
+ * Writes are idempotent upserts keyed by collection, ID and revision. A record that names the
+ * revision it replaces (`base`) is written only over exactly that revision (compare-and-swap; 0 is
+ * "no record yet"), and an atomic batch writes all of its records or none.
  */
 
 export interface SealedRecord {
@@ -21,9 +23,12 @@ export interface SealedRecord {
   schema: number;
   deleted: boolean;
   sealed: Uint8Array | null;
+  /** The revision this write replaces; absent for a plain upsert. */
+  base?: number;
 }
 
-export type WriteResult = "created" | "updated" | "unchanged" | "stale" | "conflict";
+/** `aborted`: an atomic batch wrote nothing because another of its records was refused. */
+export type WriteResult = "created" | "updated" | "unchanged" | "stale" | "conflict" | "aborted";
 
 export interface StoredRecord {
   collection: Collection;
@@ -140,17 +145,32 @@ export class AccountStore extends DurableObject<Env> {
     return exhausted ? { ok: false, reason: "quota_exhausted", usage: exhausted } : { ok: true, value: null };
   }
 
-  /** Upsert a batch of sealed records in one transaction. */
-  write(installation: string, records: SealedRecord[], limits: Limits, now: number): Charged<WriteResult[]> {
+  /** Upsert a batch of sealed records in one transaction; an atomic batch writes all or none. */
+  write(
+    installation: string,
+    records: SealedRecord[],
+    limits: Limits,
+    now: number,
+    atomic = false,
+  ): Charged<WriteResult[]> {
     const exhausted = this.charge(limits, records.length, now);
     if (exhausted) return { ok: false, reason: "quota_exhausted", usage: exhausted };
-    const results = this.ctx.storage.transactionSync(() =>
-      records.map((record) => this.upsert(installation, record, now)),
-    );
+    const results = this.ctx.storage.transactionSync(() => {
+      const decided = records.map((record) => this.decide(record));
+      if (atomic && decided.some((result) => result === "stale" || result === "conflict")) {
+        return decided.map((result) => (result === "created" || result === "updated" ? "aborted" : result));
+      }
+      return records.map((record, index) => {
+        const result = decided[index]!;
+        if (result === "created" || result === "updated") this.put(installation, record, now);
+        return result;
+      });
+    });
     return { ok: true, value: results };
   }
 
-  private upsert(installation: string, record: SealedRecord, now: number): WriteResult {
+  /** What writing `record` would do, without writing it. */
+  private decide(record: SealedRecord): WriteResult {
     const existing = this.sql
       .exec<{ revision: number; digest: string; deleted: number }>(
         "SELECT revision, digest, deleted FROM records WHERE collection = ? AND id = ?",
@@ -158,13 +178,17 @@ export class AccountStore extends DurableObject<Env> {
         record.id,
       )
       .toArray()[0];
-    if (existing) {
-      if (existing.revision > record.revision) return "stale";
-      if (existing.revision === record.revision) {
-        const same = existing.digest === record.digest && Boolean(existing.deleted) === record.deleted;
-        return same ? "unchanged" : "conflict";
-      }
+    // A repeated send of what is already held is acknowledged whatever it names as its base.
+    if (existing?.revision === record.revision) {
+      const same = existing.digest === record.digest && Boolean(existing.deleted) === record.deleted;
+      return same ? "unchanged" : "conflict";
     }
+    if (record.base !== undefined && (existing?.revision ?? 0) !== record.base) return "conflict";
+    if (existing && existing.revision > record.revision) return "stale";
+    return existing ? "updated" : "created";
+  }
+
+  private put(installation: string, record: SealedRecord, now: number): void {
     const generation = this.nextGeneration(record.collection);
     this.sql.exec(
       `INSERT INTO records
@@ -186,7 +210,6 @@ export class AccountStore extends DurableObject<Env> {
       installation,
       record.sealed,
     );
-    return existing ? "updated" : "created";
   }
 
   private nextGeneration(collection: string): number {
