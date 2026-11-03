@@ -260,6 +260,16 @@ def configure_worker(access, token_ids):
     return team
 
 
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Access answers a missing service token with a redirect to its sign-in page: report it."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+OPENER = urllib.request.build_opener(NoRedirect)
+
+
 def request(url, method="GET", headers=None, body=None):
     data = json.dumps(body).encode() if body is not None else None
     # Cloudflare's browser integrity check refuses urllib's default User-Agent (error 1010).
@@ -268,7 +278,7 @@ def request(url, method="GET", headers=None, body=None):
         headers["Content-Type"] = "application/json"
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
     try:
-        with urllib.request.urlopen(req, timeout=25) as response:
+        with OPENER.open(req, timeout=25) as response:
             return response.status, response.read(1_000_000)
     except urllib.error.HTTPError as error:
         return error.code, error.read(1_000_000)
