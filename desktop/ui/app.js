@@ -12,7 +12,7 @@ async function invoke(method, args = {}) {
     return { visible: true };
   }
   let result = await rawInvoke('command', { request: {
-    method, args, revision: READS.includes(method) || /^(implementation_|machine_|variable_|crate_update_)/.test(method) ? null : current?.revision ?? null, contract: 1
+    method, args, revision: READS.includes(method) || /^(implementation_|machine_|variable_|crate_update_|cloud_)/.test(method) ? null : current?.revision ?? null, contract: 1
   }});
   if (window.ptaTransport.browser && result.code === 'authorization_pending' && method === 'connect_microsoft') {
     result = await browserMicrosoftLogin(result.data.authorization_url);
@@ -27,7 +27,7 @@ async function invoke(method, args = {}) {
     }
   }
   if (result.revision) lastRevision = result.revision;
-  if (result.revision && current && !READS.includes(method) && !/^(implementation_|machine_|variable_|crate_update_)/.test(method)) current.revision = result.revision;
+  if (result.revision && current && !READS.includes(method) && !/^(implementation_|machine_|variable_|crate_update_|cloud_)/.test(method)) current.revision = result.revision;
   if (!result.ok) throw result.message || result.code;
   return result.data;
 }
@@ -130,7 +130,7 @@ function showTab(name, anchor) {
   if (name === 'knowledge') loadKnowledge().catch(fail);
   if (name === 'todo') loadTodo();
   if (name === 'agent-history') loadAgentHistory();
-  if (name === 'settings') { loadMachines().catch(fail); loadVariables(); loadAccountConfig(); loadUpdates(); }
+  if (name === 'settings') { loadMachines().catch(fail); loadVariables(); loadAccountConfig(); loadUpdates(); loadCloud(); }
   const target = anchor && document.getElementById(anchor);
   // A panel inside a tab (a Settings section, an Activities view) opens that tab first.
   const owner = target && document.querySelector(`[aria-controls="${target.closest('[role=tabpanel]')?.id}"]`);
@@ -2026,6 +2026,73 @@ $('#account-config-reset').onclick = event => {
   });
 };
 setInterval(() => { if (tab === 'settings' && !$('#panel-account-config').hidden) loadAccountConfig(); }, 10_000);
+
+// ---------------------------------------------------------------- account store link
+
+/** This computer's link to the account store (never credentials). */
+let cloudStatus = null;
+
+const CLOUD_STATES = {
+  live: ['Linked', 'ok'], offline: ['Offline', 'warn'], revoked: ['Credentials refused', 'error'],
+  unconfigured: ['Store not set up', 'warn'], not_enrolled: ['Not connected yet', 'muted'], disconnected: ['Not connected yet', 'muted'],
+};
+
+async function loadCloud() {
+  try { cloudStatus = await invoke('cloud_status'); }
+  catch { cloudStatus = null; }
+  renderCloud();
+}
+
+function renderCloud() {
+  const status = cloudStatus;
+  const [label, tone] = CLOUD_STATES[status?.standing] ?? ['Unknown', 'muted'];
+  const badge = $('#cloud-state');
+  badge.textContent = t(label);
+  badge.className = `badge ${tone}`;
+  $('#cloud-summary').textContent = !status ? t('The link could not be read.')
+    : !status.endpoint ? t('This computer is not connected to an account store.')
+    : t('{endpoint}, checked {when}. Mode: {mode}.', { endpoint: status.endpoint, when: ago(status.checked_at * 1000), mode: status.mode === 'off' ? t('nothing is uploaded') : status.mode === 'mirror' ? t('copy kept up to date') : t('the account store is the source') });
+  const problem = $('#cloud-problem');
+  problem.textContent = status?.problem ? tx(status.problem) : '';
+  problem.hidden = !problem.textContent;
+  const details = $('#cloud-details');
+  details.replaceChildren();
+  if (status?.worker) {
+    details.append(el('p', { class: 'hint', textContent: t('Account store {version} ({environment}), protocol {protocols}.', { version: status.worker.version, environment: status.worker.environment, protocols: (status.worker.protocols ?? []).join(', ') }) }));
+  }
+  if (status?.principal) {
+    details.append(el('p', { class: 'hint', textContent: tn(status.principal.account_installations, 'This computer is “{label}”, connected {when}; the account has {n} connected computer.', 'This computer is “{label}”, connected {when}; the account has {n} connected computers.', { label: status.principal.label, when: ago(status.principal.enrolled_at * 1000) }) }));
+  }
+  if (status?.store?.usage) {
+    const usage = status.store.usage;
+    details.append(el('p', { class: 'hint', textContent: t('Today: {requests} of {limit} requests and {rows} of {rows_limit} records written.', { requests: usage.requests, limit: usage.limits.requests, rows: usage.rows_written, rows_limit: usage.limits.rows_written }) }));
+  }
+  details.hidden = !details.childElementCount;
+  if (status?.endpoint && !$('#cloud-endpoint').value) $('#cloud-endpoint').value = status.endpoint;
+}
+
+$('#cloud-refresh').onclick = event => busy(event.currentTarget, loadCloud);
+
+$('#cloud-connect').onclick = event => busy(event.currentTarget, async () => {
+  const endpoint = $('#cloud-endpoint').value.trim();
+  if (!/^https:\/\/[^/?#\s]+\.[^/?#\s]+\/?$/.test(endpoint)) throw t('Give the account store address, like https://store.example.com.');
+  const id = $('#cloud-client-id').value.trim();
+  const secret = $('#cloud-client-secret').value.trim();
+  if (Boolean(id) !== Boolean(secret)) throw t('Give both the client ID and the client secret, or neither.');
+  const args = { endpoint };
+  const label = $('#cloud-label').value.trim();
+  if (label) args.label = label;
+  if (id) { args.client_id = id; args.client_secret = secret; }
+  try {
+    const reply = await invoke('cloud_connect', args);
+    cloudStatus = reply.status ?? cloudStatus;
+  } finally {
+    $('#cloud-client-secret').value = '';
+  }
+  $('#cloud-client-id').value = '';
+  renderCloud();
+  done(t('This computer is connected to the account store. Nothing was uploaded.'));
+});
 
 // ---------------------------------------------------------------- account readiness
 

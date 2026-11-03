@@ -455,6 +455,25 @@ pub(super) const TOOLS: &[Tool] = &[
         },
     },
     Tool {
+        name: "cloud_status",
+        title: "Account store link",
+        description: "This installation's link to the account store in Cloudflare: endpoint, mode (off until a migration; nothing is uploaded in this phase), whether it is enrolled, the Worker's environment, version and protocols, and, when enrolled, the live principal (installation label, enrollment time, active installations of the account), the store's per-collection record counts, bytes and generations, and today's usage against the account's daily share. standing is disconnected, not_enrolled, live, offline (network or the daily share used up: the installation keeps working locally), revoked (connect again) or unconfigured (the Worker's Access settings are missing). Never returns credentials.",
+        effect: Effect::Read,
+        schema: none,
+    },
+    Tool {
+        name: "cloud_connect",
+        title: "Connect to the account store",
+        description: "Enroll this installation with the account store Worker at the given HTTPS origin, using the Access service token already stored on this installation (the user gives a new one only through pta cloud connect on stdin or the application's Settings, never through this tool), and keep the installation credential the Worker issues. Owner only. If the installation is already enrolled and live it changes nothing. The mode stays off: nothing is uploaded. Needs the user's confirmation.",
+        effect: Effect::External,
+        schema: || {
+            object(
+                json!({"endpoint":string("HTTPS origin of the account store, like https://store.example.com."),"label":string("Optional name of this installation in the account store, up to 80 characters."),"confirmed":confirmed()}),
+                &["endpoint"],
+            )
+        },
+    },
+    Tool {
         name: "update_apply",
         title: "Install a prepared update",
         description: "Install the prepared version (shown by update_status as staged): wait while an answer, a send, an implementation, a creation or a migration is in progress (it is never interrupted; update_status then reports `deferred` with the reasons), then replace the application and pta together, restart the application the way it was running, restore the assistant and check health. If the new version does not start and report healthy, the previous pair is restored automatically. The application restarts, so the tool returns while the update continues: poll update_status, which reads the update journal while the application is down. `apply.state` is `success` only after the health check; `rolled_back` and `failed` carry the reason. Needs the user's confirmation and the owner of this computer. Afterwards MCP clients must reconnect to read the new tool catalog.",
@@ -1578,6 +1597,12 @@ pub(super) async fn run(name: &str, args: &Value) -> Result<Value, String> {
         "variable_entry_request" => ipc("variable_entry_start", args.clone()).await,
         "variable_update" | "variable_rename" | "variable_usage" => ipc(name, args.clone()).await,
         "consumer_list" => ipc("variable_consumer_list", args.clone()).await,
+        "cloud_status" => ipc(name, args.clone()).await,
+        "cloud_connect" => {
+            let mut args = args.clone();
+            args.as_object_mut().unwrap().remove("confirmed");
+            ipc(name, args).await
+        }
         "update_status" => ipc("crate_update_status", args.clone()).await,
         "update_check" => ipc("crate_update_check", args.clone()).await,
         "update_dismiss" => ipc("crate_update_dismiss", args.clone()).await,
@@ -1903,6 +1928,10 @@ pub(super) fn confirmation(name: &str, args: &Value) -> Option<String> {
             )
         }
         "variable_delete" => "Delete this stored variable? Its value cannot be recovered.".into(),
+        "cloud_connect" => format!(
+            "Enroll this installation with the account store at {}?",
+            args["endpoint"].as_str().unwrap_or_default()
+        ),
         "consumer_bind" => format!(
             "Use variable {} as the {} credential? It is sent only to that consumer's fixed destination.",
             args["variable"], args["consumer"]

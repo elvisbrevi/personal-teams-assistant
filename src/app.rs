@@ -32,6 +32,7 @@ mod activity;
 mod authority;
 mod azure_cli;
 pub mod cli;
+mod cloud;
 mod consumers;
 pub mod control;
 mod deliveries;
@@ -581,6 +582,7 @@ fn credential_names(config: &Config) -> Vec<String> {
         "STATE_ENCRYPTION_KEY".into(),
         "PTA_MACHINE_TOKEN".into(),
     ];
+    names.extend(cloud::CREDENTIALS.map(String::from));
     if config.server.cloudflare_tunnel {
         names.push("CLOUDFLARE_TUNNEL_TOKEN".into());
     }
@@ -594,7 +596,8 @@ fn credential_names(config: &Config) -> Vec<String> {
 /// only while DeepSeek is in the LLM chain; Codex and Claude use their own CLI login.
 fn required_credentials(config: &Config) -> Vec<String> {
     let mut names = credential_names(config);
-    names.retain(|name| name != "PTA_MACHINE_TOKEN");
+    names
+        .retain(|name| name != "PTA_MACHINE_TOKEN" && !cloud::CREDENTIALS.contains(&name.as_str()));
     if !crate::llm::uses_deepseek(&config.llm) {
         names.retain(|name| name != "DEEPSEEK_API_KEY");
     }
@@ -861,6 +864,8 @@ async fn save_settings(
     let state = &host.state;
     let previous = state.settings.config().map_err(fail)?;
     config.knowledge_map = state.settings.map_path().to_path_buf();
+    // The account store link changes only through `cloud_connect`: editors keep the stored one.
+    config.cloud = previous.cloud.clone();
     // The map's own rules say what to fix (a duplicate context, an unknown source); they never
     // carry secrets.
     toml::to_string(&map)

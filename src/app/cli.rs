@@ -116,6 +116,17 @@ Account configuration
                            changes are kept: --reset replaces them (a private backup is kept).
   account records status|history [DAY|FROM..TO]  Reads the coordinator's saved daily task record (read-only).
 
+Account store (Cloudflare)
+  cloud status                This installation's link to the account store Worker: endpoint, mode (off until a
+                           migration), enrollment, the Worker's version and protocols, and, when enrolled, the live
+                           principal, the store's per-collection counts and today's usage. Standing: disconnected,
+                           not_enrolled, live, offline, revoked or unconfigured. Uploads nothing.
+  cloud connect --endpoint URL [--label TEXT] --confirmed
+                           Enrolls this installation with the account store (owner only) and keeps the installation
+                           credential it issues (CLOUD_STORE_TOKEN). The account's Access service token comes as JSON
+                           on stdin, {client_id, client_secret}, never as arguments; without stdin the stored one is
+                           used. Keeps the mode off: nothing is uploaded.
+
 Account variables
   variables list [--limit N]  Names, descriptions and versions of this account's stored variables; never values.
   variables search TEXT       Variables matching TEXT: each word begins a word of the name or description (case, accents
@@ -348,6 +359,8 @@ fn words(args: &[String]) -> Vec<&str> {
                 | "--destination"
                 | "--name"
                 | "--existing"
+                | "--endpoint"
+                | "--label"
         ) {
             skip = true;
         } else if !arg.starts_with("--") {
@@ -507,6 +520,44 @@ async fn account_command(args: &[String]) -> Result<Reply> {
             body["day"] = values["day"].clone();
             body["from"] = values["from"].clone();
             call("portable_records", body, None, true).await
+        }
+        _ => anyhow::bail!("missing argument; consult --help"),
+    }
+}
+
+/// The installation's link to the account store Worker.
+async fn cloud_command(args: &[String]) -> Result<Reply> {
+    match words(args).get(1).copied() {
+        Some("status") => call("cloud_status", json!({}), None, true).await,
+        Some("connect") => {
+            let endpoint = option(args, "--endpoint").context("--endpoint is required")?;
+            if let Some(reply) = unconfirmed(
+                args,
+                format!("Enroll this installation with the account store at {endpoint}?"),
+            ) {
+                return Ok(reply);
+            }
+            let mut body = json!({"endpoint": endpoint});
+            if let Some(label) = option(args, "--label") {
+                body["label"] = json!(label);
+            }
+            // The service token arrives only through a pipe; a terminal means the stored one.
+            if !std::io::stdin().is_terminal() {
+                let text = stdin_text()?;
+                if !text.trim().is_empty() {
+                    let token: Value = serde_json::from_str(&text).context("stdin must be JSON")?;
+                    let fields = token.as_object().context("stdin must be a JSON object")?;
+                    ensure!(
+                        fields.len() == 2
+                            && fields.get("client_id").is_some_and(Value::is_string)
+                            && fields.get("client_secret").is_some_and(Value::is_string),
+                        "stdin must hold exactly client_id and client_secret"
+                    );
+                    body["client_id"] = token["client_id"].clone();
+                    body["client_secret"] = token["client_secret"].clone();
+                }
+            }
+            call("cloud_connect", body, None, true).await
         }
         _ => anyhow::bail!("missing argument; consult --help"),
     }
@@ -942,7 +993,7 @@ fn validate_args(args: &[String]) -> Result<()> {
             "--json" | "--non-interactive" | "--offline" | "--no-browser" | "--wait"
             | "--content" | "--current-profile" | "--context-stdin" | "--value" | "--confirmed"
             | "--reset" | "--bind" | "--settings" | "--replace-settings" => {}
-            "--destination" | "--name" | "--existing" | "--to" | "--target" => {
+            "--destination" | "--name" | "--existing" | "--to" | "--target" | "--label" => {
                 i += 1;
                 ensure!(
                     args.get(i)
@@ -1023,6 +1074,13 @@ fn validate_args(args: &[String]) -> Result<()> {
                 ensure!(
                     args.get(i).is_some_and(|v| v.parse::<usize>().is_ok()),
                     "invalid limit"
+                );
+            }
+            "--endpoint" => {
+                i += 1;
+                ensure!(
+                    args.get(i).is_some_and(|v| v.starts_with("https://")),
+                    "invalid account store endpoint"
                 );
             }
             "--redirect" => {
@@ -1124,6 +1182,7 @@ fn validate_args(args: &[String]) -> Result<()> {
                 "status" | "pending" | "run" | "history" | "open"
             ]
             | ["activity", "run" | "history" | "open" | "resolve", _]
+            | ["cloud", "status" | "connect"]
             | ["credentials", "list"]
             | ["credentials", "set" | "delete", _]
             | [
@@ -1255,7 +1314,8 @@ fn validate_args(args: &[String]) -> Result<()> {
         ),
         (
             "--confirmed",
-            p.as_slice().starts_with(&["update", "stage"])
+            p.as_slice() == ["cloud", "connect"]
+                || p.as_slice().starts_with(&["update", "stage"])
                 || p.as_slice().starts_with(&["update", "apply"])
                 || p.as_slice().starts_with(&["variables", "migrate", "run"])
                 || p.as_slice().starts_with(&["variables", "bind"])
@@ -1268,6 +1328,8 @@ fn validate_args(args: &[String]) -> Result<()> {
                     .starts_with(&["variables", "destination", "define"]),
         ),
         ("--to", p.as_slice().starts_with(&["variables", "deliver"])),
+        ("--endpoint", p.as_slice() == ["cloud", "connect"]),
+        ("--label", p.as_slice() == ["cloud", "connect"]),
         (
             "--target",
             p.as_slice()
@@ -1393,6 +1455,9 @@ async fn execute(mut args: Vec<String>) -> Result<Reply> {
     if command == "account" {
         return account_command(&args).await;
     }
+    if command == "cloud" {
+        return cloud_command(&args).await;
+    }
     if command == "setup" {
         return call(
             "setup_readiness",
@@ -1438,7 +1503,7 @@ async fn execute(mut args: Vec<String>) -> Result<Reply> {
         }
         "capabilities" => {
             return Ok(Reply::success(
-                json!({"contract":control::CONTRACT,"commands":HELP,"skill_version":env!("CARGO_PKG_VERSION"),"activity_registration_support":true,"web_support":true,"web_access_support":true,"knowledge_index_support":true,"mcp_support":true,"tools_support":true,"todo_support":true,"implementation_support":true,"machine_pairing_support":true,"machine_login_support":true,"machine_management_support":true,"account_variables_support":true,"account_portable_support":true,"account_authority_support":true,"shared_accounts_support":true}),
+                json!({"contract":control::CONTRACT,"commands":HELP,"skill_version":env!("CARGO_PKG_VERSION"),"activity_registration_support":true,"web_support":true,"web_access_support":true,"knowledge_index_support":true,"mcp_support":true,"tools_support":true,"todo_support":true,"implementation_support":true,"machine_pairing_support":true,"machine_login_support":true,"machine_management_support":true,"account_variables_support":true,"account_portable_support":true,"account_authority_support":true,"shared_accounts_support":true,"cloud_store_support":true}),
             ));
         }
         "skill" => return crate::app::skill::command(action, args.get(2).map(String::as_str)),
@@ -2668,6 +2733,16 @@ mod help_tests {
             &["index", "refresh", "handbook"],
             &["setup", "status"],
             &["setup", "status", "--expect", "DEPLOY_ENDPOINT"],
+            &["cloud", "status"],
+            &[
+                "cloud",
+                "connect",
+                "--endpoint",
+                "https://store.example.com",
+                "--label",
+                "synthetic host",
+                "--confirmed",
+            ],
         ];
         for command in commands {
             let args: Vec<String> = command.iter().map(|a| a.to_string()).collect();

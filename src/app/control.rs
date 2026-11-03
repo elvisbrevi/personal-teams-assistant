@@ -92,6 +92,8 @@ struct Endpoint {
     web_support: bool,
     #[serde(default)]
     web_access_support: bool,
+    #[serde(default)]
+    cloud_store_support: bool,
     contract: u32,
     port: u16,
     token: String,
@@ -468,6 +470,10 @@ async fn client_with_transport(
             endpoint.implementation_support || !implementation::handles(&request.method),
             "Incompatible implementation host: update the host and CLI together."
         );
+        ensure!(
+            endpoint.cloud_store_support || !cloud::handles(&request.method),
+            "Incompatible account store host: update the host and CLI together before connecting to the account store."
+        );
         ensure!(endpoint.contract == CONTRACT, "incompatible host contract");
         ensure!(
             endpoint.web_support
@@ -572,6 +578,7 @@ pub(crate) fn launch(
             machine_management_support: true,
             account_variables_support: true,
             account_portable_support: true,
+            cloud_store_support: true,
             contract: CONTRACT,
             port: listener.local_addr()?.port(),
             token: token.clone(),
@@ -736,6 +743,10 @@ async fn dispatch_inner(host: &Arc<Host>, request: Request) -> Reply {
     if readiness::handles(&request.method) {
         // Only reads, through the operations it reports on; independent of profile edits.
         return readiness::operate(host, &request).await;
+    }
+    if cloud::handles(&request.method) {
+        // Network exchanges with the account store; takes the operations lock only to save.
+        return cloud::operate(host, &request).await;
     }
     let _guard = state.operations.lock().await;
     if activity::active(state).await
@@ -1427,6 +1438,7 @@ mod tests {
                 machine_management_support: true,
                 account_variables_support: true,
                 account_portable_support: true,
+                cloud_store_support: true,
                 account_authority_support: true,
                 shared_accounts_support: true,
                 account_binding: None,
@@ -1456,6 +1468,7 @@ mod tests {
                 machine_management_support: true,
                 account_variables_support: true,
                 account_portable_support: true,
+                cloud_store_support: true,
                 account_authority_support: true,
                 shared_accounts_support: true,
                 account_binding: None,
@@ -1500,6 +1513,7 @@ mod tests {
                     machine_management_support: true,
                     account_variables_support: true,
                     account_portable_support: true,
+                    cloud_store_support: true,
                     account_authority_support: true,
                     shared_accounts_support: true,
                     account_binding: None,

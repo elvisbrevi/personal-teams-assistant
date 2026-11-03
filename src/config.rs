@@ -25,6 +25,77 @@ pub struct Config {
     /// that predates it still loads the profile.
     #[serde(default, skip_serializing_if = "MessageStyle::is_default")]
     pub message_style: MessageStyle,
+    /// This installation's link to the account store in Cloudflare; installation-local, never
+    /// part of the account configuration. Omitted while not connected, so older hosts still
+    /// load the profile until the installation connects.
+    #[serde(default, skip_serializing_if = "Cloud::is_default")]
+    pub cloud: Cloud,
+}
+
+/// The account store link of this installation (`[cloud]`).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Cloud {
+    /// HTTPS origin of the account store Worker.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub endpoint: String,
+    /// The installation the Worker enrolled; its credential is `CLOUD_STORE_TOKEN`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub installation: String,
+    /// What the account store is for this installation: `off` until a migration (phase 4a).
+    #[serde(default)]
+    pub mode: CloudMode,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CloudMode {
+    #[default]
+    Off,
+    Mirror,
+    Primary,
+}
+
+impl Cloud {
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+    pub fn validate(&self) -> Result<()> {
+        if !self.endpoint.is_empty() {
+            Self::check_endpoint(&self.endpoint)?;
+        }
+        ensure!(
+            self.installation.is_empty()
+                || uuid::Uuid::parse_str(&self.installation)
+                    .is_ok_and(|id| id.to_string() == self.installation),
+            "cloud.installation is a UUID"
+        );
+        ensure!(
+            self.installation.is_empty() || !self.endpoint.is_empty(),
+            "cloud.installation needs cloud.endpoint"
+        );
+        ensure!(
+            self.mode == CloudMode::Off || !self.installation.is_empty(),
+            "cloud.mode needs an enrolled installation"
+        );
+        Ok(())
+    }
+    /// An HTTPS origin without credentials, path, query or fragment.
+    pub fn check_endpoint(endpoint: &str) -> Result<url::Url> {
+        let url = url::Url::parse(endpoint)?;
+        ensure!(
+            url.scheme() == "https"
+                && url.host_str().is_some_and(|h| h.contains('.'))
+                && url.username().is_empty()
+                && url.password().is_none()
+                && url.query().is_none()
+                && url.fragment().is_none()
+                && url.path() == "/"
+                && url.port().is_none(),
+            "cloud.endpoint must be an HTTPS origin"
+        );
+        Ok(url)
+    }
 }
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -351,6 +422,7 @@ impl Config {
         self.activity_registration.validate()?;
         self.knowledge_index.validate()?;
         self.message_style.validate()?;
+        self.cloud.validate()?;
         if let Some(reference) = self
             .knowledge_index
             .embeddings
