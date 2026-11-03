@@ -6,6 +6,7 @@
 use crate::app::{read_config, write_private};
 use crate::{config::Config, knowledge::KnowledgeMap};
 use anyhow::{Result, ensure};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
@@ -128,19 +129,44 @@ pub(crate) fn read_back(config: &Config, map: &KnowledgeMap) -> Result<(Config, 
     Ok((config, map))
 }
 
-/// The two settings records of a configuration and its map (see [`LocalSettings::export`]).
+/// The configuration's top-level sections that belong to one installation (decision 19 of the
+/// cloud storage design): its listener, public URL, data directory, tunnel and webhook prefix,
+/// its Microsoft identity and chats, the map's path and the knowledge index (embeddings). Besides
+/// these, `policy.dry_run` and the map's repository folders are the installation's too.
+pub(crate) const INSTALLATION_SECTIONS: [&str; 4] =
+    ["server", "graph", "knowledge_map", "knowledge_index"];
+
+/// The settings records of a configuration and its map (see [`LocalSettings::export`]): the
+/// account's configuration and map, and, once the installation is enrolled, its own settings.
 pub(crate) fn records(config: Config, map: KnowledgeMap) -> Result<Vec<crate::mirror::Exported>> {
+    let installation_id = config.cloud.installation.clone();
     let mut config = serde_json::to_value(config)?;
+    let mut installation = serde_json::Map::new();
     if let Some(object) = config.as_object_mut() {
         object.remove("secrets");
         object.remove("cloud");
+        for section in INSTALLATION_SECTIONS {
+            if let Some(value) = object.remove(section) {
+                installation.insert(section.into(), value);
+            }
+        }
+        if let Some(dry_run) = object
+            .get_mut("policy")
+            .and_then(Value::as_object_mut)
+            .and_then(|policy| policy.remove("dry_run"))
+        {
+            installation.insert("dry_run".into(), dry_run);
+        }
     }
     let mut map = serde_json::to_value(map)?;
     if let Some(object) = map.as_object_mut() {
         object.remove("organization");
         object.remove("work_item_guides");
+        if let Some(repositories) = object.remove("repositories") {
+            installation.insert("repositories".into(), repositories);
+        }
     }
-    Ok(vec![
+    let mut records = vec![
         crate::mirror::Exported {
             id: "config".into(),
             value: config,
@@ -149,7 +175,42 @@ pub(crate) fn records(config: Config, map: KnowledgeMap) -> Result<Vec<crate::mi
             id: "knowledge_map".into(),
             value: map,
         },
-    ])
+    ];
+    if !installation_id.is_empty() {
+        records.push(crate::mirror::Exported {
+            id: crate::mirror::installation_record(&installation_id),
+            value: Value::Object(installation),
+        });
+    }
+    Ok(records)
+}
+
+/// The account's configuration record installed over this installation's: every section but the
+/// installation's own ones (and `[secrets]`, `[cloud]`, `policy.dry_run`) comes from the record.
+/// A record written before the split still carries those sections; they are ignored as well.
+pub(crate) fn install_account_config(local: &Config, record: Value) -> Result<Config> {
+    let mut merged = serde_json::to_value(local)?;
+    let (Some(merged_object), Value::Object(record)) = (merged.as_object_mut(), record) else {
+        anyhow::bail!("the configuration record is not an object");
+    };
+    for (section, value) in record {
+        if INSTALLATION_SECTIONS.contains(&section.as_str())
+            || matches!(section.as_str(), "secrets" | "cloud")
+        {
+            continue;
+        }
+        if section == "policy" {
+            let dry_run = merged_object["policy"]["dry_run"].clone();
+            let mut policy = value;
+            if let Some(policy) = policy.as_object_mut() {
+                policy.insert("dry_run".into(), dry_run);
+            }
+            merged_object.insert(section, policy);
+            continue;
+        }
+        merged_object.insert(section, value);
+    }
+    Ok(serde_json::from_value(merged)?)
 }
 
 impl SettingsStore for LocalSettings {
@@ -319,6 +380,79 @@ mod tests {
             reopened.config().unwrap().server.data_dir,
             root.path().join("data")
         );
+    }
+
+    #[test]
+    fn the_installations_settings_travel_in_a_record_of_their_own() {
+        let (_root, store) = profile();
+        let mut config = store.config().unwrap();
+        let mut map = store.map().unwrap();
+        map.repositories
+            .insert("synthetic".into(), "/home/example/synthetic".into());
+        // Not enrolled yet: only the account's two records.
+        let ids = |records: &[crate::mirror::Exported]| -> Vec<String> {
+            records.iter().map(|r| r.id.clone()).collect()
+        };
+        let plain = records(config.clone(), map.clone()).unwrap();
+        assert_eq!(ids(&plain), ["config", "knowledge_map"]);
+        config.cloud.installation = "00000000-0000-4000-8000-000000000001".into();
+        config.policy.dry_run = true;
+        let split = records(config.clone(), map.clone()).unwrap();
+        assert_eq!(
+            ids(&split),
+            [
+                "config",
+                "knowledge_map",
+                "installation/00000000-0000-4000-8000-000000000001"
+            ]
+        );
+        let account = &split[0].value;
+        for section in [
+            "server",
+            "graph",
+            "knowledge_map",
+            "knowledge_index",
+            "secrets",
+            "cloud",
+        ] {
+            assert!(account.get(section).is_none(), "{section}");
+        }
+        assert!(account["policy"].get("dry_run").is_none());
+        assert!(account["llm"].is_object() && account["policy"]["greeting"].is_string());
+        assert!(split[1].value.get("repositories").is_none());
+        let own = &split[2].value;
+        assert_eq!(own["server"]["bind"], "127.0.0.1:38655");
+        assert_eq!(own["dry_run"], true);
+        assert_eq!(own["repositories"]["synthetic"], "/home/example/synthetic");
+    }
+
+    #[test]
+    fn the_accounts_configuration_never_replaces_the_installations_own() {
+        let (_root, store) = profile();
+        let local = store.config().unwrap();
+        let mut other = local.clone();
+        other.server.bind = "127.0.0.1:49999".into();
+        other.server.public_url = "https://other.example.com".into();
+        other.graph.tenant_id = uuid::Uuid::new_v4().to_string();
+        other.policy.dry_run = !local.policy.dry_run;
+        other.policy.greeting = "Synthetic greeting".into();
+        other.message_style.label = "Synthetic label".into();
+        // A record from before the split carries every section; only the account's are taken.
+        let mut full = serde_json::to_value(&other).unwrap();
+        full.as_object_mut().unwrap().remove("secrets");
+        full.as_object_mut().unwrap().remove("cloud");
+        let installed = install_account_config(&local, full).unwrap();
+        assert_eq!(installed.server.bind, local.server.bind);
+        assert_eq!(installed.server.public_url, local.server.public_url);
+        assert_eq!(installed.graph.tenant_id, local.graph.tenant_id);
+        assert_eq!(installed.policy.dry_run, local.policy.dry_run);
+        assert_eq!(installed.policy.greeting, "Synthetic greeting");
+        assert_eq!(installed.message_style.label, "Synthetic label");
+        // The same from a record after the split.
+        let split = records(other, store.map().unwrap()).unwrap();
+        let installed = install_account_config(&local, split[0].value.clone()).unwrap();
+        assert_eq!(installed.server.bind, local.server.bind);
+        assert_eq!(installed.policy.greeting, "Synthetic greeting");
     }
 
     #[test]

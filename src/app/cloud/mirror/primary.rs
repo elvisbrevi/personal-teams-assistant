@@ -229,21 +229,21 @@ impl Apply for HostApply<'_> {
                         .clone()
                         .ok_or_else(|| anyhow::anyhow!("the settings are never removed"))?;
                     match id.as_str() {
+                        // The account's: this installation keeps its own sections.
                         "config" => {
-                            let mut next: Config = serde_json::from_value(value)?;
-                            // What never leaves, or only means something on this installation.
-                            next.secrets = std::mem::take(&mut config.secrets);
-                            next.cloud = config.cloud.clone();
-                            next.knowledge_map = config.knowledge_map.clone();
-                            next.server.data_dir = config.server.data_dir.clone();
-                            config = next;
+                            config =
+                                crate::store::settings::install_account_config(&config, value)?;
                         }
                         "knowledge_map" => {
                             let mut next: KnowledgeMap = serde_json::from_value(value)?;
                             next.organization = std::mem::take(&mut map.organization);
                             next.work_item_guides = std::mem::take(&mut map.work_item_guides);
+                            // Repository folders are each computer's own binding.
+                            next.repositories = std::mem::take(&mut map.repositories);
                             map = next;
                         }
+                        // This installation's own settings: local first, the copy is a backup.
+                        id if id.starts_with("installation/") => {}
                         _ => anyhow::bail!("unknown settings record"),
                     }
                 }

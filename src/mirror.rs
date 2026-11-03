@@ -21,6 +21,19 @@ pub fn wake() {
     WAKE.notify_one();
 }
 
+/// The ID, in the `settings` collection, of one installation's own settings (decision 19 of the
+/// cloud storage design): kept in the account store for that installation only.
+pub fn installation_record(installation: &str) -> String {
+    format!("installation/{installation}")
+}
+
+/// Whether a `settings` record ID is another installation's own settings than `own`'s: such a
+/// record is never applied, compared or removed by this installation.
+pub fn foreign_installation(id: &str, own: Option<&str>) -> bool {
+    id.strip_prefix("installation/")
+        .is_some_and(|installation| Some(installation) != own)
+}
+
 pub mod engine;
 pub mod key;
 pub mod ledger;

@@ -147,6 +147,10 @@ impl<L: Local, T: Transport> Engine<'_, L, T> {
                 {
                     continue;
                 }
+                // Another installation's own settings: kept for it, never installed here.
+                if row.is_none() && self.foreign(collection, &held) {
+                    continue;
+                }
                 let opened: Opened = if held.deleted {
                     // A tombstone of a record this installation never had changes nothing.
                     let Some(row) = row else { continue };

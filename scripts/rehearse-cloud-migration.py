@@ -239,9 +239,12 @@ def rehearse(run, endpoint, service, label):
     r = run.pta("notes", "remove", note)
     run.step("note remove (through the store)", r)
     run.expect(r.get("ok"), "a note removal goes through the store")
-    r = run.pta("cloud", "pull")
-    run.step("pull", r, conflicts=(r.get("data") or {}).get("conflicts"))
+    bind = run.pta("config", "get", "server.bind").get("data")
+    r = run.pta("cloud", "pull", "--replace", "--confirmed")
+    run.step("pull --replace", r, conflicts=(r.get("data") or {}).get("conflicts"))
     run.expect(r.get("ok") and (r.get("data") or {}).get("conflicts") == 0, "the pull finds no conflict")
+    run.expect(run.pta("config", "get", "server.bind").get("data") == bind,
+               "the account's configuration never replaces this installation's own settings")
     store_before = ((run.pta("cloud", "status").get("data") or {}).get("store") or {}).get("collections") or {}
     r = run.pta("cloud", "rollback", "--confirmed", timeout=1800)
     data = r.get("data") or {}
