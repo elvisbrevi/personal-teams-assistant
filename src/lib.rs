@@ -14,6 +14,7 @@ pub mod knowledge;
 pub mod llm;
 pub mod local_chat;
 pub mod maintenance;
+pub mod mirror;
 pub mod organization;
 pub mod pipeline;
 pub mod portable;

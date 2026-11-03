@@ -124,6 +124,7 @@ pub(crate) struct DesktopState {
     variables: variables::State,
     portable: portable::State,
     standing: standing::State,
+    cloud: cloud::State,
 }
 
 #[derive(Serialize)]
@@ -553,6 +554,7 @@ pub(crate) fn init_state(config_dir: &Path, data_dir: &Path) -> Result<DesktopSt
         variables: variables::State::new(&config_dir),
         portable: portable::State::new(&config_dir),
         standing: standing::State::default(),
+        cloud: cloud::State::default(),
         operations: Mutex::new(()),
         loaded_config: Mutex::new(None),
         settings,

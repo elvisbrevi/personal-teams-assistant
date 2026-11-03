@@ -367,6 +367,7 @@ fn key_backup_restores_a_copied_database_and_never_replaces_a_different_key() {
     let mut different = KeyBackup {
         format: backup.format.clone(),
         masters: backup.masters.clone(),
+        cloud_content: None,
     };
     different.masters.insert(1, STANDARD.encode(random_key()));
     assert!(matches!(
@@ -378,14 +379,17 @@ fn key_backup_restores_a_copied_database_and_never_replaces_a_different_key() {
         KeyBackup {
             format: "other".into(),
             masters: backup.masters.clone(),
+            cloud_content: None,
         },
         KeyBackup {
             format: backup.format.clone(),
             masters: BTreeMap::new(),
+            cloud_content: None,
         },
         KeyBackup {
             format: backup.format.clone(),
             masters: BTreeMap::from([(1, "!!".into())]),
+            cloud_content: None,
         },
     ] {
         assert!(restored.import_keys(&broken).is_err());

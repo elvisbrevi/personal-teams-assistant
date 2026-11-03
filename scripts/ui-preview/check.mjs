@@ -1631,6 +1631,29 @@ for (const [label, viewport] of [['desktop', { width: 1440, height: 900 }], ['ph
   check('shared account updates panel passes axe', (await scan(page)).length === 0, JSON.stringify(await scan(page)));
   await context.close();
 }
+// Cloud storage: the encrypted copy starts only on a second tap, then offers verify and stop.
+for (const [label, options] of [['desktop', {}], ['phone', { context: { viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true } }]]) {
+  const { context, page, errors } = await open({ axe: true, ...options });
+  await page.evaluate(() => showTab('settings', 'panel-cloud'));
+  const panel = page.locator('#panel-cloud');
+  await panel.locator('#cloud-mirror').waitFor();
+  const start = panel.locator('#cloud-mirror-start');
+  check(`${label}: the copy is offered with the key notice`, await start.isVisible() && (await panel.locator('#cloud-mirror-summary').innerText()).includes('pta variables key backup'));
+  await start.click();
+  check(`${label}: the first tap only arms the upload`, (await start.innerText()).includes('Toca de nuevo') && await page.evaluate(() => !window.__ptaCloudMirror));
+  await start.click();
+  await panel.locator('#cloud-mirror-stop').waitFor();
+  check(`${label}: the second tap starts the copy and offers verify and stop`, await start.isHidden() && await panel.locator('#cloud-verify').isVisible() && (await panel.locator('#cloud-mirror-summary').innerText()).includes('al día'));
+  await panel.locator('#cloud-verify').click();
+  await panel.locator('#cloud-verify-result').waitFor();
+  check(`${label}: a verification lists changes not copied yet`, (await panel.locator('#cloud-verify-result').innerText()).includes('Mensajes'));
+  await page.evaluate(axeSource);
+  check(`${label}: the cloud storage panel passes axe`, (await scan(page)).length === 0, JSON.stringify(await scan(page)));
+  check(`${label}: the cloud storage panel keeps the phone boundary`, await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+  await page.screenshot({ path: `${out}/cloud-${label}.png`, fullPage: false });
+  check(`${label}: cloud storage has no browser errors`, errors.length === 0, errors.join('; '));
+  await context.close();
+}
 await browser.close();
 fs.writeFileSync(`${out}/flows.json`, JSON.stringify(results, null, 1));
 const failed = results.filter(r => !r.ok).length;

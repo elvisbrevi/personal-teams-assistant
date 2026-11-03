@@ -94,6 +94,8 @@ struct Endpoint {
     web_access_support: bool,
     #[serde(default)]
     cloud_store_support: bool,
+    #[serde(default)]
+    cloud_mirror_support: bool,
     contract: u32,
     port: u16,
     token: String,
@@ -474,6 +476,11 @@ async fn client_with_transport(
             endpoint.cloud_store_support || !cloud::handles(&request.method),
             "Incompatible account store host: update the host and CLI together before connecting to the account store."
         );
+        ensure!(
+            endpoint.cloud_mirror_support
+                || !matches!(request.method.as_str(), "cloud_mirror" | "cloud_verify"),
+            "Incompatible account store host: update the host and CLI together before mirroring to the account store."
+        );
         ensure!(endpoint.contract == CONTRACT, "incompatible host contract");
         ensure!(
             endpoint.web_support
@@ -579,6 +586,7 @@ pub(crate) fn launch(
             account_variables_support: true,
             account_portable_support: true,
             cloud_store_support: true,
+            cloud_mirror_support: true,
             contract: CONTRACT,
             port: listener.local_addr()?.port(),
             token: token.clone(),
@@ -1439,6 +1447,7 @@ mod tests {
                 account_variables_support: true,
                 account_portable_support: true,
                 cloud_store_support: true,
+                cloud_mirror_support: true,
                 account_authority_support: true,
                 shared_accounts_support: true,
                 account_binding: None,
@@ -1469,6 +1478,7 @@ mod tests {
                 account_variables_support: true,
                 account_portable_support: true,
                 cloud_store_support: true,
+                cloud_mirror_support: true,
                 account_authority_support: true,
                 shared_accounts_support: true,
                 account_binding: None,
@@ -1514,6 +1524,7 @@ mod tests {
                     account_variables_support: true,
                     account_portable_support: true,
                     cloud_store_support: true,
+                    cloud_mirror_support: true,
                     account_authority_support: true,
                     shared_accounts_support: true,
                     account_binding: None,

@@ -199,7 +199,7 @@ pub(super) struct State {
     tasks: Mutex<HashMap<String, tokio::task::JoinHandle<()>>>,
     calls: Mutex<Vec<Call>>,
     login: Mutex<Option<login::Pending>>,
-    db: store::Database,
+    pub(in crate::app) db: store::Database,
 }
 fn now() -> i64 {
     chrono::Utc::now().timestamp()

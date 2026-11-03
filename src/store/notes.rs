@@ -72,6 +72,101 @@ impl<'a> LocalNotes<'a> {
     pub fn new(index: &'a Index) -> Self {
         Self { index }
     }
+
+    /// A write of a mirrored record: the mirror is told once it is committed.
+    fn write<T>(&self, f: impl FnOnce(&rusqlite::Transaction) -> Result<T>) -> Result<T> {
+        let written = self.index.write(f)?;
+        crate::mirror::wake();
+        Ok(written)
+    }
+
+    /// The verified notes, by ID, as the account store mirrors them.
+    pub fn export_notes(&self) -> Result<Vec<crate::mirror::Exported>> {
+        self.index.read(|db| {
+            let mut stmt = db.prepare("SELECT id,payload,updated_at FROM notes ORDER BY id")?;
+            let rows = stmt.query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, i64>(2)?,
+                ))
+            })?;
+            let mut out = Vec::new();
+            for row in rows {
+                let (id, payload, updated_at) = row?;
+                out.push(crate::mirror::Exported {
+                    id,
+                    value: serde_json::json!({
+                        "updated_at": updated_at,
+                        "note": serde_json::from_str::<serde_json::Value>(&payload)?,
+                    }),
+                });
+            }
+            Ok(out)
+        })
+    }
+
+    /// The answer evaluations, by Teams message, as the account store mirrors them.
+    pub fn export_evaluations(&self) -> Result<Vec<crate::mirror::Exported>> {
+        self.index.read(|db| {
+            let mut stmt = db.prepare(
+                "SELECT resource,question_id,payload,updated_at FROM question_feedback ORDER BY resource",
+            )?;
+            let rows = stmt.query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, i64>(3)?,
+                ))
+            })?;
+            let mut out = Vec::new();
+            for row in rows {
+                let (resource, question, payload, updated_at) = row?;
+                out.push(crate::mirror::Exported {
+                    id: resource,
+                    value: serde_json::json!({
+                        "question_id": question,
+                        "updated_at": updated_at,
+                        "evaluation": serde_json::from_str::<serde_json::Value>(&payload)?,
+                    }),
+                });
+            }
+            Ok(out)
+        })
+    }
+
+    /// The approved examples, by Teams message, as the account store mirrors them.
+    pub fn export_examples(&self) -> Result<Vec<crate::mirror::Exported>> {
+        self.index.read(|db| {
+            let mut stmt = db.prepare(
+                "SELECT resource,request,answer,context,updated_at FROM examples ORDER BY resource",
+            )?;
+            let rows = stmt.query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, Option<String>>(3)?,
+                    r.get::<_, i64>(4)?,
+                ))
+            })?;
+            let mut out = Vec::new();
+            for row in rows {
+                let (resource, request, answer, context, updated_at) = row?;
+                out.push(crate::mirror::Exported {
+                    id: resource,
+                    value: serde_json::json!({
+                        "request": request,
+                        "answer": answer,
+                        "context": context,
+                        "updated_at": updated_at,
+                    }),
+                });
+            }
+            Ok(out)
+        })
+    }
 }
 
 impl NotesStore for LocalNotes<'_> {
@@ -104,7 +199,7 @@ impl NotesStore for LocalNotes<'_> {
 
     fn save_note(&self, mut note: Note) -> Result<Note> {
         let now = chrono::Utc::now().timestamp();
-        self.index.write(|tx| {
+        self.write(|tx| {
             if note.id.is_empty() {
                 note.id = uuid::Uuid::new_v4().to_string();
                 note.created_at = now;
@@ -132,11 +227,11 @@ impl NotesStore for LocalNotes<'_> {
     }
 
     fn put_note(&self, note: &Note) -> Result<()> {
-        self.index.write(|tx| put_note(tx, note))
+        self.write(|tx| put_note(tx, note))
     }
 
     fn replace_notes(&self, notes: &[Note]) -> Result<()> {
-        self.index.write(|tx| {
+        self.write(|tx| {
             let held: Vec<(String, String)> = tx
                 .prepare("SELECT id,payload FROM notes")?
                 .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
@@ -164,7 +259,7 @@ impl NotesStore for LocalNotes<'_> {
     }
 
     fn remove_note(&self, id: &str) -> Result<bool> {
-        self.index.write(|tx| {
+        self.write(|tx| {
             let removed = tx.execute("DELETE FROM notes WHERE id=?1", [id])? > 0;
             tx.execute(
                 "DELETE FROM documents WHERE source=?1 AND key=?2",
@@ -176,7 +271,7 @@ impl NotesStore for LocalNotes<'_> {
 
     fn save_evaluation(&self, value: &AnswerEvaluation) -> Result<()> {
         let now = chrono::Utc::now().timestamp();
-        self.index.write(|tx| {
+        self.write(|tx| {
             tx.execute(
                 "DELETE FROM documents WHERE key=?1 AND source LIKE '@feedback:%'",
                 [&value.resource],
@@ -195,7 +290,7 @@ impl NotesStore for LocalNotes<'_> {
     }
 
     fn remove_evaluation(&self, resource: &str) -> Result<()> {
-        self.index.write(|tx| {
+        self.write(|tx| {
             tx.execute(
                 "DELETE FROM question_feedback WHERE resource=?1",
                 [resource],
@@ -221,7 +316,7 @@ impl NotesStore for LocalNotes<'_> {
     }
 
     fn retain_evaluations(&self, questions: &[&str]) -> Result<()> {
-        self.index.write(|tx| {
+        self.write(|tx| {
             let evaluated: Vec<String> = tx
                 .prepare("SELECT DISTINCT question_id FROM question_feedback")?
                 .query_map([], |r| r.get(0))?
@@ -247,7 +342,7 @@ impl NotesStore for LocalNotes<'_> {
             answer,
             context,
         } = example;
-        self.index.write(|tx| {
+        self.write(|tx| {
             tx.execute(
                 "INSERT INTO examples(resource,request,answer,context,updated_at) VALUES (?1,?2,?3,?4,?5) ON CONFLICT(resource) DO UPDATE SET request=excluded.request,answer=excluded.answer,context=excluded.context,updated_at=excluded.updated_at",
                 params![resource, request, answer, context, now],
@@ -266,7 +361,7 @@ impl NotesStore for LocalNotes<'_> {
     }
 
     fn remove_example(&self, resource: &str) -> Result<()> {
-        self.index.write(|tx| {
+        self.write(|tx| {
             tx.execute("DELETE FROM examples WHERE resource=?1", [resource])?;
             tx.execute(
                 "DELETE FROM documents WHERE source=?1 AND key=?2",

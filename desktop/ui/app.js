@@ -2067,9 +2067,92 @@ function renderCloud() {
     const usage = status.store.usage;
     details.append(el('p', { class: 'hint', textContent: t('Today: {requests} of {limit} requests and {rows} of {rows_limit} records written.', { requests: usage.requests, limit: usage.limits.requests, rows: usage.rows_written, rows_limit: usage.limits.rows_written }) }));
   }
+  if (status?.latency_ms?.store !== undefined) {
+    details.append(el('p', { class: 'hint', textContent: t('Round trip to the account store: {ms} ms.', { ms: status.latency_ms.store }) }));
+  }
   details.hidden = !details.childElementCount;
   if (status?.endpoint && !$('#cloud-endpoint').value) $('#cloud-endpoint').value = status.endpoint;
+  renderCloudMirror();
 }
+
+let cloudMirrorArmed = false;
+
+function renderCloudMirror() {
+  const status = cloudStatus;
+  const mirror = status?.mirror ?? {};
+  $('#cloud-mirror').hidden = !status?.enrolled;
+  const outbox = mirror.outbox;
+  const lines = [];
+  if (status?.mode === 'mirror') {
+    lines.push(outbox?.pending
+      ? tn(outbox.pending, '{n} change waits to be copied.', '{n} changes wait to be copied.')
+      : t('The copy is up to date.'));
+    if (outbox?.blocked) lines.push(tn(outbox.blocked, '{n} record is too large for the account store and is not copied.', '{n} records are too large for the account store and are not copied.'));
+    if (mirror.last_success_at) lines.push(t('Last copied {when}.', { when: ago(mirror.last_success_at * 1000) }));
+  } else {
+    lines.push(mirror.initial_verified_at ? t('The copy is stopped; the account store keeps what it has.') : t('Nothing is copied yet. Starting uploads every record, verifies the copy and then keeps it up to date.'));
+  }
+  if (mirror.key?.present === false && status?.mode !== 'mirror') lines.push(t('Starting creates the account content key on this computer. Back it up right after with pta variables key backup.'));
+  if (mirror.last_verify) lines.push(mirror.last_verify.ok ? t('Last verification {when}: the copy matches.', { when: ago(mirror.last_verify.at * 1000) }) : t('Last verification {when}: the copy differs.', { when: ago(mirror.last_verify.at * 1000) }));
+  $('#cloud-mirror-summary').textContent = lines.join(' ');
+  const start = $('#cloud-mirror-start');
+  start.hidden = status?.mode === 'mirror';
+  start.textContent = cloudMirrorArmed ? t('Tap again to upload') : t('Start the encrypted copy');
+  $('#cloud-mirror-stop').hidden = status?.mode !== 'mirror';
+  $('#cloud-verify').hidden = !mirror.key?.present;
+}
+
+const CLOUD_COLLECTIONS = {
+  settings: () => t('Settings'), organization: () => t('Organization'), notes: () => t('Verified notes'),
+  evaluations: () => t('Answer evaluations'), examples: () => t('Approved examples'), audits: () => t('Messages'),
+  activity_snapshots: () => t('Daily task snapshots'), activity_summaries: () => t('Daily summaries'), activity_runs: () => t('Activity runs'),
+  implementation_runs: () => t('Implementation runs'), implementation_requests: () => t('Request runs'),
+};
+
+function renderCloudVerify(report) {
+  const box = $('#cloud-verify-result');
+  box.replaceChildren();
+  for (const c of report?.collections ?? []) {
+    if (c.ok && !c.pending) continue;
+    box.append(el('p', { class: 'hint', textContent: c.ok
+      ? tn(c.pending, '{name}: {n} change not copied yet.', '{name}: {n} changes not copied yet.', { name: CLOUD_COLLECTIONS[c.name]?.() ?? c.name })
+      : t('{name}: {local} here, {remote} in the account store; the copy differs.', { name: CLOUD_COLLECTIONS[c.name]?.() ?? c.name, local: c.local, remote: c.remote }) }));
+  }
+  box.hidden = !box.childElementCount;
+}
+
+$('#cloud-mirror-start').onclick = event => {
+  if (!cloudMirrorArmed) {
+    cloudMirrorArmed = true;
+    renderCloudMirror();
+    setTimeout(() => { cloudMirrorArmed = false; renderCloudMirror(); }, 4000);
+    return;
+  }
+  cloudMirrorArmed = false;
+  busy(event.currentTarget, async () => {
+    const reply = await invoke('cloud_mirror', { action: 'start' });
+    renderCloudVerify(reply.verify);
+    await loadCloud();
+    if (!reply.complete) throw t('The copy is not complete yet. Start it again to continue where it stopped.');
+    done(reply.key_created
+      ? t('The encrypted copy is up to date. Back up the new account content key now with pta variables key backup.')
+      : t('The encrypted copy is up to date.'));
+  });
+};
+
+$('#cloud-verify').onclick = event => busy(event.currentTarget, async () => {
+  const reply = await invoke('cloud_verify');
+  renderCloudVerify(reply.verify);
+  await loadCloud();
+  if (!reply.ok) throw t('The copy differs from this computer. Start the encrypted copy again to repair it.');
+  done(t('The copy matches this computer.'));
+});
+
+$('#cloud-mirror-stop').onclick = event => busy(event.currentTarget, async () => {
+  await invoke('cloud_mirror', { action: 'stop' });
+  await loadCloud();
+  done(t('The copy is stopped. Nothing was deleted.'));
+});
 
 $('#cloud-refresh').onclick = event => busy(event.currentTarget, loadCloud);
 

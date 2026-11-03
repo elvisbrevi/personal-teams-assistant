@@ -183,6 +183,8 @@ pub(super) fn check_shared_operation(request: &control::Request) -> Result<()> {
                 | "variable_delivery_remove"
                 | "variable_deliver"
                 | "cloud_connect"
+                | "cloud_mirror"
+                | "cloud_verify"
         ),
         "{EXECUTION_DENIED}"
     );

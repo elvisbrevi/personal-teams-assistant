@@ -145,7 +145,7 @@ is a kind of organization entry.
 ## 5. Cloudflare options
 
 Verified on 2026-11-02 in the official documentation ([sources](#sources)) and again on 2026-11-03
-before phase 3a: no limit or price in this section changed. Two details matter to the
+before phases 3a and 3b: no limit or price in this section changed. Two details matter to the
 implementation: SQLite storage in Durable Objects is billed since January 2026 (on Free it is
 the 5 GB total below), and new Access service token secrets carry a `cfast_` prefix and accept
 tags, while the headers stay `CF-Access-Client-Id` / `CF-Access-Client-Secret`.
@@ -210,12 +210,16 @@ person profiles and activity records. Data classes:
 | Secrets | variable values and keys, credentials, OAuth vault, machine tokens, provider sessions | never |
 | Sensitive content | audits, answers, notes, evaluations, examples, people, activity records, run prompts and outputs, organization entries | **encrypted by the client** (§11) |
 | Configuration structure | sources (URLs, tool catalogs with organization URLs and emails), contexts, questions, prompts | encrypted by the client |
-| Operational metadata | record IDs, collection, revision, content digest, sizes, timestamps, schema versions | clear (needed for synchronization, never content) |
+| Operational metadata | blinded record IDs (a keyed hash of the natural ID), collection, revision, ciphertext digest, sizes, timestamps, schema versions | clear (needed for synchronization, never content or a natural identifier) |
 
 **Client-side encryption.** Each record is sealed by the host with AES-256-GCM-SIV (the existing
 dependency) under a per-account **content key**; the associated data binds a domain string, the
-account, collection, record ID and revision, so ciphertext moved to another account, record or
-revision fails authentication (the same construction as account variables). The content key is
+account, the key version, the collection, record ID, revision and payload schema, so ciphertext
+moved to another account, record or revision fails authentication (the construction of account
+variables). «The account» in the associated data is a random **content account** identifier kept
+with the key (§11, decision 7), never the Worker's account ID, which no host learns. The nonce is
+synthetic (a keyed hash of the associated data and the plaintext), so a repeated send carries the
+same bytes; record IDs are blinded with a separate key kept in the same file. The content key is
 random, never sent to Cloudflare, kept in the installation's private `keys/` directory, given to a
 new installation only at trust time (the existing browser «Trust this machine» approval) and
 exportable with the existing operator-local key backup. Rotation re-encrypts the account (small
@@ -301,7 +305,9 @@ Optional, per account, reversible, with a prior backup and no loss of history.
    collection, the record count and a digest over sorted `(id, revision, ciphertext digest)`
    computed on both sides, plus a full decryption and comparison of every record. Only then does
    the mode become `mirror`. Local stores are never deleted.
-4. `mirror` keeps local as the source of truth and pushes every change. `pta cloud verify`
+4. `mirror` keeps local as the source of truth and pushes every change. Phase 3b (0.10.26) does the
+   upload, the read-back verification and the switch as `pta cloud mirror` (GUI Settings › Advanced ›
+   Cloud storage, MCP `cloud_mirror`); `migrate` adds the backup and the dry-run report in 4a. `pta cloud verify`
    compares at any time. `pta cloud promote` switches to `primary` after a clean verification.
 5. `pta cloud rollback` pulls everything to local, verifies, switches to `off` and leaves the cloud
    copy untouched until an explicit `pta cloud erase`.
@@ -357,7 +363,7 @@ parity, the `AGENTS.md` checks, and delivery verified on crates.io and on the se
 | 1b. Organization (local) — done (0.10.16) | `[organization]` in the map (name, entries, source IDs); guides shown as entries; new `organization` source kind (disabled by default) and index documents; Settings › Organization replaces the current guides editor (no duplicate control); `pta organization …` with `pta guides …` kept as its guides subcommand; MCP `organization_*`; agents receive norms and architecture as untrusted input; skill, architecture and `CONTEXT.md`. The organization, guides included, joins the account configuration's allowlist and travels with the account. | Prompt size growth for agents (bound entries per run); a second place to edit guides if the old editor is not removed in the same PR. |
 | 2. Storage abstraction — done (0.10.17–0.10.22) | One trait per account aggregate under the crate's `store/` (at the crate root, because the message pipeline uses them too), each with its local implementation as the default and a shared `contract::run` suite; no behavior change. `SettingsStore` (`store/settings.rs`, `LocalSettings`): `Config`, `KnowledgeMap` and the tunnel path, committed together with the existing journal. `NotesStore` (`store/notes.rs`, `LocalNotes`): verified notes (by ID, `updated_at` as revision), answer evaluations and approved examples (by Teams message), in `knowledge-index.db` with each record's search document in the same transaction. `AuditStore` (`store/audit.rs`, `LocalAudit`): the finished messages' audits (by Teams message, audit as revision) in `assistant.db` › `jobs`; the worker's in-flight rows, state machine and send nonces stay local. `ActivityStore` (`store/activity.rs`, `LocalActivity`): daily task snapshots and summaries (by day), finished runs (by ID) and the legacy record, in `activity-registration.db`; running runs, slot claims and recovery stay local. `ImplementationStore` (`store/implementation.rs`, `LocalImplementation`, crate-private): finished agent runs (by launch ID) and request runs (by ID) in `implementation/runs.db`; in-flight runs and requests, the change feed, the session index, remote-session access and the machine files stay local. `OrganizationStore` (`store/organization.rs`, `LocalOrganization`): the organization (name, entries by ID with `updated_at` as revision, documenting sources) and its work item guides (by ID) as one unit with one revision, kept in the map's `[organization]` and `[[work_item_guides]]` through the settings store's journaled commit; the settings editors still save it with the rest of the map in one commit. Search and ranking stay in the local index, which reads the stores' records; the pipeline reads the local stores and never waits on the cloud, whose store will keep the local replica current. In-flight state is joined with each store's finished records where a listing shows both (`audit`, activity runs, implementation runs and requests). | Broad refactor of hot paths: done store by store, each PR behavior-neutral and fully tested. |
 | 3a. Worker and authentication — under way (Worker: 0.10.23; host link: 0.10.25) | `cloud/` Worker, `Registry`, `AccountStore` schema v1 (encrypted records with clear metadata), Access service token, installation credential, health; Workers Builds; host `cloud status/connect`. | Access/Workers configuration mistakes: staging Worker first, contract tests including cross-account attempts. |
-| 3b. Mirror | Outbox for append-only records, encrypted snapshots of configuration, `cloud verify`; local stays the source of truth. | Outbox growth while offline (bounded, visible in status); latency measured here. |
+| 3b. Mirror — done (0.10.26) | Content key, sealing and blinded IDs; the ledger as outbox for every collection (finished records and configuration snapshots); `cloud mirror` (plan, verified initial upload, then mode `mirror`; stop) and `cloud verify`; key in the operator key backup; latency in `cloud status`. Local stays the source of truth. | Outbox growth while offline (bounded by the local records, visible in status); latency measured here (§5). |
 | 3c. Primary | Compare-and-swap configuration writes through the Worker; local replica; `portable_*` served from the account store. | Conflict handling regressions: reuse the portable rules and their tests. |
 | 4a. Migration | `cloud migrate/promote/rollback/erase` with backup and read-back verification; production migrated when the owner decides. | Data loss: never delete local data; rollback rehearsed on a copy of the production profile first. |
 | 4b. Other users | Every portal account gets its own cloud account store: the operator enables it per account, each with its own content key, installation credentials and quota share; the owner's account is not special in the Worker. | Authorization bugs between accounts (cross-account contract tests); the shared Free quota (per-account shares, §5). |
@@ -386,6 +392,16 @@ Taken during phase 2 (2026-11-02):
    (§9), instead of leaving them inside the settings store's map. The cloud can then keep, sync
    and revise the organization apart from the rest of the configuration, while the local profile
    keeps both in `knowledge-map.toml` without changing files or formats.
+
+Taken before phase 3b (2026-11-03):
+
+7. **The account in the associated data.** A random content account UUID generated with the content
+   key and kept in the same private file (and its backup), plus the key version; the Worker's account
+   ID is never needed or sent.
+8. **First upload.** All eleven collections, configuration included (without `[secrets]` and
+   `[cloud]`), so verification covers everything phase 3c needs.
+9. **Key delivery.** Only the operator key backup and restore in this phase; delivery at the «Trust
+   this machine» confirmation waits for phase 4b, when a second installation uploads.
 
 ## Sources
 

@@ -1,0 +1,625 @@
+//! The mirror engine: find what changed locally, seal it and upload it in batches, and compare
+//! the account store's copy with the local stores. It reads local records through `Local` and
+//! reaches the Worker through `Transport`; it never writes a local store and never touches the
+//! Teams pipeline. Sending a record again is always safe (the Worker's upserts are idempotent and
+//! the sealed bytes of a repeated send are identical); this is unrelated to the never-retry rule
+//! for Graph, whose nonces and in-flight jobs never reach this module.
+
+use super::{
+    Collection, Exported, hex_sha256,
+    key::Content,
+    ledger::{DELETED, Ledger, Row},
+    plaintext, seal,
+};
+use anyhow::Result;
+use serde::Serialize;
+use serde_json::Value;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    time::Instant,
+};
+
+/// The largest sealed record the Worker accepts.
+pub const SEALED_MAX: usize = 1024 * 1024;
+const PAGE: usize = 500;
+
+/// The local records a mirror reads: every finished record of a collection, not a page of them.
+pub trait Local {
+    fn collect(&self, collection: Collection) -> Result<Vec<Exported>>;
+}
+
+/// Why an exchange with the Worker did not answer what was asked.
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub enum Failure {
+    /// Network, timeout or a server error: nothing is lost, the records wait.
+    Offline,
+    /// Access or the Worker refused the credentials.
+    Revoked,
+    /// The account's daily share is used up; behaves like being offline.
+    Quota,
+    /// The Worker has no Access settings yet.
+    Unconfigured,
+    /// Anything else the Worker refused, with its error code.
+    Refused(String),
+}
+
+impl Failure {
+    pub fn code(&self) -> String {
+        match self {
+            Failure::Offline => "offline".into(),
+            Failure::Revoked => "revoked".into(),
+            Failure::Quota => "quota".into(),
+            Failure::Unconfigured => "unconfigured".into(),
+            Failure::Refused(code) => code.clone(),
+        }
+    }
+}
+
+/// One sealed record as the protocol carries it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Wire {
+    pub collection: Collection,
+    pub id: String,
+    pub revision: u64,
+    pub digest: String,
+    pub schema: u32,
+    pub deleted: bool,
+    pub sealed: Option<Vec<u8>>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Outcome {
+    Created,
+    Updated,
+    Unchanged,
+    Stale,
+    Conflict,
+}
+
+/// One record as the Worker keeps it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Stored {
+    pub collection: Collection,
+    pub id: String,
+    pub revision: u64,
+    pub digest: String,
+    pub schema: u32,
+    pub deleted: bool,
+    pub generation: u64,
+    pub sealed: Option<Vec<u8>>,
+}
+
+pub struct Page {
+    pub records: Vec<Stored>,
+    pub more: bool,
+}
+
+#[allow(async_fn_in_trait)]
+pub trait Transport {
+    /// Upsert 1 to 100 records; the outcomes come in the same order.
+    async fn write(&self, records: &[Wire]) -> Result<Vec<Outcome>, Failure>;
+    /// The records of a collection that changed after generation `since`, oldest first.
+    async fn page(&self, collection: Collection, since: u64, limit: usize)
+    -> Result<Page, Failure>;
+    async fn get(&self, collection: Collection, id: &str) -> Result<Option<Stored>, Failure>;
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct Limits {
+    /// Records sent in one pass.
+    pub records: usize,
+    pub batch_records: usize,
+    /// Sealed bytes in one request (the Worker's body limit is 4 MiB after base64).
+    pub batch_bytes: usize,
+}
+
+impl Default for Limits {
+    fn default() -> Self {
+        Self {
+            records: 500,
+            batch_records: 100,
+            batch_bytes: 2_500_000,
+        }
+    }
+}
+
+/// A row waiting to be sent, with the content to send (none for a tombstone).
+struct Pending {
+    row: Row,
+    value: Option<Value>,
+}
+
+/// What a pass did.
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct Flushed {
+    pub sent: u64,
+    pub batches: u64,
+    /// Records the Worker refused (retried later with a backoff).
+    pub refused: u64,
+    /// Round-trip milliseconds of each batch.
+    pub batch_millis: Vec<u64>,
+    pub failure: Option<String>,
+}
+
+pub struct Engine<'a, L: Local, T: Transport> {
+    pub local: &'a L,
+    pub transport: &'a T,
+    pub ledger: &'a Ledger,
+    pub content: &'a Content,
+}
+
+fn hash(id: &str, value: &Value) -> String {
+    hex_sha256(&plaintext(id, value))
+}
+
+fn backoff(attempts: u32) -> i64 {
+    (30i64 << attempts.min(7)).min(3600)
+}
+
+/// Point a row at the content the stores hold now, allocating the next revision when that is not
+/// what it already sends or what the Worker acknowledged. True when the row changed.
+fn retarget(row: &mut Row, desired: &str, now: i64) -> bool {
+    if row.target_hash == desired {
+        return false;
+    }
+    if row.target_hash.is_empty() && row.acked_hash == desired && row.revision == row.acked_revision
+    {
+        return false;
+    }
+    row.revision = row.revision.max(row.acked_revision).max(row.floor) + 1;
+    row.target_hash = desired.into();
+    row.pending_since.get_or_insert(now);
+    row.attempts = 0;
+    row.next_at = 0;
+    row.error.clear();
+    true
+}
+
+impl<L: Local, T: Transport> Engine<'_, L, T> {
+    /// Compare the local stores with the ledger and record what must be sent. Returns the
+    /// pending rows with their content, oldest first.
+    fn sweep(&self, now: i64) -> Result<Vec<Pending>> {
+        let mut pending = Vec::new();
+        for collection in Collection::ALL {
+            let exported = self.local.collect(collection)?;
+            let mut held: BTreeMap<String, Row> = self
+                .ledger
+                .rows(collection)?
+                .into_iter()
+                .map(|r| (r.natural.clone(), r))
+                .collect();
+            let mut changed = Vec::new();
+            let mut present = BTreeSet::new();
+            for Exported { id, value } in exported {
+                let desired = hash(&id, &value);
+                let mut row = held.remove(&id).unwrap_or_else(|| Row {
+                    collection,
+                    blind: seal::blind_id(self.content, collection, &id),
+                    natural: id.clone(),
+                    revision: 0,
+                    floor: 0,
+                    acked_revision: 0,
+                    acked_hash: String::new(),
+                    acked_digest: String::new(),
+                    target_hash: String::new(),
+                    pending_since: None,
+                    attempts: 0,
+                    next_at: 0,
+                    error: String::new(),
+                });
+                if retarget(&mut row, &desired, now) {
+                    changed.push(row.clone());
+                }
+                present.insert(id);
+                if row.pending() {
+                    pending.push(Pending {
+                        row,
+                        value: Some(value),
+                    });
+                }
+            }
+            // Rows whose record is gone: a tombstone, unless nothing was ever sent for them.
+            for (natural, mut row) in held {
+                if present.contains(&natural) {
+                    continue;
+                }
+                if row.revision == 0 && row.acked_revision == 0 {
+                    self.ledger.forget(collection, &natural)?;
+                    continue;
+                }
+                if retarget(&mut row, DELETED, now) {
+                    changed.push(row.clone());
+                }
+                if row.pending() {
+                    pending.push(Pending { row, value: None });
+                }
+            }
+            self.ledger.put_all(&changed)?;
+        }
+        pending.sort_by(|a, b| {
+            (a.row.pending_since, a.row.collection, &a.row.natural).cmp(&(
+                b.row.pending_since,
+                b.row.collection,
+                &b.row.natural,
+            ))
+        });
+        Ok(pending)
+    }
+
+    /// The records that are pending now, without sending anything.
+    pub fn plan(&self, now: i64) -> Result<u64> {
+        Ok(self.sweep(now)?.len() as u64)
+    }
+
+    /// Find what changed and upload up to `limits.records` of it.
+    pub async fn flush(&self, now: i64, limits: Limits) -> Result<Flushed> {
+        let pending = self.sweep(now)?;
+        let mut flushed = Flushed::default();
+        let eligible: Vec<Pending> = pending
+            .into_iter()
+            .filter(|p| p.row.next_at <= now)
+            .take(limits.records)
+            .collect();
+        let mut batch: Vec<(Row, Wire)> = Vec::new();
+        let mut bytes = 0usize;
+        let mut batches: Vec<Vec<(Row, Wire)>> = Vec::new();
+        for Pending { mut row, value } in eligible {
+            let wire = match value {
+                None => Wire {
+                    collection: row.collection,
+                    id: row.blind.clone(),
+                    revision: row.revision,
+                    digest: hex_sha256(b""),
+                    schema: row.collection.schema(),
+                    deleted: true,
+                    sealed: None,
+                },
+                Some(value) => {
+                    let bytes = plaintext(&row.natural, &value);
+                    let sealed = seal::seal(
+                        self.content,
+                        row.collection,
+                        &row.blind,
+                        row.revision,
+                        &bytes,
+                    )?;
+                    if sealed.len() > SEALED_MAX {
+                        row.error = "too_large".into();
+                        row.next_at = i64::MAX;
+                        self.ledger.put(&row)?;
+                        continue;
+                    }
+                    Wire {
+                        collection: row.collection,
+                        id: row.blind.clone(),
+                        revision: row.revision,
+                        digest: hex_sha256(&sealed),
+                        schema: row.collection.schema(),
+                        deleted: false,
+                        sealed: Some(sealed),
+                    }
+                }
+            };
+            let size = wire.sealed.as_ref().map_or(0, Vec::len);
+            if !batch.is_empty()
+                && (batch.len() >= limits.batch_records || bytes + size > limits.batch_bytes)
+            {
+                batches.push(std::mem::take(&mut batch));
+                bytes = 0;
+            }
+            bytes += size;
+            batch.push((row, wire));
+        }
+        if !batch.is_empty() {
+            batches.push(batch);
+        }
+        for batch in batches {
+            let wires: Vec<Wire> = batch.iter().map(|(_, w)| w.clone()).collect();
+            let started = Instant::now();
+            let reply = self.transport.write(&wires).await;
+            flushed.batches += 1;
+            flushed
+                .batch_millis
+                .push(started.elapsed().as_millis() as u64);
+            match reply {
+                Ok(outcomes) if outcomes.len() == batch.len() => {
+                    let mut rows = Vec::new();
+                    for ((mut row, wire), outcome) in batch.into_iter().zip(outcomes) {
+                        match outcome {
+                            Outcome::Created | Outcome::Updated | Outcome::Unchanged => {
+                                acknowledge(&mut row, &wire);
+                                flushed.sent += 1;
+                            }
+                            Outcome::Stale | Outcome::Conflict => {
+                                // The Worker holds another revision of this record (a restored
+                                // ledger or database): continue above it, or accept an identical one.
+                                match self.transport.get(row.collection, &row.blind).await {
+                                    Ok(Some(held))
+                                        if held.revision == wire.revision
+                                            && held.digest == wire.digest
+                                            && held.deleted == wire.deleted =>
+                                    {
+                                        acknowledge(&mut row, &wire);
+                                        flushed.sent += 1;
+                                    }
+                                    Ok(held) => {
+                                        row.floor = row.floor.max(held.map_or(0, |h| h.revision));
+                                        row.revision = row.revision.max(row.floor) + 1;
+                                        row.attempts += 1;
+                                        row.error = "drift".into();
+                                        flushed.refused += 1;
+                                    }
+                                    Err(failure) => {
+                                        self.ledger.put_all(&rows)?;
+                                        return self.finish(flushed, failure, now);
+                                    }
+                                }
+                            }
+                        }
+                        rows.push(row);
+                    }
+                    self.ledger.put_all(&rows)?;
+                }
+                Ok(_) => {
+                    let rows = refuse(batch, "bad_reply", now);
+                    flushed.refused += rows.len() as u64;
+                    self.ledger.put_all(&rows)?;
+                }
+                Err(Failure::Refused(code)) => {
+                    let rows = refuse(batch, &code, now);
+                    flushed.refused += rows.len() as u64;
+                    self.ledger.put_all(&rows)?;
+                }
+                Err(failure) => {
+                    let rows: Vec<Row> = batch
+                        .into_iter()
+                        .map(|(mut row, _)| {
+                            row.attempts += 1;
+                            row.error = failure.code();
+                            row
+                        })
+                        .collect();
+                    self.ledger.put_all(&rows)?;
+                    return self.finish(flushed, failure, now);
+                }
+            }
+        }
+        if flushed.refused == 0 {
+            self.ledger.set_meta("last_success_at", &now.to_string())?;
+            self.ledger.clear_meta("last_error")?;
+        } else {
+            self.ledger.set_meta("last_error", "refused")?;
+        }
+        Ok(flushed)
+    }
+
+    fn finish(&self, mut flushed: Flushed, failure: Failure, _now: i64) -> Result<Flushed> {
+        self.ledger.set_meta("last_error", &failure.code())?;
+        flushed.failure = Some(failure.code());
+        Ok(flushed)
+    }
+
+    /// Compare the account store's copy with the local stores: per collection the counts and a
+    /// digest over the sorted `(id, revision, ciphertext digest)` computed from the ledger and
+    /// from the Worker's listing, plus a full decryption of every record checked against what
+    /// was sent.
+    pub async fn verify(&self) -> Result<std::result::Result<Report, Failure>> {
+        let mut collections = Vec::new();
+        for collection in Collection::ALL {
+            let mut remote = Vec::new();
+            let mut since = 0u64;
+            loop {
+                let page = match self.transport.page(collection, since, PAGE).await {
+                    Ok(page) => page,
+                    Err(failure) => return Ok(Err(failure)),
+                };
+                since = page
+                    .records
+                    .iter()
+                    .map(|r| r.generation)
+                    .max()
+                    .unwrap_or(since);
+                let more = page.more && !page.records.is_empty();
+                remote.extend(page.records);
+                if !more {
+                    break;
+                }
+            }
+            collections.push(self.verify_collection(collection, remote)?);
+        }
+        Ok(Ok(Report {
+            ok: collections.iter().all(|c| c.ok),
+            collections,
+        }))
+    }
+
+    fn verify_collection(
+        &self,
+        collection: Collection,
+        remote: Vec<Stored>,
+    ) -> Result<CollectionReport> {
+        let local: BTreeMap<String, String> = self
+            .local
+            .collect(collection)?
+            .into_iter()
+            .map(|e| {
+                let h = hash(&e.id, &e.value);
+                (e.id, h)
+            })
+            .collect();
+        let rows: Vec<Row> = self
+            .ledger
+            .rows(collection)?
+            .into_iter()
+            .filter(|r| r.acked_revision > 0)
+            .collect();
+        let by_blind: BTreeMap<&str, &Row> = rows.iter().map(|r| (r.blind.as_str(), r)).collect();
+        let stored: BTreeMap<&str, &Stored> = remote.iter().map(|s| (s.id.as_str(), s)).collect();
+
+        let digest = |lines: Vec<String>| {
+            let mut lines = lines;
+            lines.sort();
+            hex_sha256(lines.join("\n").as_bytes())
+        };
+        let local_digest = digest(
+            rows.iter()
+                .map(|r| {
+                    format!(
+                        "{}|{}|{}|{}",
+                        r.blind,
+                        r.acked_revision,
+                        r.acked_digest,
+                        u8::from(r.acked_hash == DELETED)
+                    )
+                })
+                .collect(),
+        );
+        let remote_digest = digest(
+            remote
+                .iter()
+                .map(|s| {
+                    format!(
+                        "{}|{}|{}|{}",
+                        s.id,
+                        s.revision,
+                        s.digest,
+                        u8::from(s.deleted)
+                    )
+                })
+                .collect(),
+        );
+
+        let mut report = CollectionReport {
+            name: collection.name(),
+            local: local.len() as u64,
+            remote: remote.iter().filter(|s| !s.deleted).count() as u64,
+            tombstones: remote.iter().filter(|s| s.deleted).count() as u64,
+            pending: 0,
+            missing_remote: 0,
+            unknown_remote: 0,
+            differing: 0,
+            undecryptable: 0,
+            content_differs: 0,
+            local_digest,
+            remote_digest,
+            ok: false,
+        };
+        for row in &rows {
+            if !stored.contains_key(row.blind.as_str()) {
+                report.missing_remote += 1;
+            }
+        }
+        for held in &remote {
+            let Some(row) = by_blind.get(held.id.as_str()) else {
+                report.unknown_remote += 1;
+                continue;
+            };
+            if row.acked_revision != held.revision
+                || row.acked_digest != held.digest
+                || (row.acked_hash == DELETED) != held.deleted
+            {
+                report.differing += 1;
+                continue;
+            }
+            let Some(sealed) = held.sealed.as_deref().filter(|_| !held.deleted) else {
+                continue;
+            };
+            if hex_sha256(sealed) != held.digest {
+                report.differing += 1;
+                continue;
+            }
+            let Some(plain) = seal::open(
+                self.content,
+                collection,
+                &held.id,
+                held.revision,
+                held.schema,
+                sealed,
+            ) else {
+                report.undecryptable += 1;
+                continue;
+            };
+            let named = serde_json::from_slice::<Value>(&plain)
+                .ok()
+                .and_then(|v| v["id"].as_str().map(str::to_owned));
+            let consistent = named
+                .as_deref()
+                .is_some_and(|n| seal::blind_id(self.content, collection, n) == held.id)
+                && hex_sha256(&plain) == row.acked_hash;
+            if !consistent {
+                report.content_differs += 1;
+            }
+        }
+        // What changed locally since the last upload is the outbox's, not a difference.
+        let acked: BTreeMap<&str, &str> = rows
+            .iter()
+            .map(|r| (r.natural.as_str(), r.acked_hash.as_str()))
+            .collect();
+        for (id, current) in &local {
+            if acked.get(id.as_str()) != Some(&current.as_str()) {
+                report.pending += 1;
+            }
+        }
+        for row in &rows {
+            if row.acked_hash != DELETED && !local.contains_key(&row.natural) {
+                report.pending += 1;
+            }
+        }
+        report.ok = report.missing_remote == 0
+            && report.unknown_remote == 0
+            && report.differing == 0
+            && report.undecryptable == 0
+            && report.content_differs == 0
+            && report.local_digest == report.remote_digest;
+        Ok(report)
+    }
+}
+
+fn acknowledge(row: &mut Row, wire: &Wire) {
+    row.acked_revision = wire.revision;
+    row.acked_hash = row.target_hash.clone();
+    row.acked_digest = wire.digest.clone();
+    row.target_hash.clear();
+    row.pending_since = None;
+    row.attempts = 0;
+    row.next_at = 0;
+    row.error.clear();
+}
+
+fn refuse(batch: Vec<(Row, Wire)>, code: &str, now: i64) -> Vec<Row> {
+    batch
+        .into_iter()
+        .map(|(mut row, _)| {
+            row.attempts += 1;
+            row.error = code.into();
+            row.next_at = now + backoff(row.attempts);
+            row
+        })
+        .collect()
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct CollectionReport {
+    pub name: &'static str,
+    /// Records in the local stores.
+    pub local: u64,
+    /// Live and deleted records the Worker holds.
+    pub remote: u64,
+    pub tombstones: u64,
+    /// Local records whose newest content has not been acknowledged yet (the outbox's).
+    pub pending: u64,
+    pub missing_remote: u64,
+    pub unknown_remote: u64,
+    pub differing: u64,
+    pub undecryptable: u64,
+    pub content_differs: u64,
+    pub local_digest: String,
+    pub remote_digest: String,
+    pub ok: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct Report {
+    pub ok: bool,
+    pub collections: Vec<CollectionReport>,
+}
