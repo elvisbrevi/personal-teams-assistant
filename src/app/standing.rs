@@ -61,10 +61,29 @@ struct Record {
     last_live: Option<i64>,
 }
 
+/// The same record for the account store link (`[cloud]`), qualified by endpoint and installation.
+#[derive(Default)]
+struct StoreRecord {
+    link: Option<String>,
+    observed: Observed,
+    at: Option<i64>,
+    last_live: Option<i64>,
+}
+
 #[derive(Default)]
 pub(super) struct State {
     record: std::sync::Mutex<Record>,
+    store: std::sync::Mutex<StoreRecord>,
 }
+
+pub(super) const STORE_OFFLINE: &str =
+    "The account store did not answer; this installation keeps working locally.";
+pub(super) const STORE_REVOKED: &str =
+    "The account store refused this installation's credentials. Connect again.";
+const STORE_DISCONNECTED: &str = "This computer is not connected to an account store.";
+const STORE_NOT_ENROLLED: &str =
+    "This computer is not enrolled in the account store. Connect it again.";
+const STORE_UNKNOWN: &str = "The account store has not been checked since this host started.";
 
 impl State {
     fn record(&self) -> std::sync::MutexGuard<'_, Record> {
@@ -100,6 +119,73 @@ impl State {
         }
         observed
     }
+    fn store(&self) -> std::sync::MutexGuard<'_, StoreRecord> {
+        self.store.lock().unwrap_or_else(|e| e.into_inner())
+    }
+    /// Record the outcome of one exchange with the account store of `cloud`: `None` is an
+    /// answer, a failure says why there was none. A refusal of the operation itself says nothing
+    /// about the link and leaves the state alone.
+    pub(super) fn observe_store(
+        &self,
+        cloud: &crate::config::Cloud,
+        failure: Option<&crate::mirror::engine::Failure>,
+    ) {
+        use crate::mirror::engine::Failure;
+        let observed = match failure {
+            None => Observed::Live,
+            Some(Failure::Revoked) => Observed::Revoked,
+            Some(Failure::Offline | Failure::Quota | Failure::Unconfigured) => Observed::Offline,
+            Some(Failure::Refused(_)) => return,
+        };
+        let link = store_qualifier(cloud);
+        let mut record = self.store();
+        if record.link.as_ref() != Some(&link) {
+            *record = StoreRecord {
+                link: Some(link),
+                ..StoreRecord::default()
+            };
+        }
+        let now = chrono::Utc::now().timestamp();
+        record.observed = observed;
+        record.at = Some(now);
+        if observed == Observed::Live {
+            record.last_live = Some(now);
+        }
+    }
+    /// Forget what was observed of the account store (this installation disconnected).
+    pub(super) fn reset_store(&self) {
+        *self.store() = StoreRecord::default();
+    }
+    /// The account store link as a standing of its own kind, from what was last observed (no
+    /// exchange). Never a credential or an identity.
+    pub(super) fn store_view(&self, cloud: &crate::config::Cloud, enrolled: bool) -> Value {
+        let record = self.store();
+        let link = (!cloud.endpoint.is_empty() && enrolled).then(|| store_qualifier(cloud));
+        let matching = link.is_some() && record.link == link;
+        let observed = if matching {
+            record.observed
+        } else {
+            Observed::Unknown
+        };
+        let (state, recovery) = match (cloud.endpoint.is_empty(), enrolled, observed) {
+            (true, _, _) => ("disconnected", STORE_DISCONNECTED),
+            (false, false, _) => ("not_enrolled", STORE_NOT_ENROLLED),
+            (_, _, Observed::Unknown) => ("unknown", STORE_UNKNOWN),
+            (_, _, Observed::Live) => ("live", ""),
+            (_, _, Observed::Offline) => ("offline", STORE_OFFLINE),
+            (_, _, Observed::Revoked) => ("revoked", STORE_REVOKED),
+        };
+        json!({
+            "kind": "account_store",
+            "state": state,
+            "endpoint": (!cloud.endpoint.is_empty()).then_some(&cloud.endpoint),
+            "account_key": link,
+            "mode": cloud.mode,
+            "checked_at": if matching { record.at } else { None },
+            "last_live_at": if matching { record.last_live } else { None },
+            "recovery": recovery,
+        })
+    }
     /// What a client may show: the state, when it was last confirmed and how to recover. Never
     /// a token, a value or the raw transport error.
     pub(super) fn view(&self, link: Option<&Link>) -> Value {
@@ -118,6 +204,7 @@ impl State {
             (Some(_), Observed::Revoked) => ("revoked", REVOKED),
         };
         json!({
+            "kind": "coordinator",
             "state": state,
             "coordinator": link.map(|l| l.origin.as_str()),
             "account_key": link.map(qualifier),
@@ -141,6 +228,21 @@ pub(super) fn qualifier(link: &Link) -> String {
             link.account.to_string().as_bytes(),
             b"\0",
             link.machine.as_bytes(),
+        ]
+        .concat(),
+    );
+    digest[..16].iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// An opaque qualifier of the account store link (endpoint and installation).
+fn store_qualifier(cloud: &crate::config::Cloud) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(
+        [
+            b"personal-teams-assistant/account-store-qualifier/v1".as_slice(),
+            cloud.endpoint.trim_end_matches('/').as_bytes(),
+            b"\0",
+            cloud.installation.as_bytes(),
         ]
         .concat(),
     );

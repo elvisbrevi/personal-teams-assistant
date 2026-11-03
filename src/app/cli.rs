@@ -122,11 +122,17 @@ Account store (Cloudflare)
                            store's per-collection counts and today's usage, the round-trip latency of each check and the
                            mirror (content key fingerprint, outbox by collection, last pass and verification). Standing:
                            disconnected, not_enrolled, live, offline, revoked or unconfigured. Uploads nothing.
-  cloud connect --endpoint URL [--label TEXT] --confirmed
+  cloud connect --endpoint URL [--label TEXT] [--token-expires YYYY-MM-DD] --confirmed
                            Enrolls this installation with the account store (owner only) and keeps the installation
                            credential it issues (CLOUD_STORE_TOKEN). The account's Access service token comes as JSON
                            on stdin, {client_id, client_secret}, never as arguments; without stdin the stored one is
-                           used. Keeps the mode off: nothing is uploaded.
+                           used. Keeps the mode off: nothing is uploaded. --token-expires records when the service
+                           token expires (status and setup status warn 30 days before); on a live installation it only
+                           updates that date.
+  cloud disconnect [--forget-service-token] --confirmed
+                           Owner only. Revokes this installation in the account store when it answers, removes
+                           CLOUD_STORE_TOKEN and sets the mode to off; with --forget-service-token also the Access
+                           service token and the endpoint. The encrypted copy, the content key and the outbox stay.
   cloud mirror --dry-run      Lists per collection what mirroring would upload (records and bytes); sends nothing.
   cloud mirror --confirmed    Owner only. Creates the account content key on first use (back it up with
                            pta variables key backup), uploads every collection sealed with it (AES-256-GCM-SIV in this
@@ -552,6 +558,9 @@ async fn cloud_command(args: &[String]) -> Result<Reply> {
             if let Some(label) = option(args, "--label") {
                 body["label"] = json!(label);
             }
+            if let Some(date) = option(args, "--token-expires") {
+                body["token_expires"] = json!(date);
+            }
             // The service token arrives only through a pipe; a terminal means the stored one.
             if !std::io::stdin().is_terminal() {
                 let text = stdin_text()?;
@@ -589,6 +598,26 @@ async fn cloud_command(args: &[String]) -> Result<Reply> {
             call("cloud_mirror", json!({"action": "start"}), None, true).await
         }
         Some("verify") => call("cloud_verify", json!({}), None, true).await,
+        Some("disconnect") => {
+            let forget = args.iter().any(|a| a == "--forget-service-token");
+            if let Some(reply) = unconfirmed(
+                args,
+                if forget {
+                    "Disconnect this installation from the account store and remove the account's service token from it?".into()
+                } else {
+                    "Disconnect this installation from the account store?".into()
+                },
+            ) {
+                return Ok(reply);
+            }
+            call(
+                "cloud_disconnect",
+                json!({"forget_service_token": forget}),
+                None,
+                true,
+            )
+            .await
+        }
         _ => anyhow::bail!("missing argument; consult --help"),
     }
 }
@@ -1020,11 +1049,25 @@ fn validate_args(args: &[String]) -> Result<()> {
     while i < args.len() {
         let a = args[i].as_str();
         match a {
-            "--json" | "--non-interactive" | "--offline" | "--no-browser" | "--wait"
-            | "--content" | "--current-profile" | "--context-stdin" | "--value" | "--confirmed"
-            | "--reset" | "--bind" | "--settings" | "--replace-settings" | "--dry-run"
-            | "--stop" => {}
-            "--destination" | "--name" | "--existing" | "--to" | "--target" | "--label" => {
+            "--json"
+            | "--non-interactive"
+            | "--offline"
+            | "--no-browser"
+            | "--wait"
+            | "--content"
+            | "--current-profile"
+            | "--context-stdin"
+            | "--value"
+            | "--confirmed"
+            | "--reset"
+            | "--bind"
+            | "--settings"
+            | "--replace-settings"
+            | "--dry-run"
+            | "--stop"
+            | "--forget-service-token" => {}
+            "--destination" | "--name" | "--existing" | "--to" | "--target" | "--label"
+            | "--token-expires" => {
                 i += 1;
                 ensure!(
                     args.get(i)
@@ -1213,7 +1256,10 @@ fn validate_args(args: &[String]) -> Result<()> {
                 "status" | "pending" | "run" | "history" | "open"
             ]
             | ["activity", "run" | "history" | "open" | "resolve", _]
-            | ["cloud", "status" | "connect" | "mirror" | "verify"]
+            | [
+                "cloud",
+                "status" | "connect" | "mirror" | "verify" | "disconnect"
+            ]
             | ["credentials", "list"]
             | ["credentials", "set" | "delete", _]
             | [
@@ -1347,6 +1393,7 @@ fn validate_args(args: &[String]) -> Result<()> {
             "--confirmed",
             p.as_slice() == ["cloud", "connect"]
                 || p.as_slice() == ["cloud", "mirror"]
+                || p.as_slice() == ["cloud", "disconnect"]
                 || p.as_slice().starts_with(&["update", "stage"])
                 || p.as_slice().starts_with(&["update", "apply"])
                 || p.as_slice().starts_with(&["variables", "migrate", "run"])
@@ -1362,6 +1409,11 @@ fn validate_args(args: &[String]) -> Result<()> {
         ("--to", p.as_slice().starts_with(&["variables", "deliver"])),
         ("--endpoint", p.as_slice() == ["cloud", "connect"]),
         ("--dry-run", p.as_slice() == ["cloud", "mirror"]),
+        ("--token-expires", p.as_slice() == ["cloud", "connect"]),
+        (
+            "--forget-service-token",
+            p.as_slice() == ["cloud", "disconnect"],
+        ),
         ("--stop", p.as_slice() == ["cloud", "mirror"]),
         ("--label", p.as_slice() == ["cloud", "connect"]),
         (
@@ -1537,7 +1589,7 @@ async fn execute(mut args: Vec<String>) -> Result<Reply> {
         }
         "capabilities" => {
             return Ok(Reply::success(
-                json!({"contract":control::CONTRACT,"commands":HELP,"skill_version":env!("CARGO_PKG_VERSION"),"activity_registration_support":true,"web_support":true,"web_access_support":true,"knowledge_index_support":true,"mcp_support":true,"tools_support":true,"todo_support":true,"implementation_support":true,"machine_pairing_support":true,"machine_login_support":true,"machine_management_support":true,"account_variables_support":true,"account_portable_support":true,"account_authority_support":true,"shared_accounts_support":true,"cloud_store_support":true,"cloud_mirror_support":true}),
+                json!({"contract":control::CONTRACT,"commands":HELP,"skill_version":env!("CARGO_PKG_VERSION"),"activity_registration_support":true,"web_support":true,"web_access_support":true,"knowledge_index_support":true,"mcp_support":true,"tools_support":true,"todo_support":true,"implementation_support":true,"machine_pairing_support":true,"machine_login_support":true,"machine_management_support":true,"account_variables_support":true,"account_portable_support":true,"account_authority_support":true,"shared_accounts_support":true,"cloud_store_support":true,"cloud_mirror_support":true,"cloud_disconnect_support":true}),
             ));
         }
         "skill" => return crate::app::skill::command(action, args.get(2).map(String::as_str)),
@@ -2769,6 +2821,13 @@ mod help_tests {
             &["setup", "status", "--expect", "DEPLOY_ENDPOINT"],
             &["cloud", "status"],
             &["cloud", "verify"],
+            &["cloud", "disconnect", "--confirmed"],
+            &[
+                "cloud",
+                "disconnect",
+                "--forget-service-token",
+                "--confirmed",
+            ],
             &["cloud", "mirror", "--dry-run"],
             &["cloud", "mirror", "--stop"],
             &["cloud", "mirror", "--confirmed"],

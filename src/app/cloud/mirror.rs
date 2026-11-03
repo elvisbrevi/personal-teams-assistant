@@ -38,6 +38,16 @@ pub(in crate::app) struct State {
     gate: tokio::sync::Mutex<()>,
 }
 
+/// Wait for the pass, upload or verification in progress, and keep the next one out.
+pub(super) async fn hold(host: &Host) -> tokio::sync::MutexGuard<'_, ()> {
+    host.state.cloud.gate.lock().await
+}
+
+/// Record what a pass, upload or verification learned about the link.
+fn observe(host: &Host, cloud: &Cloud, failure: Option<&Failure>) {
+    host.state.standing.observe_store(cloud, failure);
+}
+
 /// The local stores, read as the engine needs them.
 struct HostLocal<'a>(&'a Host);
 
@@ -292,7 +302,7 @@ fn median(values: &mut [u64]) -> u64 {
 
 /// One sweep and upload of what changed. Used by the loop; the engine does the work.
 async fn pass(host: &Arc<Host>) -> std::result::Result<Option<String>, ()> {
-    let _gate = host.state.cloud.gate.lock().await;
+    let _gate = hold(host).await;
     let Ok(config) = host.state.settings.config() else {
         return Err(());
     };
@@ -313,6 +323,13 @@ async fn pass(host: &Arc<Host>) -> std::result::Result<Option<String>, ()> {
     let Ok(flushed) = engine.flush(at, Limits::default()).await else {
         return Err(());
     };
+    if flushed.batches > 0 {
+        observe(
+            host,
+            &config.cloud,
+            flushed.failure.as_deref().map(failure_of).as_ref(),
+        );
+    }
     if flushed.batches > 0 {
         let mut millis = flushed.batch_millis.clone();
         let _ = setup.ledger.set_meta(
@@ -344,6 +361,17 @@ pub(in crate::app) async fn run(host: Arc<Host>) {
             Ok(Some(code)) if code == "quota" => 1800,
             Ok(Some(_)) | Err(()) => 120,
         };
+    }
+}
+
+/// A pass's failure code back as the failure it names.
+fn failure_of(code: &str) -> Failure {
+    match code {
+        "revoked" => Failure::Revoked,
+        "unconfigured" => Failure::Unconfigured,
+        "quota" => Failure::Quota,
+        "offline" => Failure::Offline,
+        other => Failure::Refused(other.to_owned()),
     }
 }
 
@@ -478,9 +506,10 @@ async fn start(host: &Arc<Host>) -> std::result::Result<Reply, Box<Reply>> {
     }
     let setup = open(host, &config.cloud).map_err(|m| Box::new(missing_reply(&m)))?;
     // The Worker must be reachable and speak this protocol before anything is queued.
-    health(&setup.http.endpoint)
-        .await
-        .map_err(|failure| Box::new(failure_reply(&failure)))?;
+    health(&setup.http.endpoint).await.map_err(|failure| {
+        observe(host, &config.cloud, Some(&failure));
+        Box::new(failure_reply(&failure))
+    })?;
     let local = HostLocal(host);
     let engine = Engine {
         local: &local,
@@ -507,12 +536,8 @@ async fn start(host: &Arc<Host>) -> std::result::Result<Reply, Box<Reply>> {
         refused += flushed.refused;
         millis.extend(flushed.batch_millis);
         if let Some(code) = flushed.failure {
-            let failure = match code.as_str() {
-                "revoked" => Failure::Revoked,
-                "unconfigured" => Failure::Unconfigured,
-                "quota" => Failure::Quota,
-                _ => Failure::Offline,
-            };
+            let failure = failure_of(&code);
+            observe(host, &config.cloud, Some(&failure));
             return Err(Box::new(failure_reply(&failure)));
         }
         if flushed.batches == 0 || passes >= 200 {
@@ -522,8 +547,12 @@ async fn start(host: &Arc<Host>) -> std::result::Result<Reply, Box<Reply>> {
     let outbox = setup.ledger.outbox(None, now()).map_err(internal)?;
     let report = match engine.verify().await.map_err(internal)? {
         Ok(report) => report,
-        Err(failure) => return Err(Box::new(failure_reply(&failure))),
+        Err(failure) => {
+            observe(host, &config.cloud, Some(&failure));
+            return Err(Box::new(failure_reply(&failure)));
+        }
     };
+    observe(host, &config.cloud, None);
     let _ = setup.ledger.set_meta(
         "last_verify",
         &json!({"at": now(), "ok": report.ok, "report": report}).to_string(),
@@ -579,8 +608,14 @@ pub(super) async fn operate_verify(host: &Arc<Host>) -> Reply {
     };
     let started = Instant::now();
     let report = match engine.verify().await {
-        Ok(Ok(report)) => report,
-        Ok(Err(failure)) => return failure_reply(&failure),
+        Ok(Ok(report)) => {
+            observe(host, &config.cloud, None);
+            report
+        }
+        Ok(Err(failure)) => {
+            observe(host, &config.cloud, Some(&failure));
+            return failure_reply(&failure);
+        }
         Err(_) => return Reply::error("operation_failed", 1, "The copy could not be verified."),
     };
     let _ = setup.ledger.set_meta(

@@ -31,7 +31,7 @@ const LABEL_CHARS: usize = 80;
 pub(super) fn handles(method: &str) -> bool {
     matches!(
         method,
-        "cloud_status" | "cloud_connect" | "cloud_mirror" | "cloud_verify"
+        "cloud_status" | "cloud_connect" | "cloud_mirror" | "cloud_verify" | "cloud_disconnect"
     )
 }
 
@@ -46,6 +46,9 @@ struct ConnectArgs {
     client_id: Option<String>,
     #[serde(default)]
     client_secret: Option<String>,
+    /// When the service token expires, `YYYY-MM-DD`; kept to warn before it does.
+    #[serde(default)]
+    token_expires: Option<String>,
 }
 
 fn standing_of(failure: &Failure) -> &'static str {
@@ -104,6 +107,15 @@ pub(super) async fn operate(host: &Arc<Host>, request: &control::Request) -> Rep
                 return Reply::error("invalid_input", 2, "Invalid arguments.");
             };
             mirror::operate_mirror(host, args).await
+        }
+        "cloud_disconnect" => {
+            if !invocation.scope.owner || invocation.scope.shared {
+                return Reply::error("authority_denied", 6, authority::EXECUTION_DENIED);
+            }
+            let Ok(args) = serde_json::from_value::<DisconnectArgs>(request.args.clone()) else {
+                return Reply::error("invalid_input", 2, "Invalid arguments.");
+            };
+            disconnect(host, args).await
         }
         "cloud_verify" => {
             if !invocation.scope.owner || invocation.scope.shared {
@@ -230,7 +242,7 @@ fn origin(endpoint: &str) -> String {
 }
 
 /// What this installation knows about its link, checked live against the Worker.
-async fn status(host: &Arc<Host>) -> Result<Value> {
+pub(super) async fn status(host: &Arc<Host>) -> Result<Value> {
     let config = host.state.settings.config()?;
     let cloud = &config.cloud;
     let checked_at = now();
@@ -242,6 +254,8 @@ async fn status(host: &Arc<Host>) -> Result<Value> {
             "installation": null,
             "standing": "disconnected",
             "checked_at": checked_at,
+            "link": host.state.standing.store_view(cloud, false),
+            "mirror": mirror::describe(host, cloud),
         }));
     }
     let endpoint = origin(&cloud.endpoint);
@@ -254,6 +268,9 @@ async fn status(host: &Arc<Host>) -> Result<Value> {
         "checked_at": checked_at,
     });
     view["mirror"] = mirror::describe(host, cloud);
+    if let Some(token) = token_view(cloud, checked_at) {
+        view["service_token"] = token;
+    }
     let mut latency = serde_json::Map::new();
     let started = std::time::Instant::now();
     let health = health(&endpoint).await;
@@ -262,8 +279,12 @@ async fn status(host: &Arc<Host>) -> Result<Value> {
     let health = match health {
         Ok(health) => health,
         Err(failure) => {
+            if enrolled {
+                host.state.standing.observe_store(cloud, Some(&failure));
+            }
             view["standing"] = json!(standing_of(&failure));
             view["problem"] = json!(problem(&failure));
+            view["link"] = host.state.standing.store_view(cloud, enrolled);
             return Ok(view);
         }
     };
@@ -277,6 +298,7 @@ async fn status(host: &Arc<Host>) -> Result<Value> {
     let credentials = stored_credentials().filter(|c| c.token.is_some());
     let Some(credentials) = credentials.filter(|_| enrolled) else {
         view["standing"] = json!("not_enrolled");
+        view["link"] = host.state.standing.store_view(cloud, false);
         return Ok(view);
     };
     let started = std::time::Instant::now();
@@ -304,6 +326,9 @@ async fn status(host: &Arc<Host>) -> Result<Value> {
         (Ok(whoami), Ok(store)) => {
             let same = whoami["installation"]["id"] == json!(cloud.installation);
             view["standing"] = json!(if same { "live" } else { "revoked" });
+            host.state
+                .standing
+                .observe_store(cloud, (!same).then_some(&Failure::Revoked));
             view["principal"] = json!({
                 "label": whoami["installation"]["label"],
                 "enrolled_at": whoami["installation"]["enrolled_at"],
@@ -312,11 +337,42 @@ async fn status(host: &Arc<Host>) -> Result<Value> {
             view["store"] = store;
         }
         (Err(failure), _) | (_, Err(failure)) => {
+            host.state.standing.observe_store(cloud, Some(&failure));
             view["standing"] = json!(standing_of(&failure));
             view["problem"] = json!(problem(&failure));
         }
     }
+    view["link"] = host.state.standing.store_view(cloud, true);
     Ok(view)
+}
+
+/// Days a service token has left before status warns.
+pub(super) const TOKEN_WARN_DAYS: i64 = 30;
+
+/// The service token's expiry as the user gave it: when, how many days are left, and whether to
+/// renew it now. Never the token.
+fn token_view(cloud: &Cloud, now: i64) -> Option<Value> {
+    (cloud.token_expires_at > 0).then(|| {
+        let days = (cloud.token_expires_at - now).div_euclid(86_400);
+        json!({
+            "expires_at": cloud.token_expires_at,
+            "days_left": days,
+            "renew": days <= TOKEN_WARN_DAYS,
+        })
+    })
+}
+
+/// A date the user typed (`YYYY-MM-DD`) as Unix seconds at 00:00 UTC.
+fn expiry(text: &str) -> Option<i64> {
+    let date = chrono::NaiveDate::parse_from_str(text.trim(), "%Y-%m-%d").ok()?;
+    let at = date.and_hms_opt(0, 0, 0)?.and_utc().timestamp();
+    Cloud {
+        token_expires_at: at,
+        ..Cloud::default()
+    }
+    .validate()
+    .ok()
+    .map(|()| at)
 }
 
 fn problem(failure: &Failure) -> String {
@@ -386,6 +442,12 @@ async fn connect(host: &Arc<Host>, args: ConnectArgs) -> std::result::Result<Rep
     if label.chars().count() > LABEL_CHARS || label.chars().any(char::is_control) {
         return Err(invalid("The label is one line of up to 80 characters."));
     }
+    let token_expires = match args.token_expires.as_deref().map(str::trim) {
+        None | Some("") => None,
+        Some(text) => Some(expiry(text).ok_or_else(|| {
+            invalid("Give the service token's expiry as a date, like 2027-11-03.")
+        })?),
+    };
     let given = match (args.client_id, args.client_secret) {
         (Some(id), Some(secret)) => {
             let (id, secret) = (id.trim().to_owned(), secret.trim().to_owned());
@@ -436,8 +498,28 @@ async fn connect(host: &Arc<Host>, args: ConnectArgs) -> std::result::Result<Rep
         )
         .await;
         if whoami.is_ok_and(|w| w["installation"]["id"] == json!(config.cloud.installation)) {
+            // Only the recorded expiry of the service token can change here.
+            let changed = token_expires.is_some_and(|at| at != config.cloud.token_expires_at);
+            if let Some(at) = token_expires.filter(|_| changed) {
+                let _guard = host.state.operations.lock().await;
+                let mut config = host.state.settings.config().map_err(|_| {
+                    boxed(
+                        "operation_failed",
+                        1,
+                        "The configuration could not be read.",
+                    )
+                })?;
+                config.cloud.token_expires_at = at;
+                host.state.settings.save_config(&config).map_err(|_| {
+                    boxed(
+                        "operation_failed",
+                        1,
+                        "The configuration could not be saved.",
+                    )
+                })?;
+            }
             let data = status(host).await.unwrap_or_default();
-            return Ok(Reply::success(json!({"changed": false, "status": data})));
+            return Ok(Reply::success(json!({"changed": changed, "status": data})));
         }
     }
     credentials.token = None;
@@ -492,10 +574,17 @@ async fn connect(host: &Arc<Host>, args: ConnectArgs) -> std::result::Result<Rep
                 "The configuration could not be read.",
             )
         })?;
+        // A new service token without a date has no known expiry; the same token keeps its own.
+        let token_expires_at = token_expires.unwrap_or(if fresh {
+            0
+        } else {
+            config.cloud.token_expires_at
+        });
         config.cloud = Cloud {
             endpoint,
             installation: installation.to_owned(),
             mode: CloudMode::Off,
+            token_expires_at,
         };
         config
             .cloud
@@ -513,6 +602,99 @@ async fn connect(host: &Arc<Host>, args: ConnectArgs) -> std::result::Result<Rep
     Ok(Reply::success(
         json!({"changed": true, "installation": installation, "status": data}),
     ))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DisconnectArgs {
+    /// Also remove the account's Access service token and the endpoint from this installation.
+    #[serde(default)]
+    forget_service_token: bool,
+}
+
+/// Leave the account store: revoke this installation's credential in the Worker when it answers,
+/// then remove it here and set the mode to `off`. Always succeeds locally and is safe to repeat;
+/// the encrypted copy, the content key and the ledger stay, so connecting again continues.
+async fn disconnect(host: &Arc<Host>, args: DisconnectArgs) -> Reply {
+    let fail = || {
+        Reply::error(
+            "operation_failed",
+            1,
+            "The configuration could not be saved.",
+        )
+    };
+    let _gate = mirror::hold(host).await;
+    let Ok(config) = host.state.settings.config() else {
+        return fail();
+    };
+    let cloud = config.cloud.clone();
+    let mut notified = None;
+    if !cloud.endpoint.is_empty()
+        && enrolled(&cloud)
+        && let Some(credentials) = stored_credentials().filter(|c| c.token.is_some())
+    {
+        let reply = exchange(
+            &origin(&cloud.endpoint),
+            reqwest::Method::DELETE,
+            "/v1/installations/self",
+            Some(&credentials),
+            None,
+        )
+        .await;
+        // A store that already refuses the credential has nothing left to revoke.
+        notified = Some(match reply {
+            Ok(_) | Err(Failure::Revoked) => true,
+            Err(Failure::Refused(code)) => code == "not_found",
+            Err(_) => false,
+        });
+    }
+    let mut names = vec![TOKEN];
+    if args.forget_service_token {
+        names.extend([ACCESS_ID, ACCESS_SECRET]);
+    }
+    for name in names {
+        if security::secret_source(name).is_ok_and(|s| s.is_some())
+            && security::delete_desktop_secret("default", name).is_err()
+        {
+            return Reply::error(
+                "operation_failed",
+                1,
+                "The credential store refused to remove the account store credential.",
+            );
+        }
+    }
+    {
+        let _guard = host.state.operations.lock().await;
+        let Ok(mut config) = host.state.settings.config() else {
+            return fail();
+        };
+        config.cloud = if args.forget_service_token {
+            Cloud::default()
+        } else {
+            Cloud {
+                endpoint: config.cloud.endpoint.clone(),
+                token_expires_at: config.cloud.token_expires_at,
+                ..Cloud::default()
+            }
+        };
+        if config
+            .cloud
+            .validate()
+            .and_then(|_| host.state.settings.save_config(&config))
+            .is_err()
+        {
+            return fail();
+        }
+    }
+    host.state.standing.reset_store();
+    let changed = !cloud.installation.is_empty() || args.forget_service_token;
+    Reply::success(json!({
+        "changed": changed,
+        "store_notified": notified,
+        "service_token_forgotten": args.forget_service_token,
+        "kept": "The encrypted copy, the account content key and the ledger stay; connect again to continue mirroring.",
+        "status": mirror::describe(host, &host.state.settings.config().map(|c| c.cloud).unwrap_or_default()),
+    }))
 }
 
 #[cfg(test)]

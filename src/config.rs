@@ -42,9 +42,18 @@ pub struct Cloud {
     /// The installation the Worker enrolled; its credential is `CLOUD_STORE_TOKEN`.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub installation: String,
-    /// What the account store is for this installation: `off` until a migration (phase 4a).
+    /// What the account store is for this installation: `off`, or `mirror` once a verified
+    /// upload made the copy (phase 3b).
     #[serde(default)]
     pub mode: CloudMode,
+    /// When the account's Access service token expires (Unix seconds), as the user gave it;
+    /// 0 when unknown. Status warns before it does.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub token_expires_at: i64,
+}
+
+fn is_zero(value: &i64) -> bool {
+    *value == 0
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
@@ -77,6 +86,12 @@ impl Cloud {
         ensure!(
             self.mode == CloudMode::Off || !self.installation.is_empty(),
             "cloud.mode needs an enrolled installation"
+        );
+        // 2020-01-01 to 2100-01-01: a date the user typed, not a duration or milliseconds.
+        ensure!(
+            self.token_expires_at == 0
+                || (1_577_836_800..4_102_444_800).contains(&self.token_expires_at),
+            "cloud.token_expires_at is a date"
         );
         Ok(())
     }

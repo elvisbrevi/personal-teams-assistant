@@ -91,6 +91,19 @@ const VERSIONS_MANAGED: &str =
 const VERSIONS_BUSY: &str =
     "An update is being prepared or applied. Check its status before doing anything else.";
 const FAILED_READ: &str = "This could not be read right now.";
+const STORE_NONE: &str = "Optional: keep an encrypted copy of this account in Cloudflare. Connect this computer to the account store first.";
+const STORE_NOT_ENROLLED: &str =
+    "This computer is not enrolled in the account store. Connect it again.";
+const STORE_OFF: &str = "Connected to the account store. Start the encrypted copy when you want one; nothing is uploaded until then.";
+const STORE_MIRROR: &str = "The encrypted copy is up to date.";
+const STORE_PENDING: &str =
+    "Changes are waiting to be copied to the account store; they are sent in the background.";
+const STORE_BLOCKED: &str = "Some records are too large for the account store and are not copied.";
+const STORE_DIFFERS: &str = "The last verification found differences in the encrypted copy. Start the copy again to repair it.";
+const STORE_TOKEN: &str = "The account store's service token expires within 30 days. Ask whoever runs the account store to renew it, then connect again with the new expiry.";
+const STORE_SHARED: &str = "The account store is not available to this account yet.";
+const STORE_UNCONFIGURED: &str =
+    "The account store's Access settings are missing; see docs/delivery.md.";
 
 fn gui(place: &str) -> Value {
     json!({"kind":"gui","where":place})
@@ -229,6 +242,7 @@ pub(super) async fn operate(host: &Arc<Host>, request: &control::Request) -> Rep
         providers(host).await,
         roots(host, shared).await,
         teams(host, &machines, link.is_some()).await,
+        account_store(host, shared || browser && !invocation.scope.owner).await,
         versions(host).await,
     ];
 
@@ -693,6 +707,80 @@ async fn teams(host: &Arc<Host>, machines: &Machines, connected: bool) -> Step {
         return step.is("todo", TEAMS_IDLE).act(cli("pta start"));
     }
     step.is("done", TEAMS_RUNNING)
+}
+
+/// This computer's link to the account store and its encrypted copy, checked live.
+async fn account_store(host: &Arc<Host>, shared: bool) -> Step {
+    let step = Step::new("account_store", "this_machine", false);
+    if shared {
+        return step.is("not_applicable", STORE_SHARED);
+    }
+    let Ok(view) = Box::pin(super::cloud::status(host)).await else {
+        return step.is("unknown", FAILED_READ);
+    };
+    let mirror = &view["mirror"];
+    let outbox = &mirror["outbox"];
+    let step = step.facts(json!({
+        "standing": view["standing"], "mode": view["mode"], "last_live_at": view["link"]["last_live_at"],
+        "pending": outbox["pending"], "blocked": outbox["blocked"],
+        "last_verify_ok": mirror["last_verify"]["ok"],
+        "token_expires_at": view["service_token"]["expires_at"],
+    }));
+    let place = gui("Settings > Advanced > Cloud storage");
+    match view["standing"].as_str().unwrap_or("unknown") {
+        // Never connected: shown, but not offered as a next step to every installation.
+        "disconnected" => {
+            return step
+                .is("not_applicable", STORE_NONE)
+                .act(place)
+                .act(cli("pta cloud connect"));
+        }
+        "not_enrolled" => {
+            return step
+                .is("todo", STORE_NOT_ENROLLED)
+                .act(place)
+                .act(cli("pta cloud connect"));
+        }
+        "offline" => {
+            return step
+                .is("attention", standing::STORE_OFFLINE)
+                .act(cli("pta cloud status"));
+        }
+        "revoked" => {
+            return step
+                .is("attention", standing::STORE_REVOKED)
+                .act(place)
+                .act(cli("pta cloud connect"));
+        }
+        "unconfigured" => return step.is("attention", STORE_UNCONFIGURED),
+        _ => {}
+    }
+    if view["service_token"]["renew"] == true {
+        return step.is("attention", STORE_TOKEN).act(place);
+    }
+    if view["mode"] != "mirror" {
+        return step
+            .is("optional", STORE_OFF)
+            .act(place)
+            .act(cli("pta cloud mirror --dry-run"));
+    }
+    if mirror["last_verify"]["ok"] == false {
+        return step
+            .is("attention", STORE_DIFFERS)
+            .act(place)
+            .act(cli("pta cloud mirror --confirmed"));
+    }
+    if outbox["blocked"].as_u64().unwrap_or(0) > 0 {
+        return step
+            .is("attention", STORE_BLOCKED)
+            .act(cli("pta cloud status"));
+    }
+    if outbox["pending"].as_u64().unwrap_or(0) > 0 {
+        return step
+            .is("waiting", STORE_PENDING)
+            .act(cli("pta cloud status"));
+    }
+    step.is("done", STORE_MIRROR).act(cli("pta cloud verify"))
 }
 
 async fn versions(host: &Arc<Host>) -> Step {

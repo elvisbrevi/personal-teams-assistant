@@ -468,7 +468,7 @@ pub(super) const TOOLS: &[Tool] = &[
         effect: Effect::External,
         schema: || {
             object(
-                json!({"endpoint":string("HTTPS origin of the account store, like https://store.example.com."),"label":string("Optional name of this installation in the account store, up to 80 characters."),"confirmed":confirmed()}),
+                json!({"endpoint":string("HTTPS origin of the account store, like https://store.example.com."),"label":string("Optional name of this installation in the account store, up to 80 characters."),"token_expires":string("Optional expiry of the account's Access service token, YYYY-MM-DD, as the person who created it reported; status warns 30 days before. On a live installation only this date changes."),"confirmed":confirmed()}),
                 &["endpoint"],
             )
         },
@@ -481,6 +481,18 @@ pub(super) const TOOLS: &[Tool] = &[
         schema: || {
             object(
                 json!({"action":{"type":"string","enum":["plan","start","stop"],"description":"plan (default), start or stop."},"confirmed":confirmed()}),
+                &[],
+            )
+        },
+    },
+    Tool {
+        name: "cloud_disconnect",
+        title: "Disconnect from the account store",
+        description: "Disconnect this installation from the account store: revoke its installation credential in the Worker when it answers (store_notified), remove CLOUD_STORE_TOKEN and set the mode to off. forget_service_token also removes the account's Access service token and the endpoint from this installation. The encrypted copy, the account content key and the outbox are kept, so connecting again continues. Owner only. Needs the user's confirmation.",
+        effect: Effect::External,
+        schema: || {
+            object(
+                json!({"forget_service_token":{"type":"boolean","description":"Also remove the Access service token and the endpoint."},"confirmed":confirmed()}),
                 &[],
             )
         },
@@ -1617,7 +1629,7 @@ pub(super) async fn run(name: &str, args: &Value) -> Result<Value, String> {
         "variable_update" | "variable_rename" | "variable_usage" => ipc(name, args.clone()).await,
         "consumer_list" => ipc("variable_consumer_list", args.clone()).await,
         "cloud_status" | "cloud_verify" => ipc(name, args.clone()).await,
-        "cloud_mirror" => {
+        "cloud_mirror" | "cloud_disconnect" => {
             let mut args = args.clone();
             args.as_object_mut().unwrap().remove("confirmed");
             ipc(name, args).await
@@ -1952,6 +1964,11 @@ pub(super) fn confirmation(name: &str, args: &Value) -> Option<String> {
             )
         }
         "variable_delete" => "Delete this stored variable? Its value cannot be recovered.".into(),
+        "cloud_disconnect" => if args["forget_service_token"] == true {
+            "Disconnect this installation from the account store and remove the account's service token from it?".into()
+        } else {
+            "Disconnect this installation from the account store?".into()
+        },
         "cloud_mirror" => match args["action"].as_str().unwrap_or("plan") {
             "start" => "Upload this installation's records, encrypted with the account content key, to the account store and keep it mirrored?".into(),
             "stop" => "Stop mirroring this installation to the account store (the copy is kept)?".into(),

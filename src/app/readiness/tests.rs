@@ -62,7 +62,7 @@ fn wire(pair: &crate::app::variables::sync_tests::Pair) {
         }));
 }
 
-const ORDER: [&str; 10] = [
+const ORDER: [&str; 11] = [
     "coordinator",
     "connection",
     "machine",
@@ -72,6 +72,7 @@ const ORDER: [&str; 10] = [
     "providers",
     "roots",
     "teams",
+    "account_store",
     "versions",
 ];
 

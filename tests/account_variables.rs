@@ -1188,6 +1188,7 @@ async fn a_fresh_session_agent_finishes_setup_from_readiness_alone_without_a_sec
             "providers",
             "roots",
             "teams",
+            "account_store",
             "versions"
         ]
     );
