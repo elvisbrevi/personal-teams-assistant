@@ -174,7 +174,10 @@ children and run installed coding agents.
    beside every row and use the shared sheet. Portal roots remain operator-controlled.
    `machine_revoke` (`machine`) revokes even an offline/selected remote machine, invalidating
    its credential and deselecting Teams without starting another assistant. The old lease
-   still delays a successor. Inspect list/detail to verify `trust: revoked`; another enrollment
+   still delays a successor. A machine that received the account store at trust time is revoked
+   there too (`store.revoked`); relay `store.next`: for a lost or stolen computer the service token
+   must be replaced and the content key rotated, because it keeps both. Inspect list/detail to
+   verify `trust: revoked`; another enrollment
    requires fresh browser trust or operator-local pairing. The coordinator cannot revoke
    itself this way. No operation returns credential values; variable use by consumers
    (`consumer_*`, `launcher_*`) re-checks the same live authorization. Revocation cannot retract data already

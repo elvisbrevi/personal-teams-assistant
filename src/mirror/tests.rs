@@ -150,11 +150,13 @@ fn the_content_key_is_created_once_and_restored_without_replacing() {
 
 // --- the engine against an in-memory Worker -------------------------------------------------
 
-/// The local records of an installation, and its ID in the account store.
+/// The local records of an installation, its ID in the account store and whether it is signed
+/// in to a coordinator (so its configuration is the coordinator's).
 #[derive(Default)]
 struct Records(
     Mutex<BTreeMap<Collection, Vec<Exported>>>,
     Mutex<Option<String>>,
+    Mutex<bool>,
 );
 
 impl Records {
@@ -180,6 +182,10 @@ impl Records {
 impl Local for Records {
     fn installation(&self) -> Option<String> {
         self.1.lock().unwrap().clone()
+    }
+
+    fn configuration(&self) -> bool {
+        !*self.2.lock().unwrap()
     }
 
     fn collect(&self, collection: Collection) -> anyhow::Result<Vec<Exported>> {
@@ -951,6 +957,46 @@ async fn another_installations_own_settings_are_kept_for_it_alone() {
     let mine = f.verify().await;
     assert!(mine.ok, "{mine:?}");
     assert_eq!(collection(&mine, "settings").others, 1);
+}
+
+#[tokio::test]
+async fn a_computer_signed_in_to_a_coordinator_mirrors_only_its_history() {
+    let f = Fixture::new();
+    f.local
+        .set(Collection::Settings, "config", json!({"language": "es"}));
+    f.flush(100).await;
+    // Another computer of the account, with the key it received at trust time.
+    let other = Installation::new();
+    *other.local.2.lock().unwrap() = true;
+    other
+        .local
+        .set(Collection::Settings, "config", json!({"language": "pt"}));
+    other
+        .local
+        .set(Collection::Notes, "mine", json!({"title": "its own"}));
+    other.local.set(
+        Collection::Audits,
+        "chats('z')/messages('9')",
+        json!({"status": "sent"}),
+    );
+    *f.worker.installation.lock().unwrap() = 3;
+    let sent = other
+        .engine(&f)
+        .flush(200, Limits::default())
+        .await
+        .unwrap();
+    assert_eq!(sent.sent, 1, "only the message audit");
+    let theirs = other.engine(&f).verify().await.unwrap().unwrap();
+    assert!(theirs.ok, "{theirs:?}");
+    assert_eq!(collection(&theirs, "settings").others, 1);
+    // The account's configuration in the store is untouched.
+    *f.worker.installation.lock().unwrap() = 0;
+    assert_eq!(f.pull(false).await.applied, 0);
+    assert_eq!(
+        f.value(Collection::Settings, "config").unwrap(),
+        json!({"language": "es"})
+    );
+    assert!(f.verify().await.ok);
 }
 
 use super::primary::{Change, Refusal};

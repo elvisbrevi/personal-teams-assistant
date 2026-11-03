@@ -323,6 +323,7 @@ impl Portal {
             "cloud_erase",
             "cloud_installations",
             "cloud_revoke",
+            "cloud_rotate_key",
             "setup_readiness",
             "variable_create",
             "variable_update",

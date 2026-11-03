@@ -895,9 +895,12 @@ for (const [label, viewport] of [['desktop', { width: 1440, height: 900 }], ['ph
   await page.evaluate(() => {
     $('#machine-trust-name').textContent = 'Synthetic laptop'; $('#machine-trust-os').textContent = 'Windows';
     $('#machine-trust-code').textContent = '1A2B-3C4D'; $('#machine-trust-account').textContent = 'ana';
+    $('#machine-trust-store-field').hidden = false; $('#machine-trust-store').checked = false;
     $('#machine-trust-dialog').showModal();
   });
   check(`${label}: the trust dialog has no accessibility violations`, (await scan(page)).length === 0);
+  check(`${label}: the account store is offered unticked, with what it gives`, await page.evaluate(() => !$('#machine-trust-store').checked)
+    && (await page.locator('#machine-trust-store-field').innerText()).includes('almacén de cuenta') && (await page.locator('#machine-trust-store-field').innerText()).includes('clave de contenido'));
   await page.evaluate(() => $('#machine-trust-dialog').close());
   if (!await page.isVisible('nav [data-tab="knowledge"]')) await page.click('#nav-more');
   await page.click('nav [data-tab="knowledge"]');
@@ -1654,6 +1657,15 @@ for (const [label, options] of [['desktop', {}], ['phone', { context: { viewport
   await panel.locator('#cloud-verify').click();
   await panel.locator('#cloud-verify-result').waitFor();
   check(`${label}: a verification lists changes not copied yet`, (await panel.locator('#cloud-verify-result').innerText()).includes('Mensajes'));
+  const rotateKey = panel.locator('#cloud-rotate');
+  await rotateKey.click();
+  check(`${label}: the first tap only arms the key rotation`, (await rotateKey.innerText()).includes('Toca de nuevo') && await page.evaluate(() => !window.__ptaCloudRotated));
+  await rotateKey.click();
+  await page.waitForFunction(() => window.__ptaCloudRotated === true);
+  check(`${label}: the second tap rotates the key and says to back it up`, await page.waitForFunction(() => {
+    const text = document.querySelector('#notice-text')?.textContent ?? '';
+    return text.includes('42') && text.includes('pta variables key backup');
+  }, null, { timeout: 5000 }).then(() => true, () => false), await page.locator('#notice-text').textContent());
   const promote = panel.locator('#cloud-promote');
   check(`${label}: a verified copy can become the source`, await promote.isVisible() && await panel.locator('#cloud-demote').isHidden());
   await page.evaluate(() => { window.__ptaCloudConflicts = 1; });

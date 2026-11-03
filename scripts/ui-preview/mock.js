@@ -507,6 +507,7 @@
       { id: '00000000-0000-4000-8000-000000000002', label: 'Synthetic <b>desktop</b>', host_version: '0.10.33', enrolled_at: secs(NOW) - 7200, last_seen_at: secs(NOW) - 600, revoked_at: null, current: false },
       { id: '00000000-0000-4000-8000-000000000003', label: 'Old computer', host_version: '0.10.25', enrolled_at: secs(NOW) - 900000, last_seen_at: secs(NOW) - 800000, revoked_at: secs(NOW) - 700000, current: false },
     ]), active: 2 }),
+    cloud_rotate_key: () => { window.__ptaCloudRotated = true; return { rotated: true, version: 2, resealing: 42 }; },
     cloud_revoke: args => {
       window.__ptaCloudRevoked = args.installation;
       const entry = window.__ptaCloudInstallations.find(i => i.id === args.installation);

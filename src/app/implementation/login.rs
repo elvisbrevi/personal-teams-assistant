@@ -10,6 +10,8 @@ pub(in crate::app) struct Pending {
     code: String,
     expires_at: u64,
     expected_account: Option<u64>,
+    /// The key pair the account store handoff is sealed to; `None` with a coordinator without it.
+    receiver: Option<crate::mirror::handoff::Receiver>,
 }
 impl Pending {
     fn approval_url(&self) -> String {
@@ -190,11 +192,12 @@ pub(in crate::app) async fn begin_at(
             .await;
         }
         let verifier = security::random_secret();
+        let receiver = crate::mirror::handoff::Receiver::generate()?;
         let reply = post(
             &endpoint,
             json!({"action":"login_start","id":id,"name":name,"os":std::env::consts::OS,
                 "installation":installation(&state.root)?,"challenge":digest(&verifier),
-                "expected_account":expected_account}),
+                "expected_account":expected_account,"store_key":receiver.public()}),
         )
         .await?;
         let transaction = reply["transaction"]
@@ -218,6 +221,17 @@ pub(in crate::app) async fn begin_at(
             .as_u64()
             .filter(|at| (unix_now()..=unix_now() + 3600).contains(at))
             .context("The coordinator returned an invalid sign-in.")?;
+        // This computer shows the code it computes itself: it covers its own public key, so a
+        // key swapped on the way shows another code on the approval page. A coordinator that
+        // does not know the handoff answers the code of the sign-in alone.
+        let receiver = if code == crate::mirror::handoff::code(transaction, Some(receiver.public()))
+        {
+            Some(receiver)
+        } else if code == crate::mirror::handoff::code(transaction, None) {
+            None
+        } else {
+            anyhow::bail!("The coordinator returned an invalid sign-in.");
+        };
         retain(&state.root, origin)?;
         *pending = Some(Pending {
             origin: origin.into(),
@@ -227,6 +241,7 @@ pub(in crate::app) async fn begin_at(
             code: code.into(),
             expires_at,
             expected_account,
+            receiver,
         });
     }
     let current = pending.as_ref().unwrap();
@@ -353,10 +368,45 @@ pub(in crate::app) async fn finish_with(
         })?,
     )?;
     retain(&state.root, &current.origin)?;
-    Ok(
-        json!({"connected":true,"roots_reset":true,"coordinator":current.origin,
-        "username":reply["username"].as_str().unwrap_or_default()}),
-    )
+    let mut value = json!({"connected":true,"roots_reset":true,"coordinator":current.origin,
+        "username":reply["username"].as_str().unwrap_or_default()});
+    drop(_switch);
+    drop(pending);
+    if let Some(store) = store_handoff(host, &current, &reply["store"]).await {
+        value["store"] = store;
+    }
+    Ok(value)
+}
+
+/// The account store the person handed to this computer with its trust, opened with this
+/// sign-in's key and installed; or why not. `None` when it was not asked for.
+async fn store_handoff(host: &Arc<Host>, current: &Pending, store: &Value) -> Option<Value> {
+    if let Some(reason) = store["unavailable"].as_str() {
+        return Some(json!({"installed": false, "problem": reason}));
+    }
+    let sealed =
+        serde_json::from_value::<crate::mirror::handoff::Sealed>(store["sealed"].clone()).ok()?;
+    let receiver = current.receiver.as_ref()?;
+    let Ok(plain) = receiver.open(&current.transaction, &sealed) else {
+        return Some(
+            json!({"installed": false, "problem": "The account store handoff could not be opened on this computer."}),
+        );
+    };
+    let name = host
+        .state
+        .implementation
+        .registry
+        .lock()
+        .await
+        .settings
+        .name
+        .clone();
+    let installed = super::super::cloud::receive(host, &plain, &name).await;
+    if let Some(installation) = installed["installation"].as_str() {
+        // The coordinator revokes this installation in the store when it revokes the computer.
+        let _ = super::fleet::report_store_installation(host, installation).await;
+    }
+    Some(installed)
 }
 
 pub(in crate::app) async fn cancel(host: &Arc<Host>) -> Result<Value> {

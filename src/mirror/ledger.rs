@@ -179,6 +179,18 @@ impl Ledger {
         Ok(())
     }
 
+    /// After a key rotation: every live record the Worker acknowledged is sent again at its next
+    /// revision with the same content, so it is sealed with the active key; tombstones carry no
+    /// content and stay, and a conflict waits for its resolution. Returns how many rows wait.
+    pub fn reseal(&self, now: i64) -> Result<u64> {
+        Ok(self.lock().execute(
+            "UPDATE records SET target_hash=acked_hash, revision=MAX(revision, acked_revision, floor)+1, \
+             pending_since=?1, attempts=0, next_at=0, error='' \
+             WHERE acked_revision>0 AND acked_hash!='' AND acked_hash!=?2 AND target_hash='' AND error!=?3",
+            rusqlite::params![now, DELETED, super::engine::CONFLICT],
+        )? as u64)
+    }
+
     /// Forget every record and every note: the account store's copy was erased, so the next
     /// upload starts from revision 1 with nothing acknowledged.
     pub fn clear(&self) -> Result<()> {

@@ -19,6 +19,9 @@ struct Login {
     /// Provider subject of the account this installation already belongs to.
     #[serde(default)]
     expected_account: Option<String>,
+    /// The installation's X25519 public key, when it asked for the account store too.
+    #[serde(default)]
+    store_key: Option<String>,
     expires_at: u64,
     #[serde(default)]
     approval: Option<Approval>,
@@ -30,6 +33,9 @@ struct Login {
 struct Approval {
     account_id: String,
     version: String,
+    /// The person also gave this computer the account store (content key and service token).
+    #[serde(default)]
+    store: bool,
 }
 
 pub(super) enum Poll {
@@ -50,10 +56,10 @@ fn hex64(value: &str) -> bool {
 pub(super) fn transaction(value: &str) -> Option<&str> {
     hex64(value).then_some(value)
 }
-/// Short code shown on both the installation and the approval page.
-fn code(transaction: &str) -> String {
-    let digest = hash(transaction).to_ascii_uppercase();
-    format!("{}-{}", &digest[..4], &digest[4..8])
+/// Short code shown on both the installation and the approval page; it covers the installation's
+/// public key when it asked for the account store, so a key swapped in transit shows another code.
+fn code(transaction: &str, store_key: Option<&str>) -> String {
+    crate::mirror::handoff::code(transaction, store_key)
 }
 fn logins(root: &Path) -> Result<HashMap<String, Login>> {
     let path = root.join("machine-logins.json");
@@ -97,6 +103,16 @@ pub(super) fn start(root: &Path, input: &Value) -> Result<Value> {
     let os = input["os"].as_str().unwrap_or_default();
     let installation = input["installation"].as_str().unwrap_or_default();
     let challenge = input["challenge"].as_str().unwrap_or_default();
+    let store_key = match input.get("store_key") {
+        None | Some(Value::Null) => None,
+        Some(value) => Some(
+            value
+                .as_str()
+                .filter(|key| crate::mirror::handoff::valid_public(key))
+                .context("invalid machine sign-in")?
+                .to_owned(),
+        ),
+    };
     let expected_account = match input.get("expected_account") {
         None | Some(Value::Null) => None,
         Some(value) => Some(
@@ -135,6 +151,7 @@ pub(super) fn start(root: &Path, input: &Value) -> Result<Value> {
                 installation: installation.into(),
                 challenge: challenge.into(),
                 expected_account,
+                store_key: store_key.clone(),
                 expires_at,
                 approval: None,
                 denied: false,
@@ -142,7 +159,22 @@ pub(super) fn start(root: &Path, input: &Value) -> Result<Value> {
         );
         Ok(())
     })??;
-    Ok(json!({"transaction":transaction,"code":code(&transaction),"expires_at":expires_at}))
+    Ok(
+        json!({"transaction":transaction,"code":code(&transaction, store_key.as_deref()),"expires_at":expires_at}),
+    )
+}
+
+/// Whether the account's own profile keeps an account store copy it could hand to a computer:
+/// a content key and a link to the store. The coordinator checks again when it seals the handoff.
+fn store_available(root: &Path, account: &Account) -> bool {
+    let profile = profile_dir(root, account);
+    profile
+        .join("keys")
+        .join(crate::mirror::key::FILE)
+        .is_file()
+        && LocalSettings::at(&profile)
+            .config()
+            .is_ok_and(|config| !config.cloud.installation.is_empty())
 }
 
 /// What the signed-in browser user is asked to trust.
@@ -155,7 +187,9 @@ pub(super) fn inspect(root: &Path, account: &Account, transaction: &str) -> Resu
         ensure!(owner_matches(login, account), MISMATCH);
         Ok(
             json!({"machine":{"id":login.machine_id,"name":login.name,"os":login.os},
-            "code":code(transaction),"expires_at":login.expires_at,"username":account.username}),
+            "code":code(transaction, login.store_key.as_deref()),"expires_at":login.expires_at,"username":account.username,
+            "store_requested":login.store_key.is_some(),
+            "store_available":login.store_key.is_some() && store_available(root, account)}),
         )
     })?
 }
@@ -166,6 +200,7 @@ pub(super) fn decide(
     account: &Account,
     transaction: &str,
     trust: bool,
+    store: bool,
 ) -> Result<Value> {
     edit(root, |entries| {
         let login = entries
@@ -177,12 +212,14 @@ pub(super) fn decide(
             return Ok(json!({"denied":true}));
         }
         ensure!(owner_matches(login, account), MISMATCH);
+        let store = store && login.store_key.is_some();
         login.approval = Some(Approval {
             account_id: account.id.clone(),
             version: account.version.clone(),
+            store,
         });
         Ok(
-            json!({"trusted":true,"machine":{"id":login.machine_id,"name":login.name,"os":login.os}}),
+            json!({"trusted":true,"store":store,"machine":{"id":login.machine_id,"name":login.name,"os":login.os}}),
         )
     })?
 }
@@ -231,11 +268,14 @@ pub(super) fn poll(
             return Some(Poll::State("approved"));
         }
         let login = entries.remove(&key).unwrap();
-        Some(Poll::Register(
-            account,
-            json!({"id":login.machine_id,"name":login.name,"os":login.os,
-                "installation":login.installation,"enrollment":"login"}),
-        ))
+        let mut args = json!({"id":login.machine_id,"name":login.name,"os":login.os,
+            "installation":login.installation,"enrollment":"login"});
+        // The account store goes only to the key this sign-in started with, sealed by the host.
+        if let Some(key) = login.store_key.filter(|_| approval.store) {
+            args["store_key"] = json!(key);
+            args["handoff"] = json!(transaction);
+        }
+        Some(Poll::Register(account, args))
     })
 }
 
@@ -329,8 +369,14 @@ pub(super) async fn browser(
     };
     let result = match input["action"].as_str().unwrap_or_default() {
         "inspect" => inspect(&portal.root, &account, transaction),
-        "trust" => decide(&portal.root, &account, transaction, true),
-        "deny" => decide(&portal.root, &account, transaction, false),
+        "trust" => decide(
+            &portal.root,
+            &account,
+            transaction,
+            true,
+            input["store"] == true,
+        ),
+        "deny" => decide(&portal.root, &account, transaction, false, false),
         _ => return StatusCode::BAD_REQUEST.into_response(),
     };
     Json(match result {

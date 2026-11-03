@@ -129,10 +129,21 @@ pub(super) async fn operate(host: &Arc<Host>, method: &str, args: &Value) -> Res
                 "The coordinator cannot revoke itself. Ask the portal operator to revoke the account instead."
             );
             let mut data = state.registry.lock().await;
+            let store = data
+                .machines
+                .iter()
+                .find(|m| m.id == id)
+                .map(|m| m.store_installation.clone())
+                .unwrap_or_default();
             revoke(&mut data, id)?;
             state.save(&data)?;
+            drop(data);
             state.calls.lock().await.retain(|c| c.machine != id);
-            Ok(json!({"revoked":true,"machine":id}))
+            let mut reply = json!({"revoked":true,"machine":id});
+            if !store.is_empty() {
+                reply["store"] = super::super::cloud::revoke_installation(host, &store).await;
+            }
+            Ok(reply)
         }
         "machine_directories" => {
             ensure!(

@@ -1911,14 +1911,14 @@ async fn machine_login_denied_mismatched_revoked_expired_and_cancelled_requests_
     let (verifier, challenge) = login_verifier();
     let owned = start_login(&portal, &machine, &challenge, json!(1001)).await;
     assert!(enrollment::inspect(&portal.root, &entries[1], &owned).is_err());
-    assert!(enrollment::decide(&portal.root, &entries[1], &owned, true).is_err());
-    enrollment::decide(&portal.root, &entries[0], &owned, false).unwrap();
+    assert!(enrollment::decide(&portal.root, &entries[1], &owned, true, false).is_err());
+    enrollment::decide(&portal.root, &entries[0], &owned, false, false).unwrap();
     assert_eq!(finish(owned, verifier).await, "denied");
 
     // Approval is bound to the account version: revocation before finishing issues nothing.
     let (verifier, challenge) = login_verifier();
     let revoked = start_login(&portal, &machine, &challenge, Value::Null).await;
-    enrollment::decide(&portal.root, &entries[1], &revoked, true).unwrap();
+    enrollment::decide(&portal.root, &entries[1], &revoked, true, false).unwrap();
     store::edit_accounts(&portal.root, |accounts| {
         accounts[1].version = uuid::Uuid::new_v4().to_string();
         Ok(())
@@ -1957,7 +1957,7 @@ async fn machine_login_denied_mismatched_revoked_expired_and_cancelled_requests_
             ["ok"],
         true
     );
-    assert!(enrollment::decide(&portal.root, &entries[0], &cancelled, true).is_err());
+    assert!(enrollment::decide(&portal.root, &entries[0], &cancelled, true, false).is_err());
     assert_eq!(finish(cancelled, verifier).await, "expired");
     assert!(host.received_requests().await.unwrap().is_empty());
 }
@@ -1995,7 +1995,7 @@ async fn machine_login_is_rate_limited_and_never_reaches_an_older_host() {
     let other = uuid::Uuid::new_v4().to_string();
     let (verifier, challenge) = login_verifier();
     let transaction = start_login(&portal, &other, &challenge, Value::Null).await;
-    enrollment::decide(&portal.root, &entries[0], &transaction, true).unwrap();
+    enrollment::decide(&portal.root, &entries[0], &transaction, true, false).unwrap();
     assert_eq!(
         login_poll(&portal, "login_finish", &other, &transaction, &verifier)
             .await
@@ -2003,6 +2003,59 @@ async fn machine_login_is_rate_limited_and_never_reaches_an_older_host() {
         StatusCode::BAD_GATEWAY
     );
     assert!(host.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn the_account_store_goes_only_to_the_key_a_trusted_sign_in_started_with() {
+    let (_dir, portal, entries, _issuer) = configured_fixture().await;
+    let receiver = crate::mirror::handoff::Receiver::generate().unwrap();
+    let start = |store_key: Value| {
+        let id = uuid::Uuid::new_v4().to_string();
+        let (verifier, challenge) = login_verifier();
+        let input = json!({"id":id,"name":"Synthetic laptop","os":"linux","installation":"b".repeat(64),
+            "challenge":challenge,"store_key":store_key});
+        (id, verifier, enrollment::start(&portal.root, &input))
+    };
+    assert!(start(json!("not-a-key")).2.is_err());
+    let (id, verifier, started) = start(json!(receiver.public()));
+    let started = started.unwrap();
+    let transaction = started["transaction"].as_str().unwrap().to_owned();
+    // The code covers the key: a key swapped on the way would show another code.
+    assert_eq!(
+        started["code"],
+        crate::mirror::handoff::code(&transaction, Some(receiver.public()))
+    );
+    let shown = enrollment::inspect(&portal.root, &entries[0], &transaction).unwrap();
+    assert_eq!(shown["store_requested"], true);
+    assert_eq!(shown["code"], started["code"]);
+    // No copy in the account's profile yet: not offered.
+    assert_eq!(shown["store_available"], false);
+    let trusted = enrollment::decide(&portal.root, &entries[0], &transaction, true, true).unwrap();
+    assert_eq!(trusted["store"], true);
+    let finish = json!({"transaction":transaction,"verifier":verifier,"id":id});
+    let Some(enrollment::Poll::Register(_, args)) =
+        enrollment::poll(&portal.root, &portal.settings, &finish, true).unwrap()
+    else {
+        panic!("the approved sign-in registers");
+    };
+    assert_eq!(args["store_key"], receiver.public());
+    assert_eq!(args["handoff"], transaction);
+
+    // Trusted without the account store, or a sign-in without a key: nothing to seal.
+    for (key, store) in [(json!(receiver.public()), false), (Value::Null, true)] {
+        let (id, verifier, started) = start(key);
+        let transaction = started.unwrap()["transaction"].as_str().unwrap().to_owned();
+        let trusted =
+            enrollment::decide(&portal.root, &entries[0], &transaction, true, store).unwrap();
+        assert_eq!(trusted["store"], false);
+        let finish = json!({"transaction":transaction,"verifier":verifier,"id":id});
+        let Some(enrollment::Poll::Register(_, args)) =
+            enrollment::poll(&portal.root, &portal.settings, &finish, true).unwrap()
+        else {
+            panic!("the approved sign-in registers");
+        };
+        assert!(args.get("store_key").is_none() && args.get("handoff").is_none());
+    }
 }
 
 struct NativeShell;
@@ -2104,7 +2157,7 @@ async fn machine_login_native_installation_finishes_only_after_trust_and_keeps_p
         control::dispatch(&native, browse.clone()).await.data["directories"],
         json!([old_root])
     );
-    enrollment::decide(&served.root, &entries[0], &transaction, true).unwrap();
+    enrollment::decide(&served.root, &entries[0], &transaction, true, false).unwrap();
     assert_eq!(status(&native).await.unwrap()["state"], "approved");
     let connected = finish_with(&native, |token| {
         stored = Some(token.to_owned());
@@ -2149,7 +2202,7 @@ async fn machine_login_native_installation_finishes_only_after_trust_and_keeps_p
         .next()
         .unwrap()
         .to_owned();
-    enrollment::decide(&served.root, &entries[0], &denied_transaction, false).unwrap();
+    enrollment::decide(&served.root, &entries[0], &denied_transaction, false, false).unwrap();
     let mut called = false;
     let error = finish_with(&native, |_| {
         called = true;
@@ -2172,9 +2225,13 @@ async fn machine_login_native_installation_finishes_only_after_trust_and_keeps_p
         .next()
         .unwrap()
         .to_owned();
-    assert!(enrollment::decide(&served.root, &entries[0], &foreign_transaction, true).is_err());
+    assert!(
+        enrollment::decide(&served.root, &entries[0], &foreign_transaction, true, false).is_err()
+    );
     cancel(&native).await.unwrap();
-    assert!(enrollment::decide(&served.root, &entries[1], &foreign_transaction, true).is_err());
+    assert!(
+        enrollment::decide(&served.root, &entries[1], &foreign_transaction, true, false).is_err()
+    );
     assert!(finish_with(&native, |_| Ok(())).await.is_err());
     assert_eq!(fs::read(&connection_path).unwrap(), before);
     assert_eq!(account_host.received_requests().await.unwrap().len(), 1);

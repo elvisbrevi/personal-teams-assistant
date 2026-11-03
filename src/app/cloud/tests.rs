@@ -286,6 +286,59 @@ async fn installations_need_the_owner_and_a_link_and_never_revoke_this_one() {
 }
 
 #[tokio::test]
+async fn a_handoff_installs_the_key_once_and_never_replaces_another() {
+    let root = tempfile::tempdir().unwrap();
+    let host = host(root.path());
+    let bundle = |content: &crate::mirror::key::Content| {
+        serde_json::to_vec(&json!({
+            "endpoint": "https://store.example.invalid",
+            "client_id": "synthetic.access",
+            "client_secret": "synthetic-client-secret",
+            "token_expires_at": 0,
+            "content_key": content.backup(),
+        }))
+        .unwrap()
+    };
+    let kept = std::sync::Mutex::new(Vec::new());
+    let receive = |plain: Vec<u8>| {
+        let (host, kept) = (&host, &kept);
+        async move {
+            receive_with(host, &plain, "Synthetic laptop", |name, value| {
+                kept.lock()
+                    .unwrap()
+                    .push((name.to_owned(), value.to_owned()));
+                Ok(())
+            })
+            .await
+        }
+    };
+    let content = crate::mirror::key::Content::generate();
+    let installed = receive(bundle(&content)).await;
+    assert_eq!(installed["installed"], true, "{installed}");
+    assert_eq!(installed["key_written"], true);
+    // The store does not answer here: installed, not connected, and nothing uploaded.
+    assert_eq!(installed["connected"], false);
+    let keys = host.state.settings.profile().join("keys");
+    let held = crate::mirror::key::load(&keys).unwrap().unwrap();
+    assert_eq!(held.backup(), content.backup());
+    assert!(
+        !serde_json::to_string(&installed)
+            .unwrap()
+            .contains("synthetic-client-secret")
+    );
+    // The same key again changes nothing; another one is refused and the first one stays.
+    let again = receive(bundle(&content)).await;
+    assert_eq!(again["key_written"], false);
+    let other = receive(bundle(&crate::mirror::key::Content::generate())).await;
+    assert_eq!(other["installed"], false);
+    assert_eq!(
+        crate::mirror::key::load(&keys).unwrap().unwrap().backup(),
+        content.backup()
+    );
+    assert_eq!(receive(b"not json".to_vec()).await["installed"], false);
+}
+
+#[tokio::test]
 async fn settings_editors_keep_the_stored_link() {
     let root = tempfile::tempdir().unwrap();
     let host = host(root.path());

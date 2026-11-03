@@ -104,6 +104,8 @@ struct Endpoint {
     cloud_migration_support: bool,
     #[serde(default)]
     cloud_installations_support: bool,
+    #[serde(default)]
+    cloud_handoff_support: bool,
     contract: u32,
     port: u16,
     token: String,
@@ -514,6 +516,10 @@ async fn client_with_transport(
                 ),
             "Incompatible account store host: update the host and CLI together before managing the account's installations."
         );
+        ensure!(
+            endpoint.cloud_handoff_support || request.method != "cloud_rotate_key",
+            "Incompatible account store host: update the host and CLI together before rotating the account content key."
+        );
         ensure!(endpoint.contract == CONTRACT, "incompatible host contract");
         ensure!(
             endpoint.web_support
@@ -624,6 +630,7 @@ pub(crate) fn launch(
             cloud_primary_support: true,
             cloud_migration_support: true,
             cloud_installations_support: true,
+            cloud_handoff_support: true,
             contract: CONTRACT,
             port: listener.local_addr()?.port(),
             token: token.clone(),
@@ -1489,6 +1496,7 @@ mod tests {
                 cloud_primary_support: true,
                 cloud_migration_support: true,
                 cloud_installations_support: true,
+                cloud_handoff_support: true,
                 account_authority_support: true,
                 shared_accounts_support: true,
                 account_binding: None,
@@ -1524,6 +1532,7 @@ mod tests {
                 cloud_primary_support: true,
                 cloud_migration_support: true,
                 cloud_installations_support: true,
+                cloud_handoff_support: true,
                 account_authority_support: true,
                 shared_accounts_support: true,
                 account_binding: None,
@@ -1574,6 +1583,7 @@ mod tests {
                     cloud_primary_support: true,
                     cloud_migration_support: true,
                     cloud_installations_support: true,
+                    cloud_handoff_support: true,
                     account_authority_support: true,
                     shared_accounts_support: true,
                     account_binding: None,

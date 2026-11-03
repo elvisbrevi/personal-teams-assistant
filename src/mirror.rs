@@ -35,6 +35,7 @@ pub fn foreign_installation(id: &str, own: Option<&str>) -> bool {
 }
 
 pub mod engine;
+pub mod handoff;
 pub mod key;
 pub mod ledger;
 pub mod primary;

@@ -451,6 +451,7 @@
                 <button id="cloud-demote" type="button" class="secondary">Make this computer the source again</button>
                 <button id="cloud-rollback" type="button" class="secondary">Bring everything back to this computer</button>
                 <button id="cloud-rollback-local" type="button" class="secondary">Bring it back keeping this computer's</button>
+                <button id="cloud-rotate" type="button" class="secondary">Rotate the content key</button>
                 <button id="cloud-disconnect" type="button" class="secondary">Disconnect this computer</button>
               </div>
               <div id="cloud-erase-box" hidden>
@@ -821,6 +822,7 @@
       <dt>Account</dt><dd id="machine-trust-account" translate="no"></dd>
     </dl>
     <p class="hint">It joins your machine list only. It gets no directories, does not answer Teams and starts nothing until you choose so.</p>
+    <label id="machine-trust-store-field" class="check" hidden><input id="machine-trust-store" type="checkbox"> Also give it the account store <small>It receives the account's content key and service token, encrypted for that computer only, and connects to the store; nothing is uploaded. Give it only to a computer you own.</small></label>
     <p id="machine-trust-status" class="hint" role="status"></p>
     <div class="actions"><button id="machine-trust-approve" type="button">Trust this machine</button><button id="machine-trust-deny" type="button" class="secondary">Deny</button><button id="machine-trust-close" type="button" class="secondary" hidden>Close</button></div>
   </dialog>
