@@ -54,6 +54,9 @@ struct Machine {
     roots: Vec<PathBuf>,
     #[serde(default)]
     management_support: bool,
+    /// Its installation in the account store, revoked there when the machine is revoked.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    store_installation: String,
 }
 /// The coordinator and account this installation signed in to. Anything synchronized from that
 /// account is qualified by it, so a different coordinator, account or machine never reuses it.

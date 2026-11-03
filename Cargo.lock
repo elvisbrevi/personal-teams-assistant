@@ -3279,11 +3279,12 @@ checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 
 [[package]]
 name = "personal-teams-assistant"
-version = "0.10.35"
+version = "0.10.36"
 dependencies = [
  "aes-gcm-siv",
  "anyhow",
  "async-trait",
+ "aws-lc-rs",
  "axum",
  "base64 0.22.1",
  "chrono",

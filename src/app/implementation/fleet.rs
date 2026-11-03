@@ -205,6 +205,22 @@ pub(super) async fn operate(host: &Arc<Host>, method: &str, args: &Value) -> Res
     }
 }
 
+/// Tell the coordinator this machine's installation in the account store, so revoking the machine
+/// revokes it there too.
+pub(super) async fn report_store_installation(host: &Arc<Host>, installation: &str) -> Result<()> {
+    let connection = host
+        .state
+        .implementation
+        .connection()?
+        .context("This computer is not signed in to a coordinator.")?;
+    remote(
+        &connection,
+        json!({"action":"store","installation":installation}),
+    )
+    .await
+    .map(|_| ())
+}
+
 /// Invoked only after the portal consumes an operator-issued pairing credential or a
 /// browser-approved sign-in whose verifier the initiating installation presented.
 pub(in crate::app) async fn register(host: &Arc<Host>, args: &Value) -> Result<Value> {
@@ -226,6 +242,24 @@ pub(in crate::app) async fn register(host: &Arc<Host>, args: &Value) -> Result<V
         "Invalid machine registration."
     );
     let login = args["enrollment"] == "login";
+    // The account store goes, sealed, only to the key the trusted sign-in started with.
+    let handoff = match (args.get("store_key"), args.get("handoff")) {
+        (None, None) => None,
+        (Some(key), Some(context)) => {
+            let (Some(key), Some(context)) = (key.as_str(), context.as_str()) else {
+                anyhow::bail!("Invalid machine registration.");
+            };
+            ensure!(
+                login
+                    && crate::mirror::handoff::valid_public(key)
+                    && context.len() == 64
+                    && context.bytes().all(|c| c.is_ascii_hexdigit()),
+                "Invalid machine registration."
+            );
+            Some((key.to_owned(), context.to_owned()))
+        }
+        _ => anyhow::bail!("Invalid machine registration."),
+    };
     let account_version = authority::invocation(&host.state)?
         .scope
         .account
@@ -270,9 +304,15 @@ pub(in crate::app) async fn register(host: &Arc<Host>, args: &Value) -> Result<V
         revoked: false,
         roots: Vec::new(),
         management_support: false,
+        store_installation: String::new(),
     });
     state.save(&data)?;
-    Ok(json!({"token":token}))
+    drop(data);
+    let mut reply = json!({"token":token});
+    if let Some((key, context)) = handoff {
+        reply["store"] = super::super::cloud::handoff(host, &key, &context);
+    }
+    Ok(reply)
 }
 fn leased(data: &mut Registry, id: &str) -> bool {
     if data.teams_machine != id {
@@ -383,6 +423,17 @@ pub(in crate::app) async fn protocol(host: &Arc<Host>, args: &Value) -> Result<V
                 json!({"id":c.id,"method":c.method,"args":c.args})
             });
             Ok(json!({"command":command,"session_cursor":session_cursor}))
+        }
+        // The machine's installation in the account store it received at trust time.
+        "store" => {
+            let installation = args["installation"].as_str().unwrap_or_default();
+            uuid(installation)?;
+            let mut data = state.registry.lock().await;
+            if let Some(machine) = data.machines.iter_mut().find(|m| m.id == id) {
+                machine.store_installation = installation.into();
+            }
+            state.save(&data)?;
+            Ok(json!({"recorded":true}))
         }
         "lease" => {
             let mut data = state.registry.lock().await;
@@ -819,6 +870,7 @@ mod tests {
             revoked: false,
             roots: vec![],
             management_support: true,
+            store_installation: String::new(),
         });
         data.teams_machine = worker.clone();
         assert!(leased(&mut data, &worker));

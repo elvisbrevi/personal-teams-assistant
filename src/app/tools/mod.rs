@@ -524,6 +524,13 @@ pub(super) const TOOLS: &[Tool] = &[
         },
     },
     Tool {
+        name: "cloud_rotate_key",
+        title: "Rotate the account content key",
+        description: "For a lost or stolen computer, after revoking it: a new account content key becomes active on this installation and the whole copy in the account store is sent again sealed with it (under compare-and-swap in primary); earlier keys stay here so nothing becomes unreadable. Tell the user to back up the new key (pta variables key backup) and to trust the account's other computers again with the account store. Owner, or a portal account the operator enabled the account store for. Needs the user's confirmation.",
+        effect: Effect::External,
+        schema: || object(json!({"confirmed":confirmed()}), &[]),
+    },
+    Tool {
         name: "cloud_disconnect",
         title: "Disconnect from the account store",
         description: "Disconnect this installation from the account store: revoke its installation credential in the Worker when it answers (store_notified), remove CLOUD_STORE_TOKEN and set the mode to off. forget_service_token also removes the account's Access service token and the endpoint from this installation. The encrypted copy, the account content key and the outbox are kept, so connecting again continues. Owner, or a portal account the operator enabled the account store for. Needs the user's confirmation.",
@@ -1691,7 +1698,7 @@ pub(super) async fn run(name: &str, args: &Value) -> Result<Value, String> {
         "variable_update" | "variable_rename" | "variable_usage" => ipc(name, args.clone()).await,
         "consumer_list" => ipc("variable_consumer_list", args.clone()).await,
         "cloud_status" | "cloud_verify" | "cloud_installations" => ipc(name, args.clone()).await,
-        "cloud_migrate" | "cloud_rollback" | "cloud_erase" | "cloud_disconnect" | "cloud_promote" | "cloud_pull" | "cloud_revoke" => {
+        "cloud_migrate" | "cloud_rollback" | "cloud_erase" | "cloud_disconnect" | "cloud_promote" | "cloud_pull" | "cloud_revoke" | "cloud_rotate_key" => {
             let mut args = args.clone();
             args.as_object_mut().unwrap().remove("confirmed");
             ipc(name, args).await
@@ -2051,6 +2058,7 @@ pub(super) fn confirmation(name: &str, args: &Value) -> Option<String> {
             "Bring the account store's configuration back to this computer, verify and stop using the account store (the copy in the store stays)?".into()
         },
         "cloud_erase" => "Erase this account's copy in the account store (records and backups) and set the content key aside? This computer keeps all of its data.".into(),
+        "cloud_rotate_key" => "Rotate the account content key: seal the whole copy again with a new key (the earlier one stays on this computer)?".into(),
         "cloud_revoke" => format!(
             "Revoke installation {} of this account in the account store? That computer keeps its data.",
             args["installation"].as_str().unwrap_or_default()

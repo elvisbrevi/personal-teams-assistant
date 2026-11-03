@@ -2146,6 +2146,7 @@ let cloudRollbackArmed = false;
 let cloudRollbackLocalArmed = false;
 let cloudEraseArmed = false;
 let cloudDisconnectArmed = false;
+let cloudRotateArmed = false;
 let cloudPromoteArmed = false;
 let cloudReplaceArmed = false;
 
@@ -2197,7 +2198,26 @@ function renderCloudMirror() {
   $('#cloud-demote').hidden = !primary;
   $('#cloud-verify').hidden = !mirror.key?.present;
   $('#cloud-disconnect').textContent = cloudDisconnectArmed ? t('Tap again to disconnect') : t('Disconnect this computer');
+  const rotate = $('#cloud-rotate');
+  rotate.hidden = status?.mode !== 'mirror' && !primary;
+  rotate.textContent = cloudRotateArmed ? t('Tap again to rotate the key') : t('Rotate the content key');
 }
+
+// For a lost computer, after revoking it: a new key, and the whole copy sealed again with it.
+$('#cloud-rotate').onclick = event => {
+  if (!cloudRotateArmed) {
+    cloudRotateArmed = true;
+    renderCloudMirror();
+    setTimeout(() => { cloudRotateArmed = false; renderCloudMirror(); }, 4000);
+    return;
+  }
+  cloudRotateArmed = false;
+  busy(event.currentTarget, async () => {
+    const reply = await invoke('cloud_rotate_key', {});
+    await loadCloud();
+    done(tn(reply.resealing, 'A new content key is active; {n} record is being sealed again with it. Back up the key now with pta variables key backup, and trust your other computers again with the account store.', 'A new content key is active; {n} records are being sealed again with it. Back up the key now with pta variables key backup, and trust your other computers again with the account store.'));
+  });
+};
 
 $('#cloud-disconnect').onclick = event => {
   if (!cloudDisconnectArmed) {
@@ -4994,7 +5014,11 @@ async function machineLogin(url) {
       if (cancelled) return false;
       if (result.ok) {
         connected = true;
-        done(result.data.username ? t('This computer is connected to {account}.', { account: result.data.username }) : t('This computer is connected to your account.'));
+        const store = result.data.store;
+        const joined = result.data.username ? t('This computer is connected to {account}.', { account: result.data.username }) : t('This computer is connected to your account.');
+        done(!store ? joined
+          : store.installed && store.connected ? `${joined} ${t('It also received the account store and is connected to it; nothing was uploaded.')}`
+          : `${joined} ${t('The account store was not set up here: {problem}', { problem: tx(store.problem || '') })}`);
         return true;
       }
       if (result.code !== 'authorization_pending') throw new Error(tx(result.message || result.code));
@@ -5474,7 +5498,10 @@ async function machineTrust(transaction) {
   history.replaceState(null, '', '/');
   const detail = await request('inspect');
   if (!detail.ok) throw new Error(tx(detail.message || detail.code));
-  const { machine, code, username } = detail.data;
+  const { machine, code, username, store_available: storeAvailable } = detail.data;
+  // The account store goes to this computer only when its owner ticks it here, in this session.
+  $('#machine-trust-store-field').hidden = !storeAvailable;
+  $('#machine-trust-store').checked = false;
   $('#machine-trust-name').textContent = machine.name;
   $('#machine-trust-os').textContent = { linux: 'Linux', macos: 'macOS', windows: 'Windows' }[machine.os] || machine.os;
   $('#machine-trust-code').textContent = code;
@@ -5487,10 +5514,12 @@ async function machineTrust(transaction) {
     approve.hidden = deny.hidden = true; close.hidden = false; close.focus();
   };
   const decide = (button, action) => busy(button, async () => {
-    const result = await request(action);
+    const result = await window.ptaTransport.request('/api/enrollment', { action, transaction, store: action === 'trust' && storeAvailable && $('#machine-trust-store').checked });
     if (!result.ok) throw new Error(tx(result.message || result.code));
     decided(action === 'trust'
-      ? t('Trusted. Return to {name}: it finishes connecting by itself.', { name: machine.name })
+      ? (result.data?.store
+        ? t('Trusted, with the account store. Return to {name}: it finishes connecting by itself.', { name: machine.name })
+        : t('Trusted. Return to {name}: it finishes connecting by itself.', { name: machine.name }))
       : t('Denied. That computer was not added to your account.'));
   });
   approve.onclick = () => decide(approve, 'trust');

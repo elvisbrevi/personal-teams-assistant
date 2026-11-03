@@ -163,6 +163,11 @@ Account store (Cloudflare)
                            digest over the sorted (ID, revision, ciphertext digest) on both sides and a full decryption
                            of every record. Local changes not sent yet are pending, not differences. History other
                            computers of the account wrote is counted apart (others): each verifies its own.
+  cloud rotate-key --confirmed
+                           Owner or enabled portal account, in mirror or primary. A new account content key
+                           becomes active and the whole copy is sent again sealed with it (earlier keys stay on this
+                           computer). For a lost computer, after revoking it; then back the key up again and trust
+                           the account's other computers again with the account store.
   cloud installations         Owner or enabled portal account. The account's computers in the account store: label, host version, when each
                            enrolled and was last seen, revoked ones and which is this one.
   cloud installations revoke ID --confirmed
@@ -655,6 +660,15 @@ async fn cloud_command(args: &[String]) -> Result<Reply> {
             call("cloud_erase", json!({}), None, true).await
         }
         Some("verify") => call("cloud_verify", json!({}), None, true).await,
+        Some("rotate-key") => {
+            if let Some(reply) = unconfirmed(
+                args,
+                "Rotate the account content key: seal the whole copy again with a new key (the earlier one stays on this computer)?".into(),
+            ) {
+                return Ok(reply);
+            }
+            call("cloud_rotate_key", json!({}), None, true).await
+        }
         Some("installations") => match words(args).get(2).copied() {
             None => call("cloud_installations", json!({}), None, true).await,
             Some("revoke") => {
@@ -1377,6 +1391,7 @@ fn validate_args(args: &[String]) -> Result<()> {
                     | "demote"
                     | "pull"
                     | "installations"
+                    | "rotate-key"
             ]
             | ["cloud", "installations", "revoke", _]
             | ["credentials", "list"]
@@ -1518,6 +1533,7 @@ fn validate_args(args: &[String]) -> Result<()> {
                 || p.as_slice() == ["cloud", "promote"]
                 || p.as_slice() == ["cloud", "demote"]
                 || p.as_slice() == ["cloud", "pull"]
+                || p.as_slice() == ["cloud", "rotate-key"]
                 || p.as_slice()
                     .starts_with(&["cloud", "installations", "revoke"])
                 || p.as_slice().starts_with(&["update", "stage"])
@@ -1726,7 +1742,7 @@ async fn execute(mut args: Vec<String>) -> Result<Reply> {
         }
         "capabilities" => {
             return Ok(Reply::success(
-                json!({"contract":control::CONTRACT,"commands":HELP,"skill_version":env!("CARGO_PKG_VERSION"),"activity_registration_support":true,"web_support":true,"web_access_support":true,"knowledge_index_support":true,"mcp_support":true,"tools_support":true,"todo_support":true,"implementation_support":true,"machine_pairing_support":true,"machine_login_support":true,"machine_management_support":true,"account_variables_support":true,"account_portable_support":true,"account_authority_support":true,"shared_accounts_support":true,"cloud_store_support":true,"cloud_mirror_support":true,"cloud_disconnect_support":true,"cloud_primary_support":true,"cloud_migration_support":true,"cloud_installations_support":true}),
+                json!({"contract":control::CONTRACT,"commands":HELP,"skill_version":env!("CARGO_PKG_VERSION"),"activity_registration_support":true,"web_support":true,"web_access_support":true,"knowledge_index_support":true,"mcp_support":true,"tools_support":true,"todo_support":true,"implementation_support":true,"machine_pairing_support":true,"machine_login_support":true,"machine_management_support":true,"account_variables_support":true,"account_portable_support":true,"account_authority_support":true,"shared_accounts_support":true,"cloud_store_support":true,"cloud_mirror_support":true,"cloud_disconnect_support":true,"cloud_primary_support":true,"cloud_migration_support":true,"cloud_installations_support":true,"cloud_handoff_support":true}),
             ));
         }
         "skill" => return crate::app::skill::command(action, args.get(2).map(String::as_str)),

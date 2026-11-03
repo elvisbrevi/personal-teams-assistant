@@ -66,6 +66,11 @@ impl Local for HostLocal<'_> {
         (!config.cloud.installation.is_empty()).then_some(config.cloud.installation)
     }
 
+    fn configuration(&self) -> bool {
+        // Signed in to a coordinator: the account's configuration comes from it.
+        !matches!(crate::app::implementation::link(&self.0.state), Ok(Some(_)))
+    }
+
     fn collect(&self, collection: Collection) -> Result<Vec<Exported>> {
         let state = &self.0.state;
         let config = state.settings.config()?;

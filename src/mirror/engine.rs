@@ -30,6 +30,12 @@ pub trait Local {
     fn installation(&self) -> Option<String> {
         None
     }
+    /// Whether this installation keeps the account's configuration in the store. An installation
+    /// that takes it from its coordinator mirrors only its own history: its configuration is the
+    /// coordinator's to write.
+    fn configuration(&self) -> bool {
+        true
+    }
 }
 
 /// Why an exchange with the Worker did not answer what was asked.
@@ -223,6 +229,9 @@ impl<L: Local, T: Transport> Engine<'_, L, T> {
     fn sweep(&self, now: i64) -> Result<Vec<Pending>> {
         let mut pending = Vec::new();
         for collection in Collection::ALL {
+            if collection.is_configuration() && !self.local.configuration() {
+                continue;
+            }
             let exported = self.local.collect(collection)?;
             let mut held: BTreeMap<String, Row> = self
                 .ledger
@@ -469,6 +478,10 @@ impl<L: Local, T: Transport> Engine<'_, L, T> {
                     break;
                 }
             }
+            if collection.is_configuration() && !self.local.configuration() {
+                collections.push(CollectionReport::others(collection, remote.len() as u64));
+                continue;
+            }
             collections.push(self.verify_collection(collection, remote)?);
         }
         Ok(Ok(Report {
@@ -711,6 +724,29 @@ pub struct CollectionReport {
     pub local_digest: String,
     pub remote_digest: String,
     pub ok: bool,
+}
+
+impl CollectionReport {
+    /// A collection this installation does not keep in the store: what it holds is others'.
+    fn others(collection: Collection, held: u64) -> Self {
+        let none = hex_sha256(b"");
+        Self {
+            name: collection.name(),
+            local: 0,
+            remote: 0,
+            tombstones: 0,
+            pending: 0,
+            missing_remote: 0,
+            unknown_remote: 0,
+            differing: 0,
+            undecryptable: 0,
+            content_differs: 0,
+            others: held,
+            local_digest: none.clone(),
+            remote_digest: none,
+            ok: true,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]

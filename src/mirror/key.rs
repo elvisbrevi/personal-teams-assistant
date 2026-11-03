@@ -183,6 +183,32 @@ pub fn import(keys: &Path, backup: &ContentBackup) -> Result<bool> {
     }
 }
 
+/// Rotate the content key: a new random key becomes the active version and the earlier ones stay,
+/// so records sealed with them still open until they are sealed again. The content account and
+/// the ID key stay (the blinded IDs do not change). The file is replaced atomically.
+pub fn rotate(keys: &Path) -> Result<Content> {
+    let mut content = load(keys)?.context("There is no account content key to rotate.")?;
+    let next = content.keys.keys().max().copied().unwrap_or(0) + 1;
+    content.keys.insert(next, random_key());
+    content.active = next;
+    let temporary = keys.join(format!(".{FILE}.{}", uuid::Uuid::new_v4()));
+    {
+        use std::io::Write;
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&temporary)?;
+        file.write_all(serde_json::to_string(&content.backup())?.as_bytes())?;
+        file.sync_all()?;
+    }
+    crate::security::replace_private_file(&temporary, &path(keys))?;
+    Ok(content)
+}
+
 /// Set the key aside after the account store's copy was erased: the file is renamed to
 /// `cloud-content-retired-<at>.json` (still private), so the next upload creates a new key and
 /// what Cloudflare may still hold sealed with this one (point-in-time recovery) stays unreadable

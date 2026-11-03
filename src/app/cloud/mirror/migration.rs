@@ -390,6 +390,48 @@ async fn rollback(host: &Arc<Host>, args: RollbackArgs) -> std::result::Result<R
     })))
 }
 
+pub(in crate::app::cloud) async fn operate_rotate(host: &Arc<Host>) -> Reply {
+    rotate(host).await.unwrap_or_else(|reply| *reply)
+}
+
+/// Rotate the account content key (decision 18 of the design, for a lost computer): a new key
+/// becomes active, the earlier ones stay so what is not sealed again yet still opens, and every
+/// record the store holds is sent again sealed with the new key, through the outbox (under
+/// compare-and-swap in primary). The blinded IDs and the content account do not change.
+async fn rotate(host: &Arc<Host>) -> std::result::Result<Reply, Box<Reply>> {
+    let failed = |text: &str| Box::new(Reply::error("operation_failed", 1, text));
+    let _operations = host.state.operations.lock().await;
+    let _gate = hold(host).await;
+    let config = host
+        .state
+        .settings
+        .config()
+        .map_err(|_| failed("The configuration could not be read."))?;
+    if config.cloud.mode == CloudMode::Off {
+        return Err(Box::new(Reply::error(
+            "not_ready",
+            3,
+            "This computer does not use the account store: there is no copy to seal again. Nothing was rotated.",
+        )));
+    }
+    let setup = open(host, &config.cloud).map_err(|m| Box::new(missing_reply(&m)))?;
+    let keys = host.state.settings.profile().join("keys");
+    let content = crate::mirror::key::rotate(&keys)
+        .map_err(|_| failed("The account content key could not be rotated; nothing changed."))?;
+    let resealing = setup
+        .ledger
+        .reseal(now())
+        .map_err(|_| failed("The new key is active, but the copy could not be scheduled to be sealed again: run the rotation again."))?;
+    let _ = setup.ledger.set_meta("rotated_at", &now().to_string());
+    crate::mirror::wake();
+    Ok(Reply::success(json!({
+        "rotated": true,
+        "version": content.active,
+        "resealing": resealing,
+        "next": "Back up the new key now (pta variables key backup). The account's other computers keep the earlier key: trust them again with the account store to give them this one.",
+    })))
+}
+
 pub(in crate::app::cloud) async fn operate_erase(host: &Arc<Host>) -> Reply {
     erase(host).await.unwrap_or_else(|reply| *reply)
 }

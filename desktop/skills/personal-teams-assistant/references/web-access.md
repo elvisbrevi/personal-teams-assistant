@@ -214,6 +214,11 @@ installation's CLI/host and the coordinator must advertise `machine_login_suppor
 3. Open the URL on any device, sign in with your GitHub identity through Access, check that
    the page names this computer and shows the same code, then choose Trust this machine (or
    Deny). This one confirmation is the only approval; signing in alone registers nothing.
+   When the account keeps a copy in the account store, the page also offers «Also give it the
+   account store»: ticked, the computer receives the account's content key and service token
+   encrypted for it alone, and connects to the store without uploading anything
+   (`machine_login_finish` › `store`: `installed`, `connected`, `problem`). Tick it only for a
+   computer the user owns; revoking the computer later also revokes it in the store.
 4. On the computer, select nothing more in the GUI (it finishes by itself and brings the
    account's configuration and variables), or run `pta auth machine finish --wait`
    (which then runs `pta account sync`) / call `machine_login_finish` until it returns

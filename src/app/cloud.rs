@@ -89,6 +89,7 @@ pub(super) fn handles(method: &str) -> bool {
             | "cloud_erase"
             | "cloud_installations"
             | "cloud_revoke"
+            | "cloud_rotate_key"
     )
 }
 
@@ -230,6 +231,15 @@ pub(super) async fn operate(host: &Arc<Host>, request: &control::Request) -> Rep
                 return Reply::error("invalid_input", 2, "Invalid arguments.");
             }
             migration::operate_erase(host).await
+        }
+        "cloud_rotate_key" => {
+            if let Some(reply) = refused_here(host, &invocation) {
+                return reply;
+            }
+            if request.args != json!({}) && !request.args.is_null() {
+                return Reply::error("invalid_input", 2, "Invalid arguments.");
+            }
+            migration::operate_rotate(host).await
         }
         "cloud_installations" => {
             if let Some(reply) = refused_here(host, &invocation) {
@@ -963,6 +973,24 @@ async fn revoke(host: &Arc<Host>, args: RevokeArgs) -> Reply {
     }
 }
 
+/// Revoke a revoked computer's installation in the account store (`machine_revoke`). It still
+/// holds the account's content key and service token, so the reply says what else to do.
+pub(in crate::app) async fn revoke_installation(host: &Arc<Host>, id: &str) -> Value {
+    let next = "That computer still has the account's content key and service token: for a lost or stolen computer, replace the service token (the portal operator) and rotate the content key.";
+    let reply = revoke(
+        host,
+        RevokeArgs {
+            installation: id.to_owned(),
+        },
+    )
+    .await;
+    json!({
+        "revoked": reply.ok || reply.message.as_deref() == Some("The account has no such installation."),
+        "problem": (!reply.ok).then(|| reply.message.unwrap_or_default()),
+        "next": next,
+    })
+}
+
 /// The endpoint, both credentials and this installation's ID of an enrolled installation.
 fn linked(host: &Arc<Host>) -> std::result::Result<(String, Credentials, String), Box<Reply>> {
     let config = host.state.settings.config().map_err(|_| {
@@ -986,6 +1014,122 @@ fn linked(host: &Arc<Host>) -> std::result::Result<(String, Credentials, String)
         credentials,
         config.cloud.installation,
     ))
+}
+
+/// What a trusted computer receives to use the account store (decision 18 of the design): the
+/// account's content key and service token, and where the store is. Never logged or shown.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Handoff {
+    endpoint: String,
+    client_id: String,
+    client_secret: String,
+    #[serde(default)]
+    token_expires_at: i64,
+    content_key: crate::mirror::key::ContentBackup,
+}
+
+/// On the coordinator, while it registers a computer the person trusted with the account store:
+/// the handoff sealed to the key that computer's sign-in started with (`context`: that sign-in),
+/// or why there is none. The portal and the tunnel only carry the result.
+pub(in crate::app) fn handoff(host: &Host, recipient: &str, context: &str) -> Value {
+    let unavailable = |reason: &str| json!({"unavailable": reason});
+    let Ok(config) = host.state.settings.config() else {
+        return unavailable("The coordinator's configuration could not be read.");
+    };
+    let credentials = stored_credentials();
+    let key = crate::mirror::key::load(&host.state.settings.profile().join("keys"));
+    let (Some(credentials), Ok(Some(content))) = (credentials, key) else {
+        return unavailable(
+            "This account has no account store on its coordinator yet: migrate it there first.",
+        );
+    };
+    if !enrolled(&config.cloud) {
+        return unavailable("The coordinator is not connected to the account store.");
+    }
+    let bundle = Handoff {
+        endpoint: origin(&config.cloud.endpoint),
+        client_id: credentials.client_id,
+        client_secret: credentials.client_secret,
+        token_expires_at: config.cloud.token_expires_at,
+        content_key: content.backup(),
+    };
+    match serde_json::to_vec(&bundle)
+        .map_err(anyhow::Error::from)
+        .and_then(|plain| crate::mirror::handoff::seal(recipient, context, &plain))
+    {
+        Ok(sealed) => json!({"sealed": sealed}),
+        Err(_) => unavailable("The account store could not be handed to this computer."),
+    }
+}
+
+/// On the computer that signed in: install a handoff it opened. The content key is written only
+/// when it has none (a different one is never replaced), the service token goes to the credential
+/// store and the account store's address to `[cloud]`; then it connects (enrolls) with them.
+/// Nothing is uploaded: the mode stays as it was.
+pub(in crate::app) async fn receive(host: &Arc<Host>, plain: &[u8], label: &str) -> Value {
+    receive_with(host, plain, label, |name, value| {
+        security::put_desktop_secret("default", name, value)
+    })
+    .await
+}
+
+/// `receive`, keeping the credentials with `store`.
+async fn receive_with(
+    host: &Arc<Host>,
+    plain: &[u8],
+    label: &str,
+    store: impl Fn(&str, &str) -> Result<()>,
+) -> Value {
+    let Ok(bundle) = serde_json::from_slice::<Handoff>(plain) else {
+        return json!({"installed": false, "problem": "The coordinator sent an unreadable account store handoff."});
+    };
+    if Cloud::check_endpoint(&bundle.endpoint).is_err()
+        || !valid_client_id(&bundle.client_id)
+        || !valid_client_secret(&bundle.client_secret)
+    {
+        return json!({"installed": false, "problem": "The coordinator sent an invalid account store handoff."});
+    }
+    let keys = host.state.settings.profile().join("keys");
+    let key = match crate::mirror::key::import(&keys, &bundle.content_key) {
+        Ok(written) => written,
+        Err(error) => {
+            return json!({"installed": false, "problem": error.to_string()});
+        }
+    };
+    for (name, value) in [
+        (ACCESS_ID, bundle.client_id.as_str()),
+        (ACCESS_SECRET, bundle.client_secret.as_str()),
+    ] {
+        if store(name, value).is_err() {
+            return json!({"installed": false, "key_written": key, "problem": "The credential store refused the account store credentials."});
+        }
+    }
+    let expires = (bundle.token_expires_at > 0).then(|| {
+        chrono::DateTime::from_timestamp(bundle.token_expires_at, 0)
+            .map(|at| at.format("%Y-%m-%d").to_string())
+            .unwrap_or_default()
+    });
+    let connected = connect(
+        host,
+        ConnectArgs {
+            endpoint: bundle.endpoint.clone(),
+            label: label.to_owned(),
+            token_expires: expires,
+            client_id: None,
+            client_secret: None,
+        },
+    )
+    .await
+    .unwrap_or_else(|reply| *reply);
+    json!({
+        "installed": true,
+        "key_written": key,
+        "endpoint": bundle.endpoint,
+        "connected": connected.ok,
+        "problem": (!connected.ok).then(|| connected.message.unwrap_or_default()),
+        "installation": connected.data["installation"],
+    })
 }
 
 #[derive(Deserialize)]
