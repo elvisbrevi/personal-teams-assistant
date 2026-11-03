@@ -83,12 +83,17 @@ desktop/                      app resources: tauri.conf.json, Info.plist, capabi
   ui/                         shared HTML/CSS/JS; transport.js selects Tauri invoke or authenticated web API;
                               i18n.js translates the English source text to `llm.language`
   skills/                     operating skill (canonical source)
+cloud/                        account store Worker outside the Cargo package (TypeScript, Bun): `src/index.ts`
+                              (routes, `authenticate`), `access.ts` (Access assertion), `registry.ts` and
+                              `account-store.ts` (SQLite-backed Durable Objects), `protocol.ts`, `test/`
+                              (Workers runtime) and `wrangler.jsonc` (production and staging)
 site/                         static landing outside the Cargo package: `public/` (HTML and CSS without
                               JavaScript or a build, `_headers`, `404.html`, GUI screenshots with
                               synthetic data) and `wrangler.jsonc` (Cloudflare Workers, assets only)
 tests/integration.rs          integration with wiremock (Graph, DeepSeek) and test doubles
 config.example.toml           profile template (`Config::desktop_template`)
 knowledge-map.example.toml    synthetic example of the source map
+scripts/configure-cloud-access.py  Access applications, Worker secrets and service tokens of the cloud Worker
 scripts/export-public.py      exports a snapshot without private history (requires gitleaks)
 scripts/ui-preview/           GUI preview with a mocked Tauri bridge and synthetic data: screenshots,
                               axe WCAG 2.2 AA scans and interaction checks (Playwright outside the repo)

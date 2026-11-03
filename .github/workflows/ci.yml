@@ -33,6 +33,7 @@ jobs:
     outputs:
       rust: ${{ steps.filter.outputs.rust }}
       ui: ${{ steps.filter.outputs.ui }}
+      cloud: ${{ steps.filter.outputs.cloud }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -47,35 +48,40 @@ jobs:
           verdict() {
             echo "rust=$1" >> "$GITHUB_OUTPUT"
             echo "ui=$2" >> "$GITHUB_OUTPUT"
-            echo "Rust checks: $1. UI and script checks: $2. Reason: $3." | tee -a "$GITHUB_STEP_SUMMARY"
+            echo "cloud=$3" >> "$GITHUB_OUTPUT"
+            echo "Rust checks: $1. UI and script checks: $2. Cloud Worker checks: $3. Reason: $4." | tee -a "$GITHUB_STEP_SUMMARY"
             exit 0
           }
           # Weekly checks refresh the full matrix and its trusted main-branch caches.
-          [ "$EVENT" != schedule ] || verdict true true "weekly full verification"
+          [ "$EVENT" != schedule ] || verdict true true true "weekly full verification"
           # A release candidate must run Linux tests and package verification even without a diff.
           if [ "$EVENT" = push ] && [ "$REF" = refs/heads/main ]; then
             version=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["package"]["version"])')
             code=$(curl -sS -A "personal-teams-assistant-ci (github.com/$GITHUB_REPOSITORY)" -o /dev/null -w '%{http_code}' \
               "https://crates.io/api/v1/crates/personal-teams-assistant/$version" || echo 000)
-            [ "$code" = 200 ] || verdict true true "version $version is not on crates.io (HTTP $code), so it will be released"
+            [ "$code" = 200 ] || verdict true true true "version $version is not on crates.io (HTTP $code), so it will be released"
           fi
           if [ -z "$BASE" ] || [ -z "${BASE//0/}" ] || ! git fetch --quiet --no-tags --depth=1 origin "$BASE"; then
-            verdict true true "no base commit to compare with"
+            verdict true true true "no base commit to compare with"
           fi
           files=$(git diff --name-only "$BASE" "$GITHUB_SHA")
           rust=false
           ui=false
+          cloud=false
           while IFS= read -r file; do
             case "$file" in
               # Not part of the binary or its checks: the landing (Cloudflare publishes it),
               # documentation and agent instructions.
               site/* | docs/* | .agents/* | .claude/* | AGENTS.md | CLAUDE.md | CONTEXT.md | README.md | LICENSE | .gitignore) ;;
+              # The account store Worker: its own checks; Workers Builds publishes it.
+              cloud/*) cloud=true ;;
               scripts/*) ui=true ;;
-              desktop/ui/* | .github/*) rust=true; ui=true ;;
+              desktop/ui/*) rust=true; ui=true ;;
+              .github/*) rust=true; ui=true; cloud=true ;;
               *) rust=true ;;
             esac
           done <<< "$files"
-          verdict "$rust" "$ui" "changed paths"
+          verdict "$rust" "$ui" "$cloud" "changed paths"
 
   linux:
     name: Linux
@@ -142,6 +148,7 @@ jobs:
         run: |
           bun scripts/test-ci-workflow.mjs
           python3 scripts/test-configure-web-access.py
+          python3 scripts/test-configure-cloud-access.py
           python3 scripts/test-vps-update.py
       # Playwright and axe-core stay outside the repository, as in docs/ui-design-conventions.md.
       - name: Playwright Chromium and axe-core
@@ -163,6 +170,35 @@ jobs:
           path: ${{ runner.temp }}/ui-check
           retention-days: 7
           if-no-files-found: ignore
+
+  # The account store Worker (cloud/): type check and tests inside the Workers runtime (Miniflare),
+  # with synthetic Access settings. No secrets: Workers Builds deploys from Cloudflare's side.
+  cloud:
+    name: Cloud Worker
+    needs: changes
+    if: github.event_name != 'push' && needs.changes.outputs.cloud == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: cloud
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+      - run: bun install --frozen-lockfile
+      - name: Type check
+        run: bun run check
+      - name: Tests in the Workers runtime
+        run: bun run test
+      - name: Bundle both environments
+        run: |
+          bunx wrangler deploy --dry-run --outdir "$RUNNER_TEMP/cloud-production"
+          bunx wrangler deploy --dry-run --env staging --outdir "$RUNNER_TEMP/cloud-staging"
 
   macos:
     name: macOS
@@ -269,7 +305,7 @@ jobs:
   result:
     name: CI result
     if: always()
-    needs: [changes, linux, ui, macos, windows, security]
+    needs: [changes, linux, ui, cloud, macos, windows, security]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:

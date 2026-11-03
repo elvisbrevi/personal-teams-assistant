@@ -6,6 +6,7 @@ Agents develop, open a pull request, wait for CI and merge. Everything after the
 flowchart LR
   PR[pull request] --> CI[ci.yml: full checks for changed paths] --> M[merge to main]
   M --> CF[Cloudflare Workers Builds: site/ only] --> L[landing]
+  M --> CW[Cloudflare Workers Builds: cloud/ only] --> W[account store Worker]
   M --> CI2[ci.yml on main: Linux tests/package + security] --> R[release.yml: new version?] --> C[crates.io + tag + GitHub release]
   C --> B[binaries.yml: archives for cargo binstall]
   C --> U[server timer: vps-update.py] --> P[web portal on the new version]
@@ -17,7 +18,7 @@ The repository is public, so GitHub-hosted **standard** runners (`ubuntu-latest`
 
 **If the repository ever turns private, GitHub Actions stops being free:** a free account gets 2,000 minutes a month, macOS minutes count ten times and Windows twice. One full CI run (see the times below, each job rounded up to the minute) would then cost roughly 75 minutes, 50 of them for macOS; only about 25 runs a month would fit. Turn the macOS and Windows jobs off, or pay, before making it private.
 
-The landing (`site/`) stays on Cloudflare Workers Builds (free plan), which publishes it on its own when `site/` changes on `main`. The server is never a runner: on a public repository a pull request from anyone could run code there. It pulls releases from crates.io instead.
+The landing (`site/`) and the account store Worker (`cloud/`) stay on Cloudflare Workers Builds (free plan), which publishes each on its own when its directory changes on `main`. The server is never a runner: on a public repository a pull request from anyone could run code there. It pulls releases from crates.io instead.
 
 ## CI (`.github/workflows/ci.yml`)
 
@@ -25,27 +26,30 @@ Runs on every pull request, every push to `main` and weekly, with `contents: rea
 
 | Event | Checks |
 | --- | --- |
-| Pull request | Full checks for changed paths: Linux lint/tests/package, UI/scripts, macOS and native Windows; security always runs |
+| Pull request | Full checks for changed paths: Linux lint/tests/package, UI/scripts, the cloud Worker, macOS and native Windows; security always runs |
 | Push to `main` | Linux tests with and without GUI and verified Cargo package when Rust/package inputs changed or a new version needs publication; security always runs |
-| Weekly | Full Linux/UI/macOS/Windows/security matrix on `main`, also refreshing trusted shared caches |
+| Weekly | Full Linux/UI/cloud Worker/macOS/Windows/security matrix on `main`, also refreshing trusted shared caches |
 
 Formatting, clippy, browser previews, macOS and the clean native Windows installation run on the PR instead of repeating after each merge; Windows remains informative. Linux still tests the exact merged commit with both feature sets and verifies the `.crate` before publication. Cross-platform and browser checks on the final `main` combination run weekly rather than on every push. This is not reuse of a PR's success or artifacts: the release still requires successful Linux verification on its exact `main` commit.
 
 `Changes` decides what a change needs by comparing it with its base:
 
-| Changed paths | Rust checks requested | UI/scripts checks requested |
-| --- | --- | --- |
-| only `site/`, `docs/`, `.agents/`, `.claude/`, `AGENTS.md`, `CLAUDE.md`, `CONTEXT.md`, `README.md`, `LICENSE`, `.gitignore` | skipped | skipped |
-| `scripts/` | skipped | run |
-| `desktop/ui/`, `.github/` | run | run |
-| anything else (`src/`, `tests/`, `Cargo.*`, `build.rs`, `desktop/`, …) | run | skipped unless also above |
+| Changed paths | Rust checks requested | UI/scripts checks requested | Cloud Worker checks requested |
+| --- | --- | --- | --- |
+| only `site/`, `docs/`, `.agents/`, `.claude/`, `AGENTS.md`, `CLAUDE.md`, `CONTEXT.md`, `README.md`, `LICENSE`, `.gitignore` | skipped | skipped | skipped |
+| `cloud/` | skipped | skipped | run |
+| `scripts/` | skipped | run | skipped |
+| `desktop/ui/` | run | run | skipped |
+| `.github/` | run | run | run |
+| anything else (`src/`, `tests/`, `Cargo.*`, `build.rs`, `desktop/`, …) | run | skipped unless also above | skipped unless also above |
 
-A push to `main` whose `Cargo.toml` version crates.io does not have yet always requests Linux tests/package verification, even when the diff would skip it. Without a base to compare with (a new branch, a force push), all path flags are enabled; the event policy above still applies. Weekly runs enable both flags without a diff.
+A push to `main` whose `Cargo.toml` version crates.io does not have yet always requests Linux tests/package verification, even when the diff would skip it. Without a base to compare with (a new branch, a force push), all path flags are enabled; the event policy above still applies. Weekly runs enable every flag without a diff.
 
 | Job | Runner | What it runs |
 | --- | --- | --- |
 | Linux | `ubuntu-latest` | Tauri 2 system libraries; versions agree (`Cargo.toml`, `desktop/tauri.conf.json`; `--locked` checks `Cargo.lock`); `cargo fmt --check` and clippy only on PR/weekly runs; tests with and without `gui` and `cargo package --locked` on every selected run (the `.crate` as crates.io receives it, built from the package) |
 | UI and scripts | `ubuntu-latest` | PR/weekly only: `bun scripts/test-ci-workflow.mjs` (actual workflow routing and merge gate); `bun build desktop/ui/app.js`; `node --test scripts/test-activity-ui.cjs scripts/test-ui-i18n.cjs`; the Python script tests; `scripts/ui-preview/check.mjs` with Playwright's Chromium (axe WCAG 2.2 AA on every section, theme and phone, plus the interaction checks; any violation fails); the results are an artifact for 7 days |
+| Cloud Worker | `ubuntu-latest` | PR/weekly only, in `cloud/`: `bun install --frozen-lockfile`, `tsc --noEmit`, the Worker's tests inside the Workers runtime (`@cloudflare/vitest-plugin`, Miniflare, synthetic Access keys; contract tests include cross-account attempts) and a `wrangler deploy --dry-run` bundle of both environments; no secrets |
 | macOS | `macos-latest` | PR/weekly only: clippy and tests with `gui` |
 | Windows (informative) | `windows-latest` | PR/weekly only: clean release `cargo install --path . --locked`; PE stack fields and native GUI open/status/close/reopen/quit/relaunch with Teams stopped; clippy with `gui`; headless operator admission/binding/recovery/revocation fixture through the real CLI; browser-assisted machine sign-in/trust tests (`machine_login`: two accounts, verifier, replay, expiry, denial, revocation, installation proof and native finish with Windows paths, locks and OS reporting); account machine management (two accounts, two machines, offline presence, roots and revocation); account variables, catalog and configuration synchronization, account standing, credential migration, readiness and local updates (including replacing running and locked executables, journal recovery and rollback); `continue-on-error`, so a failure shows but blocks nothing |
 | Security | `ubuntu-latest` | GitHub dependency review on PRs; full-history and working-tree Gitleaks scan with a pinned checksum-verified release; `cargo audit` against RustSec; no repository secrets |
@@ -135,6 +139,25 @@ tail ~/.local/state/personal-teams-assistant-update/history.log        # updates
 ```
 
 `--rollback-drill` installs the newest release (or reinstalls the installed version when there is none newer), verifies it, rolls back to the backed-up binaries as if it had failed, restarts and verifies them; it blocks nothing, so the next timer run installs a newer release for good. It restarts the portal twice: run it when a short interruption is acceptable. To retry a blocked version, delete its entry from `blocked` in `~/.local/state/personal-teams-assistant-update/state.json`. To pause updates: `systemctl --user stop personal-teams-assistant-update.timer`.
+
+## Account store Worker (`cloud/`)
+
+The Worker of the [cloud storage design](organization-and-cloud-storage.md) is TypeScript outside the Cargo package, like `site/`. Its two environments are in `cloud/wrangler.jsonc`, each with its own custom domain, Durable Object namespaces and R2 bucket; `workers.dev` and preview URLs are off.
+
+| Environment | Worker | Published by |
+| --- | --- | --- |
+| production | `pta-cloud` | Workers Builds on merges to `main` that touch `cloud/` |
+| staging | `pta-cloud-staging` | the maintainer, by hand: `cd cloud && bunx wrangler deploy --env staging` from the pull request's branch |
+
+**Workers Builds** (Cloudflare dashboard › Workers › `pta-cloud` › Settings › Build): the repository, root directory `cloud`, production branch `main`, build command `bun install --frozen-lockfile`, deploy command `bunx wrangler deploy`, build watch path `cloud/*`, and **non-production branch builds disabled**: a preview version would run against the production objects. GitHub holds no deploy secret.
+
+**Access.** Each hostname is an Access application whose only policy is Service Auth for the listed service tokens (one per account), with an exact Bypass application for `/v1/health`. The Worker validates the `Cf-Access-Jwt-Assertion` again with the secrets `ACCESS_TEAM_DOMAIN` and `ACCESS_AUD`; until both are set it answers `not_configured` (503) to everything but the health check. `scripts/configure-cloud-access.py` creates the applications, sets both secrets with the maintainer's wrangler login and, for production, creates the account's service token and hands it to `pta cloud connect` on standard input; for staging it runs an end-to-end check with two temporary service tokens (enrollment, cross-account refusals, revocation) and deletes them. It reads its Cloudflare API token from an approved PTA launcher (account permissions: Access: Apps and Policies Write, Access: Service Tokens Write, Access: Organizations, Identity Providers, and Groups Read) and writes a report without secrets. Service tokens last a year: renew them in Zero Trust › Access controls › Service credentials before they expire.
+
+**Order.** A host release that needs a Worker change merges only after that change is deployed and healthy: the Worker serves every protocol version the installed hosts use (additive changes within `/v1`), so the Worker goes first and the host follows.
+
+**Verify a deployment.** `curl -s https://HOSTNAME/v1/health` (the hostname in `cloud/wrangler.jsonc`) answers without credentials with the environment, the Worker version, the deployment (Workers version ID, the same one Workers Builds shows), the protocols, the schema of each object and `configured: true`. Then `pta cloud status` on a connected installation reports the live principal and the account store.
+
+**When Workers Builds fails:** from a clean checkout of merged `main` on a maintainer's machine, `cd cloud && bun install --frozen-lockfile && bunx wrangler deploy` (wrangler login with Workers write), then verify as above. Code rollback: `bunx wrangler rollback` (or Workers › Deployments); data rollback: the Durable Objects' 30-day point-in-time recovery. Migrations are forward-only and additive, so the previous code reads the current schema.
 
 ## Repository settings
 
