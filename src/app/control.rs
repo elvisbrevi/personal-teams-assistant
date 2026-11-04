@@ -112,6 +112,8 @@ struct Endpoint {
     cloud_restore_support: bool,
     #[serde(default)]
     cloud_conflicts_support: bool,
+    #[serde(default)]
+    cloud_lost_support: bool,
     contract: u32,
     port: u16,
     token: String,
@@ -544,6 +546,10 @@ async fn client_with_transport(
                 || !matches!(request.method.as_str(), "cloud_conflicts" | "cloud_resolve"),
             "Incompatible account store host: update the host and CLI together before resolving a conflict."
         );
+        ensure!(
+            endpoint.cloud_lost_support || request.method != "cloud_lost",
+            "Incompatible account store host: update the host and CLI together before securing a lost computer."
+        );
         ensure!(endpoint.contract == CONTRACT, "incompatible host contract");
         ensure!(
             endpoint.web_support
@@ -658,6 +664,7 @@ pub(crate) fn launch(
             cloud_delivery_support: true,
             cloud_restore_support: true,
             cloud_conflicts_support: true,
+            cloud_lost_support: true,
             contract: CONTRACT,
             port: listener.local_addr()?.port(),
             token: token.clone(),
@@ -1527,6 +1534,7 @@ mod tests {
                 cloud_delivery_support: true,
                 cloud_restore_support: true,
                 cloud_conflicts_support: true,
+                cloud_lost_support: true,
                 account_authority_support: true,
                 shared_accounts_support: true,
                 account_binding: None,
@@ -1566,6 +1574,7 @@ mod tests {
                 cloud_delivery_support: true,
                 cloud_restore_support: true,
                 cloud_conflicts_support: true,
+                cloud_lost_support: true,
                 account_authority_support: true,
                 shared_accounts_support: true,
                 account_binding: None,
@@ -1620,6 +1629,7 @@ mod tests {
                     cloud_delivery_support: true,
                     cloud_restore_support: true,
                     cloud_conflicts_support: true,
+                    cloud_lost_support: true,
                     account_authority_support: true,
                     shared_accounts_support: true,
                     account_binding: None,

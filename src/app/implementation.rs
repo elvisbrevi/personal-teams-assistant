@@ -121,6 +121,46 @@ pub(super) async fn store_machines(host: &Arc<Host>) -> Vec<StoreMachine> {
         .collect()
 }
 
+/// A machine of this coordinator, as the lost computer path needs it.
+pub(super) struct KnownMachine {
+    pub id: String,
+    pub name: String,
+    pub store_installation: String,
+    pub revoked: bool,
+}
+
+/// The machine with this ID, or the one that joined the account store as this installation; the
+/// coordinator's own ID is `Err`.
+pub(super) async fn known_machine(
+    host: &Arc<Host>,
+    machine: Option<&str>,
+    installation: Option<&str>,
+) -> std::result::Result<Option<KnownMachine>, ()> {
+    let data = host.state.implementation.registry.lock().await;
+    if machine.is_some_and(|id| id == data.id) {
+        return Err(());
+    }
+    Ok(data
+        .machines
+        .iter()
+        .find(|m| {
+            machine.is_some_and(|id| m.id == id)
+                || installation.is_some_and(|id| !id.is_empty() && m.store_installation == id)
+        })
+        .map(|m| KnownMachine {
+            id: m.id.clone(),
+            name: m.name.clone(),
+            store_installation: m.store_installation.clone(),
+            revoked: m.revoked,
+        }))
+}
+
+/// Revoke a machine on this coordinator (`machine_revoke` without its checks of a trusted,
+/// listed machine); returns its installation in the account store.
+pub(super) async fn revoke_machine(host: &Arc<Host>, id: &str) -> Result<String> {
+    management::revoke_now(host, id).await
+}
+
 pub(super) fn link(state: &DesktopState) -> Result<Option<Link>> {
     Ok(state.implementation.connection()?.map(|c| Link {
         origin: c.url,
@@ -1395,6 +1435,67 @@ mod tests {
                 json!([])
             );
         }
+    }
+    #[tokio::test]
+    async fn a_lost_machine_is_revoked_and_repeating_continues_without_redoing_it() {
+        let root = tempfile::tempdir().unwrap();
+        let host = host(root.path());
+        let own = host.state.implementation.registry.lock().await.id.clone();
+        let id = uuid::Uuid::new_v4().to_string();
+        let key = crate::mirror::handoff::Receiver::generate().unwrap();
+        let registration = fleet::register(
+            &host,
+            &json!({"id":id,"name":"Laptop","os":"linux","enrollment":"login",
+                "installation":"a".repeat(64),"store_key":key.public(),"handoff":"b".repeat(64)}),
+        )
+        .await
+        .unwrap();
+        let lost = |args: Value| {
+            let host = host.clone();
+            async move {
+                let mut request = control::Request::new("cloud_lost");
+                request.args = args;
+                crate::app::cloud::operate(&host, &request).await
+            }
+        };
+        // The coordinator itself, both targets or none are refused.
+        assert_eq!(lost(json!({"machine": own})).await.code, "invalid_input");
+        assert_eq!(lost(json!({})).await.code, "invalid_input");
+        assert_eq!(
+            lost(json!({"machine": id, "installation": id})).await.code,
+            "invalid_input"
+        );
+        // Without an account store only the machine is revoked; the rest is not needed.
+        let reply = lost(json!({"machine": id})).await;
+        assert!(reply.ok, "{:?}", reply.message);
+        assert_eq!(reply.data["complete"], true);
+        let states: Vec<_> = reply.data["steps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| (s["step"].as_str().unwrap(), s["state"].as_str().unwrap()))
+            .collect();
+        assert_eq!(
+            states,
+            [
+                ("machine", "done"),
+                ("store", "not_needed"),
+                ("token", "not_needed"),
+                ("key", "not_needed")
+            ]
+        );
+        // Its credential no longer works, and no store delivery is announced to anyone.
+        assert!(
+            fleet::protocol(
+                &host,
+                &json!({"id":id,"token":registration["token"],"action":"poll"})
+            )
+            .await
+            .is_err()
+        );
+        // A finished record is not continued: the same machine again is already revoked.
+        let again = lost(json!({"machine": id})).await;
+        assert_eq!(again.data["steps"][0]["detail"], "It was already revoked.");
     }
     #[tokio::test]
     async fn the_coordinator_keeps_the_approved_store_key_and_what_a_machine_holds() {

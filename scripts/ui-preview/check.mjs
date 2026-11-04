@@ -1702,13 +1702,30 @@ for (const [label, options] of [['desktop', {}], ['phone', { context: { viewport
   check(`${label}: the plan's shared quota is shown and an oversubscribed plan warns`, await panel.locator('#cloud-details').innerText().then(text => text.includes('compartidos por 6 cuentas') && text.includes('reduzca las partes')));
   const computers = panel.locator('#cloud-installation-list');
   check(`${label}: the account's computers are listed as text, this one and the revoked one without a revoke button`, await computers.innerText().then(text => text.includes('Synthetic <b>desktop</b>') && text.includes('Este computador') && text.includes('Acceso revocado'))
-    && await computers.locator('b').count() === 0 && await computers.getByRole('button').count() === 1);
+    && await computers.locator('b').count() === 0 && await computers.getByRole('button', { name: /^Revocar/ }).count() === 1);
+  check(`${label}: the coordinator offers «Lost or stolen» for every other computer, revoked or not`, await computers.getByRole('button', { name: /^Perdido o robado/ }).count() === 2);
   const revokeOther = computers.getByRole('button', { name: 'Revocar Synthetic <b>desktop</b>' });
   await revokeOther.click();
   check(`${label}: the first tap only arms the revocation`, await page.evaluate(() => !window.__ptaCloudRevoked) && (await revokeOther.innerText()).includes('Toca de nuevo'));
   await revokeOther.click();
-  await computers.getByRole('button').waitFor({ state: 'detached' });
+  await revokeOther.waitFor({ state: 'detached' });
   check(`${label}: the second tap revokes that computer by ID`, await page.evaluate(() => window.__ptaCloudRevoked === '00000000-0000-4000-8000-000000000002'));
+  const lostButton = computers.getByRole('button', { name: 'Perdido o robado: Synthetic <b>desktop</b>' });
+  await page.evaluate(() => { window.__ptaCloudLostPending = true; });
+  await lostButton.click();
+  check(`${label}: the first tap only arms securing the account`, await page.evaluate(() => !window.__ptaCloudLostArgs) && (await lostButton.innerText()).includes('Toca de nuevo'));
+  await lostButton.click();
+  const lostBox = panel.locator('#cloud-lost');
+  await lostBox.waitFor();
+  check(`${label}: a step that waits shows what to do, as text, and offers to continue`, await page.evaluate(() => window.__ptaCloudLostArgs.installation === '00000000-0000-4000-8000-000000000002')
+    && await lostBox.innerText().then(text => text.includes('Synthetic <b>desktop</b>') && text.includes('Espera tu acción') && text.includes('Aprueba el launcher') && text.includes('Clave de contenido rotada'))
+    && await lostBox.locator('b').count() === 0 && await panel.locator('#cloud-lost-continue').isVisible(), await lostBox.innerText());
+  await page.evaluate(axeSource);
+  check(`${label}: the lost computer steps pass axe`, (await scan(page)).length === 0, JSON.stringify(await scan(page)));
+  await panel.locator('#cloud-lost-continue').click();
+  await lostBox.waitFor({ state: 'hidden' });
+  check(`${label}: continuing finishes the steps for the same computer and says to back up the key`, await page.evaluate(() => window.__ptaCloudLostArgs.installation === '00000000-0000-4000-8000-000000000002')
+    && await page.waitForFunction(() => (document.querySelector('#notice-text')?.textContent ?? '').includes('pta variables key backup'), null, { timeout: 5000 }).then(() => true, () => false));
   const backupList = panel.locator('#cloud-backup-list');
   check(`${label}: the backups are listed and a damaged one cannot be restored`, await panel.locator('#cloud-backups').isVisible()
     && await backupList.innerText().then(text => text.includes('Antes de migrar') && text.includes('No se puede restaurar') && text.includes('no coincide'))

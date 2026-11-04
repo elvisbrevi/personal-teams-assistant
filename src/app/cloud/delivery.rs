@@ -7,12 +7,20 @@
 //! same bundle as at trust time, sealed to that key: the portal, the tunnel and Cloudflare carry
 //! only ciphertext, and a revoked machine is refused by the machine protocol before anything is
 //! sealed for it. `cloud_token` shows, on the coordinator, which computers hold the current
-//! credentials and how to replace the service token.
+//! credentials and how to replace the service token. The coordinator announces new credentials in
+//! its answer to each machine's poll (`store_delivery: true`), so a machine asks within seconds
+//! instead of at its next ten-minute check.
 use super::*;
 use crate::mirror::{handoff, key};
+use std::collections::{HashMap, HashSet};
 
 /// How often a computer asks while nothing tells it to ask sooner.
 const EVERY_SECONDS: i64 = 600;
+/// The least time between two announced asks, so a coordinator that keeps announcing (a machine to
+/// trust again, a seal that fails) does not turn every poll into a request.
+const ANNOUNCED_SECONDS: i64 = 30;
+/// How long the coordinator reuses what it holds when answering polls.
+const HELD_SECONDS: i64 = 30;
 /// The launcher that replaces the account's service token by rotating its secret in Access
 /// (`scripts/configure-cloud-access.py production --rotate`), named by convention.
 pub(super) const ROTATE_LAUNCHER: &str = "cloud-token-rotate";
@@ -70,6 +78,73 @@ pub(super) fn held(host: &Host) -> Option<(String, u32)> {
         handoff::token_fingerprint(&credentials.client_id, &credentials.client_secret),
         active,
     ))
+}
+
+type Held = Option<(String, u32)>;
+/// Per profile (a portal serves several accounts in one process): what the coordinator holds and
+/// when it read it.
+static HELD: std::sync::LazyLock<std::sync::Mutex<HashMap<std::path::PathBuf, (i64, Held)>>> =
+    std::sync::LazyLock::new(Default::default);
+/// Per profile: the machines whose announced ask is running.
+static ASKING: std::sync::LazyLock<std::sync::Mutex<HashSet<std::path::PathBuf>>> =
+    std::sync::LazyLock::new(Default::default);
+
+/// On the coordinator, answering a machine's poll: whether it holds older credentials than these
+/// (`token` fingerprint, content key version) and should ask for the new ones now. What the
+/// coordinator holds is read at most every `HELD_SECONDS`.
+pub(in crate::app) fn announce(host: &Host, token: &str, key: u32) -> bool {
+    if !host
+        .state
+        .settings
+        .config()
+        .is_ok_and(|config| enrolled(&config.cloud))
+    {
+        return false;
+    }
+    let profile = host.state.settings.profile().to_path_buf();
+    let current = {
+        let mut cached = HELD.lock().unwrap_or_else(|e| e.into_inner());
+        match cached.get(&profile) {
+            Some((at, held)) if now() - at < HELD_SECONDS => held.clone(),
+            _ => {
+                let held = held(host);
+                cached.insert(profile, (now(), held.clone()));
+                held
+            }
+        }
+    };
+    // Only a machine the coordinator can seal for is told; one to trust again is shown on the
+    // coordinator instead.
+    verdict(
+        current
+            .as_ref()
+            .map(|(token, active)| (token.as_str(), *active)),
+        "recorded",
+        token,
+        key,
+    ) == Verdict::Seal
+}
+
+/// On a machine, the coordinator announced new credentials: ask now, unless an ask is running or
+/// one finished in the last `ANNOUNCED_SECONDS`.
+pub(in crate::app) fn announced(host: &Arc<Host>) {
+    let profile = host.state.settings.profile().to_path_buf();
+    if now() - last(host).checked_at < ANNOUNCED_SECONDS
+        || !ASKING
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(profile.clone())
+    {
+        return;
+    }
+    let host = host.clone();
+    tokio::spawn(async move {
+        refresh(&host, true).await;
+        ASKING
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&profile);
+    });
 }
 
 /// On the coordinator, answering a machine's `store_delivery`: `current` when it holds this
@@ -409,6 +484,10 @@ pub(super) async fn operate_token(host: &Arc<Host>) -> Reply {
             "Run the approved launcher that rotates the service token's secret in Cloudflare Access (configure-cloud-access.py production --rotate): the previous secret stops working at once, this computer stores the new one and the account's other computers receive it automatically."
         },
     });
+    // A lost computer being secured from here, step by step.
+    if let Some(record) = super::lost::last(host) {
+        data["lost"] = super::lost::view(&record);
+    }
     let current = held.as_ref().map(|(token, _)| token.clone());
     let active = held.as_ref().map(|(_, active)| *active);
     let machines = crate::app::implementation::store_machines(host).await;

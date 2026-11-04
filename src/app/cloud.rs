@@ -18,9 +18,10 @@ use serde_json::{Value, json};
 use std::time::Duration;
 
 mod delivery;
+mod lost;
 mod mirror;
 pub(in crate::app) mod restore;
-pub(in crate::app) use delivery::{KEY_BEHIND, deliver};
+pub(in crate::app) use delivery::{KEY_BEHIND, announce, announced, deliver};
 pub(in crate::app) use mirror::{State, migration, primary, run};
 
 pub(super) const ACCESS_ID: &str = "CLOUD_ACCESS_CLIENT_ID";
@@ -98,6 +99,7 @@ pub(super) fn handles(method: &str) -> bool {
             | "cloud_restore"
             | "cloud_conflicts"
             | "cloud_resolve"
+            | "cloud_lost"
     )
 }
 
@@ -286,6 +288,15 @@ pub(super) async fn operate(host: &Arc<Host>, request: &control::Request) -> Rep
                 return Reply::error("invalid_input", 2, "Invalid arguments.");
             };
             restore::operate_restore(host, args).await
+        }
+        "cloud_lost" => {
+            if let Some(reply) = refused_here(host, &invocation) {
+                return reply;
+            }
+            let Ok(args) = serde_json::from_value::<lost::LostArgs>(request.args.clone()) else {
+                return Reply::error("invalid_input", 2, "Invalid arguments.");
+            };
+            lost::operate(host, args).await
         }
         "cloud_token" => {
             if let Some(reply) = refused_here(host, &invocation) {
@@ -1113,7 +1124,7 @@ async fn revoke(host: &Arc<Host>, args: RevokeArgs) -> Reply {
 /// Revoke a revoked computer's installation in the account store (`machine_revoke`). It still
 /// holds the account's content key and service token, so the reply says what else to do.
 pub(in crate::app) async fn revoke_installation(host: &Arc<Host>, id: &str) -> Value {
-    let next = "That computer still has the account's content key and service token: for a lost or stolen computer, replace the service token (the portal operator) and rotate the content key.";
+    let next = "That computer still has the account's content key and service token: for a lost or stolen computer, run cloud lost for it (pta cloud lost INSTALLATION --confirmed), which replaces the service token and rotates the content key.";
     let reply = revoke(
         host,
         RevokeArgs {

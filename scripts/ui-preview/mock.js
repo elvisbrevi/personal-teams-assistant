@@ -521,10 +521,27 @@
     }),
     // Synthetic connection: connected and live, so only the recorded expiry can change.
     cloud_connect: args => { window.__ptaCloudConnectArgs = structuredClone(args); return { changed: true }; },
+    // Synthetic lost computer: the first run can wait for the launcher's approval, the next completes.
+    cloud_lost: args => {
+      window.__ptaCloudLostArgs = structuredClone(args);
+      const pending = !!window.__ptaCloudLostPending;
+      window.__ptaCloudLostPending = false;
+      window.__ptaCloudLost = {
+        name: 'Synthetic <b>desktop</b>', installation: args.installation ?? null, machine: args.machine ?? null, started_at: secs(NOW), finished_at: pending ? null : secs(NOW), complete: !pending,
+        steps: [
+          { step: 'machine', state: 'done', at: secs(NOW), detail: 'Revoked on this coordinator.' },
+          { step: 'store', state: 'done', at: secs(NOW), detail: 'It was already revoked.' },
+          { step: 'token', state: pending ? 'pending' : 'done', at: secs(NOW), detail: pending ? 'Approve the launcher cloud-token-rotate in Settings › Variables › Local programs, then run this again.' : 'Replaced.' },
+          { step: 'key', state: 'done', at: secs(NOW), detail: 'Content key version 2 is active; 42 records are being sealed again.' },
+        ],
+      };
+      return { ...structuredClone(window.__ptaCloudLost), next: 'Back up the new content key now.' };
+    },
     cloud_restore: args => { window.__ptaCloudRestore = args.backup; return { restarting: true, backup: args.backup, assistant: false }; },
     // Synthetic service token: the coordinator's view, one computer waiting and one to trust again.
     cloud_token: () => ({
       connected: true, coordinator: true, service_token: { stored: true, expires_at: secs(NOW) + 300 * 86400 },
+      ...(window.__ptaCloudLost ? { lost: structuredClone(window.__ptaCloudLost) } : {}),
       replace: { where: 'here', runs_here: true, launcher: { id: 'cloud-token-rotate', defined: true, approved: true }, command: 'pta variables launcher run cloud-token-rotate --confirmed' },
       pending: window.__ptaCloudTokenRotated ? 1 : 2,
       computers: [

@@ -99,6 +99,24 @@ pub(super) async fn save_roots(host: &Arc<Host>, args: &Value) -> Result<Value> 
     Ok(json!({"roots":data.settings.roots,"saved":true}))
 }
 
+/// Revoke a machine on this coordinator and drop its pending calls; returns its installation in the
+/// account store (empty: none). Repeating it on a revoked machine changes nothing more.
+pub(super) async fn revoke_now(host: &Arc<Host>, id: &str) -> Result<String> {
+    let state = &host.state.implementation;
+    let mut data = state.registry.lock().await;
+    let store = data
+        .machines
+        .iter()
+        .find(|m| m.id == id)
+        .map(|m| m.store_installation.clone())
+        .unwrap_or_default();
+    revoke(&mut data, id)?;
+    state.save(&data)?;
+    drop(data);
+    state.calls.lock().await.retain(|c| c.machine != id);
+    Ok(store)
+}
+
 pub(super) async fn operate(host: &Arc<Host>, method: &str, args: &Value) -> Result<Value> {
     if let Some(result) = fleet::coordinator(host, method, args).await? {
         return Ok(result);
@@ -128,17 +146,7 @@ pub(super) async fn operate(host: &Arc<Host>, method: &str, args: &Value) -> Res
                 id != own,
                 "The coordinator cannot revoke itself. Ask the portal operator to revoke the account instead."
             );
-            let mut data = state.registry.lock().await;
-            let store = data
-                .machines
-                .iter()
-                .find(|m| m.id == id)
-                .map(|m| m.store_installation.clone())
-                .unwrap_or_default();
-            revoke(&mut data, id)?;
-            state.save(&data)?;
-            drop(data);
-            state.calls.lock().await.retain(|c| c.machine != id);
+            let store = revoke_now(host, id).await?;
             let mut reply = json!({"revoked":true,"machine":id});
             if !store.is_empty() {
                 reply["store"] = super::super::cloud::revoke_installation(host, &store).await;

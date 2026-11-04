@@ -569,6 +569,18 @@ pub(super) const TOOLS: &[Tool] = &[
         },
     },
     Tool {
+        name: "cloud_lost",
+        title: "Secure the account after a lost computer",
+        description: "For a lost or stolen computer, on the account's coordinator, in one confirmed action: revokes its machine here and its installation in the account store, replaces the service token with the approved launcher cloud-token-rotate (only from this machine's window or local CLI; a portal account asks its operator) and rotates the content key, so the account's other computers receive both within a minute. Give the installation from cloud_installations or the machine ID from machine_list, not both. The reply lists each step (done, not_needed, pending, failed) with what to do; repeating the same call continues where it stopped and never repeats a finished step. Relay `next` (back up the new key). Owner, or a portal account the operator enabled the account store for. Needs the user's confirmation.",
+        effect: Effect::External,
+        schema: || {
+            object(
+                json!({"installation":string("The lost computer's installation ID from cloud_installations."),"machine":string("Or its machine ID from machine_list."),"confirmed":confirmed()}),
+                &[],
+            )
+        },
+    },
+    Tool {
         name: "cloud_rotate_key",
         title: "Rotate the account content key",
         description: "For a lost or stolen computer, after revoking it: a new account content key becomes active on this installation and the whole copy in the account store is sent again sealed with it (under compare-and-swap in primary); earlier keys stay here so nothing becomes unreadable. Tell the user to back up the new key (pta variables key backup); the account's other computers trusted with the account store receive it from the coordinator within minutes (cloud_token lists which hold it). Also replace the service token for a lost computer (cloud_token). Owner, or a portal account the operator enabled the account store for. Needs the user's confirmation.",
@@ -1746,7 +1758,7 @@ pub(super) async fn run(name: &str, args: &Value) -> Result<Value, String> {
         | "cloud_backups" | "cloud_conflicts" => {
             ipc(name, args.clone()).await
         }
-        "cloud_migrate" | "cloud_rollback" | "cloud_erase" | "cloud_disconnect" | "cloud_promote" | "cloud_pull" | "cloud_revoke" | "cloud_rotate_key" | "cloud_restore" | "cloud_resolve" => {
+        "cloud_migrate" | "cloud_rollback" | "cloud_erase" | "cloud_disconnect" | "cloud_promote" | "cloud_pull" | "cloud_revoke" | "cloud_rotate_key" | "cloud_restore" | "cloud_resolve" | "cloud_lost" => {
             let mut args = args.clone();
             args.as_object_mut().unwrap().remove("confirmed");
             ipc(name, args).await
@@ -2108,6 +2120,10 @@ pub(super) fn confirmation(name: &str, args: &Value) -> Option<String> {
         },
         "cloud_erase" => "Erase this account's copy in the account store (records and backups) and set the content key aside? This computer keeps all of its data.".into(),
         "cloud_rotate_key" => "Rotate the account content key: seal the whole copy again with a new key (the earlier one stays on this computer)?".into(),
+        "cloud_lost" => format!(
+            "Secure the account after the lost computer {}: revoke it here and in the account store, replace the service token and rotate the content key?",
+            args["installation"].as_str().or(args["machine"].as_str()).unwrap_or_default()
+        ),
         "cloud_resolve" => format!(
             "Keep {} version of {} record {}?",
             if args["keep"] == "here" { "this computer's" } else { "the account store's" },

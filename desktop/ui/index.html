@@ -436,8 +436,14 @@
             <div id="cloud-details" class="list" hidden></div>
             <div id="cloud-installations" hidden>
               <h3>Computers of this account</h3>
-              <p class="hint">Each computer connected to this account's store. Revoking one stops its access at once; it keeps its own data and can connect again with the service token.</p>
+              <p class="hint">Each computer connected to this account's store. Revoking one stops its access at once; it keeps its own data and can connect again with the service token. For a lost or stolen computer, «Lost or stolen» also replaces the service token and rotates the content key.</p>
               <div id="cloud-installation-list" class="list"></div>
+            </div>
+            <div id="cloud-lost" hidden>
+              <h3>Lost computer</h3>
+              <p id="cloud-lost-summary" class="hint" role="status"></p>
+              <div id="cloud-lost-steps" class="list"></div>
+              <div class="actions"><button id="cloud-lost-continue" type="button" hidden>Continue</button></div>
             </div>
             <div id="cloud-token" hidden>
               <h3>Service token</h3>
