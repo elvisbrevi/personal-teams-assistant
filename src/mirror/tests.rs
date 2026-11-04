@@ -1182,6 +1182,135 @@ async fn a_local_change_the_store_never_acknowledged_is_never_overwritten_by_a_p
     assert!(f.verify().await.ok);
 }
 
+#[test]
+fn a_conflict_lists_the_fields_that_differ() {
+    let here = json!({"llm": {"language": "es", "model": "a"}, "policy": {"greeting": "hola"}, "list": [1]});
+    let store = json!({"llm": {"language": "en", "model": "a"}, "policy": {}, "list": [1, 2]});
+    let fields = super::primary::diff(Some(&here), Some(&store));
+    let paths: Vec<&str> = fields.iter().map(|f| f.path.as_str()).collect();
+    assert_eq!(paths, ["list", "llm.language", "policy.greeting"]);
+    assert_eq!(fields[2].here, Some(json!("hola")));
+    assert_eq!(fields[2].store, None);
+    assert!(super::primary::diff(Some(&here), Some(&here)).is_empty());
+    let removed = super::primary::diff(None, Some(&store));
+    assert_eq!(removed.len(), 1);
+    assert_eq!(removed[0].path, "");
+}
+
+/// A note changed here without reaching the store and changed in the store by another installation.
+async fn conflicting(f: &Fixture) {
+    f.local.set(
+        Collection::Notes,
+        "n1",
+        json!({"title": "one", "text": "same"}),
+    );
+    f.flush(100).await;
+    let other = Installation::new();
+    other
+        .engine(f)
+        .pull(&other.local, false)
+        .await
+        .unwrap()
+        .unwrap();
+    other
+        .engine(f)
+        .write(&[change(
+            Collection::Notes,
+            "n1",
+            Some(json!({"title": "theirs", "text": "same"})),
+        )])
+        .await
+        .unwrap()
+        .unwrap()
+        .settle(&other.ledger)
+        .unwrap();
+    f.local.set(
+        Collection::Notes,
+        "n1",
+        json!({"title": "mine", "text": "same"}),
+    );
+    assert_eq!(f.pull(false).await.conflicts, 1);
+}
+
+#[tokio::test]
+async fn a_conflict_is_resolved_per_record_with_the_stores_version() {
+    let f = Fixture::new();
+    conflicting(&f).await;
+    let listed = f.primary().conflicts().await.unwrap().unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(
+        (listed[0].collection, listed[0].id.as_str()),
+        (Collection::Notes, "n1")
+    );
+    assert_eq!(listed[0].fields.len(), 1);
+    assert_eq!(listed[0].fields[0].path, "title");
+    assert_eq!(listed[0].fields[0].here, Some(json!("mine")));
+    assert_eq!(listed[0].fields[0].store, Some(json!("theirs")));
+    let resolved = f
+        .primary()
+        .resolve(
+            &f.local,
+            Collection::Notes,
+            "n1",
+            super::primary::Keep::Store,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(resolved.is_some());
+    assert_eq!(f.value(Collection::Notes, "n1").unwrap()["title"], "theirs");
+    assert_eq!(f.ledger.conflicts().unwrap(), 0);
+    assert!(f.primary().conflicts().await.unwrap().unwrap().is_empty());
+    // Not in conflict anymore: nothing to resolve, and the copy verifies.
+    assert!(
+        f.primary()
+            .resolve(
+                &f.local,
+                Collection::Notes,
+                "n1",
+                super::primary::Keep::Here
+            )
+            .await
+            .unwrap()
+            .unwrap()
+            .is_none()
+    );
+    assert!(f.verify().await.ok);
+}
+
+#[tokio::test]
+async fn a_conflict_is_resolved_per_record_with_this_installations_version() {
+    let f = Fixture::new();
+    conflicting(&f).await;
+    let resolved = f
+        .primary()
+        .resolve(
+            &f.local,
+            Collection::Notes,
+            "n1",
+            super::primary::Keep::Here,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(resolved.is_some());
+    assert_eq!(f.value(Collection::Notes, "n1").unwrap()["title"], "mine");
+    assert_eq!(f.ledger.conflicts().unwrap(), 0);
+    // The store now holds this installation's version: another installation pulls it.
+    let other = Installation::new();
+    other
+        .engine(&f)
+        .pull(&other.local, false)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        other.local.collect(Collection::Notes).unwrap()[0].value["title"],
+        "mine"
+    );
+    assert!(f.verify().await.ok);
+}
+
 #[tokio::test]
 async fn the_outbox_sends_configuration_naming_its_base_and_stops_at_a_conflict() {
     let f = Fixture::new();

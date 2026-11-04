@@ -1673,15 +1673,20 @@ for (const [label, options] of [['desktop', {}], ['phone', { context: { viewport
   check(`${label}: the first tap only arms the promotion`, (await promote.innerText()).includes('Toca de nuevo') && await page.evaluate(() => window.__ptaCloudMirror.mode === 'mirror'));
   await promote.click();
   await panel.locator('#cloud-demote').waitFor();
-  const replace = panel.locator('#cloud-replace');
-  check(`${label}: primary mode explains read-only and shows the conflict`, await promote.isHidden() && await rollback.isVisible() && await panel.locator('#cloud-rollback-local').isVisible() && await replace.isVisible() && (await panel.locator('#cloud-mirror-summary').innerText()).includes('fuente'));
+  const conflicts = panel.locator('#cloud-conflicts');
+  await conflicts.waitFor();
+  check(`${label}: primary mode explains read-only and lists the conflict's fields as text`, await promote.isHidden() && await rollback.isVisible() && await panel.locator('#cloud-rollback-local').isVisible()
+    && (await panel.locator('#cloud-mirror-summary').innerText()).includes('fuente')
+    && await conflicts.innerText().then(text => text.includes('La configuración de la cuenta') && text.includes('policy.greeting') && text.includes('Hola <b>equipo</b>') && text.includes('Buenos días') && text.includes('(no está)') && text.includes('…'))
+    && await conflicts.locator('b').count() === 0);
   await page.evaluate(axeSource);
   check(`${label}: primary mode passes axe`, (await scan(page)).length === 0, JSON.stringify(await scan(page)));
-  await replace.click();
-  check(`${label}: the first tap only arms the replacement`, (await replace.innerText()).includes('Toca otra vez'), await replace.innerText());
-  await replace.click();
-  await replace.waitFor({ state: 'hidden' });
-  check(`${label}: replacing clears the conflict`, await page.evaluate(() => window.__ptaCloudMirror.primary.conflicts === 0));
+  const keepStore = conflicts.getByRole('button', { name: /Conservar el del almacén de cuenta/ });
+  await keepStore.click();
+  check(`${label}: the first tap only arms the choice`, (await keepStore.innerText()).includes('Toca de nuevo') && await page.evaluate(() => !window.__ptaCloudResolved));
+  await keepStore.click();
+  await conflicts.waitFor({ state: 'hidden' });
+  check(`${label}: the second tap keeps the store's version of that record and clears the conflict`, await page.evaluate(() => window.__ptaCloudResolved?.collection === 'settings' && window.__ptaCloudResolved?.record === 'config' && window.__ptaCloudResolved?.keep === 'store' && window.__ptaCloudMirror.primary.conflicts === 0));
   check(`${label}: without a conflict the store's version is not offered`, await panel.locator('#cloud-rollback-local').isHidden());
   await panel.locator('#cloud-demote').click();
   await panel.locator('#cloud-promote').waitFor();

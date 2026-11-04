@@ -189,6 +189,14 @@ Account store (Cloudflare)
                            running, then restarts the application: before anything opens it copies the current data to
                            backups/before-restore-<time>/ (never deleted) and puts the backup's files back. This
                            computer's account store link ([cloud]) stays as it is now.
+  cloud conflicts             Owner or enabled portal account, in primary. The configuration records changed both here and in the
+                           account store (collection, record, label) with every field that differs (path, this computer's
+                           value, the store's).
+  cloud resolve COLLECTION RECORD --keep here|store --confirmed
+                           Settles one of them: store installs the account store's version here (this computer's
+                           configuration and notes backed up first); here writes this computer's over the store's current
+                           one under compare-and-swap (the store's kept in cloud/backups/overwritten-<time>.json). There is
+                           no automatic merge. pull --replace still takes the store's version of every record at once.
   cloud installations         Owner or enabled portal account. The account's computers in the account store: label, host version, when each
                            enrolled and was last seen, revoked ones and which is this one.
   cloud installations revoke ID --confirmed
@@ -438,6 +446,7 @@ fn words(args: &[String]) -> Vec<&str> {
                 | "--existing"
                 | "--endpoint"
                 | "--label"
+                | "--keep"
         ) {
             skip = true;
         } else if !arg.starts_with("--") {
@@ -703,6 +712,36 @@ async fn cloud_command(args: &[String]) -> Result<Reply> {
         }
         Some("token") => call("cloud_token", json!({}), None, true).await,
         Some("backups") => call("cloud_backups", json!({}), None, true).await,
+        Some("conflicts") => call("cloud_conflicts", json!({}), None, true).await,
+        Some("resolve") => {
+            let (collection, record) = match (words(args).get(2), words(args).get(3)) {
+                (Some(collection), Some(record)) => (*collection, *record),
+                _ => anyhow::bail!(
+                    "missing argument: give the collection and the record, as pta cloud conflicts lists them"
+                ),
+            };
+            let keep = option(args, "--keep").context("missing argument: --keep here|store")?;
+            if let Some(reply) = unconfirmed(
+                args,
+                format!(
+                    "Keep {} version of {collection} record {record}?",
+                    if keep == "here" {
+                        "this computer's"
+                    } else {
+                        "the account store's"
+                    }
+                ),
+            ) {
+                return Ok(reply);
+            }
+            call(
+                "cloud_resolve",
+                json!({"collection": collection, "record": record, "keep": keep}),
+                None,
+                true,
+            )
+            .await
+        }
         Some("restore") => {
             let backup = words(args)
                 .get(2)
@@ -1238,7 +1277,7 @@ fn validate_args(args: &[String]) -> Result<()> {
             | "--adopt"
             | "--forget-service-token" => {}
             "--destination" | "--name" | "--existing" | "--to" | "--target" | "--label"
-            | "--token-expires" => {
+            | "--token-expires" | "--keep" => {
                 i += 1;
                 ensure!(
                     args.get(i)
@@ -1444,7 +1483,9 @@ fn validate_args(args: &[String]) -> Result<()> {
                     | "rotate-key"
                     | "token"
                     | "backups"
+                    | "conflicts"
             ]
+            | ["cloud", "resolve", _, _]
             | ["cloud", "installations", "revoke", _]
             | ["cloud", "restore", _]
             | ["credentials", "list"]
@@ -1588,6 +1629,7 @@ fn validate_args(args: &[String]) -> Result<()> {
                 || p.as_slice() == ["cloud", "pull"]
                 || p.as_slice() == ["cloud", "rotate-key"]
                 || p.as_slice().starts_with(&["cloud", "restore"])
+                || p.as_slice().starts_with(&["cloud", "resolve"])
                 || p.as_slice()
                     .starts_with(&["cloud", "installations", "revoke"])
                 || p.as_slice().starts_with(&["update", "stage"])
@@ -1624,6 +1666,7 @@ fn validate_args(args: &[String]) -> Result<()> {
         ("--keep-local", p.as_slice() == ["cloud", "rollback"]),
         ("--replace", p.as_slice() == ["cloud", "pull"]),
         ("--label", p.as_slice() == ["cloud", "connect"]),
+        ("--keep", p.as_slice().starts_with(&["cloud", "resolve"])),
         (
             "--target",
             p.as_slice()
@@ -1797,7 +1840,7 @@ async fn execute(mut args: Vec<String>) -> Result<Reply> {
         }
         "capabilities" => {
             return Ok(Reply::success(
-                json!({"contract":control::CONTRACT,"commands":HELP,"skill_version":env!("CARGO_PKG_VERSION"),"activity_registration_support":true,"web_support":true,"web_access_support":true,"knowledge_index_support":true,"mcp_support":true,"tools_support":true,"todo_support":true,"implementation_support":true,"machine_pairing_support":true,"machine_login_support":true,"machine_management_support":true,"account_variables_support":true,"account_portable_support":true,"account_authority_support":true,"shared_accounts_support":true,"cloud_store_support":true,"cloud_mirror_support":true,"cloud_disconnect_support":true,"cloud_primary_support":true,"cloud_migration_support":true,"cloud_installations_support":true,"cloud_handoff_support":true,"cloud_delivery_support":true,"cloud_restore_support":true}),
+                json!({"contract":control::CONTRACT,"commands":HELP,"skill_version":env!("CARGO_PKG_VERSION"),"activity_registration_support":true,"web_support":true,"web_access_support":true,"knowledge_index_support":true,"mcp_support":true,"tools_support":true,"todo_support":true,"implementation_support":true,"machine_pairing_support":true,"machine_login_support":true,"machine_management_support":true,"account_variables_support":true,"account_portable_support":true,"account_authority_support":true,"shared_accounts_support":true,"cloud_store_support":true,"cloud_mirror_support":true,"cloud_disconnect_support":true,"cloud_primary_support":true,"cloud_migration_support":true,"cloud_installations_support":true,"cloud_handoff_support":true,"cloud_delivery_support":true,"cloud_restore_support":true,"cloud_conflicts_support":true}),
             ));
         }
         "skill" => return crate::app::skill::command(action, args.get(2).map(String::as_str)),
@@ -2835,6 +2878,16 @@ mod wiki_tests {
             &["cloud", "installations"],
             &["cloud", "token"],
             &["cloud", "backups"],
+            &["cloud", "conflicts"],
+            &[
+                "cloud",
+                "resolve",
+                "notes",
+                "n1",
+                "--keep",
+                "store",
+                "--confirmed",
+            ],
             &["cloud", "restore", "cloud-1793748961", "--confirmed"],
             &["cloud", "rotate-key", "--confirmed"],
             &[

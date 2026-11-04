@@ -10,7 +10,7 @@ use crate::{
     config::Config,
     index::{Index, Note},
     knowledge::KnowledgeMap,
-    mirror::primary::{Accepted, Apply, Change, Pulled, Refusal},
+    mirror::primary::{Accepted, Apply, Change, Conflict, Keep, Pulled, Refusal},
     store::{
         notes::{LocalNotes, NotesStore},
         organization::OrganizationRecord,
@@ -634,6 +634,248 @@ pub(in crate::app::cloud) async fn operate_pull(host: &Arc<Host>, args: PullArgs
         }
         Err(error) => pull_reply(&error),
     }
+}
+
+/// How much of a value a conflict shows per side, and how many fields per record.
+const PREVIEW_CHARS: usize = 300;
+const FIELDS_SHOWN: usize = 200;
+
+fn preview(value: &Option<Value>) -> Value {
+    let Some(value) = value else {
+        return Value::Null;
+    };
+    let text = value.to_string();
+    if text.chars().count() <= PREVIEW_CHARS {
+        return value.clone();
+    }
+    json!({"preview": text.chars().take(PREVIEW_CHARS).collect::<String>(), "truncated": true})
+}
+
+/// What the person recognizes a record by: its kind, or a note's title.
+fn label(conflict: &Conflict) -> String {
+    match (conflict.collection, conflict.id.as_str()) {
+        (Collection::Settings, "config") => "The account's settings".into(),
+        (Collection::Settings, "knowledge_map") => "The knowledge map".into(),
+        (Collection::Organization, _) => "The organization and its guides".into(),
+        (Collection::Notes, _) => conflict
+            .here
+            .as_ref()
+            .or(conflict.store.as_ref())
+            .and_then(|v| v["note"]["title"].as_str())
+            .map_or_else(|| "A note".into(), |title| format!("Note «{title}»")),
+        _ => conflict.id.clone(),
+    }
+}
+
+fn conflict_view(conflict: &Conflict) -> Value {
+    json!({
+        "collection": conflict.collection.name(),
+        "record": conflict.id,
+        "label": label(conflict),
+        "store_revision": conflict.store_revision,
+        "removed_here": conflict.here.is_none(),
+        "removed_in_store": conflict.store.is_none(),
+        "fields": conflict.fields.iter().take(FIELDS_SHOWN).map(|f| json!({
+            "path": f.path, "here": preview(&f.here), "store": preview(&f.store),
+        })).collect::<Vec<_>>(),
+        "more_fields": conflict.fields.len().saturating_sub(FIELDS_SHOWN),
+    })
+}
+
+/// `cloud_conflicts`: the configuration records changed both here and in the account store,
+/// each with the fields that differ. Read-only; asks the store for its current versions.
+pub(in crate::app::cloud) async fn operate_conflicts(host: &Arc<Host>) -> Reply {
+    let _operations = host.state.operations.lock().await;
+    let _gate = hold(host).await;
+    let Ok(config) = host.state.settings.config() else {
+        return Reply::error(
+            "operation_failed",
+            1,
+            "The configuration could not be read.",
+        );
+    };
+    if config.cloud.mode != CloudMode::Primary {
+        return Reply::success(json!({"mode": config.cloud.mode, "conflicts": [], "count": 0}));
+    }
+    let setup = match open(host, &config.cloud) {
+        Ok(setup) => setup,
+        Err(missing) => return missing_reply(&missing),
+    };
+    let local = HostLocal(host);
+    let engine = Engine {
+        local: &local,
+        transport: &setup.http,
+        ledger: &setup.ledger,
+        content: &setup.content,
+        cas: true,
+    };
+    match engine.conflicts().await {
+        Ok(Ok(found)) => {
+            observe(host, &config.cloud, None);
+            Reply::success(json!({
+                "mode": config.cloud.mode,
+                "count": found.len(),
+                "conflicts": found.iter().map(conflict_view).collect::<Vec<_>>(),
+            }))
+        }
+        Ok(Err(failure)) => {
+            observe(host, &config.cloud, Some(&failure));
+            failure_reply(&failure)
+        }
+        Err(_) => Reply::error("operation_failed", 1, "The conflicts could not be read."),
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(in crate::app::cloud) struct ResolveArgs {
+    collection: String,
+    record: String,
+    /// `here` (this computer's version goes to the store) or `store` (the store's comes here).
+    keep: String,
+}
+
+/// `cloud_resolve`: settle one conflicting record with the version the person chose. Keeping the
+/// store's backs this computer's configuration and notes up first (`cloud/backups/replaced-…`);
+/// keeping this computer's keeps the store's version in `cloud/backups/overwritten-…`.
+pub(in crate::app::cloud) async fn operate_resolve(host: &Arc<Host>, args: ResolveArgs) -> Reply {
+    let invalid = |message: &str| Reply::error("invalid_input", 2, message);
+    let Some(collection) = Collection::parse(&args.collection).filter(|c| c.is_configuration())
+    else {
+        return invalid("Give a configuration collection: settings, organization or notes.");
+    };
+    let keep = match args.keep.as_str() {
+        "here" => Keep::Here,
+        "store" => Keep::Store,
+        _ => return invalid("Keep here (this computer's version) or store (the account store's)."),
+    };
+    let _operations = host.state.operations.lock().await;
+    let _gate = hold(host).await;
+    let Ok(config) = host.state.settings.config() else {
+        return Reply::error(
+            "operation_failed",
+            1,
+            "The configuration could not be read.",
+        );
+    };
+    if config.cloud.mode != CloudMode::Primary {
+        return Reply::error(
+            "not_ready",
+            3,
+            "The account store is not the source of truth on this installation; nothing is in conflict.",
+        );
+    }
+    let setup = match open(host, &config.cloud) {
+        Ok(setup) => setup,
+        Err(missing) => return missing_reply(&missing),
+    };
+    let local = HostLocal(host);
+    let engine = Engine {
+        local: &local,
+        transport: &setup.http,
+        ledger: &setup.ledger,
+        content: &setup.content,
+        cas: true,
+    };
+    let current = match engine.conflicts().await {
+        Ok(Ok(found)) => found
+            .into_iter()
+            .find(|c| c.collection == collection && c.id == args.record),
+        Ok(Err(failure)) => {
+            observe(host, &config.cloud, Some(&failure));
+            return failure_reply(&failure);
+        }
+        Err(_) => return Reply::error("operation_failed", 1, "The conflicts could not be read."),
+    };
+    let Some(current) = current else {
+        return Reply::error(
+            "state_conflict",
+            6,
+            "This record is not in conflict (anymore); read the conflicts again.",
+        );
+    };
+    let backup = match keep {
+        Keep::Store => back_up(host),
+        Keep::Here => keep_overwritten(host, &current),
+    };
+    let Ok(backup) = backup else {
+        return Reply::error(
+            "operation_failed",
+            1,
+            "The version about to be replaced could not be backed up; nothing was changed.",
+        );
+    };
+    match engine
+        .resolve(&HostApply(host), collection, &args.record, keep)
+        .await
+    {
+        Ok(Ok(Some(_))) => {
+            observe(host, &config.cloud, None);
+            crate::mirror::wake();
+            let applied = keep == Keep::Store && collection != Collection::Notes;
+            Reply::success(json!({
+                "resolved": true,
+                "collection": collection.name(),
+                "record": args.record,
+                "kept": args.keep,
+                "backup": backup,
+                "remaining": setup.ledger.conflicts().unwrap_or(0),
+                "restart_required": applied && host.state.running.try_lock().map_or(true, |r| r.is_some()),
+            }))
+        }
+        Ok(Ok(None)) => Reply::error(
+            "state_conflict",
+            6,
+            "This record is not in conflict (anymore); read the conflicts again.",
+        ),
+        Ok(Err(Refusal::Conflict)) => {
+            crate::mirror::wake();
+            Reply::error(
+                "state_conflict",
+                6,
+                "The account store changed this record again; read the conflicts again and choose.",
+            )
+        }
+        Ok(Err(Refusal::TooLarge)) => {
+            invalid("This computer's version is too large for the account store.")
+        }
+        Ok(Err(Refusal::Failure(failure))) => {
+            observe(host, &config.cloud, Some(&failure));
+            failure_reply(&failure)
+        }
+        Ok(Err(Refusal::Unresolved)) | Err(_) => Reply::error(
+            "operation_failed",
+            1,
+            "The chosen version could not be installed; nothing more was changed. Check pta cloud status.",
+        ),
+    }
+}
+
+/// The store's version of a record this computer's replaces, kept privately (the newest three).
+fn keep_overwritten(host: &Host, conflict: &Conflict) -> Result<String> {
+    let dir = host.state.settings.profile().join("cloud").join("backups");
+    security::private_dir(&dir)?;
+    let path = dir.join(format!("overwritten-{}.json", now()));
+    write_private(
+        &path,
+        &serde_json::to_string(&json!({
+            "collection": conflict.collection.name(), "record": conflict.id,
+            "store_revision": conflict.store_revision, "store": conflict.store,
+        }))?,
+    )?;
+    let mut held: Vec<_> = std::fs::read_dir(&dir)?
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with("overwritten-"))
+        })
+        .collect();
+    held.sort();
+    while held.len() > BACKUPS {
+        let _ = std::fs::remove_file(held.remove(0));
+    }
+    Ok(path.display().to_string())
 }
 
 /// A private copy of the configuration and the notes about to be replaced, in

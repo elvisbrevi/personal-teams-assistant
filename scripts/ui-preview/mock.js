@@ -548,6 +548,16 @@
       mirror.primary = { promoted_at: secs(NOW), conflicts: window.__ptaCloudConflicts ?? 0, last_pull: { at: secs(NOW), applied: 0, conflicts: 0 } };
       return { action: 'promote', mode: 'primary', changed: true, verify: { ok: true, collections: [] } };
     },
+    // Synthetic conflict: the account's settings changed on both sides, one field long enough to be cut.
+    cloud_conflicts: () => ({ mode: 'primary', count: window.__ptaCloudMirror?.primary?.conflicts ? 1 : 0, conflicts: window.__ptaCloudMirror?.primary?.conflicts ? [
+      { collection: 'settings', record: 'config', label: "The account's settings", store_revision: 7, removed_here: false, removed_in_store: false, more_fields: 0,
+        fields: [
+          { path: 'policy.greeting', here: 'Hola <b>equipo</b>', store: 'Buenos días' },
+          { path: 'llm.language', here: 'es', store: null },
+          { path: 'policy.signature', here: { preview: 'x'.repeat(300), truncated: true }, store: 'Firma' },
+        ] },
+    ] : [] }),
+    cloud_resolve: args => { window.__ptaCloudResolved = structuredClone(args); window.__ptaCloudMirror.primary.conflicts = 0; return { resolved: true, ...args, kept: args.keep, remaining: 0 }; },
     cloud_pull: args => {
       const primary = window.__ptaCloudMirror.primary;
       const resolved = args?.replace ? primary.conflicts : 0;

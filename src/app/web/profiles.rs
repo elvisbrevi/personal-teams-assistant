@@ -327,6 +327,8 @@ impl Portal {
             "cloud_token",
             "cloud_backups",
             "cloud_restore",
+            "cloud_conflicts",
+            "cloud_resolve",
             "setup_readiness",
             "variable_create",
             "variable_update",

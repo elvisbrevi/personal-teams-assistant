@@ -17,7 +17,9 @@ CLOUDFLARE_API_TOKEN_FILE, as for configure-cloud-access.py), and the copy runs 
 (dry run, then confirmed), verify, promote, a configuration edit and a note through the store and
 a pull with replace; then a second computer of the account (a fresh profile with the content key a
 trust confirmation hands over) is refused without adopting, adopts, verifies, joins primary and
-edits through the store, which the first pulls; another account (the second token) sees none of
+edits through the store, which the first pulls; a conflict (the second edits through the store, the
+first by hand) that the first sees field by field, resolves keeping its own and the second receives;
+another account (the second token) sees none of
 it; then rollback, an erasure refused while the second computer is connected, its revocation and
 the erasure, checking that local data never shrinks and that the store ends empty; last, the backup
 the migration took is restored (the host restarts itself, keeps the data from just before and comes
@@ -288,7 +290,37 @@ def second_installation(run, endpoint, service, label, greeting):
     run.step("first: pull", r, applied=((r.get("data") or {}).get("pulled") or {}).get("applied"))
     r = run.pta("config", "get", "policy.greeting")
     run.expect(r.get("ok") and json.dumps(second) in json.dumps(r.get("data")), "the first computer receives the second's edit")
-    return other, second
+    return other, conflict(run, other)
+
+
+def conflict(run, other):
+    """Both computers change the greeting: the second through the store, the first by hand (never
+    acknowledged). The first sees which field differs, keeps its own, and the second receives it."""
+    theirs = f"Rehearsal theirs {secrets.token_hex(3)}"
+    mine = f"Rehearsal mine {secrets.token_hex(3)}"
+    r = other.pta("config", "set", "policy.greeting", json.dumps(theirs))
+    run.expect(r.get("ok"), "the second computer edits the greeting again through the store")
+    config = run.profile / "config.toml"
+    text, n = re.subn(r'(?m)^greeting = .*$', "greeting = " + json.dumps(mine), config.read_text(), count=1)
+    run.expect(n == 1, "the first computer's greeting is edited by hand")
+    config.write_text(text)
+    r = run.pta("cloud", "pull")
+    run.step("first: pull with a hand edit", r, conflicts=(r.get("data") or {}).get("conflicts"))
+    r = run.pta("cloud", "conflicts")
+    found = (r.get("data") or {}).get("conflicts") or []
+    fields = {f.get("path"): f for c in found for f in c.get("fields", [])}
+    run.step("cloud conflicts", r, records=len(found), fields=len(fields))
+    greeting = fields.get("policy.greeting", {})
+    run.expect(r.get("ok") and len(found) == 1 and greeting.get("here") == mine and greeting.get("store") == theirs,
+               "the conflict shows the field that differs on each side")
+    record = found[0]
+    r = run.pta("cloud", "resolve", record["collection"], record["record"], "--keep", "here", "--confirmed")
+    run.step("cloud resolve --keep here", r, remaining=(r.get("data") or {}).get("remaining"))
+    run.expect(r.get("ok") and (r.get("data") or {}).get("remaining") == 0, "keeping this computer's version settles the conflict")
+    r = other.pta("cloud", "pull")
+    r = other.pta("config", "get", "policy.greeting")
+    run.expect(r.get("ok") and json.dumps(mine) in json.dumps(r.get("data")), "the second computer receives the version kept")
+    return mine
 
 
 def second_account(binaries, root, endpoint, service, label, first_records):
@@ -387,6 +419,13 @@ def rehearse(run, endpoint, service, label, second_service=None):
         enrolled, held, adopt, steps = second_account(run.binaries, run.root, endpoint, second_service, label, sum(local.values()))
         run.steps.extend(steps)
         run.expect(enrolled and held == 0 and adopt is False, "another account's store holds none of this account's records")
+    # Both computers' outboxes empty first, so nothing they still send changes the counts below.
+    for _ in range(120):
+        pending = [((i.pta("cloud", "status").get("data") or {}).get("mirror") or {}).get("outbox", {}).get("pending")
+                   for i in (run, other)]
+        if pending == [0, 0]:
+            break
+        time.sleep(1)
     store_before = ((run.pta("cloud", "status").get("data") or {}).get("store") or {}).get("collections") or {}
     r = run.pta("cloud", "rollback", "--confirmed", timeout=1800)
     data = r.get("data") or {}
@@ -395,7 +434,13 @@ def rehearse(run, endpoint, service, label, second_service=None):
     run.expect(r.get("ok") and data.get("mode") == "off", "the rollback returns to off")
     status = run.pta("cloud", "status").get("data") or {}
     store_after = (status.get("store") or {}).get("collections") or {}
-    run.expect({k: v.get("records") for k, v in store_after.items()} == {k: v.get("records") for k, v in store_before.items()},
+    before_counts = {k: v.get("records") for k, v in store_before.items()}
+    after_counts = {k: v.get("records") for k, v in store_after.items()}
+    run.step("store after the rollback", {"ok": True},
+             changed={k: [before_counts.get(k), after_counts.get(k)] for k in set(before_counts) | set(after_counts)
+                      if before_counts.get(k) != after_counts.get(k)})
+    # History may still grow meanwhile (the copy's own scheduled activity review): nothing is removed.
+    run.expect(all((after_counts.get(k) or 0) >= (n or 0) for k, n in before_counts.items()),
                "the rollback leaves the copy in the store")
     after = counts(run.pta("cloud", "migrate", "--dry-run"))
     run.expect(all(after.get(name, 0) >= number for name, number in local.items()), "no local record was lost")
