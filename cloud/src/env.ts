@@ -23,6 +23,8 @@ export interface Env {
   /** The plan's daily quota every account shares, reported by `GET /v1/store`. */
   PLAN_DAILY_REQUESTS?: string;
   PLAN_DAILY_ROWS_WRITTEN?: string;
+  /** The oldest host version an account's installations may mix with (default 0.10.37). */
+  MIN_HOST_VERSION?: string;
   /** Environment label shown by the health check (`production` or `staging`). */
   ENVIRONMENT?: string;
 }

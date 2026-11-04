@@ -26,7 +26,8 @@
   "vars": {
     "ENVIRONMENT": "production",
     "ACCOUNT_DAILY_REQUESTS": "20000",
-    "ACCOUNT_DAILY_ROWS_WRITTEN": "20000"
+    "ACCOUNT_DAILY_ROWS_WRITTEN": "20000",
+    "MIN_HOST_VERSION": "0.10.37"
   },
   "observability": { "enabled": true },
   "env": {
@@ -46,7 +47,8 @@
       "vars": {
         "ENVIRONMENT": "staging",
         "ACCOUNT_DAILY_REQUESTS": "5000",
-        "ACCOUNT_DAILY_ROWS_WRITTEN": "5000"
+        "ACCOUNT_DAILY_ROWS_WRITTEN": "5000",
+        "MIN_HOST_VERSION": "0.10.37"
       }
     }
   }

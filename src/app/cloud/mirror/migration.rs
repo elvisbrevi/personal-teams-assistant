@@ -279,6 +279,9 @@ async fn migrate(host: &Arc<Host>, adopt: bool) -> std::result::Result<Reply, Bo
     if elsewhere && !matches!(key::load(&keys_dir(host)), Ok(Some(_))) {
         return Err(Box::new(Reply::error("not_ready", 3, NEED_KEY)));
     }
+    if elsewhere && let Some(refusal) = super::super::outdated_elsewhere(host).await {
+        return Err(Box::new(refusal));
+    }
     let backup = back_up_data(host, "migrate").map_err(|_| {
         Box::new(Reply::error(
             "operation_failed",

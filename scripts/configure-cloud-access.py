@@ -49,6 +49,8 @@ SERVICE_POLICY = "Assistant installations"
 HEALTH_POLICY = "Public health only"
 TOKEN_DURATION = "8760h"
 TOKEN_SECONDS = 8760 * 3600
+# The host version the verification's installations announce: newer than any minimum the Worker keeps.
+VERIFY_HOST = "0.99.0"
 PERMISSIONS = {
     "/service_tokens": "Access: Service Tokens Write",
     "/organizations": "Access: Organizations Read",
@@ -389,7 +391,7 @@ def verify(access, report):
         enrolled = {}
         for name, token in (("a", first), ("b", second)):
             status, body = request(base + "/v1/enroll", "POST", edge_headers(token),
-                                   {"label": f"verification {name}", "host_version": "0.0.0"})
+                                   {"label": f"verification {name}", "host_version": VERIFY_HOST})
             check(status == 201, f"installation {name} enrolls", checks)
             enrolled[name] = json.loads(body)
         a = {**edge_headers(first), "Authorization": "Bearer " + enrolled["a"]["token"]}
@@ -398,6 +400,18 @@ def verify(access, report):
         status, body = request(base + "/v1/whoami", headers=a)
         check(status == 200 and json.loads(body)["installation"]["id"] == enrolled["a"]["installation"],
               "installation a is identified", checks)
+        if "versions" in health.get("features", []):
+            status, body = request(base + "/v1/enroll", "POST", edge_headers(first),
+                                   {"label": "verification old", "host_version": "0.10.30"})
+            check(status == 409 and json.loads(body)["error"]["code"] == "outdated",
+                  "a host older than the minimum cannot enroll", checks)
+            newer = {**a, "User-Agent": "personal-teams-assistant/0.99.1"}
+            check(request(base + "/v1/whoami", headers=newer)[0] == 200, "an updated host is identified", checks)
+            status, body = request(base + "/v1/installations", headers=a)
+            versions = {i["id"]: i["host_version"] for i in json.loads(body)["installations"]} if status == 200 else {}
+            report["observed_host_versions"] = sorted(versions.values())
+            check(versions.get(enrolled["a"]["installation"]) == "0.99.1",
+                  "an installation's recorded version follows its host", checks)
         check(request(base + "/v1/whoami", headers=a_under_b)[0] == 401,
               "a credential presented under another service token is refused", checks)
         sealed = b"synthetic sealed bytes"
@@ -428,7 +442,7 @@ def verify(access, report):
         check(request(base + f"/v1/records/notes/verify-{run}", headers=a)[0] == 200,
               "account b's erasure leaves account a's records", checks)
         status, body = request(base + "/v1/enroll", "POST", edge_headers(first),
-                               {"label": "verification a2", "host_version": "0.0.0"})
+                               {"label": "verification a2", "host_version": VERIFY_HOST})
         check(status == 201, "a second installation of account a enrolls", checks)
         a2 = {**edge_headers(first), "Authorization": "Bearer " + json.loads(body)["token"]}
         check("origin" in health.get("features", []), "the Worker says which installation wrote a record", checks)

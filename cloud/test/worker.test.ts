@@ -1,3 +1,4 @@
+import { env, runInDurableObject } from "cloudflare:test";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { forgetKeys } from "../src/access";
 import { assertion, call, EMPTY_DIGEST, enrolled, mockAccessKeys, sealed } from "./helpers";
@@ -28,7 +29,7 @@ describe("health", () => {
       service: "personal-teams-assistant-cloud",
       environment: "production",
       protocols: [1],
-      features: ["cas", "erase", "origin", "rebind", "plan"],
+      features: ["cas", "erase", "origin", "rebind", "plan", "versions"],
       schema: { registry: 1, account_store: 1 },
       configured: true,
     });
@@ -132,6 +133,42 @@ describe("installation credential", () => {
     expect((await call("/v1/installations/self", { method: "DELETE", caller: first })).status).toBe(200);
     expect((await call("/v1/whoami", { caller: first })).status).toBe(401);
     expect((await call("/v1/whoami", { caller: stranger })).status).toBe(200);
+  });
+});
+
+describe("versions", () => {
+  it("refuses a host older than the minimum, and joining an account with an older active one", async () => {
+    const id = identity();
+    const old = await call("/v1/enroll", { method: "POST", caller: { identity: id }, body: { label: "old", host_version: "0.10.30" } });
+    expect(old.status).toBe(409);
+    expect(((await old.json()) as { error: { code: string } }).error.code).toBe("outdated");
+    const first = await enrolled(id, "first");
+    // An installation recorded with an older version (enrolled before the check) blocks joining
+    // until it reports a current one.
+    const bindings = env as unknown as import("../src/env").Env;
+    const store = bindings.REGISTRY.get(bindings.REGISTRY.idFromName("registry"));
+    await runInDurableObject(store, (_, state) => {
+      state.storage.sql.exec("UPDATE installations SET host_version = '0.10.25' WHERE id = ?", first.installation);
+    });
+    const blocked = await call("/v1/enroll", { method: "POST", caller: { identity: id }, body: { label: "second", host_version: "0.10.42" } });
+    expect(blocked.status).toBe(409);
+    expect(((await blocked.json()) as { error: { code: string } }).error.code).toBe("outdated");
+    // Its next request names its current version, and joining works again.
+    expect((await call("/v1/whoami", { caller: first, headers: { "user-agent": "personal-teams-assistant/0.10.42" } })).status).toBe(200);
+    const listed = (await (await call("/v1/installations", { caller: first })).json()) as {
+      installations: { id: string; host_version: string }[];
+    };
+    expect(listed.installations.find((entry) => entry.id === first.installation)?.host_version).toBe("0.10.42");
+    const second = await enrolled(id, "second");
+    expect(second.installation).toBeTruthy();
+    // Another account is never blocked by this one's computers.
+    await enrolled(identity(), "elsewhere");
+  });
+
+  it("is advertised", async () => {
+    const health = (await (await call("/v1/health")).json()) as { features: string[]; version: string };
+    expect(health.features).toContain("versions");
+    expect(health.version).toBe("0.5.0");
   });
 });
 

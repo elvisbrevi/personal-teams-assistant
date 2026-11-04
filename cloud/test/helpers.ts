@@ -80,11 +80,15 @@ export async function call(
 }
 
 /** Enroll an installation for a service token identity and return a caller holding its credential. */
-export async function enrolled(identity: string, label = "synthetic host"): Promise<Caller & { installation: string }> {
+export async function enrolled(
+  identity: string,
+  label = "synthetic host",
+  hostVersion = "0.10.42",
+): Promise<Caller & { installation: string }> {
   const response = await call("/v1/enroll", {
     method: "POST",
     caller: { identity },
-    body: { label, host_version: "0.10.23" },
+    body: { label, host_version: hostVersion },
   });
   if (response.status !== 201) throw new Error(`enroll failed: ${response.status} ${await response.text()}`);
   const enrolled = (await response.json()) as { token: string; installation: string };

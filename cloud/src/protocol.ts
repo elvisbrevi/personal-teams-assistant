@@ -1,5 +1,5 @@
 /** Version of this Worker's code; reported by `/v1/health`. */
-export const WORKER_VERSION = "0.4.0";
+export const WORKER_VERSION = "0.5.0";
 /** Protocol versions served. Changes inside a version are additive only. */
 export const PROTOCOLS = [1] as const;
 /**
@@ -8,9 +8,32 @@ export const PROTOCOLS = [1] as const;
  * `DELETE /v1/store` removes the account's records and backups. `origin`: listed and read records
  * say whether the calling installation wrote them (`own`). `rebind`: `POST /v1/rebind` moves the
  * account to another Access service token. `plan`: `GET /v1/store` reports the plan's daily quota
- * the accounts share and how many accounts share it.
+ * the accounts share and how many accounts share it. `versions`: every authenticated request
+ * refreshes the installation's recorded host version from its User-Agent, and an enrollment is
+ * refused (`outdated`) from a host, or into an account with an active installation, older than
+ * `MIN_HOST_VERSION`.
  */
-export const FEATURES = ["cas", "erase", "origin", "rebind", "plan"] as const;
+export const FEATURES = ["cas", "erase", "origin", "rebind", "plan", "versions"] as const;
+/** The oldest host an account may mix with a joining one (`MIN_HOST_VERSION` overrides it). */
+export const DEFAULT_MIN_HOST_VERSION = "0.10.37";
+
+/** `MAJOR.MINOR.PATCH` as numbers, or null for anything else. */
+export function hostVersion(text: string | null | undefined): [number, number, number] | null {
+  const match = /^(\d{1,6})\.(\d{1,6})\.(\d{1,6})(?:[-+][0-9A-Za-z.+-]*)?$/.exec(text ?? "");
+  return match ? [Number(match[1]), Number(match[2]), Number(match[3])] : null;
+}
+
+/** Whether `text` is a host version older than `minimum` (anything unreadable counts as older). */
+export function olderThan(text: string, minimum: string): boolean {
+  const version = hostVersion(text);
+  const floor = hostVersion(minimum);
+  if (!floor) return false;
+  if (!version) return true;
+  for (const [mine, least] of version.map((part, i) => [part, floor[i] ?? 0] as const)) {
+    if (mine !== least) return mine < least;
+  }
+  return false;
+}
 /** Schema versions of the Durable Objects; each applies forward-only migrations on start. */
 export const REGISTRY_SCHEMA = 1;
 export const ACCOUNT_STORE_SCHEMA = 1;
@@ -66,6 +89,7 @@ export type ErrorCode =
   | "not_found"
   | "invalid_input"
   | "conflict"
+  | "outdated"
   | "payload_too_large"
   | "method_not_allowed"
   | "quota_exhausted"
@@ -77,6 +101,7 @@ const STATUS: Record<ErrorCode, number> = {
   not_found: 404,
   invalid_input: 400,
   conflict: 409,
+  outdated: 409,
   payload_too_large: 413,
   method_not_allowed: 405,
   quota_exhausted: 429,

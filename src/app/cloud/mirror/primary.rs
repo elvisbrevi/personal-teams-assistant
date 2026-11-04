@@ -491,6 +491,10 @@ async fn promote(host: &Arc<Host>) -> std::result::Result<Reply, Box<Reply>> {
             }
         }
     }
+    // No computer of the account may still run a host that stops at another's own settings.
+    if let Some(refusal) = super::super::outdated_elsewhere(host).await {
+        return Err(Box::new(refusal));
+    }
     let setup = open(host, &config.cloud).map_err(|m| Box::new(missing_reply(&m)))?;
     let health = setup.http.health().await.map_err(|failure| {
         observe(host, &config.cloud, Some(&failure));
