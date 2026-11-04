@@ -57,6 +57,8 @@ const CONFIG_CONFLICT: &str = "A configuration change conflicted with a newer on
 const CONFIG_ERROR: &str = "The last configuration synchronization failed. Synchronize again; the account and this computer were left as they were.";
 const CONFIG_BUSY: &str = "The account configuration is synchronizing now.";
 const CONFIG_OWN: &str = "This installation holds the account configuration itself.";
+const CONFIG_STORE: &str =
+    "This computer reads and writes the account's configuration in the account store directly.";
 const VARIABLES_OK: &str = "The account's variables are available by name.";
 const VARIABLES_NONE: &str = "No variable has been stored yet. Add one when something needs it; the value is typed by you, never by the agent.";
 const VARIABLES_ERROR: &str = "The variable catalog could not be read or synchronized. Synchronize again; no value was needed for this check.";
@@ -468,6 +470,7 @@ async fn configuration(host: &Arc<Host>, connected: bool) -> Step {
     let step = step.facts(facts);
     match sync["state"].as_str().unwrap_or_default() {
         "authoritative" => step.is("done", CONFIG_OWN),
+        "account_store" => step.is("done", CONFIG_STORE).act(cli("pta cloud status")),
         "synced" => step.is("done", CONFIG_SYNCED),
         "syncing" => step.is("waiting", CONFIG_BUSY),
         "never" if sync["error"].is_null() && sync["local_changes"] == true => step

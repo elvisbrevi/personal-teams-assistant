@@ -2775,7 +2775,8 @@ function renderAccountChip() {
     [title, detail, tone, label, glyph] = [t('Sign-in no longer valid'), host, 'error', t('Sign in again'), 'user'];
   } else {
     const sync = accountConfig;
-    const [state, stateTone] = sync?.mode === 'replica' ? chipState(sync.state) : ['', 'ok'];
+    const [state, stateTone] = sync?.mode === 'replica' ? chipState(sync.state)
+      : sync?.mode === 'account_store' ? [t('Configuration from the account store'), 'ok'] : ['', 'ok'];
     const when = sync?.synced_at ? t('Synchronized {when}.', { when: ago(sync.synced_at * 1000) }) : '';
     title = standing === 'offline' ? t('Coordinator offline') : t('Signed in');
     detail = [host, state, sync?.state === 'synced' ? when : ''].filter(Boolean).join(' · ');
