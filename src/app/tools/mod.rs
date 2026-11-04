@@ -512,6 +512,25 @@ pub(super) const TOOLS: &[Tool] = &[
         schema: none,
     },
     Tool {
+        name: "cloud_conflicts",
+        title: "Account store conflicts",
+        description: "In primary, the configuration records changed both on this computer and in the account store: collection, record, a label, and every field that differs (dotted path, this computer's value, the store's, long values truncated). Read-only; it asks the store for its current versions. Show the user the fields and let them choose per record with cloud_resolve; there is no automatic merge. Owner, or a portal account the operator enabled the account store for.",
+        effect: Effect::Read,
+        schema: none,
+    },
+    Tool {
+        name: "cloud_resolve",
+        title: "Resolve an account store conflict",
+        description: "Settle one record cloud_conflicts lists with the version the user chose: keep store installs the account store's version here (this computer's configuration and notes are backed up first); keep here writes this computer's version over the store's current one under compare-and-swap (the store's is kept in cloud/backups/overwritten-<time>.json). state_conflict means it changed again: read the conflicts again. Never choose for the user. Owner, or a portal account the operator enabled the account store for. Needs the user's confirmation.",
+        effect: Effect::External,
+        schema: || {
+            object(
+                json!({"collection":string("settings, organization or notes, as cloud_conflicts lists it."),"record":string("The record as cloud_conflicts lists it."),"keep":string("here or store."),"confirmed":confirmed()}),
+                &["collection", "record", "keep"],
+            )
+        },
+    },
+    Tool {
         name: "cloud_backups",
         title: "Account store backups",
         description: "This computer's backups taken before migrate, promote and rollback (backups/cloud-<time>/): name, time, reason, version, size, whether each can be restored (or why not), the copies kept before earlier restores (before_restore), a pending restore and the last restore's outcome (last_restore), and whether this client may restore (restores_here). Read-only. Owner, or a portal account the operator enabled the account store for.",
@@ -1724,10 +1743,10 @@ pub(super) async fn run(name: &str, args: &Value) -> Result<Value, String> {
         "variable_update" | "variable_rename" | "variable_usage" => ipc(name, args.clone()).await,
         "consumer_list" => ipc("variable_consumer_list", args.clone()).await,
         "cloud_status" | "cloud_verify" | "cloud_installations" | "cloud_token"
-        | "cloud_backups" => {
+        | "cloud_backups" | "cloud_conflicts" => {
             ipc(name, args.clone()).await
         }
-        "cloud_migrate" | "cloud_rollback" | "cloud_erase" | "cloud_disconnect" | "cloud_promote" | "cloud_pull" | "cloud_revoke" | "cloud_rotate_key" | "cloud_restore" => {
+        "cloud_migrate" | "cloud_rollback" | "cloud_erase" | "cloud_disconnect" | "cloud_promote" | "cloud_pull" | "cloud_revoke" | "cloud_rotate_key" | "cloud_restore" | "cloud_resolve" => {
             let mut args = args.clone();
             args.as_object_mut().unwrap().remove("confirmed");
             ipc(name, args).await
@@ -2089,6 +2108,12 @@ pub(super) fn confirmation(name: &str, args: &Value) -> Option<String> {
         },
         "cloud_erase" => "Erase this account's copy in the account store (records and backups) and set the content key aside? This computer keeps all of its data.".into(),
         "cloud_rotate_key" => "Rotate the account content key: seal the whole copy again with a new key (the earlier one stays on this computer)?".into(),
+        "cloud_resolve" => format!(
+            "Keep {} version of {} record {}?",
+            if args["keep"] == "here" { "this computer's" } else { "the account store's" },
+            args["collection"].as_str().unwrap_or_default(),
+            args["record"].as_str().unwrap_or_default()
+        ),
         "cloud_restore" => format!(
             "Restore backup {}? The application restarts, keeps a copy of the current data first and puts the backup back.",
             args["backup"].as_str().unwrap_or_default()

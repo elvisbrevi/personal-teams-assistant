@@ -321,6 +321,8 @@ nav button, .status-row, .activity-row, .segmented button, .subnav [role=tab], .
 /* A stored variable: masked value, then its actions, then the optional edit forms. */
 .row .variable-value-box, .row .variable-actions, .row .variable-note, .row .variable-edit { flex: 1 1 100%; min-width: 0; }
 .variable-row { align-items: flex-start; }
+.conflict-fields { flex-basis: 100%; margin: 0; padding-left: 1.2rem; overflow-wrap: anywhere; }
+.conflict-fields li { margin: .2rem 0; }
 .variable-mask { font-family: var(--mono); letter-spacing: .15em; color: var(--muted); }
 .variable-value { margin: 0; padding: .6rem .75rem; border: 1.5px solid var(--rule); border-radius: 10px; background: var(--sunken); font-family: var(--mono); font-size: .86rem; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 14rem; overflow: auto; }
 .variable-actions { display: flex; gap: .5rem; flex-wrap: wrap; }

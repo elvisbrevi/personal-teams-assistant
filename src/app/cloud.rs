@@ -96,6 +96,8 @@ pub(super) fn handles(method: &str) -> bool {
             | "cloud_token"
             | "cloud_backups"
             | "cloud_restore"
+            | "cloud_conflicts"
+            | "cloud_resolve"
     )
 }
 
@@ -246,6 +248,25 @@ pub(super) async fn operate(host: &Arc<Host>, request: &control::Request) -> Rep
                 return Reply::error("invalid_input", 2, "Invalid arguments.");
             }
             migration::operate_rotate(host).await
+        }
+        "cloud_conflicts" => {
+            if let Some(reply) = refused_here(host, &invocation) {
+                return reply;
+            }
+            if request.args != json!({}) && !request.args.is_null() {
+                return Reply::error("invalid_input", 2, "Invalid arguments.");
+            }
+            primary::operate_conflicts(host).await
+        }
+        "cloud_resolve" => {
+            if let Some(reply) = refused_here(host, &invocation) {
+                return reply;
+            }
+            let Ok(args) = serde_json::from_value::<primary::ResolveArgs>(request.args.clone())
+            else {
+                return Reply::error("invalid_input", 2, "Invalid arguments.");
+            };
+            primary::operate_resolve(host, args).await
         }
         "cloud_backups" => {
             if let Some(reply) = refused_here(host, &invocation) {

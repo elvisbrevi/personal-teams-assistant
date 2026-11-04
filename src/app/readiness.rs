@@ -99,7 +99,7 @@ const STORE_ROLLED_BACK: &str =
     "This computer no longer uses the account store; the copy stays there until you erase it.";
 const STORE_MIRROR: &str = "The encrypted copy is up to date.";
 const STORE_PRIMARY: &str = "The account store is the source of truth of this account's configuration, and this computer is up to date with it.";
-const STORE_CONFLICT: &str = "This computer and the account store changed the same configuration. Review it and replace this computer's version with the account store's; until then those records cannot be edited.";
+const STORE_CONFLICT: &str = "This computer and the account store changed the same configuration. Review the fields that differ and keep, per record, this computer's version or the account store's; until then those records cannot be edited.";
 const STORE_PENDING: &str =
     "Changes are waiting to be copied to the account store; they are sent in the background.";
 const STORE_BLOCKED: &str = "Some records are too large for the account store and are not copied.";
@@ -790,7 +790,7 @@ async fn account_store(host: &Arc<Host>, shared: bool) -> Step {
         return step
             .is("attention", STORE_CONFLICT)
             .act(place)
-            .act(cli("pta cloud pull --replace --confirmed"));
+            .act(cli("pta cloud conflicts"));
     }
     if view["mode"] != "mirror" && !primary {
         if mirror["rolled_back_at"].is_number() {

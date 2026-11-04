@@ -2061,6 +2061,11 @@ async function loadCloud() {
     try { cloudToken = await invoke('cloud_token'); }
     catch { cloudToken = null; }
   }
+  cloudConflicts = [];
+  if (cloudStatus?.mode === 'primary' && cloudStatus?.mirror?.primary?.conflicts) {
+    try { cloudConflicts = (await invoke('cloud_conflicts')).conflicts ?? []; }
+    catch { cloudConflicts = []; }
+  }
   cloudBackups = null;
   if (cloudStatus && cloudStatus.enabled !== false) {
     try { cloudBackups = await invoke('cloud_backups'); }
@@ -2275,7 +2280,9 @@ let cloudDisconnectArmed = false;
 let cloudRotateArmed = false;
 let cloudAdoptArmed = false;
 let cloudPromoteArmed = false;
-let cloudReplaceArmed = false;
+/** Records changed both here and in the store, with the fields that differ; the choice that waits for a second tap. */
+let cloudConflicts = [];
+let cloudResolveArmed = null;
 
 function renderCloudMirror() {
   const status = cloudStatus;
@@ -2325,9 +2332,7 @@ function renderCloudMirror() {
   const promote = $('#cloud-promote');
   promote.hidden = status?.mode !== 'mirror' || !mirror.initial_verified_at;
   promote.textContent = cloudPromoteArmed ? t('Tap again to make it the source') : t('Make the account store the source');
-  const replace = $('#cloud-replace');
-  replace.hidden = !primary || !conflicts;
-  replace.textContent = cloudReplaceArmed ? t('Tap again to replace') : t('Replace with the account store\'s');
+  renderCloudConflicts();
   $('#cloud-demote').hidden = !primary;
   $('#cloud-verify').hidden = !mirror.key?.present;
   $('#cloud-disconnect').textContent = cloudDisconnectArmed ? t('Tap again to disconnect') : t('Disconnect this computer');
@@ -2467,20 +2472,50 @@ $('#cloud-promote').onclick = event => {
   });
 };
 
-$('#cloud-replace').onclick = event => {
-  if (!cloudReplaceArmed) {
-    cloudReplaceArmed = true;
-    renderCloudMirror();
-    setTimeout(() => { cloudReplaceArmed = false; renderCloudMirror(); }, 4000);
-    return;
-  }
-  cloudReplaceArmed = false;
-  busy(event.currentTarget, async () => {
-    await invoke('cloud_pull', { replace: true });
-    await loadCloud();
-    done(t('This computer now has the account store\'s configuration. The replaced version was kept in a private backup.'));
-  });
-};
+/** A field's value as plain text: removed, cut short, or as it is. */
+function conflictValue(value) {
+  if (value === null || value === undefined) return t('(not there)');
+  if (value?.truncated) return `${value.preview}…`;
+  return typeof value === 'string' ? value : JSON.stringify(value);
+}
+
+/** Each conflicting record with its differing fields and the two choices, two taps each. */
+function renderCloudConflicts() {
+  const box = $('#cloud-conflicts');
+  box.hidden = !cloudConflicts.length;
+  box.replaceChildren(...cloudConflicts.map(entry => {
+    const fields = entry.fields.map(field => el('li', {},
+      el('span', { class: 'cred-name', textContent: field.path || t('The whole record'), translate: 'no' }),
+      el('span', { class: 'hint', textContent: ` ${t('Here:')} ${conflictValue(field.here)} · ${t('Account store:')} ${conflictValue(field.store)}` })));
+    if (entry.more_fields) fields.push(el('li', { class: 'hint', textContent: tn(entry.more_fields, 'And {n} more field.', 'And {n} more fields.') }));
+    const choice = (keep, label, armedLabel, message) => {
+      const key = `${entry.collection}/${entry.record}/${keep}`;
+      const armed = cloudResolveArmed === key;
+      const button = el('button', { type: 'button', class: keep === 'store' ? '' : 'secondary', textContent: armed ? t(armedLabel) : t(label), 'aria-label': `${t(label)}: ${tx(entry.label)}` });
+      button.onclick = () => {
+        if (!armed) {
+          cloudResolveArmed = key;
+          renderCloudConflicts();
+          setTimeout(() => { if (cloudResolveArmed === key) { cloudResolveArmed = null; renderCloudConflicts(); } }, 4000);
+          return;
+        }
+        cloudResolveArmed = null;
+        busy(button, async () => {
+          await invoke('cloud_resolve', { collection: entry.collection, record: entry.record, keep });
+          await loadCloud();
+          done(t(message));
+        });
+      };
+      return button;
+    };
+    return el('div', { class: 'row variable-row' },
+      rowText(el('span', { class: 'cred-name', textContent: tx(entry.label) }), tn(entry.fields.length + (entry.more_fields ?? 0), '{n} field differs.', '{n} fields differ.'), badge(t('Conflict'), 'warn')),
+      el('ul', { class: 'conflict-fields' }, fields),
+      el('div', { class: 'variable-actions' },
+        choice('store', 'Keep the account store\'s', 'Tap again to keep the store\'s', 'This computer now has the account store\'s version of that record. The replaced one was kept in a private backup.'),
+        choice('here', 'Keep this computer\'s', 'Tap again to keep this computer\'s', 'The account store now has this computer\'s version of that record. Its previous one was kept in a private backup.')));
+  }));
+}
 
 $('#cloud-demote').onclick = event => busy(event.currentTarget, async () => {
   await invoke('cloud_promote', { action: 'demote' });

@@ -35,6 +35,66 @@ pub trait Apply {
     fn apply(&self, collection: Collection, changes: &[(String, Option<Value>)]) -> Result<()>;
 }
 
+/// A configuration record changed both here and in the store: both versions, and the fields
+/// that differ, for the user to choose one.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Conflict {
+    pub collection: Collection,
+    /// The record's natural ID (`account`, `map`, a note ID…).
+    pub id: String,
+    /// This installation's version; `None` when it removed the record.
+    pub here: Option<Value>,
+    /// The store's version; `None` when it holds a removal.
+    pub store: Option<Value>,
+    pub store_revision: u64,
+    pub fields: Vec<Field>,
+}
+
+/// One field that differs between the two versions, by its dotted path.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct Field {
+    pub path: String,
+    pub here: Option<Value>,
+    pub store: Option<Value>,
+}
+
+/// Which version of a conflicting record the user keeps.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Keep {
+    Here,
+    Store,
+}
+
+/// The fields that differ between two versions of a record: objects are compared key by key,
+/// anything else (arrays included) as a whole.
+pub fn diff(here: Option<&Value>, store: Option<&Value>) -> Vec<Field> {
+    let mut fields = Vec::new();
+    walk(String::new(), here, store, &mut fields);
+    fields
+}
+
+fn walk(path: String, here: Option<&Value>, store: Option<&Value>, out: &mut Vec<Field>) {
+    match (here, store) {
+        (Some(Value::Object(a)), Some(Value::Object(b))) => {
+            let keys: std::collections::BTreeSet<&String> = a.keys().chain(b.keys()).collect();
+            for key in keys {
+                let next = if path.is_empty() {
+                    key.clone()
+                } else {
+                    format!("{path}.{key}")
+                };
+                walk(next, a.get(key), b.get(key), out);
+            }
+        }
+        (a, b) if a == b => {}
+        (a, b) => out.push(Field {
+            path,
+            here: a.cloned(),
+            store: b.cloned(),
+        }),
+    }
+}
+
 /// What a pull did.
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
 pub struct Pulled {
@@ -215,6 +275,160 @@ impl<L: Local, T: Transport> Engine<'_, L, T> {
                 .set_meta(&pulled_key(collection), &since.to_string())?;
         }
         Ok(Ok(pulled))
+    }
+
+    /// The configuration records in conflict, each with the store's current version and the
+    /// fields that differ from this installation's.
+    pub async fn conflicts(&self) -> Result<std::result::Result<Vec<Conflict>, Failure>> {
+        let mut found = Vec::new();
+        for collection in Collection::ALL.into_iter().filter(|c| c.is_configuration()) {
+            let rows: Vec<Row> = self
+                .ledger
+                .rows(collection)?
+                .into_iter()
+                .filter(|r| r.error == CONFLICT)
+                .collect();
+            if rows.is_empty() {
+                continue;
+            }
+            let local: BTreeMap<String, Value> = self
+                .local
+                .collect(collection)?
+                .into_iter()
+                .map(|e| (e.id, e.value))
+                .collect();
+            for row in rows {
+                let held = match self.transport.get(collection, &row.blind).await {
+                    Ok(held) => held,
+                    Err(failure) => return Ok(Err(failure)),
+                };
+                let (store, store_revision) = match &held {
+                    None => (None, 0),
+                    Some(held) if held.deleted => (None, held.revision),
+                    Some(held) => match self.open(collection, held) {
+                        Some((natural, value, _)) if natural == row.natural => {
+                            (value, held.revision)
+                        }
+                        _ => continue,
+                    },
+                };
+                let here = local.get(&row.natural).cloned();
+                found.push(Conflict {
+                    collection,
+                    id: row.natural.clone(),
+                    fields: diff(here.as_ref(), store.as_ref()),
+                    here,
+                    store,
+                    store_revision,
+                });
+            }
+        }
+        Ok(Ok(found))
+    }
+
+    /// Resolve one conflicting record with the version the user chose: the store's is installed
+    /// here (`apply`), or this installation's is written to the store over the revision it holds
+    /// now, under compare-and-swap. `Ok(None)`: the record is not in conflict (anymore).
+    pub async fn resolve(
+        &self,
+        apply: &impl Apply,
+        collection: Collection,
+        id: &str,
+        keep: Keep,
+    ) -> Result<std::result::Result<Option<Conflict>, Refusal>> {
+        let Some(mut row) = self.ledger.get(collection, id)? else {
+            return Ok(Ok(None));
+        };
+        if row.error != CONFLICT || !collection.is_configuration() {
+            return Ok(Ok(None));
+        }
+        let held = match self.transport.get(collection, &row.blind).await {
+            Ok(held) => held,
+            Err(failure) => return Ok(Err(Refusal::Failure(failure))),
+        };
+        let local = self
+            .local
+            .collect(collection)?
+            .into_iter()
+            .find(|e| e.id == id)
+            .map(|e| e.value);
+        let (store, store_hash, wire) = match &held {
+            None => (None, DELETED.to_owned(), None),
+            Some(held) if held.deleted => (None, DELETED.to_owned(), Some(held)),
+            Some(held) => match self.open(collection, held) {
+                Some((natural, value, plain)) if natural == id => (value, plain, Some(held)),
+                _ => {
+                    return Ok(Err(Refusal::Failure(Failure::Refused(
+                        "undecryptable".into(),
+                    ))));
+                }
+            },
+        };
+        let store_revision = wire.map_or(0, |held| held.revision);
+        let conflict = Conflict {
+            collection,
+            id: id.to_owned(),
+            fields: diff(local.as_ref(), store.as_ref()),
+            here: local.clone(),
+            store: store.clone(),
+            store_revision,
+        };
+        row.error.clear();
+        row.next_at = 0;
+        row.floor = row.floor.max(store_revision);
+        match keep {
+            Keep::Store => {
+                apply.apply(collection, &[(id.to_owned(), store)])?;
+                row.revision = row.revision.max(store_revision);
+                row.target_hash = store_hash;
+                if let Some(held) = wire {
+                    acknowledge(
+                        &mut row,
+                        &Wire {
+                            collection,
+                            id: held.id.clone(),
+                            revision: held.revision,
+                            digest: held.digest.clone(),
+                            schema: held.schema,
+                            deleted: held.deleted,
+                            sealed: None,
+                            base: None,
+                        },
+                    );
+                }
+                self.ledger.put(&row)?;
+                Ok(Ok(Some(conflict)))
+            }
+            Keep::Here => {
+                // This installation's version over the one the store holds now: the store's
+                // revision becomes the agreed base, so the write names it.
+                row.acked_revision = store_revision;
+                row.acked_hash = store_hash;
+                self.ledger.put(&row)?;
+                match self
+                    .write(&[Change {
+                        collection,
+                        id: id.to_owned(),
+                        value: local,
+                    }])
+                    .await?
+                {
+                    Ok(accepted) => {
+                        accepted.settle(self.ledger)?;
+                        Ok(Ok(Some(conflict)))
+                    }
+                    Err(refusal) => {
+                        // Still this installation's change against a newer store version; the
+                        // revision the write recorded stays used.
+                        let mut row = self.ledger.get(collection, id)?.unwrap_or(row);
+                        row.error = CONFLICT.into();
+                        row.next_at = i64::MAX;
+                        self.ledger.put(&row)?;
+                        Ok(Err(refusal))
+                    }
+                }
+            }
+        }
     }
 
     /// Open a record the store holds, checking that its natural ID is the one it is filed under.
