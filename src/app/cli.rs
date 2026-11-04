@@ -1416,6 +1416,7 @@ fn validate_args(args: &[String]) -> Result<()> {
                     | "pull"
                     | "installations"
                     | "rotate-key"
+                    | "token"
             ]
             | ["cloud", "installations", "revoke", _]
             | ["credentials", "list"]
@@ -2797,6 +2798,27 @@ pub async fn run() -> i32 {
 #[cfg(test)]
 mod wiki_tests {
     use super::*;
+    #[test]
+    fn every_cloud_command_the_help_lists_is_accepted() {
+        for command in [
+            &["cloud", "status"][..],
+            &["cloud", "verify"],
+            &["cloud", "installations"],
+            &["cloud", "token"],
+            &["cloud", "rotate-key", "--confirmed"],
+            &[
+                "cloud",
+                "installations",
+                "revoke",
+                "synthetic",
+                "--confirmed",
+            ],
+        ] {
+            let args: Vec<String> = command.iter().map(|w| w.to_string()).collect();
+            assert!(validate_args(&args).is_ok(), "{command:?}");
+        }
+        assert!(validate_args(&["cloud", "tokens"].map(str::to_owned)).is_err());
+    }
     #[test]
     fn wiki_commands_require_exact_local_source_argument_and_closed_stdin_schema() {
         for operation in ["list", "search", "read"] {
