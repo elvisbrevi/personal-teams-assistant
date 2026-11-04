@@ -20,6 +20,9 @@ and Worker names come from cloud/wrangler.jsonc. Every run writes a report witho
               so the account store needs no rebinding; the previous secret stops working at once),
               which goes to the same command; the account's other computers then receive it from
               their coordinator, sealed to the key each one signed in with.
+              With --portal-user USER --retire that portal account's token is taken out of the Access
+              policy and deleted, after `pta web users cloud disable USER` (refused while the account
+              store is still enabled for it). The portal account, its binding and its sign-in policy stay.
 
 Each hostname gets a self-hosted application whose only policy is Service Auth for the listed service
 tokens, plus an exact Bypass application for /v1/health. Applications this script did not create are
@@ -560,6 +563,27 @@ def rotate(access, label, user, report):
         raise SetupError("The rotated secret could not be stored; run the same command again with a new rotation.")
 
 
+def retire_portal_user(access, user, report):
+    """Delete a portal account's service token once its account store is disabled; the portal account,
+    its Access binding and its sign-in policy stay, so it can be enabled again with a new token."""
+    pta = shutil.which("pta") or str(Path.home() / ".cargo" / "bin" / "pta")
+    completed = subprocess.run([pta, "--json", "web", "users", "list"], capture_output=True, text=True, timeout=120)
+    accounts = json.loads(completed.stdout or "{}").get("data") or []
+    account = next((a for a in accounts if a.get("username") == user), None)
+    if completed.returncode != 0 or account is None:
+        raise SetupError("The portal account could not be found; nothing was changed.")
+    if account.get("cloud_enabled"):
+        raise SetupError("The account store is still enabled for this portal account; run `pta web users cloud disable USER` first.")
+    name = f"{APP_PREFIX} {access.environment} portal {user}"
+    found = [t["id"] for t in access.tokens() if t.get("name") == name]
+    if found:
+        configure_worker(access, access.admitted() - set(found))
+        wait_for_configuration(access.hostname)
+        for ident in found:
+            access.delete_token(ident)
+    report["retire"] = {"portal_user": user, "deleted": len(found)}
+
+
 def enable_portal_user(access, user, report):
     """A service token for a portal account; its secret goes only to `pta web users cloud enable`."""
     pta = shutil.which("pta") or str(Path.home() / ".cargo" / "bin" / "pta")
@@ -605,7 +629,9 @@ def run(args):
             team = configure_worker(access, access.admitted())
             report["team_domain"] = team
             report["health"] = wait_for_configuration(access.hostname)
-            if args.rotate:
+            if args.retire:
+                retire_portal_user(access, args.portal_user, report)
+            elif args.rotate:
                 rotate(access, args.label, args.portal_user, report)
             elif args.portal_user:
                 enable_portal_user(access, args.portal_user, report)
@@ -629,12 +655,16 @@ def main():
     parser.add_argument("--account", help="Cloudflare account ID (instead of CLOUDFLARE_ACCOUNT_ID)")
     parser.add_argument("--rotate", action="store_true",
                         help="replace the account's service token by rotating its secret (production)")
+    parser.add_argument("--retire", action="store_true",
+                        help="delete a portal account's service token after its account store was disabled (production)")
     args = parser.parse_args()
     if args.account:
         # A launcher passes fixed arguments and only the variables it names.
         os.environ["CLOUDFLARE_ACCOUNT_ID"] = args.account
     if not re.fullmatch(r"[a-z0-9][a-z0-9 -]{0,40}", args.label):
         parser.error("--label: lowercase letters, digits, spaces and dashes")
+    if args.retire and (args.rotate or not args.portal_user):
+        parser.error("--retire: only with --portal-user, and not with --rotate")
     if args.rotate and args.environment != "production":
         parser.error("--rotate: for production only (staging verification rotates a temporary token)")
     if args.portal_user is not None and (args.environment != "production" or not re.fullmatch(r"[a-z0-9][a-z0-9._@-]{0,63}", args.portal_user)):

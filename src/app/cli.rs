@@ -275,7 +275,9 @@ Account variables
                            nothing until the user approves it in the application window (Settings › Credentials).
   variables launcher run NAME [--pin ENV=VERSION ...] --confirmed
                            Runs it with the values resolved now; prints status and references, never output or values.
-  variables launcher remove NAME  Removes an approved launcher.
+  variables launcher remove NAME [--confirmed]
+                           Removes a launcher (proposed or approved); it needs no confirmation, and --confirmed is
+                           accepted so the same command line as define and run works.
   variables audit [--limit N]  Operator-local: recent variable edits, deletions and reveals (never values).
   variables verify            Checks that every stored variable authenticates with the current keys.
   variables key backup --output PRIVATE_FILE  Operator-local: writes the master keys (not values) to a new 0600 file.
@@ -1640,6 +1642,8 @@ fn validate_args(args: &[String]) -> Result<()> {
                 || p.as_slice()
                     .starts_with(&["variables", "launcher", "define"])
                 || p.as_slice().starts_with(&["variables", "launcher", "run"])
+                || p.as_slice()
+                    .starts_with(&["variables", "launcher", "remove"])
                 || p.as_slice().starts_with(&["variables", "deliver"])
                 || p.as_slice()
                     .starts_with(&["variables", "destination", "define"]),
@@ -2890,6 +2894,13 @@ mod wiki_tests {
             ],
             &["cloud", "restore", "cloud-1793748961", "--confirmed"],
             &["cloud", "rotate-key", "--confirmed"],
+            &[
+                "variables",
+                "launcher",
+                "remove",
+                "synthetic",
+                "--confirmed",
+            ],
             &[
                 "cloud",
                 "installations",
