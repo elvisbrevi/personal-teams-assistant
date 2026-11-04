@@ -9,7 +9,10 @@ import {
   DEFAULT_DAILY_ROWS_WRITTEN,
   DEFAULT_PLAN_DAILY_REQUESTS,
   DEFAULT_PLAN_DAILY_ROWS_WRITTEN,
+  DEFAULT_MIN_HOST_VERSION,
+  hostVersion,
   json,
+  olderThan,
   LIMITS,
   FEATURES,
   PROTOCOLS,
@@ -145,13 +148,23 @@ async function sha256Hex(bytes: Uint8Array | string): Promise<string> {
   return Array.from(digest, (b) => b.toString(16).padStart(2, "0")).join("");
 }
 
+/** The host version a request's User-Agent names (`personal-teams-assistant/X.Y.Z`), if any. */
+function userAgentVersion(request: Request): string | undefined {
+  const match = /^personal-teams-assistant\/(\d{1,6}\.\d{1,6}\.\d{1,6})(?:\s|$)/.exec(request.headers.get("user-agent") ?? "");
+  return match?.[1];
+}
+
+function minimumHost(env: Env): string {
+  return hostVersion(env.MIN_HOST_VERSION) ? env.MIN_HOST_VERSION! : DEFAULT_MIN_HOST_VERSION;
+}
+
 /** The principal of a request: its Access service token identity plus its installation credential. */
 export async function authenticate(request: Request, env: Env): Promise<Principal> {
   const identity = await serviceIdentity(request, env);
   const header = request.headers.get("authorization") ?? "";
   const token = /^Bearer (ptac_[A-Za-z0-9_-]{43})$/.exec(header)?.[1];
   if (!token) throw new Refusal("unauthorized", "A valid installation credential is required.");
-  const principal = await registry(env).authenticate(identity, await sha256Hex(token), now());
+  const principal = await registry(env).authenticate(identity, await sha256Hex(token), now(), userAgentVersion(request));
   if (!principal) throw new Refusal("unauthorized", "A valid installation credential is required.");
   return principal;
 }
@@ -285,11 +298,21 @@ async function enroll(request: Request, env: Env): Promise<Response> {
   const input = await body(request, 4096);
   closed(input, ["label", "host_version"], "the enrollment");
   const label = text(input.label, "label", LIMITS.labelChars, /^[^\p{Cc}]+$/u);
-  const hostVersion = text(input.host_version, "host version", 40, /^[0-9A-Za-z.+-]+$/);
+  const host = text(input.host_version, "host version", 40, /^[0-9A-Za-z.+-]+$/);
+  const minimum = minimumHost(env);
+  if (olderThan(host, minimum)) {
+    throw new Refusal("outdated", `This host is older than ${minimum}; update it before connecting.`);
+  }
   // 256 random bits; the registry keeps only the SHA-256.
   const secret = crypto.getRandomValues(new Uint8Array(32));
   const token = `ptac_${base64(secret).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "")}`;
-  const enrolled = await registry(env).enroll(identity, await sha256Hex(token), label, hostVersion, now());
+  const enrolled = await registry(env).enroll(identity, await sha256Hex(token), label, host, now(), minimum);
+  if (!enrolled.ok && enrolled.reason === "outdated_installation") {
+    throw new Refusal(
+      "outdated",
+      `Another active installation of this account runs a host older than ${minimum}; update or revoke it first.`,
+    );
+  }
   if (!enrolled.ok) throw new Refusal("conflict", "The account has too many active installations; revoke one first.");
   return json({ installation: enrolled.installation, generation: enrolled.generation, token }, 201);
 }

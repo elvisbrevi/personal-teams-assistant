@@ -790,6 +790,11 @@ async fn connect(host: &Arc<Host>, args: ConnectArgs) -> std::result::Result<Rep
             6,
             "The account has too many installations in the account store; revoke one first.",
         ),
+        Failure::Refused(code) if code == "outdated" => boxed(
+            "state_conflict",
+            6,
+            "Another computer of this account runs a version older than 0.10.37: update it (or revoke it with pta cloud installations revoke) before connecting this one.",
+        ),
         failure => Box::new(refused(&failure)),
     })?;
     let installation = enrollment["installation"].as_str().unwrap_or_default();
@@ -952,6 +957,75 @@ async fn rebind(
 }
 
 /// The account's installations in the account store, this one marked `current`.
+/// The oldest host an account may mix with one that joins it, adopts its configuration or makes
+/// the store its source: earlier hosts stop their pull at another installation's own settings.
+pub(super) const MIXED_MINIMUM: &str = "0.10.37";
+
+fn older_than_minimum(version: &str) -> bool {
+    let parse = |text: &str| -> Option<(u64, u64, u64)> {
+        let core = text.split(['-', '+']).next()?;
+        let mut parts = core.split('.').map(|p| p.parse::<u64>().ok());
+        Some((parts.next()??, parts.next()??, parts.next()??))
+    };
+    match (parse(version), parse(MIXED_MINIMUM)) {
+        (Some(version), Some(minimum)) => version < minimum,
+        _ => true,
+    }
+}
+
+/// The other active installations of a `GET /v1/installations` listing that run an older host,
+/// as `label (version)`.
+fn outdated(listed: &Value) -> Vec<String> {
+    listed["installations"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|i| i["current"] != true && i["revoked_at"].is_null())
+        .filter(|i| older_than_minimum(i["host_version"].as_str().unwrap_or_default()))
+        .map(|i| {
+            format!(
+                "{} ({})",
+                i["label"].as_str().unwrap_or("another computer"),
+                i["host_version"].as_str().unwrap_or("unknown version")
+            )
+        })
+        .collect()
+}
+
+/// Before joining, adopting or promoting: the account's other active installations that run a
+/// host older than `MIXED_MINIMUM`, as a refusal naming them. Only with a Worker that keeps the
+/// versions current (feature `versions`); an earlier one only knows the enrollment's.
+pub(super) async fn outdated_elsewhere(host: &Arc<Host>) -> Option<Reply> {
+    let (endpoint, credentials, _) = linked(host).ok()?;
+    let worker = health(&endpoint).await.ok()?;
+    if !offers(&worker, "versions") {
+        return None;
+    }
+    let listed = match exchange(
+        &endpoint,
+        reqwest::Method::GET,
+        "/v1/installations",
+        Some(&credentials),
+        None,
+    )
+    .await
+    {
+        Ok(listed) => listed,
+        Err(failure) => return Some(refused(&failure)),
+    };
+    let outdated = outdated(&listed);
+    (!outdated.is_empty()).then(|| Reply {
+        data: json!({"outdated": outdated}),
+        ..Reply::error(
+            "state_conflict",
+            6,
+            &format!(
+                "Another computer of this account runs a version older than {MIXED_MINIMUM}: update it (or revoke it with pta cloud installations revoke) first; nothing was changed."
+            ),
+        )
+    })
+}
+
 async fn installations(host: &Arc<Host>) -> Reply {
     let (endpoint, credentials, _) = match linked(host) {
         Ok(linked) => linked,

@@ -542,3 +542,25 @@ async fn setup_status_reports_the_account_store_step() {
     );
     assert_eq!(step["facts"]["standing"], "disconnected");
 }
+
+#[test]
+fn hosts_before_the_minimum_are_told_apart() {
+    assert!(older_than_minimum("0.10.25"));
+    assert!(older_than_minimum("0.9.99"));
+    assert!(older_than_minimum("not a version"));
+    assert!(!older_than_minimum("0.10.37"));
+    assert!(!older_than_minimum("0.10.42"));
+    assert!(!older_than_minimum("0.11.0-rc.1"));
+}
+
+#[test]
+fn only_other_active_computers_with_an_older_host_hold_a_join_back() {
+    let listed = json!({"installations": [
+        {"id": "a", "label": "This one", "host_version": "0.10.30", "current": true, "revoked_at": null},
+        {"id": "b", "label": "Old laptop", "host_version": "0.10.30", "current": false, "revoked_at": null},
+        {"id": "c", "label": "Gone", "host_version": "0.10.20", "current": false, "revoked_at": 1},
+        {"id": "d", "label": "Desktop", "host_version": "0.10.42", "current": false, "revoked_at": null},
+    ]});
+    assert_eq!(outdated(&listed), ["Old laptop (0.10.30)"]);
+    assert!(outdated(&json!({})).is_empty());
+}

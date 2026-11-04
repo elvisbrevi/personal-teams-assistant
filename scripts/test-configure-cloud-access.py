@@ -34,7 +34,7 @@ class CloudAccessTests(unittest.TestCase):
         for name, value in {
             "api": self.fake_api,
             "put_worker_secret": lambda environment, name, value: self.worker_secrets.__setitem__((environment, name), value),
-            "wait_for_configuration": lambda hostname, seconds=300: {"configured": True, "features": ["cas", "erase", "origin", "rebind", "plan"]},
+            "wait_for_configuration": lambda hostname, seconds=300: {"configured": True, "features": ["cas", "erase", "origin", "rebind", "plan", "versions"]},
             "wait_for_admission": lambda hostname, token, seconds=180: None,
             "wait_for_refusal": lambda hostname, token, seconds=180: True,
         }.items():
@@ -216,6 +216,9 @@ class CloudAccessTests(unittest.TestCase):
             for name in ("a", "b"):
                 yield 201, json.dumps({"installation": f"inst-{name}", "token": f"ptac_{name}"}).encode()
             yield 200, json.dumps({"installation": {"id": "inst-a"}}).encode()
+            yield 409, json.dumps({"error": {"code": "outdated"}}).encode()  # an old host
+            yield 200, b"{}"  # an updated host
+            yield 200, json.dumps({"installations": [{"id": "inst-a", "host_version": "0.99.1"}]}).encode()
             yield 401, b"{}"  # a under b
             yield 200, b"{}"  # write
             yield 200, b"{}"  # read back

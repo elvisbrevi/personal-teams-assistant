@@ -1,6 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
 import type { Env } from "./env";
-import { LIMITS, REGISTRY_SCHEMA } from "./protocol";
+import { LIMITS, REGISTRY_SCHEMA, olderThan } from "./protocol";
 
 /** Who a request acts for. Derived only from the Access identity and the installation credential. */
 export interface Principal {
@@ -21,7 +21,7 @@ export interface Installation {
 
 export type Enrollment =
   | { ok: true; installation: string; generation: number }
-  | { ok: false; reason: "installation_limit" };
+  | { ok: false; reason: "installation_limit" | "outdated_installation" };
 
 export type Rebinding =
   | { ok: true; rebound: boolean; principal: Principal }
@@ -77,8 +77,18 @@ export class Registry extends DurableObject<Env> {
     this.sql.exec("INSERT OR REPLACE INTO meta (key, value) VALUES ('schema', ?)", REGISTRY_SCHEMA);
   }
 
-  /** Enroll a new installation for the identity's account, creating the account on first use. */
-  enroll(identity: string, tokenSha256: string, label: string, hostVersion: string, now: number): Enrollment {
+  /**
+   * Enroll a new installation for the identity's account, creating the account on first use.
+   * Refused while another active installation of the account runs a host older than `minimum`.
+   */
+  enroll(
+    identity: string,
+    tokenSha256: string,
+    label: string,
+    hostVersion: string,
+    now: number,
+    minimum: string,
+  ): Enrollment {
     return this.ctx.storage.transactionSync(() => {
       let account = this.sql
         .exec<{ id: string; generation: number }>("SELECT id, generation FROM accounts WHERE identity = ?", identity)
@@ -101,6 +111,16 @@ export class Registry extends DurableObject<Env> {
         )
         .one().n;
       if (active >= LIMITS.installations) return { ok: false, reason: "installation_limit" } as const;
+      const versions = this.sql
+        .exec<{ host_version: string }>(
+          "SELECT host_version FROM installations WHERE account = ? AND revoked_at IS NULL AND generation = ?",
+          account.id,
+          account.generation,
+        )
+        .toArray();
+      if (versions.some((row) => olderThan(row.host_version, minimum))) {
+        return { ok: false, reason: "outdated_installation" } as const;
+      }
       const installation = crypto.randomUUID();
       this.sql.exec(
         `INSERT INTO installations
@@ -123,10 +143,11 @@ export class Registry extends DurableObject<Env> {
    * The principal of an installation credential presented with an Access identity, or null. Both
    * must belong to the same account: a credential issued under another service token is refused.
    */
-  authenticate(identity: string, tokenSha256: string, now: number): Principal | null {
+  authenticate(identity: string, tokenSha256: string, now: number, hostVersion?: string): Principal | null {
     const row = this.sql
-      .exec<{ installation: string; account: string; last_seen_at: number }>(
-        `SELECT i.id AS installation, i.account AS account, i.last_seen_at AS last_seen_at
+      .exec<{ installation: string; account: string; last_seen_at: number; host_version: string }>(
+        `SELECT i.id AS installation, i.account AS account, i.last_seen_at AS last_seen_at,
+                i.host_version AS host_version
            FROM installations i JOIN accounts a ON a.id = i.account
           WHERE i.token_sha256 = ? AND a.identity = ? AND i.revoked_at IS NULL
             AND i.generation = a.generation`,
@@ -135,7 +156,15 @@ export class Registry extends DurableObject<Env> {
       )
       .toArray()[0];
     if (!row) return null;
-    if (now - row.last_seen_at >= SEEN_INTERVAL_SECONDS) {
+    // The host version comes from the request (an updated host says so on its next request).
+    if (hostVersion && hostVersion !== row.host_version) {
+      this.sql.exec(
+        "UPDATE installations SET host_version = ?, last_seen_at = ? WHERE id = ?",
+        hostVersion,
+        now,
+        row.installation,
+      );
+    } else if (now - row.last_seen_at >= SEEN_INTERVAL_SECONDS) {
       this.sql.exec("UPDATE installations SET last_seen_at = ? WHERE id = ?", now, row.installation);
     }
     return { account: row.account, installation: row.installation, identity };
