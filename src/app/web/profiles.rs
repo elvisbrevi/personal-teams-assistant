@@ -329,6 +329,7 @@ impl Portal {
             "cloud_restore",
             "cloud_conflicts",
             "cloud_resolve",
+            "cloud_lost",
             "setup_readiness",
             "variable_create",
             "variable_update",

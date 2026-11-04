@@ -426,6 +426,17 @@ pub(in crate::app) async fn protocol(host: &Arc<Host>, args: &Value) -> Result<V
             Ok(json!({"disconnected":true}))
         }
         "poll" => {
+            // Replaced account store credentials are announced at once (the machine then asks
+            // with `store_delivery`), before the calls lock so the two locks never nest.
+            let held = {
+                let data = state.registry.lock().await;
+                data.machines
+                    .iter()
+                    .find(|m| m.id == id && !m.store_key.is_empty())
+                    .and_then(|m| m.store_held.as_ref().map(|h| (h.token.clone(), h.key)))
+            };
+            let store_delivery =
+                held.is_some_and(|(token, key)| super::super::cloud::announce(host, &token, key));
             if args.get("sessions").is_some() {
                 state
                     .db
@@ -448,7 +459,11 @@ pub(in crate::app) async fn protocol(host: &Arc<Host>, args: &Value) -> Result<V
                 c.claimed = true;
                 json!({"id":c.id,"method":c.method,"args":c.args})
             });
-            Ok(json!({"command":command,"session_cursor":session_cursor}))
+            let mut reply = json!({"command":command,"session_cursor":session_cursor});
+            if store_delivery {
+                reply["store_delivery"] = json!(true);
+            }
+            Ok(reply)
         }
         // Whether the account store is the account's source here (a signed-in computer asks
         // before it joins it as its own source).
@@ -785,6 +800,9 @@ async fn poll(host: Arc<Host>) {
                     cursor = next;
                 }
                 results.clear();
+                if reply["store_delivery"] == true {
+                    crate::app::cloud::announced(&host);
+                }
                 if let Some(command) = reply["command"].as_object() {
                     if command["method"] == "machine_assistant" {
                         let host = host.clone();

@@ -2041,6 +2041,8 @@ const CLOUD_STATES = {
 let cloudInstallations = [];
 /** The installation whose revocation waits for a second tap. */
 let cloudRevokeArmed = null;
+/** The installation whose «Lost or stolen» waits for a second tap. */
+let cloudLostArmed = null;
 /** The service token and, on the coordinator, which computers hold the current one. */
 let cloudToken = null;
 let cloudTokenArmed = false;
@@ -2228,11 +2230,61 @@ function renderCloudInstallations() {
       };
       actions.push(revoke);
     }
+    // Only the coordinator secures the account after a lost computer, revoked or not yet.
+    if (!entry.current && cloudToken?.coordinator) {
+      const armed = cloudLostArmed === entry.id;
+      const lost = el('button', { type: 'button', class: 'secondary', textContent: armed ? t('Tap again to secure the account') : t('Lost or stolen'), 'aria-label': t('Lost or stolen: {name}', { name: entry.label }) });
+      lost.onclick = () => {
+        if (!armed) {
+          cloudLostArmed = entry.id;
+          renderCloudInstallations();
+          cloudDisarmLater(`lost:${entry.id}`, () => { if (cloudLostArmed === entry.id) { cloudLostArmed = null; renderCloudInstallations(); } });
+          return;
+        }
+        cloudLostArmed = null;
+        busy(lost, () => cloudLost({ installation: entry.id }));
+      };
+      actions.push(lost);
+    }
     return el('div', { class: 'row variable-row' },
       rowText(el('span', { class: 'cred-name', textContent: entry.label, translate: 'no' }), seen, state),
       actions.length ? el('div', { class: 'variable-actions' }, actions) : null);
   }));
   $('#cloud-installations').hidden = cloudInstallations.length < 2;
+}
+
+const CLOUD_LOST_STEPS = {
+  machine: () => t('Revoked on this coordinator'),
+  store: () => t('Revoked in the account store'),
+  token: () => t('Service token replaced'),
+  key: () => t('Content key rotated'),
+};
+const CLOUD_LOST_STATES = { done: ['Done', 'ok'], not_needed: ['Not needed', 'muted'], pending: ['Waiting for your action', 'warn'], failed: ['Failed', 'warn'] };
+
+/** Secure the account after a lost computer; repeating it for the same computer continues. */
+async function cloudLost(target) {
+  const reply = await invoke('cloud_lost', target);
+  await loadCloud();
+  if (!reply.complete) throw t('Some steps are not done yet: see Lost computer.');
+  done(t('{name} can no longer use this account: the service token was replaced and the content key rotated. Back up the new key now with pta variables key backup.', { name: reply.name }));
+}
+
+/** The last lost computer secured from here: each step, and Continue while one is left. */
+function renderCloudLost() {
+  const record = cloudToken?.lost;
+  const box = $('#cloud-lost');
+  box.hidden = !record || record.complete;
+  if (box.hidden) return;
+  $('#cloud-lost-summary').textContent = t('Securing the account after “{name}” was lost. Do what each step that is not done says, then continue: finished steps are not repeated.', { name: record.name });
+  $('#cloud-lost-steps').replaceChildren(...(record.steps ?? []).map(step => {
+    const [label, tone] = CLOUD_LOST_STATES[step.state] ?? ['Unknown', 'muted'];
+    const detail = ['pending', 'failed'].includes(step.state) ? tx(step.detail) : '';
+    return el('div', { class: 'row variable-row' },
+      rowText(el('span', { class: 'cred-name', textContent: CLOUD_LOST_STEPS[step.step]?.() ?? step.step }), detail, badge(t(label), tone)));
+  }));
+  const next = $('#cloud-lost-continue');
+  next.hidden = false;
+  next.onclick = () => busy(next, () => cloudLost(record.installation ? { installation: record.installation } : { machine: record.machine }));
 }
 
 function renderCloud() {
@@ -2288,6 +2340,7 @@ function renderCloud() {
   if (granted) $('#cloud-endpoint').value = granted;
   $('#cloud-endpoint').readOnly = Boolean(granted);
   renderCloudInstallations();
+  renderCloudLost();
   renderCloudToken();
   renderCloudBackups();
   renderCloudMirror();
