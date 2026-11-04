@@ -105,6 +105,7 @@ const STORE_PENDING: &str =
 const STORE_BLOCKED: &str = "Some records are too large for the account store and are not copied.";
 const STORE_DIFFERS: &str =
     "The last verification found differences in the encrypted copy. Migrate again to repair it.";
+const STORE_RETRUST: &str = "This computer was trusted before it could receive the account store's new credentials: trust it again with the account store.";
 const STORE_TOKEN: &str = "The account store's service token expires within 30 days. Ask whoever runs the account store to renew it, then connect again with the new expiry.";
 const STORE_SHARED: &str =
     "The portal operator has not enabled the account store for this account.";
@@ -737,6 +738,7 @@ async fn account_store(host: &Arc<Host>, shared: bool) -> Step {
         "last_verify_ok": mirror["last_verify"]["ok"],
         "conflicts": mirror["primary"]["conflicts"],
         "token_expires_at": view["service_token"]["expires_at"],
+        "delivery": view["delivery"]["state"], "key_behind": view["delivery"]["key"]["behind"],
     }));
     let place = gui("Settings > Advanced > Cloud storage");
     match view["standing"].as_str().unwrap_or("unknown") {
@@ -769,6 +771,19 @@ async fn account_store(host: &Arc<Host>, shared: bool) -> Step {
     }
     if view["service_token"]["renew"] == true {
         return step.is("attention", STORE_TOKEN).act(place);
+    }
+    // A computer signed in to a coordinator that cannot receive the account's new credentials, or
+    // has not received its current content key yet.
+    if view["delivery"]["state"] == "retrust" {
+        return step
+            .is("attention", STORE_RETRUST)
+            .act(place)
+            .act(cli("pta auth machine login"));
+    }
+    if view["delivery"]["key"]["behind"] == true {
+        return step
+            .is("waiting", super::cloud::KEY_BEHIND)
+            .act(cli("pta cloud status"));
     }
     let primary = view["mode"] == "primary";
     if primary && mirror["primary"]["conflicts"].as_u64().unwrap_or(0) > 0 {

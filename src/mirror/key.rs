@@ -191,6 +191,40 @@ pub fn rotate(keys: &Path) -> Result<Content> {
     let next = content.keys.keys().max().copied().unwrap_or(0) + 1;
     content.keys.insert(next, random_key());
     content.active = next;
+    replace(keys, &content.backup())?;
+    Ok(content)
+}
+
+/// Install the account's key as the coordinator holds it after a rotation: the same content
+/// account and ID key, every version kept here unchanged and an active version at least as new.
+/// Without a key here it is written as `import` would. Anything else (another account's key, a
+/// changed or missing version, an older active one) is refused and nothing changes. The result
+/// says whether a file was written.
+pub fn update(keys: &Path, backup: &ContentBackup) -> Result<bool> {
+    let received = Content::from_backup(backup)?;
+    let Some(current) = load(keys)? else {
+        write_new(keys, &received.backup())?;
+        return Ok(true);
+    };
+    if current.backup() == received.backup() {
+        return Ok(false);
+    }
+    ensure!(
+        received.account == current.account
+            && received.id_key == current.id_key
+            && received.active >= current.active
+            && current
+                .keys
+                .iter()
+                .all(|(version, key)| received.keys.get(version) == Some(key)),
+        "A different account content key is already installed; nothing was replaced."
+    );
+    replace(keys, &received.backup())?;
+    Ok(true)
+}
+
+/// Replace the key file atomically.
+fn replace(keys: &Path, backup: &ContentBackup) -> Result<()> {
     let temporary = keys.join(format!(".{FILE}.{}", uuid::Uuid::new_v4()));
     {
         use std::io::Write;
@@ -202,11 +236,10 @@ pub fn rotate(keys: &Path) -> Result<Content> {
             options.mode(0o600);
         }
         let mut file = options.open(&temporary)?;
-        file.write_all(serde_json::to_string(&content.backup())?.as_bytes())?;
+        file.write_all(serde_json::to_string(backup)?.as_bytes())?;
         file.sync_all()?;
     }
-    crate::security::replace_private_file(&temporary, &path(keys))?;
-    Ok(content)
+    crate::security::replace_private_file(&temporary, &path(keys))
 }
 
 /// Set the key aside after the account store's copy was erased: the file is renamed to
@@ -226,4 +259,32 @@ pub fn retire(keys: &Path, at: i64) -> Result<Option<std::path::PathBuf>> {
     }
     std::fs::rename(&current, &retired)?;
     Ok(Some(retired))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_rotated_key_replaces_only_the_same_accounts_earlier_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let (here, coordinator) = (dir.path().join("here"), dir.path().join("coordinator"));
+        let created = create(&coordinator).unwrap();
+        assert!(update(&here, &created.backup()).unwrap());
+        assert!(!update(&here, &created.backup()).unwrap());
+        let rotated = rotate(&coordinator).unwrap();
+        assert_eq!(rotated.active, 2);
+        // The rotated set keeps version 1, so it replaces the copy here.
+        assert!(update(&here, &rotated.backup()).unwrap());
+        assert_eq!(load(&here).unwrap().unwrap().backup(), rotated.backup());
+        // An older set, another account's key or a changed version is refused and nothing changes.
+        assert!(update(&here, &created.backup()).is_err());
+        assert!(update(&here, &Content::generate().backup()).is_err());
+        let mut changed = rotated.backup();
+        changed.keys.insert(1, STANDARD.encode(random_key()));
+        assert!(update(&here, &changed).is_err());
+        assert_eq!(load(&here).unwrap().unwrap().backup(), rotated.backup());
+        // The trust-time import still never replaces a different key.
+        assert!(import(&here, &created.backup()).is_err());
+    }
 }

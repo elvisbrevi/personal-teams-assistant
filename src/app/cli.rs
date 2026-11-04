@@ -172,8 +172,8 @@ Account store (Cloudflare)
   cloud rotate-key --confirmed
                            Owner or enabled portal account, in mirror or primary. A new account content key
                            becomes active and the whole copy is sent again sealed with it (earlier keys stay on this
-                           computer). For a lost computer, after revoking it; then back the key up again and trust
-                           the account's other computers again with the account store.
+                           computer). For a lost computer, after revoking it; then back the key up again. The account's
+                           computers trusted with the account store receive it from the coordinator.
   cloud token                 Owner or enabled portal account. The account's service token and how to replace it: run the approved
                            launcher cloud-token-rotate (configure-cloud-access.py production --rotate, which rotates its secret in
                            Cloudflare Access; the previous one stops working at once). On the coordinator, which of the account's
@@ -1416,6 +1416,7 @@ fn validate_args(args: &[String]) -> Result<()> {
                     | "pull"
                     | "installations"
                     | "rotate-key"
+                    | "token"
             ]
             | ["cloud", "installations", "revoke", _]
             | ["credentials", "list"]
@@ -2797,6 +2798,27 @@ pub async fn run() -> i32 {
 #[cfg(test)]
 mod wiki_tests {
     use super::*;
+    #[test]
+    fn every_cloud_command_the_help_lists_is_accepted() {
+        for command in [
+            &["cloud", "status"][..],
+            &["cloud", "verify"],
+            &["cloud", "installations"],
+            &["cloud", "token"],
+            &["cloud", "rotate-key", "--confirmed"],
+            &[
+                "cloud",
+                "installations",
+                "revoke",
+                "synthetic",
+                "--confirmed",
+            ],
+        ] {
+            let args: Vec<String> = command.iter().map(|w| w.to_string()).collect();
+            assert!(validate_args(&args).is_ok(), "{command:?}");
+        }
+        assert!(validate_args(&["cloud", "tokens"].map(str::to_owned)).is_err());
+    }
     #[test]
     fn wiki_commands_require_exact_local_source_argument_and_closed_stdin_schema() {
         for operation in ["list", "search", "read"] {

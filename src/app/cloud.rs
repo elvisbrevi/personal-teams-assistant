@@ -19,7 +19,7 @@ use std::time::Duration;
 
 mod delivery;
 mod mirror;
-pub(in crate::app) use delivery::deliver;
+pub(in crate::app) use delivery::{KEY_BEHIND, deliver};
 pub(in crate::app) use mirror::{State, migration, primary, run};
 
 pub(super) const ACCESS_ID: &str = "CLOUD_ACCESS_CLIENT_ID";
