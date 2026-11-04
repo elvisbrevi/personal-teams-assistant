@@ -510,6 +510,16 @@
       { id: '00000000-0000-4000-8000-000000000002', label: 'Synthetic <b>desktop</b>', host_version: '0.10.33', enrolled_at: secs(NOW) - 7200, last_seen_at: secs(NOW) - 600, revoked_at: null, current: false },
       { id: '00000000-0000-4000-8000-000000000003', label: 'Old computer', host_version: '0.10.25', enrolled_at: secs(NOW) - 900000, last_seen_at: secs(NOW) - 800000, revoked_at: secs(NOW) - 700000, current: false },
     ]), active: 2 }),
+    // Synthetic backups: one that can be restored, one whose manifest does not match.
+    cloud_backups: () => ({
+      backups: [
+        { name: 'cloud-1700000200', created_at: secs(NOW) - 3600, reason: 'migrate', host_version: '0.10.40', bytes: 409600, files: 12, restorable: true },
+        { name: 'cloud-1700000100', restorable: false, problem: "The backup's manifest does not match its files; nothing was restored." },
+      ],
+      before_restore: [], pending: !!window.__ptaCloudRestore, restores_here: true,
+      last_restore: null,
+    }),
+    cloud_restore: args => { window.__ptaCloudRestore = args.backup; return { restarting: true, backup: args.backup, assistant: false }; },
     // Synthetic service token: the coordinator's view, one computer waiting and one to trust again.
     cloud_token: () => ({
       connected: true, coordinator: true, service_token: { stored: true, expires_at: secs(NOW) + 300 * 86400 },

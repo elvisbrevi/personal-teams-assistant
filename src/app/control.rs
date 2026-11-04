@@ -108,6 +108,8 @@ struct Endpoint {
     cloud_handoff_support: bool,
     #[serde(default)]
     cloud_delivery_support: bool,
+    #[serde(default)]
+    cloud_restore_support: bool,
     contract: u32,
     port: u16,
     token: String,
@@ -410,11 +412,15 @@ async fn client_with_transport(
     if scope.shared && !scope.owner {
         require_shared_account_host_at(dir)?;
     }
-    // Model-backed operations wait for the model without a deadline.
+    // Model-backed operations wait for the model without a deadline; a launcher runs for as long
+    // as its own approved timeout (at most ten minutes), which the host enforces.
     let mut client = reqwest::Client::builder()
         .no_proxy()
         .redirect(reqwest::redirect::Policy::none());
-    if !matches!(request.method.as_str(), "chat" | "test_providers") {
+    if !matches!(
+        request.method.as_str(),
+        "chat" | "test_providers" | "variable_launcher_run"
+    ) {
         client = client.timeout(Duration::from_secs(120));
     }
     let client = client.build()?;
@@ -525,6 +531,11 @@ async fn client_with_transport(
         ensure!(
             endpoint.cloud_delivery_support || request.method != "cloud_token",
             "Incompatible account store host: update the host and CLI together before replacing the service token."
+        );
+        ensure!(
+            endpoint.cloud_restore_support
+                || !matches!(request.method.as_str(), "cloud_backups" | "cloud_restore"),
+            "Incompatible account store host: update the host and CLI together before restoring a backup."
         );
         ensure!(endpoint.contract == CONTRACT, "incompatible host contract");
         ensure!(
@@ -638,6 +649,7 @@ pub(crate) fn launch(
             cloud_installations_support: true,
             cloud_handoff_support: true,
             cloud_delivery_support: true,
+            cloud_restore_support: true,
             contract: CONTRACT,
             port: listener.local_addr()?.port(),
             token: token.clone(),
@@ -1505,6 +1517,7 @@ mod tests {
                 cloud_installations_support: true,
                 cloud_handoff_support: true,
                 cloud_delivery_support: true,
+                cloud_restore_support: true,
                 account_authority_support: true,
                 shared_accounts_support: true,
                 account_binding: None,
@@ -1542,6 +1555,7 @@ mod tests {
                 cloud_installations_support: true,
                 cloud_handoff_support: true,
                 cloud_delivery_support: true,
+                cloud_restore_support: true,
                 account_authority_support: true,
                 shared_accounts_support: true,
                 account_binding: None,
@@ -1594,6 +1608,7 @@ mod tests {
                     cloud_installations_support: true,
                     cloud_handoff_support: true,
                     cloud_delivery_support: true,
+                    cloud_restore_support: true,
                     account_authority_support: true,
                     shared_accounts_support: true,
                     account_binding: None,

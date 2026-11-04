@@ -179,6 +179,16 @@ Account store (Cloudflare)
                            Cloudflare Access; the previous one stops working at once). On the coordinator, which of the account's
                            computers hold the current token: those trusted with the account store receive it automatically,
                            sealed to the key they signed in with; the others are trusted again with the account store.
+  cloud backups               Owner or enabled portal account. This computer's backups (backups/cloud-<time>/, taken before
+                           migrate, promote and rollback), whether each can be restored, the copies kept before earlier
+                           restores and the last restore's outcome.
+  cloud restore NAME --confirmed
+                           Owner, at this computer only (window or local CLI). Checks the backup (its manifest, that
+                           every file goes back inside this profile or its data directory, that each database is
+                           intact, that this version can read it), refuses while work a restart would interrupt is
+                           running, then restarts the application: before anything opens it copies the current data to
+                           backups/before-restore-<time>/ (never deleted) and puts the backup's files back. This
+                           computer's account store link ([cloud]) stays as it is now.
   cloud installations         Owner or enabled portal account. The account's computers in the account store: label, host version, when each
                            enrolled and was last seen, revoked ones and which is this one.
   cloud installations revoke ID --confirmed
@@ -692,6 +702,22 @@ async fn cloud_command(args: &[String]) -> Result<Reply> {
             call("cloud_rotate_key", json!({}), None, true).await
         }
         Some("token") => call("cloud_token", json!({}), None, true).await,
+        Some("backups") => call("cloud_backups", json!({}), None, true).await,
+        Some("restore") => {
+            let backup = words(args)
+                .get(2)
+                .copied()
+                .context("give the backup's name, as pta cloud backups lists it")?;
+            if let Some(reply) = unconfirmed(
+                args,
+                format!(
+                    "Restore backup {backup}? The application restarts, keeps a copy of the current data first and puts the backup back."
+                ),
+            ) {
+                return Ok(reply);
+            }
+            call("cloud_restore", json!({"backup": backup}), None, true).await
+        }
         Some("installations") => match words(args).get(2).copied() {
             None => call("cloud_installations", json!({}), None, true).await,
             Some("revoke") => {
@@ -1417,8 +1443,10 @@ fn validate_args(args: &[String]) -> Result<()> {
                     | "installations"
                     | "rotate-key"
                     | "token"
+                    | "backups"
             ]
             | ["cloud", "installations", "revoke", _]
+            | ["cloud", "restore", _]
             | ["credentials", "list"]
             | ["credentials", "set" | "delete", _]
             | [
@@ -1559,6 +1587,7 @@ fn validate_args(args: &[String]) -> Result<()> {
                 || p.as_slice() == ["cloud", "demote"]
                 || p.as_slice() == ["cloud", "pull"]
                 || p.as_slice() == ["cloud", "rotate-key"]
+                || p.as_slice().starts_with(&["cloud", "restore"])
                 || p.as_slice()
                     .starts_with(&["cloud", "installations", "revoke"])
                 || p.as_slice().starts_with(&["update", "stage"])
@@ -1768,7 +1797,7 @@ async fn execute(mut args: Vec<String>) -> Result<Reply> {
         }
         "capabilities" => {
             return Ok(Reply::success(
-                json!({"contract":control::CONTRACT,"commands":HELP,"skill_version":env!("CARGO_PKG_VERSION"),"activity_registration_support":true,"web_support":true,"web_access_support":true,"knowledge_index_support":true,"mcp_support":true,"tools_support":true,"todo_support":true,"implementation_support":true,"machine_pairing_support":true,"machine_login_support":true,"machine_management_support":true,"account_variables_support":true,"account_portable_support":true,"account_authority_support":true,"shared_accounts_support":true,"cloud_store_support":true,"cloud_mirror_support":true,"cloud_disconnect_support":true,"cloud_primary_support":true,"cloud_migration_support":true,"cloud_installations_support":true,"cloud_handoff_support":true,"cloud_delivery_support":true}),
+                json!({"contract":control::CONTRACT,"commands":HELP,"skill_version":env!("CARGO_PKG_VERSION"),"activity_registration_support":true,"web_support":true,"web_access_support":true,"knowledge_index_support":true,"mcp_support":true,"tools_support":true,"todo_support":true,"implementation_support":true,"machine_pairing_support":true,"machine_login_support":true,"machine_management_support":true,"account_variables_support":true,"account_portable_support":true,"account_authority_support":true,"shared_accounts_support":true,"cloud_store_support":true,"cloud_mirror_support":true,"cloud_disconnect_support":true,"cloud_primary_support":true,"cloud_migration_support":true,"cloud_installations_support":true,"cloud_handoff_support":true,"cloud_delivery_support":true,"cloud_restore_support":true}),
             ));
         }
         "skill" => return crate::app::skill::command(action, args.get(2).map(String::as_str)),
@@ -2805,6 +2834,8 @@ mod wiki_tests {
             &["cloud", "verify"],
             &["cloud", "installations"],
             &["cloud", "token"],
+            &["cloud", "backups"],
+            &["cloud", "restore", "cloud-1793748961", "--confirmed"],
             &["cloud", "rotate-key", "--confirmed"],
             &[
                 "cloud",

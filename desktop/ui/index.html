@@ -466,6 +466,12 @@
                 <div class="actions"><button id="cloud-erase" type="button" class="danger">Erase the account store's copy</button></div>
               </div>
             </div>
+            <div id="cloud-backups" hidden>
+              <h3>Backups of this computer</h3>
+              <p class="hint">Taken before migrating, promoting and bringing everything back. Restoring one restarts the application, keeps a copy of the current data first and puts the backup back; this computer's link to the account store stays as it is.</p>
+              <p id="cloud-backups-summary" class="hint" role="status"></p>
+              <div id="cloud-backup-list" class="list"></div>
+            </div>
             <details class="fold" id="cloud-connect-fold">
               <summary>Connect this computer <small>Advanced</small></summary>
               <p class="hint" id="cloud-connect-own">The address and the Access service token come from whoever runs your account store. The client secret is kept only on this computer.</p>
