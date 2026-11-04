@@ -439,6 +439,12 @@
               <p class="hint">Each computer connected to this account's store. Revoking one stops its access at once; it keeps its own data and can connect again with the service token.</p>
               <div id="cloud-installation-list" class="list"></div>
             </div>
+            <div id="cloud-token" hidden>
+              <h3>Service token</h3>
+              <p id="cloud-token-summary" class="hint" role="status"></p>
+              <div id="cloud-token-list" class="list"></div>
+              <div class="actions"><button id="cloud-token-rotate" type="button" class="secondary" hidden>Replace the service token</button></div>
+            </div>
             <div id="cloud-mirror" hidden>
               <h3>Encrypted copy</h3>
               <p id="cloud-mirror-summary" class="hint" role="status"></p>

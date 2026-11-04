@@ -102,6 +102,14 @@ pub(super) fn approve(
     Ok(json!({"launcher":launcher.id,"approved_at":launcher.approved_at}))
 }
 
+/// Whether this installation has the launcher `id`, and whether the user approved it.
+pub(in crate::app) fn launcher_state(state: &DesktopState, id: &str) -> (bool, bool) {
+    match state.variables.consumers.launchers.get(id) {
+        Ok(launcher) => (true, launcher.approved_at.is_some()),
+        Err(_) => (false, false),
+    }
+}
+
 /// What a person reviews before approving a launcher; the digest identifies that definition.
 pub(super) fn launcher_view(launcher: &rules::Launcher, variables: Vec<Value>) -> Value {
     json!({

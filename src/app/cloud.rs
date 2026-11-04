@@ -17,7 +17,9 @@ use crate::mirror::engine::Failure;
 use serde_json::{Value, json};
 use std::time::Duration;
 
+mod delivery;
 mod mirror;
+pub(in crate::app) use delivery::deliver;
 pub(in crate::app) use mirror::{State, migration, primary, run};
 
 pub(super) const ACCESS_ID: &str = "CLOUD_ACCESS_CLIENT_ID";
@@ -90,6 +92,7 @@ pub(super) fn handles(method: &str) -> bool {
             | "cloud_installations"
             | "cloud_revoke"
             | "cloud_rotate_key"
+            | "cloud_token"
     )
 }
 
@@ -240,6 +243,15 @@ pub(super) async fn operate(host: &Arc<Host>, request: &control::Request) -> Rep
                 return Reply::error("invalid_input", 2, "Invalid arguments.");
             }
             migration::operate_rotate(host).await
+        }
+        "cloud_token" => {
+            if let Some(reply) = refused_here(host, &invocation) {
+                return reply;
+            }
+            if request.args != json!({}) && !request.args.is_null() {
+                return Reply::error("invalid_input", 2, "Invalid arguments.");
+            }
+            delivery::operate_token(host).await
         }
         "cloud_installations" => {
             if let Some(reply) = refused_here(host, &invocation) {
@@ -428,6 +440,9 @@ async fn linked_status(host: &Arc<Host>) -> Result<Value> {
         "checked_at": checked_at,
     });
     view["mirror"] = mirror::describe(host, cloud);
+    if let Some(delivery) = delivery::describe(host) {
+        view["delivery"] = delivery;
+    }
     if let Some(token) = token_view(cloud, checked_at) {
         view["service_token"] = token;
     }

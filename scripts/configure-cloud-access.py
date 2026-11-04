@@ -9,13 +9,17 @@ and Worker names come from cloud/wrangler.jsonc. Every run writes a report witho
 
   staging     Access applications and Worker secrets for the staging Worker, then an end-to-end check
               with three temporary service tokens (enrollment, cross-account refusals, compare-and-swap,
-              origin, erasure, rebinding, the shared plan, revocation); the temporary tokens are
+              origin, erasure, rebinding, secret rotation, the shared plan, revocation); the temporary tokens are
               removed afterwards.
   production  Access applications and Worker secrets for the production Worker, then one service
               token for this account, whose client ID and secret go only to `pta cloud connect` on
               standard input. With --portal-user USER the token is that portal account's instead:
               it goes only to `pta web users cloud enable USER` on standard input (a token that
               account already had is replaced; the account moves to the new one when it connects).
+              With --rotate the account's existing token gets a new secret instead (same client ID,
+              so the account store needs no rebinding; the previous secret stops working at once),
+              which goes to the same command; the account's other computers then receive it from
+              their coordinator, sealed to the key each one signed in with.
 
 Each hostname gets a self-hosted application whose only policy is Service Auth for the listed service
 tokens, plus an exact Bypass application for /v1/health. Applications this script did not create are
@@ -233,6 +237,13 @@ class Access:
             raise SetupError("Cloudflare returned an incomplete service token.")
         return created
 
+    def rotate_token(self, ident):
+        """A new secret for the token `ident`, same client ID; the previous secret stops at once."""
+        rotated = result(self.token, "POST", f"{self.base}/service_tokens/{ident}/rotate", {})
+        if not rotated.get("client_id") or not rotated.get("client_secret"):
+            raise SetupError("Cloudflare returned an incomplete service token rotation.")
+        return rotated
+
     def delete_token(self, ident):
         result(self.token, "DELETE", f"{self.base}/service_tokens/{ident}")
 
@@ -327,6 +338,17 @@ def wait_for_admission(hostname, token, seconds=180):
                 return
         time.sleep(5)
     raise SetupError("The service token was not admitted by Access in time.")
+
+
+def wait_for_refusal(hostname, token, seconds=180):
+    """A revoked secret takes a while to stop at the edge: wait until Access refuses it."""
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        status, body = request(f"https://{hostname}/v1/whoami", headers=edge_headers(token))
+        if status in (302, 401, 403) and not body.startswith(b"{"):
+            return True
+        time.sleep(5)
+    return False
 
 
 def wait_for_configuration(hostname, seconds=300):
@@ -438,9 +460,22 @@ def verify(access, report):
         plan = json.loads(body).get("plan", {}) if status == 200 else {}
         check("plan" in health.get("features", []) and plan.get("accounts", 0) >= 2 and "oversubscribed" in plan,
               "the store reports the shared plan and how many accounts share it", checks)
-        for name, headers in (("a", a_under_c), ("b", b)):
+        # Rotating the secret keeps the client ID, so the account stays bound to the same identity.
+        rotated = access.rotate_token(third["id"])
+        check(rotated["client_id"] == third["client_id"] and rotated["client_secret"] != third["client_secret"],
+              "rotating a service token's secret keeps its client ID", checks)
+        wait_for_admission(access.hostname, rotated)
+        check(wait_for_refusal(access.hostname, third), "the previous secret stops reaching the Worker", checks)
+        a_rotated = {**edge_headers(rotated), "Authorization": "Bearer " + enrolled["a"]["token"]}
+        status, body = request(base + "/v1/whoami", headers=a_rotated)
+        check(status == 200 and json.loads(body)["installation"]["id"] == enrolled["a"]["installation"],
+              "the rotated secret reaches the same account and installation", checks)
+        status, body = request(base + "/v1/rebind", "POST", a_rotated, {"confirm": "rebind"})
+        check(status == 200 and json.loads(body).get("rebound") is False,
+              "a rotated secret needs no rebinding", checks)
+        for name, headers in (("a", a_rotated), ("b", b)):
             check(request(base + "/v1/installations/self", "DELETE", headers)[0] == 200, f"installation {name} revokes itself", checks)
-        check(request(base + "/v1/whoami", headers=a_under_c)[0] == 401, "a revoked credential is refused", checks)
+        check(request(base + "/v1/whoami", headers=a_rotated)[0] == 401, "a revoked credential is refused", checks)
     finally:
         try:
             configure_worker(access, access.admitted() - set(temporary))
@@ -480,6 +515,35 @@ def replace_token(access, label):
     wait_for_configuration(access.hostname)
     wait_for_admission(access.hostname, token)
     return token, bool(previous)
+
+
+def rotate(access, label, user, report):
+    """Replace this account's service token (or a portal account's) by rotating its secret: the client
+    ID stays, so the account store keeps the account; the previous secret stops working at once. The
+    new secret goes only to `pta cloud connect` (or `pta web users cloud enable USER`) on standard
+    input, and the account's other computers then receive it from their coordinator."""
+    pta = shutil.which("pta") or str(Path.home() / ".cargo" / "bin" / "pta")
+    name = f"{APP_PREFIX} {access.environment} " + (f"portal {user}" if user else label)
+    found = [t for t in access.tokens() if t.get("name") == name]
+    if len(found) != 1:
+        raise SetupError("There is no single service token of this account to rotate.")
+    rotated = access.rotate_token(found[0]["id"])
+    if rotated["client_id"] != found[0]["client_id"]:
+        raise SetupError("Cloudflare changed the client ID while rotating.")
+    wait_for_admission(access.hostname, rotated)
+    expires = (rotated.get("expires_at") or found[0].get("expires_at") or "")[:10]
+    payload = json.dumps({"client_id": rotated["client_id"], "client_secret": rotated["client_secret"]})
+    endpoint = f"https://{access.hostname}"
+    command = ([pta, "--json", "web", "users", "cloud", "enable", user, "--endpoint", endpoint] if user
+               else [pta, "--json", "cloud", "connect", "--endpoint", endpoint, "--label", label, "--confirmed"])
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", expires):
+        command += ["--token-expires", expires]
+    completed = subprocess.run(command, input=payload, capture_output=True, text=True, timeout=120)
+    outcome = json.loads(completed.stdout or "{}")
+    report["rotate"] = {"exit_code": completed.returncode, "code": outcome.get("code"),
+                        "portal_user": user, "token_expires": expires or None}
+    if completed.returncode != 0:
+        raise SetupError("The rotated secret could not be stored; run the same command again with a new rotation.")
 
 
 def enable_portal_user(access, user, report):
@@ -527,7 +591,9 @@ def run(args):
             team = configure_worker(access, access.admitted())
             report["team_domain"] = team
             report["health"] = wait_for_configuration(access.hostname)
-            if args.portal_user:
+            if args.rotate:
+                rotate(access, args.label, args.portal_user, report)
+            elif args.portal_user:
                 enable_portal_user(access, args.portal_user, report)
             else:
                 connect(access, args.label, report)
@@ -547,12 +613,16 @@ def main():
     parser.add_argument("--label", default="server", help="installation label (production)")
     parser.add_argument("--portal-user", help="portal account to enable the account store for (production)")
     parser.add_argument("--account", help="Cloudflare account ID (instead of CLOUDFLARE_ACCOUNT_ID)")
+    parser.add_argument("--rotate", action="store_true",
+                        help="replace the account's service token by rotating its secret (production)")
     args = parser.parse_args()
     if args.account:
         # A launcher passes fixed arguments and only the variables it names.
         os.environ["CLOUDFLARE_ACCOUNT_ID"] = args.account
     if not re.fullmatch(r"[a-z0-9][a-z0-9 -]{0,40}", args.label):
         parser.error("--label: lowercase letters, digits, spaces and dashes")
+    if args.rotate and args.environment != "production":
+        parser.error("--rotate: for production only (staging verification rotates a temporary token)")
     if args.portal_user is not None and (args.environment != "production" or not re.fullmatch(r"[a-z0-9][a-z0-9._@-]{0,63}", args.portal_user)):
         parser.error("--portal-user: a portal username, for production only")
     sys.exit(run(args))

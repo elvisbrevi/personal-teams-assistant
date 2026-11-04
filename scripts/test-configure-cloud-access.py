@@ -36,6 +36,7 @@ class CloudAccessTests(unittest.TestCase):
             "put_worker_secret": lambda environment, name, value: self.worker_secrets.__setitem__((environment, name), value),
             "wait_for_configuration": lambda hostname, seconds=300: {"configured": True, "features": ["cas", "erase", "origin", "rebind", "plan"]},
             "wait_for_admission": lambda hostname, token, seconds=180: None,
+            "wait_for_refusal": lambda hostname, token, seconds=180: True,
         }.items():
             patcher = patch.object(setup, name, value)
             patcher.start()
@@ -56,6 +57,12 @@ class CloudAccessTests(unittest.TestCase):
             ident = f"token-{len(self.tokens)}"
             value = {"id": ident, "name": data["name"], "client_id": f"{ident}.access", "client_secret": f"secret-of-{ident}"}
             self.tokens[ident] = {"id": ident, "name": data["name"], "client_id": value["client_id"]}
+        elif path.startswith(base + "/service_tokens/") and path.endswith("/rotate") and method == "POST":
+            ident = path.split("/")[-2]
+            self.assertEqual(data, {})  # the previous secret is revoked at once
+            self.rotations = getattr(self, "rotations", 0) + 1
+            value = {**self.tokens[ident], "client_secret": f"secret-of-{ident}-rotated-{self.rotations}",
+                     "expires_at": "2027-11-03T00:00:00Z"}
         elif path.startswith(base + "/service_tokens/") and method == "DELETE":
             value = self.tokens.pop(path.rsplit("/", 1)[1])
         elif path == base + "/apps" and method == "GET":
@@ -79,6 +86,7 @@ class CloudAccessTests(unittest.TestCase):
 
     def run_setup(self, environment, **extra):
         extra.setdefault("portal_user", None)
+        extra.setdefault("rotate", False)
         args = argparse.Namespace(environment=environment, report=self.report, label="server", **extra)
         code = setup.run(args)
         report = self.report.read_text()
@@ -155,6 +163,39 @@ class CloudAccessTests(unittest.TestCase):
         self.assertEqual(self.tokens["token-0"]["name"], "pta-cloud production portal synthetic-user")
         self.assertFalse(report["portal_user"]["replaced"])
 
+    def test_rotating_keeps_the_client_id_and_hands_the_secret_through_stdin_only(self):
+        self.tokens["token-0"] = {"id": "token-0", "name": "pta-cloud production server", "client_id": "token-0.access"}
+        self.tokens["token-1"] = {"id": "token-1", "name": "pta-cloud production portal synthetic-user", "client_id": "token-1.access"}
+        runs = []
+
+        def fake_run(command, **kwargs):
+            runs.append((command, kwargs.get("input")))
+            return setup.subprocess.CompletedProcess(command, 0, json.dumps({"code": "ok", "data": {}}), "")
+
+        with patch.object(setup.subprocess, "run", fake_run):
+            code, report = self.run_setup("production", rotate=True)
+        self.assertEqual(code, 0, report)
+        command, stdin = runs[0]
+        self.assertEqual(command[1:4], ["--json", "cloud", "connect"])
+        self.assertEqual(command[-2:], ["--token-expires", "2027-11-03"])
+        self.assertNotIn("rotated", " ".join(command))
+        self.assertEqual(json.loads(stdin), {"client_id": "token-0.access", "client_secret": "secret-of-token-0-rotated-1"})
+        # Only that token was rotated; nothing was created or deleted.
+        self.assertEqual(set(self.tokens), {"token-0", "token-1"})
+        self.assertFalse([call for call in self.calls if call[0] == "DELETE" or call[1].endswith("/service_tokens") and call[0] == "POST"])
+        with patch.object(setup.subprocess, "run", fake_run):
+            code, report = self.run_setup("production", rotate=True, portal_user="synthetic-user")
+        self.assertEqual(code, 0, report)
+        command, stdin = runs[1]
+        self.assertEqual(command[1:7], ["--json", "web", "users", "cloud", "enable", "synthetic-user"])
+        self.assertEqual(json.loads(stdin)["client_id"], "token-1.access")
+
+    def test_rotating_without_a_token_of_the_account_changes_nothing(self):
+        code, report = self.run_setup("production", rotate=True)
+        self.assertEqual(code, 1)
+        self.assertIn("no single service token", report["error"])
+        self.assertFalse([call for call in self.calls if call[1].endswith("/rotate")])
+
     def test_unmanaged_applications_on_the_hostname_are_never_changed(self):
         _, hostname = setup.worker_settings("staging")
         self.apps["foreign"] = {"id": "foreign", "name": "someone else", "domain": hostname, "type": "self_hosted"}
@@ -197,6 +238,8 @@ class CloudAccessTests(unittest.TestCase):
             yield 200, b"{}"  # a under c
             yield 409, b"{}"  # b cannot take c
             yield 200, json.dumps({"plan": {"accounts": 2, "oversubscribed": False}}).encode()
+            yield 200, json.dumps({"installation": {"id": "inst-a"}}).encode()  # a under c's rotated secret
+            yield 200, json.dumps({"rebound": False, "installation": "inst-a"}).encode()  # no rebinding needed
             yield 200, b"{}"
             yield 200, b"{}"
             yield 401, b"{}"  # revoked

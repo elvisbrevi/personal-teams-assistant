@@ -512,6 +512,13 @@ pub(super) const TOOLS: &[Tool] = &[
         schema: none,
     },
     Tool {
+        name: "cloud_token",
+        title: "Account store service token",
+        description: "The account's Access service token for the account store (stored, expiry) and how to replace it: on the coordinator, run the approved launcher cloud-token-rotate with launcher_run (it rotates the token's secret in Cloudflare Access, so the previous one stops working at once, and stores the new one here), and see which of the account's computers already hold the current token (computers, pending): those trusted with the account store receive it automatically, sealed to the key they signed in with; one that says retrust is trusted again with the account store. On a computer signed in to a coordinator: whether it receives new credentials and the last delivery. Read-only. Owner, or a portal account the operator enabled the account store for.",
+        effect: Effect::Read,
+        schema: none,
+    },
+    Tool {
         name: "cloud_revoke",
         title: "Revoke an account store installation",
         description: "Revoke another computer of the account in the account store, by the ID cloud_installations lists: its credential stops working at once, and it keeps its own data. Use it for a lost or retired computer, or before cloud_erase, which needs a single connected computer. This computer disconnects with cloud_disconnect instead. Owner, or a portal account the operator enabled the account store for. Needs the user's confirmation.",
@@ -1697,7 +1704,9 @@ pub(super) async fn run(name: &str, args: &Value) -> Result<Value, String> {
         "variable_entry_request" => ipc("variable_entry_start", args.clone()).await,
         "variable_update" | "variable_rename" | "variable_usage" => ipc(name, args.clone()).await,
         "consumer_list" => ipc("variable_consumer_list", args.clone()).await,
-        "cloud_status" | "cloud_verify" | "cloud_installations" => ipc(name, args.clone()).await,
+        "cloud_status" | "cloud_verify" | "cloud_installations" | "cloud_token" => {
+            ipc(name, args.clone()).await
+        }
         "cloud_migrate" | "cloud_rollback" | "cloud_erase" | "cloud_disconnect" | "cloud_promote" | "cloud_pull" | "cloud_revoke" | "cloud_rotate_key" => {
             let mut args = args.clone();
             args.as_object_mut().unwrap().remove("confirmed");

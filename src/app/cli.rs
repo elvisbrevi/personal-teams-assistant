@@ -174,6 +174,11 @@ Account store (Cloudflare)
                            becomes active and the whole copy is sent again sealed with it (earlier keys stay on this
                            computer). For a lost computer, after revoking it; then back the key up again and trust
                            the account's other computers again with the account store.
+  cloud token                 Owner or enabled portal account. The account's service token and how to replace it: run the approved
+                           launcher cloud-token-rotate (configure-cloud-access.py production --rotate, which rotates its secret in
+                           Cloudflare Access; the previous one stops working at once). On the coordinator, which of the account's
+                           computers hold the current token: those trusted with the account store receive it automatically,
+                           sealed to the key they signed in with; the others are trusted again with the account store.
   cloud installations         Owner or enabled portal account. The account's computers in the account store: label, host version, when each
                            enrolled and was last seen, revoked ones and which is this one.
   cloud installations revoke ID --confirmed
@@ -686,6 +691,7 @@ async fn cloud_command(args: &[String]) -> Result<Reply> {
             }
             call("cloud_rotate_key", json!({}), None, true).await
         }
+        Some("token") => call("cloud_token", json!({}), None, true).await,
         Some("installations") => match words(args).get(2).copied() {
             None => call("cloud_installations", json!({}), None, true).await,
             Some("revoke") => {
@@ -1761,7 +1767,7 @@ async fn execute(mut args: Vec<String>) -> Result<Reply> {
         }
         "capabilities" => {
             return Ok(Reply::success(
-                json!({"contract":control::CONTRACT,"commands":HELP,"skill_version":env!("CARGO_PKG_VERSION"),"activity_registration_support":true,"web_support":true,"web_access_support":true,"knowledge_index_support":true,"mcp_support":true,"tools_support":true,"todo_support":true,"implementation_support":true,"machine_pairing_support":true,"machine_login_support":true,"machine_management_support":true,"account_variables_support":true,"account_portable_support":true,"account_authority_support":true,"shared_accounts_support":true,"cloud_store_support":true,"cloud_mirror_support":true,"cloud_disconnect_support":true,"cloud_primary_support":true,"cloud_migration_support":true,"cloud_installations_support":true,"cloud_handoff_support":true}),
+                json!({"contract":control::CONTRACT,"commands":HELP,"skill_version":env!("CARGO_PKG_VERSION"),"activity_registration_support":true,"web_support":true,"web_access_support":true,"knowledge_index_support":true,"mcp_support":true,"tools_support":true,"todo_support":true,"implementation_support":true,"machine_pairing_support":true,"machine_login_support":true,"machine_management_support":true,"account_variables_support":true,"account_portable_support":true,"account_authority_support":true,"shared_accounts_support":true,"cloud_store_support":true,"cloud_mirror_support":true,"cloud_disconnect_support":true,"cloud_primary_support":true,"cloud_migration_support":true,"cloud_installations_support":true,"cloud_handoff_support":true,"cloud_delivery_support":true}),
             ));
         }
         "skill" => return crate::app::skill::command(action, args.get(2).map(String::as_str)),

@@ -10,7 +10,8 @@ pub(in crate::app) struct Pending {
     code: String,
     expires_at: u64,
     expected_account: Option<u64>,
-    /// The key pair the account store handoff is sealed to; `None` with a coordinator without it.
+    /// The computer's key pair the account store handoff is sealed to; `None` with a coordinator
+    /// without it.
     receiver: Option<crate::mirror::handoff::Receiver>,
 }
 impl Pending {
@@ -192,7 +193,10 @@ pub(in crate::app) async fn begin_at(
             .await;
         }
         let verifier = security::random_secret();
-        let receiver = crate::mirror::handoff::Receiver::generate()?;
+        // The computer's own key pair, kept while it stays trusted: the account store handed
+        // over now, and a replaced service token or rotated key later, are sealed to it.
+        let receiver =
+            crate::mirror::handoff::Receiver::machine(&host.state.settings.profile().join("keys"))?;
         let reply = post(
             &endpoint,
             json!({"action":"login_start","id":id,"name":name,"os":std::env::consts::OS,

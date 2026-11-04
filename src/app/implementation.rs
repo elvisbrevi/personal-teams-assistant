@@ -57,6 +57,23 @@ struct Machine {
     /// Its installation in the account store, revoked there when the machine is revoked.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     store_installation: String,
+    /// The public key the person approved, with the account store, when trusting the machine: a
+    /// replaced service token or a rotated content key is sealed to it later. Empty when the
+    /// machine was trusted without the account store or before 0.10.38.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    store_key: String,
+    /// What the machine last said it holds of the account store.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    store_held: Option<StoreHeld>,
+}
+/// A machine's account store credentials as it last reported them: its service token's
+/// fingerprint and its content key's active version, never the values.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoreHeld {
+    token: String,
+    key: u32,
+    at: i64,
 }
 /// The coordinator and account this installation signed in to. Anything synchronized from that
 /// account is qualified by it, so a different coordinator, account or machine never reuses it.
@@ -72,6 +89,36 @@ pub(super) struct Link {
 /// protocol: a signed-in computer joins the store as its source only when the coordinator has.
 pub(super) async fn coordinator_store_mode(host: &Arc<Host>) -> Result<String> {
     fleet::coordinator_store_mode(host).await
+}
+
+/// A machine of the account trusted with the account store, as the coordinator knows it.
+pub(super) struct StoreMachine {
+    pub id: String,
+    pub name: String,
+    pub store_installation: String,
+    /// Whether the coordinator recorded a key to seal new credentials to.
+    pub receives: bool,
+    /// What it last reported: token fingerprint, content key version, when.
+    pub held: Option<(String, u32, i64)>,
+}
+
+/// The machines (not revoked) that were given the account store or joined it.
+pub(super) async fn store_machines(host: &Arc<Host>) -> Vec<StoreMachine> {
+    let data = host.state.implementation.registry.lock().await;
+    data.machines
+        .iter()
+        .filter(|m| !m.revoked && (!m.store_key.is_empty() || !m.store_installation.is_empty()))
+        .map(|m| StoreMachine {
+            id: m.id.clone(),
+            name: m.name.clone(),
+            store_installation: m.store_installation.clone(),
+            receives: !m.store_key.is_empty(),
+            held: m
+                .store_held
+                .as_ref()
+                .map(|h| (h.token.clone(), h.key, h.at)),
+        })
+        .collect()
 }
 
 pub(super) fn link(state: &DesktopState) -> Result<Option<Link>> {
@@ -1348,6 +1395,65 @@ mod tests {
                 json!([])
             );
         }
+    }
+    #[tokio::test]
+    async fn the_coordinator_keeps_the_approved_store_key_and_what_a_machine_holds() {
+        let root = tempfile::tempdir().unwrap();
+        let host = host(root.path());
+        let id = uuid::Uuid::new_v4().to_string();
+        let key = crate::mirror::handoff::Receiver::generate().unwrap();
+        let registration = fleet::register(
+            &host,
+            &json!({"id":id,"name":"Laptop","os":"linux","enrollment":"login",
+                "installation":"a".repeat(64),"store_key":key.public(),"handoff":"b".repeat(64)}),
+        )
+        .await
+        .unwrap();
+        // This coordinator has no account store: nothing to seal, and it says so.
+        assert!(registration["store"]["unavailable"].is_string());
+        let token = registration["token"].as_str().unwrap().to_owned();
+        let held = "c".repeat(32);
+        let delivery = |held: Value| {
+            let (host, id, token) = (host.clone(), id.clone(), token.clone());
+            async move {
+                fleet::protocol(
+                    &host,
+                    &json!({"id":id,"token":token,"action":"store_delivery","held":held}),
+                )
+                .await
+            }
+        };
+        let reply = delivery(json!({"token": held, "key": 1})).await.unwrap();
+        assert_eq!(reply["state"], "unavailable");
+        assert!(reply.get("sealed").is_none());
+        {
+            let data = host.state.implementation.registry.lock().await;
+            let machine = data.machines.iter().find(|m| m.id == id).unwrap();
+            assert_eq!(machine.store_key, key.public());
+            assert_eq!(
+                machine
+                    .store_held
+                    .as_ref()
+                    .map(|h| (h.token.as_str(), h.key)),
+                Some((held.as_str(), 1))
+            );
+        }
+        let listed = store_machines(&host).await;
+        assert_eq!(listed.len(), 1);
+        assert!(listed[0].receives);
+        // Only fingerprints are accepted, and a revoked machine is refused before anything else.
+        assert!(
+            delivery(json!({"token": "not a fingerprint", "key": 1}))
+                .await
+                .is_err()
+        );
+        {
+            let mut data = host.state.implementation.registry.lock().await;
+            management::revoke(&mut data, &id).unwrap();
+            host.state.implementation.save(&data).unwrap();
+        }
+        assert!(delivery(json!({"token": held, "key": 1})).await.is_err());
+        assert!(store_machines(&host).await.is_empty());
     }
     #[tokio::test]
     async fn worker_authentication_and_claiming_do_not_replay_commands() {

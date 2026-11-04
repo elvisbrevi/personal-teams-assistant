@@ -23,7 +23,7 @@ impl Shell for TestShell {
     fn exit(&self) {}
 }
 
-fn host(root: &Path) -> Arc<Host> {
+pub(super) fn host(root: &Path) -> Arc<Host> {
     Arc::new(Host {
         state: init_state(&root.join("profile"), &root.join("data")).unwrap(),
         shell: Box::new(TestShell),

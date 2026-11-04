@@ -324,6 +324,7 @@ impl Portal {
             "cloud_installations",
             "cloud_revoke",
             "cloud_rotate_key",
+            "cloud_token",
             "setup_readiness",
             "variable_create",
             "variable_update",

@@ -5,6 +5,11 @@
 //! short code both screens show, so a key swapped in transit shows another code. The coordinator
 //! seals the bundle to that public key with an ephemeral key of its own (X25519, HKDF-SHA256 and
 //! AES-256-GCM-SIV), bound to the sign-in it answers.
+//!
+//! The computer keeps that key pair (`keys/cloud-machine.json`, private) for as long as it stays
+//! trusted, and the coordinator records the public key it approved, so a replaced service token or
+//! a rotated content key reaches it later the same way, sealed to the key the person confirmed,
+//! without trusting the computer again.
 
 use aes_gcm_siv::{
     Aes256GcmSiv, KeyInit, Nonce,
@@ -15,12 +20,24 @@ use aws_lc_rs::agreement::{self, PrivateKey, UnparsedPublicKey, X25519};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::path::Path;
 
 use super::seal::hmac_sha256;
 
 const DOMAIN: &[u8] = b"personal-teams-assistant/cloud-handoff/v1";
 /// The largest bundle: the content key file and a service token are a few kilobytes.
 const MAX_BYTES: usize = 64 * 1024;
+/// The computer's own key pair, kept while it stays trusted.
+pub const MACHINE_FILE: &str = "cloud-machine.json";
+const MACHINE_FORMAT: &str = "pta-cloud-machine-1";
+
+/// The stored key pair: only the private seed; the public key is derived from it.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Stored {
+    format: String,
+    private: String,
+}
 
 /// A sealed bundle as it travels: the sender's ephemeral public key, the nonce and the ciphertext.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -45,6 +62,74 @@ impl Receiver {
             .map_err(|_| anyhow!("no public key"))?
             .as_ref());
         Ok(Self { key, public })
+    }
+
+    fn from_seed(seed: &[u8]) -> Result<Self> {
+        let key = PrivateKey::from_private_key(&X25519, seed)
+            .map_err(|_| anyhow!("The computer's account store key is damaged."))?;
+        let public = hex(key
+            .compute_public_key()
+            .map_err(|_| anyhow!("no public key"))?
+            .as_ref());
+        Ok(Self { key, public })
+    }
+
+    /// This computer's key pair in `keys`, created (private) the first time.
+    pub fn machine(keys: &Path) -> Result<Self> {
+        let path = keys.join(MACHINE_FILE);
+        match std::fs::read_to_string(&path) {
+            Ok(text) => {
+                let stored: Stored = serde_json::from_str(&text)
+                    .context("The computer's account store key is damaged.")?;
+                ensure!(
+                    stored.format == MACHINE_FORMAT,
+                    "The computer's account store key is damaged."
+                );
+                let seed = STANDARD
+                    .decode(stored.private.trim())
+                    .context("The computer's account store key is damaged.")?;
+                Self::from_seed(&seed)
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let created = Self::generate()?;
+                created.store(keys)?;
+                Ok(created)
+            }
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    /// Whether this computer has kept a key pair (it signed in asking for the account store).
+    pub fn kept(keys: &Path) -> bool {
+        keys.join(MACHINE_FILE).exists()
+    }
+
+    fn store(&self, keys: &Path) -> Result<()> {
+        use aws_lc_rs::encoding::AsBigEndian;
+        use std::io::Write;
+        let seed: aws_lc_rs::encoding::Curve25519SeedBin<'_> = self
+            .key
+            .as_be_bytes()
+            .map_err(|_| anyhow!("no private key"))?;
+        let stored = Stored {
+            format: MACHINE_FORMAT.into(),
+            private: STANDARD.encode(seed.as_ref()),
+        };
+        crate::security::private_dir(keys)?;
+        let temporary = keys.join(format!(".{MACHINE_FILE}.{}", uuid::Uuid::new_v4()));
+        {
+            let mut options = std::fs::OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+            let mut file = options.open(&temporary)?;
+            file.write_all(serde_json::to_string(&stored)?.as_bytes())?;
+            file.sync_all()?;
+        }
+        crate::security::replace_private_file(&temporary, &keys.join(MACHINE_FILE))
     }
 
     /// The public key, 64 hex digits, sent with the sign-in.
@@ -139,6 +224,23 @@ fn associated(context: &str, sender: &str, recipient: &str) -> Vec<u8> {
     out
 }
 
+/// A short, one-way fingerprint of a service token (client ID and secret), so a computer and its
+/// coordinator can tell whether they hold the same one without either sending it.
+pub fn token_fingerprint(client_id: &str, client_secret: &str) -> String {
+    hex(&hmac_sha256(
+        b"personal-teams-assistant/cloud-token/v1",
+        &[client_id.as_bytes(), &[0], client_secret.as_bytes()],
+    ))[..32]
+        .to_owned()
+}
+
+pub fn valid_fingerprint(value: &str) -> bool {
+    value.len() == 32
+        && value
+            .bytes()
+            .all(|c| matches!(c, b'0'..=b'9' | b'a'..=b'f'))
+}
+
 pub fn valid_public(value: &str) -> bool {
     unhex(value, 32).is_some()
 }
@@ -180,6 +282,44 @@ mod tests {
         let again = seal(receiver.public(), "sign-in-1", b"synthetic bundle").unwrap();
         assert_ne!(again.key, sealed.key);
         assert!(seal("00", "sign-in-1", b"x").is_err());
+    }
+
+    #[test]
+    fn a_computer_keeps_its_key_pair() {
+        let dir = tempfile::tempdir().unwrap();
+        let keys = dir.path().join("keys");
+        assert!(!Receiver::kept(&keys));
+        let first = Receiver::machine(&keys).unwrap();
+        assert!(Receiver::kept(&keys));
+        let again = Receiver::machine(&keys).unwrap();
+        assert_eq!(first.public(), again.public());
+        // What was sealed to the key the coordinator recorded still opens after a restart.
+        let sealed = seal(first.public(), "delivery", b"synthetic bundle").unwrap();
+        assert_eq!(
+            again.open("delivery", &sealed).unwrap(),
+            b"synthetic bundle"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(keys.join(MACHINE_FILE))
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o077, 0);
+        }
+        std::fs::write(keys.join(MACHINE_FILE), "{}").unwrap();
+        assert!(Receiver::machine(&keys).is_err());
+    }
+
+    #[test]
+    fn a_token_fingerprint_tells_tokens_apart_without_revealing_them() {
+        let one = token_fingerprint("synthetic.access", "cfast_one");
+        assert!(valid_fingerprint(&one));
+        assert_eq!(one, token_fingerprint("synthetic.access", "cfast_one"));
+        assert_ne!(one, token_fingerprint("synthetic.access", "cfast_two"));
+        assert_ne!(one, token_fingerprint("other.access", "cfast_one"));
+        assert!(!one.contains("cfast"));
     }
 
     #[test]

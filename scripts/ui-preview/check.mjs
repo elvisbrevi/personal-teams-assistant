@@ -1700,6 +1700,17 @@ for (const [label, options] of [['desktop', {}], ['phone', { context: { viewport
   await revokeOther.click();
   await computers.getByRole('button').waitFor({ state: 'detached' });
   check(`${label}: the second tap revokes that computer by ID`, await page.evaluate(() => window.__ptaCloudRevoked === '00000000-0000-4000-8000-000000000002'));
+  const tokenBox = panel.locator('#cloud-token');
+  const tokenList = panel.locator('#cloud-token-list');
+  check(`${label}: the service token lists which computers wait for it, names as text`, await tokenBox.isVisible()
+    && await tokenList.innerText().then(text => text.includes('Synthetic <i>desktop</i>') && text.includes('Esperando el token nuevo') && text.includes('Vuelve a confiarlo'))
+    && await tokenList.locator('i').count() === 0 && (await panel.locator('#cloud-token-summary').innerText()).includes('2 computadores'));
+  const replaceToken = panel.locator('#cloud-token-rotate');
+  await replaceToken.click();
+  check(`${label}: the first tap only arms the token replacement`, await page.evaluate(() => !window.__ptaLauncherRun) && (await replaceToken.innerText()).includes('Toca de nuevo'));
+  await replaceToken.click();
+  await page.waitForFunction(() => document.querySelector('#cloud-token-summary').textContent.includes('1 computador aún'));
+  check(`${label}: the second tap runs the approved launcher and only the computer to trust again still waits`, await page.evaluate(() => window.__ptaLauncherRun === 'cloud-token-rotate'));
   await page.screenshot({ path: `${out}/cloud-${label}.png`, fullPage: false });
   await rollback.click();
   check(`${label}: the first tap only arms the rollback`, (await rollback.innerText()).includes('Toca de nuevo') && await page.evaluate(() => window.__ptaCloudMirror.mode === 'mirror'));
