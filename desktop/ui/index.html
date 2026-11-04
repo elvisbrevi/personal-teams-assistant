@@ -443,7 +443,10 @@
               <h3>Service token</h3>
               <p id="cloud-token-summary" class="hint" role="status"></p>
               <div id="cloud-token-list" class="list"></div>
-              <div class="actions"><button id="cloud-token-rotate" type="button" class="secondary" hidden>Replace the service token</button></div>
+              <div class="grid" id="cloud-expiry" hidden>
+                <label>Service token expires on <small>As Cloudflare Access shows it. A reminder appears 30 days before.</small><input id="cloud-expiry-date" type="date"></label>
+              </div>
+              <div class="actions"><button id="cloud-expiry-save" type="button" class="secondary" hidden>Save the date</button><button id="cloud-token-rotate" type="button" class="secondary" hidden>Replace the service token</button></div>
             </div>
             <div id="cloud-mirror" hidden>
               <h3>Encrypted copy</h3>
@@ -481,6 +484,7 @@
                 <label>Name of this computer <small>Shown in the account store.</small><input id="cloud-label" maxlength="80" autocomplete="off"></label>
                 <label id="cloud-client-id-field">Access client ID<input id="cloud-client-id" spellcheck="false" autocomplete="off"></label>
                 <label id="cloud-client-secret-field">Access client secret <small>Empty uses the one this computer already has.</small><input id="cloud-client-secret" type="password" spellcheck="false" autocomplete="off"></label>
+                <label id="cloud-expires-field">Service token expires on <small>Optional, as Cloudflare Access shows it.</small><input id="cloud-expires" type="date"></label>
               </div>
               <div class="actions"><button id="cloud-connect" type="button">Connect to the account store</button></div>
             </details>

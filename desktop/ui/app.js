@@ -2115,6 +2115,15 @@ function renderCloudToken() {
     return el('div', { class: 'row variable-row' },
       rowText(el('span', { class: 'cred-name', textContent: entry.name, translate: 'no' }), seen, badge(t(label), tone)));
   }));
+  // The recorded expiry is this computer's own reminder; a portal account's comes from its operator.
+  const expiry = !cloudStatus?.granted_endpoint && cloudStatus?.standing === 'live';
+  $('#cloud-expiry').hidden = !expiry;
+  $('#cloud-expiry-save').hidden = !expiry;
+  const date = $('#cloud-expiry-date');
+  if (expiry && document.activeElement !== date) {
+    const at = cloudStatus?.service_token?.expires_at;
+    date.value = at ? new Date(at * 1000).toISOString().slice(0, 10) : '';
+  }
   const rotate = $('#cloud-token-rotate');
   rotate.hidden = !(token.replace?.runs_here && token.replace?.launcher?.approved);
   rotate.textContent = cloudTokenArmed ? t('Tap again to replace the token') : t('Replace the service token');
@@ -2149,7 +2158,7 @@ function renderCloudBackups() {
         if (!armed) {
           cloudRestoreArmed = entry.name;
           renderCloudBackups();
-          setTimeout(() => { if (cloudRestoreArmed === entry.name) { cloudRestoreArmed = null; renderCloudBackups(); } }, 4000);
+          cloudDisarmLater(`restore:${entry.name}`, () => { if (cloudRestoreArmed === entry.name) { cloudRestoreArmed = null; renderCloudBackups(); } });
           return;
         }
         cloudRestoreArmed = null;
@@ -2170,7 +2179,7 @@ $('#cloud-token-rotate').onclick = event => {
   if (!cloudTokenArmed) {
     cloudTokenArmed = true;
     renderCloudToken();
-    setTimeout(() => { cloudTokenArmed = false; renderCloudToken(); }, 4000);
+    cloudDisarmLater('#cloud-token-rotate', () => { cloudTokenArmed = false; renderCloudToken(); });
     return;
   }
   cloudTokenArmed = false;
@@ -2181,6 +2190,15 @@ $('#cloud-token-rotate').onclick = event => {
     done(t('The service token was replaced. The account\'s other computers receive it within minutes.'));
   });
 };
+
+$('#cloud-expiry-save').onclick = event => busy(event.currentTarget, async () => {
+  const date = $('#cloud-expiry-date').value;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) throw t('Give the date the service token expires, as Cloudflare Access shows it.');
+  // Connecting again with the same token only records the new date.
+  const reply = await invoke('cloud_connect', { endpoint: cloudStatus.endpoint, token_expires: date });
+  await loadCloud();
+  done(reply.changed ? t('The service token\'s expiry date was saved.') : t('That date was already saved.'));
+});
 
 /** Plain text only: labels are whatever each computer called itself. */
 function renderCloudInstallations() {
@@ -2198,7 +2216,7 @@ function renderCloudInstallations() {
         if (!armed) {
           cloudRevokeArmed = entry.id;
           renderCloudInstallations();
-          setTimeout(() => { if (cloudRevokeArmed === entry.id) { cloudRevokeArmed = null; renderCloudInstallations(); } }, 4000);
+          cloudDisarmLater(`revoke:${entry.id}`, () => { if (cloudRevokeArmed === entry.id) { cloudRevokeArmed = null; renderCloudInstallations(); } });
           return;
         }
         cloudRevokeArmed = null;
@@ -2249,7 +2267,7 @@ function renderCloud() {
   if (status?.service_token?.expires_at) {
     const when = new Date(status.service_token.expires_at * 1000).toLocaleDateString(uiLocale(), { timeZone: 'UTC' });
     details.append(el('p', { class: status.service_token.renew ? 'callout warn' : 'hint', textContent: status.service_token.renew
-      ? t('The service token expires on {date}. Ask whoever runs the account store to renew it, then connect again with the new date.', { date: when })
+      ? t('The service token expires on {date}. Ask whoever runs the account store to renew it, then save the new date under Service token.', { date: when })
       : t('The service token expires on {date}.', { date: when }) }));
   }
   if (status?.latency_ms?.store !== undefined) {
@@ -2259,17 +2277,34 @@ function renderCloud() {
   if (status?.endpoint && !$('#cloud-endpoint').value) $('#cloud-endpoint').value = status.endpoint;
   // A portal account connects only to the store its operator enabled, with the operator's token.
   const granted = status?.granted_endpoint;
-  $('#cloud-connect-fold').hidden = status?.enabled === false;
+  // Once this computer is connected and the store answers, connecting again changes nothing: the
+  // form stays out of the way until the link breaks (revoked, a refused token, not enrolled).
+  $('#cloud-connect-fold').hidden = status?.enabled === false || (status?.enrolled && status?.standing === 'live');
   $('#cloud-connect-own').hidden = Boolean(granted);
   $('#cloud-connect-granted').hidden = !granted;
   $('#cloud-client-id-field').hidden = Boolean(granted);
   $('#cloud-client-secret-field').hidden = Boolean(granted);
+  $('#cloud-expires-field').hidden = Boolean(granted);
   if (granted) $('#cloud-endpoint').value = granted;
   $('#cloud-endpoint').readOnly = Boolean(granted);
   renderCloudInstallations();
   renderCloudToken();
   renderCloudBackups();
   renderCloudMirror();
+}
+
+/**
+ * How long the cloud panel's first tap stays armed. Its actions back up, upload or reseal the whole
+ * account, so the second tap is deliberate and often comes after reading the button again; a
+ * short window expired before it on slow pointers and screen readers.
+ */
+const CLOUD_CONFIRM_MS = 12000;
+const cloudDisarmTimers = new Map();
+/** Disarms `key` after the confirm window, replacing a pending disarm so a re-arm gets the whole window. */
+function cloudDisarmLater(key, disarm) {
+  clearTimeout(cloudDisarmTimers.get(key));
+  cloudDisarmTimers.delete(key);
+  if (disarm) cloudDisarmTimers.set(key, setTimeout(() => { cloudDisarmTimers.delete(key); disarm(); }, CLOUD_CONFIRM_MS));
 }
 
 let cloudMigrateArmed = false;
@@ -2341,53 +2376,26 @@ function renderCloudMirror() {
   rotate.textContent = cloudRotateArmed ? t('Tap again to rotate the key') : t('Rotate the content key');
 }
 
-$('#cloud-adopt').onclick = event => {
-  if (!cloudAdoptArmed) {
-    cloudAdoptArmed = true;
-    renderCloudMirror();
-    setTimeout(() => { cloudAdoptArmed = false; renderCloudMirror(); }, 4000);
-    return;
-  }
-  cloudAdoptArmed = false;
-  busy(event.currentTarget, async () => {
-    await invoke('cloud_migrate', { action: 'start', adopt: true });
-    await loadCloud();
-    done(t('This computer adopted the account\'s configuration and keeps its history in the account store.'));
-  });
-};
+cloudTwoTaps('#cloud-adopt', () => cloudAdoptArmed, v => { cloudAdoptArmed = v; }, async () => {
+  await invoke('cloud_migrate', { action: 'start', adopt: true });
+  await loadCloud();
+  done(t('This computer adopted the account\'s configuration and keeps its history in the account store.'));
+});
 
 // For a lost computer, after revoking it: a new key, and the whole copy sealed again with it.
-$('#cloud-rotate').onclick = event => {
-  if (!cloudRotateArmed) {
-    cloudRotateArmed = true;
-    renderCloudMirror();
-    setTimeout(() => { cloudRotateArmed = false; renderCloudMirror(); }, 4000);
-    return;
-  }
-  cloudRotateArmed = false;
-  busy(event.currentTarget, async () => {
-    const reply = await invoke('cloud_rotate_key', {});
-    await loadCloud();
-    done(tn(reply.resealing, 'A new content key is active; {n} record is being sealed again with it. Back up the key now with pta variables key backup; your other computers trusted with the account store receive it within minutes.', 'A new content key is active; {n} records are being sealed again with it. Back up the key now with pta variables key backup; your other computers trusted with the account store receive it within minutes.'));
-  });
-};
+cloudTwoTaps('#cloud-rotate', () => cloudRotateArmed, v => { cloudRotateArmed = v; }, async () => {
+  const reply = await invoke('cloud_rotate_key', {});
+  await loadCloud();
+  done(tn(reply.resealing, 'A new content key is active; {n} record is being sealed again with it. Back up the key now with pta variables key backup; your other computers trusted with the account store receive it within minutes.', 'A new content key is active; {n} records are being sealed again with it. Back up the key now with pta variables key backup; your other computers trusted with the account store receive it within minutes.'));
+});
 
-$('#cloud-disconnect').onclick = event => {
-  if (!cloudDisconnectArmed) {
-    cloudDisconnectArmed = true;
-    renderCloudMirror();
-    setTimeout(() => { cloudDisconnectArmed = false; renderCloudMirror(); }, 4000);
-    return;
-  }
-  cloudDisconnectArmed = false;
-  busy(event.currentTarget, async () => {
-    const reply = await invoke('cloud_disconnect', {});
-    await loadCloud();
-    done(reply.store_notified === false
-      ? t('This computer is disconnected. The account store did not answer, so it may still list this computer until another one revokes it. The copy and the key were kept.')
-      : t('This computer is disconnected from the account store. The copy and the key were kept.'));
-  });
-};
+cloudTwoTaps('#cloud-disconnect', () => cloudDisconnectArmed, v => { cloudDisconnectArmed = v; }, async () => {
+  const reply = await invoke('cloud_disconnect', {});
+  await loadCloud();
+  done(reply.store_notified === false
+    ? t('This computer is disconnected. The account store did not answer, so it may still list this computer until another one revokes it. The copy and the key were kept.')
+    : t('This computer is disconnected from the account store. The copy and the key were kept.'));
+});
 
 const CLOUD_COLLECTIONS = {
   settings: () => t('Settings'), organization: () => t('Organization'), notes: () => t('Verified notes'),
@@ -2408,16 +2416,17 @@ function renderCloudVerify(report) {
   box.hidden = !box.childElementCount;
 }
 
-/** A two-tap action of the cloud panel: the first tap arms it for four seconds. */
+/** A two-tap action of the cloud panel: the first tap arms it for CLOUD_CONFIRM_MS. */
 function cloudTwoTaps(id, armed, setArmed, run) {
   $(id).onclick = event => {
     if (!armed()) {
       setArmed(true);
       renderCloudMirror();
-      setTimeout(() => { setArmed(false); renderCloudMirror(); }, 4000);
+      cloudDisarmLater(id, () => { setArmed(false); renderCloudMirror(); });
       return;
     }
     setArmed(false);
+    cloudDisarmLater(id, null);
     busy(event.currentTarget, run);
   };
 }
@@ -2456,21 +2465,12 @@ $('#cloud-verify').onclick = event => busy(event.currentTarget, async () => {
   done(t('The copy matches this computer.'));
 });
 
-$('#cloud-promote').onclick = event => {
-  if (!cloudPromoteArmed) {
-    cloudPromoteArmed = true;
-    renderCloudMirror();
-    setTimeout(() => { cloudPromoteArmed = false; renderCloudMirror(); }, 4000);
-    return;
-  }
-  cloudPromoteArmed = false;
-  busy(event.currentTarget, async () => {
-    const reply = await invoke('cloud_promote', { action: 'promote' });
-    renderCloudVerify(reply.verify);
-    await loadCloud();
-    done(t('The account store is now the source of this account\'s configuration.'));
-  });
-};
+cloudTwoTaps('#cloud-promote', () => cloudPromoteArmed, v => { cloudPromoteArmed = v; }, async () => {
+  const reply = await invoke('cloud_promote', { action: 'promote' });
+  renderCloudVerify(reply.verify);
+  await loadCloud();
+  done(t('The account store is now the source of this account\'s configuration.'));
+});
 
 /** A field's value as plain text: removed, cut short, or as it is. */
 function conflictValue(value) {
@@ -2496,7 +2496,7 @@ function renderCloudConflicts() {
         if (!armed) {
           cloudResolveArmed = key;
           renderCloudConflicts();
-          setTimeout(() => { if (cloudResolveArmed === key) { cloudResolveArmed = null; renderCloudConflicts(); } }, 4000);
+          cloudDisarmLater(`resolve:${key}`, () => { if (cloudResolveArmed === key) { cloudResolveArmed = null; renderCloudConflicts(); } });
           return;
         }
         cloudResolveArmed = null;
@@ -2535,6 +2535,8 @@ $('#cloud-connect').onclick = event => busy(event.currentTarget, async () => {
   const label = $('#cloud-label').value.trim();
   if (label) args.label = label;
   if (id) { args.client_id = id; args.client_secret = secret; }
+  const expires = $('#cloud-expires').value;
+  if (expires && !$('#cloud-expires-field').hidden) args.token_expires = expires;
   try {
     const reply = await invoke('cloud_connect', args);
     cloudStatus = reply.status ?? cloudStatus;

@@ -1649,8 +1649,12 @@ for (const [label, options] of [['desktop', {}], ['phone', { context: { viewport
   const start = panel.locator('#cloud-migrate');
   const rollback = panel.locator('#cloud-rollback');
   check(`${label}: the migration is offered with the key notice`, await start.isVisible() && (await panel.locator('#cloud-mirror-summary').innerText()).includes('pta variables key backup') && await panel.locator('#cloud-erase-box').isHidden());
+  check(`${label}: a connected computer does not offer to connect again`, await panel.locator('#cloud-connect-fold').isHidden());
   await start.click();
   check(`${label}: the first tap only arms the migration`, (await start.innerText()).includes('Toca de nuevo') && await page.evaluate(() => !window.__ptaCloudMirror));
+  // A long action stays armed longer than a quick double tap would need.
+  await page.waitForTimeout(5000);
+  check(`${label}: the migration stays armed for a deliberate second tap`, (await start.innerText()).includes('Toca de nuevo'));
   await start.click();
   await rollback.waitFor();
   check(`${label}: the second tap migrates and offers verify and rollback`, await start.isHidden() && await panel.locator('#cloud-verify').isVisible() && (await panel.locator('#cloud-mirror-summary').innerText()).includes('al día') && (await panel.locator('#cloud-mirror-summary').innerText()).includes('Último respaldo'));
@@ -1722,6 +1726,13 @@ for (const [label, options] of [['desktop', {}], ['phone', { context: { viewport
   check(`${label}: the service token lists which computers wait for it, names as text`, await tokenBox.isVisible()
     && await tokenList.innerText().then(text => text.includes('Synthetic <i>desktop</i>') && text.includes('Esperando el token nuevo') && text.includes('Vuelve a confiarlo'))
     && await tokenList.locator('i').count() === 0 && (await panel.locator('#cloud-token-summary').innerText()).includes('2 computadores'));
+  const expiryDate = panel.locator('#cloud-expiry-date');
+  check(`${label}: the service token's expiry can be changed here and shows the recorded date`, await expiryDate.isVisible()
+    && await expiryDate.inputValue() === await page.evaluate(() => new Date(cloudStatus.service_token.expires_at * 1000).toISOString().slice(0, 10)));
+  await expiryDate.fill('2027-11-04');
+  await panel.locator('#cloud-expiry-save').click();
+  await page.waitForFunction(() => window.__ptaCloudConnectArgs && (document.querySelector('#notice-text')?.textContent ?? '').includes('fecha de vencimiento'));
+  check(`${label}: saving the date connects again with only the endpoint and the date`, await page.evaluate(() => JSON.stringify(window.__ptaCloudConnectArgs) === JSON.stringify({ endpoint: 'https://store.example.com', token_expires: '2027-11-04' })));
   const replaceToken = panel.locator('#cloud-token-rotate');
   await replaceToken.click();
   check(`${label}: the first tap only arms the token replacement`, await page.evaluate(() => !window.__ptaLauncherRun) && (await replaceToken.innerText()).includes('Toca de nuevo'));
@@ -1756,7 +1767,7 @@ for (const [label, options] of [['desktop', {}], ['phone', { context: { viewport
   await page.evaluate(async () => { window.__ptaCloudEnabled = true; window.__ptaCloudGranted = 'https://store.example.com'; await loadCloud(); });
   // The connection form is folded; what it offers is read from the elements themselves.
   check(`${label}: an enabled portal account connects to the operator's store without asking for a token`, await page.evaluate(() =>
-    !document.querySelector('#cloud-connect-fold').hidden && document.querySelector('#cloud-client-id-field').hidden && document.querySelector('#cloud-client-secret-field').hidden
+    !document.querySelector('#cloud-connect-fold').hidden && document.querySelector('#cloud-client-id-field').hidden && document.querySelector('#cloud-client-secret-field').hidden && document.querySelector('#cloud-expires-field').hidden
     && !document.querySelector('#cloud-connect-granted').hidden && document.querySelector('#cloud-endpoint').value === 'https://store.example.com' && document.querySelector('#cloud-endpoint').readOnly));
   // A second computer of the account: it adopts the account's configuration instead of migrating its own.
   await page.evaluate(async () => {
