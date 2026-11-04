@@ -87,6 +87,7 @@ class CloudAccessTests(unittest.TestCase):
     def run_setup(self, environment, **extra):
         extra.setdefault("portal_user", None)
         extra.setdefault("rotate", False)
+        extra.setdefault("retire", False)
         args = argparse.Namespace(environment=environment, report=self.report, label="server", **extra)
         code = setup.run(args)
         report = self.report.read_text()
@@ -189,6 +190,37 @@ class CloudAccessTests(unittest.TestCase):
         command, stdin = runs[1]
         self.assertEqual(command[1:7], ["--json", "web", "users", "cloud", "enable", "synthetic-user"])
         self.assertEqual(json.loads(stdin)["client_id"], "token-1.access")
+
+    def test_retiring_a_portal_account_deletes_only_its_token_after_it_was_disabled(self):
+        self.tokens["token-0"] = {"id": "token-0", "name": "pta-cloud production server", "client_id": "token-0.access"}
+        self.tokens["token-1"] = {"id": "token-1", "name": "pta-cloud production portal synthetic-user", "client_id": "token-1.access"}
+        setup.Access(API_SECRET, ACCOUNT, "production").configure({"token-0", "token-1"})
+        enabled = {"value": True}
+
+        def fake_run(command, **kwargs):
+            self.assertEqual(command[1:], ["--json", "web", "users", "list"])
+            self.assertIsNone(kwargs.get("input"))
+            return setup.subprocess.CompletedProcess(command, 0, json.dumps({"code": "ok", "data": [
+                {"username": "synthetic-user", "cloud_enabled": enabled["value"]}]}), "")
+
+        with patch.object(setup.subprocess, "run", fake_run):
+            code, report = self.run_setup("production", portal_user="synthetic-user", retire=True)
+        self.assertEqual(code, 1)
+        self.assertIn("still enabled", report["error"])
+        self.assertEqual(set(self.tokens), {"token-0", "token-1"})
+        enabled["value"] = False
+        with patch.object(setup.subprocess, "run", fake_run):
+            code, report = self.run_setup("production", portal_user="synthetic-user", retire=True)
+        self.assertEqual(code, 0, report)
+        self.assertEqual(set(self.tokens), {"token-0"})
+        self.assertEqual(report["retire"], {"portal_user": "synthetic-user", "deleted": 1})
+        _, hostname = setup.worker_settings("production")
+        policy = self.policies[self.app(hostname)["id"]][0]
+        self.assertEqual(policy["include"], [{"service_token": {"token_id": "token-0"}}])
+        # Repeating is safe: nothing is left to delete.
+        with patch.object(setup.subprocess, "run", fake_run):
+            code, report = self.run_setup("production", portal_user="synthetic-user", retire=True)
+        self.assertEqual((code, report["retire"]["deleted"]), (0, 0))
 
     def test_rotating_without_a_token_of_the_account_changes_nothing(self):
         code, report = self.run_setup("production", rotate=True)
