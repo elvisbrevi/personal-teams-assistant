@@ -28,6 +28,8 @@ const UI_CATALOG = { es: {
   "This computer does not use the account store: there is no copy to seal again. Nothing was rotated.": "Este computador no usa el almacén de cuenta: no hay copia que sellar de nuevo. No se rotó nada.",
   "The portal operator enabled the account store for this account and keeps its service token. Connecting enrolls this account; nothing is uploaded until you migrate.": "El operador del portal habilitó el almacén de cuenta para esta cuenta y guarda su service token. Conectar inscribe esta cuenta; no se sube nada hasta que migres.",
   "Computers of this account": "Computadores de esta cuenta",
+  "Configuration from the account store": "Configuración desde el almacén de cuenta",
+  "This computer reads and writes the account's configuration in the account store directly.": "Este computador lee y escribe la configuración de la cuenta directamente en el almacén de cuenta.",
   "Tap again to replace": "Toca otra vez para reemplazar",
   "(not there)": "(no está)",
   "The whole record": "El registro completo",

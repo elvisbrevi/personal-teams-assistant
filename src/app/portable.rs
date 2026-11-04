@@ -1125,6 +1125,14 @@ pub(super) async fn operate(host: &Arc<Host>, request: &control::Request) -> Rep
                     Err(_) => refused("The configuration could not be read."),
                 };
             };
+            // Joined to the account store as its source: the coordinator's document and this
+            // computer's last copy of it no longer describe its configuration.
+            if method == "portable_status" && cloud::primary::active(&host.state) {
+                return Reply::success(json!({
+                    "sync": {"mode": "account_store", "state": "account_store", "source": "account_store"},
+                    "standing": host.state.standing.view(Some(&link)),
+                }));
+            }
             if method == "portable_status" {
                 return Reply::success(json!({
                     "sync": describe(host, &link, true).await,
