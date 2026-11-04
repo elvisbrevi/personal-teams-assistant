@@ -172,8 +172,8 @@ Account store (Cloudflare)
   cloud rotate-key --confirmed
                            Owner or enabled portal account, in mirror or primary. A new account content key
                            becomes active and the whole copy is sent again sealed with it (earlier keys stay on this
-                           computer). For a lost computer, after revoking it; then back the key up again and trust
-                           the account's other computers again with the account store.
+                           computer). For a lost computer, after revoking it; then back the key up again. The account's
+                           computers trusted with the account store receive it from the coordinator.
   cloud token                 Owner or enabled portal account. The account's service token and how to replace it: run the approved
                            launcher cloud-token-rotate (configure-cloud-access.py production --rotate, which rotates its secret in
                            Cloudflare Access; the previous one stops working at once). On the coordinator, which of the account's

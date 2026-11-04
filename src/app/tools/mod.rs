@@ -533,7 +533,7 @@ pub(super) const TOOLS: &[Tool] = &[
     Tool {
         name: "cloud_rotate_key",
         title: "Rotate the account content key",
-        description: "For a lost or stolen computer, after revoking it: a new account content key becomes active on this installation and the whole copy in the account store is sent again sealed with it (under compare-and-swap in primary); earlier keys stay here so nothing becomes unreadable. Tell the user to back up the new key (pta variables key backup) and to trust the account's other computers again with the account store. Owner, or a portal account the operator enabled the account store for. Needs the user's confirmation.",
+        description: "For a lost or stolen computer, after revoking it: a new account content key becomes active on this installation and the whole copy in the account store is sent again sealed with it (under compare-and-swap in primary); earlier keys stay here so nothing becomes unreadable. Tell the user to back up the new key (pta variables key backup); the account's other computers trusted with the account store receive it from the coordinator within minutes (cloud_token lists which hold it). Also replace the service token for a lost computer (cloud_token). Owner, or a portal account the operator enabled the account store for. Needs the user's confirmation.",
         effect: Effect::External,
         schema: || object(json!({"confirmed":confirmed()}), &[]),
     },

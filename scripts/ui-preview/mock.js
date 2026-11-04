@@ -516,7 +516,7 @@
       replace: { where: 'here', runs_here: true, launcher: { id: 'cloud-token-rotate', defined: true, approved: true }, command: 'pta variables launcher run cloud-token-rotate --confirmed' },
       pending: window.__ptaCloudTokenRotated ? 1 : 2,
       computers: [
-        { machine: '00000000-0000-4000-8000-0000000000a1', name: 'Synthetic <i>desktop</i>', receives: true, token: window.__ptaCloudTokenRotated ? 'current' : 'previous', reported_at: secs(NOW) - 120 },
+        { machine: '00000000-0000-4000-8000-0000000000a1', name: 'Synthetic <i>desktop</i>', receives: true, token: window.__ptaCloudTokenRotated ? 'current' : 'previous', key: window.__ptaCloudRotated ? 'previous' : 'current', reported_at: secs(NOW) - 120 },
         { machine: '00000000-0000-4000-8000-0000000000a2', name: 'Synthetic tablet', receives: false, token: 'unknown', reported_at: null },
       ],
     }),

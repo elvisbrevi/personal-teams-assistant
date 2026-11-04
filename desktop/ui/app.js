@@ -2089,13 +2089,15 @@ function renderCloudToken() {
         : t('To replace the service token, define and approve the launcher cloud-token-rotate (configure-cloud-access.py production --rotate) on this computer.'));
     if (token.computers?.length) {
       lines.push(token.pending
-        ? tn(token.pending, '{n} computer does not have the current token yet.', '{n} computers do not have the current token yet.')
-        : t('Every computer of the account has the current token.'));
+        ? tn(token.pending, '{n} computer does not have the current token or content key yet.', '{n} computers do not have the current token or content key yet.')
+        : t('Every computer of the account has the current token and content key.'));
     }
   }
   $('#cloud-token-summary').textContent = lines.join(' ');
   $('#cloud-token-list').replaceChildren(...(token.computers ?? []).map(entry => {
-    const [label, tone] = entry.receives ? CLOUD_TOKEN_STATES[entry.token] ?? CLOUD_TOKEN_STATES.unknown : ['Trust it again with the account store', 'warn'];
+    const [label, tone] = !entry.receives ? ['Trust it again with the account store', 'warn']
+      : entry.token === 'current' && entry.key === 'previous' ? ['Waiting for the new content key', 'warn']
+      : CLOUD_TOKEN_STATES[entry.token] ?? CLOUD_TOKEN_STATES.unknown;
     const seen = entry.reported_at ? t('Reported {when}.', { when: ago(entry.reported_at * 1000) }) : t('It has not asked for the account store\'s credentials yet.');
     return el('div', { class: 'row variable-row' },
       rowText(el('span', { class: 'cred-name', textContent: entry.name, translate: 'no' }), seen, badge(t(label), tone)));
@@ -2306,7 +2308,7 @@ $('#cloud-rotate').onclick = event => {
   busy(event.currentTarget, async () => {
     const reply = await invoke('cloud_rotate_key', {});
     await loadCloud();
-    done(tn(reply.resealing, 'A new content key is active; {n} record is being sealed again with it. Back up the key now with pta variables key backup, and trust your other computers again with the account store.', 'A new content key is active; {n} records are being sealed again with it. Back up the key now with pta variables key backup, and trust your other computers again with the account store.'));
+    done(tn(reply.resealing, 'A new content key is active; {n} record is being sealed again with it. Back up the key now with pta variables key backup; your other computers trusted with the account store receive it within minutes.', 'A new content key is active; {n} records are being sealed again with it. Back up the key now with pta variables key backup; your other computers trusted with the account store receive it within minutes.'));
   });
 };
 

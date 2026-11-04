@@ -30,6 +30,8 @@ pub(super) struct Last {
     /// on the way is never installed over it.
     pub issued_at: i64,
     pub installed_at: i64,
+    /// The content key version the coordinator last said is active (0: not known yet).
+    pub coordinator_key: u32,
 }
 
 fn path(host: &Host) -> std::path::PathBuf {
@@ -71,28 +73,37 @@ pub(super) fn held(host: &Host) -> Option<(String, u32)> {
 }
 
 /// On the coordinator, answering a machine's `store_delivery`: `current` when it holds this
-/// service token; otherwise the account store sealed to the key the person approved for it
-/// (`sealed`, with `issued_at`), or why not: `retrust` (it was trusted without a key this
-/// coordinator recorded) or `unavailable`.
+/// service token and this content key (or a newer one); otherwise the account store sealed to the
+/// key the person approved for it (`sealed`, with `issued_at`), or why not: `retrust` (it was
+/// trusted without a key this coordinator recorded) or `unavailable`. Every answer but
+/// `unavailable` names the active content key version (`key`).
 pub(in crate::app) fn deliver(
     host: &Host,
     machine: &str,
     recipient: &str,
     token: &str,
-    _key: u32,
+    key: u32,
 ) -> Value {
     let enrolled_here = host
         .state
         .settings
         .config()
         .is_ok_and(|config| enrolled(&config.cloud));
-    let current = held(host).filter(|_| enrolled_here).map(|(token, _)| token);
-    match verdict(current.as_deref(), recipient, token) {
+    let current = held(host).filter(|_| enrolled_here);
+    let active = current.as_ref().map(|(_, active)| *active).unwrap_or(0);
+    match verdict(
+        current
+            .as_ref()
+            .map(|(token, active)| (token.as_str(), *active)),
+        recipient,
+        token,
+        key,
+    ) {
         Verdict::Unavailable => {
             return json!({"state": "unavailable", "problem": "The coordinator is not connected to the account store."});
         }
-        Verdict::Current => return json!({"state": "current"}),
-        Verdict::Retrust => return json!({"state": "retrust"}),
+        Verdict::Current => return json!({"state": "current", "key": active}),
+        Verdict::Retrust => return json!({"state": "retrust", "key": active}),
         Verdict::Seal => {}
     }
     let issued_at = now();
@@ -100,6 +111,7 @@ pub(in crate::app) fn deliver(
     if reply.get("sealed").is_some() {
         reply["state"] = json!("sealed");
         reply["issued_at"] = json!(issued_at);
+        reply["key"] = json!(active);
     } else {
         reply["problem"] = reply["unavailable"].clone();
         reply["state"] = json!("unavailable");
@@ -115,12 +127,12 @@ enum Verdict {
     Seal,
 }
 
-/// What the coordinator answers a machine holding `token`, given its own (`None`: it has no
-/// account store) and the key recorded for the machine (empty: none).
-fn verdict(current: Option<&str>, recipient: &str, token: &str) -> Verdict {
+/// What the coordinator answers a machine holding `token` and content key version `key`, given
+/// its own (`None`: it has no account store) and the key recorded for the machine (empty: none).
+fn verdict(current: Option<(&str, u32)>, recipient: &str, token: &str, key: u32) -> Verdict {
     match current {
         None => Verdict::Unavailable,
-        Some(current) if current == token => Verdict::Current,
+        Some((current, active)) if current == token && key >= active => Verdict::Current,
         Some(_) if recipient.is_empty() => Verdict::Retrust,
         Some(_) => Verdict::Seal,
     }
@@ -188,6 +200,23 @@ fn answer(
     reply: &Value,
     store: impl Fn(&str, &str) -> Result<()>,
 ) -> Last {
+    let coordinator_key = reply["key"]
+        .as_u64()
+        .and_then(|key| u32::try_from(key).ok())
+        .unwrap_or(previous.coordinator_key);
+    Last {
+        coordinator_key,
+        ..outcome(host, machine, previous, reply, store)
+    }
+}
+
+fn outcome(
+    host: &Host,
+    machine: &str,
+    previous: &Last,
+    reply: &Value,
+    store: impl Fn(&str, &str) -> Result<()>,
+) -> Last {
     let state = reply["state"].as_str().unwrap_or_default();
     let keep = |state: &str, problem: &str| Last {
         state: state.into(),
@@ -232,6 +261,7 @@ fn answer(
                     issued_at,
                     installed_at: now(),
                     checked_at: 0,
+                    coordinator_key: 0,
                 }
             } else {
                 keep("failed", installed["problem"].as_str().unwrap_or_default())
@@ -247,8 +277,9 @@ fn answer(
 }
 
 /// Install a delivery this computer opened: the same account store only; a new service token goes
-/// to the credential store (and its expiry to `[cloud]`), the content key only when this computer
-/// has none. Nothing else changes: the enrollment and the mode stay.
+/// to the credential store (and its expiry to `[cloud]`), and the content key replaces this
+/// computer's only when it is the same account's with every version kept (`key::update`, a
+/// rotation). Nothing else changes: the enrollment and the mode stay.
 fn install(host: &Host, plain: &[u8], store: impl Fn(&str, &str) -> Result<()>) -> Value {
     let Ok(bundle) = serde_json::from_slice::<Handoff>(plain) else {
         return json!({"installed": false, "problem": "The coordinator sent an unreadable delivery."});
@@ -265,7 +296,7 @@ fn install(host: &Host, plain: &[u8], store: impl Fn(&str, &str) -> Result<()>) 
     if origin(&config.cloud.endpoint) != origin(&bundle.endpoint) {
         return json!({"installed": false, "problem": "The coordinator uses another account store than this computer."});
     }
-    let key_written = match key::import(&keys(host), &bundle.content_key) {
+    let key_written = match key::update(&keys(host), &bundle.content_key) {
         Ok(written) => written,
         Err(error) => return json!({"installed": false, "problem": error.to_string()}),
     };
@@ -293,6 +324,8 @@ fn install(host: &Host, plain: &[u8], store: impl Fn(&str, &str) -> Result<()>) 
     json!({"installed": true, "token_replaced": replaced, "key_written": key_written})
 }
 
+pub(in crate::app) const KEY_BEHIND: &str = "This computer does not have the account's current content key yet; it receives it from the coordinator within minutes.";
+
 /// What `cloud_status` says about this computer's deliveries, when it is signed in to a
 /// coordinator; `None` otherwise.
 pub(super) fn describe(host: &Host) -> Option<Value> {
@@ -300,10 +333,24 @@ pub(super) fn describe(host: &Host) -> Option<Value> {
         .ok()
         .flatten()?;
     let last = last(host);
+    let active = key::load(&keys(host))
+        .ok()
+        .flatten()
+        .map(|content| content.active)
+        .unwrap_or(0);
+    // The coordinator's key is newer than this computer's: what it seals since then is unreadable
+    // here until the delivery arrives (or the computer is trusted again).
+    let behind = last.coordinator_key > active;
+    let problem = match (behind, last.problem.is_empty()) {
+        (_, false) => Some(last.problem.as_str()),
+        (true, true) => Some(KEY_BEHIND),
+        (false, true) => None,
+    };
     Some(json!({
         "receives": handoff::Receiver::kept(&keys(host)),
         "state": (!last.state.is_empty()).then_some(last.state.as_str()),
-        "problem": (!last.problem.is_empty()).then_some(last.problem.as_str()),
+        "problem": problem,
+        "key": {"here": active, "coordinator": (last.coordinator_key > 0).then_some(last.coordinator_key), "behind": behind},
         "checked_at": (last.checked_at > 0).then_some(last.checked_at),
         "installed_at": (last.installed_at > 0).then_some(last.installed_at),
     }))
@@ -363,6 +410,7 @@ pub(super) async fn operate_token(host: &Arc<Host>) -> Reply {
         },
     });
     let current = held.as_ref().map(|(token, _)| token.clone());
+    let active = held.as_ref().map(|(_, active)| *active);
     let machines = crate::app::implementation::store_machines(host).await;
     let computers: Vec<Value> = machines
         .iter()
@@ -373,17 +421,28 @@ pub(super) async fn operate_token(host: &Arc<Host>) -> Reply {
                 (Some(held), _) if held.0.is_empty() => "none",
                 _ => "previous",
             };
+            let key = match (&machine.held, active) {
+                (None, _) | (_, None) => "unknown",
+                (Some(held), Some(active)) if held.1 >= active => "current",
+                _ => "previous",
+            };
             json!({
                 "machine": machine.id,
                 "name": machine.name,
                 "store_installation": (!machine.store_installation.is_empty()).then_some(&machine.store_installation),
                 "receives": machine.receives,
                 "token": token,
+                "key": key,
                 "reported_at": machine.held.as_ref().map(|held| held.2),
             })
         })
         .collect();
-    data["pending"] = json!(computers.iter().filter(|c| c["token"] != "current").count());
+    data["pending"] = json!(
+        computers
+            .iter()
+            .filter(|c| c["token"] != "current" || c["key"] != "current")
+            .count()
+    );
     data["computers"] = json!(computers);
     Reply::success(data)
 }
@@ -401,11 +460,15 @@ mod tests {
     #[test]
     fn the_coordinator_seals_only_for_a_key_it_recorded() {
         let key = "1".repeat(64);
-        assert_eq!(verdict(None, &key, "a"), Verdict::Unavailable);
-        assert_eq!(verdict(Some("a"), &key, "a"), Verdict::Current);
-        assert_eq!(verdict(Some("a"), "", "a"), Verdict::Current);
-        assert_eq!(verdict(Some("b"), "", "a"), Verdict::Retrust);
-        assert_eq!(verdict(Some("b"), &key, "a"), Verdict::Seal);
+        assert_eq!(verdict(None, &key, "a", 1), Verdict::Unavailable);
+        assert_eq!(verdict(Some(("a", 1)), &key, "a", 1), Verdict::Current);
+        assert_eq!(verdict(Some(("a", 1)), "", "a", 1), Verdict::Current);
+        assert_eq!(verdict(Some(("b", 1)), "", "a", 1), Verdict::Retrust);
+        assert_eq!(verdict(Some(("b", 1)), &key, "a", 1), Verdict::Seal);
+        // A rotated content key is sealed for the machine too, with the same token.
+        assert_eq!(verdict(Some(("a", 2)), &key, "a", 1), Verdict::Seal);
+        assert_eq!(verdict(Some(("a", 2)), "", "a", 1), Verdict::Retrust);
+        assert_eq!(verdict(Some(("a", 2)), &key, "a", 3), Verdict::Current);
     }
 
     fn connected(host: &Host, endpoint: &str) {
@@ -485,6 +548,32 @@ mod tests {
             host.state.settings.config().unwrap().cloud.token_expires_at,
             1_900_000_000
         );
+        // The coordinator rotated the content key: the same account's set with version 2 replaces it.
+        let coordinator = root.path().join("coordinator-keys");
+        key::import(&coordinator, &content.backup()).unwrap();
+        let rotated = key::rotate(&coordinator).unwrap();
+        let again = bundle(
+            "https://store.example.invalid",
+            "cfast_synthetic_new_secret",
+            &rotated,
+        );
+        let mut previous = installed.clone();
+        previous.coordinator_key = 2;
+        let installed = answer(
+            &host,
+            "machine-1",
+            &previous,
+            &{
+                let mut reply = sealed(250, &again);
+                reply["key"] = json!(2);
+                reply
+            },
+            store,
+        );
+        assert_eq!(installed.state, "installed", "{installed:?}");
+        assert_eq!(installed.coordinator_key, 2);
+        assert_eq!(key::load(&keys(&host)).unwrap().unwrap().active, 2);
+        let stored = kept.lock().unwrap().len();
         // Another account store is never installed over this one's.
         let elsewhere = bundle(
             "https://other.example.invalid",
@@ -500,7 +589,7 @@ mod tests {
         );
         assert_eq!(refused.state, "failed");
         assert!(refused.problem.contains("another account store"));
-        assert_eq!(kept.lock().unwrap().len(), 2);
+        assert_eq!(kept.lock().unwrap().len(), stored);
     }
 
     #[test]

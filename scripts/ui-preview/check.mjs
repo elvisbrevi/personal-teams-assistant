@@ -1711,6 +1711,7 @@ for (const [label, options] of [['desktop', {}], ['phone', { context: { viewport
   await replaceToken.click();
   await page.waitForFunction(() => document.querySelector('#cloud-token-summary').textContent.includes('1 computador aún'));
   check(`${label}: the second tap runs the approved launcher and only the computer to trust again still waits`, await page.evaluate(() => window.__ptaLauncherRun === 'cloud-token-rotate'));
+  check(`${label}: a computer with the new token but the earlier content key waits for the key`, (await tokenList.innerText()).includes('Esperando la clave de contenido nueva'));
   await page.screenshot({ path: `${out}/cloud-${label}.png`, fullPage: false });
   await rollback.click();
   check(`${label}: the first tap only arms the rollback`, (await rollback.innerText()).includes('Toca de nuevo') && await page.evaluate(() => window.__ptaCloudMirror.mode === 'mirror'));

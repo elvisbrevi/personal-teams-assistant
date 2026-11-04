@@ -480,7 +480,7 @@ async fn rotate(host: &Arc<Host>) -> std::result::Result<Reply, Box<Reply>> {
         "rotated": true,
         "version": content.active,
         "resealing": resealing,
-        "next": "Back up the new key now (pta variables key backup). The account's other computers keep the earlier key: trust them again with the account store to give them this one.",
+        "next": "Back up the new key now (pta variables key backup). The account's other computers trusted with the account store receive it from this coordinator within minutes (pta cloud token lists them); one trusted before 0.10.38 is trusted again with the account store.",
     })))
 }
 
