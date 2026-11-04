@@ -512,6 +512,25 @@ pub(super) const TOOLS: &[Tool] = &[
         schema: none,
     },
     Tool {
+        name: "cloud_backups",
+        title: "Account store backups",
+        description: "This computer's backups taken before migrate, promote and rollback (backups/cloud-<time>/): name, time, reason, version, size, whether each can be restored (or why not), the copies kept before earlier restores (before_restore), a pending restore and the last restore's outcome (last_restore), and whether this client may restore (restores_here). Read-only. Owner, or a portal account the operator enabled the account store for.",
+        effect: Effect::Read,
+        schema: none,
+    },
+    Tool {
+        name: "cloud_restore",
+        title: "Restore an account store backup",
+        description: "Restore one backup by the name cloud_backups lists: it is checked first (manifest, paths inside this profile, intact databases, not from a newer version), refused while work a restart would interrupt is running (reasons), and then the application restarts: before anything opens it copies the current data to backups/before-restore-<time>/ and puts the backup's files back; this computer's account store link stays as it is. Only the owner at this computer's window or local CLI. Ask the user first and relay next; check the outcome with cloud_backups once the application answers again. Needs the user's confirmation.",
+        effect: Effect::External,
+        schema: || {
+            object(
+                json!({"backup":string("The backup's name from cloud_backups, like cloud-1793748961."),"confirmed":confirmed()}),
+                &["backup"],
+            )
+        },
+    },
+    Tool {
         name: "cloud_token",
         title: "Account store service token",
         description: "The account's Access service token for the account store (stored, expiry) and how to replace it: on the coordinator, run the approved launcher cloud-token-rotate with launcher_run (it rotates the token's secret in Cloudflare Access, so the previous one stops working at once, and stores the new one here), and see which of the account's computers already hold the current token (computers, pending): those trusted with the account store receive it automatically, sealed to the key they signed in with; one that says retrust is trusted again with the account store. On a computer signed in to a coordinator: whether it receives new credentials and the last delivery. Read-only. Owner, or a portal account the operator enabled the account store for.",
@@ -1704,10 +1723,11 @@ pub(super) async fn run(name: &str, args: &Value) -> Result<Value, String> {
         "variable_entry_request" => ipc("variable_entry_start", args.clone()).await,
         "variable_update" | "variable_rename" | "variable_usage" => ipc(name, args.clone()).await,
         "consumer_list" => ipc("variable_consumer_list", args.clone()).await,
-        "cloud_status" | "cloud_verify" | "cloud_installations" | "cloud_token" => {
+        "cloud_status" | "cloud_verify" | "cloud_installations" | "cloud_token"
+        | "cloud_backups" => {
             ipc(name, args.clone()).await
         }
-        "cloud_migrate" | "cloud_rollback" | "cloud_erase" | "cloud_disconnect" | "cloud_promote" | "cloud_pull" | "cloud_revoke" | "cloud_rotate_key" => {
+        "cloud_migrate" | "cloud_rollback" | "cloud_erase" | "cloud_disconnect" | "cloud_promote" | "cloud_pull" | "cloud_revoke" | "cloud_rotate_key" | "cloud_restore" => {
             let mut args = args.clone();
             args.as_object_mut().unwrap().remove("confirmed");
             ipc(name, args).await
@@ -2069,6 +2089,10 @@ pub(super) fn confirmation(name: &str, args: &Value) -> Option<String> {
         },
         "cloud_erase" => "Erase this account's copy in the account store (records and backups) and set the content key aside? This computer keeps all of its data.".into(),
         "cloud_rotate_key" => "Rotate the account content key: seal the whole copy again with a new key (the earlier one stays on this computer)?".into(),
+        "cloud_restore" => format!(
+            "Restore backup {}? The application restarts, keeps a copy of the current data first and puts the backup back.",
+            args["backup"].as_str().unwrap_or_default()
+        ),
         "cloud_revoke" => format!(
             "Revoke installation {} of this account in the account store? That computer keeps its data.",
             args["installation"].as_str().unwrap_or_default()

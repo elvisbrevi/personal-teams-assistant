@@ -1534,6 +1534,8 @@ pub fn run() {
     // A new `cargo install` replaced this executable while the previous build keeps running:
     // stop that host (assistant and tunnel first) and take its place.
     let mut previous_running = false;
+    // The successor a backup's restore started waits for the host it replaces.
+    cloud::restore::wait_for_previous();
     if control::existing_host().is_ok()
         && std::env::current_exe().is_ok_and(|exe| control::outdated_host(&exe))
     {
@@ -1577,6 +1579,12 @@ pub fn run() {
             std::process::exit(1);
         }
     };
+    // A restore recorded before the restart is applied while no store is open.
+    if let Ok(profile) = control::profile_dir()
+        && let Some(running) = cloud::restore::apply_pending(&profile)
+    {
+        previous_running |= running;
+    }
     // Provider crates must never log prompts or content.
     tracing_subscriber::fmt()
         .with_env_filter("personal_teams_assistant=info")

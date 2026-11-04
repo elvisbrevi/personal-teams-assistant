@@ -2044,6 +2044,9 @@ let cloudRevokeArmed = null;
 /** The service token and, on the coordinator, which computers hold the current one. */
 let cloudToken = null;
 let cloudTokenArmed = false;
+/** This computer's backups and the last restore; the backup whose restore waits for a second tap. */
+let cloudBackups = null;
+let cloudRestoreArmed = null;
 
 async function loadCloud() {
   try { cloudStatus = await invoke('cloud_status'); }
@@ -2057,6 +2060,11 @@ async function loadCloud() {
   if (cloudStatus?.enrolled) {
     try { cloudToken = await invoke('cloud_token'); }
     catch { cloudToken = null; }
+  }
+  cloudBackups = null;
+  if (cloudStatus && cloudStatus.enabled !== false) {
+    try { cloudBackups = await invoke('cloud_backups'); }
+    catch { cloudBackups = null; }
   }
   renderCloud();
 }
@@ -2105,6 +2113,52 @@ function renderCloudToken() {
   const rotate = $('#cloud-token-rotate');
   rotate.hidden = !(token.replace?.runs_here && token.replace?.launcher?.approved);
   rotate.textContent = cloudTokenArmed ? t('Tap again to replace the token') : t('Replace the service token');
+}
+
+const BACKUP_REASONS = { migrate: 'Before migrating', promote: 'Before making the store the source', rollback: 'Before bringing everything back' };
+
+/** Backups are listed by time and reason; restoring restarts the application. */
+function renderCloudBackups() {
+  const data = cloudBackups;
+  const box = $('#cloud-backups');
+  box.hidden = !data || (!data.backups?.length && !data.last_restore);
+  if (box.hidden) return;
+  const lines = [];
+  const outcome = data.last_restore;
+  if (data.pending) lines.push(t('A restore is waiting for the application to restart.'));
+  else if (outcome?.ok) lines.push(t('Last restore {when}: {n} files put back; the data from just before is kept in {copy}.', { when: ago(outcome.finished_at * 1000), n: outcome.files, copy: outcome.before }));
+  else if (outcome) lines.push(t('The last restore did not complete: {problem}', { problem: tx(outcome.error) }));
+  if (data.backups?.length && !data.restores_here) lines.push(t('Restore from this computer\'s own window or with pta cloud restore NAME --confirmed.'));
+  $('#cloud-backups-summary').textContent = lines.join(' ');
+  $('#cloud-backups-summary').hidden = !lines.length;
+  $('#cloud-backup-list').replaceChildren(...(data.backups ?? []).map(entry => {
+    const when = entry.created_at ? new Date(entry.created_at * 1000).toLocaleString(uiLocale()) : entry.name;
+    const detail = entry.restorable
+      ? t('{reason}, version {version}, {size} KB.', { reason: t(BACKUP_REASONS[entry.reason] ?? 'Backup'), version: entry.host_version, size: Math.max(1, Math.round(entry.bytes / 1024)) })
+      : tx(entry.problem ?? '');
+    const actions = [];
+    if (entry.restorable && data.restores_here && !data.pending) {
+      const armed = cloudRestoreArmed === entry.name;
+      const restore = el('button', { type: 'button', class: 'secondary', textContent: armed ? t('Tap again to restore') : t('Restore'), 'aria-label': t('Restore the backup of {when}', { when }) });
+      restore.onclick = () => {
+        if (!armed) {
+          cloudRestoreArmed = entry.name;
+          renderCloudBackups();
+          setTimeout(() => { if (cloudRestoreArmed === entry.name) { cloudRestoreArmed = null; renderCloudBackups(); } }, 4000);
+          return;
+        }
+        cloudRestoreArmed = null;
+        busy(restore, async () => {
+          await invoke('cloud_restore', { backup: entry.name });
+          done(t('The application is restarting to restore the backup. The data from just before is kept.'));
+        });
+      };
+      actions.push(restore);
+    }
+    return el('div', { class: 'row variable-row' },
+      rowText(el('span', { class: 'cred-name', textContent: when }), detail, entry.restorable ? null : badge(t('Cannot be restored'), 'warn')),
+      actions.length ? el('div', { class: 'variable-actions' }, actions) : null);
+  }));
 }
 
 $('#cloud-token-rotate').onclick = event => {
@@ -2209,6 +2263,7 @@ function renderCloud() {
   $('#cloud-endpoint').readOnly = Boolean(granted);
   renderCloudInstallations();
   renderCloudToken();
+  renderCloudBackups();
   renderCloudMirror();
 }
 

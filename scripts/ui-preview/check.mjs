@@ -1700,6 +1700,18 @@ for (const [label, options] of [['desktop', {}], ['phone', { context: { viewport
   await revokeOther.click();
   await computers.getByRole('button').waitFor({ state: 'detached' });
   check(`${label}: the second tap revokes that computer by ID`, await page.evaluate(() => window.__ptaCloudRevoked === '00000000-0000-4000-8000-000000000002'));
+  const backupList = panel.locator('#cloud-backup-list');
+  check(`${label}: the backups are listed and a damaged one cannot be restored`, await panel.locator('#cloud-backups').isVisible()
+    && await backupList.innerText().then(text => text.includes('Antes de migrar') && text.includes('No se puede restaurar') && text.includes('no coincide'))
+    && await backupList.getByRole('button').count() === 1);
+  const restoreBackup = backupList.getByRole('button');
+  await restoreBackup.click();
+  check(`${label}: the first tap only arms the restore`, await page.evaluate(() => !window.__ptaCloudRestore) && (await restoreBackup.innerText()).includes('Toca de nuevo'));
+  await restoreBackup.click();
+  await page.waitForFunction(() => window.__ptaCloudRestore);
+  check(`${label}: the second tap restores that backup by name and says the application restarts`, await page.evaluate(() => window.__ptaCloudRestore === 'cloud-1700000200')
+    && await page.waitForFunction(() => (document.querySelector('#notice-text')?.textContent ?? '').includes('reiniciando'), null, { timeout: 5000 }).then(() => true, () => false));
+  await page.evaluate(() => { window.__ptaCloudRestore = undefined; });
   const tokenBox = panel.locator('#cloud-token');
   const tokenList = panel.locator('#cloud-token-list');
   check(`${label}: the service token lists which computers wait for it, names as text`, await tokenBox.isVisible()

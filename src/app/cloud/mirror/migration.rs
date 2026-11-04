@@ -59,7 +59,7 @@ fn data_files(host: &Host) -> Result<Vec<(PathBuf, bool)>> {
 /// A private `backups/cloud-<time>/` in the profile: a consistent copy of every database (online
 /// `VACUUM INTO`) and the settings files, the same set as the updater's safety copy, with a
 /// `manifest.json` naming where each came from. The newest three are kept.
-pub(super) fn back_up_data(host: &Host, reason: &str) -> Result<Value> {
+pub(in crate::app::cloud) fn back_up_data(host: &Host, reason: &str) -> Result<Value> {
     let root = backups_root(host);
     security::private_dir(&root)?;
     let at = now();
@@ -97,6 +97,11 @@ pub(super) fn back_up_data(host: &Host, reason: &str) -> Result<Value> {
     Ok(
         json!({"path": base, "created_at": at, "reason": reason, "files": saved.len(), "bytes": bytes}),
     )
+}
+
+/// This profile's `backups/cloud-*` directories, oldest first.
+pub(in crate::app::cloud) fn held(root: &Path) -> Vec<PathBuf> {
+    held_backups(root)
 }
 
 fn held_backups(root: &Path) -> Vec<PathBuf> {

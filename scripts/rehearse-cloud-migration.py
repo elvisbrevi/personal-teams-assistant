@@ -19,7 +19,9 @@ a pull with replace; then a second computer of the account (a fresh profile with
 trust confirmation hands over) is refused without adopting, adopts, verifies, joins primary and
 edits through the store, which the first pulls; another account (the second token) sees none of
 it; then rollback, an erasure refused while the second computer is connected, its revocation and
-the erasure, checking that local data never shrinks and that the store ends empty. The tokens,
+the erasure, checking that local data never shrinks and that the store ends empty; last, the backup
+the migration took is restored (the host restarts itself, keeps the data from just before and comes
+back with the configuration it had before migrating and the same account store link). The tokens,
 their admission, every host started and the copies are removed afterwards. The report holds steps, codes and
 counts only: no secrets and no content. Never point it at the production Worker.
 """
@@ -211,7 +213,16 @@ class Rehearsal:
         raise RuntimeError("The rehearsal host did not start.")
 
     def stop(self):
-        if not self.host or self.host.poll() is not None:
+        if self.host and self.host.poll() is not None:
+            # A restore restarted the host as a successor this process did not start: quit it too.
+            if self.pta("status", timeout=30).get("ok"):
+                self.pta("app", "quit", timeout=60)
+                for _ in range(60):
+                    if not self.pta("status", timeout=30).get("ok"):
+                        break
+                    time.sleep(0.5)
+            return
+        if not self.host:
             return
         self.pta("app", "quit", timeout=60)
         try:
@@ -299,6 +310,36 @@ def second_account(binaries, root, endpoint, service, label, first_records):
         other.stop()
 
 
+def restore(run, greeting, local):
+    """Restore the backup the migration took: the host restarts, keeps the current data first and
+    comes back with the configuration it had before migrating and the same account store link."""
+    listed = run.pta("cloud", "backups").get("data") or {}
+    backup = next((b["name"] for b in listed.get("backups", []) if b.get("reason") == "migrate" and b.get("restorable")), None)
+    run.expect(backup, "the migration's backup can be restored")
+    link = (run.pta("cloud", "status").get("data") or {}).get("installation")
+    r = run.pta("cloud", "restore", backup, "--confirmed")
+    run.step("restore", r, restarting=(r.get("data") or {}).get("restarting"))
+    run.expect(r.get("ok") and (r.get("data") or {}).get("restarting"), "the restore restarts the host")
+    outcome = {}
+    for _ in range(240):
+        time.sleep(0.5)
+        listed = run.pta("cloud", "backups", timeout=30)
+        data = listed.get("data") or {}
+        if listed.get("ok") and not data.get("pending") and data.get("last_restore"):
+            outcome = data["last_restore"]
+            break
+    run.step("restore outcome", {"ok": outcome.get("ok")}, files=outcome.get("files"), before=bool(outcome.get("before")))
+    run.expect(outcome.get("ok") and outcome.get("backup") == backup, "the restarted host restored the backup")
+    run.expect(outcome.get("before") in data.get("before_restore", []), "the data from just before the restore is kept")
+    r = run.pta("config", "get", "policy.greeting")
+    run.expect(r.get("ok") and json.dumps(greeting) not in json.dumps(r.get("data")),
+               "the configuration is back as it was before migrating")
+    run.expect((run.pta("cloud", "status").get("data") or {}).get("installation") == link,
+               "the restore keeps this computer's account store link")
+    after = counts(run.pta("cloud", "migrate", "--dry-run"))
+    run.expect(all(after.get(name, 0) >= number for name, number in local.items()), "the restore lost no record")
+
+
 def rehearse(run, endpoint, service, label, second_service=None):
     """The sequence on the copy; raises on the first failed check."""
     payload = json.dumps({"client_id": service["client_id"], "client_secret": service["client_secret"]})
@@ -381,6 +422,7 @@ def rehearse(run, endpoint, service, label, second_service=None):
     run.expect(remaining == 0, "the store holds nothing afterwards")
     after = counts(run.pta("cloud", "migrate", "--dry-run"))
     run.expect(all(after.get(name, 0) >= number for name, number in local.items()), "the erasure deleted nothing local")
+    restore(run, greeting, local)
     r = run.pta("cloud", "disconnect", "--forget-service-token", "--confirmed")
     run.step("disconnect", r, store_notified=(r.get("data") or {}).get("store_notified"))
 
@@ -406,6 +448,13 @@ def main():
         profile, _ = copy_profile(args.profile.resolve(), root, free_port())
         token = access_module.secret("CLOUDFLARE_API_TOKEN")
         access = access_module.Access(token, access_module.cloudflare_account(token), "staging")
+        # Temporary tokens a rehearsal stopped half way left behind: unadmitted and deleted first.
+        stale = {t["id"] for t in access.tokens() if t.get("name", "").startswith("pta-cloud staging rehearsal ")}
+        if stale:
+            access_module.configure_worker(access, access.admitted() - stale)
+            for ident in stale:
+                access.delete_token(ident)
+        report["stale_tokens_removed"] = len(stale)
         label = f"rehearsal {secrets.token_hex(4)}"
         service = access.create_token(label)
         # A second account of the same Worker, to check that the stores stay apart.

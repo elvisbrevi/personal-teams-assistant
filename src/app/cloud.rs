@@ -19,6 +19,7 @@ use std::time::Duration;
 
 mod delivery;
 mod mirror;
+pub(in crate::app) mod restore;
 pub(in crate::app) use delivery::{KEY_BEHIND, deliver};
 pub(in crate::app) use mirror::{State, migration, primary, run};
 
@@ -93,6 +94,8 @@ pub(super) fn handles(method: &str) -> bool {
             | "cloud_revoke"
             | "cloud_rotate_key"
             | "cloud_token"
+            | "cloud_backups"
+            | "cloud_restore"
     )
 }
 
@@ -243,6 +246,25 @@ pub(super) async fn operate(host: &Arc<Host>, request: &control::Request) -> Rep
                 return Reply::error("invalid_input", 2, "Invalid arguments.");
             }
             migration::operate_rotate(host).await
+        }
+        "cloud_backups" => {
+            if let Some(reply) = refused_here(host, &invocation) {
+                return reply;
+            }
+            if request.args != json!({}) && !request.args.is_null() {
+                return Reply::error("invalid_input", 2, "Invalid arguments.");
+            }
+            restore::operate_backups(host)
+        }
+        "cloud_restore" => {
+            if let Some(reply) = refused_here(host, &invocation) {
+                return reply;
+            }
+            let Ok(args) = serde_json::from_value::<restore::RestoreArgs>(request.args.clone())
+            else {
+                return Reply::error("invalid_input", 2, "Invalid arguments.");
+            };
+            restore::operate_restore(host, args).await
         }
         "cloud_token" => {
             if let Some(reply) = refused_here(host, &invocation) {
