@@ -519,6 +519,8 @@
       before_restore: [], pending: !!window.__ptaCloudRestore, restores_here: true,
       last_restore: null,
     }),
+    // Synthetic connection: connected and live, so only the recorded expiry can change.
+    cloud_connect: args => { window.__ptaCloudConnectArgs = structuredClone(args); return { changed: true }; },
     cloud_restore: args => { window.__ptaCloudRestore = args.backup; return { restarting: true, backup: args.backup, assistant: false }; },
     // Synthetic service token: the coordinator's view, one computer waiting and one to trust again.
     cloud_token: () => ({
