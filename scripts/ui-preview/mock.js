@@ -510,6 +510,17 @@
       { id: '00000000-0000-4000-8000-000000000002', label: 'Synthetic <b>desktop</b>', host_version: '0.10.33', enrolled_at: secs(NOW) - 7200, last_seen_at: secs(NOW) - 600, revoked_at: null, current: false },
       { id: '00000000-0000-4000-8000-000000000003', label: 'Old computer', host_version: '0.10.25', enrolled_at: secs(NOW) - 900000, last_seen_at: secs(NOW) - 800000, revoked_at: secs(NOW) - 700000, current: false },
     ]), active: 2 }),
+    // Synthetic service token: the coordinator's view, one computer waiting and one to trust again.
+    cloud_token: () => ({
+      connected: true, coordinator: true, service_token: { stored: true, expires_at: secs(NOW) + 300 * 86400 },
+      replace: { where: 'here', runs_here: true, launcher: { id: 'cloud-token-rotate', defined: true, approved: true }, command: 'pta variables launcher run cloud-token-rotate --confirmed' },
+      pending: window.__ptaCloudTokenRotated ? 1 : 2,
+      computers: [
+        { machine: '00000000-0000-4000-8000-0000000000a1', name: 'Synthetic <i>desktop</i>', receives: true, token: window.__ptaCloudTokenRotated ? 'current' : 'previous', reported_at: secs(NOW) - 120 },
+        { machine: '00000000-0000-4000-8000-0000000000a2', name: 'Synthetic tablet', receives: false, token: 'unknown', reported_at: null },
+      ],
+    }),
+    variable_launcher_run: args => { window.__ptaLauncherRun = args.id; window.__ptaCloudTokenRotated = true; return { launcher: args.id, operation: 'run', result: { status: 'succeeded', exit_code: 0, duration_ms: 900 }, output: 'not captured' }; },
     cloud_rotate_key: () => { window.__ptaCloudRotated = true; return { rotated: true, version: 2, resealing: 42 }; },
     cloud_revoke: args => {
       window.__ptaCloudRevoked = args.installation;

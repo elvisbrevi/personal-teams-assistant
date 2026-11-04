@@ -496,6 +496,7 @@ async fn pass(host: &Arc<Host>) -> std::result::Result<Option<String>, ()> {
 pub(in crate::app) async fn run(host: Arc<Host>) {
     // The first sweep after a start catches what changed while the host was down.
     let mut pause = DEBOUNCE_SECONDS;
+    let mut refused = false;
     loop {
         tokio::select! {
             _ = crate::mirror::WAKE.notified() => {
@@ -503,9 +504,15 @@ pub(in crate::app) async fn run(host: Arc<Host>) {
             }
             _ = tokio::time::sleep(std::time::Duration::from_secs(pause)) => {}
         }
-        pause = match pass(&host).await {
+        // A computer signed in to a coordinator asks for replaced credentials first, at once when
+        // the store refused the ones it has (a rotated service token secret).
+        super::delivery::refresh(&host, refused).await;
+        let outcome = pass(&host).await;
+        refused = matches!(&outcome, Ok(Some(code)) if code == "revoked");
+        pause = match outcome {
             Ok(None) => SWEEP_SECONDS,
-            Ok(Some(code)) if code == "revoked" || code == "unconfigured" => 900,
+            Ok(Some(code)) if code == "revoked" => 120,
+            Ok(Some(code)) if code == "unconfigured" => 900,
             Ok(Some(code)) if code == "quota" => 1800,
             Ok(Some(_)) | Err(()) => 120,
         };

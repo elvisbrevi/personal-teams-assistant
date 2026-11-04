@@ -145,12 +145,16 @@ is a kind of organization entry.
 ## 5. Cloudflare options
 
 Verified on 2026-11-02 in the official documentation ([sources](#sources)) and again on 2026-11-03
-before phases 3a, 3b, 3c, 4a and 4b: no limit or price in this section changed (the only announced
+before phases 3a, 3b, 3c, 4a and 4b, and on 2026-11-03 before phase 5: no limit or price in this section changed (the only announced
 change, Workers Logs moving to Observability pricing on 2026-12-01, does not apply: the Worker logs
 nothing beyond the free defaults). Two details matter to the
 implementation: SQLite storage in Durable Objects is billed since January 2026 (on Free it is
 the 5 GB total below), and new Access service token secrets carry a `cfast_` prefix and accept
-tags, while the headers stay `CF-Access-Client-Id` / `CF-Access-Client-Secret`.
+tags, while the headers stay `CF-Access-Client-Id` / `CF-Access-Client-Secret`. Since 2026-08-25 a token's
+secret can be rotated keeping its client ID (the previous secret revoked at once or after a grace of
+one hour to 30 days), a token can be turned off without deleting it, and inactive tokens can be
+cleaned up automatically (opt-in, 30 to 365 days); strict service token authentication (401/403
+instead of a login redirect) is on by default only for organizations created since 2026-10-05.
 
 | | D1, one database per account | Durable Objects with SQLite, one object per account | R2 | Vectorize | KV |
 | --- | --- | --- | --- | --- | --- |
@@ -410,6 +414,7 @@ parity, the `AGENTS.md` checks, and delivery verified on crates.io and on the se
 | 3c. Primary — done (Worker 0.2.0 with 0.10.28; host 0.10.29) | Compare-and-swap (`base_revision`, `atomic`, feature `cas`) in the Worker; mode `primary` (`cloud promote|demote`, after a clean verification): every configuration edit is written to the store first and saved locally once accepted, read-only without an answer; the loop pulls the configuration into the local replica; conflicts stay local until `cloud pull --replace`; the coordinator serves `portable_*` from the replica it pulls. Primary scope: the whole `config` (but `[secrets]`/`[cloud]`), the map, the organization and the notes (decision 10). | Conflict handling regressions: reuse the portable rules and their tests. |
 | 4a. Migration — done (Worker 0.3.0 with 0.10.30; host 0.10.31) | `cloud migrate/promote/rollback/erase` with backup and read-back verification, the rehearsal script, and the rehearsal on a copy of the production profile against staging; production migrated when the owner decides. | Data loss: never delete local data; rollback rehearsed on a copy of the production profile first. |
 | 4b. Other users — under way (launchers approved in the portal: 0.10.32; Worker 0.4.0 with installations, rebinding and the shared plan: 0.10.33; a store per portal account, enabled by the operator: 0.10.34; installation settings apart from the account's: 0.10.35; the account store handed over at «Trust this machine», revocation in the store and key rotation: 0.10.36; other computers joining the store directly and the rehearsal of two computers and two accounts: 0.10.37) | Every portal account gets its own cloud account store: the operator enables it per account, each with its own content key, installation credentials and quota share; the owner's account is not special in the Worker. | Authorization bugs between accounts (cross-account contract tests); the shared Free quota (per-account shares, §5). |
+| 5. Production and closing — under way (replaced service tokens reach the account's computers: 0.10.38) | The limits phase 4b left: a replaced service token and a rotated content key reach the account's other computers, restoring a backup, choosing per record in a conflict, no mixed versions in one account, retiring what `portable_*` no longer needs; then production migrated and promoted, a portal account and a personal computer. | Delivering keys to the wrong computer (sealed to the key the person approved, revoked machines refused first); restoring over live data (never deletes: a copy of the current state first). |
 
 ## 11. Decisions
 
@@ -503,6 +508,19 @@ Taken before phase 4b (2026-11-03):
     folder and variables are shown, the digest must match, and any change needs a new approval.
     Ordinary accounts, the CLI, the MCP and machine credentials still cannot approve, and defining,
     removing and running stay on the machine itself.
+
+Taken before phase 5 (2026-11-03):
+
+21. **New credentials for the other computers.** A computer trusted with the account store keeps the
+    X25519 key pair its sign-in started with, and the coordinator records the public key the person
+    approved; a replaced service token or a rotated content key is sealed to it and fetched over the
+    machine protocol, so the other computers need no new trust. Computers trusted before keep
+    working and are trusted again once to receive new credentials.
+22. **Replacing the service token.** By rotating its secret in Access (same client ID, the previous
+    secret revoked at once), so the Worker keeps the account and its shares without `rebind`;
+    `rebind` stays for a token with another client ID.
+23. **Conflicts.** The fields that differ are shown and the person chooses, per record, this
+    computer's or the store's version; there is no automatic merge.
 
 ## Sources
 

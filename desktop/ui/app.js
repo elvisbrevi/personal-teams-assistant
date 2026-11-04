@@ -2041,17 +2041,85 @@ const CLOUD_STATES = {
 let cloudInstallations = [];
 /** The installation whose revocation waits for a second tap. */
 let cloudRevokeArmed = null;
+/** The service token and, on the coordinator, which computers hold the current one. */
+let cloudToken = null;
+let cloudTokenArmed = false;
 
 async function loadCloud() {
   try { cloudStatus = await invoke('cloud_status'); }
   catch { cloudStatus = null; }
   cloudInstallations = [];
+  cloudToken = null;
   if (cloudStatus?.standing === 'live') {
     try { cloudInstallations = (await invoke('cloud_installations')).installations ?? []; }
     catch { cloudInstallations = []; }
   }
+  if (cloudStatus?.enrolled) {
+    try { cloudToken = await invoke('cloud_token'); }
+    catch { cloudToken = null; }
+  }
   renderCloud();
 }
+
+const CLOUD_TOKEN_STATES = {
+  current: ['Has the current token', 'ok'], previous: ['Waiting for the new token', 'warn'],
+  none: ['Waiting for the new token', 'warn'], unknown: ['Not reported yet', 'muted'],
+};
+
+/** Replacing the service token: which computers hold it, and the approved launcher that does it. */
+function renderCloudToken() {
+  const token = cloudToken;
+  const box = $('#cloud-token');
+  box.hidden = !token;
+  if (!token) return;
+  const lines = [];
+  if (token.coordinator === false) {
+    const delivery = token.delivery ?? {};
+    lines.push(delivery.receives
+      ? t('When the coordinator replaces the service token or rotates the content key, this computer receives them automatically.')
+      : t('This computer was trusted before it could receive the account store\'s new credentials: trust it again with the account store.'));
+    if (delivery.installed_at) lines.push(t('Last received {when}.', { when: ago(delivery.installed_at * 1000) }));
+    if (delivery.problem) lines.push(tx(delivery.problem));
+  } else {
+    const launcher = token.replace?.launcher ?? {};
+    lines.push(token.replace?.where === 'operator'
+      ? t('The portal operator replaces this account\'s service token; your computers then receive it automatically.')
+      : launcher.approved
+        ? t('Replacing the service token rotates its secret in Cloudflare Access: the previous one stops working at once, and the account\'s other computers receive the new one automatically.')
+        : t('To replace the service token, define and approve the launcher cloud-token-rotate (configure-cloud-access.py production --rotate) on this computer.'));
+    if (token.computers?.length) {
+      lines.push(token.pending
+        ? tn(token.pending, '{n} computer does not have the current token yet.', '{n} computers do not have the current token yet.')
+        : t('Every computer of the account has the current token.'));
+    }
+  }
+  $('#cloud-token-summary').textContent = lines.join(' ');
+  $('#cloud-token-list').replaceChildren(...(token.computers ?? []).map(entry => {
+    const [label, tone] = entry.receives ? CLOUD_TOKEN_STATES[entry.token] ?? CLOUD_TOKEN_STATES.unknown : ['Trust it again with the account store', 'warn'];
+    const seen = entry.reported_at ? t('Reported {when}.', { when: ago(entry.reported_at * 1000) }) : t('It has not asked for the account store\'s credentials yet.');
+    return el('div', { class: 'row variable-row' },
+      rowText(el('span', { class: 'cred-name', textContent: entry.name, translate: 'no' }), seen, badge(t(label), tone)));
+  }));
+  const rotate = $('#cloud-token-rotate');
+  rotate.hidden = !(token.replace?.runs_here && token.replace?.launcher?.approved);
+  rotate.textContent = cloudTokenArmed ? t('Tap again to replace the token') : t('Replace the service token');
+}
+
+$('#cloud-token-rotate').onclick = event => {
+  if (!cloudTokenArmed) {
+    cloudTokenArmed = true;
+    renderCloudToken();
+    setTimeout(() => { cloudTokenArmed = false; renderCloudToken(); }, 4000);
+    return;
+  }
+  cloudTokenArmed = false;
+  busy(event.currentTarget, async () => {
+    const reply = await invoke('variable_launcher_run', { id: cloudToken.replace.launcher.id });
+    await loadCloud();
+    if (reply.result?.status !== 'succeeded') throw new Error(t('The launcher did not finish; nothing reports a new token yet.'));
+    done(t('The service token was replaced. The account\'s other computers receive it within minutes.'));
+  });
+};
 
 /** Plain text only: labels are whatever each computer called itself. */
 function renderCloudInstallations() {
@@ -2138,6 +2206,7 @@ function renderCloud() {
   if (granted) $('#cloud-endpoint').value = granted;
   $('#cloud-endpoint').readOnly = Boolean(granted);
   renderCloudInstallations();
+  renderCloudToken();
   renderCloudMirror();
 }
 

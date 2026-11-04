@@ -215,6 +215,17 @@ pub(super) async fn coordinator_store_mode(host: &Arc<Host>) -> Result<String> {
     Ok(reply["mode"].as_str().unwrap_or("off").to_owned())
 }
 
+/// Ask the coordinator for the account store credentials it holds now, telling it what this
+/// machine holds (fingerprint and key version only).
+pub(in crate::app) async fn store_delivery(host: &Arc<Host>, held: Value) -> Result<Value> {
+    let connection = host
+        .state
+        .implementation
+        .connection()?
+        .context("This computer is not signed in to a coordinator.")?;
+    remote(&connection, json!({"action":"store_delivery","held":held})).await
+}
+
 /// Tell the coordinator this machine's installation in the account store, so revoking the machine
 /// revokes it there too.
 pub(super) async fn report_store_installation(host: &Arc<Host>, installation: &str) -> Result<()> {
@@ -315,6 +326,11 @@ pub(in crate::app) async fn register(host: &Arc<Host>, args: &Value) -> Result<V
         roots: Vec::new(),
         management_support: false,
         store_installation: String::new(),
+        store_key: handoff
+            .as_ref()
+            .map(|(key, _)| key.clone())
+            .unwrap_or_default(),
+        store_held: None,
     });
     state.save(&data)?;
     drop(data);
@@ -455,6 +471,37 @@ pub(in crate::app) async fn protocol(host: &Arc<Host>, args: &Value) -> Result<V
             }
             state.save(&data)?;
             Ok(json!({"recorded":true}))
+        }
+        // A replaced service token or a rotated content key, sealed to the key the person
+        // approved when trusting this machine with the account store.
+        "store_delivery" => {
+            let held = &args["held"];
+            let token = held["token"].as_str().unwrap_or_default();
+            ensure!(
+                token.is_empty() || crate::mirror::handoff::valid_fingerprint(token),
+                "Invalid account store state."
+            );
+            let key = u32::try_from(held["key"].as_u64().unwrap_or(0))
+                .context("Invalid account store state.")?;
+            let recipient = {
+                let mut data = state.registry.lock().await;
+                let machine = data
+                    .machines
+                    .iter_mut()
+                    .find(|m| m.id == id)
+                    .context("Machine is not registered.")?;
+                machine.store_held = Some(StoreHeld {
+                    token: token.into(),
+                    key,
+                    at: now(),
+                });
+                let recipient = machine.store_key.clone();
+                state.save(&data)?;
+                recipient
+            };
+            Ok(super::super::cloud::deliver(
+                host, id, &recipient, token, key,
+            ))
         }
         "lease" => {
             let mut data = state.registry.lock().await;
@@ -892,6 +939,8 @@ mod tests {
             roots: vec![],
             management_support: true,
             store_installation: String::new(),
+            store_key: String::new(),
+            store_held: None,
         });
         data.teams_machine = worker.clone();
         assert!(leased(&mut data, &worker));
