@@ -105,8 +105,7 @@ const STORE_CONFLICT: &str = "This computer and the account store changed the sa
 const STORE_PENDING: &str =
     "Changes are waiting to be copied to the account store; they are sent in the background.";
 const STORE_BLOCKED: &str = "Some records are too large for the account store and are not copied.";
-const STORE_DIFFERS: &str =
-    "The last verification found differences in the encrypted copy. Migrate again to repair it.";
+const STORE_DIFFERS: &str = "The last verification found differences in the encrypted copy. Repair it (pta cloud repair, or «Repair the copy» in Cloud storage).";
 const STORE_RETRUST: &str = "This computer was trusted before it could receive the account store's new credentials: trust it again with the account store.";
 const STORE_TOKEN: &str = "The account store's service token expires within 30 days. Ask whoever runs the account store to renew it, then connect again with the new expiry.";
 const STORE_SHARED: &str =

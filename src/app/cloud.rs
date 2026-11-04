@@ -100,6 +100,7 @@ pub(super) fn handles(method: &str) -> bool {
             | "cloud_conflicts"
             | "cloud_resolve"
             | "cloud_lost"
+            | "cloud_repair"
     )
 }
 
@@ -288,6 +289,15 @@ pub(super) async fn operate(host: &Arc<Host>, request: &control::Request) -> Rep
                 return Reply::error("invalid_input", 2, "Invalid arguments.");
             };
             restore::operate_restore(host, args).await
+        }
+        "cloud_repair" => {
+            if let Some(reply) = refused_here(host, &invocation) {
+                return reply;
+            }
+            if request.args != json!({}) && !request.args.is_null() {
+                return Reply::error("invalid_input", 2, "Invalid arguments.");
+            }
+            mirror::operate_repair(host).await
         }
         "cloud_lost" => {
             if let Some(reply) = refused_here(host, &invocation) {

@@ -330,6 +330,7 @@ impl Portal {
             "cloud_conflicts",
             "cloud_resolve",
             "cloud_lost",
+            "cloud_repair",
             "setup_readiness",
             "variable_create",
             "variable_update",

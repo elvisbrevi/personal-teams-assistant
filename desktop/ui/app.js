@@ -2368,6 +2368,7 @@ let cloudDisconnectArmed = false;
 let cloudRotateArmed = false;
 let cloudAdoptArmed = false;
 let cloudPromoteArmed = false;
+let cloudRepairArmed = false;
 /** Records changed both here and in the store, with the fields that differ; the choice that waits for a second tap. */
 let cloudConflicts = [];
 let cloudResolveArmed = null;
@@ -2423,6 +2424,10 @@ function renderCloudMirror() {
   renderCloudConflicts();
   $('#cloud-demote').hidden = !primary;
   $('#cloud-verify').hidden = !mirror.key?.present;
+  // A verification that found differences is repaired by sending again only what differs.
+  const repair = $('#cloud-repair');
+  repair.hidden = !(status?.mode === 'mirror' || primary) || mirror.last_verify?.ok !== false;
+  repair.textContent = cloudRepairArmed ? t('Tap again to repair the copy') : t('Repair the copy');
   $('#cloud-disconnect').textContent = cloudDisconnectArmed ? t('Tap again to disconnect') : t('Disconnect this computer');
   const rotate = $('#cloud-rotate');
   rotate.hidden = status?.mode !== 'mirror' && !primary;
@@ -2514,8 +2519,16 @@ $('#cloud-verify').onclick = event => busy(event.currentTarget, async () => {
   const reply = await invoke('cloud_verify');
   renderCloudVerify(reply.verify);
   await loadCloud();
-  if (!reply.ok) throw t('The copy differs from this computer. Migrate again to repair it.');
+  if (!reply.ok) throw t('The copy differs from this computer. Repair it to send again what differs.');
   done(t('The copy matches this computer.'));
+});
+
+cloudTwoTaps('#cloud-repair', () => cloudRepairArmed, v => { cloudRepairArmed = v; }, async () => {
+  const reply = await invoke('cloud_repair', {});
+  renderCloudVerify(reply.verify);
+  await loadCloud();
+  if (!reply.ok) throw tn(reply.requeued, '{n} record was sent again, but the copy still differs.', '{n} records were sent again, but the copy still differs.');
+  done(t('The copy matches this computer again.'));
 });
 
 cloudTwoTaps('#cloud-promote', () => cloudPromoteArmed, v => { cloudPromoteArmed = v; }, async () => {

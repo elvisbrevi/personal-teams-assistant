@@ -114,6 +114,8 @@ struct Endpoint {
     cloud_conflicts_support: bool,
     #[serde(default)]
     cloud_lost_support: bool,
+    #[serde(default)]
+    cloud_repair_support: bool,
     contract: u32,
     port: u16,
     token: String,
@@ -550,6 +552,10 @@ async fn client_with_transport(
             endpoint.cloud_lost_support || request.method != "cloud_lost",
             "Incompatible account store host: update the host and CLI together before securing a lost computer."
         );
+        ensure!(
+            endpoint.cloud_repair_support || request.method != "cloud_repair",
+            "Incompatible account store host: update the host and CLI together before repairing the copy."
+        );
         ensure!(endpoint.contract == CONTRACT, "incompatible host contract");
         ensure!(
             endpoint.web_support
@@ -665,6 +671,7 @@ pub(crate) fn launch(
             cloud_restore_support: true,
             cloud_conflicts_support: true,
             cloud_lost_support: true,
+            cloud_repair_support: true,
             contract: CONTRACT,
             port: listener.local_addr()?.port(),
             token: token.clone(),
@@ -1535,6 +1542,7 @@ mod tests {
                 cloud_restore_support: true,
                 cloud_conflicts_support: true,
                 cloud_lost_support: true,
+                cloud_repair_support: true,
                 account_authority_support: true,
                 shared_accounts_support: true,
                 account_binding: None,
@@ -1575,6 +1583,7 @@ mod tests {
                 cloud_restore_support: true,
                 cloud_conflicts_support: true,
                 cloud_lost_support: true,
+                cloud_repair_support: true,
                 account_authority_support: true,
                 shared_accounts_support: true,
                 account_binding: None,
@@ -1630,6 +1639,7 @@ mod tests {
                     cloud_restore_support: true,
                     cloud_conflicts_support: true,
                     cloud_lost_support: true,
+                    cloud_repair_support: true,
                     account_authority_support: true,
                     shared_accounts_support: true,
                     account_binding: None,

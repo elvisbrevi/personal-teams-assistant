@@ -1661,6 +1661,16 @@ for (const [label, options] of [['desktop', {}], ['phone', { context: { viewport
   await panel.locator('#cloud-verify').click();
   await panel.locator('#cloud-verify-result').waitFor();
   check(`${label}: a verification lists changes not copied yet`, (await panel.locator('#cloud-verify-result').innerText()).includes('Mensajes'));
+  const repairCopy = panel.locator('#cloud-repair');
+  check(`${label}: a matching copy offers no repair`, await repairCopy.isHidden());
+  await page.evaluate(async () => { window.__ptaCloudMirror.last_verify = { at: Math.floor(Date.now() / 1000), ok: false }; await loadCloud(); });
+  check(`${label}: a copy that differs offers a targeted repair`, await repairCopy.isVisible() && (await panel.locator('#cloud-mirror-summary').innerText()).includes('la copia difiere'));
+  await repairCopy.click();
+  check(`${label}: the first tap only arms the repair`, (await repairCopy.innerText()).includes('Toca de nuevo') && await page.evaluate(() => !window.__ptaCloudRepaired));
+  await repairCopy.click();
+  await repairCopy.waitFor({ state: 'hidden' });
+  check(`${label}: the second tap repairs the copy and says it matches again`, await page.evaluate(() => window.__ptaCloudRepaired === true)
+    && await page.waitForFunction(() => (document.querySelector('#notice-text')?.textContent ?? '').includes('vuelve a coincidir'), null, { timeout: 5000 }).then(() => true, () => false));
   const rotateKey = panel.locator('#cloud-rotate');
   await rotateKey.click();
   check(`${label}: the first tap only arms the key rotation`, (await rotateKey.innerText()).includes('Toca de nuevo') && await page.evaluate(() => !window.__ptaCloudRotated));

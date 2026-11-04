@@ -569,6 +569,13 @@ pub(super) const TOOLS: &[Tool] = &[
         },
     },
     Tool {
+        name: "cloud_repair",
+        title: "Repair the account store's copy",
+        description: "After cloud_verify found differences (in mirror or primary): sends again every record this computer had copied that the account store lacks, holds at another revision or digest, or holds in a form that does not open or does not match, then verifies. Records only the store holds are counted (unknown_remote) and never removed. In primary only the history is repaired; configuration differences are conflicts (cloud_conflicts). Relay `next`. Owner, or a portal account the operator enabled the account store for. Needs the user's confirmation.",
+        effect: Effect::External,
+        schema: || object(json!({"confirmed":confirmed()}), &[]),
+    },
+    Tool {
         name: "cloud_lost",
         title: "Secure the account after a lost computer",
         description: "For a lost or stolen computer, on the account's coordinator, in one confirmed action: revokes its machine here and its installation in the account store, replaces the service token with the approved launcher cloud-token-rotate (only from this machine's window or local CLI; a portal account asks its operator) and rotates the content key, so the account's other computers receive both within a minute. Give the installation from cloud_installations or the machine ID from machine_list, not both. The reply lists each step (done, not_needed, pending, failed) with what to do; repeating the same call continues where it stopped and never repeats a finished step. Relay `next` (back up the new key). Owner, or a portal account the operator enabled the account store for. Needs the user's confirmation.",
@@ -1758,7 +1765,7 @@ pub(super) async fn run(name: &str, args: &Value) -> Result<Value, String> {
         | "cloud_backups" | "cloud_conflicts" => {
             ipc(name, args.clone()).await
         }
-        "cloud_migrate" | "cloud_rollback" | "cloud_erase" | "cloud_disconnect" | "cloud_promote" | "cloud_pull" | "cloud_revoke" | "cloud_rotate_key" | "cloud_restore" | "cloud_resolve" | "cloud_lost" => {
+        "cloud_migrate" | "cloud_rollback" | "cloud_erase" | "cloud_disconnect" | "cloud_promote" | "cloud_pull" | "cloud_revoke" | "cloud_rotate_key" | "cloud_restore" | "cloud_resolve" | "cloud_lost" | "cloud_repair" => {
             let mut args = args.clone();
             args.as_object_mut().unwrap().remove("confirmed");
             ipc(name, args).await
@@ -2120,6 +2127,7 @@ pub(super) fn confirmation(name: &str, args: &Value) -> Option<String> {
         },
         "cloud_erase" => "Erase this account's copy in the account store (records and backups) and set the content key aside? This computer keeps all of its data.".into(),
         "cloud_rotate_key" => "Rotate the account content key: seal the whole copy again with a new key (the earlier one stays on this computer)?".into(),
+        "cloud_repair" => "Send again every record the account store lacks or holds differently, then verify the copy?".into(),
         "cloud_lost" => format!(
             "Secure the account after the lost computer {}: revoke it here and in the account store, replace the service token and rotate the content key?",
             args["installation"].as_str().or(args["machine"].as_str()).unwrap_or_default()
