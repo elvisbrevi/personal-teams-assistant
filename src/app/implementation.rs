@@ -1467,7 +1467,7 @@ mod tests {
         );
         // Without an account store only the machine is revoked; the rest is not needed.
         let reply = lost(json!({"machine": id})).await;
-        assert!(reply.ok, "{reply:?}");
+        assert!(reply.ok, "{:?}", reply.message);
         assert_eq!(reply.data["complete"], true);
         let states: Vec<_> = reply.data["steps"]
             .as_array()
