@@ -14,7 +14,7 @@ without `--start`, so the Teams pipeline never runs and nothing reaches Microsof
 
 Two temporary staging service tokens are created and admitted (CLOUDFLARE_API_TOKEN or
 CLOUDFLARE_API_TOKEN_FILE, as for configure-cloud-access.py), and the copy runs connect, migrate
-(dry run, then confirmed), verify, promote, a configuration edit and a note through the store and
+(dry run, then confirmed), verify, a repair that has nothing to repair, promote, a configuration edit and a note through the store and
 a pull with replace; then a second computer of the account (a fresh profile with the content key a
 trust confirmation hands over) is refused without adopting, adopts, verifies, joins primary and
 edits through the store, which the first pulls; a conflict (the second edits through the store, the
@@ -394,6 +394,11 @@ def rehearse(run, endpoint, service, label, second_service=None):
     r = run.pta("cloud", "verify", timeout=1800)
     run.step("verify", r, verified=(r.get("data") or {}).get("ok"), elapsed_ms=(r.get("data") or {}).get("elapsed_ms"))
     run.expect((r.get("data") or {}).get("ok") is True, "the copy verifies")
+    r = run.pta("cloud", "repair", "--confirmed", timeout=1800)
+    data = r.get("data") or {}
+    run.step("repair (nothing differs)", r, requeued=data.get("requeued"), verified=data.get("ok"))
+    run.expect(r.get("ok") and data.get("requeued") == 0 and data.get("ok") is True,
+               "a repair of a matching copy sends nothing and still verifies")
     r = run.pta("cloud", "promote", "--confirmed", timeout=1800)
     run.step("promote", r, mode=(r.get("data") or {}).get("mode"))
     run.expect(r.get("ok") and (r.get("data") or {}).get("mode") == "primary", "the store becomes the source")

@@ -558,6 +558,12 @@
       return { revoked: args.installation };
     },
     cloud_disconnect: () => { window.__ptaCloudDisconnected = true; if (window.__ptaCloudMirror) window.__ptaCloudMirror.mode = 'off'; return { changed: true, store_notified: true }; },
+    // Synthetic targeted repair: what differed is sent again and the copy matches.
+    cloud_repair: () => {
+      window.__ptaCloudRepaired = true;
+      window.__ptaCloudMirror.last_verify = { at: secs(NOW), ok: true };
+      return { ok: true, requeued: 3, uploaded: 3, unknown_remote: 0, repaired: [{ name: 'notes', requeued: 3, unknown_remote: 0 }], verify: { ok: true, collections: [] }, next: 'The copy matches this computer again.' };
+    },
     cloud_verify: () => ({ ok: true, verify: { ok: true, collections: [{ name: 'audits', ok: true, pending: 2, local: 30, remote: 28 }] } }),
     // Synthetic primary mode: promoting switches the mode; a conflict waits for a replace.
     cloud_promote: args => {

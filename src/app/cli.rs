@@ -202,6 +202,10 @@ Account store (Cloudflare)
   cloud installations revoke ID --confirmed
                            Owner or enabled portal account. Revokes another computer of the account in the account store (its credential
                            stops working); that computer keeps its data. This one disconnects with cloud disconnect.
+  cloud repair --confirmed    Owner or enabled portal account, in mirror or primary, after cloud verify found differences.
+                           Sends again every record this computer had copied that the account store lacks or holds
+                           differently, then verifies; records only the store holds are reported, never removed. In
+                           primary only the history is repaired (configuration differences are conflicts).
   cloud lost INSTALLATION --confirmed
   cloud lost --machine ID --confirmed
                            Owner or enabled portal account, on the account's coordinator. For a lost or stolen computer:
@@ -786,6 +790,15 @@ async fn cloud_command(args: &[String]) -> Result<Reply> {
             }
             _ => anyhow::bail!("missing argument; consult --help"),
         },
+        Some("repair") => {
+            if let Some(reply) = unconfirmed(
+                args,
+                "Send again every record the account store lacks or holds differently, then verify the copy?".into(),
+            ) {
+                return Ok(reply);
+            }
+            call("cloud_repair", json!({}), None, true).await
+        }
         Some("lost") => {
             let target = match (option(args, "--machine"), words(args).get(2).copied()) {
                 (Some(machine), None) => json!({"machine": machine}),
@@ -1514,6 +1527,7 @@ fn validate_args(args: &[String]) -> Result<()> {
             | ["cloud", "resolve", _, _]
             | ["cloud", "installations", "revoke", _]
             | ["cloud", "restore", _]
+            | ["cloud", "repair"]
             | ["cloud", "lost"]
             | ["cloud", "lost", _]
             | ["credentials", "list"]
@@ -1659,6 +1673,7 @@ fn validate_args(args: &[String]) -> Result<()> {
                 || p.as_slice().starts_with(&["cloud", "restore"])
                 || p.as_slice().starts_with(&["cloud", "resolve"])
                 || p.as_slice().starts_with(&["cloud", "lost"])
+                || p.as_slice() == ["cloud", "repair"]
                 || p.as_slice()
                     .starts_with(&["cloud", "installations", "revoke"])
                 || p.as_slice().starts_with(&["update", "stage"])
@@ -1872,7 +1887,7 @@ async fn execute(mut args: Vec<String>) -> Result<Reply> {
         }
         "capabilities" => {
             return Ok(Reply::success(
-                json!({"contract":control::CONTRACT,"commands":HELP,"skill_version":env!("CARGO_PKG_VERSION"),"activity_registration_support":true,"web_support":true,"web_access_support":true,"knowledge_index_support":true,"mcp_support":true,"tools_support":true,"todo_support":true,"implementation_support":true,"machine_pairing_support":true,"machine_login_support":true,"machine_management_support":true,"account_variables_support":true,"account_portable_support":true,"account_authority_support":true,"shared_accounts_support":true,"cloud_store_support":true,"cloud_mirror_support":true,"cloud_disconnect_support":true,"cloud_primary_support":true,"cloud_migration_support":true,"cloud_installations_support":true,"cloud_handoff_support":true,"cloud_delivery_support":true,"cloud_restore_support":true,"cloud_conflicts_support":true,"cloud_lost_support":true}),
+                json!({"contract":control::CONTRACT,"commands":HELP,"skill_version":env!("CARGO_PKG_VERSION"),"activity_registration_support":true,"web_support":true,"web_access_support":true,"knowledge_index_support":true,"mcp_support":true,"tools_support":true,"todo_support":true,"implementation_support":true,"machine_pairing_support":true,"machine_login_support":true,"machine_management_support":true,"account_variables_support":true,"account_portable_support":true,"account_authority_support":true,"shared_accounts_support":true,"cloud_store_support":true,"cloud_mirror_support":true,"cloud_disconnect_support":true,"cloud_primary_support":true,"cloud_migration_support":true,"cloud_installations_support":true,"cloud_handoff_support":true,"cloud_delivery_support":true,"cloud_restore_support":true,"cloud_conflicts_support":true,"cloud_lost_support":true,"cloud_repair_support":true}),
             ));
         }
         "skill" => return crate::app::skill::command(action, args.get(2).map(String::as_str)),
@@ -2930,6 +2945,7 @@ mod wiki_tests {
                 "--confirmed",
             ],
             &["cloud", "lost", "synthetic", "--confirmed"],
+            &["cloud", "repair", "--confirmed"],
             &["cloud", "lost", "--machine", "synthetic", "--confirmed"],
             &[
                 "cloud",

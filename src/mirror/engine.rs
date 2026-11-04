@@ -459,30 +459,15 @@ impl<L: Local, T: Transport> Engine<'_, L, T> {
     pub async fn verify(&self) -> Result<std::result::Result<Report, Failure>> {
         let mut collections = Vec::new();
         for collection in Collection::ALL {
-            let mut remote = Vec::new();
-            let mut since = 0u64;
-            loop {
-                let page = match self.transport.page(collection, since, PAGE).await {
-                    Ok(page) => page,
-                    Err(failure) => return Ok(Err(failure)),
-                };
-                since = page
-                    .records
-                    .iter()
-                    .map(|r| r.generation)
-                    .max()
-                    .unwrap_or(since);
-                let more = page.more && !page.records.is_empty();
-                remote.extend(page.records);
-                if !more {
-                    break;
-                }
-            }
+            let remote = match self.listing(collection).await {
+                Ok(remote) => remote,
+                Err(failure) => return Ok(Err(failure)),
+            };
             if collection.is_configuration() && !self.local.configuration() {
                 collections.push(CollectionReport::others(collection, remote.len() as u64));
                 continue;
             }
-            collections.push(self.verify_collection(collection, remote)?);
+            collections.push(self.verify_collection(collection, remote)?.0);
         }
         Ok(Ok(Report {
             ok: collections.iter().all(|c| c.ok),
@@ -490,11 +475,66 @@ impl<L: Local, T: Transport> Engine<'_, L, T> {
         }))
     }
 
+    /// Everything the Worker holds of `collection`, page by page.
+    async fn listing(&self, collection: Collection) -> Result<Vec<Stored>, Failure> {
+        let mut remote = Vec::new();
+        let mut since = 0u64;
+        loop {
+            let page = self.transport.page(collection, since, PAGE).await?;
+            since = page
+                .records
+                .iter()
+                .map(|r| r.generation)
+                .max()
+                .unwrap_or(since);
+            let more = page.more && !page.records.is_empty();
+            remote.extend(page.records);
+            if !more {
+                break;
+            }
+        }
+        Ok(remote)
+    }
+
+    /// A targeted repair after a verification found differences: every record this
+    /// installation had acknowledged that the Worker lacks, holds at another revision or digest,
+    /// or holds in a form that does not open or does not match is queued again at its next
+    /// revision (the next flush sends it, above the Worker's revision after a `stale`). Records
+    /// only the Worker holds are left alone and counted. `configuration: false` leaves the
+    /// configuration collections to the pull and the conflicts (primary). Sends nothing itself.
+    pub async fn repair(
+        &self,
+        configuration: bool,
+    ) -> Result<std::result::Result<Vec<Repaired>, Failure>> {
+        let mut repaired = Vec::new();
+        for collection in Collection::ALL {
+            if collection.is_configuration() && !(configuration && self.local.configuration()) {
+                continue;
+            }
+            let remote = match self.listing(collection).await {
+                Ok(remote) => remote,
+                Err(failure) => return Ok(Err(failure)),
+            };
+            let (report, broken) = self.verify_collection(collection, remote)?;
+            let requeued = self.ledger.requeue(collection, &broken)?;
+            if requeued > 0 || report.unknown_remote > 0 {
+                repaired.push(Repaired {
+                    name: collection.name(),
+                    requeued,
+                    unknown_remote: report.unknown_remote,
+                });
+            }
+        }
+        Ok(Ok(repaired))
+    }
+
+    /// The collection's report and the blinded IDs of the acknowledged records the Worker does
+    /// not hold as they were sent.
     fn verify_collection(
         &self,
         collection: Collection,
         mut remote: Vec<Stored>,
-    ) -> Result<CollectionReport> {
+    ) -> Result<(CollectionReport, Vec<String>)> {
         // History is each installation's own: another computer of the account mirrors its records
         // and verifies them itself. The configuration is the account's and is compared whole.
         let held = remote.len();
@@ -578,9 +618,11 @@ impl<L: Local, T: Transport> Engine<'_, L, T> {
             remote_digest,
             ok: false,
         };
+        let mut broken = Vec::new();
         for row in &rows {
             if !stored.contains_key(row.blind.as_str()) {
                 report.missing_remote += 1;
+                broken.push(row.blind.clone());
             }
         }
         for held in &remote {
@@ -593,6 +635,7 @@ impl<L: Local, T: Transport> Engine<'_, L, T> {
                 || (row.acked_hash == DELETED) != held.deleted
             {
                 report.differing += 1;
+                broken.push(held.id.clone());
                 continue;
             }
             let Some(sealed) = held.sealed.as_deref().filter(|_| !held.deleted) else {
@@ -600,6 +643,7 @@ impl<L: Local, T: Transport> Engine<'_, L, T> {
             };
             if hex_sha256(sealed) != held.digest {
                 report.differing += 1;
+                broken.push(held.id.clone());
                 continue;
             }
             let Some(plain) = seal::open(
@@ -611,6 +655,7 @@ impl<L: Local, T: Transport> Engine<'_, L, T> {
                 sealed,
             ) else {
                 report.undecryptable += 1;
+                broken.push(held.id.clone());
                 continue;
             };
             let named = serde_json::from_slice::<Value>(&plain)
@@ -622,6 +667,7 @@ impl<L: Local, T: Transport> Engine<'_, L, T> {
                 && hex_sha256(&plain) == row.acked_hash;
             if !consistent {
                 report.content_differs += 1;
+                broken.push(held.id.clone());
             }
         }
         // What changed locally since the last upload is the outbox's, not a difference.
@@ -645,7 +691,7 @@ impl<L: Local, T: Transport> Engine<'_, L, T> {
             && report.undecryptable == 0
             && report.content_differs == 0
             && report.local_digest == report.remote_digest;
-        Ok(report)
+        Ok((report, broken))
     }
 }
 
@@ -703,6 +749,16 @@ fn refuse(batch: Vec<(Row, Wire)>, code: &str, now: i64) -> Vec<Row> {
             row
         })
         .collect()
+}
+
+/// What a targeted repair queued again in one collection.
+#[derive(Clone, Debug, Serialize)]
+pub struct Repaired {
+    pub name: &'static str,
+    /// Records queued to be sent again.
+    pub requeued: u64,
+    /// Records only the Worker holds, left alone.
+    pub unknown_remote: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]

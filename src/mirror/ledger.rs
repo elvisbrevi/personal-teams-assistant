@@ -179,6 +179,22 @@ impl Ledger {
         Ok(())
     }
 
+    /// A targeted repair: forget the acknowledgement of these records (by blinded ID), keeping
+    /// their revisions, so the next sweep queues each one again at a revision above every one used;
+    /// a record in conflict waits for its resolution. Returns how many rows changed.
+    pub fn requeue(&self, collection: Collection, blinds: &[String]) -> Result<u64> {
+        let db = self.lock();
+        let mut changed = 0;
+        for blind in blinds {
+            changed += db.execute(
+                "UPDATE records SET acked_hash='', target_hash='', pending_since=NULL, attempts=0, next_at=0, error='' \
+                 WHERE collection=?1 AND blind=?2 AND acked_revision>0 AND error!=?3",
+                params![collection.name(), blind, super::engine::CONFLICT],
+            )? as u64;
+        }
+        Ok(changed)
+    }
+
     /// After a key rotation: every live record the Worker acknowledged is sent again at its next
     /// revision with the same content, so it is sealed with the active key; tombstones carry no
     /// content and stay, and a conflict waits for its resolution. Returns how many rows wait.

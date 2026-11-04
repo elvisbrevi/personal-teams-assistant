@@ -774,6 +774,72 @@ async fn verification_finds_every_kind_of_difference() {
 }
 
 #[tokio::test]
+async fn a_targeted_repair_sends_again_only_what_differs_and_leaves_unknown_records() {
+    let f = Fixture::new();
+    f.filled();
+    f.flush(100).await;
+    let n1 = (
+        Collection::Notes,
+        seal::blind_id(&f.content, Collection::Notes, "n1"),
+    );
+    let n2 = (
+        Collection::Notes,
+        seal::blind_id(&f.content, Collection::Notes, "n2"),
+    );
+    let unknown = (Collection::Examples, "f".repeat(64));
+    {
+        let mut held = f.worker.records.lock().unwrap();
+        // A record the Worker lost, one it holds tampered with, and one only it holds.
+        held.remove(&n1);
+        let stored = held.get_mut(&n2).unwrap();
+        let mut sealed = stored.sealed.clone().unwrap();
+        *sealed.last_mut().unwrap() ^= 1;
+        stored.digest = hex_sha256(&sealed);
+        stored.sealed = Some(sealed);
+        held.insert(
+            unknown.clone(),
+            Stored {
+                collection: Collection::Examples,
+                id: unknown.1.clone(),
+                revision: 1,
+                digest: hex_sha256(b"x"),
+                schema: 1,
+                deleted: false,
+                generation: 99,
+                sealed: Some(b"x".to_vec()),
+                own: None,
+            },
+        );
+    }
+    let before = f.ledger.get(Collection::Notes, "n2").unwrap().unwrap();
+    assert!(!f.verify().await.ok);
+    let repaired = f.engine().repair(true).await.unwrap().unwrap();
+    let notes = repaired.iter().find(|r| r.name == "notes").unwrap();
+    assert_eq!(notes.requeued, 2);
+    let examples = repaired.iter().find(|r| r.name == "examples").unwrap();
+    assert_eq!((examples.requeued, examples.unknown_remote), (0, 1));
+    // Only those two are sent, each above every revision used.
+    let flushed = f.flush(200).await;
+    assert_eq!(flushed.sent, 2);
+    assert!(
+        f.ledger
+            .get(Collection::Notes, "n2")
+            .unwrap()
+            .unwrap()
+            .acked_revision
+            > before.acked_revision
+    );
+    let report = f.verify().await;
+    assert!(collection(&report, "notes").ok);
+    // The record only the Worker holds is still there and still reported.
+    assert!(f.worker.records.lock().unwrap().contains_key(&unknown));
+    assert_eq!(collection(&report, "examples").unknown_remote, 1);
+    // A repair with nothing to repair queues nothing.
+    let again = f.engine().repair(true).await.unwrap().unwrap();
+    assert!(again.iter().all(|r| r.requeued == 0));
+}
+
+#[tokio::test]
 async fn local_changes_since_the_upload_are_pending_not_differences() {
     let f = Fixture::new();
     f.filled();

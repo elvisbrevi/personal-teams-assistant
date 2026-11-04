@@ -730,6 +730,104 @@ async fn start(host: &Arc<Host>) -> std::result::Result<Reply, Box<Reply>> {
     })))
 }
 
+/// `cloud_repair`: a targeted repair after a verification found differences. Every record this
+/// computer had copied that the account store lacks or holds differently is sent again (its next
+/// revision, sealed with the active key); records only the store holds are reported, never
+/// removed. In `primary` the configuration's differences are conflicts and stay with
+/// `cloud_conflicts`; only the history is repaired. Then the copy is verified again.
+pub(super) async fn operate_repair(host: &Arc<Host>) -> Reply {
+    let _operations = host.state.operations.lock().await;
+    let _gate = hold(host).await;
+    let Ok(config) = host.state.settings.config() else {
+        return Reply::error(
+            "operation_failed",
+            1,
+            "The configuration could not be read.",
+        );
+    };
+    if config.cloud.mode == CloudMode::Off {
+        return Reply::error(
+            "not_ready",
+            3,
+            "This computer does not copy anything to the account store: migrate first.",
+        );
+    }
+    let setup = match open(host, &config.cloud) {
+        Ok(setup) => setup,
+        Err(missing) => return missing_reply(&missing),
+    };
+    let primary = config.cloud.mode == CloudMode::Primary;
+    let local = HostLocal(host);
+    let engine = Engine {
+        local: &local,
+        transport: &setup.http,
+        ledger: &setup.ledger,
+        content: &setup.content,
+        cas: primary,
+    };
+    let failed = || Reply::error("operation_failed", 1, "The copy could not be repaired.");
+    let repaired = match engine.repair(!primary).await {
+        Ok(Ok(repaired)) => repaired,
+        Ok(Err(failure)) => {
+            observe(host, &config.cloud, Some(&failure));
+            return failure_reply(&failure);
+        }
+        Err(_) => return failed(),
+    };
+    let requeued: u64 = repaired.iter().map(|r| r.requeued).sum();
+    let unknown: u64 = repaired.iter().map(|r| r.unknown_remote).sum();
+    let (mut uploaded, mut passes) = (0u64, 0u32);
+    // Send what was queued now, bounded like the initial upload; the loop sends the rest.
+    while requeued > 0 && passes < 200 {
+        let Ok(flushed) = engine.flush(now(), Limits::default()).await else {
+            return failed();
+        };
+        passes += 1;
+        uploaded += flushed.sent;
+        if let Some(code) = flushed.failure {
+            let failure = failure_of(&code);
+            observe(host, &config.cloud, Some(&failure));
+            return failure_reply(&failure);
+        }
+        if flushed.batches == 0 {
+            break;
+        }
+    }
+    let report = match engine.verify().await {
+        Ok(Ok(report)) => report,
+        Ok(Err(failure)) => {
+            observe(host, &config.cloud, Some(&failure));
+            return failure_reply(&failure);
+        }
+        Err(_) => return failed(),
+    };
+    observe(host, &config.cloud, None);
+    let _ = setup.ledger.set_meta(
+        "last_verify",
+        &json!({"at": now(), "ok": report.ok, "report": report}).to_string(),
+    );
+    crate::mirror::wake();
+    let next = if report.ok {
+        "The copy matches this computer again."
+    } else if unknown > 0 {
+        "The account store holds records this computer does not have; they were left alone. Compare with pta cloud verify; bringing everything back (cloud rollback) keeps them in the store."
+    } else if primary {
+        "Configuration differences in primary are conflicts: see pta cloud conflicts. The history was sent again."
+    } else {
+        "Some records were not sent yet; run the repair again (the outbox continues where it stopped)."
+    };
+    Reply::success(json!({
+        "ok": report.ok,
+        "repaired": repaired,
+        "requeued": requeued,
+        "uploaded": uploaded,
+        "unknown_remote": unknown,
+        "verify": report,
+        "outbox": setup.ledger.outbox(None, now()).ok(),
+        "next": next,
+    }))
+}
+
 pub(super) async fn operate_verify(host: &Arc<Host>) -> Reply {
     let _gate = host.state.cloud.gate.lock().await;
     let Ok(config) = host.state.settings.config() else {
