@@ -375,7 +375,7 @@ Knowledge
 Agents
   tools list               Shared application tools, their filters and effects (no host required).
   tools call NAME          Calls a shared tool with JSON on stdin; external actions require confirmed:true.
-                           list_azure_hus: source, project, state, kind (hu|bug), limit (default 10, maximum 100).
+                           list_azure_hus: source, project, state, kind (hu|bug|task) or type (one returned type), limit (default 10, maximum 100).
                            list_github_epics: project (OWNER/REPO), state (open|closed), limit.
                            get_azure_hu: id, optional source and project (HU or bug detail).
                            list_azure_tasks: day (YYYY-MM-DD), optional user, source and project.

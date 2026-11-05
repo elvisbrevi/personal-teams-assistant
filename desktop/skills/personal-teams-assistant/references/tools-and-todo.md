@@ -20,7 +20,8 @@ printf '%s\n' '{"source":"azure-devops-status","state":"Developing","limit":25}'
 - `source`: an enabled Azure DevOps activity source ID. Optional when exactly one is enabled.
 - `project`: optionally narrow to a project in that source's catalog.
 - `state`: an exact state returned by the tool. Omit it for all states.
-- `kind`: `hu` or `bug`; omit for both requirement-category HUs and bug-category items. Bug results also include task-category types whose work item guide sets `listed_with_bugs` (a process may classify its development bug as a task).
+- `kind`: `hu`, `bug` or `task`; omit for both requirement-category HUs and bug-category items. Bug results also include task-category types whose work item guide sets `listed_with_bugs` (a process may classify its development bug as a task); `task` lists the other task-category types (Task…).
+- `type`: one exact type from the returned `types` (for example `Task` or a custom development bug), instead of `kind`.
 - `limit`: 1–100, default 10, newest creation date first across the selected projects.
 
 The tool reuses the catalog's organization, projects, author identity and read credential.
@@ -32,7 +33,8 @@ for each type: a bug without developer identity fields falls back to `System.Ass
 when the HU type has developer roles. Returned assignments are checked
 again after reading the items. Completed items are included; there is no activity time window.
 
-Results include `items`, `states` (including states without matching items), `projects`,
+Results include `items`, `states` (including states without matching items), `types` (every
+requirement, bug and task type of the projects, each with its `group`: `hu`, `bug` or `task`), `projects`,
 `assignment_fields`, `has_more`, `partial` and `warnings`. Each item has `id`, `title`, a verified
 provider `url`, `project`, `kind` (the original type), `state`, `created_at` and `dates` with the original field reference,
 display name and nullable value. Separate HU and development dates retain their own labels.
@@ -96,7 +98,7 @@ remain available. No response-provided pagination URL receives a credential.
 ## GUI
 
 To-Do is a daily-work section. It calls `list_azure_hus` and `list_github_epics` directly through
-the host contract, with provider, type (HUs and bugs / HUs / Bugs), state and item-count selectors (10 by default). Multiple
+the host contract, with provider, type (HUs and bugs / HUs / Bugs / Tasks, then each exact type the process defines, such as a development bug or Task), state and item-count selectors (10 by default). On phones a card's title takes the full width and its actions sit below it. Multiple
 enabled Azure sources add a source selector. It keeps state names from the provider and
 shows missing dates explicitly. The existing sticker design and device theme are preserved.
 On phones, four daily destinations plus More keep the floating bar at five targets; More

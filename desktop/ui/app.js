@@ -459,6 +459,23 @@ async function loadTodoDetail() {
     }
   }
 }
+/** The Azure types the last list returned, each with its group (`hu`, `bug` or `task`). */
+let todoTypes = [];
+/** The type selector holds the groups, then each exact type the process defines (`type:NAME`). */
+function todoTypeOptions(types) {
+  todoTypes = types;
+  const select = $('#todo-kind');
+  const selected = select.value;
+  select.querySelector('optgroup')?.remove();
+  // The process's own names: a translated «User Story» would repeat the HU group.
+  const names = [...new Set(types.map(type => type.name))].sort((a, b) => a.localeCompare(b, uiLocale()));
+  if (names.length) select.append(el('optgroup', { label: t('Work item types') }, ...names.map(name => el('option', { value: `type:${name}`, textContent: name }))));
+  select.value = selected;
+}
+function todoTitle() {
+  const kind = $('#todo-kind').value;
+  return kind === 'task' ? t('My tasks') : kind.startsWith('type:') ? t('My work items') : t('My HUs and bugs');
+}
 /** Loads the list. A change of filters starts again at the first step; `more` keeps what is shown while the longer list loads. */
 async function loadTodo({ more = false, keep = more } = {}) {
   closeTodoDetail(false);
@@ -466,7 +483,7 @@ async function loadTodo({ more = false, keep = more } = {}) {
   const request = ++todoRequest;
   const azure = $('#todo-provider').value === 'azure';
   const sources = todoSources();
-  $('#todo-title').textContent = azure ? t('My HUs and bugs') : $('#todo-github-kind').value === 'all' ? t('My issues') : t('My epics');
+  $('#todo-title').textContent = azure ? todoTitle() : $('#todo-github-kind').value === 'all' ? t('My issues') : t('My epics');
   $('#todo-kind-field').hidden = !azure;
   $('#todo-github-kind-field').hidden = azure;
   if (!more) $('#todo-list').replaceChildren();
@@ -482,7 +499,9 @@ async function loadTodo({ more = false, keep = more } = {}) {
     const args = { limit: todoLimit };
     if (azure) {
       args.source = $('#todo-source').value;
-      if ($('#todo-kind').value) args.kind = $('#todo-kind').value;
+      const kind = $('#todo-kind').value;
+      if (kind.startsWith('type:')) args.type = kind.slice(5);
+      else if (kind) args.kind = kind;
     }
     if ($('#todo-state').value) args.state = $('#todo-state').value;
     const result = await invoke(azure ? 'list_azure_hus' : $('#todo-github-kind').value === 'all' ? 'list_github_issues' : 'list_github_epics', args);
@@ -490,6 +509,7 @@ async function loadTodo({ more = false, keep = more } = {}) {
     const selected = $('#todo-state').value;
     $('#todo-state').replaceChildren(el('option', { value: '', textContent: t('All states') }), ...result.states.map(state => el('option', { value: state, textContent: tx(state) })));
     $('#todo-state').value = selected;
+    if (azure) todoTypeOptions(result.types || []);
     $('#todo-assignment').textContent = azure
       ? t('Your assignment fields: {fields}', { fields: result.assignment_fields.join(', ') })
       : $('#todo-github-kind').value === 'all' ? t('Issues assigned to your connected GitHub account.') : t('Issues of type Epic assigned to your connected GitHub account. GitHub provides open and closed states; unavailable dates stay empty.');
@@ -544,8 +564,10 @@ async function openRequest() {
     const start = el('button', { id: 'request-create', type: 'button', textContent: t('Create'), disabled: true });
     const result = el('div', { id: 'request-result', 'aria-live': 'polite' });
     const kind = el('fieldset', {}, el('legend', { textContent: t('Request type') }));
+    const filter = $('#todo-kind').value;
+    const requested = filter === 'bug' || todoTypes.some(type => `type:${type.name}` === filter && type.group === 'bug') ? 'bug' : 'hu';
     for (const [value, label] of [['hu', t('HU')], ['bug', t('Bug')]]) {
-      const radio = el('input', { type: 'radio', name: 'request-kind', value, checked: value === ($('#todo-kind').value || 'hu') });
+      const radio = el('input', { type: 'radio', name: 'request-kind', value, checked: value === requested });
       kind.append(el('label', { class: 'check' }, radio, label));
     }
     kind.hidden = !azure;
@@ -5358,6 +5380,9 @@ $('#todo-provider').onchange = () => {
 };
 $('#todo-source').onchange = () => {
   $('#todo-state').replaceChildren(el('option', { value: '', textContent: t('All states') }));
+  // Another source has its own process: its types replace the previous ones.
+  if ($('#todo-kind').value.startsWith('type:')) $('#todo-kind').value = '';
+  $('#todo-kind').querySelector('optgroup')?.remove();
   loadTodo();
 };
 $('#todo-kind').onchange = () => {

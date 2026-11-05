@@ -366,8 +366,8 @@ async fn issues_with(
     use crate::tools::todo::{Date, Item, List, validate_link};
     use serde_json::Value;
     ensure!(
-        filters.source.is_none() && filters.kind.is_none(),
-        "invalid GitHub source or kind filter"
+        filters.source.is_none() && filters.kind.is_none() && filters.work_type.is_none(),
+        "invalid GitHub source, kind or type filter"
     );
     ensure!(
         filters

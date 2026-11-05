@@ -174,6 +174,7 @@ pub(super) const TOOLS: &[Tool] = &[
                 .unwrap()
                 .remove("source");
             schema["properties"].as_object_mut().unwrap().remove("kind");
+            schema["properties"].as_object_mut().unwrap().remove("type");
             schema["properties"]["state"] = json!({"type":"string","enum":["open","closed"]});
             schema
         },
@@ -1044,7 +1045,7 @@ pub(super) const TOOLS: &[Tool] = &[
     Tool {
         name: "list_azure_hus",
         title: "My Azure DevOps HUs",
-        description: "HUs and bugs assigned to the catalog user, newest first. Bug results also include task-category types whose work item guide sets listed_with_bugs. Assignment roles are discovered separately for each type; kind optionally filters hu or bug. Discovers the process's developer roles, all HU states and start/finish fields, including separate development dates. Falls back to Assigned To only in processes without developer roles. Local read; no model or Teams audience changes.",
+        description: "HUs and bugs assigned to the catalog user, newest first. Bug results also include task-category types whose work item guide sets listed_with_bugs. Assignment roles are discovered separately for each type; kind optionally filters hu, bug or task (every task-category type), and type one exact type from the returned types. Discovers the process's developer roles, all HU states and start/finish fields, including separate development dates. Falls back to Assigned To only in processes without developer roles. Local read; no model or Teams audience changes.",
         effect: Effect::Read,
         schema: todo_schema,
     },
@@ -1060,6 +1061,7 @@ pub(super) const TOOLS: &[Tool] = &[
                 .unwrap()
                 .remove("source");
             schema["properties"].as_object_mut().unwrap().remove("kind");
+            schema["properties"].as_object_mut().unwrap().remove("type");
             schema["properties"]["state"] = json!({"type":"string","enum":["open","closed"]});
             schema
         },
@@ -1556,7 +1558,8 @@ fn todo_schema() -> Value {
         json!({
             "source": string("Azure DevOps activity source ID; optional when exactly one is enabled."),
             "project": string("One configured Azure project, or GitHub OWNER/REPO."),
-            "kind": {"type":"string", "enum":["hu","bug"], "description":"Azure only: omit for HUs, bugs and the task types listed with them."},
+            "kind": {"type":"string", "enum":["hu","bug","task"], "description":"Azure only: a group of types; omit for HUs, bugs and the task types listed with them."},
+            "type": string("Azure only: one exact type returned in types (for example Task); excludes kind."),
             "state": string("Exact state returned by the tool; omit to include all states."),
             "limit": {"type":"integer","minimum":1,"maximum":100,"default":10}
         }),
@@ -2275,6 +2278,9 @@ mod tests {
         );
         assert!(validate("list_azure_hus", &json!({"kind":"bug"})).is_ok());
         assert!(validate("list_azure_hus", &json!({"kind":"Task"})).is_err());
+        assert!(validate("list_azure_hus", &json!({"kind":"task"})).is_ok());
+        assert!(validate("list_azure_hus", &json!({"type":"Task"})).is_ok());
+        assert!(validate("list_azure_hus", &json!({"type":"Task","kind":"bug"})).is_err());
         assert!(validate("list_github_epics", &json!({"kind":"bug"})).is_err());
         assert!(validate("list_azure_hus", &json!({})).is_ok());
         assert!(validate("list_azure_hus", &json!({"limit":101})).is_err());

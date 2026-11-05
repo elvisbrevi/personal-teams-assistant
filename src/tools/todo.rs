@@ -12,7 +12,11 @@ pub struct Filters {
     pub source: Option<String>,
     pub project: Option<String>,
     pub state: Option<String>,
+    /// `hu`, `bug` or `task`: a group of types.
     pub kind: Option<String>,
+    /// One exact provider type returned in [`List::types`]; excludes `kind`.
+    #[serde(rename = "type")]
+    pub work_type: Option<String>,
     pub limit: usize,
 }
 impl Default for Filters {
@@ -22,6 +26,7 @@ impl Default for Filters {
             project: None,
             state: None,
             kind: None,
+            work_type: None,
             limit: default_limit(),
         }
     }
@@ -31,14 +36,18 @@ impl Filters {
         ensure!(
             self.kind
                 .as_deref()
-                .is_none_or(|kind| ["hu", "bug"].contains(&kind)),
-            "invalid kind: use hu or bug"
+                .is_none_or(|kind| ["hu", "bug", "task"].contains(&kind)),
+            "invalid kind: use hu, bug or task"
+        );
+        ensure!(
+            self.kind.is_none() || self.work_type.is_none(),
+            "invalid filters: choose a kind or a type, not both"
         );
         ensure!(
             (1..=100).contains(&self.limit),
             "limit must be between 1 and 100"
         );
-        for value in [&self.source, &self.project, &self.state]
+        for value in [&self.source, &self.project, &self.state, &self.work_type]
             .into_iter()
             .flatten()
         {
@@ -292,10 +301,20 @@ pub fn https_link(raw: &str) -> Option<String> {
     (url.scheme() == "https" && url.username().is_empty() && url.password().is_none())
         .then(|| url.to_string())
 }
+/// A provider type the list can filter by, with the group it is listed in.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct WorkType {
+    pub name: String,
+    /// `hu`, `bug` or `task`.
+    pub group: String,
+}
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct List {
     pub items: Vec<Item>,
     pub states: Vec<String>,
+    /// Azure only: every requirement, bug and task type of the listed projects.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub types: Vec<WorkType>,
     pub projects: Vec<String>,
     /// Field names used for developer assignment, useful when a process differs from Assigned To.
     pub assignment_fields: Vec<String>,
@@ -322,6 +341,8 @@ impl List {
             values.sort();
             values.dedup();
         }
+        self.types.sort();
+        self.types.dedup();
     }
     pub fn warn(&mut self, warning: String) {
         self.partial = true;
@@ -393,6 +414,10 @@ mod tests {
     fn filters_and_links_cannot_widen_the_tool() {
         assert_eq!(serde_json::from_str::<Filters>("{}").unwrap().limit, 10);
         assert!(serde_json::from_str::<Filters>(r#"{"assignee":"someone"}"#).is_err());
+        let typed: Filters = serde_json::from_str(r#"{"type":"Bug Desarrollo"}"#).unwrap();
+        assert!(typed.validate().is_ok());
+        let both: Filters = serde_json::from_str(r#"{"type":"Task","kind":"task"}"#).unwrap();
+        assert!(both.validate().is_err());
         assert!(
             Filters {
                 limit: 0,

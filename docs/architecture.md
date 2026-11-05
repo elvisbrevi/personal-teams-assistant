@@ -681,14 +681,16 @@ not another GUI section. CLI capabilities advertise `tools_support` and `todo_su
 
 `list_azure_hus` and `list_github_epics` are read-only host methods shared by To-Do, CLI tools
 and MCP. They need no running Teams service or model and never change source audiences.
-`tools/todo.rs` defines `Filters` (optional source/project/state/kind (hu or bug), limit 1–100, default 10),
-`List` (items, all states, projects, assignment fields, partial coverage/warnings and has_more),
+`tools/todo.rs` defines `Filters` (optional source/project/state, kind (hu, bug or task) or one exact
+`type`, limit 1–100, default 10), `List` (items, all states, every Azure type with its group, projects, assignment fields, partial coverage/warnings and has_more),
 and item dates retaining their field reference, display name and nullable value.
 `ado/todo.rs` reads an enabled Azure activity source's catalog, resolves `*` to the user's team
 projects and discovers requirement-category HU and bug-category types, plus the task-category
 types whose work item guide sets `listed_with_bugs` (§16), workflow states and developer identity fields. Each item carries its type's `category` (`requirement`, `bug` or `task`); the GUI decides task detail and implementation by it, never by type name. Assignment is checked separately per type: all its developer roles are ORed, with
 Assigned To used only when that type has no developer role. The default includes both categories;
-`kind` narrows the category before querying and limiting.
+`kind` narrows to a group (`task`: the task-category types not listed with the bugs) and `type` to one
+discovered type before querying and limiting. Every type of the three categories is returned in `types`
+whatever the filter, so the GUI's type selector offers them.
 WIQL filters assignment/type/project/state and orders creation descending; the item read requests
 only displayed/verification fields, and verifies assignment and scope again. Every start/finish,
 target and closure date field stays distinct, including development dates. There is no recent
