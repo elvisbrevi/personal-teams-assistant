@@ -487,47 +487,59 @@ impl Vault {
 }
 
 pub struct Redactor {
-    patterns: Vec<Regex>,
+    /// Each pattern, and whether it is a run of digits read as a personal identifier (a RUT
+    /// or a phone number) rather than a credential or an address.
+    patterns: Vec<(Regex, bool)>,
     secrets: Vec<String>,
 }
 impl Redactor {
     pub fn new(custom: &[String], secrets: Vec<String>) -> Result<Self> {
         let mut patterns = vec![
-            r"(?s)-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----".to_owned(),
-            r"(?i)\b(?:bearer|basic)\s+[a-z0-9+/_.=-]+".to_owned(),
-            r#"(?i)\b(?:password|pwd|token|api[_-]?key|client[_-]?secret|access[_-]?token|refresh[_-]?token|connection[_-]?string)\b[\s\"']*[:=]\s*[\"']?[^\s\"'<>]+"#.to_owned(),
-            r"\b(?:sk-|tsf_|apikey_|gh[pousr]_)[A-Za-z0-9_-]{8,}\b".to_owned(),
-            r"\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b".to_owned(),
-            r"(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b".to_owned(),
-            r"\b\d{1,2}\.\d{3}\.\d{3}-[0-9kK]\b".to_owned(),
-            r"\b\d{7,8}-[0-9kK]\b".to_owned(),
-            r"(?:\+\d[\d ()-]{8,}\d)|(?:\b\d[\d -]{11,}\d\b)".to_owned(),
-            r"(?i)https?://[^\s/@]+:[^\s/@]+@[^\s]+".to_owned(),
-            r"(?i)secret://[a-z0-9_./-]+".to_owned(),
+            (r"(?s)-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----".to_owned(), false),
+            (r"(?i)\b(?:bearer|basic)\s+[a-z0-9+/_.=-]+".to_owned(), false),
+            (r#"(?i)\b(?:password|pwd|token|api[_-]?key|client[_-]?secret|access[_-]?token|refresh[_-]?token|connection[_-]?string)\b[\s\"']*[:=]\s*[\"']?[^\s\"'<>]+"#.to_owned(), false),
+            (r"\b(?:sk-|tsf_|apikey_|gh[pousr]_)[A-Za-z0-9_-]{8,}\b".to_owned(), false),
+            (r"\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b".to_owned(), false),
+            (r"(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b".to_owned(), false),
+            (r"\b\d{1,2}\.\d{3}\.\d{3}-[0-9kK]\b".to_owned(), true),
+            (r"\b\d{7,8}-[0-9kK]\b".to_owned(), true),
+            (r"(?:\+\d[\d ()-]{8,}\d)|(?:\b\d[\d -]{11,}\d\b)".to_owned(), true),
+            (r"(?i)https?://[^\s/@]+:[^\s/@]+@[^\s]+".to_owned(), false),
+            (r"(?i)secret://[a-z0-9_./-]+".to_owned(), false),
         ];
-        patterns.extend(custom.iter().cloned());
+        patterns.extend(custom.iter().map(|p| (p.clone(), false)));
         Ok(Self {
             patterns: patterns
                 .iter()
-                .map(|p| Regex::new(p))
+                .map(|(p, identifier)| Regex::new(p).map(|r| (r, *identifier)))
                 .collect::<std::result::Result<_, _>>()?,
             secrets,
         })
     }
     pub fn redact(&self, input: &str) -> String {
+        self.redact_with(input, true)
+    }
+    fn redact_with(&self, input: &str, identifiers: bool) -> String {
         let mut out = input.to_owned();
         for value in &self.secrets {
             if value.len() >= 4 {
                 out = out.replace(value, "[REDACTED]");
             }
         }
-        for p in &self.patterns {
-            out = p.replace_all(&out, "[REDACTED]").into_owned();
+        for (p, identifier) in &self.patterns {
+            if identifiers || !identifier {
+                out = p.replace_all(&out, "[REDACTED]").into_owned();
+            }
         }
         out
     }
     pub fn clean(&self, input: &str) -> bool {
         self.redact(input) == input && !input.contains("[REDACTED]")
+    }
+    /// Like `clean`, but long digit runs pass: a link's message or work item numbers read as
+    /// phone numbers. Credentials, addresses and the custom patterns are still refused.
+    pub fn clean_link(&self, input: &str) -> bool {
+        self.redact_with(input, false) == input && !input.contains("[REDACTED]")
     }
 }
 

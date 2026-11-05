@@ -121,12 +121,24 @@ fn checked(state: &DesktopState, args: &Value) -> std::result::Result<(Note, Ind
         .map_err(|e| format!("[invalid_input] {e}."))?;
     let redactor = crate::security::Redactor::new(&config.policy.sensitive_patterns, Vec::new())
         .map_err(fail)?;
-    let texts = [&note.title, &note.text]
-        .into_iter()
-        .chain(&note.keywords)
-        .chain(note.reference.as_ref());
-    if texts.into_iter().any(|t| !redactor.clean(t)) {
-        return Err("[invalid_input] The note contains sensitive data (a secret, an email, a phone number or an ID); remove it and save again.".into());
+    let sensitive = |field: &str| {
+        format!(
+            "[invalid_input] {field} contains sensitive data (a secret, an email, a phone number or an ID); remove it and save again."
+        )
+    };
+    if !redactor.clean(&note.title) {
+        return Err(sensitive("The note's title"));
+    }
+    if !redactor.clean(&note.text) {
+        return Err(sensitive("The note's text"));
+    }
+    if note.keywords.iter().any(|k| !redactor.clean(k)) {
+        return Err(sensitive("A keyword of the note"));
+    }
+    if let Some(reference) = &note.reference
+        && !clean_reference(reference, &redactor)
+    {
+        return Err("[invalid_input] The note's reference contains sensitive data; use a Teams message, a simulation or an HTTPS link without credentials, or remove it.".into());
     }
     if !note.id.is_empty()
         && LocalNotes::new(&index)
@@ -137,6 +149,35 @@ fn checked(state: &DesktopState, args: &Value) -> std::result::Result<(Note, Ind
         return Err("[invalid_input] Unknown note.".into());
     }
     Ok((note, index))
+}
+
+/// A reference that names a Teams message or a simulation this app recorded is an identifier,
+/// not personal data: its long message number would read as a phone number. An HTTPS link
+/// without credentials passes the same way; anything else goes through the redactor.
+fn clean_reference(reference: &str, redactor: &crate::security::Redactor) -> bool {
+    if crate::adapters::teams::canonical_resource(reference).is_ok_and(|c| c == reference) {
+        return true;
+    }
+    if let Some((session, id)) = reference
+        .strip_prefix("simulation:")
+        .and_then(|rest| rest.split_once(':'))
+        && (1..=64).contains(&session.len())
+        && session
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "_-".contains(c))
+        && uuid::Uuid::parse_str(id).is_ok()
+    {
+        return true;
+    }
+    if let Ok(url) = url::Url::parse(reference)
+        && url.scheme() == "https"
+        && url.host_str().is_some()
+        && url.username().is_empty()
+        && url.password().is_none()
+    {
+        return redactor.clean_link(reference);
+    }
+    redactor.clean(reference)
 }
 
 fn save(state: &DesktopState, args: &Value) -> Reply {
@@ -496,6 +537,57 @@ pub(super) async fn associate(host: &Arc<Host>, args: &Value) -> Reply {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_note_from_an_answer_keeps_its_message_reference_and_sensitive_text_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let host = super::super::variables::tests::host(dir.path());
+        let state = &host.state;
+        let note = |reference: &str, text: &str| json!({"note": {"title": "Payment states", "text": text, "origin": "answer", "reference": reference}});
+        // The 13-digit message number of a Teams resource is not a phone number.
+        for reference in [
+            "chats/19:ca20e6850c2a45d0b3d1fc233d28cb08@thread.v2/messages/1792615459990",
+            "chats/19:00000000-0000-0000-0000-000000000001_00000000-0000-0000-0000-000000000002@unq.gbl.spaces/messages/1792615459990",
+            "simulation:t:5f0c9a62-1b0e-4a7f-9a55-0d3b6e2c1a11",
+            "https://teams.microsoft.com/l/message/19:abc@thread.v2/1792615459990?parentMessageId=1792615459990",
+        ] {
+            assert!(
+                checked(
+                    state,
+                    &note(reference, "State 10 means the payment was confirmed.")
+                )
+                .is_ok(),
+                "{reference}"
+            );
+        }
+        let refused = |args: &Value| checked(state, args).err().unwrap_or_default();
+        assert!(
+            refused(&note(
+                "chats/19:abc@thread.v2/messages/1792615459990",
+                "Call +56 9 1234 5678 to confirm."
+            ))
+            .contains("The note's text")
+        );
+        for reference in [
+            "call 1792 6154 5999 0",
+            "https://user:hunter2@example.com/page",
+            "https://example.com/page?access_token=synthetic-token-value",
+            "chats/19:abc@thread.v2/messages/1792615459990 and more",
+        ] {
+            assert!(
+                refused(&note(reference, "A fact.")).contains("The note's reference"),
+                "{reference}"
+            );
+        }
+        assert!(
+            refused(&json!({"note": {"title": "Mail alice@example.com", "text": "A fact."}}))
+                .contains("The note's title")
+        );
+        assert!(
+            refused(&json!({"note": {"title": "A", "text": "A fact.", "keywords": ["ok", "12.345.678-9"]}}))
+                .contains("A keyword")
+        );
+    }
 
     #[tokio::test]
     async fn review_associates_creates_and_rates_questions_in_the_shared_profile() {

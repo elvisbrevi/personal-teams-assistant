@@ -90,6 +90,7 @@ test('known host messages are translated and unknown ones stay as they are', () 
   assert.equal(es.tx('Execution machine is offline.'), 'La máquina de ejecución está sin conexión.');
   assert.equal(es.tx('Claude Code is not installed on this desktop.'), 'Claude Code no está instalado en este equipo.');
   assert.equal(es.tx('Set AZURE_IMPLEMENTATION_WRITE_TOKEN in Credentials before creating child tasks.'), 'Configura AZURE_IMPLEMENTATION_WRITE_TOKEN en Credenciales antes de crear tareas hijas.');
+  assert.equal(es.tx("The note's reference contains sensitive data; use a Teams message, a simulation or an HTTPS link without credentials, or remove it."), 'La referencia de la nota contiene datos sensibles; usa un mensaje de Teams, una simulación o un enlace HTTPS sin credenciales, o quítala.');
   assert.equal(es.tx('Something only the host knows'), 'Something only the host knows');
   assert.equal(load('en').tx('Reading source wiki'), 'Reading source wiki');
 });

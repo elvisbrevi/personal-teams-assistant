@@ -196,6 +196,9 @@ fn fail<E: Into<anyhow::Error>>(error: E) -> String {
         Some(Rejected::Conflict(message)) => return format!("[conflict] {message}"),
         None => {}
     }
+    if let Some(message) = error.downcast_ref::<crate::simulation::InvalidRequest>() {
+        return format!("[invalid_input] {message}");
+    }
     if let Some(refusal) = error.downcast_ref::<crate::pipeline::DraftRefusal>() {
         return match refusal {
             crate::pipeline::DraftRefusal::GuidanceTooLong
@@ -1716,6 +1719,31 @@ async fn azure_wiki(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_simulation_without_sources_says_what_is_missing() {
+        let root = tempfile::tempdir().unwrap();
+        let host = variables::tests::host(root.path());
+        let mut map = host.state.settings.map().unwrap();
+        for source in &mut map.resources {
+            source.enabled = false;
+        }
+        host.state.settings.save_map(&map).unwrap();
+        let reply = variables::tests::call(
+            &host,
+            authority::Transport::Local,
+            "chat",
+            serde_json::json!({"input": {"session": "t", "text": "What is state 10?", "group": false, "mentioned": false}}),
+        )
+        .await;
+        assert_eq!(reply.code, "invalid_input", "{:?}", reply.message);
+        assert!(
+            reply
+                .message
+                .unwrap_or_default()
+                .contains("enable a source")
+        );
+    }
 
     #[test]
     fn tunnel_token_is_passed_only_in_the_child_environment() {

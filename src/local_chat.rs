@@ -8,7 +8,7 @@ use crate::{
     state::Store,
     tools::Tools,
 };
-use anyhow::{Result, ensure};
+use anyhow::Result;
 use async_trait::async_trait;
 use std::{path::Path, sync::Arc, time::Duration};
 
@@ -25,7 +25,6 @@ impl AccessToken for NoTeamsToken {
 /// No Teams credential, public URL or Graph subscription is needed.
 pub async fn chat(config_path: &Path, input: SimulationRequest) -> Result<SimulationResult> {
     simulation::validate_request(&input)?;
-    ensure!(!input.sources.is_empty(), "select at least one source");
     let config = Config::load(
         config_path
             .to_str()
@@ -33,13 +32,7 @@ pub async fn chat(config_path: &Path, input: SimulationRequest) -> Result<Simula
     )?;
     let knowledge = KnowledgeMap::load(&config.knowledge_map)?;
     let repositories = knowledge.repositories.clone();
-    ensure!(
-        input.sources.iter().all(|id| knowledge
-            .resources
-            .iter()
-            .any(|r| { r.id == *id && r.enabled && r.external_processing })),
-        "selected source is unavailable"
-    );
+    let selected = simulation::sources(&knowledge, &input)?;
     let (llm, llm_secrets) = crate::llm::from_config(&config.llm)?;
     let mut exact_secrets = llm_secrets;
     for name in config.secrets.values() {
@@ -83,8 +76,7 @@ pub async fn chat(config_path: &Path, input: SimulationRequest) -> Result<Simula
         }),
         redactor,
     };
-    let selected = input.sources.clone();
-    simulation::run(&pipeline, input, Some(&selected)).await
+    simulation::run(&pipeline, input, selected.as_deref()).await
 }
 
 struct NoLocalAdapter;
