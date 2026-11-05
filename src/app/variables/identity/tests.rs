@@ -120,6 +120,26 @@ async fn invalid_and_conflicting_setup_preserve_the_existing_database_identity()
     );
 }
 
+#[tokio::test]
+async fn a_database_left_by_a_sign_in_attempt_under_the_example_setup_takes_the_account_setup() {
+    let root = tempfile::tempdir().unwrap();
+    let pair = super::super::sync_tests::pair(root.path(), None).await;
+    configured(&pair.coordinator);
+    let data = pair.native.state.settings.config().unwrap().server.data_dir;
+    fs::create_dir_all(&data).unwrap();
+    // Connecting Microsoft before the account's setup arrived opened the database.
+    let db = crate::state::Store::open(&data.join("assistant.db")).unwrap();
+    assert!(
+        call(&pair.native, Local, "variable_sync", json!({}))
+            .await
+            .ok
+    );
+    restore(&pair.native).await.unwrap();
+    let config = pair.native.state.settings.config().unwrap();
+    assert_eq!(values(&config), [TENANT, CLIENT, USER]);
+    drop(db);
+}
+
 #[test]
 fn template_values_are_never_migrated() {
     let root = tempfile::tempdir().unwrap();
