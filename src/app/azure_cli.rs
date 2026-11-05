@@ -289,7 +289,7 @@ fn binary() -> Option<PathBuf> {
     })
 }
 fn command(binary: &Path, profile: Option<&Path>) -> tokio::process::Command {
-    let mut cmd = tokio::process::Command::new(binary);
+    let mut cmd = crate::security::program_async(binary);
     cmd.env_clear().envs(crate::llm::child_env(binary));
     for name in ["REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE", "SystemRoot"] {
         if let Some(value) = std::env::var_os(name) {

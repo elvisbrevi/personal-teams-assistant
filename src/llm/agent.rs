@@ -190,7 +190,7 @@ async fn run_configured(
     overrides: &[(OsString, OsString)],
 ) -> Result<Output> {
     use tokio::io::AsyncWriteExt;
-    let mut child = tokio::process::Command::new(binary)
+    let mut child = crate::security::program_async(binary)
         .args(args)
         .current_dir(dir)
         .env_clear()

@@ -34,7 +34,7 @@ pub(crate) async fn open_claude_session(session: &str, directory: &std::path::Pa
     let binary = agent::locate("claude")
         .ok_or_else(|| anyhow::anyhow!("Claude Code is not installed on this desktop."))?;
     mobile::close(session).await;
-    let mut command = tokio::process::Command::new(&binary);
+    let mut command = crate::security::program_async(&binary);
     command
         .args(["--desktop", "--resume", session])
         .current_dir(directory)
@@ -259,7 +259,7 @@ impl Drop for ProcessTree {
             .stderr(std::process::Stdio::null())
             .status();
         #[cfg(windows)]
-        let _ = std::process::Command::new("taskkill")
+        let _ = crate::security::program("taskkill")
             .args(["/PID", &self.0.to_string(), "/T", "/F"])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
@@ -480,7 +480,7 @@ async fn execute_at(
             Err(_) => remote(mobile::Access::unavailable())?,
         }
     }
-    let mut command = tokio::process::Command::new(binary);
+    let mut command = crate::security::program_async(binary);
     command
         .args(args)
         .current_dir(&directories[0])
