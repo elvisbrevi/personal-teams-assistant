@@ -682,7 +682,9 @@ check('axe: no WCAG 2.2 AA violations in any scan', !Object.keys(totals).length,
     && await radius() === '10px' && !(await page.isVisible('#savebar')), JSON.stringify(await look()));
   const chosenBars = await page.$$eval('meta[name="theme-color"]', metas => metas.map(m => m.content));
   check('the browser bar takes the chosen palette', chosenBars.every(color => color === 'rgb(239, 241, 245)'), chosenBars.join(' | '));
-  // A choice previews itself: it wears its own palette or style whatever the page uses.
+  // A choice previews itself: it wears its own palette or style whatever the page uses. Buttons ease
+  // between colors, so the page settles first (a slow machine read the tail of the last mode change).
+  await page.waitForTimeout(400);
   const previews = await page.evaluate(() => [getComputedStyle(document.querySelector('#palette-choice [data-palette="paper"]')).backgroundColor,
     getComputedStyle(document.querySelector('#palette-choice [data-palette="monokai"]')).backgroundColor,
     getComputedStyle(document.querySelector('#style-choice [data-style="sticker"] .look-demo')).borderTopWidth,
