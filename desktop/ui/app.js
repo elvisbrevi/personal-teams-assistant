@@ -68,24 +68,48 @@ function lines(text) { return text.split('\n').map(s => s.trim()).filter(Boolean
 function names(text) { return text.split(',').map(s => s.trim()).filter(Boolean); }
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
-/** This device's theme (Settings › General): `light` or `dark`, or none to follow the system.
- *  It lives in `localStorage`, not in the profile, and applies before the first paint. */
+/** This device's look (Settings › General › Appearance): the mode (`light`, `dark` or none to follow
+ *  the system), the palette and the style. They live in `localStorage`, not in the profile, and apply
+ *  before the first paint; an unknown or missing value is the default (Paper, Stickers, the system). */
 const THEME_KEY = 'pta-theme';
-function applyTheme(choice) {
-  const theme = ['light', 'dark'].includes(choice) ? choice : null;
-  if (theme) document.documentElement.dataset.theme = theme;
-  else delete document.documentElement.dataset.theme;
-  for (const button of document.querySelectorAll('#theme-choice button')) {
-    button.setAttribute('aria-pressed', String(button.dataset.themeChoice === (theme ?? 'system')));
-  }
-  // The browser's bar takes the page's color: the chosen theme's, or each one's under the system.
-  const page = getComputedStyle(document.documentElement).backgroundColor;
+const PALETTE_KEY = 'pta-palette';
+const STYLE_KEY = 'pta-style';
+const DEFAULT_PALETTE = 'paper';
+const DEFAULT_STYLE = 'sticker';
+function storedLook(key) { try { return localStorage.getItem(key); } catch { return null; } }
+function storeLook(key, value) {
+  try { if (value) localStorage.setItem(key, value); else localStorage.removeItem(key); }
+  catch { /* applies to this page only */ }
+}
+function applyAppearance(look = {}) {
+  const root = document.documentElement;
+  const offered = (group, attribute, value) => Boolean(value) && [...document.querySelectorAll(`${group} button`)].some(button => button.dataset[attribute] === value);
+  const theme = ['light', 'dark'].includes(look.theme) ? look.theme : null;
+  const palette = offered('#palette-choice', 'palette', look.palette) ? look.palette : DEFAULT_PALETTE;
+  const style = offered('#style-choice', 'style', look.style) ? look.style : DEFAULT_STYLE;
+  // The defaults carry no attribute: style.css draws them from `:root` alone.
+  const set = (name, value) => { if (value) root.dataset[name] = value; else delete root.dataset[name]; };
+  set('theme', theme);
+  set('palette', palette === DEFAULT_PALETTE ? null : palette);
+  set('style', style === DEFAULT_STYLE ? null : style);
+  const press = (group, attribute, value) => {
+    for (const button of document.querySelectorAll(`${group} button`)) button.setAttribute('aria-pressed', String(button.dataset[attribute] === value));
+  };
+  press('#theme-choice', 'themeChoice', theme ?? 'system');
+  press('#palette-choice', 'palette', palette);
+  press('#style-choice', 'style', style);
+  // The browser's bar takes the page's color: the chosen look's, or each mode's under the defaults.
+  const page = getComputedStyle(root).backgroundColor;
   for (const meta of document.querySelectorAll('meta[name="theme-color"]')) {
     meta.dataset.color ??= meta.content;
-    meta.content = theme ? page : meta.dataset.color;
+    meta.content = theme || palette !== DEFAULT_PALETTE ? page : meta.dataset.color;
   }
 }
-try { applyTheme(localStorage.getItem(THEME_KEY)); } catch { applyTheme(null); }
+/** The look in use; where `localStorage` is unavailable a choice still holds for this page. */
+const look = { theme: storedLook(THEME_KEY), palette: storedLook(PALETTE_KEY), style: storedLook(STYLE_KEY) };
+applyAppearance(look);
+// A palette that follows the system changes its page color with it.
+window.matchMedia?.('(prefers-color-scheme: dark)').addEventListener?.('change', () => applyAppearance(look));
 
 let noticeTimer;
 function notify(text, tone = 'info') {
@@ -5362,13 +5386,20 @@ $('#style-preset').addEventListener('change', () => {
 });
 ['#style-enabled', '#style-label', '#style-position', '#style-accent', '#style-band', '#style-label-color', '#style-icon', '#style-stripe-width', '#style-text-size', '#style-label-size', '#llm-language']
   .forEach(id => $(id).addEventListener('input', renderStylePreview));
+// Each choice is saved on this device and applied at once; the rest of the look stays as it was.
+function chooseLook(key, part, value) {
+  storeLook(key, value);
+  look[part] = value;
+  applyAppearance(look);
+}
 document.querySelectorAll('#theme-choice button').forEach(button => {
-  button.onclick = () => {
-    const choice = button.dataset.themeChoice;
-    try { if (choice === 'system') localStorage.removeItem(THEME_KEY); else localStorage.setItem(THEME_KEY, choice); }
-    catch { /* applies to this page only */ }
-    applyTheme(choice);
-  };
+  button.onclick = () => chooseLook(THEME_KEY, 'theme', button.dataset.themeChoice === 'system' ? null : button.dataset.themeChoice);
+});
+document.querySelectorAll('#palette-choice button').forEach(button => {
+  button.onclick = () => chooseLook(PALETTE_KEY, 'palette', button.dataset.palette === DEFAULT_PALETTE ? null : button.dataset.palette);
+});
+document.querySelectorAll('#style-choice button').forEach(button => {
+  button.onclick = () => chooseLook(STYLE_KEY, 'style', button.dataset.style === DEFAULT_STYLE ? null : button.dataset.style);
 });
 $('#registration-schedule').addEventListener('change', renderScheduleFields);
 $('#notice-close').onclick = () => { $('#notice').hidden = true; };

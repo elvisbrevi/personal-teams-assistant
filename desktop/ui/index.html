@@ -87,10 +87,10 @@
         <div class="actions"><button id="offer-start">Keep running</button><button id="offer-dismiss" class="secondary">Leave it stopped</button></div>
       </div>
 
-      <div id="update-offer" class="panel offer" role="status" aria-labelledby="update-offer-title" hidden>
+      <div id="update-offer" class="panel offer compact" role="status" aria-labelledby="update-offer-title" hidden>
         <h2 id="update-offer-title">A new version is available</h2>
         <p id="update-offer-text"></p>
-        <div class="actions"><button id="update-offer-stage" type="button">Prepare update</button><button id="update-offer-apply" type="button" hidden>Install update</button><button id="update-offer-dismiss" type="button" class="secondary">Dismiss</button></div>
+        <div class="actions"><button id="update-offer-stage" type="button" class="small">Prepare update</button><button id="update-offer-apply" type="button" class="small" hidden>Install update</button><button id="update-offer-dismiss" type="button" class="secondary small">Dismiss</button></div>
       </div>
 
       <section id="overview">
@@ -229,19 +229,19 @@
                 <label>Color combination<select id="style-preset" class="cfg"><option value="teams">Teams purple</option><option value="blue">Blue</option><option value="green">Green</option><option value="amber">Amber</option><option value="red">Red</option><option value="gray">Gray</option><option value="custom">Custom</option></select></label>
               </div>
               <details class="fold" id="style-custom">
-                <summary>Choose each color <small>Advanced</small></summary>
+                <summary>Colors and sizes <small>Advanced</small></summary>
                 <div class="grid">
                   <label>Stripe color<input id="style-accent" class="cfg" type="color"></label>
                   <label>Band color <small>Teams adapts it to its light or dark theme.</small><select id="style-band" class="cfg"><option value="accent">Lavender</option><option value="emphasis">Gray</option><option value="good">Green</option><option value="warning">Amber</option><option value="attention">Red</option><option value="none">No band color</option></select></label>
                   <label>Band text color<select id="style-label-color" class="cfg"><option value="default">Normal</option><option value="subtle">Soft</option><option value="accent">Accent</option><option value="good">Green</option><option value="warning">Amber</option><option value="attention">Red</option></select></label>
                 </div>
                 <label class="check"><input id="style-icon" class="cfg" type="checkbox"> Show a robot icon before the band text</label>
+                <div class="grid">
+                  <label>Stripe width <small>In pixels, from 2 to 16.</small><input id="style-stripe-width" class="cfg" type="number" min="2" max="16" step="1" inputmode="numeric"></label>
+                  <label>Message text size<select id="style-text-size" class="cfg"><option value="small">Small</option><option value="default">Normal</option><option value="medium">Medium</option><option value="large">Large</option><option value="extralarge">Extra large</option></select></label>
+                  <label>Band text size<select id="style-label-size" class="cfg"><option value="small">Small</option><option value="default">Normal</option><option value="medium">Medium</option><option value="large">Large</option><option value="extralarge">Extra large</option></select></label>
+                </div>
               </details>
-              <div class="grid">
-                <label>Stripe width <small>In pixels, from 2 to 16.</small><input id="style-stripe-width" class="cfg" type="number" min="2" max="16" step="1" inputmode="numeric"></label>
-                <label>Message text size<select id="style-text-size" class="cfg"><option value="small">Small</option><option value="default">Normal</option><option value="medium">Medium</option><option value="large">Large</option><option value="extralarge">Extra large</option></select></label>
-                <label>Band text size<select id="style-label-size" class="cfg"><option value="small">Small</option><option value="default">Normal</option><option value="medium">Medium</option><option value="large">Large</option><option value="extralarge">Extra large</option></select></label>
-              </div>
               <p class="hint">Preview, in this app's theme. Teams shows the same card in its own light or dark theme.</p>
               <div id="style-preview" class="teams-card" aria-hidden="true">
                 <p>Here is how the assistant's messages will look in Teams.</p>
@@ -251,8 +251,28 @@
           </div>
           <div class="panel" id="panel-appearance">
             <h2>Appearance</h2>
-            <p class="hint">Saved on this device and applied right away. Match the system follows its light or dark mode; other devices keep their own choice.</p>
-            <div id="theme-choice" class="segmented" role="group" aria-label="Theme">
+            <p class="hint">Saved on this device and applied right away; other devices keep their own choice.</p>
+            <h3 id="style-choice-label">Style</h3>
+            <div id="style-choice" class="look-grid" role="group" aria-labelledby="style-choice-label">
+              <button type="button" class="look" data-style="sticker" aria-pressed="true"><span class="look-demo" aria-hidden="true"><i></i><b></b><u></u></span><strong>Stickers</strong><small>Ink outlines, hard shadows and a color for each section.</small><svg class="icon pick" aria-hidden="true"><use href="#i-check"/></svg></button>
+              <button type="button" class="look" data-style="soft" aria-pressed="false"><span class="look-demo" aria-hidden="true"><i></i><b></b><u></u></span><strong>Soft <span class="badge ok">Recommended</span></strong><small>Fine lines, soft shadows and the section colors as tints.</small><svg class="icon pick" aria-hidden="true"><use href="#i-check"/></svg></button>
+              <button type="button" class="look" data-style="minimal" aria-pressed="false"><span class="look-demo" aria-hidden="true"><i></i><b></b><u></u></span><strong>Minimalist</strong><small>Flat and quiet: fine lines, small corners and ink as the only accent.</small><svg class="icon pick" aria-hidden="true"><use href="#i-check"/></svg></button>
+            </div>
+            <h3 id="palette-choice-label">Colors</h3>
+            <div id="palette-choice" class="swatch-grid" role="group" aria-labelledby="palette-choice-label">
+              <button type="button" class="swatch" data-palette="paper" aria-pressed="true"><span class="swatch-dots" aria-hidden="true"><i></i><i></i><i></i><i></i></span><span>Paper</span><svg class="icon pick" aria-hidden="true"><use href="#i-check"/></svg></button>
+              <button type="button" class="swatch" data-palette="catppuccin" aria-pressed="false"><span class="swatch-dots" aria-hidden="true"><i></i><i></i><i></i><i></i></span><span translate="no">Catppuccin</span><svg class="icon pick" aria-hidden="true"><use href="#i-check"/></svg></button>
+              <button type="button" class="swatch" data-palette="monokai" aria-pressed="false"><span class="swatch-dots" aria-hidden="true"><i></i><i></i><i></i><i></i></span><span translate="no">Monokai</span><svg class="icon pick" aria-hidden="true"><use href="#i-check"/></svg></button>
+              <button type="button" class="swatch" data-palette="dracula" aria-pressed="false"><span class="swatch-dots" aria-hidden="true"><i></i><i></i><i></i><i></i></span><span translate="no">Dracula</span><svg class="icon pick" aria-hidden="true"><use href="#i-check"/></svg></button>
+              <button type="button" class="swatch" data-palette="nord" aria-pressed="false"><span class="swatch-dots" aria-hidden="true"><i></i><i></i><i></i><i></i></span><span translate="no">Nord</span><svg class="icon pick" aria-hidden="true"><use href="#i-check"/></svg></button>
+              <button type="button" class="swatch" data-palette="solarized" aria-pressed="false"><span class="swatch-dots" aria-hidden="true"><i></i><i></i><i></i><i></i></span><span translate="no">Solarized</span><svg class="icon pick" aria-hidden="true"><use href="#i-check"/></svg></button>
+              <button type="button" class="swatch" data-palette="gruvbox" aria-pressed="false"><span class="swatch-dots" aria-hidden="true"><i></i><i></i><i></i><i></i></span><span translate="no">Gruvbox</span><svg class="icon pick" aria-hidden="true"><use href="#i-check"/></svg></button>
+              <button type="button" class="swatch" data-palette="tokyo-night" aria-pressed="false"><span class="swatch-dots" aria-hidden="true"><i></i><i></i><i></i><i></i></span><span translate="no">Tokyo Night</span><svg class="icon pick" aria-hidden="true"><use href="#i-check"/></svg></button>
+              <button type="button" class="swatch" data-palette="rose-pine" aria-pressed="false"><span class="swatch-dots" aria-hidden="true"><i></i><i></i><i></i><i></i></span><span translate="no">Rosé Pine</span><svg class="icon pick" aria-hidden="true"><use href="#i-check"/></svg></button>
+              <button type="button" class="swatch" data-palette="graphite" aria-pressed="false"><span class="swatch-dots" aria-hidden="true"><i></i><i></i><i></i><i></i></span><span>Graphite</span><svg class="icon pick" aria-hidden="true"><use href="#i-check"/></svg></button>
+            </div>
+            <h3 id="theme-choice-label">Mode</h3>
+            <div id="theme-choice" class="segmented" role="group" aria-labelledby="theme-choice-label">
               <button type="button" data-theme-choice="system" aria-pressed="true">Match the system</button>
               <button type="button" data-theme-choice="light" aria-pressed="false">Light</button>
               <button type="button" data-theme-choice="dark" aria-pressed="false">Dark</button>
@@ -284,7 +304,7 @@
           <div class="panel" id="panel-teams">
             <div class="panel-head"><h2>Microsoft Teams and Entra</h2><span id="microsoft-state" class="badge muted"></span></div>
             <p class="hint">Use your existing Entra registration (<em>Mobile and desktop</em> platform with <code>http://localhost</code> and delegated permissions). The user ID is filled in when you connect the account.</p>
-            <p class="hint">Your Entra tenant, client ID and Teams user ID are saved in account Variables and restored when you sign in on another computer. Each computer still connects to Microsoft separately.</p>
+            <p class="hint">These three IDs follow your account to other computers; each computer still connects to Microsoft separately.</p>
             <p id="teams-identity-error" class="callout warn" role="status" hidden></p>
             <div class="grid">
               <label>Entra tenant ID<input id="tenant-id" class="cfg" spellcheck="false"></label>
@@ -300,7 +320,7 @@
             <p id="self-chat-state" class="hint"></p>
             <label>Personal chat ID <small>Optional; validated against Microsoft. Empty = discover it.</small><input id="self-chat-id" spellcheck="false"></label>
             <div class="actions"><button id="self-chat-enable">Validate and enable</button><button id="self-chat-disable" class="secondary">Disable</button><button id="self-chat-test" class="secondary">Check membership</button></div>
-            <p class="hint">New messages are processed. Authorize the chosen sources for this chat's exact audience. Every answer carries a PTA link that prevents loops even after an ambiguous send.</p>
+            <p class="hint">Authorize sources for this chat's exact audience. Every answer carries a PTA link that prevents loops, even after an ambiguous send.</p>
           </div>
           <div class="panel" id="panel-server">
             <h2>Public URL and tunnel</h2>
@@ -331,8 +351,7 @@
             <div class="panel-head"><h2>Language models</h2><button id="detect-llm" class="secondary small">Detect CLIs again</button></div>
             <p class="hint">They classify messages, write the answers and pick the references they use. The first active one answers; if it fails (for example, out of credits or with its usage limit reached) the next one answers, and the next call starts again with the first. Codex, Claude and OpenCode use their installed CLI with their own login; DeepSeek uses its API with <code>DEEPSEEK_API_KEY</code>.</p>
             <div class="actions"><label for="add-llm-provider">Provider<select id="add-llm-provider"></select></label><button id="add-llm" class="secondary">Add model</button></div>
-            <p class="hint">You can add the same provider several times with different models or efforts (up to 16 models).</p>
-            <p class="hint">OpenCode only lists available favorites. Mark models as favorites in OpenCode, then detect CLIs again. Effort shows the selected model’s variants.</p>
+            <p class="hint">The same provider can be added several times with other models or efforts, up to 16 models. OpenCode lists only its favorites: mark them there and detect CLIs again.</p>
             <ol id="llm-chain" class="chain" aria-label="Model priority order"></ol>
           </div>
         </div>
@@ -344,6 +363,10 @@
             <div class="grid fill">
               <label>Daily target (hours)<input id="registration-hours" class="cfg" type="number" min="0.25" max="24" step="0.25"></label>
             </div>
+            <details class="fold">
+              <summary>Where the hours come from <small>Advanced</small></summary>
+              <label>Effort field <small>The task field that holds actual hours, such as Microsoft.VSTS.Scheduling.CompletedWork.</small><input id="registration-effort" class="cfg" translate="no" placeholder="Microsoft.VSTS.Scheduling.CompletedWork" spellcheck="false"></label>
+            </details>
           </div>
           <div class="panel" id="panel-registration-schedule">
             <h2>Schedule</h2>
@@ -354,7 +377,6 @@
               <label id="registration-interval-field">Interval (minutes)<input id="registration-interval" class="cfg" type="number" min="5" max="1440"></label>
               <label id="registration-start-field">Window starts<input id="registration-start" class="cfg" type="time"></label>
               <label id="registration-end-field">Window ends<input id="registration-end" class="cfg" type="time"></label>
-              <label>Time zone<input id="registration-zone" class="cfg" placeholder="local or America/Santiago" spellcheck="false"></label>
             </div>
             <fieldset id="registration-weekdays" class="days">
               <legend>Workdays</legend>
@@ -366,22 +388,22 @@
               <label class="day"><input class="cfg" type="checkbox" data-day="6"><span>Sat</span></label>
               <label class="day"><input class="cfg" type="checkbox" data-day="7"><span>Sun</span></label>
             </fieldset>
+            <details class="fold">
+              <summary>Time zone <small>Advanced</small></summary>
+              <label>Time zone <small>Empty or local follows this computer.</small><input id="registration-zone" class="cfg" placeholder="local or America/Santiago" spellcheck="false"></label>
+            </details>
           </div>
           <div class="panel" id="panel-registration-sources">
             <h2>Task sources</h2>
             <p class="hint">Choose the Azure sources to read. With none selected, all enabled Azure sources are used. Only existing tasks are read, using the read credential.</p>
             <div id="registration-sources" class="list choice-list"></div>
           </div>
-          <div class="panel" id="panel-registration-tasks">
-            <h2>Task hours</h2>
-            <label>Effort field <small>The task field that holds actual hours, such as Microsoft.VSTS.Scheduling.CompletedWork.</small><input id="registration-effort" class="cfg" translate="no" placeholder="Microsoft.VSTS.Scheduling.CompletedWork" spellcheck="false"></label>
-          </div>
         </div>
 
         <div id="settings-variables" class="settings-group" role="tabpanel" aria-labelledby="settings-tab-variables" data-settings-group="variables" hidden>
           <div class="panel" id="panel-variables">
             <div class="panel-head"><h2>Variables</h2><span id="variables-count" class="badge muted" hidden></span><button id="variables-refresh" type="button" class="secondary">Refresh</button></div>
-            <p class="hint">Private to your assistant account. Each variable has a name, a description and a value: values are encrypted, stay hidden and are never given to your agents. Describe what each one is for so you and your agents can pick the right one.</p>
+            <p class="hint">Private to your account. Values are encrypted, stay hidden and are never given to your agents; the description tells you and them what each one is for.</p>
             <p id="variables-standing" class="callout warn" role="status" hidden></p>
             <p id="variables-sync" class="hint" role="status" hidden></p>
             <div id="variables-pending" class="list" hidden></div>
@@ -398,17 +420,17 @@
           </div>
           <div class="panel" id="panel-consumers">
             <h2>Where variables are used</h2>
-            <p class="hint">Each use below names the variable it takes; choose another one to point it there, so several uses can share one variable. Your agents see only names and versions, never values; every use checks your account and the variable's current version again, and a deleted variable stops working instead of falling back to another credential.</p>
+            <p class="hint">Each use names the variable it takes; choose another one to point it there. Your agents see only names and versions, and a deleted variable stops working instead of falling back to another credential.</p>
             <p id="consumers-standing" class="callout warn" role="status" hidden></p>
             <div id="consumers" class="list"></div>
             <div id="launchers" hidden>
               <h3>Local programs</h3>
-              <p class="hint">Programs that receive named variables as environment variables of that one process. Your agent or the CLI can propose one, but it receives nothing until you check its program, arguments, folder and variables and approve it here, in the application window or your own portal. Their output is never shown.</p>
+              <p class="hint">Programs that receive chosen variables as environment variables of that one process. Your agent or the CLI can propose one; it receives nothing until you approve its program, arguments, folder and variables here. Their output is never shown.</p>
               <div id="launcher-list" class="list"></div>
             </div>
             <div id="deliveries" hidden>
               <h3>Delivery destinations</h3>
-              <p class="hint">Other systems that may receive chosen variables. This computer sends the value itself and your agents only see the result. Your agent can propose a destination, but nothing is sent until you check its address, headers, body and variables and approve it here; any change needs a new approval.</p>
+              <p class="hint">Other systems that may receive chosen variables. This computer sends the value and your agents only see the result. Nothing is sent until you approve the destination's address, headers, body and variables here; any change needs a new approval.</p>
               <div id="delivery-list" class="list"></div>
             </div>
           </div>
@@ -417,7 +439,7 @@
         <div id="settings-advanced" class="settings-group" role="tabpanel" aria-labelledby="settings-tab-advanced" data-settings-group="advanced" hidden>
           <div class="panel" id="panel-migration">
             <div class="panel-head"><h2>Move existing credentials</h2><button id="migration-refresh" type="button" class="secondary">Review</button></div>
-            <p class="hint">Copy credentials this computer already uses into your assistant account. You choose each one and confirm the account; this computer reads the value itself, so it is never shown or given to your agents, and the originals are never changed or deleted.</p>
+            <p class="hint">Copy credentials this computer already uses into your account. You choose each one; values are never shown or given to your agents, and the originals are never changed or deleted.</p>
             <p id="migration-standing" class="callout warn" role="status" hidden></p>
             <p id="migration-destination" class="callout" role="status" hidden></p>
             <div id="migration-list" class="list"></div>
@@ -498,7 +520,7 @@
           </div>
           <div class="panel" id="panel-updates">
             <div class="panel-head"><h2>Updates</h2><span id="update-state" class="badge muted"></span><button id="update-check" type="button" class="secondary">Check now</button></div>
-            <p id="update-intro" class="hint">Checks the public package registry for a newer stable release. Preparing an update builds it with Cargo next to the installed one and verifies it; nothing is installed or replaced, and the installed version keeps running. Installing a prepared update waits for work in progress, replaces the application and pta together, restarts the application and restores the previous version if the new one is not healthy.</p>
+            <p id="update-intro" class="hint">Preparing an update builds and verifies it next to the installed version, which keeps running. Installing it waits for work in progress, replaces the application and pta together, restarts the application and restores the previous version if the new one is not healthy.</p>
             <p id="update-managed" class="callout" role="status" hidden></p>
             <p id="update-diagnostic" class="callout warn" role="status" hidden></p>
             <div id="update-versions" class="list"></div>
@@ -511,7 +533,7 @@
           </div>
           <div class="panel" id="panel-embeddings">
             <h2>Semantic search</h2>
-            <p class="hint">Repositories and notes use text search. Optional embeddings add semantic retrieval for them, configured questions and evaluated requests; these texts are sent to the endpoint, while equivalent questions can still be recognized by the language model without embeddings.</p>
+            <p class="hint">Optional. Embeddings add retrieval by meaning to the text search of repositories, notes, questions and evaluated requests; those texts are sent to this endpoint. Without them, the language model still recognizes equivalent questions.</p>
             <div class="grid">
               <label>Endpoint URL<input id="embeddings-url" class="cfg" translate="no" placeholder="https://api.openai.com/v1" spellcheck="false"></label>
               <label>Model<input id="embeddings-model" class="cfg" translate="no" placeholder="text-embedding-3-small" spellcheck="false"></label>
@@ -555,7 +577,7 @@
       <section id="messages" hidden>
         <header class="page-head"><span class="page-tile" aria-hidden="true"><svg class="icon"><use href="#i-inbox"/></svg></span><div class="page-title">
           <h1>Messages</h1>
-          <p>Every message that arrives from Teams, what the assistant decided, the answer sent or withheld and the log of each step.</p>
+          <p>What arrived from Teams, what the assistant decided and what it answered or withheld.</p>
         </div></header>
         <div class="toolbar">
           <label class="search"><span class="sr-only">Search messages</span><svg class="icon" aria-hidden="true"><use href="#i-search"/></svg><input id="messages-search" type="search" placeholder="Search messages" autocomplete="off" spellcheck="false"></label>
@@ -627,7 +649,7 @@
         <div id="knowledge-contexts" role="tabpanel" aria-labelledby="knowledge-tab-contexts" hidden>
           <div class="panel">
             <div class="panel-head"><h2>Contexts</h2><span id="contexts-summary" class="hint"></span></div>
-            <p class="hint">A context groups what the assistant knows about one subject, such as billing or a project. When a request names it, by one of its keywords or its name, the answer reads that context's sources among the authorized ones and follows its instructions. A context never authorizes a source.</p>
+            <p class="hint">A context groups what the assistant knows about one subject, such as billing or a project. When a request names it or one of its keywords, the answer reads its sources among the authorized ones and follows its instructions. A context never authorizes a source.</p>
             <div id="contexts" class="list"></div>
             <details class="add-form">
               <summary>Add a context</summary>
@@ -694,7 +716,7 @@
         <div id="knowledge-organization" role="tabpanel" aria-labelledby="knowledge-tab-organization" hidden>
           <div class="panel">
             <div class="panel-head"><h2>Organization</h2><span id="organization-summary" class="hint"></span></div>
-            <p class="hint">How the organization you work for does things, kept as your account's data: norms, architecture, conventions, glossary terms, templates and work item guides. It travels with your account to every computer signed in to it, and nothing here grants access.</p>
+            <p class="hint">How your organization does things: norms, architecture, conventions, glossary terms, templates and work item guides. It follows your account to every computer, and nothing here grants access.</p>
             <label>Organization name <small>Shown only to you.</small><input id="organization-name" placeholder="Contoso"></label>
             <div id="organization-offer" class="callout info" hidden>
               <div class="grow">
@@ -721,7 +743,7 @@
           </div>
           <div class="panel">
             <div class="panel-head"><h2>Work item guides</h2><span id="guides-summary" class="hint"></span></div>
-            <p class="hint">How your organization uses each work item type: when to use it, how to write it and what each field is for. The implementation agents follow the guide when they plan children, implement an item or write a request, and an agent connected through MCP reads it before it creates or changes a work item. A guide never grants access: the project, the type and every value are checked against Azure DevOps or GitHub, and the agents propose values only for the fields you mark.</p>
+            <p class="hint">How your organization uses each work item type: when to use it, how to write it and what each field is for. Agents follow the guide when they plan, implement, create or change a work item. A guide never grants access: every value is checked against Azure DevOps or GitHub, and the agents propose values only for the fields you mark.</p>
             <div id="guides" class="list"></div>
             <details id="guide-form" class="add-form">
               <summary>Add a guide</summary>
