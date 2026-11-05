@@ -862,7 +862,7 @@ impl Graph {
             ..Default::default()
         })
     }
-    fn url(&self, path: &str) -> Result<url::Url> {
+    pub(super) fn url(&self, path: &str) -> Result<url::Url> {
         ensure!(
             !path.starts_with('/') && !path.contains("://"),
             "invalid Graph path"
@@ -895,7 +895,7 @@ impl Graph {
                 .any(|c| resource == format!("chats/{c}/messages"))
             || (self.config.graph.discover_all_chats && resource.starts_with("chats/"))
     }
-    async fn request(
+    pub(super) async fn request(
         &self,
         method: Method,
         path: &str,
@@ -910,7 +910,7 @@ impl Graph {
         self.request_url(method, self.url(&scoped)?, body, retry_safe)
             .await
     }
-    async fn request_url(
+    pub(super) async fn request_url(
         &self,
         method: Method,
         url: url::Url,
@@ -1020,7 +1020,8 @@ impl Graph {
             }
             found.push(
                 json!({"id":id,"type":chat["chatType"],"topic":topic,"members":members,
-                "last_updated":chat["lastUpdatedDateTime"]}),
+                "last_updated":chat["lastUpdatedDateTime"],
+                "readable":self.allowed_collection(&format!("chats/{id}/messages"))}),
             );
         }
         Ok(found)
@@ -1629,6 +1630,10 @@ fn refused_by_graph(error: &anyhow::Error) -> bool {
 
 #[derive(Debug)]
 struct GraphHttpError(u16);
+/// The HTTP status Graph refused a request with, if that is what failed.
+pub fn http_status(error: &anyhow::Error) -> Option<u16> {
+    error.downcast_ref::<GraphHttpError>().map(|e| e.0)
+}
 fn subscription_error_code(error: &anyhow::Error) -> String {
     match error.downcast_ref::<GraphHttpError>() {
         Some(status) => format!("graph_http_{}", status.0),

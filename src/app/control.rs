@@ -116,6 +116,8 @@ struct Endpoint {
     cloud_lost_support: bool,
     #[serde(default)]
     cloud_repair_support: bool,
+    #[serde(default)]
+    teams_read_support: bool,
     contract: u32,
     port: u16,
     token: String,
@@ -556,6 +558,11 @@ async fn client_with_transport(
             endpoint.cloud_repair_support || request.method != "cloud_repair",
             "Incompatible account store host: update the host and CLI together before repairing the copy."
         );
+        ensure!(
+            endpoint.teams_read_support
+                || !matches!(request.method.as_str(), "teams_messages" | "teams_search"),
+            "Incompatible host: update the host and CLI together before reading Teams chats."
+        );
         ensure!(endpoint.contract == CONTRACT, "incompatible host contract");
         ensure!(
             endpoint.web_support
@@ -672,6 +679,7 @@ pub(crate) fn launch(
             cloud_conflicts_support: true,
             cloud_lost_support: true,
             cloud_repair_support: true,
+            teams_read_support: true,
             contract: CONTRACT,
             port: listener.local_addr()?.port(),
             token: token.clone(),
@@ -1397,6 +1405,8 @@ async fn operate(
         "answer_send" => send_answer(state, args).await?,
         "teams_chats" => teams_chats(state, args).await?,
         "teams_post" => teams_post(state, args).await?,
+        "teams_messages" => teams_messages(state, args).await?,
+        "teams_search" => teams_search(state, args).await?,
         "audit" | "logs" => {
             let config = state.settings.config().map_err(fail)?;
             let limit = args.get("limit").and_then(Value::as_u64).unwrap_or(50) as usize;
@@ -1543,6 +1553,7 @@ mod tests {
                 cloud_conflicts_support: true,
                 cloud_lost_support: true,
                 cloud_repair_support: true,
+                teams_read_support: true,
                 account_authority_support: true,
                 shared_accounts_support: true,
                 account_binding: None,
@@ -1584,6 +1595,7 @@ mod tests {
                 cloud_conflicts_support: true,
                 cloud_lost_support: true,
                 cloud_repair_support: true,
+                teams_read_support: true,
                 account_authority_support: true,
                 shared_accounts_support: true,
                 account_binding: None,
@@ -1640,6 +1652,7 @@ mod tests {
                     cloud_conflicts_support: true,
                     cloud_lost_support: true,
                     cloud_repair_support: true,
+                    teams_read_support: true,
                     account_authority_support: true,
                     shared_accounts_support: true,
                     account_binding: None,

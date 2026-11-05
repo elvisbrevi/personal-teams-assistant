@@ -5463,3 +5463,253 @@ async fn teams_post_failure_is_uncertain_and_never_retried() {
         Some(&PostRefusal::Uncertain)
     );
 }
+
+fn chat_message(id: &str, at: &str, user: &str, name: &str, html: &str) -> serde_json::Value {
+    json!({"id": id, "messageType": "message", "createdDateTime": at, "lastModifiedDateTime": at,
+        "deletedDateTime": null, "lastEditedDateTime": null, "webUrl": null, "attachments": [],
+        "from": {"user": {"id": user, "displayName": name, "userIdentityType": "aadUser"}},
+        "body": {"contentType": "html", "content": html}})
+}
+fn instant(text: &str) -> chrono::DateTime<chrono::Utc> {
+    chrono::DateTime::parse_from_rfc3339(text)
+        .unwrap()
+        .with_timezone(&chrono::Utc)
+}
+
+#[tokio::test]
+async fn a_chat_history_pages_back_with_a_cursor_and_keeps_authors_and_quotes() {
+    use personal_teams_assistant::adapters::chats::{ReadRefusal, Window};
+    use wiremock::matchers::{query_param, query_param_is_missing};
+    let server = MockServer::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let graph = support::graph(&server, support::store(&dir));
+    let me = graph.config.graph.user_id.clone();
+    let mut reply = chat_message(
+        "300",
+        "2026-10-03T10:00:00.000Z",
+        "u-ana",
+        "Ana Pérez",
+        "<p><attachment id=\"100\"></attachment>Es el estado <b>10</b>: pendiente de verificación.</p>",
+    );
+    reply["attachments"] = json!([{"id": "100", "contentType": "messageReference",
+        "content": json!({"messageId": "100", "messagePreview": "¿Qué es el estado 10?",
+            "messageSender": {"user": {"id": me, "displayName": "Yo Mismo"}}}).to_string()}]);
+    let mut event = chat_message(
+        "250",
+        "2026-10-02T12:00:00.000Z",
+        "",
+        "",
+        "<systemEventMessage/>",
+    );
+    event["messageType"] = json!("systemEventMessage");
+    Mock::given(method("GET"))
+        .and(path("/chats/chat1/messages"))
+        .and(query_param("$orderby", "createdDateTime desc"))
+        .and(query_param_is_missing("$filter"))
+        .and(query_param_is_missing("$skiptoken"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"value": [reply, event,
+            chat_message("200", "2026-10-02T10:00:00.000Z", &me, "Yo Mismo", "<p>Lo reviso.</p>")],
+            "@odata.nextLink": format!("{}/chats/chat1/messages?$skiptoken=next", server.uri())})),
+        )
+        .mount(&server)
+        .await;
+    let older = json!({"value": [
+        chat_message("100", "2026-10-01T15:00:00.000Z", &me, "Yo Mismo", "<p>¿Qué es el estado 10?</p>"),
+        chat_message("50", "2026-09-20T15:00:00.000Z", "u-ana", "Ana Pérez", "<p>Antes de la ventana</p>")]});
+    Mock::given(method("GET"))
+        .and(path("/chats/chat1/messages"))
+        .and(query_param("$skiptoken", "next"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(older.clone()))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/chats/chat1/messages"))
+        .and(query_param(
+            "$filter",
+            "createdDateTime lt 2026-10-02T10:00:00.000Z",
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(older))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let since = Some(instant("2026-10-01T12:00:00Z"));
+    let first = graph
+        .chat_messages("chat1", Window::new(since, None, None).unwrap(), 2)
+        .await
+        .unwrap();
+    let ids: Vec<&str> = first.messages.iter().map(|m| m.id.as_str()).collect();
+    assert_eq!(ids, ["300", "200"]);
+    assert_eq!(
+        first.next_cursor.as_deref(),
+        Some("2026-10-02T10:00:00.000Z")
+    );
+    let answer = &first.messages[0];
+    assert_eq!(answer.author.as_deref(), Some("Ana Pérez"));
+    assert!(!answer.mine && first.messages[1].mine);
+    assert!(answer.text.contains("estado 10"), "{}", answer.text);
+    assert_eq!(answer.replies_to[0].id, "100");
+    assert_eq!(answer.replies_to[0].author.as_deref(), Some("Yo Mismo"));
+    assert_eq!(answer.replies_to[0].preview, "¿Qué es el estado 10?");
+    assert_eq!(answer.resource, "chats/chat1/messages/300");
+    let next = graph
+        .chat_messages(
+            "chat1",
+            Window::new(
+                since,
+                None,
+                Some(instant(first.next_cursor.as_deref().unwrap())),
+            )
+            .unwrap(),
+            2,
+        )
+        .await
+        .unwrap();
+    assert_eq!(next.messages.len(), 1);
+    assert_eq!(next.messages[0].id, "100");
+    assert!(next.next_cursor.is_none() && !next.partial);
+    // Chats outside the profile's allowlist are never requested.
+    let refused = graph
+        .chat_messages("chat9", Window::default(), 10)
+        .await
+        .unwrap_err();
+    assert!(refused.downcast_ref::<ReadRefusal>().is_some());
+    assert!(!serde_json::to_string(&first).unwrap().contains('@'));
+}
+
+#[tokio::test]
+async fn message_search_uses_microsoft_search_and_otherwise_reads_the_history() {
+    use personal_teams_assistant::adapters::chats::{SearchFilter, Window};
+    let server = MockServer::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let graph = support::graph(&server, support::store(&dir));
+    let me = graph.config.graph.user_id.clone();
+    let found = chat_message(
+        "300",
+        "2026-11-04T10:00:00.000Z",
+        "u-miguel",
+        "Miguel Antúnez",
+        "<p>La SPS queda en estado 10 hasta verificar el pago.</p>",
+    );
+    let hit = |chat: &str, id: &str, name: &str| {
+        json!({"hitId": id, "rank": 1, "summary": "estado 10", "resource": {"@odata.type": "#microsoft.graph.chatMessage",
+            "id": id, "chatId": chat, "createdDateTime": "2026-11-04T10:00:00Z", "channelIdentity": {},
+            "from": {"emailAddress": {"name": name, "address": "person@example.com"}}}})
+    };
+    let mut channel = hit("chat1", "301", "Miguel Antúnez");
+    channel["resource"]["channelIdentity"] = json!({"teamId": "t", "channelId": "c"});
+    let hits = json!([
+        hit("chat1", "300", "Miguel Antúnez"),
+        hit("chat9", "400", "Miguel Antúnez"),
+        channel,
+        hit("chat1", "200", "Ana Pérez")
+    ]);
+    // A tenant whose index does not read the dates in the query finds nothing with them.
+    let search = Mock::given(method("POST"))
+        .and(path("/search/query"))
+        .respond_with(move |request: &wiremock::Request| {
+            let body: serde_json::Value = request.body_json().unwrap();
+            let dated = body["requests"][0]["query"]["queryString"]
+                .as_str()
+                .unwrap()
+                .contains("sent>=");
+            ResponseTemplate::new(200).set_body_json(json!({"value": [{"searchTerms": ["estado"],
+                "hitsContainers": [{"hits": if dated { json!([]) } else { hits.clone() },
+                    "total": 4, "moreResultsAvailable": false}]}]}))
+        })
+        .expect(2)
+        .mount_as_scoped(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/chats/chat1/messages/300"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(found.clone()))
+        .mount(&server)
+        .await;
+    let filter = SearchFilter {
+        chats: Vec::new(),
+        from: Some("miguel".into()),
+        window: Window::new(Some(instant("2026-10-01T00:00:00Z")), None, None).unwrap(),
+    };
+    let result = graph
+        .search_messages("estado 10", &filter, 25)
+        .await
+        .unwrap();
+    assert_eq!(result.method, "microsoft_search");
+    assert_eq!(result.page.messages.len(), 1, "{:?}", result.page.warnings);
+    assert_eq!(
+        result.page.messages[0].author.as_deref(),
+        Some("Miguel Antúnez")
+    );
+    assert!(
+        result.page.warnings[0].contains("words alone"),
+        "{:?}",
+        result.page.warnings
+    );
+    let queries: Vec<String> = server
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .filter(|r| r.method.as_str() == "POST")
+        .map(|r| {
+            r.body_json::<serde_json::Value>().unwrap()["requests"][0]["query"]["queryString"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        })
+        .collect();
+    assert!(queries[0].starts_with("estado 10 sent>="), "{queries:?}");
+    assert_eq!(queries[1], "estado 10");
+    drop(search);
+
+    // Without Microsoft Search the readable chats' history is read directly.
+    Mock::given(method("POST"))
+        .and(path("/search/query"))
+        .respond_with(ResponseTemplate::new(403))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/me/chats"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"value": [
+            {"id": "chat9", "chatType": "group", "lastMessagePreview": {"createdDateTime": "2026-11-05T09:00:00Z"}},
+            {"id": "chat1", "chatType": "group", "lastMessagePreview": {"createdDateTime": "2026-11-04T10:00:00Z"}},
+            {"id": "chat2", "chatType": "group", "lastMessagePreview": {"createdDateTime": "2026-09-01T10:00:00Z"}}]})))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/chats/chat1/messages"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"value": [found,
+            chat_message("290", "2026-11-03T10:00:00.000Z", &me, "Yo Mismo", "<p>Reviso el estado del pago 10 veces</p>"),
+            chat_message("280", "2026-11-02T10:00:00.000Z", "u-miguel", "Miguel Antúnez", "<p>Otro tema</p>"),
+            chat_message("100", "2026-09-30T10:00:00.000Z", "u-miguel", "Miguel Antúnez", "<p>estado 10, antes</p>")]})))
+        .mount(&server)
+        .await;
+    let fallback = graph
+        .search_messages(
+            "estado 10",
+            &SearchFilter {
+                from: None,
+                ..filter.clone()
+            },
+            25,
+        )
+        .await
+        .unwrap();
+    assert_eq!(fallback.method, "chat_history");
+    let ids: Vec<&str> = fallback
+        .page
+        .messages
+        .iter()
+        .map(|m| m.id.as_str())
+        .collect();
+    assert_eq!(ids, ["300", "290"]);
+    assert!(
+        fallback.page.warnings[0].contains("HTTP 403"),
+        "{:?}",
+        fallback.page.warnings
+    );
+    // The user's own messages in the same window.
+    let own = graph.own_chat_messages(filter.window, 50).await.unwrap();
+    let ids: Vec<&str> = own.messages.iter().map(|m| m.id.as_str()).collect();
+    assert_eq!(ids, ["290"]);
+}

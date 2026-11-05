@@ -1458,12 +1458,48 @@ pub(super) const TOOLS: &[Tool] = &[
     Tool {
         name: "teams_chats",
         title: "Find a Teams chat",
-        description: "Chats the user belongs to (1:1, group, meeting) with topic and member names, newest first; query filters by topic or member name. Use it to find the chat ID for teams_post. Channels are not available.",
+        description: "Chats the user belongs to (1:1, group, meeting) with topic and member names, newest first, with the total; readable says whether teams_messages may read it. query filters by topic or member name; offset and limit page through them. Use it to find the chat ID for teams_post or teams_messages. Channels are not available.",
         effect: Effect::Read,
         schema: || {
             object(
-                json!({"query": string("Part of a chat topic or a member's name.")}),
+                json!({"query": string("Part of a chat topic or a member's name."),
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 500, "description": "How many (default 50)."},
+                    "offset": {"type": "integer", "minimum": 0, "description": "How many to skip; next_offset from the previous call."}}),
                 &[],
+            )
+        },
+    },
+    Tool {
+        name: "teams_messages",
+        title: "Read a Teams chat",
+        description: "Read-only. A chat's messages from every author, newest first: author name (never an address), date, plain text, what each replies to or quotes, and next_cursor to pass as before for older ones. chat is an ID from teams_chats, self, or one message's resource (chats/CHAT/messages/ID, as messages_list shows it). mine instead reads the user's own messages in the chats this profile reads (last 30 days by default). Only chats the profile may read (the personal chat, graph.allowed_chats, or all with graph.discover_all_chats).",
+        effect: Effect::Read,
+        schema: || {
+            object(
+                json!({"chat": string("Chat ID from teams_chats, self, or a message resource."),
+                    "mine": {"type": "boolean", "description": "The user's own messages across chats, instead of one chat."},
+                    "since": string("Start: YYYY-MM-DD (this computer's time zone) or an RFC 3339 instant."),
+                    "until": string("End: YYYY-MM-DD (that day included) or an RFC 3339 instant."),
+                    "before": string("next_cursor of the previous call: only older messages."),
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 200, "description": "How many (default 50)."}}),
+                &[],
+            )
+        },
+    },
+    Tool {
+        name: "teams_search",
+        title: "Search Teams messages",
+        description: "Read-only. Messages matching some words in the chats this profile reads, newest first, with the same fields as teams_messages. Uses Microsoft Search; if it cannot be used, reads the chats' history directly (method chat_history, bounded: partial and warnings say what was not covered). chats keeps those chats, from a part of the author's name, since/until a window.",
+        effect: Effect::Read,
+        schema: || {
+            object(
+                json!({"query": string("The words to find (at most 200 characters)."),
+                    "chats": strings("Chat IDs from teams_chats (or self) to keep."),
+                    "from": string("Part of the author's display name."),
+                    "since": string("Start: YYYY-MM-DD or an RFC 3339 instant."),
+                    "until": string("End: YYYY-MM-DD (that day included) or an RFC 3339 instant."),
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 100, "description": "How many (default 25)."}}),
+                &["query"],
             )
         },
     },
@@ -2003,7 +2039,11 @@ pub(super) async fn run(name: &str, args: &Value) -> Result<Value, String> {
             "sources": args.get("sources").cloned().unwrap_or(json!([]))})).await,
         "index_refresh" => ipc("index_refresh", json!({"source": args.get("source")})).await,
         "answer_send" => ipc("answer_send", json!({"resource": text(args, "resource")?})).await,
-        "teams_chats" => ipc("teams_chats", json!({"query": args.get("query")})).await,
+        "teams_chats" => ipc("teams_chats", json!({"query": args.get("query"), "limit": args.get("limit"), "offset": args.get("offset")})).await,
+        "teams_messages" => ipc("teams_messages", json!({"chat": args.get("chat"), "mine": args.get("mine"), "since": args.get("since"),
+            "until": args.get("until"), "before": args.get("before"), "limit": args.get("limit")})).await,
+        "teams_search" => ipc("teams_search", json!({"query": text(args, "query")?, "chats": args.get("chats"), "from": args.get("from"),
+            "since": args.get("since"), "until": args.get("until"), "limit": args.get("limit")})).await,
         "teams_post" => ipc("teams_post", json!({"chat": text(args, "chat")?, "text": text(args, "text")?})).await,
         "activity_run" => ipc("activity_run", json!({"day": args.get("day")})).await,
         "activity_settings_update" => {

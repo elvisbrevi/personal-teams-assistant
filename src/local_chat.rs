@@ -12,18 +12,53 @@ use anyhow::Result;
 use async_trait::async_trait;
 use std::{path::Path, sync::Arc, time::Duration};
 
-struct NoTeamsToken;
+/// How a simulation reads the user's own Teams messages.
+pub enum Teams {
+    /// No source it may read needs Teams.
+    Unused,
+    /// The host's Microsoft session.
+    Session(Arc<dyn AccessToken>),
+    /// There is none, and why.
+    Missing(&'static str),
+}
+
+/// An access token the host obtained for one simulation.
+pub struct FixedToken(pub String);
+
+#[async_trait]
+impl AccessToken for FixedToken {
+    async fn access_token(&self) -> Result<String> {
+        Ok(self.0.clone())
+    }
+}
+
+/// Why a simulation read no Teams message of the user's.
+#[derive(Debug)]
+pub struct NoTeamsSession(pub &'static str);
+impl std::fmt::Display for NoTeamsSession {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.0)
+    }
+}
+impl std::error::Error for NoTeamsSession {}
+
+struct NoTeamsToken(&'static str);
 
 #[async_trait]
 impl AccessToken for NoTeamsToken {
     async fn access_token(&self) -> Result<String> {
-        anyhow::bail!("Teams account is not connected to local chat")
+        Err(NoTeamsSession(self.0).into())
     }
 }
 
-/// Run the real decision and answer pipeline with a local-only adapter.
-/// No Teams credential, public URL or Graph subscription is needed.
-pub async fn chat(config_path: &Path, input: SimulationRequest) -> Result<SimulationResult> {
+/// Run the real decision and answer pipeline with a local-only adapter. No public URL or
+/// Graph subscription is needed; `teams` is the session the user's own Teams messages are
+/// read with, the only Graph read a simulation makes.
+pub async fn chat(
+    config_path: &Path,
+    input: SimulationRequest,
+    teams: Teams,
+) -> Result<SimulationResult> {
     simulation::validate_request(&input)?;
     let config = Config::load(
         config_path
@@ -55,7 +90,11 @@ pub async fn chat(config_path: &Path, input: SimulationRequest) -> Result<Simula
     let config = Arc::new(config);
     let graph = Arc::new(Graph {
         client: client.clone(),
-        token: Arc::new(NoTeamsToken),
+        token: match teams {
+            Teams::Session(token) => token,
+            Teams::Unused => Arc::new(NoTeamsToken("no source of this simulation reads Teams")),
+            Teams::Missing(reason) => Arc::new(NoTeamsToken(reason)),
+        },
         base_url: "https://graph.microsoft.com/v1.0".into(),
         config: config.clone(),
         store: store.clone(),
