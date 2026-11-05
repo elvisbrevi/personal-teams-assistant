@@ -143,7 +143,7 @@ jobs:
       - name: GUI syntax
         run: bun build desktop/ui/app.js --no-bundle --outfile "$RUNNER_TEMP/app-check.js"
       - name: GUI logic and translations
-        run: node --test scripts/test-activity-ui.cjs scripts/test-ui-i18n.cjs
+        run: node --test scripts/test-activity-ui.cjs scripts/test-ui-i18n.cjs scripts/test-ui-themes.cjs
       - name: Script tests
         run: |
           bun scripts/test-ci-workflow.mjs

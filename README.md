@@ -107,6 +107,12 @@ manifest: on an iPhone, remove the home-screen shortcut and add it again from
 Safari to get the new icon. Nothing changes in the assistant's behavior,
 configuration or CLI.
 
+Version 0.10.48 lets each device choose its look in Settings › General ›
+Appearance: three styles (Stickers, the default; Soft; Minimalist) and ten color
+palettes (Paper, Catppuccin, Monokai, Dracula, Nord, Solarized, Gruvbox, Tokyo
+Night, Rosé Pine and Graphite), each in light and dark. It also shortens several
+Settings explanations and folds rarely changed fields under Advanced.
+
 Version 0.7.13 answers status rounds from the work item itself: an HU named in
 the question is read even after it was handed over (its state, since when and
 who holds it now, its tasks, linked code and comments), and your own recent Wiki

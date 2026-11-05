@@ -591,7 +591,7 @@ check('axe: no WCAG 2.2 AA violations in any scan', !Object.keys(totals).length,
     for (const band of ['accent', 'emphasis', 'good', 'warning', 'attention', 'none']) {
       await page.selectOption('#style-band', band);
       for (const theme of ['light', 'dark']) {
-        await page.evaluate(choice => applyTheme(choice), theme);
+        await page.evaluate(choice => applyAppearance({ theme: choice }), theme);
         const violations = await scan();
         if (violations.length) check(`message style preview passes axe (${label} on ${band}, ${theme})`, false, JSON.stringify(violations));
       }
@@ -621,6 +621,36 @@ check('axe: no WCAG 2.2 AA violations in any scan', !Object.keys(totals).length,
   await context.close();
 }
 {
+  // Every palette passes axe in light and dark, on the sections with the most colors; the styles rotate
+  // so each one meets every palette (the token pairs are checked one by one in test-ui-themes.cjs).
+  for (const [label, ctx, tabs] of [['desktop', {}, ['overview', 'messages', 'settings']], ['phone', { viewport: { width: 393, height: 852 }, isMobile: true, hasTouch: true }, ['overview', 'settings']]]) {
+    const { context, page, errors } = await open({ axe: true, context: ctx });
+    await page.evaluate(axeSource);
+    const palettes = await page.$$eval('#palette-choice button', buttons => buttons.map(button => button.dataset.palette));
+    const styles = await page.$$eval('#style-choice button', buttons => buttons.map(button => button.dataset.style));
+    const failures = [];
+    let turn = 0;
+    for (const palette of palettes) {
+      for (const theme of ['light', 'dark']) {
+        const style = styles[turn++ % styles.length];
+        await page.evaluate(look => applyAppearance(look), { theme, palette, style });
+        for (const tab of tabs) {
+          await page.evaluate(name => showTab(name), tab);
+          await page.waitForTimeout(120);
+          const violations = await page.evaluate(async () => (await axe.run(document, { runOnly: { type: 'tag', values: ['wcag2a', 'wcag2aa', 'wcag21aa', 'wcag22aa'] } })).violations
+            .map(v => `${v.id}: ${v.nodes[0]?.target?.join(' ')}`));
+          if (violations.length) failures.push(`${palette}/${style}/${theme}/${tab}: ${violations.join(', ')}`);
+        }
+      }
+    }
+    check(`${label}: every palette passes axe in light and dark`, failures.length === 0, failures.join(' | '));
+    const sideways = await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth);
+    check(`${label}: Appearance does not scroll sideways`, !sideways);
+    check(`${label}: palettes have no page errors`, errors.length === 0, errors.join(' | '));
+    await context.close();
+  }
+}
+{
   // Theme: this device's choice applies at once, asks for no save and survives a reload.
   const { context, page } = await open();
   const theme = () => page.evaluate(() => [document.documentElement.dataset.theme ?? null, getComputedStyle(document.body).backgroundColor, localStorage.getItem('pta-theme')]);
@@ -638,6 +668,45 @@ check('axe: no WCAG 2.2 AA violations in any scan', !Object.keys(totals).length,
   await page.evaluate(() => showTab('settings'));
   await page.click('#theme-choice [data-theme-choice="system"]');
   check('matching the system again forgets the choice', JSON.stringify(await theme()) === JSON.stringify([null, 'rgb(255, 246, 229)', null]), JSON.stringify(await theme()));
+  // Palette and style: each applies at once on this device, asks for no save and survives a reload.
+  const look = () => page.evaluate(() => [document.documentElement.dataset.palette ?? null, document.documentElement.dataset.style ?? null,
+    getComputedStyle(document.body).backgroundColor, localStorage.getItem('pta-palette'), localStorage.getItem('pta-style')]);
+  const radius = () => page.evaluate(() => getComputedStyle(document.querySelector('#theme-choice button')).borderTopLeftRadius);
+  check('the look starts as Paper and Stickers', JSON.stringify(await look()) === JSON.stringify([null, null, 'rgb(255, 246, 229)', null, null])
+    && await page.getAttribute('#palette-choice [data-palette="paper"]', 'aria-pressed') === 'true'
+    && await page.getAttribute('#style-choice [data-style="sticker"]', 'aria-pressed') === 'true' && await radius() === '99px', JSON.stringify(await look()));
+  check('Appearance offers three styles and ten palettes', await page.locator('#style-choice button').count() === 3 && await page.locator('#palette-choice button').count() === 10);
+  await page.click('#palette-choice [data-palette="catppuccin"]');
+  await page.click('#style-choice [data-style="soft"]');
+  check('a palette and a style apply right away without asking to save', JSON.stringify(await look()) === JSON.stringify(['catppuccin', 'soft', 'rgb(239, 241, 245)', 'catppuccin', 'soft'])
+    && await radius() === '10px' && !(await page.isVisible('#savebar')), JSON.stringify(await look()));
+  const chosenBars = await page.$$eval('meta[name="theme-color"]', metas => metas.map(m => m.content));
+  check('the browser bar takes the chosen palette', chosenBars.every(color => color === 'rgb(239, 241, 245)'), chosenBars.join(' | '));
+  // A choice previews itself: it wears its own palette or style whatever the page uses. Buttons ease
+  // between colors, so the page settles first (a slow machine read the tail of the last mode change).
+  await page.waitForTimeout(400);
+  const previews = await page.evaluate(() => [getComputedStyle(document.querySelector('#palette-choice [data-palette="paper"]')).backgroundColor,
+    getComputedStyle(document.querySelector('#palette-choice [data-palette="monokai"]')).backgroundColor,
+    getComputedStyle(document.querySelector('#style-choice [data-style="sticker"] .look-demo')).borderTopWidth,
+    getComputedStyle(document.querySelector('#style-choice [data-style="minimal"] .look-demo')).borderTopWidth]);
+  check('each choice previews its own palette or style', JSON.stringify(previews) === JSON.stringify(['rgb(255, 246, 229)', 'rgb(246, 241, 238)', '2px', '1px']), previews.join(' | '));
+  await page.click('#theme-choice [data-theme-choice="dark"]');
+  await page.reload();
+  await page.waitForTimeout(600);
+  check('the chosen look survives a reload', JSON.stringify((await look()).slice(0, 3)) === JSON.stringify(['catppuccin', 'soft', 'rgb(24, 24, 37)'])
+    && await page.evaluate(() => document.documentElement.dataset.theme) === 'dark', JSON.stringify(await look()));
+  await page.evaluate(() => showTab('settings'));
+  await page.click('#style-choice [data-style="minimal"]');
+  check('Minimal draws the same controls with small corners and no section tile', await radius() === '6px' && !(await page.isVisible('#settings .page-tile')));
+  await page.click('#palette-choice [data-palette="paper"]');
+  await page.click('#style-choice [data-style="sticker"]');
+  await page.click('#theme-choice [data-theme-choice="system"]');
+  check('choosing the defaults again forgets the look', JSON.stringify(await look()) === JSON.stringify([null, null, 'rgb(255, 246, 229)', null, null]), JSON.stringify(await look()));
+  await page.evaluate(() => { localStorage.setItem('pta-palette', 'no-such-palette'); localStorage.setItem('pta-style', 'no-such-style'); });
+  await page.reload();
+  await page.waitForTimeout(600);
+  check('an unknown stored look falls back to the defaults', JSON.stringify((await look()).slice(0, 3)) === JSON.stringify([null, null, 'rgb(255, 246, 229)']), JSON.stringify(await look()));
+  await page.evaluate(() => { localStorage.removeItem('pta-palette'); localStorage.removeItem('pta-style'); });
   // The tab icon, the iOS home-screen icon and the manifest with every icon it names load under the portal's CSP.
   const icons = await page.evaluate(async () => {
     const manifest = await (await fetch(document.querySelector('link[rel=manifest]').href)).json();
