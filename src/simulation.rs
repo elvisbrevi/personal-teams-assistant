@@ -34,6 +34,23 @@ pub struct SimulationResult {
     pub warnings: Vec<String>,
 }
 
+/// A simulation that cannot run as asked; the message says what is missing.
+#[derive(Debug)]
+pub struct InvalidRequest(pub &'static str);
+impl std::fmt::Display for InvalidRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.0)
+    }
+}
+impl std::error::Error for InvalidRequest {}
+
+/// Who writes in a simulated conversation.
+pub const SENDER: &str = "simulated-user";
+/// The conversation a simulation session runs in.
+pub fn conversation(session: &str) -> String {
+    format!("chats/simulation-{session}")
+}
+
 pub fn validate_request(input: &SimulationRequest) -> Result<()> {
     ensure!(
         !input.session.is_empty()
@@ -44,9 +61,54 @@ pub fn validate_request(input: &SimulationRequest) -> Result<()> {
                 .all(|c| c.is_ascii_alphanumeric() || "_-".contains(c))
             && !input.text.trim().is_empty()
             && input.text.chars().count() <= 2000,
-        "invalid simulation request"
+        InvalidRequest(
+            "A simulation needs a session (at most 64 letters, digits, - or _) and a text of at most 2000 characters."
+        )
     );
     Ok(())
+}
+
+/// The sources a local simulation may read. Named sources must be enabled and allow external
+/// processing. Without any, a map with questions offers every such source and the identified
+/// question narrows them to its own; a map without questions reads those authorized for the
+/// simulated conversation. `None` means the conversation's authorization.
+pub fn sources(
+    knowledge: &crate::knowledge::KnowledgeMap,
+    input: &SimulationRequest,
+) -> Result<Option<Vec<String>>> {
+    let readable: Vec<String> = knowledge
+        .resources
+        .iter()
+        .filter(|r| r.enabled && r.external_processing)
+        .map(|r| r.id.clone())
+        .collect();
+    if !input.sources.is_empty() {
+        ensure!(
+            input.sources.iter().all(|id| readable.contains(id)),
+            InvalidRequest(
+                "A selected source is unknown, disabled or does not allow external processing; see pta sources list."
+            )
+        );
+        return Ok(Some(input.sources.clone()));
+    }
+    ensure!(
+        !readable.is_empty(),
+        InvalidRequest(
+            "No source can be read in a simulation: enable a source that allows external processing, or name the sources to read in \"sources\"."
+        )
+    );
+    if knowledge.questions.is_some() {
+        return Ok(Some(readable));
+    }
+    ensure!(
+        !knowledge
+            .available(&conversation(&input.session), SENDER)
+            .is_empty(),
+        InvalidRequest(
+            "No source is authorized for the simulated conversation and the map has no questions: name the sources to read in \"sources\" (enabled, with external processing)."
+        )
+    );
+    Ok(None)
 }
 
 struct TestAdapter(teams::IncomingMessage);
@@ -70,8 +132,8 @@ pub async fn run(
     let resource = format!("simulation:{}:{}", input.session, uuid::Uuid::new_v4());
     let message = teams::IncomingMessage {
         resource: resource.clone(),
-        conversation: format!("chats/simulation-{}", input.session),
-        sender: "simulated-user".into(),
+        conversation: conversation(&input.session),
+        sender: SENDER.into(),
         sender_name: String::new(),
         kind: if input.group {
             teams::ConversationKind::Group
@@ -125,4 +187,91 @@ pub async fn run(
         partial: audit.partial,
         warnings: audit.coverage_warnings,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn map(questions: bool, audience: &str) -> crate::knowledge::KnowledgeMap {
+        let questions = if questions {
+            "[[questions]]\nid = \"payment-states\"\ntext = \"What do states 6 and 10 mean?\"\nsources = [\"wiki\"]\n"
+        } else {
+            ""
+        };
+        crate::knowledge::KnowledgeMap::parse(&format!(
+            r#"
+[[resources]]
+id = "wiki"
+description = "Synthetic Wiki"
+topics = []
+enabled = true
+external_processing = true
+allowed_conversations = [{audience}]
+allowed_senders = []
+kind = "url"
+url = "https://example.com/wiki"
+
+[[resources]]
+id = "off"
+description = "Disabled"
+topics = []
+enabled = false
+external_processing = true
+allowed_conversations = ["*"]
+allowed_senders = []
+kind = "url"
+url = "https://example.com/off"
+{questions}"#
+        ))
+        .unwrap()
+    }
+    fn request(sources: &[&str]) -> SimulationRequest {
+        SimulationRequest {
+            session: "t".into(),
+            text: "What is state 10?".into(),
+            group: false,
+            mentioned: false,
+            sources: sources.iter().map(|s| (*s).to_owned()).collect(),
+        }
+    }
+    fn refusal(result: Result<Option<Vec<String>>>) -> String {
+        result
+            .unwrap_err()
+            .downcast::<InvalidRequest>()
+            .expect("a typed invalid request")
+            .to_string()
+    }
+
+    #[test]
+    fn a_simulation_without_sources_uses_the_question_or_the_conversation_authorization() {
+        // With questions, every readable source; the identified question keeps its own.
+        assert_eq!(
+            sources(&map(true, ""), &request(&[])).unwrap(),
+            Some(vec!["wiki".to_owned()])
+        );
+        // Without questions, the sources authorized for the simulated conversation.
+        assert_eq!(sources(&map(false, "\"*\""), &request(&[])).unwrap(), None);
+        assert!(refusal(sources(&map(false, ""), &request(&[]))).contains("name the sources"));
+        assert_eq!(
+            sources(&map(false, ""), &request(&["wiki"])).unwrap(),
+            Some(vec!["wiki".to_owned()])
+        );
+        for named in ["off", "unknown"] {
+            assert!(
+                refusal(sources(&map(true, ""), &request(&[named]))).contains("pta sources list")
+            );
+        }
+        let mut none = map(true, "");
+        none.resources.retain(|r| !r.enabled);
+        assert!(refusal(sources(&none, &request(&[]))).contains("enable a source"));
+        let mut empty = request(&[]);
+        empty.text = " ".into();
+        assert!(
+            validate_request(&empty)
+                .unwrap_err()
+                .downcast::<InvalidRequest>()
+                .is_ok()
+        );
+    }
 }

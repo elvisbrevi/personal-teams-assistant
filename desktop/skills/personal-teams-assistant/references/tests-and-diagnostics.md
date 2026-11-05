@@ -8,7 +8,7 @@ Use `pta auth microsoft login`, complete the browser verification and check
 encryption key and scopes; do not log out or replace credentials to renew MFA.
 Failed token renewal never deletes the saved session or prints provider text.
 
-`pta chat` or `pta test simulate` read a SimulationRequest JSON on stdin: session, text, group, mentioned, sources. Use enabled sources that allow external processing. The simulation calls the configured providers and may cost; it never sends messages to Graph or widens audiences.
+`pta chat` or `pta test simulate` read a SimulationRequest JSON on stdin: session, text, group, mentioned and optionally sources. Named sources must be enabled and allow external processing (otherwise `invalid_input`). Without `sources`, a map with questions offers every such source and the identified question reads its own (no question matched: `no_matching_question`, like in Teams); a map without questions reads the sources authorized for every conversation (`*`). When none can be read, the reply is `invalid_input` and says what is missing. The simulation calls the configured providers and may cost; it never sends messages to Graph or widens audiences.
 
 `pta test self-chat` checks the membership of the configured conversation. It does not prove sending or reception. For the real check, the person writes a new question there and verifies the answer. Read `pta audit list --limit 20` and `pta self-chat status`. Repeat after a restart. The assistant's answers must be ignored without producing another send.
 

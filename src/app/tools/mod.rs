@@ -1229,7 +1229,7 @@ pub(super) const TOOLS: &[Tool] = &[
         effect: Effect::Read,
         schema: || {
             object(
-                json!({"text": string("The question, as a colleague would write it."), "sources": strings("Source IDs to read (enabled ones with external processing)."), "session": string("Keeps a test conversation's context across calls.")}),
+                json!({"text": string("The question, as a colleague would write it."), "sources": strings("Source IDs to read (enabled ones with external processing). Omitted: the identified question's sources, or those authorized for every conversation."), "session": string("Keeps a test conversation's context across calls.")}),
                 &["text"],
             )
         },
