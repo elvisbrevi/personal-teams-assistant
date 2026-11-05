@@ -575,7 +575,10 @@ mod tests {
         let mut command = program("git");
         command.args(["status", "--short"]);
         assert_eq!(command.get_program(), "git");
-        assert_eq!(command.get_args().collect::<Vec<_>>(), ["status", "--short"]);
+        assert_eq!(
+            command.get_args().collect::<Vec<_>>(),
+            ["status", "--short"]
+        );
         let command = program_async("gh");
         assert_eq!(command.as_std().get_program(), "gh");
     }
