@@ -186,31 +186,25 @@ pub(crate) fn records(config: Config, map: KnowledgeMap) -> Result<Vec<crate::mi
 }
 
 /// The account's configuration record installed over this installation's: every section but the
-/// installation's own ones (and `[secrets]`, `[cloud]`, `policy.dry_run`) comes from the record.
-/// A record written before the split still carries those sections; they are ignored as well.
+/// installation's own ones (and `[secrets]`, `[cloud]`, `policy.dry_run`) comes from the record,
+/// so an account section the record leaves out while it holds its defaults (`message_style`,
+/// `teams_reading`) returns to them here too. A record written before the split still carries
+/// the installation's sections; they are ignored as well.
 pub(crate) fn install_account_config(local: &Config, record: Value) -> Result<Config> {
-    let mut merged = serde_json::to_value(local)?;
-    let (Some(merged_object), Value::Object(record)) = (merged.as_object_mut(), record) else {
+    let local = serde_json::to_value(local)?;
+    let (Some(local), Value::Object(mut merged)) = (local.as_object(), record) else {
         anyhow::bail!("the configuration record is not an object");
     };
-    for (section, value) in record {
-        if INSTALLATION_SECTIONS.contains(&section.as_str())
-            || matches!(section.as_str(), "secrets" | "cloud")
-        {
-            continue;
+    for section in INSTALLATION_SECTIONS.iter().chain(&["secrets", "cloud"]) {
+        merged.remove(*section);
+        if let Some(value) = local.get(*section) {
+            merged.insert((*section).into(), value.clone());
         }
-        if section == "policy" {
-            let dry_run = merged_object["policy"]["dry_run"].clone();
-            let mut policy = value;
-            if let Some(policy) = policy.as_object_mut() {
-                policy.insert("dry_run".into(), dry_run);
-            }
-            merged_object.insert(section, policy);
-            continue;
-        }
-        merged_object.insert(section, value);
     }
-    Ok(serde_json::from_value(merged)?)
+    if let Some(policy) = merged.get_mut("policy").and_then(Value::as_object_mut) {
+        policy.insert("dry_run".into(), local["policy"]["dry_run"].clone());
+    }
+    Ok(serde_json::from_value(Value::Object(merged))?)
 }
 
 impl SettingsStore for LocalSettings {
@@ -453,6 +447,26 @@ mod tests {
         let installed = install_account_config(&local, split[0].value.clone()).unwrap();
         assert_eq!(installed.server.bind, local.server.bind);
         assert_eq!(installed.policy.greeting, "Synthetic greeting");
+
+        // A section the account returned to its defaults is left out of the record, and
+        // returns to them here instead of keeping this computer's former copy.
+        let mut reading = local.clone();
+        reading.teams_reading.all_chats = true;
+        reading.graph.discover_all_chats = true;
+        let account = records(local.clone(), store.map().unwrap()).unwrap();
+        assert!(account[0].value.get("teams_reading").is_none());
+        let installed = install_account_config(&reading, account[0].value.clone()).unwrap();
+        assert!(installed.teams_reading.is_default());
+        assert!(installed.graph.discover_all_chats);
+        let account = records(reading.clone(), store.map().unwrap()).unwrap();
+        assert_eq!(account[0].value["teams_reading"]["all_chats"], true);
+        assert!(account[0].value.get("graph").is_none());
+        let installed = install_account_config(&local, account[0].value.clone()).unwrap();
+        assert!(installed.teams_reading.all_chats);
+        assert_eq!(
+            installed.graph.discover_all_chats,
+            local.graph.discover_all_chats
+        );
     }
 
     #[test]

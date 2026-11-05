@@ -10,9 +10,11 @@
 //! the repository *alias* and a relative path) while the alias's folder on a computer stays that
 //! computer's own binding: a source whose binding does not resolve is unavailable there, never
 //! reinterpreted. The organization (its name, entries and documenting sources) and the work
-//! item guides are account data too, and travel with it.
+//! item guides are account data too, and travel with it. The chats each computer receives stay
+//! its own; the account's separate reading scope (`teams_reading`, chat IDs included) travels,
+//! and only reads on request use it.
 use crate::{
-    config::{Config, Language, LlmChoice},
+    config::{Config, Language, LlmChoice, TeamsReading},
     index::Note,
     knowledge::{Access, Context, KnowledgeMap, Resource},
     organization::{Entry, Organization},
@@ -36,7 +38,7 @@ pub const MAX_NOTE_PAGES: usize = 256;
 pub const MAX_NOTES: usize = NOTES_PAGE * MAX_NOTE_PAGES;
 
 /// The documented list of portable settings, shown to users and agents.
-pub const SETTINGS_FIELDS: [&str; 7] = [
+pub const SETTINGS_FIELDS: [&str; 10] = [
     "llm.language",
     "llm.style",
     "llm.chain",
@@ -44,6 +46,9 @@ pub const SETTINGS_FIELDS: [&str; 7] = [
     "policy.max_context_chars",
     "policy.max_message_age_seconds",
     "policy.sensitive_patterns",
+    "teams_reading.all_chats",
+    "teams_reading.personal_chat",
+    "teams_reading.chats",
 ];
 /// What synchronization carries besides the settings.
 pub const COLLECTIONS: [&str; 6] = [
@@ -68,6 +73,10 @@ pub struct Settings {
     pub max_context_chars: usize,
     pub max_message_age_seconds: i64,
     pub sensitive_patterns: Vec<String>,
+    /// The chats any computer of the account may read on request. Left out while it adds
+    /// nothing, so an account that never set it keeps the document an older host computes.
+    #[serde(default, skip_serializing_if = "TeamsReading::is_default")]
+    pub teams_reading: TeamsReading,
 }
 
 impl Settings {
@@ -80,6 +89,7 @@ impl Settings {
             max_context_chars: config.policy.max_context_chars,
             max_message_age_seconds: config.policy.max_message_age_seconds,
             sensitive_patterns: config.policy.sensitive_patterns.clone(),
+            teams_reading: config.teams_reading.clone(),
         }
     }
     /// Write the portable fields into a profile's configuration. An empty chain keeps the
@@ -94,6 +104,7 @@ impl Settings {
         config.policy.max_context_chars = self.max_context_chars;
         config.policy.max_message_age_seconds = self.max_message_age_seconds;
         config.policy.sensitive_patterns = self.sensitive_patterns.clone();
+        config.teams_reading = self.teams_reading.clone();
     }
     /// The existing validation rules, applied to the settings alone.
     pub fn check(&self) -> Result<()> {
@@ -252,7 +263,8 @@ impl Document {
     /// is kept. Sources whose repository binding does not resolve here are left out and
     /// reported, and so are the questions that only read them; contexts and questions that lose
     /// some are reported as partial, and the organization stops naming them here. Nothing is
-    /// enabled, widened or defaulted.
+    /// enabled, widened or defaulted: the account's reading scope is installed as the account
+    /// holds it, and the chats this profile receives are not touched.
     pub fn install(
         &self,
         config: &Config,
@@ -431,10 +443,14 @@ impl Patch {
     /// holds them. A change may never broaden what the assistant may read: a new source starts
     /// disabled, without audiences or external processing, and an existing one keeps (or
     /// narrows) its flags, audiences and, while enabled, its destination. Granting access is
-    /// done on the account's own coordinator.
+    /// done on the account's own coordinator, and so is widening the account's reading scope.
     pub fn apply_to(&self, document: &mut Document, unavailable: &BTreeSet<String>) -> Result<()> {
         ensure!(document.schema == SCHEMA, "unsupported portable schema");
         if let Some(settings) = &self.settings {
+            ensure!(
+                !reads_more(&document.settings.teams_reading, &settings.teams_reading),
+                "Letting the account's computers read more Teams chats (teams_reading) is done on the account's own coordinator, not through synchronization."
+            );
             document.settings = settings.clone();
         }
         for id in &self.sources.remove {
@@ -550,6 +566,14 @@ fn merge<T: Clone>(
             items.push(item);
         }
     }
+}
+
+/// Whether `after` lets the account's computers read a chat `before` does not.
+fn reads_more(before: &TeamsReading, after: &TeamsReading) -> bool {
+    (after.all_chats && !before.all_chats)
+        || (!before.all_chats
+            && ((after.personal_chat && !before.personal_chat)
+                || after.chats.iter().any(|c| !before.chats.contains(c))))
 }
 
 /// Whether `after` lets the assistant read more than `before` does.
@@ -902,5 +926,53 @@ mod tests {
             .apply_to(&mut next, &BTreeSet::from(["hidden".to_owned()]))
             .unwrap();
         assert_eq!(next.organization.sources, ["hidden"]);
+    }
+
+    #[test]
+    fn the_reading_scope_follows_the_account_and_never_the_reception() {
+        let (config, map) = profile();
+        // Left out while it adds nothing: the document and digest an older host computes.
+        let plain = Document::project(&config, &map);
+        assert!(
+            !serde_json::to_string(&plain)
+                .unwrap()
+                .contains("teams_reading")
+        );
+        let mut coordinator = config.clone();
+        coordinator.graph.discover_all_chats = true;
+        coordinator.graph.allowed_chats = vec!["19:received@thread.v2".into()];
+        coordinator.teams_reading = TeamsReading {
+            all_chats: false,
+            personal_chat: true,
+            chats: vec!["19:shared@thread.v2".into()],
+        };
+        let account = Document::project(&coordinator, &map);
+        account.check().unwrap();
+        let text = serde_json::to_string(&account).unwrap();
+        assert!(text.contains("19:shared") && !text.contains("19:received"));
+        assert_ne!(account.digest(&[]), plain.digest(&[]));
+
+        // Installed exactly; what the computer receives stays its own.
+        let mut local = config.clone();
+        local.graph.allowed_chats = vec!["19:local@thread.v2".into()];
+        let (installed, _, _) = account.install(&local, &map, |_| true);
+        assert_eq!(installed.teams_reading, coordinator.teams_reading);
+        assert!(!installed.graph.discover_all_chats);
+        assert_eq!(installed.graph.allowed_chats, ["19:local@thread.v2"]);
+
+        // A replica may narrow the scope but never widen it.
+        let widen = |change: &dyn Fn(&mut TeamsReading)| {
+            let mut after = account.clone();
+            change(&mut after.settings.teams_reading);
+            let mut next = account.clone();
+            Patch::between(&account, &after).apply_to(&mut next, &BTreeSet::new())
+        };
+        assert!(widen(&|r| r.all_chats = true).is_err());
+        assert!(widen(&|r| r.chats.push("19:other@thread.v2".into())).is_err());
+        assert!(widen(&|r| r.personal_chat = false).is_ok());
+        assert!(widen(&|r| r.chats.clear()).is_ok());
+        let mut invalid = account.clone();
+        invalid.settings.teams_reading.chats = vec!["../me".into()];
+        assert!(invalid.check().is_err());
     }
 }

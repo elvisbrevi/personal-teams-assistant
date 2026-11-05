@@ -25,11 +25,69 @@ pub struct Config {
     /// that predates it still loads the profile.
     #[serde(default, skip_serializing_if = "MessageStyle::is_default")]
     pub message_style: MessageStyle,
+    /// The chats every computer of the account may read on request; omitted while it adds
+    /// nothing, so a host that predates it still loads the profile.
+    #[serde(default, skip_serializing_if = "TeamsReading::is_default")]
+    pub teams_reading: TeamsReading,
     /// This installation's link to the account store in Cloudflare; installation-local, never
     /// part of the account configuration. Omitted while not connected, so older hosts still
     /// load the profile until the installation connects.
     #[serde(default, skip_serializing_if = "Cloud::is_default")]
     pub cloud: Cloud,
+}
+
+/// What the account lets any of its computers read in Teams on request (`pta teams messages|
+/// search|chats` and the MCP `teams_*` reads), with that computer's own Microsoft session; Graph
+/// still checks that the user belongs to the chat. It follows the account and adds to the chats
+/// the profile receives (`graph.*`), which stay each computer's own: it never subscribes to,
+/// receives, answers or posts in a chat.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct TeamsReading {
+    /// Every chat the user belongs to, the personal chat included.
+    #[serde(default)]
+    pub all_chats: bool,
+    /// The personal chat (the user's Teams notes).
+    #[serde(default)]
+    pub personal_chat: bool,
+    /// Chat IDs, as `pta teams chats` lists them.
+    #[serde(default)]
+    pub chats: Vec<String>,
+}
+
+impl TeamsReading {
+    pub const MAX_CHATS: usize = 500;
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+    pub fn validate(&self) -> Result<()> {
+        ensure!(
+            self.chats.len() <= Self::MAX_CHATS,
+            "teams_reading.chats lists at most {} chats",
+            Self::MAX_CHATS
+        );
+        for (i, chat) in self.chats.iter().enumerate() {
+            ensure!(
+                crate::adapters::teams::canonical_resource(&format!("chats/{chat}/messages/0"))
+                    .is_ok()
+                    && !self.chats[..i].contains(chat),
+                "teams_reading.chats holds chat IDs, each once"
+            );
+        }
+        Ok(())
+    }
+    /// Whether this scope reads a chat's message collection (`chats/{id}/messages`).
+    pub fn reads(&self, collection: &str) -> bool {
+        let Some(id) = collection
+            .strip_prefix("chats/")
+            .and_then(|c| c.strip_suffix("/messages"))
+        else {
+            return false;
+        };
+        self.all_chats
+            || (self.personal_chat && id == "48:notes")
+            || self.chats.iter().any(|c| c == id)
+    }
 }
 
 /// The account store link of this installation (`[cloud]`).
@@ -404,6 +462,7 @@ impl Config {
                 "self chat account mismatch"
             );
         }
+        self.teams_reading.validate()?;
         let url = url::Url::parse(&self.server.public_url)?;
         ensure!(
             url.scheme() == "https"

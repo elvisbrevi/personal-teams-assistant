@@ -27,6 +27,9 @@ pub(super) struct Tool {
 fn default_message_style() -> Value {
     serde_json::to_value(crate::config::MessageStyle::default()).unwrap_or_default()
 }
+fn default_teams_reading() -> Value {
+    serde_json::to_value(crate::config::TeamsReading::default()).unwrap_or_default()
+}
 fn object(properties: Value, required: &[&str]) -> Value {
     json!({"type": "object", "properties": properties, "required": required, "additionalProperties": false})
 }
@@ -1226,6 +1229,13 @@ pub(super) const TOOLS: &[Tool] = &[
         schema: none,
     },
     Tool {
+        name: "teams_reading",
+        title: "Teams chats readable on request",
+        description: "Which Teams chats teams_messages, teams_search and teams_chats may read here. account follows the account to every computer signed in to it (all_chats, personal_chat, chats); this_computer is what this computer receives and answers (graph.discover_all_chats, graph.allowed_chats, the personal chat), which stays its own. A read is allowed when either allows it.",
+        effect: Effect::Read,
+        schema: none,
+    },
+    Tool {
         name: "chat_simulate",
         title: "Try a question",
         description: "Runs the real pipeline on a test question and returns the answer; never sends to Teams. Uses the configured models' quota.",
@@ -1475,7 +1485,7 @@ pub(super) const TOOLS: &[Tool] = &[
     Tool {
         name: "teams_messages",
         title: "Read a Teams chat",
-        description: "Read-only. A chat's messages from every author, newest first: author name (never an address), date, plain text, what each replies to or quotes, and next_cursor to pass as before for older ones. chat is an ID from teams_chats, self, or one message's resource (chats/CHAT/messages/ID, as messages_list shows it). mine instead reads the user's own messages in the chats this profile reads (last 30 days by default). Only chats the profile may read (the personal chat, graph.allowed_chats, or all with graph.discover_all_chats).",
+        description: "Read-only. A chat's messages from every author, newest first: author name (never an address), date, plain text, what each replies to or quotes, and next_cursor to pass as before for older ones. chat is an ID from teams_chats, self, or one message's resource (chats/CHAT/messages/ID, as messages_list shows it). mine instead reads the user's own messages in the chats this profile reads (last 30 days by default). Only chats this computer receives (the personal chat, graph.allowed_chats, or all with graph.discover_all_chats) or the account lets every computer read (teams_reading).",
         effect: Effect::Read,
         schema: || {
             object(
@@ -1492,7 +1502,7 @@ pub(super) const TOOLS: &[Tool] = &[
     Tool {
         name: "teams_search",
         title: "Search Teams messages",
-        description: "Read-only. Messages matching some words in the chats this profile reads, newest first, with the same fields as teams_messages. Uses Microsoft Search; if it cannot be used, reads the chats' history directly (method chat_history, bounded: partial and warnings say what was not covered). chats keeps those chats, from a part of the author's name, since/until a window.",
+        description: "Read-only. Messages matching some words in the chats this computer may read (see teams_reading), newest first, with the same fields as teams_messages. Uses Microsoft Search; if it cannot be used, reads the chats' history directly (method chat_history, bounded: partial and warnings say what was not covered). chats keeps those chats, from a part of the author's name, since/until a window.",
         effect: Effect::Read,
         schema: || {
             object(
@@ -1552,6 +1562,18 @@ pub(super) const TOOLS: &[Tool] = &[
             object(
                 json!({"changes": {"type": "object", "description": "Fields of message_style to set."}}),
                 &["changes"],
+            )
+        },
+    },
+    Tool {
+        name: "teams_reading_update",
+        title: "Change the Teams chats readable on request",
+        description: "Changes which Teams chats every computer of the account may read on request (teams_messages, teams_search, teams_chats), each with its own Microsoft session. It never changes what any computer receives or answers. all_chats is every chat the user belongs to, personal_chat their Teams notes, chats exact IDs from teams_chats (the whole list). A computer that synchronizes through its coordinator may only narrow it. Needs the user's confirmation.",
+        effect: Effect::External,
+        schema: || {
+            object(
+                json!({"all_chats": {"type": "boolean"}, "personal_chat": {"type": "boolean"}, "chats": strings("Chat IDs from teams_chats; replaces the list."), "confirmed": confirmed()}),
+                &[],
             )
         },
     },
@@ -1928,6 +1950,16 @@ pub(super) async fn run(name: &str, args: &Value) -> Result<Value, String> {
             let style = ipc("snapshot", json!({})).await?["config"]["message_style"].clone();
             Ok(if style.is_null() { default_message_style() } else { style })
         }
+        "teams_reading" => {
+            let config = ipc("snapshot", json!({})).await?["config"].clone();
+            let account = &config["teams_reading"];
+            Ok(json!({
+                "account": if account.is_null() { default_teams_reading() } else { account.clone() },
+                "this_computer": {"discover_all_chats": config["graph"]["discover_all_chats"],
+                    "allowed_chats": config["graph"]["allowed_chats"],
+                    "personal_chat": !config["graph"]["self_chat"].is_null()},
+            }))
+        }
         "chat_simulate" => {
             let input = json!({"session": args.get("session").and_then(Value::as_str).unwrap_or("mcp"), "text": text(args, "text")?,
                 "group": false, "mentioned": false, "sources": args.get("sources").cloned().unwrap_or(json!([]))});
@@ -2075,6 +2107,29 @@ pub(super) async fn run(name: &str, args: &Value) -> Result<Value, String> {
                     .ok_or("Invalid profile.")?;
                 for (key, value) in changes {
                     style.insert(key, value);
+                }
+                Ok(())
+            })
+            .await
+        }
+        "teams_reading_update" => {
+            let fields: Vec<(String, Value)> = ["all_chats", "personal_chat", "chats"]
+                .iter()
+                .filter_map(|k| args.get(*k).map(|v| ((*k).to_owned(), v.clone())))
+                .collect();
+            if fields.is_empty() {
+                return Err("Say what to change: all_chats, personal_chat or chats.".into());
+            }
+            edit(|p| {
+                let reading = p["config"]
+                    .as_object_mut()
+                    .ok_or("Invalid profile.")?
+                    .entry("teams_reading")
+                    .or_insert_with(default_teams_reading)
+                    .as_object_mut()
+                    .ok_or("Invalid profile.")?;
+                for (key, value) in fields {
+                    reading.insert(key, value);
                 }
                 Ok(())
             })
@@ -2261,6 +2316,10 @@ pub(super) fn confirmation(name: &str, args: &Value) -> Option<String> {
             "Post this message in the Teams chat {}, as you?\n\n{}",
             args["chat"].as_str().unwrap_or("?"),
             args["text"].as_str().unwrap_or("")
+        ),
+        "teams_reading_update" => format!(
+            "Change which Teams chats every computer of the account may read on request: {}?",
+            json!({"all_chats": args.get("all_chats"), "personal_chat": args.get("personal_chat"), "chats": args.get("chats")})
         ),
         "source_authorize" => format!(
             "Change who may read the source {}: {}?",

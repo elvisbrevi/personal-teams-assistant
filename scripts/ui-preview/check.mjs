@@ -309,6 +309,13 @@ check('axe: no WCAG 2.2 AA violations in any scan', !Object.keys(totals).length,
   check('edited section is flagged', await page.isVisible('#settings-tab-teams .flag.edited'));
   check('save bar appears with unsaved changes', await page.isVisible('#savebar'));
   await page.click('#discover-chats');
+  check('reception is marked as this computer\'s and reading on request as the account\'s',
+    (await page.textContent('#teams-reception legend')).includes('Este computador') && (await page.textContent('#teams-reading legend')).includes('Cuenta'));
+  check('the account\'s readable chats are shown while not reading all chats',
+    await page.isVisible('#reading-chats-field') && await page.isChecked('#reading-personal-chat') && (await page.inputValue('#reading-chats')).includes('19:abc@thread.v2'));
+  await page.click('#reading-all-chats');
+  check('reading all chats hides the personal chat and the list', !(await page.isVisible('#reading-chats-field')) && !(await page.isVisible('#reading-personal-chat-field')));
+  await page.click('#reading-all-chats');
   // Keyboard tabs
   await page.focus('#settings-tab-teams');
   await page.keyboard.press('ArrowRight');

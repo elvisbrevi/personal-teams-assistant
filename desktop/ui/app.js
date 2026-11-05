@@ -1535,6 +1535,10 @@ async function reload() {
   field('#allowed-chats', config.graph.allowed_chats.join('\n'));
   $('#dry-run').checked = config.policy.dry_run;
   $('#discover-chats').checked = config.graph.discover_all_chats;
+  const reading = config.teams_reading ?? {};
+  $('#reading-all-chats').checked = Boolean(reading.all_chats);
+  $('#reading-personal-chat').checked = Boolean(reading.personal_chat);
+  field('#reading-chats', (reading.chats ?? []).join('\n'));
   renderChatList();
   renderRegistrationSettings();
   renderEmbeddings();
@@ -1557,7 +1561,12 @@ setInterval(async () => {
 // ---------------------------------------------------------------- settings
 
 /** The allowed-chats list only applies while not every chat is discovered; its value is kept either way. */
-function renderChatList() { $('#allowed-chats-field').hidden = $('#discover-chats').checked; }
+function renderChatList() {
+  $('#allowed-chats-field').hidden = $('#discover-chats').checked;
+  const all = $('#reading-all-chats').checked;
+  $('#reading-personal-chat-field').hidden = all;
+  $('#reading-chats-field').hidden = all;
+}
 
 function rowText(primary, secondary, extra) {
   return el('div', {}, el('strong', {}, primary, extra), el('small', { textContent: secondary }));
@@ -3581,6 +3590,11 @@ function collectSettings() {
   config.graph.user_id = $('#user-id').value.trim();
   config.graph.allowed_chats = lines($('#allowed-chats').value);
   config.graph.discover_all_chats = $('#discover-chats').checked;
+  config.teams_reading = {
+    all_chats: $('#reading-all-chats').checked,
+    personal_chat: $('#reading-personal-chat').checked,
+    chats: [...new Set(lines($('#reading-chats').value))],
+  };
   config.server.public_url = $('#public-url').value.trim();
   config.server.bind = $('#bind').value.trim();
   config.server.cloudflare_tunnel = $('#cloudflare-tunnel').checked;
@@ -5441,6 +5455,7 @@ document.querySelectorAll('.cfg').forEach(input => {
   input.addEventListener('change', markDirty);
 });
 $('#discover-chats').addEventListener('change', renderChatList);
+$('#reading-all-chats').addEventListener('change', renderChatList);
 $('#style-preset').addEventListener('change', () => {
   const chosen = $('#style-preset').value;
   const preset = STYLE_PRESETS[chosen];

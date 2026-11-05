@@ -21,6 +21,7 @@
     Object.assign(c.graph, { tenant_id: '7f3c1a52-2b6e-4f4e-9a51-1c2d3e4f5a6b', client_id: 'b1d2c3e4-5f60-4718-8a9b-0c1d2e3f4a5b',
       user_id: '0a1b2c3d-4e5f-6071-8293-a4b5c6d7e8f9', discover_all_chats: true, self_chat: { id: '48:notes', enabled_at: 1791900000 } });
     Object.assign(c.server, { public_url: 'https://assistant.contoso.dev', cloudflare_tunnel: true });
+    c.teams_reading = { all_chats: false, personal_chat: true, chats: ['19:abc@thread.v2'] };
     c.llm.chain = [
       { provider: 'codex', model: 'gpt-6.1-sol', effort: 'medium', enabled: true },
       { provider: 'deepseek', model: 'deepseek-flash', effort: 'max', enabled: true },
