@@ -70,7 +70,7 @@ async function open(options = {}, scenario = 'full') {
 // An admitted ordinary account sees its own identity and never probes host CLI sessions.
 {
   const { context, page, errors } = await open({ axe: true, context: { viewport: { width: 393, height: 852 }, isMobile: true } }, 'account');
-  check('shared account Home explains personal execution', await page.locator('#azure-cli-status').innerText().then(text => text.includes('máquina personal')));
+  check('shared account Home explains personal execution', await page.locator('#azure-cli-status').textContent().then(text => text.includes('máquina personal')));
   check('shared account does not probe operator CLI sessions', await page.evaluate(() => !window.__ptaCalls.some(call => ['azure_cli_status', 'github_cli_status'].includes(call.method))));
   await page.evaluate(() => showTab('settings', 'panel-web-account'));
   check('shared account shows its own identity', await page.locator('#account-identity').innerText().then(text => text.includes('bob')));
@@ -90,9 +90,12 @@ const scan = page => page.evaluate(async () => (await axe.run(document, { runOnl
 for (const [label, ctx] of [['desktop-light', {}], ['desktop-dark', { colorScheme: 'dark' }], ['phone', { viewport: { width: 393, height: 852 }, isMobile: true, hasTouch: true }]]) {
   const { context, page } = await open({ axe: true, context: ctx });
   await page.evaluate(axeSource);
-  for (const tab of ['overview', 'todo', 'agent-history', 'messages', 'registration', 'knowledge', 'chat', 'settings']) {
+  for (const tab of ['overview', 'todo', 'agent-history', 'agent-guides', 'messages', 'registration', 'knowledge', 'chat', 'settings']) {
     await page.evaluate(t => showTab(t), tab);
     await page.waitForTimeout(300);
+    // Home's parts in order and the guides' editors are scanned open.
+    if (tab === 'overview') await page.evaluate(() => { document.querySelector('#status-more').open = true; });
+    if (tab === 'agent-guides') await page.evaluate(() => { for (const d of document.querySelectorAll('#agent-guides details')) d.open = true; });
     // Every tab of the section's tab list (Settings sections, Activities and Knowledge views) is scanned.
     const list = { settings: '#settings-tabs', knowledge: '#knowledge-tabs' }[tab];
     const groups = list ? await page.$$eval(`${list} [role=tab]`, tabs => tabs.map(t => t.dataset.group)).catch(() => []) : [];
@@ -146,12 +149,18 @@ check('axe: no WCAG 2.2 AA violations in any scan', !Object.keys(totals).length,
   const { context, page, errors } = await open();
   // Navigation order and Settings in the footer
   const order = await page.$$eval('nav [data-tab]', b => b.map(x => x.dataset.tab));
-  check('nav order: daily work first, Settings last', JSON.stringify(order) === JSON.stringify(['overview', 'todo', 'messages', 'registration', 'agent-history', 'knowledge', 'chat', 'settings']), order.join(','));
+  check('nav order: daily work first, Settings last', JSON.stringify(order) === JSON.stringify(['overview', 'todo', 'messages', 'registration', 'knowledge', 'chat', 'settings']), order.join(','));
   await page.click('nav [data-tab="todo"]');
   await page.waitForTimeout(200);
   check('To-Do initially requests ten Azure HUs', await page.evaluate(() => window.__ptaLastTodo?.provider === 'azure' && window.__ptaLastTodo?.limit === 10) && await page.locator('.todo-item').count() === 10);
   check('To-Do includes states without assigned items', await page.locator('#todo-state option[value="Awaiting validation"]').count() === 1);
-  check('To-Do keeps both HU and development date pairs', await page.locator('.todo-item:first-child .todo-dates dt').count() === 5);
+  check('a To-Do card shows the two dates nearest to today', await page.locator('.todo-item:first-child .todo-dates dt').count() === 2);
+  await page.click('.todo-item:first-child .todo-select');
+  await page.waitForSelector('#todo-detail-title');
+  const detailDates = await page.locator('#todo-detail-content .todo-detail-header .todo-dates dt').allTextContents();
+  check('the To-Do detail keeps when it was created and every date', detailDates.includes('Creada') && detailDates.includes('Inicio de desarrollo'), detailDates.join(', '));
+  await page.click('#todo-back');
+  await page.waitForSelector('.todo-item');
   await page.click('.todo-item:first-child .todo-actions .icon-button:nth-child(2)');
   await page.waitForFunction(() => window.__ptaOpenedWorkItem);
   check('native To-Do link uses the host browser operation', await page.evaluate(() => window.__ptaOpenedWorkItem?.endsWith('/5000')));
@@ -232,9 +241,17 @@ check('axe: no WCAG 2.2 AA violations in any scan', !Object.keys(totals).length,
   await page.waitForTimeout(200);
   check('To-Do has a filtered empty state', await page.isVisible('#todo-list .empty'));
   await page.selectOption('#todo-state', '');
-  await page.selectOption('#todo-limit', '25');
   await page.waitForTimeout(200);
-  check('To-Do limit reaches the backend tool', await page.evaluate(() => window.__ptaLastTodo?.limit === 25) && await page.locator('.todo-item').count() === 15);
+  check('To-Do offers more while the list has more', await page.isVisible('#todo-more') && await page.locator('.todo-item').count() === 10);
+  await page.click('#todo-more');
+  await page.waitForFunction(() => document.querySelectorAll('.todo-item').length === 15);
+  check('Show more asks the backend tool for the next step and continues at the first new item', await page.evaluate(() => window.__ptaLastTodo?.limit === 25
+    && document.activeElement === document.querySelectorAll('.todo-item')[10].querySelector('.todo-select')) && !(await page.isVisible('#todo-more')));
+  await page.selectOption('#todo-state', 'Finished');
+  await page.waitForTimeout(200);
+  check('a new filter starts again at the first step', await page.evaluate(() => window.__ptaLastTodo?.limit === 10));
+  await page.selectOption('#todo-state', '');
+  await page.waitForTimeout(200);
   await page.evaluate(() => { window.__ptaTodoError = true; });
   await page.click('#todo-refresh');
   await page.waitForTimeout(200);
@@ -244,7 +261,8 @@ check('axe: no WCAG 2.2 AA violations in any scan', !Object.keys(totals).length,
   await page.selectOption('#todo-provider', 'github');
   await page.waitForTimeout(400);
   check('To-Do ignores an older Azure response after switching provider', await page.locator('.todo-item').count() === 1 && (await page.textContent('#todo-list')).includes('Billing platform'));
-  check('GitHub offers its native issue states and unavailable dates', await page.locator('#todo-state option[value="closed"]').count() === 1 && (await page.textContent('#todo-list')).includes('Sin registrar'));
+  check('GitHub offers its native issue states, and a card without recorded dates says when it was created', await page.locator('#todo-state option[value="closed"]').count() === 1
+    && (await page.locator('.todo-item .todo-dates dt').allTextContents()).join() === 'Creada', (await page.locator('.todo-item .todo-dates dt').allTextContents()).join());
   await page.click('.todo-item:first-child .todo-select');
   await page.waitForSelector('#todo-detail-title');
   check('GitHub epic detail passes repository-local ID and includes sub-issues', await page.evaluate(() => window.__ptaLastDetail?.provider === 'github' && window.__ptaLastDetail?.id === 42 && window.__ptaLastDetail?.project === 'contoso/billing') && (await page.textContent('#todo-detail-content')).includes('#43'));
@@ -271,7 +289,10 @@ check('axe: no WCAG 2.2 AA violations in any scan', !Object.keys(totals).length,
   check('nav click focuses the section heading', await page.evaluate(() => document.activeElement?.matches('#knowledge h1')));
   // Status row deep link to Settings › Microsoft Teams
   await page.click('nav [data-tab="overview"]');
-  await page.click('#tiles .status-row:nth-child(1)');
+  check('Home folds the parts in order into one line', !(await page.isVisible('#tiles')) && !(await page.isVisible('#tiles-fine .status-row'))
+    && (await page.textContent('#status-more-summary')).includes('Todo en orden: 9 partes'), await page.textContent('#status-more-summary'));
+  await page.click('#status-more-summary');
+  await page.click('#tiles-fine .status-row:nth-child(1)');
   await page.waitForTimeout(300);
   check('status row opens Settings › Microsoft Teams', await page.isVisible('#panel-teams') && await page.getAttribute('#settings-tab-teams', 'aria-selected') === 'true');
   // Conditional fields
@@ -479,6 +500,12 @@ check('axe: no WCAG 2.2 AA violations in any scan', !Object.keys(totals).length,
     const o = window.__ptaLastSave?.map?.organization;
     return o?.name === 'Contoso Ltd' && o.sources.includes('handbook') && o.entries.some(e => e.id === 'layers' && e.kind === 'architecture');
   }));
+  check('Organization no longer holds the guides or the agent instructions', await page.locator('#knowledge #guides, #knowledge #agent-prompts').count() === 0
+    && (await page.textContent('#organization-summary')).trim() === '2 entradas', await page.textContent('#organization-summary'));
+  await page.click('nav [data-tab="todo"]');
+  await page.click('#todo-agent-guides');
+  check('To-Do opens Guides and instructions and stays the current section', await page.isVisible('#agent-guides') && await page.getAttribute('nav [data-tab="todo"]', 'aria-current') === 'page'
+    && await page.evaluate(() => document.activeElement?.matches('#agent-guides h1')));
   check('work item guides list the task guide', await page.isVisible('#guides .resource:has(code:text-is("Task"))'));
   await page.click('#guide-form summary');
   await page.fill('#guide-id', 'support');
@@ -498,6 +525,9 @@ check('axe: no WCAG 2.2 AA violations in any scan', !Object.keys(totals).length,
   await plan.locator('.actions button').click();
   await page.click('#save'); await page.waitForTimeout(300);
   check('restoring the default removes the change', await page.evaluate(() => !window.__ptaLastSave.map.agent_prompts.some(p => p.id === 'plan')));
+  await page.click('#agent-guides-back');
+  check('Back returns to To-Do, on the button that opened the guides', await page.isVisible('#todo-master') && await page.evaluate(() => document.activeElement?.id === 'todo-agent-guides'));
+  await page.evaluate(() => showTab('knowledge'));
   // URL sources: public groups and exact authenticated Wiki pages.
   await page.click('#knowledge-tab-sources');
   await page.click('#url-source-form summary');
@@ -752,7 +782,7 @@ check('axe: no WCAG 2.2 AA violations in any scan', !Object.keys(totals).length,
   await page.click('#nav-more');
   check('phone: More reveals Knowledge and Test chat', await page.isVisible('nav [data-tab="knowledge"]') && await page.isVisible('nav [data-tab="chat"]'));
   await page.keyboard.press('Tab');
-  check('phone: Tab enters the More disclosure in reading order', await page.evaluate(() => document.activeElement?.dataset.tab === 'agent-history'));
+  check('phone: Tab enters the More disclosure in reading order', await page.evaluate(() => document.activeElement?.dataset.tab === 'knowledge'));
   await page.keyboard.press('Escape');
   check('phone: Escape closes More and restores focus', await page.getAttribute('#nav-more', 'aria-expanded') === 'false' && await page.evaluate(() => document.activeElement.id === 'nav-more'));
   await page.click('#nav-more');
@@ -882,19 +912,19 @@ for (const [label, viewport] of [['desktop', { width: 1440, height: 900 }], ['ph
   check(`${label}: direct task execution preserves the verified task classification`, await page.evaluate(() => window.__ptaLastImplementation.item.task === true));
   await page.click('nav [data-tab="settings"]');
   await page.click('#settings-tab-teams');
-  await page.waitForSelector('#teams-machine-list input[type=radio]');
-  check(`${label}: existing Teams machine is selected by default`, await page.locator('#teams-machine-list input:checked').inputValue() === '11111111-1111-4111-8111-111111111111');
-  await page.check('#teams-machine-list input[value="22222222-2222-4222-8222-222222222222"]');
-  await page.waitForFunction(() => window.__ptaTeamsMachine && !document.querySelector('#teams-machine-list input').disabled);
+  await page.click('#teams-machine-open');
+  check(`${label}: Teams settings lead to the one machine list`, await page.getAttribute('#settings-tab-machines', 'aria-selected') === 'true' && await page.locator('#panel-teams-machine').count() === 0);
+  await page.waitForSelector('#machine-list input[type=radio]');
+  check(`${label}: existing Teams machine is selected by default`, await page.locator('#machine-list input:checked').inputValue() === '11111111-1111-4111-8111-111111111111');
+  await page.check('#machine-list input[value="22222222-2222-4222-8222-222222222222"]');
+  await page.waitForFunction(() => window.__ptaTeamsMachine && !document.querySelector('#machine-list input').disabled);
   check(`${label}: Teams machine is configured separately from implementation`, await page.evaluate(() => window.__ptaTeamsMachine === '22222222-2222-4222-8222-222222222222'));
   await page.evaluate(() => { window.__ptaTeamsMachineError = true; });
-  await page.check('#teams-machine-list input[value="11111111-1111-4111-8111-111111111111"]');
-  await page.waitForFunction(() => !document.querySelector('#teams-machine-list input').disabled);
-  check(`${label}: failed Teams switch restores the saved radio choice`, await page.locator('#teams-machine-list input:checked').inputValue() === '22222222-2222-4222-8222-222222222222');
+  await page.check('#machine-list input[value="11111111-1111-4111-8111-111111111111"]');
+  await page.waitForFunction(() => !document.querySelector('#machine-list input').disabled);
+  check(`${label}: failed Teams switch restores the saved radio choice`, await page.locator('#machine-list input:checked').inputValue() === '22222222-2222-4222-8222-222222222222');
   await page.evaluate(() => { window.__ptaTeamsMachineError = false; });
   await page.click('#notice-close');
-  await page.click('#settings-tab-models');
-  check(`${label}: machine list shares the Teams radio selection`, await page.locator('#machine-list input:checked').inputValue() === '22222222-2222-4222-8222-222222222222');
   check(`${label}: only the selected Teams machine can start`, await page.getByRole('button', { name: 'Iniciar asistente en Preview server', exact: true }).isDisabled() && await page.getByRole('button', { name: 'Iniciar asistente en Preview Mac', exact: true }).isEnabled());
   await page.getByRole('button', { name: 'Iniciar asistente en Preview Mac', exact: true }).click();
   await page.waitForSelector('#machine-list button[aria-label="Detener asistente en Preview Mac"]');
@@ -1149,7 +1179,7 @@ if (flag !== '--axe-only') for (const [label, viewport] of [['desktop', { width:
 for (const [label, ctx] of [['machine-desktop', {}], ['machine-phone', { viewport: { width: 393, height: 852 }, isMobile: true }]]) {
   const { context, page, errors } = await open({ axe: true, context: ctx });
   await page.evaluate(() => showTab('settings', 'panel-machines'));
-  await page.click('#settings-tab-models');
+  check(`${label}: a link to the machines opens their Settings category`, await page.getAttribute('#settings-tab-machines', 'aria-selected') === 'true');
   await page.getByRole('button', { name: 'Administrar máquina: Preview Mac', exact: true }).click();
   const editor = page.getByRole('dialog', { name: 'Administrar máquina', exact: true });
   await editor.waitFor();
@@ -1714,6 +1744,9 @@ for (const [label, options] of [['desktop', {}], ['phone', { context: { viewport
   const { context, page, errors } = await open({ axe: true, ...options });
   await page.evaluate(() => { window.__ptaCloudToken = true; showTab('settings', 'panel-cloud'); });
   const panel = page.locator('#panel-cloud');
+  await panel.locator('#cloud-migrate').waitFor();
+  check(`${label}: maintenance is folded under the next step`, !(await panel.locator('#cloud-disconnect').isVisible()) && await panel.locator('#cloud-maintenance > summary').isVisible());
+  await panel.locator('#cloud-maintenance > summary').click();
   await panel.locator('#cloud-mirror').waitFor();
   const start = panel.locator('#cloud-migrate');
   const rollback = panel.locator('#cloud-rollback');

@@ -151,7 +151,7 @@ reads retain their read-only behavior. The separate implementation flow can crea
 children and run installed coding agents.
 
 1. Read `machine_settings` and `machine_list`. The current coordinator defaults to itself as
-   the single Teams machine. In Settings > Language models, name this machine. Choose its
+   the single Teams machine. In Settings > Machines, name this machine. Choose its
    allowed directory roots after enrollment. Isolated portal profiles remain restricted to their own repositories.
    The GUI uses a shared directory sheet for allowed roots and local checkout add/edit paths,
    with single or multiple selection, a leading `../` row, parent navigation and Apply/Cancel. `machine_browse`
@@ -205,8 +205,8 @@ children and run installed coding agents.
 3. Select the single Teams machine in Settings > Microsoft Teams or `machine_teams`. The
    previous machine stops after losing its lease; handover waits up to 120 seconds before a
    new machine can start. Start the Teams assistant explicitly on the selected machine.
-   Settings > Language models shows the same choice as a radio beside each machine;
-   both lists also offer Start/Stop buttons. `machine_assistant` takes `machine`, `action`
+   Settings > Machines shows the same choice as a radio beside each machine;
+   the list also offers Start/Stop buttons. `machine_assistant` takes `machine`, `action`
    (`start`/`stop`) and CLI/MCP confirmation. It uses the target's ordinary assistant controls;
    Start still checks the selected Teams machine, lease, configuration and credentials.
    It does not change ownership or start automatically after choosing a radio. Refresh the
@@ -323,7 +323,7 @@ Agents use the same operations through `pta tools call` or MCP:
 1. `implementation_request_catalog` with `provider: azure|github` and, for Azure, `source`. It returns exact `targets`, up to three `recent` targets, CLI session/write readiness and available coding CLI providers/models/efforts. Keep a target as returned; arbitrary or edited targets are rejected.
 2. After the user approves the context, target, type and agent, call `implementation_request_start` with a new stable UUID `id`, the exact `target`, `kind: epic|hu|bug`, `context`, CLI `provider`, `model`, `effort` and `confirmed: true`. Azure requires the authenticated Azure CLI session on this host; read credentials cannot create requests. GitHub uses the GitHub CLI session that supplied the repository list, including its own assignment; the GitHub App connection does not authorize this flow. The process defines the actual Azure work item type. Creation uses its To-Do developer assignment role (or Assigned To) and description/reproduction field.
 3. Inspect `implementation_request_status` with `id` until generation/sending ends. Reusing that ID with the same submission only reads the saved record; another submission cannot reuse it. After any timeout inspect status, never start a replacement automatically. A failed/uncertain send is never retried. An uncertain request may already exist: inspect the provider first. If GitHub silently drops the Epic type or own assignment, `needs_attention` preserves its verified issue URL for review.
-4. `implementation_history` takes no arguments and returns the latest 100 recorded local requests and local/cached implementation sessions, bounded to 800 KB; `partial` indicates bounded history. The GUI's Agent history screen is in navigation (More on phones) and To-Do. Run IDs belong to PTA; session IDs belong to the native coding CLI. Missing session IDs and finish times remain empty, including interrupted executions.
+4. `implementation_history` takes no arguments and returns the latest 100 recorded local requests and local/cached implementation sessions, bounded to 800 KB; `partial` indicates bounded history. The GUI's Agent history screen opens from To-Do. Run IDs belong to PTA; session IDs belong to the native coding CLI. Missing session IDs and finish times remain empty, including interrupted executions.
 5. Use `implementation_open_session` with the recorded `machine` and run `id` on that machine's native desktop. The existing Codex/Claude platform limits apply; OpenCode and unsupported remote/mobile sessions retain their ID with an explanation rather than an invented app URL.
 
 Daily task snapshots, activity runs and all evidence tools remain read-only. This is a distinct explicit request-creation action; it does not authorize autonomous work item creation by the assistant.

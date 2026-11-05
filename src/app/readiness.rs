@@ -71,8 +71,7 @@ const MIGRATION_OPEN: &str = "Optional: review which existing credentials of thi
 const PROVIDERS_OK: &str =
     "Every model provider in the configuration is installed and signed in on this computer.";
 const PROVIDERS_MISSING: &str = "A model provider in the configuration is not installed or signed in on this computer. Nothing is installed or used in its place; install it and sign in yourself, then check again.";
-const PROVIDERS_NONE: &str =
-    "No model provider is turned on. Turn one on in Settings > Language models.";
+const PROVIDERS_NONE: &str = "No model provider is turned on. Turn one on in Settings > Models.";
 const ROOTS_NONE: &str = "No directory is selected for coding agents on this computer. Registration never grants access; choose the folders yourself with the directory selector.";
 const ROOTS_SET: &str =
     "Coding agents on this computer may work only in the directories you selected.";
@@ -622,7 +621,7 @@ async fn providers(host: &Arc<Host>) -> Step {
     if config.llm.active().is_empty() {
         return step
             .is("todo", PROVIDERS_NONE)
-            .act(gui("Settings > Language models"));
+            .act(gui("Settings > Models"));
     }
     let needed = portable::local_setup(host, &crate::portable::Unavailable::default()).await;
     let missing: Vec<&Value> = needed
@@ -643,7 +642,7 @@ async fn providers(host: &Arc<Host>) -> Step {
         .collect();
     step.is("attention", PROVIDERS_MISSING)
         .facts(json!({"providers": names}))
-        .act(gui("Settings > Language models > Detect CLIs again"))
+        .act(gui("Settings > Models > Detect CLIs again"))
 }
 
 async fn roots(host: &Arc<Host>, shared: bool) -> Step {
@@ -659,7 +658,7 @@ async fn roots(host: &Arc<Host>, shared: bool) -> Step {
         return step
             .is("optional", ROOTS_NONE)
             .facts(facts)
-            .act(gui("Settings > Execution machines > Choose directories"))
+            .act(gui("Settings > Machines > Choose directories"))
             .act(tool("machine_browse", json!({})));
     }
     step.is("done", ROOTS_SET).facts(facts)
@@ -709,7 +708,7 @@ async fn teams(host: &Arc<Host>, machines: &Machines, connected: bool) -> Step {
     if connected && selected.is_some_and(|s| s != own) {
         return step
             .is("optional", TEAMS_OTHER)
-            .act(gui("Settings > Execution machines > Machine for Teams"));
+            .act(gui("Settings > Machines > Machine for Teams"));
     }
     if !signed_in {
         return step
