@@ -47,7 +47,7 @@ test('every To-Do card opens its own detail after the list is rendered', async (
   const context = vm.createContext({ $, window: { scrollY: 0 },
     el: (tag, props, ...children) => node({ tag, ...props, children }), badge: () => null,
     todoOriginal: () => null, todoDate: () => null, t: x => x, tx: x => x, tn: () => '',
-    closeTodoDetail() {}, todoSources: () => [{}],
+    closeTodoDetail() {}, todoSources: () => [{}], todoTitle: () => '', todoTypeOptions() {},
     loadWorkItemSessions: async () => {},
     invoke: async () => ({ items, states: [], assignment_fields: [] }),
     loadTodoDetail: () => opened.push(vm.runInContext('todoSelection.item.id', context)),

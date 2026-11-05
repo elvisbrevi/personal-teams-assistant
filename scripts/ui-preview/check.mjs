@@ -222,7 +222,7 @@ check('axe: no WCAG 2.2 AA violations in any scan', !Object.keys(totals).length,
   await page.click('#todo-back');
   await page.selectOption('#todo-kind', 'bug');
   await page.waitForTimeout(200);
-  check('Azure bug filter reaches the tool and keeps only bugs', await page.evaluate(() => window.__ptaLastTodo?.kind === 'bug') && await page.locator('.todo-item').count() === 5);
+  check('Azure bug filter reaches the tool and keeps only bugs', await page.evaluate(() => window.__ptaLastTodo?.kind === 'bug') && await page.locator('.todo-item').count() === 6);
   await page.click('.todo-item:first-child .todo-select');
   await page.waitForSelector('#todo-detail-title');
   check('Bug detail uses reproduction steps and severity', await page.getByRole('heading', { name: 'Pasos de reproducción' }).count() === 1 && (await page.textContent('#todo-detail-content')).includes('2 - High'));
@@ -233,6 +233,13 @@ check('axe: no WCAG 2.2 AA violations in any scan', !Object.keys(totals).length,
   await page.evaluate(() => { window.__ptaDetailError = false; });
   await page.click('#todo-back');
   check('Detail back keeps the type filter', await page.inputValue('#todo-kind') === 'bug');
+  check('Every type of the process is offered as a filter', await page.locator('#todo-kind optgroup option').count() === 4 && await page.locator('#todo-kind option[value="type:Task"]').count() === 1);
+  await page.selectOption('#todo-kind', 'type:Development Bug');
+  await page.waitForTimeout(200);
+  check('An exact type reaches the tool instead of a group', await page.evaluate(() => window.__ptaLastTodo?.type === 'Development Bug' && !window.__ptaLastTodo?.kind) && await page.locator('.todo-item').count() === 1 && await page.inputValue('#todo-kind') === 'type:Development Bug');
+  await page.selectOption('#todo-kind', 'task');
+  await page.waitForTimeout(200);
+  check('The task group reaches the tool', await page.evaluate(() => window.__ptaLastTodo?.kind === 'task') && await page.isVisible('#todo-list .empty'));
   await page.selectOption('#todo-kind', '');
   await page.selectOption('#todo-state', 'Finished');
   await page.waitForTimeout(200);
@@ -764,12 +771,20 @@ check('axe: no WCAG 2.2 AA violations in any scan', !Object.keys(totals).length,
   await page.click('nav [data-tab="todo"]');
   await page.waitForTimeout(200);
   check('phone: To-Do has a direct tab and 44px link targets', await page.isVisible('#todo') && await page.$eval('.todo-item .icon-button', button => button.getBoundingClientRect().height >= 44));
+  check('phone: a card title takes the full width, its actions below', await page.$eval('.todo-item', card => {
+    const title = card.querySelector('h3').getBoundingClientRect(), actions = card.querySelector('.todo-actions').getBoundingClientRect(), box = card.getBoundingClientRect();
+    return title.width >= box.width - 48 && actions.top >= title.bottom;
+  }));
   await page.evaluate(() => { window.__ptaDetailDelay = 800; });
   const headerHeight = await page.locator('.sidebar').evaluate(node => node.getBoundingClientRect().height);
   await page.click('.todo-item:first-child .todo-select');
   check('phone: header stays compact during detail loading', await page.locator('.sidebar').evaluate(node => node.getBoundingClientRect().height) === headerHeight && await page.isVisible('#todo-detail-progress'));
   await page.waitForSelector('#todo-detail-title');
   await page.evaluate(() => { window.__ptaDetailDelay = 0; });
+  check('phone: a detail title takes the full width, its actions below', await page.$eval('.todo-detail-header', header => {
+    const title = header.querySelector('h2').getBoundingClientRect(), actions = header.querySelector('.todo-actions').getBoundingClientRect();
+    return title.width >= header.getBoundingClientRect().width - 48 && actions.top >= title.bottom;
+  }));
   check('phone: detail fits the screen and has touch-sized navigation', await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth) && await page.$eval('#todo-back', button => button.getBoundingClientRect().height >= 44));
   await page.selectOption('#todo-detail-content .todo-relation-filter select', 'Task');
   await page.locator('#todo-detail-content .todo-list .todo-select').nth(1).tap();

@@ -767,6 +767,11 @@ dialog p { overflow-wrap: anywhere; }
 @media (max-width: 680px) {
   .machine-actions { grid-column: 1 / -1; grid-row: auto; justify-content: start; }
   .todo-heading .icon-button, #todo-detail-content > .icon-button { min-width: 44px; min-height: 44px; }
+  /* The title takes the card's full width: a card's actions close it, a detail's follow its title. */
+  .todo-item { display: flex; flex-direction: column; }
+  .todo-item > .todo-heading { display: contents; }
+  .todo-item .todo-actions { order: 1; margin-top: .6rem; }
+  .todo-detail-header .todo-heading { flex-direction: column; align-items: stretch; gap: .5rem; }
   .nav-secondary { top: auto; bottom: calc(100% + .75rem); }
   :root { font-size: 16px; --tabbar: calc(4.5rem + env(safe-area-inset-bottom)); }
   h1 { font-size: 1.6rem; }

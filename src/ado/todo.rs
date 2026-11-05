@@ -1,6 +1,6 @@
 //! The user's HUs and bugs by process-specific assignment, independent of activity windows.
 use super::*;
-use crate::tools::todo::{Date, Filters, Item, List};
+use crate::tools::todo::{Date, Filters, Item, List, WorkType};
 use crate::work_items::{self, Guide};
 use sha2::{Digest, Sha256};
 
@@ -83,6 +83,8 @@ struct Kind {
 }
 struct Schema {
     kinds: Vec<Kind>,
+    /// Every requirement, bug and task type of the project, whatever the filter.
+    types: Vec<WorkType>,
     states: BTreeSet<String>,
     assignments: Vec<Value>,
     dates: Vec<Value>,
@@ -93,7 +95,7 @@ async fn schema(
     cache: &Store,
     source: &Source,
     project: &str,
-    filter: Option<&str>,
+    filters: &Filters,
     guides: &[Guide],
 ) -> Result<Schema> {
     let fields = metadata(
@@ -107,15 +109,12 @@ async fn schema(
         .as_array()
         .context("invalid organization fields")?;
     let mut names = BTreeMap::new();
-    for (category, group, label) in [
-        ("Microsoft.RequirementCategory", "hu", "requirement"),
-        ("Microsoft.BugCategory", "bug", "bug"),
-        // A process may classify a development bug as a task: its guide lists it with the bugs.
-        ("Microsoft.TaskCategory", "bug", "task"),
+    let mut types = Vec::new();
+    for (category, label) in [
+        ("Microsoft.RequirementCategory", "requirement"),
+        ("Microsoft.BugCategory", "bug"),
+        ("Microsoft.TaskCategory", "task"),
     ] {
-        if filter.is_some_and(|filter| filter != group) {
-            continue;
-        }
         let reply = metadata(
             client,
             key,
@@ -140,15 +139,31 @@ async fn schema(
             let Some(name) = kind["name"].as_str() else {
                 continue;
             };
-            if category == "Microsoft.TaskCategory"
-                && !work_items::listed_with_bugs(guides, name, project)
-            {
+            // A process may classify a development bug as a task: its guide lists it with the bugs.
+            let group = match label {
+                "requirement" => "hu",
+                "task" if !work_items::listed_with_bugs(guides, name, project) => "task",
+                _ => "bug",
+            };
+            if types.iter().any(|t: &WorkType| t.name == name) {
                 continue;
             }
-            names.entry(name.to_owned()).or_insert(label);
+            types.push(WorkType {
+                name: name.to_owned(),
+                group: group.to_owned(),
+            });
+            let wanted = match (&filters.work_type, &filters.kind) {
+                (Some(work_type), _) => work_type == name,
+                (None, Some(kind)) => kind == group,
+                // Without a filter the list holds the HUs and bugs, not every task.
+                (None, None) => group != "task",
+            };
+            if wanted {
+                names.entry(name.to_owned()).or_insert(label);
+            }
         }
     }
-    ensure!(names.len() <= 40, "invalid work item types");
+    ensure!(types.len() <= 60, "invalid work item types");
     let mut kinds = Vec::new();
     let mut states = BTreeSet::new();
     let mut used = BTreeSet::new();
@@ -203,6 +218,7 @@ async fn schema(
         .collect();
     Ok(Schema {
         kinds,
+        types,
         states,
         assignments,
         dates,
@@ -220,16 +236,8 @@ async fn in_project(
     guides: &[Guide],
     result: &mut List,
 ) -> Result<()> {
-    let schema = schema(
-        client,
-        key,
-        cache,
-        source,
-        project,
-        filters.kind.as_deref(),
-        guides,
-    )
-    .await?;
+    let schema = schema(client, key, cache, source, project, filters, guides).await?;
+    result.types.extend(schema.types.iter().cloned());
     result.states.extend(schema.states.iter().cloned());
     result.assignment_fields.extend(
         schema
@@ -442,6 +450,14 @@ pub async fn list(
                 .is_none_or(|s| result.states.contains(s)),
         "invalid state: choose a state returned by this tool"
     );
+    ensure!(
+        result.partial
+            || filters
+                .work_type
+                .as_ref()
+                .is_none_or(|w| result.types.iter().any(|t| &t.name == w)),
+        "invalid type: choose a type returned by this tool"
+    );
     result.finish(filters.limit);
     Ok(result)
 }
@@ -486,6 +502,10 @@ mod tests {
                 json!({"fields":[{"referenceName":"System.AssignedTo"}],"states":[{"name":"Resolved"}]}),
             ),
             (
+                "/example/Payments/_apis/wit/workitemtypes/Task",
+                json!({"fields":[{"referenceName":"System.AssignedTo"}],"states":[{"name":"To Do"}]}),
+            ),
+            (
                 "/example/Payments/_apis/wit/workitemtypes/Development%20Bug",
                 json!({"fields":[{"referenceName":"System.AssignedTo"}],"states":[{"name":"New"},{"name":"Done"}]}),
             ),
@@ -504,7 +524,7 @@ mod tests {
             let query = r.body_json::<Value>().unwrap()["query"].as_str().unwrap().to_owned();
             if query.contains("Custom HU") { assert!(query.contains("[Custom.Developer1] = 'me@example.test' OR [Custom.Developer2] = 'me@example.test'"), "{query}"); }
             if query.contains("[System.WorkItemType] = 'Bug' AND") { assert!(query.contains("[System.WorkItemType] = 'Bug' AND ([System.AssignedTo] = 'me@example.test')")); }
-            if query.contains("Development Bug") {
+            if query.contains("Development Bug") && query.contains("= 'Bug' AND") {
                 assert!(query.contains("[System.WorkItemType] = 'Development Bug' AND ([System.AssignedTo] = 'me@example.test')"), "{query}");
                 assert!(!query.contains("[System.WorkItemType] = 'Task'"), "{query}");
             }
@@ -558,6 +578,21 @@ mod tests {
             ["task", "bug"]
         );
         assert!(result.states.contains(&"Unused state".into()));
+        assert!(!result.states.contains(&"To Do".into()));
+        // Every type of the process is offered as a filter, each in the group it is listed with.
+        assert_eq!(
+            result
+                .types
+                .iter()
+                .map(|t| (t.name.as_str(), t.group.as_str()))
+                .collect::<Vec<_>>(),
+            [
+                ("Bug", "bug"),
+                ("Custom HU", "hu"),
+                ("Development Bug", "bug"),
+                ("Task", "task")
+            ]
+        );
         assert_eq!(result.items[0].dates.len(), 4);
         assert_eq!(
             result.items[0]
@@ -598,6 +633,45 @@ mod tests {
                 assert_eq!(filtered.assignment_fields, ["Assigned To"]);
             }
         }
+        for (work_type, expected, states) in [
+            ("Development Bug", vec![3], vec!["Done", "New"]),
+            ("Bug", vec![2], vec!["Resolved"]),
+            ("Task", vec![], vec!["To Do"]),
+        ] {
+            let filtered = list(
+                &Client::new(),
+                "test-key",
+                catalog,
+                &cache,
+                &Filters {
+                    limit: 2,
+                    work_type: Some(work_type.into()),
+                    ..Default::default()
+                },
+                &guides,
+            )
+            .await
+            .unwrap();
+            assert!(!filtered.partial, "{:?}", filtered.warnings);
+            assert_eq!(
+                filtered.items.iter().map(|i| i.id).collect::<Vec<_>>(),
+                expected
+            );
+            assert_eq!(filtered.states, states);
+        }
+        let unknown = list(
+            &Client::new(),
+            "test-key",
+            catalog,
+            &cache,
+            &Filters {
+                work_type: Some("Epic".into()),
+                ..Default::default()
+            },
+            &guides,
+        )
+        .await;
+        assert!(unknown.is_err());
         // Without that guide only the requirement and bug categories are listed.
         let unguided = list(
             &Client::new(),
@@ -614,6 +688,24 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(unguided.items.iter().map(|i| i.id).collect::<Vec<_>>(), [2]);
+        // There the development bug is one of the tasks.
+        let tasks = list(
+            &Client::new(),
+            "test-key",
+            catalog,
+            &cache,
+            &Filters {
+                limit: 2,
+                kind: Some("task".into()),
+                ..Default::default()
+            },
+            &[],
+        )
+        .await
+        .unwrap();
+        assert!(!tasks.partial, "{:?}", tasks.warnings);
+        assert_eq!(tasks.items.iter().map(|i| i.id).collect::<Vec<_>>(), [3]);
+        assert_eq!(tasks.items[0].category, "task");
         TEST_SERVER.with(|s| *s.borrow_mut() = None);
     }
 }
