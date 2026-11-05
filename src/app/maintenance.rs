@@ -243,7 +243,7 @@ fn status(host: &Host, env: &Environment) -> Value {
         && matches!(state, "staged" | "deferred");
     let install = match &installation {
         Ok(i) => json!({"supported":true,"features":i.features,"all_features":i.all_features,
-            "no_default_features":i.no_default_features,"target":i.target}),
+            "no_default_features":i.no_default_features,"target":i.target,"prebuilt":i.prebuilt}),
         Err(diagnostic) => json!({"supported":false,"diagnostic":diagnostic}),
     };
     // A failure about a release that is no longer on offer is stale.
@@ -392,21 +392,22 @@ fn dismiss(host: &Host, env: &Environment, version: &str) -> Reply {
     }
 }
 
-/// Where Cargo is: the build's own `PATH` first, then the places `rustup` installs it.
-fn find_cargo(variables: &[(OsString, OsString)]) -> Option<PathBuf> {
+/// Where Cargo (or one of its tools) is: the build's own `PATH` first, then the place `rustup`
+/// and `cargo install` put them.
+fn find_tool(variables: &[(OsString, OsString)], name: &str) -> Option<PathBuf> {
     let get = |name: &str| {
         variables
             .iter()
             .find(|(k, _)| k == name)
             .map(|(_, v)| v.clone())
     };
-    core::find_program("cargo", get("PATH").as_deref()).or_else(|| {
+    core::find_program(name, get("PATH").as_deref()).or_else(|| {
         let home = get("CARGO_HOME").map(PathBuf::from).or_else(|| {
             get("HOME")
                 .or_else(|| get("USERPROFILE"))
                 .map(|h| PathBuf::from(h).join(".cargo"))
         })?;
-        core::find_program("cargo", Some(home.join("bin").as_os_str()))
+        core::find_program(name, Some(home.join("bin").as_os_str()))
     })
 }
 
@@ -483,18 +484,31 @@ async fn stage(host: &Host, env: &Environment, requested: &str) -> Reply {
     if version <= env.running.max(installation.version) {
         return Reply::error("state_conflict", 6, "That version is already installed.");
     }
-    let Some(cargo) = find_cargo(&env.variables) else {
+    let Some(cargo) = find_tool(&env.variables, "cargo") else {
         return Reply::error(
             "not_ready",
             3,
             "Cargo was not found. Install the Rust toolchain from https://rustup.rs and try again.",
         );
     };
-    let build_env = core::build_environment(env.variables.clone());
+    if installation.prebuilt && find_tool(&env.variables, "cargo-binstall").is_none() {
+        return Reply::error(
+            "not_ready",
+            3,
+            "This installation came from `cargo binstall`, which was not found. Install cargo-binstall again and try again.",
+        );
+    }
+    let mut build_env = core::build_environment(env.variables.clone());
+    if installation.prebuilt {
+        // Fetching the release's own archive reports nothing to third parties.
+        build_env.push(("BINSTALL_DISABLE_TELEMETRY".into(), "true".into()));
+    }
     match core::cargo_version(&cargo, &build_env).await {
         Err(message) => return Reply::error("not_ready", 3, &message),
         Ok(have) => {
-            if let Some(need) = release.rust_version.filter(|need| have < *need) {
+            // A prebuilt archive needs no compiler of the release's own age.
+            let need = release.rust_version.filter(|_| !installation.prebuilt);
+            if let Some(need) = need.filter(|need| have < *need) {
                 return Reply::error(
                     "not_ready",
                     3,

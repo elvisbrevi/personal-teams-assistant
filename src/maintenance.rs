@@ -183,6 +183,9 @@ pub struct Installation {
     pub no_default_features: bool,
     /// Present only when the install used a target other than the compiler's own.
     pub target: Option<String>,
+    /// Installed from the release's prebuilt archive with `cargo binstall`, which records the
+    /// package in `.crates.toml` only: an update fetches the archive instead of building.
+    pub prebuilt: bool,
 }
 
 #[derive(Deserialize)]
@@ -190,7 +193,7 @@ struct Records {
     #[serde(default)]
     installs: BTreeMap<String, Record>,
 }
-#[derive(Deserialize)]
+#[derive(Default, Deserialize)]
 struct Record {
     #[serde(default)]
     bins: Vec<String>,
@@ -212,15 +215,63 @@ fn bin_name(name: &str) -> &str {
     name.strip_suffix(".exe").unwrap_or(name)
 }
 
-fn read_records(root: &Path) -> std::result::Result<Records, String> {
-    let path = root.join(".crates2.json");
-    let file = std::fs::File::open(&path).map_err(|_| {
-        "This executable has no Cargo install record, so it was not installed with `cargo install`. Update it the way you installed it.".to_owned()
-    })?;
+fn read_bounded(path: &Path) -> Option<std::io::Result<String>> {
+    let file = std::fs::File::open(path).ok()?;
     let mut text = String::new();
-    std::io::Read::read_to_string(&mut std::io::Read::take(file, MAX_RECORDS), &mut text)
+    Some(
+        std::io::Read::read_to_string(&mut std::io::Read::take(file, MAX_RECORDS), &mut text)
+            .map(|_| text),
+    )
+}
+
+/// What is installed under `root`: Cargo's own record, or the one `cargo binstall` keeps for a
+/// prebuilt archive (the flag says which).
+fn read_records(root: &Path) -> std::result::Result<(Records, bool), String> {
+    let Some(text) = read_bounded(&root.join(".crates2.json")) else {
+        return prebuilt_records(root).map(|records| (records, true));
+    };
+    let text = text.map_err(|_| "Cargo's install record cannot be read.".to_owned())?;
+    serde_json::from_str(&text)
+        .map(|records| (records, false))
+        .map_err(|_| "Cargo's install record is not valid.".to_owned())
+}
+
+/// `cargo binstall` lists a prebuilt package and its executables in `.crates.toml`, beside its
+/// own `binstall/crates-v1.json`, and writes no `.crates2.json`.
+fn prebuilt_records(root: &Path) -> std::result::Result<Records, String> {
+    let text = root
+        .join("binstall")
+        .join("crates-v1.json")
+        .is_file()
+        .then(|| read_bounded(&root.join(".crates.toml")))
+        .flatten()
+        .ok_or("This executable has no Cargo install record, so it was not installed with `cargo install` or `cargo binstall`. Update it the way you installed it.")?
         .map_err(|_| "Cargo's install record cannot be read.".to_owned())?;
-    serde_json::from_str(&text).map_err(|_| "Cargo's install record is not valid.".to_owned())
+    let table: toml::Table = text
+        .parse()
+        .map_err(|_| "Cargo's install record is not valid.".to_owned())?;
+    let installs = table
+        .get("v1")
+        .and_then(toml::Value::as_table)
+        .into_iter()
+        .flatten()
+        .map(|(key, bins)| {
+            let bins = bins
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|bin| bin.as_str().map(str::to_owned))
+                .collect();
+            (
+                key.clone(),
+                Record {
+                    bins,
+                    ..Record::default()
+                },
+            )
+        })
+        .collect();
+    Ok(Records { installs })
 }
 
 /// The one entry for this crate: its version, source and build choices.
@@ -260,7 +311,8 @@ pub fn inspect(exe: &Path) -> std::result::Result<Installation, String> {
         .parent()
         .ok_or("This executable is not in a Cargo installation root.")?
         .to_path_buf();
-    let (version, record) = own_record(read_records(&root)?)?;
+    let (records, prebuilt) = read_records(&root)?;
+    let (version, record) = own_record(records)?;
     let bins: BTreeSet<&str> = record.bins.iter().map(|b| bin_name(b)).collect();
     if !(bins.contains(CRATE) && bins.contains(CLI)) {
         return Err(
@@ -305,6 +357,7 @@ pub fn inspect(exe: &Path) -> std::result::Result<Installation, String> {
         all_features: record.all_features,
         no_default_features: record.no_default_features,
         target,
+        prebuilt,
     })
 }
 
@@ -401,7 +454,8 @@ pub fn build_environment(
     kept
 }
 
-/// The `cargo install` arguments that rebuild `version` the way `installation` was built.
+/// The `cargo install` arguments that rebuild `version` the way `installation` was built, or the
+/// `cargo binstall` ones that fetch its prebuilt archive for an installation that came from one.
 /// `target_dir` keeps Cargo's build cache between updates, so a release recompiles only what
 /// changed instead of every dependency (Cargo otherwise builds in a temporary directory).
 pub fn install_args(
@@ -410,6 +464,17 @@ pub fn install_args(
     root: &Path,
     target_dir: &Path,
 ) -> Vec<OsString> {
+    if installation.prebuilt {
+        // `=` pins the exact release; without it the newest compatible one would be taken.
+        let mut args: Vec<OsString> = ["binstall", CRATE, "--version"]
+            .into_iter()
+            .map(OsString::from)
+            .collect();
+        args.push(format!("={version}").into());
+        args.extend(["--locked", "--no-confirm", "--root"].map(OsString::from));
+        args.push(root.as_os_str().to_owned());
+        return args;
+    }
     let mut args: Vec<OsString> = ["install", CRATE, "--version"]
         .into_iter()
         .map(OsString::from)
@@ -673,8 +738,8 @@ pub async fn verify(
     env: &[(OsString, OsString)],
     now: i64,
 ) -> Result<Manifest> {
-    let (recorded, record) =
-        own_record(read_records(root).map_err(anyhow::Error::msg)?).map_err(anyhow::Error::msg)?;
+    let (records, _) = read_records(root).map_err(anyhow::Error::msg)?;
+    let (recorded, record) = own_record(records).map_err(anyhow::Error::msg)?;
     ensure!(
         recorded == *version,
         "The staged package is not version {version}."

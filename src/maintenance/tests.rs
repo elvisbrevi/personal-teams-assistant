@@ -147,6 +147,71 @@ fn an_installation_is_recognized_from_cargos_record() {
     assert_eq!(installation.target, None);
 }
 
+/// What `cargo binstall` leaves in a root: Cargo's first record format and its own manifest.
+fn write_prebuilt(root: &Path, version: &str, bins: &[&str]) {
+    std::fs::create_dir_all(root.join("bin")).unwrap();
+    std::fs::create_dir_all(root.join("binstall")).unwrap();
+    std::fs::write(root.join("binstall").join("crates-v1.json"), "{}").unwrap();
+    let mut v1 = toml::Table::new();
+    v1.insert(crates_io(version), bins.to_vec().into());
+    v1.insert(
+        "other-tool 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)".into(),
+        vec!["other-tool"].into(),
+    );
+    let mut table = toml::Table::new();
+    table.insert("v1".into(), v1.into());
+    std::fs::write(root.join(".crates.toml"), toml::to_string(&table).unwrap()).unwrap();
+}
+
+#[test]
+fn an_installation_from_a_prebuilt_archive_is_recognized_and_fetched_again() {
+    let dir = tempfile::tempdir().unwrap();
+    write_prebuilt(
+        dir.path(),
+        "0.10.55",
+        &["personal-teams-assistant.exe", "pta.exe"],
+    );
+    let installation = inspect(&dir.path().join("bin").join(exe_name(CLI))).unwrap();
+    assert!(installation.prebuilt);
+    assert_eq!(installation.version, v("0.10.55"));
+    assert!(installation.features.is_empty() && !installation.no_default_features);
+    assert_eq!(installation.target, None);
+    let args: Vec<String> = install_args(
+        &installation,
+        &v("0.10.57"),
+        Path::new("/stage/root"),
+        Path::new("/cache"),
+    )
+    .into_iter()
+    .map(|a| a.into_string().unwrap())
+    .collect();
+    assert_eq!(
+        args,
+        [
+            "binstall",
+            CRATE,
+            "--version",
+            "=0.10.57",
+            "--locked",
+            "--no-confirm",
+            "--root",
+            "/stage/root"
+        ]
+    );
+}
+
+#[test]
+fn a_bare_first_format_record_is_not_taken_for_a_prebuilt_installation() {
+    let dir = tempfile::tempdir().unwrap();
+    write_prebuilt(dir.path(), "0.10.55", &["personal-teams-assistant", "pta"]);
+    std::fs::remove_dir_all(dir.path().join("binstall")).unwrap();
+    let reason = |dir: &Path| inspect(&dir.join("bin").join(exe_name(CLI))).unwrap_err();
+    assert!(reason(dir.path()).contains("no Cargo install record"));
+    // Without the pair, or from another source, it is refused as Cargo's own record is.
+    write_prebuilt(dir.path(), "0.10.55", &["pta"]);
+    assert!(reason(dir.path()).contains("both the application and the pta command"));
+}
+
 #[test]
 fn the_feature_and_target_choices_are_kept() {
     let dir = tempfile::tempdir().unwrap();
@@ -390,8 +455,33 @@ mod processes {
             all_features: false,
             no_default_features: true,
             target: None,
+            prebuilt: false,
         }
     }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_pair_fetched_as_a_prebuilt_archive_is_verified_from_its_own_record() {
+    let dir = tempfile::tempdir().unwrap();
+    processes::staged(dir.path(), "0.10.57", json!([]), false);
+    // `cargo binstall` leaves no second-format record in the root it installs into.
+    std::fs::remove_file(dir.path().join(".crates2.json")).unwrap();
+    write_prebuilt(dir.path(), "0.10.57", &[CRATE, CLI]);
+    let wanted = Installation {
+        no_default_features: false,
+        prebuilt: true,
+        ..processes::wanted()
+    };
+    let manifest = verify(dir.path(), &v("0.10.57"), &wanted, &[], 77)
+        .await
+        .unwrap();
+    assert_eq!(manifest.version, "0.10.57");
+    assert!(
+        verify(dir.path(), &v("0.10.58"), &wanted, &[], 77)
+            .await
+            .is_err()
+    );
 }
 
 #[cfg(unix)]
