@@ -1109,11 +1109,14 @@ pub(super) const TOOLS: &[Tool] = &[
     Tool {
         name: "messages_list",
         title: "Recent messages",
-        description: "The latest Teams messages addressed to the assistant with their outcome, intent, answer (sent or proposed), sources, context, sender, person profile and rating.",
+        description: "The Teams messages the assistant received, newest first, with their outcome, intent, answer (sent or proposed), sources, context, sender, person profile and rating; next_cursor (pass it as before) reads older ones, total says how many the window holds. A message not addressed to the assistant (reason ineligible_message) has no text here: read it with teams_messages and its resource.",
         effect: Effect::Read,
         schema: || {
             object(
-                json!({"limit": {"type": "integer", "minimum": 1, "maximum": 100, "description": "How many, newest first (default 20)."}}),
+                json!({"limit": {"type": "integer", "minimum": 1, "maximum": 100, "description": "How many, newest first (default 20)."},
+                    "before": string("next_cursor of the previous call, or a day/instant: only older messages."),
+                    "since": string("Start: YYYY-MM-DD (this computer's time zone) or an RFC 3339 instant."),
+                    "until": string("End: YYYY-MM-DD (that day included) or an RFC 3339 instant.")}),
                 &[],
             )
         },
@@ -1880,16 +1883,18 @@ pub(super) async fn run(name: &str, args: &Value) -> Result<Value, String> {
         }
         "messages_list" => {
             let limit = args.get("limit").and_then(Value::as_u64).unwrap_or(20).clamp(1, 100);
-            let rows = ipc("audit", json!({"limit": limit, "resource": null, "content": true})).await?;
-            let rows = rows.as_array().cloned().unwrap_or_default();
-            Ok(json!(rows.iter().map(|r| {
+            let page = ipc("audit_list", json!({"limit": limit, "content": true, "before": args.get("before"),
+                "since": args.get("since"), "until": args.get("until")})).await?;
+            let rows = page["entries"].as_array().cloned().unwrap_or_default();
+            let messages: Vec<Value> = rows.iter().map(|r| {
                 let a = &r["audit"];
                 let answer = if a["sent"].is_null() { &a["proposed"] } else { &a["sent"] };
                 json!({"resource": r["resource"], "status": r["status"], "created_at": r["created_at"], "reason": a["reason"],
                     "intent": a["intent"], "question": a["question"], "answer": answer,
                     "sent": !a["sent"].is_null(), "source": a["source"], "context": a["context"], "sender_name": a["sender_name"],
                     "person": a["person"], "feedback": a["feedback"], "identified_question": a["identified_question"], "available_sources": a["available_sources"], "selected_sources": a["selected_sources"]})
-            }).collect::<Vec<_>>()))
+            }).collect();
+            Ok(json!({"messages": messages, "next_cursor": page["next_cursor"], "total": page["total"], "oldest_at": page["oldest_at"]}))
         }
         "message_show" => {
             let rows = ipc("audit", json!({"limit": 1, "resource": text(args, "resource")?, "content": true})).await?;

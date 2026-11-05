@@ -401,6 +401,7 @@ impl Portal {
             "finish_azure_cli_login",
             "cancel_azure_cli_login",
             "audit",
+            "audit_list",
             "answer_refine",
             "answer_send",
             "answer_feedback",

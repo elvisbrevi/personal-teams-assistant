@@ -118,6 +118,8 @@ struct Endpoint {
     cloud_repair_support: bool,
     #[serde(default)]
     teams_read_support: bool,
+    #[serde(default)]
+    audit_pages_support: bool,
     contract: u32,
     port: u16,
     token: String,
@@ -563,6 +565,10 @@ async fn client_with_transport(
                 || !matches!(request.method.as_str(), "teams_messages" | "teams_search"),
             "Incompatible host: update the host and CLI together before reading Teams chats."
         );
+        ensure!(
+            endpoint.audit_pages_support || request.method != "audit_list",
+            "Incompatible host: update the host and CLI together before paging the audit."
+        );
         ensure!(endpoint.contract == CONTRACT, "incompatible host contract");
         ensure!(
             endpoint.web_support
@@ -680,6 +686,7 @@ pub(crate) fn launch(
             cloud_lost_support: true,
             cloud_repair_support: true,
             teams_read_support: true,
+            audit_pages_support: true,
             contract: CONTRACT,
             port: listener.local_addr()?.port(),
             token: token.clone(),
@@ -864,6 +871,7 @@ async fn dispatch_inner(host: &Arc<Host>, request: Request) -> Reply {
             "open_work_item",
             "llm_providers",
             "audit",
+            "audit_list",
             "logs",
             "activity_status",
             "activity_history",
@@ -916,6 +924,7 @@ async fn dispatch_inner(host: &Arc<Host>, request: Request) -> Reply {
             "app_quit",
             "self_chat_status",
             "audit",
+            "audit_list",
             "logs",
             "finish_microsoft",
             "cancel_microsoft",
@@ -962,6 +971,7 @@ async fn dispatch_inner(host: &Arc<Host>, request: Request) -> Reply {
             "activity_open",
             "self_chat_status",
             "audit",
+            "audit_list",
             "logs",
             "notes_list",
             "knowledge_search",
@@ -1406,6 +1416,7 @@ async fn operate(
         "teams_chats" => teams_chats(state, args).await?,
         "teams_post" => teams_post(state, args).await?,
         "teams_messages" => teams_messages(state, args).await?,
+        "audit_list" => audit_list(state, args)?,
         "teams_search" => teams_search(state, args).await?,
         "audit" | "logs" => {
             let config = state.settings.config().map_err(fail)?;
@@ -1554,6 +1565,7 @@ mod tests {
                 cloud_lost_support: true,
                 cloud_repair_support: true,
                 teams_read_support: true,
+                audit_pages_support: true,
                 account_authority_support: true,
                 shared_accounts_support: true,
                 account_binding: None,
@@ -1596,6 +1608,7 @@ mod tests {
                 cloud_lost_support: true,
                 cloud_repair_support: true,
                 teams_read_support: true,
+                audit_pages_support: true,
                 account_authority_support: true,
                 shared_accounts_support: true,
                 account_binding: None,
@@ -1653,6 +1666,7 @@ mod tests {
                     cloud_lost_support: true,
                     cloud_repair_support: true,
                     teams_read_support: true,
+                    audit_pages_support: true,
                     account_authority_support: true,
                     shared_accounts_support: true,
                     account_binding: None,
