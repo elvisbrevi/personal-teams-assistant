@@ -284,7 +284,7 @@ nav button, .status-row, .activity-row, .segmented button, .subnav [role=tab], .
 .banner > span { flex: 1 1 14rem; }
 .banner > .icon { width: 22px; height: 22px; stroke-width: 2.6; }
 /* Recent activity is what changes every day: it takes the wide column; setup and status stack beside it. */
-.home-grid { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr); gap: 1rem; align-items: start; }
+.home-grid { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr); grid-template-rows: auto 1fr; gap: 1rem; align-items: start; }
 .home-grid > .panel { margin: 0; }
 #recent-panel { grid-column: 1; grid-row: 1 / span 2; }
 #setup-panel, #status-panel { grid-column: 2; }
@@ -303,6 +303,11 @@ nav button, .status-row, .activity-row, .segmented button, .subnav [role=tab], .
 .status-row.info .status-icon { background: color-mix(in srgb, var(--info-fill) var(--fill-strength), var(--surface)); color: var(--on-fill); }
 .status-row.error .status-icon { background: color-mix(in srgb, var(--error-fill) var(--fill-strength), var(--surface)); color: var(--on-fill); }
 .status-row > .icon { color: var(--muted); width: 16px; height: 16px; }
+/* The parts in order fold into one line under the ones that need attention. */
+#status-more { margin-top: .3rem; border-top: 0; }
+#status-more > summary { padding: .45rem 0; }
+#status-more > .status-list { margin-top: 0; }
+.status-list[hidden] + #status-more { margin-top: 0; }
 .status-value { display: grid; gap: .05rem; min-width: 0; }
 .status-label { color: var(--muted); font-size: var(--fs-xs); font-weight: 650; }
 .status-value strong { font-family: var(--display); font-size: 1rem; font-weight: var(--w-strong); }
@@ -591,6 +596,8 @@ nav button .short { display: none; }
 .fold-panel > summary::-webkit-details-marker { display: none; }
 .fold-panel > summary::after { content: ""; width: .5rem; height: .5rem; margin-left: auto; border-right: 2.5px solid var(--text); border-bottom: 2.5px solid var(--text); transform: rotate(45deg); transition: transform .15s; }
 .fold-panel[open] > summary { margin-bottom: .4rem; }
+/* What a folded panel holds, said beside its title. */
+.fold-panel > summary .hint { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--sans); font-weight: 400; }
 .fold-panel[open] > summary::after { transform: rotate(-135deg); }
 
 /* Activities: a numbered flow, review → decide → what the day holds */
@@ -890,11 +897,13 @@ body.directory-picker-open { overflow: hidden; }
 .implementation-footer { margin: 1rem 0; }
 #implementation fieldset { min-width: 0; }
 
-[data-tab="agent-history"], #agent-history { --tile: var(--c-todo); }
+#agent-history, #agent-guides { --tile: var(--c-todo); }
 #create-request { --tile: var(--c-todo); }
 #agent-history .todo-fields dd { overflow-wrap: anywhere; min-width: 0; }
 
 .request-footer, .todo-create-actions { margin: 1rem 0; }
+.todo-more { justify-content: center; }
+.todo-more:has(> [hidden]) { display: none; }
 
 .request-target { width: 100%; text-align: left; white-space: normal; overflow-wrap: anywhere; border-radius: var(--radius-control); }
 .destination-search { padding: .75rem 1rem; margin: 0; flex: none; }

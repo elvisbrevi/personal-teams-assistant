@@ -113,6 +113,13 @@ palettes (Paper, Catppuccin, Monokai, Dracula, Nord, Solarized, Gruvbox, Tokyo
 Night, Rosé Pine and Graphite), each in light and dark. It also shortens several
 Settings explanations and folds rarely changed fields under Advanced.
 
+Version 0.10.49 puts things where they are used: Home's status shows what needs
+attention and folds the rest into one line; Agent history and the work item guides
+with the agent instructions open from To-Do, whose list grows with «Show more»;
+Settings has a Machines category with the one list of machines; Cloud storage keeps
+the next step in sight and folds its maintenance; and the public URL panel folds
+once it is configured.
+
 Version 0.7.13 answers status rounds from the work item itself: an HU named in
 the question is read even after it was handed over (its state, since when and
 who holds it now, its tasks, linked code and comments), and your own recent Wiki

@@ -42,7 +42,7 @@ test('every To-Do card opens its own detail after the list is rendered', async (
     if (!nodes.has(selector)) nodes.set(selector, node({ value: '' }));
     return nodes.get(selector);
   };
-  $('#todo-provider').value = 'azure'; $('#todo-source').value = 'ado'; $('#todo-limit').value = '10';
+  $('#todo-provider').value = 'azure'; $('#todo-source').value = 'ado';
   const items = [7, 8, 9].map(id => ({ id, title: `Item ${id}`, dates: [] }));
   const context = vm.createContext({ $, window: { scrollY: 0 },
     el: (tag, props, ...children) => node({ tag, ...props, children }), badge: () => null,
@@ -52,12 +52,26 @@ test('every To-Do card opens its own detail after the list is rendered', async (
     invoke: async () => ({ items, states: [], assignment_fields: [] }),
     loadTodoDetail: () => opened.push(vm.runInContext('todoSelection.item.id', context)),
   });
-  vm.runInContext('let todoRequest = 0, todoSelection, todoListScroll, todoReturnFocus;\n' +
+  vm.runInContext('let todoRequest = 0, todoLimit = 10, todoSelection, todoListScroll, todoReturnFocus;\nconst TODO_LIMITS = [10, 25, 50, 100];\n' +
     source.slice(source.indexOf('function todoStateStyle('), source.indexOf('\nfunction closeTodoDetail(')) +
-    source.slice(source.indexOf('async function loadTodo()'), source.indexOf('// ---------------------------------------------------------------- implementation')), context);
+    source.slice(source.indexOf('async function loadTodo('), source.indexOf('// ---------------------------------------------------------------- implementation')), context);
   await vm.runInContext('loadTodo()', context);
   for (const card of $('#todo-list').children) await card.children[0].children[0].children[0].onclick();
   assert.deepEqual(opened, [7, 8, 9]);
+});
+
+test('a To-Do card shows the two recorded dates nearest to today, or when it was created', () => {
+  const context = vm.createContext({ t: x => x, tx: x => x, todoDate: (name, value) => `${name}=${value}` });
+  vm.runInContext(source.slice(source.indexOf('function todoCardDates('), source.indexOf('\nfunction todoItem(')), context);
+  const day = offset => new Date(Date.now() + offset * 86400000).toISOString();
+  const [far, soon, past] = [day(40), day(3), day(-10)];
+  const item = { created_at: day(-60), dates: [
+    { name: 'Start date', value: day(-50) }, { name: 'Completion date', value: far },
+    { name: 'Development start', value: null }, { name: 'Development finish', value: soon }, { name: 'Review', value: past }] };
+  context.item = item;
+  assert.deepEqual([...vm.runInContext('todoCardDates(item)', context)], [`Review=${past}`, `Development finish=${soon}`]);
+  context.item = { created_at: item.created_at, dates: [{ name: 'Start date', value: null }] };
+  assert.deepEqual([...vm.runInContext('todoCardDates(item)', context)], [`Created=${item.created_at}`]);
 });
 
 test('a task-category item opens task detail and workflow states get distinct colors', () => {

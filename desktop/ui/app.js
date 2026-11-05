@@ -139,15 +139,17 @@ async function busy(button, task) {
   }
 }
 
+/** Views opened from To-Do: they have no navigation item of their own. */
+const TODO_VIEWS = ['implementation', 'create-request', 'agent-history', 'agent-guides'];
 function showTab(name, anchor) {
   tab = name;
   clearRevealedVariable();
   setNavOverflow(false);
-  for (const section of ['overview', 'todo', 'implementation', 'create-request', 'agent-history', 'settings', 'messages', 'knowledge', 'chat', 'registration']) $('#' + section).hidden = section !== name;
+  for (const section of ['overview', 'todo', ...TODO_VIEWS, 'settings', 'messages', 'knowledge', 'chat', 'registration']) $('#' + section).hidden = section !== name;
   for (const button of document.querySelectorAll('nav button[data-tab]')) {
-    button.setAttribute('aria-current', button.dataset.tab === (['implementation', 'create-request'].includes(name) ? 'todo' : name) ? 'page' : 'false');
+    button.setAttribute('aria-current', button.dataset.tab === (TODO_VIEWS.includes(name) ? 'todo' : name) ? 'page' : 'false');
   }
-  $('#nav-more').setAttribute('aria-current', ['knowledge', 'chat', 'agent-history'].includes(name) ? 'page' : 'false');
+  $('#nav-more').setAttribute('aria-current', ['knowledge', 'chat'].includes(name) ? 'page' : 'false');
   if (name === 'messages') loadMessages().catch(fail);
   if (name === 'overview') loadActivity();
   if (name === 'registration') loadRegistration().catch(fail);
@@ -159,6 +161,8 @@ function showTab(name, anchor) {
   // A panel inside a tab (a Settings section, an Activities view) opens that tab first.
   const owner = target && document.querySelector(`[aria-controls="${target.closest('[role=tabpanel]')?.id}"]`);
   if (owner) selectTab(owner.parentElement, owner.dataset.group);
+  // A folded panel opens when something leads to it.
+  if (target?.tagName === 'DETAILS') target.open = true;
   renderSavebar();
   renderActivityNotice();
   if (target) target.scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -173,6 +177,9 @@ function setNavOverflow(open) {
 // ---------------------------------------------------------------- To-Do
 
 let todoRequest = 0;
+/** How many items To-Do asks for: it starts at the first step and «Show more» takes the next one. */
+const TODO_LIMITS = [10, 25, 50, 100];
+let todoLimit = TODO_LIMITS[0];
 function todoSources() {
   const sources = (live?.map.resources ?? []).filter(r => r.kind === 'tool' && r.tool.type === 'azure_devops_status' && r.enabled);
   const selected = $('#todo-source').value;
@@ -219,6 +226,15 @@ function todoStateStyle(state) {
   if (/\b(new|proposed|approved|to do|todo|backlog|not started|not taken|unassigned|sin asignar|sin tomar|por hacer|no iniciado|no comenzado|aprobado|propuesto|nuevo|nueva)\b/.test(value)) return { class: 'unstarted', tone: 'muted' };
   return { class: '', tone: 'info' };
 }
+/** The dates a card shows: the two recorded ones nearest to today, in order; without any, when it was created.
+ *  The detail lists them all. */
+function todoCardDates(item) {
+  const now = Date.now();
+  const recorded = item.dates.filter(date => date.value && !Number.isNaN(new Date(date.value).valueOf()));
+  const nearest = [...recorded].sort((a, b) => Math.abs(new Date(a.value) - now) - Math.abs(new Date(b.value) - now)).slice(0, 2)
+    .sort((a, b) => new Date(a.value) - new Date(b.value));
+  return nearest.length ? nearest.map(date => todoDate(tx(date.name), date.value)) : [todoDate(t('Created'), item.created_at)];
+}
 function todoItem(item, onSelect = null, selection = null) {
   const stateStyle = todoStateStyle(item.state);
   const select = el('button', { type: 'button', class: 'todo-select', textContent: `#${item.id} · ${item.title}` });
@@ -232,7 +248,7 @@ function todoItem(item, onSelect = null, selection = null) {
   return el('article', { class: `todo-item ${stateStyle.class}`.trim() },
     el('div', { class: 'todo-heading' }, el('h3', {}, select), todoOriginal(item, selection)),
     el('div', { class: 'todo-context' }, badge(tx(item.state), stateStyle.tone), badge(tx(item.kind || 'HU'), 'muted'), el('span', { textContent: item.project })),
-    el('dl', { class: 'todo-dates' }, todoDate(t('Created'), item.created_at), ...item.dates.map(date => todoDate(tx(date.name), date.value))));
+    el('dl', { class: 'todo-dates' }, ...todoCardDates(item)));
 }
 function closeTodoDetail(restore = true) {
   if (restore && backRelatedItem('todo')) return;
@@ -443,24 +459,27 @@ async function loadTodoDetail() {
     }
   }
 }
-async function loadTodo() {
+/** Loads the list. A change of filters starts again at the first step; `more` keeps what is shown while the longer list loads. */
+async function loadTodo({ more = false, keep = more } = {}) {
   closeTodoDetail(false);
+  if (!keep) todoLimit = TODO_LIMITS[0];
   const request = ++todoRequest;
   const azure = $('#todo-provider').value === 'azure';
   const sources = todoSources();
   $('#todo-title').textContent = azure ? t('My HUs and bugs') : $('#todo-github-kind').value === 'all' ? t('My issues') : t('My epics');
   $('#todo-kind-field').hidden = !azure;
   $('#todo-github-kind-field').hidden = azure;
-  $('#todo-list').replaceChildren();
+  if (!more) $('#todo-list').replaceChildren();
   $('#todo-list').setAttribute('aria-busy', 'true');
-  $('#todo-progress').textContent = t('Loading…');
+  $('#todo-more').hidden = !more;
+  if (!more) $('#todo-progress').textContent = t('Loading…');
   $('#todo-assignment').textContent = '';
   $('#todo-problem').hidden = true;
   $('#todo-warnings').hidden = true;
   $('#todo-refresh').disabled = true;
   try {
     if (azure && !sources.length) throw t('Configure an Azure DevOps activity source in Knowledge to see your HUs.');
-    const args = { limit: Number($('#todo-limit').value) };
+    const args = { limit: todoLimit };
     if (azure) {
       args.source = $('#todo-source').value;
       if ($('#todo-kind').value) args.kind = $('#todo-kind').value;
@@ -478,8 +497,9 @@ async function loadTodo() {
     loadWorkItemSessions().catch(fail);
     if (!result.items.length) $('#todo-list').append(el('p', { class: 'empty', textContent: t('No items match these filters. Try another state.') }));
     $('#todo-progress').textContent = result.has_more
-      ? t('Showing the {n} newest items. Increase the limit to see more.', { n: result.items.length })
+      ? t('Showing the {n} newest items.', { n: result.items.length })
       : tn(result.items.length, '{n} item', '{n} items');
+    $('#todo-more').hidden = !result.has_more || todoLimit >= TODO_LIMITS.at(-1);
     if (result.partial) {
       $('#todo-warnings').hidden = false;
       $('#todo-warnings').textContent = t('Some projects could not be read. The list and available states may be incomplete.');
@@ -1031,7 +1051,7 @@ function renderMachineRoots() {
   }));
 }
 function renderTeamsMachines(fleet) {
-  for (const id of ['machine-list', 'teams-machine-list']) {
+  for (const id of ['machine-list']) {
     const list = $('#' + id);
     list.replaceChildren(...fleet.machines.map(machine => {
       const radio = el('input', { type: 'radio', name: id, value: machine.id, checked: machine.id === fleet.teams_machine, disabled: machine.trust === 'revoked' || (!machine.online && machine.id !== fleet.teams_machine) });
@@ -1160,7 +1180,8 @@ function markDirty(event) {
   renderSavebar();
 }
 function renderSavebar() {
-  $('#savebar').hidden = !(dirty && ['settings', 'knowledge'].includes(tab));
+  // Settings, Knowledge and To-Do's guides are saved together with the bar.
+  $('#savebar').hidden = !(dirty && ['settings', 'knowledge', 'agent-guides'].includes(tab));
   renderSettingsFlags();
 }
 
@@ -1174,6 +1195,7 @@ function expectedSubscriptions(config) {
 }
 const entraReady = config => !config.graph.client_id.endsWith('0002') && !config.graph.tenant_id.endsWith('0001');
 const urlReady = config => !config.server.public_url.includes('example.com');
+function serverHost(config) { try { return new URL(config.server.public_url).host; } catch { return config.server.public_url; } }
 const readySources = map => map.resources.filter(r => r.enabled && r.external_processing && r.allowed_conversations.length);
 const missingCredentials = credentials => Object.entries(credentials).filter(([name, source]) => source === 'missing' && !GENERATED.includes(name)).map(([name]) => name);
 const enabledChain = config => config.llm.chain.length
@@ -1344,7 +1366,7 @@ function renderTiles(s) {
   const tunnelManaged = config.server.cloudflare_tunnel || s.tunnel_config.trim();
   let host = t('Public URL missing');
   try { if (urlReady(config)) host = new URL(config.server.public_url).host; } catch { /* shown as missing */ }
-  $('#tiles').replaceChildren(
+  const rows = [
     tile(t('Microsoft account'), s.microsoft_connected ? t('Connected') : t('Not connected'), s.microsoft_connected ? 'ok' : 'warn',
       s.microsoft_connected ? t('Reads and answers as you') : t('Connect it in Settings'), ['settings', 'panel-teams'], 'user'),
     azureCliTile(), githubCliTile(),
@@ -1359,7 +1381,17 @@ function renderTiles(s) {
     tile(t('Sources'), t('{ready} of {total} ready', { ready, total: s.map.resources.length }), ready ? 'ok' : 'warn', t('Enabled, authorized and with an audience'), ['knowledge'], 'book'),
     tile(t('Personal chat'), config.graph.self_chat ? t('Enabled') : t('Disabled'), config.graph.self_chat ? 'ok' : 'muted',
       config.graph.self_chat ? t('Ask it from your Teams notes') : t('Optional'), ['settings', 'panel-self-chat'], 'chat'),
-  );
+  ];
+  // What needs attention stays in sight; the parts in order fold into one line that opens them.
+  const attention = rows.filter(row => row.classList.contains('warn') || row.classList.contains('error'));
+  const fine = rows.filter(row => !attention.includes(row));
+  $('#tiles').replaceChildren(...attention);
+  $('#tiles').hidden = !attention.length;
+  $('#tiles-fine').replaceChildren(...fine);
+  $('#status-more').hidden = !fine.length;
+  $('#status-more-summary').textContent = attention.length
+    ? tn(fine.length, '{n} more part in order', '{n} more parts in order')
+    : tn(fine.length, 'Everything in order: {n} part', 'Everything in order: {n} parts');
 }
 
 function renderSteps(s) {
@@ -1471,6 +1503,9 @@ async function reload() {
   if (useLanguage(config.llm.language ?? 'es')) return;
   field('#tenant-id', config.graph.tenant_id); field('#client-id', config.graph.client_id);
   field('#user-id', config.graph.user_id); field('#public-url', config.server.public_url);
+  // Set up once and rarely changed: the address folds away while it is configured.
+  $('#panel-server').open = !urlReady(config);
+  $('#server-summary').textContent = urlReady(config) ? serverHost(config) : t('Not configured');
   field('#bind', config.server.bind); field('#llm-style', config.llm.style);
   field('#llm-language', config.llm.language ?? 'es');
   field('#tunnel-config', current.tunnel_config);
@@ -2456,6 +2491,8 @@ function renderCloudMirror() {
   const rotate = $('#cloud-rotate');
   rotate.hidden = status?.mode !== 'mirror' && !primary;
   rotate.textContent = cloudRotateArmed ? t('Tap again to rotate the key') : t('Rotate the content key');
+  const maintenance = $('#cloud-maintenance');
+  maintenance.hidden = ![...maintenance.querySelectorAll('.actions button')].some(button => !button.closest('[hidden]'));
 }
 
 cloudTwoTaps('#cloud-adopt', () => cloudAdoptArmed, v => { cloudAdoptArmed = v; }, async () => {
@@ -4724,9 +4761,8 @@ function renderOrganization() {
     };
     fieldset.append(el('label', { class: 'check' }, box, el('span', { textContent: resource.id }), ' ', el('small', { textContent: kindName(resource) })));
   }
-  const entries = organization.entries?.length ?? 0, guides = current.map.work_item_guides?.length ?? 0;
-  $('#organization-summary').textContent = entries || guides
-    ? [tn(entries, '1 entry', '{n} entries'), tn(guides, '1 guide', '{n} guides')].join(' · ') : '';
+  const entries = organization.entries?.length ?? 0;
+  $('#organization-summary').textContent = entries ? tn(entries, '1 entry', '{n} entries') : '';
 }
 $('#organization-name').oninput = event => {
   (current.map.organization ??= {}).name = event.target.value;
@@ -5332,12 +5368,21 @@ $('#todo-github-kind').onchange = () => loadTodo();
 $('#todo-back').onclick = () => closeTodoDetail();
 $('#todo-detail-refresh').onclick = () => loadTodoDetail();
 $('#todo-state').onchange = () => loadTodo();
-$('#todo-limit').onchange = () => loadTodo();
+$('#todo-more').onclick = () => busy($('#todo-more'), async () => {
+  const shown = $('#todo-list').querySelectorAll('.todo-item').length;
+  todoLimit = TODO_LIMITS.find(limit => limit > todoLimit) ?? todoLimit;
+  await loadTodo({ more: true });
+  // Reading continues where the list ended.
+  $('#todo-list').querySelectorAll('.todo-item')[shown]?.querySelector('.todo-select')?.focus({ preventScroll: true });
+});
+$('#todo-agent-guides').onclick = () => { showTab('agent-guides'); $('#agent-guides h1').focus(); };
+$('#agent-guides-back').onclick = () => { showTab('todo'); $('#todo-agent-guides').focus(); };
+$('#teams-machine-open').onclick = () => showTab('settings', 'panel-machines');
 $('#todo-create').onclick = openRequest;
 $('#todo-agent-history').onclick = () => showTab('agent-history');
 $('#agent-history-back').onclick = () => showTab('todo');
 $('#agent-history-refresh').onclick = () => busy($('#agent-history-refresh'), loadAgentHistory);
-$('#todo-refresh').onclick = () => busy($('#todo-refresh'), loadTodo);
+$('#todo-refresh').onclick = () => busy($('#todo-refresh'), () => loadTodo({ keep: true }));
 
 // After a section change, focus its heading so a screen reader starts there (no visible ring after a click).
 document.querySelectorAll('section > .page-head h1').forEach(heading => { heading.tabIndex = -1; });
