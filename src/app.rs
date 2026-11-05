@@ -744,7 +744,7 @@ fn cloudflared_command(
     config_path: Option<&Path>,
     token: Option<&str>,
 ) -> tokio::process::Command {
-    let mut command = tokio::process::Command::new(binary);
+    let mut command = security::program_async(binary);
     command.kill_on_drop(true);
     command.arg("tunnel").arg("--no-autoupdate");
     if let Some(path) = config_path {

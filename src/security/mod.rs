@@ -392,9 +392,33 @@ pub fn protect_file(path: &Path) -> Result<()> {
     restrict_windows(path, false)?;
     Ok(())
 }
+/// A program the host starts. On Windows the host has no console, so a console program would
+/// open a window of its own for as long as it runs; it is started without one.
+#[cfg_attr(not(windows), allow(unused_mut))]
+pub fn program(binary: impl AsRef<std::ffi::OsStr>) -> std::process::Command {
+    let mut command = std::process::Command::new(binary);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // CREATE_NO_WINDOW
+        command.creation_flags(0x0800_0000);
+    }
+    command
+}
+
+/// [`program`] for one started through Tokio.
+#[cfg_attr(not(windows), allow(unused_mut))]
+pub fn program_async(binary: impl AsRef<std::ffi::OsStr>) -> tokio::process::Command {
+    let mut command = tokio::process::Command::new(binary);
+    // CREATE_NO_WINDOW
+    #[cfg(windows)]
+    command.creation_flags(0x0800_0000);
+    command
+}
+
 #[cfg(windows)]
 fn restrict_windows(path: &Path, directory: bool) -> Result<()> {
-    let output = std::process::Command::new("whoami")
+    let output = program("whoami")
         .args(["/user", "/fo", "csv", "/nh"])
         .output()?;
     ensure!(
@@ -416,7 +440,7 @@ fn restrict_windows(path: &Path, directory: bool) -> Result<()> {
         "invalid Windows SID"
     );
     let grant = format!("*{sid}:{}F", if directory { "(OI)(CI)" } else { "" });
-    let status = std::process::Command::new("icacls")
+    let status = program("icacls")
         .arg(path)
         .args(["/inheritance:r", "/grant:r", &grant])
         .stdout(std::process::Stdio::null())
@@ -546,6 +570,15 @@ impl Redactor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn a_started_program_keeps_its_name_and_arguments() {
+        let mut command = program("git");
+        command.args(["status", "--short"]);
+        assert_eq!(command.get_program(), "git");
+        assert_eq!(command.get_args().collect::<Vec<_>>(), ["status", "--short"]);
+        let command = program_async("gh");
+        assert_eq!(command.as_std().get_program(), "gh");
+    }
     #[test]
     fn redacts_credentials_and_pii() {
         let r = Redactor::new(&[], vec!["an-exact-test-secret".into()]).unwrap();

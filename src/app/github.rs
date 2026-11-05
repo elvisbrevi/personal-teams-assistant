@@ -566,7 +566,7 @@ pub async fn clone_repository(
         move || -> Result<()> {
             let exe = std::env::current_exe()?;
             let status = git_status(
-                Command::new("git")
+                crate::security::program("git")
                     .args(["clone", "--single-branch", "--", &url])
                     .arg(&temporary)
                     .env("GIT_ASKPASS", exe)
@@ -609,7 +609,7 @@ pub async fn update_repository(alias: &str, path: &Path, data_dir: &Path) -> Res
     let remote = tokio::task::spawn_blocking({
         let path = path.clone();
         move || {
-            Command::new("git")
+            crate::security::program("git")
                 .arg("-C")
                 .arg(path)
                 .args(["remote", "get-url", "origin"])
@@ -635,7 +635,7 @@ pub async fn update_repository(alias: &str, path: &Path, data_dir: &Path) -> Res
     let token = access_token().await?;
     tokio::task::spawn_blocking(move || -> Result<()> {
         let exe = std::env::current_exe()?;
-        let clean = Command::new("git")
+        let clean = crate::security::program("git")
             .arg("-C")
             .arg(&path)
             .args(["status", "--porcelain"])
@@ -647,7 +647,7 @@ pub async fn update_repository(alias: &str, path: &Path, data_dir: &Path) -> Res
             "Git checkout has local changes"
         );
         let status = git_status(
-            Command::new("git")
+            crate::security::program("git")
                 .arg("-C")
                 .arg(&path)
                 .args(["fetch", "origin"])
@@ -666,7 +666,7 @@ pub async fn update_repository(alias: &str, path: &Path, data_dir: &Path) -> Res
         )?;
         ensure!(status.success(), "Git fetch failed");
         let status = git_status(
-            Command::new("git")
+            crate::security::program("git")
                 .arg("-C")
                 .arg(&path)
                 .args([

@@ -54,7 +54,7 @@ async fn codex_command(binary: &std::path::Path, action: &str) -> Result<Value> 
     let directory = tempfile::tempdir()?;
     let output = tokio::time::timeout(
         Duration::from_secs(25),
-        tokio::process::Command::new(binary)
+        crate::security::program_async(binary)
             .args(["remote-control", action, "--json"])
             .current_dir(directory.path())
             .env_clear()
@@ -271,7 +271,7 @@ async fn spawn(
     args: &[OsString],
     directory: &std::path::Path,
 ) -> Result<Session> {
-    let mut command = tokio::process::Command::new(binary);
+    let mut command = crate::security::program_async(binary);
     command
         .args(args)
         .current_dir(directory)

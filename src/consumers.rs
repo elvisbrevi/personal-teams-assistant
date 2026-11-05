@@ -623,7 +623,7 @@ pub async fn run(launcher: &Launcher, values: Vec<(String, Secret)>) -> Result<R
         ));
     }
     let started = std::time::Instant::now();
-    let mut command = tokio::process::Command::new(&program);
+    let mut command = crate::security::program_async(&program);
     command
         .args(&launcher.args)
         .current_dir(&launcher.directory)
