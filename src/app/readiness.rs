@@ -77,8 +77,7 @@ const ROOTS_SET: &str =
     "Coding agents on this computer may work only in the directories you selected.";
 const ROOTS_PORTAL: &str =
     "Your portal account does not run coding agents. Add your personal computer to run them there.";
-const TEAMS_OTHER: &str =
-    "Another machine of your account is selected to answer Teams, so this one does not.";
+const TEAMS_OTHER: &str = "Another machine of your account is selected to answer Teams, so this one does not. Reading and sending Teams messages when you ask still works here once Microsoft is signed in on this computer.";
 const TEAMS_SIGN_IN: &str =
     "Microsoft is not signed in on this computer. Sign in to read and answer Teams as you.";
 const TEAMS_IDLE: &str = "Teams is configured here but the assistant is stopped. Start it yourself when you are ready; nothing starts automatically.";

@@ -639,6 +639,13 @@ fn placeholder_identity(value: &str) -> bool {
     uuid::Uuid::parse_str(value).is_ok_and(|id| id.as_u128() <= 3)
 }
 
+/// The Microsoft session is the only thing a Teams database seals with the state key and ties
+/// to a registration. One that cannot be read counts as holding a session.
+fn holds_session(config: &Config) -> bool {
+    let db = config.server.data_dir.join("assistant.db");
+    db.exists() && Store::has_token(&db).unwrap_or(true)
+}
+
 /// A Teams database stays with the organization, client and user it was opened for. One opened
 /// under the example registration (a first sign-in attempt creates it) belongs to nobody while
 /// it holds no Microsoft session, so the real registration may still replace the example.
@@ -653,7 +660,7 @@ fn protect_identity(previous: &Config, next: &Config) -> Result<()> {
         || differs(&before.client_id, &after.client_id);
     let db = previous.server.data_dir.join("assistant.db");
     ensure!(
-        !db.exists() || (!changed && !(registered && Store::has_token(&db).unwrap_or(true))),
+        !(db.exists() && changed) && !(registered && holds_session(previous)),
         "cannot reuse a Teams database with another organization, client, or user"
     );
     Ok(())
@@ -988,9 +995,9 @@ async fn start_service(state: &DesktopState) -> Result<()> {
     validate_teams_setup(&config)?;
     for name in ["GRAPH_WEBHOOK_SECRET", "STATE_ENCRYPTION_KEY"] {
         if security::secret_source(name)?.is_none() {
+            // A database without a session has nothing sealed with the missing key.
             ensure!(
-                name != "STATE_ENCRYPTION_KEY"
-                    || !config.server.data_dir.join("assistant.db").exists(),
+                name != "STATE_ENCRYPTION_KEY" || !holds_session(&config),
                 "import the existing state key before opening the database"
             );
             security::put_desktop_secret("default", name, &security::random_secret())?;
@@ -1483,7 +1490,8 @@ async fn begin_microsoft(host: &Arc<Host>, open: bool) -> std::result::Result<St
         .map_err(fail)?
         .is_none()
     {
-        if config.server.data_dir.join("assistant.db").exists() {
+        // A database without a session has nothing sealed with the missing key.
+        if holds_session(&config) {
             return Err("Import the existing encryption key first.".into());
         }
         security::put_desktop_secret(
@@ -2278,6 +2286,22 @@ mod tests {
         drop(store);
         fs::write(dir.path().join("assistant.db"), "").unwrap();
         assert!(protect_identity(&previous, &next).is_err());
+    }
+
+    #[test]
+    fn only_a_database_with_a_session_needs_its_state_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = Config::desktop_template().unwrap();
+        config.server.data_dir = dir.path().to_path_buf();
+        assert!(!holds_session(&config));
+        // Opened by a sign-in that never finished: nothing in it is sealed.
+        let store = Store::open(&dir.path().join("assistant.db")).unwrap();
+        assert!(!holds_session(&config));
+        store.put_token(b"session").unwrap();
+        assert!(holds_session(&config));
+        drop(store);
+        fs::write(dir.path().join("assistant.db"), "").unwrap();
+        assert!(holds_session(&config));
     }
 
     #[tokio::test]
