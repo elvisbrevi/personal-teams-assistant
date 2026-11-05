@@ -1172,11 +1172,20 @@ async fn operate(
             json!({"deleted":true})
         }
         "azure_wiki" => {
+            let count = |key: &str| args.get(key).and_then(Value::as_u64).map(|n| n as usize);
+            let review = match (count("offset"), count("limit")) {
+                (None, None) => None,
+                (offset, limit) => Some(
+                    crate::ado::wiki::Review::new(offset.unwrap_or(0), limit.unwrap_or(10))
+                        .map_err(|e| format!("[invalid_input] {e}"))?,
+                ),
+            };
             azure_wiki(
                 state,
                 arg(args, "source")?,
                 arg(args, "operation")?,
                 args.get("input").cloned().unwrap_or(json!({})),
+                review,
             )
             .await?
         }

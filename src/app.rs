@@ -1881,7 +1881,11 @@ async fn azure_wiki(
     id: String,
     operation: String,
     input: serde_json::Value,
+    review: Option<crate::ado::wiki::Review>,
 ) -> std::result::Result<serde_json::Value, String> {
+    if review.is_some() && operation != "search" {
+        return Err("[invalid_input] limit and offset page a Wiki search only.".into());
+    }
     use crate::{ado::wiki, tools::ToolSpec};
     let config = state.settings.config().map_err(fail)?;
     let map = state.settings.map().map_err(fail)?;
@@ -1920,8 +1924,10 @@ async fn azure_wiki(
         .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(fail)?;
+    // A review reads up to 25 pages with their authorship; the CLI waits 120 s for a reply.
     let reader = wiki::Reader::new(&client, &key, &catalog, wiki_ids)
         .map_err(|_| "[invalid_input] Invalid Wiki catalog or scope.".to_owned())?
+        .with_deadline(if review.is_some() { 100 } else { 30 })
         .own_scope()
         .await
         .map_err(|_| {
@@ -1940,7 +1946,10 @@ async fn azure_wiki(
         "search" => {
             let input: wiki::SearchInput = serde_json::from_value(input).map_err(|_| "[invalid_input] Invalid Wiki search JSON.".to_owned())?;
             input.validate().map_err(|e| format!("[invalid_input] {e}"))?;
-            let mut result = reader.search(&input, *author_mode).await;
+            let mut result = match review {
+                Some(review) => reader.search_page(&input, *author_mode, review).await,
+                None => reader.search(&input, *author_mode).await,
+            };
             if *repository_docs && let Ok(result) = &mut result {
                 // Its own deadline, as in the assistant's tool call.
                 if let Ok(docs) = wiki::Reader::new(&client, &key, &catalog, wiki_ids) {
@@ -1969,7 +1978,15 @@ async fn azure_wiki(
     let redactor =
         security::Redactor::new(&config.policy.sensitive_patterns, vec![key]).map_err(fail)?;
     let mut value = serde_json::to_value(result).map_err(fail)?;
-    // Redact strings recursively; retain schema/types and never serialize author emails.
+    redact_wiki(&mut value, &redactor);
+    Ok(value)
+}
+
+/// Redact a Wiki result's strings, keeping its schema (author emails are never serialized).
+/// Redaction may hide text that only looks sensitive (a run of digits reads as a phone
+/// number), so the pages it changed are named in `warnings` and the result is `partial`,
+/// instead of returning a silently shorter page.
+fn redact_wiki(value: &mut serde_json::Value, redactor: &security::Redactor) {
     fn redact(value: &mut serde_json::Value, r: &security::Redactor) {
         match value {
             serde_json::Value::String(s) => *s = r.redact(s),
@@ -1978,8 +1995,30 @@ async fn azure_wiki(
             _ => {}
         }
     }
-    redact(&mut value, &redactor);
-    Ok(value)
+    let before: Vec<String> = value["pages"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|p| p["content"].as_str().unwrap_or("").to_owned())
+        .collect();
+    redact(value, redactor);
+    let changed: Vec<String> = value["pages"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .zip(&before)
+        .filter(|(page, content)| page["content"].as_str() != Some(content.as_str()))
+        .map(|(page, _)| page["path"].as_str().unwrap_or("?").to_owned())
+        .collect();
+    if !changed.is_empty() {
+        value["partial"] = serde_json::json!(true);
+        if let Some(warnings) = value["warnings"].as_array_mut() {
+            warnings.push(serde_json::json!(format!(
+                "Text that looks sensitive (a secret, an email, a phone number or an ID) was replaced with [REDACTED] in {}",
+                changed.join(", ")
+            )));
+        }
+    }
 }
 
 #[cfg(test)]
@@ -2052,6 +2091,28 @@ mod tests {
         assert_eq!(dated.data["entries"].as_array().unwrap().len(), 1);
         let unknown = list(serde_json::json!({"before": "chats/c/messages/9"})).await;
         assert_eq!(unknown.code, "invalid_input", "{:?}", unknown.message);
+    }
+
+    #[test]
+    fn a_wiki_page_that_redaction_changed_is_named() {
+        let redactor = security::Redactor::new(&[], vec![]).unwrap();
+        let mut value = serde_json::json!({"partial": false, "warnings": [], "pages": [
+            {"path": "/Flujo", "content": "La SPS pasa a estado `10` (pendiente)."},
+            {"path": "/Estados", "content": "Estados 2 - 3 - 4 - 10 - 11 en orden."}]});
+        redact_wiki(&mut value, &redactor);
+        assert_eq!(
+            value["pages"][0]["content"],
+            "La SPS pasa a estado `10` (pendiente)."
+        );
+        assert!(
+            value["pages"][1]["content"]
+                .as_str()
+                .unwrap()
+                .contains("[REDACTED]")
+        );
+        assert_eq!(value["partial"], true);
+        let warning = value["warnings"][0].as_str().unwrap();
+        assert!(warning.ends_with("in /Estados"), "{warning}");
     }
 
     #[test]
