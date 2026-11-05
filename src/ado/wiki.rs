@@ -29,6 +29,25 @@ pub struct SearchInput {
     #[serde(default)]
     pub author_mode: Option<AuthorMode>,
 }
+/// A review's page of a search: every candidate in turn, `limit` pages from `offset`,
+/// instead of the bounds an answer uses (10 candidates read, four pages kept).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Review {
+    pub offset: usize,
+    pub limit: usize,
+}
+impl Review {
+    /// Candidates a review pages through, and pages one call reads.
+    pub const CANDIDATES: usize = 200;
+    pub const MAX_LIMIT: usize = 25;
+    pub fn new(offset: usize, limit: usize) -> Result<Self> {
+        ensure!(
+            (1..=Self::MAX_LIMIT).contains(&limit) && offset < Self::CANDIDATES,
+            "invalid Wiki page: limit 1–25 and offset below 200"
+        );
+        Ok(Self { offset, limit })
+    }
+}
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReadInput {
@@ -184,6 +203,9 @@ pub struct WikiResult {
     pub histories_checked: usize,
     pub partial: bool,
     pub warnings: Vec<String>,
+    /// In a review, the `offset` of the next candidates when more remain.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_offset: Option<usize>,
     /// Only when the source enables `repository_docs`: README and OpenAPI files of the
     /// repositories named like the search topic.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1824,7 +1846,32 @@ impl<'a> Reader<'a> {
         input: &SearchInput,
         default_mode: AuthorMode,
     ) -> Result<WikiResult> {
+        self.search_with(input, default_mode, None).await
+    }
+    /// Search for a review: candidates `offset..offset + limit` in Search's order, every one
+    /// of them read and kept, and `next_offset` while more remain.
+    pub async fn search_page(
+        &self,
+        input: &SearchInput,
+        default_mode: AuthorMode,
+        review: Review,
+    ) -> Result<WikiResult> {
+        self.search_with(input, default_mode, Some(review)).await
+    }
+    async fn search_with(
+        &self,
+        input: &SearchInput,
+        default_mode: AuthorMode,
+        review: Option<Review>,
+    ) -> Result<WikiResult> {
         input.validate()?;
+        let cap = if review.is_some() {
+            Review::CANDIDATES
+        } else {
+            100
+        };
+        // Unique candidates seen, and whether some lie past the review's page.
+        let (mut unique, mut more) = (0, false);
         if let Some(id) = &input.wiki_id {
             ensure!(
                 self.allowed_id(id),
@@ -1844,9 +1891,9 @@ impl<'a> Reader<'a> {
             if source.projects.is_empty() {
                 continue;
             }
-            for skip in (0..100).step_by(25) {
-                if result.candidates >= 100 {
-                    result.warn("Search candidate limit (100)");
+            for skip in (0..cap).step_by(25) {
+                if result.candidates >= cap {
+                    result.warn(&format!("Search candidate limit ({cap})"));
                     break 'organizations;
                 }
                 let mut url = organization_url(source, &["_apis", "search", "wikisearchresults"])?;
@@ -1882,8 +1929,8 @@ impl<'a> Reader<'a> {
                     .as_array()
                     .context("invalid Wiki Search results")?;
                 for hit in hits {
-                    if result.candidates >= 100 {
-                        result.warn("Search global candidate limit (100)");
+                    if result.candidates >= cap {
+                        result.warn(&format!("Search global candidate limit ({cap})"));
                         break 'organizations;
                     }
                     result.candidates += 1;
@@ -1921,9 +1968,20 @@ impl<'a> Reader<'a> {
                     )) {
                         continue;
                     }
-                    if read_candidates.len() >= 10 {
-                        result.warn("Relevant candidate/history limit (10)");
-                        continue;
+                    let index = unique;
+                    unique += 1;
+                    match review {
+                        Some(page) if index < page.offset => continue,
+                        Some(page) if index >= page.offset + page.limit => {
+                            more = true;
+                            continue;
+                        }
+                        Some(_) => {}
+                        None if read_candidates.len() >= 10 => {
+                            result.warn("Relevant candidate/history limit (10)");
+                            continue;
+                        }
+                        None => {}
                     }
                     let ck = (
                         source.organization.clone(),
@@ -2011,8 +2069,8 @@ impl<'a> Reader<'a> {
                 if hits.len() < 25 || skip + hits.len() >= count {
                     break;
                 }
-                if skip == 75 {
-                    result.warn("Search pagination limit (100)");
+                if skip + 25 == cap {
+                    result.warn(&format!("Search pagination limit ({cap})"));
                 }
             }
         }
@@ -2062,7 +2120,9 @@ impl<'a> Reader<'a> {
                 ))
             });
         }
-        if result.pages.len() > 4 {
+        if let Some(page) = review {
+            result.next_offset = more.then_some(page.offset + page.limit);
+        } else if result.pages.len() > 4 {
             result.warn("Content/context page limit (4)");
             result.pages.truncate(4);
         }
@@ -2948,6 +3008,92 @@ mod tests {
                     .contains("me@example.test")
             );
         }
+    }
+    #[tokio::test]
+    async fn a_review_pages_through_every_candidate_while_an_answer_keeps_its_bounds() {
+        let server = MockServer::start().await;
+        let pages: Vec<(String, String)> = (0..6)
+            .map(|n| (format!("/Page-{n}.md"), format!("/Page {n}")))
+            .collect();
+        let subpages: Vec<Value> = pages
+            .iter()
+            .map(|(git, canonical)| page_value(git, canonical, ""))
+            .collect();
+        Mock::given(method("GET"))
+            .and(path(format!("/test/{PID}/_apis/wiki/wikis/{WID}/pages")))
+            .and(query_param("recursionLevel", "full"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"path":"/","gitItemPath":"/","subPages":subpages})),
+            )
+            .with_priority(1)
+            .mount(&server)
+            .await;
+        let lookup = pages.clone();
+        Mock::given(method("GET"))
+            .and(path(format!("/test/{PID}/_apis/wiki/wikis/{WID}/pages")))
+            .and(query_param("includeContent", "true"))
+            .respond_with(move |request: &wiremock::Request| {
+                let wanted = request
+                    .url
+                    .query_pairs()
+                    .find(|(k, _)| k == "path")
+                    .map(|(_, v)| v.into_owned())
+                    .unwrap_or_default();
+                let (git, canonical) = lookup.iter().find(|(_, c)| *c == wanted).unwrap();
+                ResponseTemplate::new(200)
+                    .insert_header("etag", format!("\"{SHA}\""))
+                    .set_body_json(page_value(
+                        git,
+                        canonical,
+                        "The SPS goes to state `10` (pending verification).\n\n```mermaid\ngraph TD\n  A[EstadoId = 10]\n```",
+                    ))
+            })
+            .with_priority(1)
+            .mount(&server)
+            .await;
+        fixture(&server, "/", "projectWiki", "/Page-0.md", "/Page 0", false).await;
+        let hits: Vec<Value> = pages.iter().map(|(git, _)| hit(git)).collect();
+        Mock::given(method("POST"))
+            .and(path("/test/_apis/search/wikisearchresults"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"infoCode":0,"count":6,"results":hits})),
+            )
+            .mount(&server)
+            .await;
+        let client = Client::new();
+        let ids = vec![WID.to_owned()];
+        let r = reader(&client, "synthetic-token", &catalog(false), &ids, &server);
+        let input = SearchInput {
+            query: "estado 10".into(),
+            wiki_id: None,
+            author_mode: Some(AuthorMode::All),
+        };
+        let paths = |result: &WikiResult| -> Vec<String> {
+            result.pages.iter().map(|p| p.path.clone()).collect()
+        };
+        let first = r
+            .search_page(&input, AuthorMode::All, Review::new(2, 2).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(paths(&first), ["/Page 2", "/Page 3"]);
+        assert_eq!(first.next_offset, Some(4));
+        assert!(!first.partial, "{:?}", first.warnings);
+        // The page is read whole: inline code and Mermaid blocks keep their text.
+        assert!(first.pages[0].content.contains("state `10`"));
+        assert!(first.pages[0].content.contains("EstadoId = 10"));
+        let last = r
+            .search_page(&input, AuthorMode::All, Review::new(4, 2).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(paths(&last), ["/Page 4", "/Page 5"]);
+        assert_eq!(last.next_offset, None);
+        // An answer keeps its bounds: four pages and partial coverage.
+        let answer = r.search(&input, AuthorMode::All).await.unwrap();
+        assert_eq!(answer.pages.len(), 4);
+        assert!(answer.partial && answer.next_offset.is_none());
+        assert!(Review::new(0, 26).is_err() && Review::new(200, 1).is_err());
     }
     #[tokio::test]
     async fn wildcard_search_does_not_enumerate_projects_and_exposes_index_status() {

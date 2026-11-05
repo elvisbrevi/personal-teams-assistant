@@ -1501,6 +1501,7 @@ pub(super) const TOOLS: &[Tool] = &[
                     "from": string("Part of the author's display name."),
                     "since": string("Start: YYYY-MM-DD or an RFC 3339 instant."),
                     "until": string("End: YYYY-MM-DD (that day included) or an RFC 3339 instant."),
+                    "before": string("next_cursor of the previous call (when the history was read directly): only older matches."),
                     "limit": {"type": "integer", "minimum": 1, "maximum": 100, "description": "How many (default 25)."}}),
                 &["query"],
             )
@@ -2048,7 +2049,7 @@ pub(super) async fn run(name: &str, args: &Value) -> Result<Value, String> {
         "teams_messages" => ipc("teams_messages", json!({"chat": args.get("chat"), "mine": args.get("mine"), "since": args.get("since"),
             "until": args.get("until"), "before": args.get("before"), "limit": args.get("limit")})).await,
         "teams_search" => ipc("teams_search", json!({"query": text(args, "query")?, "chats": args.get("chats"), "from": args.get("from"),
-            "since": args.get("since"), "until": args.get("until"), "limit": args.get("limit")})).await,
+            "since": args.get("since"), "until": args.get("until"), "before": args.get("before"), "limit": args.get("limit")})).await,
         "teams_post" => ipc("teams_post", json!({"chat": text(args, "chat")?, "text": text(args, "text")?})).await,
         "activity_run" => ipc("activity_run", json!({"day": args.get("day")})).await,
         "activity_settings_update" => {

@@ -91,9 +91,10 @@ Messages and diagnostics
                            to or quotes, and next_cursor for --before. --mine: your own messages in the chats this
                            profile reads (last 30 days by default). DATE: YYYY-MM-DD (this computer's time zone,
                            --until includes the day) or RFC 3339. 50 by default, at most 200. Read-only.
-  teams search TEXT [--chat ID]... [--from NAME] [--since DATE] [--until DATE] [--limit N]
+  teams search TEXT [--chat ID]... [--from NAME] [--since DATE] [--until DATE] [--limit N] [--before CURSOR]
                            Messages matching TEXT in the chats this profile reads: Microsoft Search, else their
-                           history read directly (bounded; partial and warnings say so). 25 by default, at most 100.
+                           history read directly (bounded; partial and warnings say so, and next_cursor goes to
+                           --before for older matches). 25 by default, at most 100.
   teams send CHAT          Posts the Markdown text on stdin as you in a chat (ID from `teams chats`, or
                            `self`); @[Display Name] mentions a chat member. Sent once, never retried.
   logs [--limit N]         Host events.
@@ -384,7 +385,15 @@ Knowledge
   knowledge search TEXT [--source ID]... [--context ID]
                            The sections the assistant would read from repositories and notes (no model).
   index status | index refresh [SOURCE]  What each indexed source holds; compare repositories with their files.
-  azure wiki list|search|read SOURCE_ID  (search/read: JSON on stdin; local read only)
+  azure wiki list SOURCE_ID              The Wikis a Wiki source reads (works while it is disabled).
+  azure wiki search SOURCE_ID --query TEXT [--wiki ID] [--author prefer_mine|mine_only|all] [--limit N] [--offset N]
+                           Pages matching TEXT with their authorship and verified links. Without --limit/--offset,
+                           the assistant's bounds (10 candidates read, 4 pages kept); with them, a review reads every
+                           candidate in turn: N pages (1–25, 10 by default) from --offset, and next_offset.
+  azure wiki read SOURCE_ID --wiki ID --path PATH
+                           One page's whole Markdown (Mermaid and code blocks included) by its exact Wiki path.
+                           Instead of the flags, stdin may carry the JSON: search {\"query\":TEXT,\"wiki_id\":ID|null,
+                           \"author_mode\":\"all\"}, read {\"wiki_id\":ID,\"path\":PATH}. Local read only; enable the source.
 
 Agents
   tools list               Shared application tools, their filters and effects (no host required).
@@ -481,6 +490,10 @@ fn words(args: &[String]) -> Vec<&str> {
                 | "--before"
                 | "--from"
                 | "--chat"
+                | "--query"
+                | "--wiki"
+                | "--author"
+                | "--path"
         ) {
             skip = true;
         } else if !arg.starts_with("--") {
@@ -1338,7 +1351,7 @@ fn validate_args(args: &[String]) -> Result<()> {
             | "--forget-service-token" => {}
             "--destination" | "--name" | "--existing" | "--to" | "--target" | "--label"
             | "--token-expires" | "--keep" | "--machine" | "--since" | "--until" | "--before"
-            | "--from" | "--chat" => {
+            | "--from" | "--chat" | "--query" | "--wiki" | "--author" => {
                 i += 1;
                 ensure!(
                     args.get(i)
@@ -1449,6 +1462,13 @@ fn validate_args(args: &[String]) -> Result<()> {
                     args.get(i)
                         .is_some_and(|v| !v.is_empty() && !v.starts_with("--")),
                     "invalid source ID"
+                );
+            }
+            "--path" => {
+                i += 1;
+                ensure!(
+                    args.get(i).is_some_and(|v| v.starts_with('/')),
+                    "invalid Wiki path: it starts with /"
                 );
             }
             "--output" => {
@@ -1794,9 +1814,31 @@ fn validate_args(args: &[String]) -> Result<()> {
         (
             "--limit",
             ["audit", "logs", "notes", "variables"].contains(&p[0])
-                || (p[0] == "teams" && p.get(1) != Some(&"send")),
+                || (p[0] == "teams" && p.get(1) != Some(&"send"))
+                || p.as_slice().starts_with(&["azure", "wiki", "search"]),
         ),
-        ("--offset", p.as_slice().starts_with(&["teams", "chats"])),
+        (
+            "--offset",
+            p.as_slice().starts_with(&["teams", "chats"])
+                || p.as_slice().starts_with(&["azure", "wiki", "search"]),
+        ),
+        (
+            "--query",
+            p.as_slice().starts_with(&["azure", "wiki", "search"]),
+        ),
+        (
+            "--author",
+            p.as_slice().starts_with(&["azure", "wiki", "search"]),
+        ),
+        (
+            "--wiki",
+            p.as_slice().starts_with(&["azure", "wiki", "search"])
+                || p.as_slice().starts_with(&["azure", "wiki", "read"]),
+        ),
+        (
+            "--path",
+            p.as_slice().starts_with(&["azure", "wiki", "read"]),
+        ),
         (
             "--since",
             p.as_slice().starts_with(&["teams", "messages"])
@@ -1811,7 +1853,9 @@ fn validate_args(args: &[String]) -> Result<()> {
         ),
         (
             "--before",
-            p.as_slice().starts_with(&["teams", "messages"]) || p.as_slice() == ["audit", "list"],
+            p.as_slice().starts_with(&["teams", "messages"])
+                || p.as_slice().starts_with(&["teams", "search"])
+                || p.as_slice() == ["audit", "list"],
         ),
         ("--mine", p.as_slice() == ["teams", "messages"]),
         ("--chat", p.as_slice().starts_with(&["teams", "search"])),
@@ -2017,7 +2061,8 @@ async fn execute(mut args: Vec<String>) -> Result<Reply> {
                     "teams_search",
                     json!({"query": operand, "chats": options(&args, "--chat"),
                         "from": option(&args, "--from"), "since": option(&args, "--since"),
-                        "until": option(&args, "--until"), "limit": count("--limit")?}),
+                        "until": option(&args, "--until"), "before": option(&args, "--before"),
+                        "limit": count("--limit")?}),
                     None,
                     true,
                 )
@@ -2117,11 +2162,27 @@ async fn execute(mut args: Vec<String>) -> Result<Reply> {
         ));
     }
     if command == "azure" {
-        let operation = positional(&args, 2)?;
+        let words = words(&args);
+        let operation = *words.get(2).context("missing argument; consult --help")?;
+        let source = *words.get(3).context("missing argument; consult --help")?;
+        let flagged = ["--query", "--wiki", "--author", "--path"]
+            .iter()
+            .any(|flag| args.iter().any(|a| a == flag));
         let value = if operation == "list" {
             json!({})
+        } else if flagged {
+            match operation {
+                "search" => {
+                    json!({"query": option(&args, "--query").context("--query is required")?,
+                    "wiki_id": option(&args, "--wiki"), "author_mode": option(&args, "--author")})
+                }
+                _ => json!({"wiki_id": option(&args, "--wiki").context("--wiki is required")?,
+                    "path": option(&args, "--path").context("--path is required")?}),
+            }
         } else {
-            serde_json::from_str::<Value>(&stdin_text()?).context("input must be Wiki JSON")?
+            serde_json::from_str::<Value>(&stdin_text()?).context(
+                "input must be Wiki JSON on stdin, or use --query (search) or --wiki and --path (read)",
+            )?
         };
         match operation {
             "search" => serde_json::from_value::<crate::ado::wiki::SearchInput>(value.clone())
@@ -2132,9 +2193,15 @@ async fn execute(mut args: Vec<String>) -> Result<Reply> {
                 .validate()?,
             _ => {}
         }
+        let count = |flag: &str| {
+            option(&args, flag)
+                .map(|v| v.parse::<u64>().context("invalid number"))
+                .transpose()
+        };
         return call(
             "azure_wiki",
-            json!({"operation":operation,"source":positional(&args,3)?,"input":value}),
+            json!({"operation":operation,"source":source,"input":value,
+                "limit":count("--limit")?,"offset":count("--offset")?}),
             None,
             true,
         )
@@ -3051,6 +3118,63 @@ mod wiki_tests {
         assert!(validate_args(&["cloud", "tokens"].map(str::to_owned)).is_err());
     }
     #[test]
+    fn wiki_flags_belong_to_their_operation() {
+        let ok =
+            |args: &[&str]| validate_args(&args.iter().map(|a| a.to_string()).collect::<Vec<_>>());
+        assert!(
+            ok(&[
+                "azure",
+                "wiki",
+                "search",
+                "w",
+                "--query",
+                "estado 10",
+                "--wiki",
+                "id",
+                "--author",
+                "all"
+            ])
+            .is_ok()
+        );
+        assert!(
+            ok(&[
+                "azure",
+                "wiki",
+                "read",
+                "w",
+                "--wiki",
+                "id",
+                "--path",
+                "/Portal pagos (actual)/TGR"
+            ])
+            .is_ok()
+        );
+        for wrong in [
+            &["azure", "wiki", "read", "w", "--query", "x"][..],
+            &["azure", "wiki", "search", "w", "--path", "/x"],
+            &["azure", "wiki", "read", "w", "--limit", "3"],
+            &["azure", "wiki", "list", "w", "--offset", "3"],
+            &[
+                "azure", "wiki", "read", "w", "--wiki", "id", "--path", "relative",
+            ],
+        ] {
+            assert!(ok(wrong).is_err(), "{wrong:?}");
+        }
+        let args = [
+            "azure",
+            "wiki",
+            "search",
+            "--query",
+            "estado 10",
+            "w",
+            "--limit",
+            "5",
+        ]
+        .map(str::to_owned);
+        assert_eq!(words(&args), ["azure", "wiki", "search", "w"]);
+    }
+
+    #[test]
     fn teams_reads_take_only_their_own_flags() {
         let ok =
             |args: &[&str]| validate_args(&args.iter().map(|a| a.to_string()).collect::<Vec<_>>());
@@ -3059,7 +3183,7 @@ mod wiki_tests {
         assert!(ok(&["teams", "search", "estado", "--chat", "a", "--chat", "b"]).is_ok());
         for wrong in [
             &["teams", "messages", "self", "--mine"][..],
-            &["teams", "search", "estado", "--before", "2026-10-01"],
+            &["teams", "search", "estado", "--offset", "3"],
             &["teams", "send", "self", "--limit", "3"],
             &["teams", "chats", "--since", "2026-10-01"],
             &["teams", "messages", "self", "--since"],
@@ -3241,6 +3365,28 @@ mod help_tests {
             &["repos", "list"],
             &["sources", "list"],
             &["azure", "wiki", "list", "manuals"],
+            &[
+                "azure",
+                "wiki",
+                "search",
+                "manuals",
+                "--query",
+                "estado 10",
+                "--limit",
+                "10",
+                "--offset",
+                "10",
+            ],
+            &[
+                "azure",
+                "wiki",
+                "read",
+                "manuals",
+                "--wiki",
+                "00000000-0000-0000-0000-000000000002",
+                "--path",
+                "/Flujo de Pago",
+            ],
             &["tunnel", "status"],
             &["test", "providers"],
             &["audit", "list"],
