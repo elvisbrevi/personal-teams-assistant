@@ -884,8 +884,18 @@ pub struct ScopedTool {
 pub struct ToolArgs {
     pub question: String,
 }
+/// A failed read keeps only a fixed reason the user can act on, never provider text.
 #[derive(Debug)]
-pub struct ToolError;
+pub struct ToolError(pub Option<&'static str>);
+impl ToolError {
+    fn from_error(error: anyhow::Error) -> Self {
+        Self(
+            error
+                .downcast_ref::<crate::local_chat::NoTeamsSession>()
+                .map(|reason| reason.0),
+        )
+    }
+}
 impl std::fmt::Display for ToolError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "read-only tool failed")
@@ -897,24 +907,34 @@ impl ScopedTool {
         self.executor
             .execute(&self.spec, &args.question, &self.conversation)
             .await
-            .map_err(|_| ToolError)
+            .map_err(ToolError::from_error)
     }
     pub async fn review(&self, days: i64) -> std::result::Result<String, ToolError> {
         self.executor
             .review(&self.spec, days)
             .await
-            .map_err(|_| ToolError)
+            .map_err(ToolError::from_error)
     }
     pub async fn status_pages(&self, question: &str) -> std::result::Result<String, ToolError> {
         self.executor
             .status_pages(&self.spec, question)
             .await
-            .map_err(|_| ToolError)
+            .map_err(ToolError::from_error)
     }
 }
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_failed_read_keeps_only_a_fixed_reason() {
+        let missing: anyhow::Error = crate::local_chat::NoTeamsSession("no session").into();
+        assert_eq!(ToolError::from_error(missing).0, Some("no session"));
+        assert_eq!(
+            ToolError::from_error(anyhow::anyhow!("provider text")).0,
+            None
+        );
+    }
     #[tokio::test]
     async fn installed_tools_cannot_write_even_with_a_legacy_write_credential() {
         struct NoToken;

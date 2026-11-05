@@ -79,7 +79,18 @@ Messages and diagnostics
   answer send RESOURCE     Sends an unsent answer once, after your review (never retried).
   answer feedback RESOURCE JSON on stdin: rating good|bad (null clears), comment, example (a good answer
                            guides later answers to similar requests, by structure and tone) and context.
-  teams chats [QUERY]      Chats you belong to (topic, members, ID); QUERY filters by topic or member name.
+  teams chats [QUERY] [--limit N] [--offset N]
+                           Chats you belong to, newest first (topic, members, ID, readable) with the total;
+                           QUERY filters by topic or member name; 50 by default, at most 500 per call.
+  teams messages CHAT|--mine [--since DATE] [--until DATE] [--limit N] [--before CURSOR]
+                           A chat's messages from every author, newest first (ID from `teams chats`, `self`, or
+                           one message's chats/.../messages/ID): author name, date, plain text, what it replies
+                           to or quotes, and next_cursor for --before. --mine: your own messages in the chats this
+                           profile reads (last 30 days by default). DATE: YYYY-MM-DD (this computer's time zone,
+                           --until includes the day) or RFC 3339. 50 by default, at most 200. Read-only.
+  teams search TEXT [--chat ID]... [--from NAME] [--since DATE] [--until DATE] [--limit N]
+                           Messages matching TEXT in the chats this profile reads: Microsoft Search, else their
+                           history read directly (bounded; partial and warnings say so). 25 by default, at most 100.
   teams send CHAT          Posts the Markdown text on stdin as you in a chat (ID from `teams chats`, or
                            `self`); @[Display Name] mentions a chat member. Sent once, never retried.
   logs [--limit N]         Host events.
@@ -461,6 +472,12 @@ fn words(args: &[String]) -> Vec<&str> {
                 | "--label"
                 | "--keep"
                 | "--machine"
+                | "--offset"
+                | "--since"
+                | "--until"
+                | "--before"
+                | "--from"
+                | "--chat"
         ) {
             skip = true;
         } else if !arg.starts_with("--") {
@@ -1314,9 +1331,11 @@ fn validate_args(args: &[String]) -> Result<()> {
             | "--dry-run"
             | "--keep-local"
             | "--adopt"
+            | "--mine"
             | "--forget-service-token" => {}
             "--destination" | "--name" | "--existing" | "--to" | "--target" | "--label"
-            | "--token-expires" | "--keep" | "--machine" => {
+            | "--token-expires" | "--keep" | "--machine" | "--since" | "--until" | "--before"
+            | "--from" | "--chat" => {
                 i += 1;
                 ensure!(
                     args.get(i)
@@ -1397,6 +1416,13 @@ fn validate_args(args: &[String]) -> Result<()> {
                 ensure!(
                     args.get(i).is_some_and(|v| v.parse::<usize>().is_ok()),
                     "invalid limit"
+                );
+            }
+            "--offset" => {
+                i += 1;
+                ensure!(
+                    args.get(i).is_some_and(|v| v.parse::<usize>().is_ok()),
+                    "invalid offset"
                 );
             }
             "--endpoint" => {
@@ -1564,8 +1590,8 @@ fn validate_args(args: &[String]) -> Result<()> {
             | ["audit", "list"]
             | ["audit", "show", _]
             | ["answer", "refine" | "send" | "feedback", _]
-            | ["teams", "chats"]
-            | ["teams", "chats" | "send", _]
+            | ["teams", "chats" | "messages"]
+            | ["teams", "chats" | "send" | "messages" | "search", _]
             | ["people", "list" | "add"]
             | ["people", "show" | "edit" | "remove", _]
             | ["guides", "list" | "add"]
@@ -1764,8 +1790,24 @@ fn validate_args(args: &[String]) -> Result<()> {
         ),
         (
             "--limit",
-            ["audit", "logs", "notes", "variables"].contains(&p[0]),
+            ["audit", "logs", "notes", "variables"].contains(&p[0])
+                || (p[0] == "teams" && p.get(1) != Some(&"send")),
         ),
+        ("--offset", p.as_slice().starts_with(&["teams", "chats"])),
+        (
+            "--since",
+            p.as_slice().starts_with(&["teams", "messages"])
+                || p.as_slice().starts_with(&["teams", "search"]),
+        ),
+        (
+            "--until",
+            p.as_slice().starts_with(&["teams", "messages"])
+                || p.as_slice().starts_with(&["teams", "search"]),
+        ),
+        ("--before", p.as_slice().starts_with(&["teams", "messages"])),
+        ("--mine", p.as_slice() == ["teams", "messages"]),
+        ("--chat", p.as_slice().starts_with(&["teams", "search"])),
+        ("--from", p.as_slice().starts_with(&["teams", "search"])),
         (
             "--source",
             p.as_slice().starts_with(&["answer", "refine"])
@@ -1887,7 +1929,7 @@ async fn execute(mut args: Vec<String>) -> Result<Reply> {
         }
         "capabilities" => {
             return Ok(Reply::success(
-                json!({"contract":control::CONTRACT,"commands":HELP,"skill_version":env!("CARGO_PKG_VERSION"),"activity_registration_support":true,"web_support":true,"web_access_support":true,"knowledge_index_support":true,"mcp_support":true,"tools_support":true,"todo_support":true,"implementation_support":true,"machine_pairing_support":true,"machine_login_support":true,"machine_management_support":true,"account_variables_support":true,"account_portable_support":true,"account_authority_support":true,"shared_accounts_support":true,"cloud_store_support":true,"cloud_mirror_support":true,"cloud_disconnect_support":true,"cloud_primary_support":true,"cloud_migration_support":true,"cloud_installations_support":true,"cloud_handoff_support":true,"cloud_delivery_support":true,"cloud_restore_support":true,"cloud_conflicts_support":true,"cloud_lost_support":true,"cloud_repair_support":true}),
+                json!({"contract":control::CONTRACT,"commands":HELP,"skill_version":env!("CARGO_PKG_VERSION"),"activity_registration_support":true,"web_support":true,"web_access_support":true,"knowledge_index_support":true,"mcp_support":true,"tools_support":true,"todo_support":true,"implementation_support":true,"machine_pairing_support":true,"machine_login_support":true,"machine_management_support":true,"account_variables_support":true,"account_portable_support":true,"account_authority_support":true,"shared_accounts_support":true,"cloud_store_support":true,"cloud_mirror_support":true,"cloud_disconnect_support":true,"cloud_primary_support":true,"cloud_migration_support":true,"cloud_installations_support":true,"cloud_handoff_support":true,"cloud_delivery_support":true,"cloud_restore_support":true,"cloud_conflicts_support":true,"cloud_lost_support":true,"cloud_repair_support":true,"teams_read_support":true}),
             ));
         }
         "skill" => return crate::app::skill::command(action, args.get(2).map(String::as_str)),
@@ -1937,8 +1979,42 @@ async fn execute(mut args: Vec<String>) -> Result<Reply> {
         return call("question_associate", value, None, true).await;
     }
     if command == "teams" {
+        let count = |flag: &str| {
+            option(&args, flag)
+                .map(|v| v.parse::<u64>().context("invalid number"))
+                .transpose()
+        };
+        let operand = words(&args).get(2).map(|w| (*w).to_owned());
         return match action {
-            "chats" => call("teams_chats", json!({"query": args.get(2)}), None, true).await,
+            "chats" => call(
+                "teams_chats",
+                json!({"query": operand, "limit": count("--limit")?, "offset": count("--offset")?}),
+                None,
+                true,
+            )
+            .await,
+            "messages" => {
+                call(
+                    "teams_messages",
+                    json!({"chat": operand, "mine": args.iter().any(|a| a == "--mine"),
+                        "since": option(&args, "--since"), "until": option(&args, "--until"),
+                        "before": option(&args, "--before"), "limit": count("--limit")?}),
+                    None,
+                    true,
+                )
+                .await
+            }
+            "search" => {
+                call(
+                    "teams_search",
+                    json!({"query": operand, "chats": options(&args, "--chat"),
+                        "from": option(&args, "--from"), "since": option(&args, "--since"),
+                        "until": option(&args, "--until"), "limit": count("--limit")?}),
+                    None,
+                    true,
+                )
+                .await
+            }
             _ => {
                 let text = stdin_text()?;
                 call(
@@ -2961,6 +3037,36 @@ mod wiki_tests {
         assert!(validate_args(&["cloud", "tokens"].map(str::to_owned)).is_err());
     }
     #[test]
+    fn teams_reads_take_only_their_own_flags() {
+        let ok =
+            |args: &[&str]| validate_args(&args.iter().map(|a| a.to_string()).collect::<Vec<_>>());
+        assert!(ok(&["teams", "messages", "self", "--before", "2026-10-01"]).is_ok());
+        assert!(ok(&["teams", "messages", "--mine", "--since", "2026-10-01"]).is_ok());
+        assert!(ok(&["teams", "search", "estado", "--chat", "a", "--chat", "b"]).is_ok());
+        for wrong in [
+            &["teams", "messages", "self", "--mine"][..],
+            &["teams", "search", "estado", "--before", "2026-10-01"],
+            &["teams", "send", "self", "--limit", "3"],
+            &["teams", "chats", "--since", "2026-10-01"],
+            &["teams", "messages", "self", "--since"],
+            &["notes", "list", "--mine"],
+        ] {
+            assert!(ok(wrong).is_err(), "{wrong:?}");
+        }
+        let words_of = [
+            "teams",
+            "search",
+            "--chat",
+            "self",
+            "estado 10",
+            "--from",
+            "Ana",
+        ]
+        .map(str::to_owned);
+        assert_eq!(words(&words_of), ["teams", "search", "estado 10"]);
+    }
+
+    #[test]
     fn wiki_commands_require_exact_local_source_argument_and_closed_stdin_schema() {
         for operation in ["list", "search", "read"] {
             assert!(
@@ -3128,7 +3234,35 @@ mod help_tests {
             &["answer", "send", "resource"],
             &["teams", "chats"],
             &["teams", "chats", "ana"],
+            &["teams", "chats", "--limit", "100", "--offset", "50"],
             &["teams", "send", "self"],
+            &[
+                "teams",
+                "messages",
+                "self",
+                "--since",
+                "2026-09-05",
+                "--limit",
+                "100",
+            ],
+            &[
+                "teams",
+                "messages",
+                "--mine",
+                "--before",
+                "2026-10-01T09:00:00.000Z",
+            ],
+            &[
+                "teams",
+                "search",
+                "estado 10",
+                "--chat",
+                "self",
+                "--from",
+                "Ana",
+                "--until",
+                "2026-11-04",
+            ],
             &["answer", "feedback", "resource"],
             &["people", "list"],
             &["people", "edit", "ana"],

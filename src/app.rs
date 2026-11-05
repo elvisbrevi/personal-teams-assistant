@@ -199,6 +199,9 @@ fn fail<E: Into<anyhow::Error>>(error: E) -> String {
     if let Some(message) = error.downcast_ref::<crate::simulation::InvalidRequest>() {
         return format!("[invalid_input] {message}");
     }
+    if let Some(refusal) = error.downcast_ref::<crate::adapters::chats::ReadRefusal>() {
+        return format!("[invalid_input] {refusal}");
+    }
     if let Some(refusal) = error.downcast_ref::<crate::pipeline::DraftRefusal>() {
         return match refusal {
             crate::pipeline::DraftRefusal::GuidanceTooLong
@@ -324,15 +327,171 @@ async fn teams_graph(state: &DesktopState) -> Result<TeamsGraph> {
     Ok(TeamsGraph::Profile(profile_graph(state).await?))
 }
 
-/// The chats the user can post in, optionally filtered by a topic or member name.
+/// The chats the user belongs to, newest first, optionally filtered by a topic or member
+/// name: `limit` of them from `offset`, with the total.
 async fn teams_chats(
     state: &DesktopState,
     args: &serde_json::Value,
 ) -> std::result::Result<serde_json::Value, String> {
     let query = args.get("query").and_then(serde_json::Value::as_str);
+    let limit = teams_count(args, "limit", 50, 500)?;
+    let offset = teams_count(args, "offset", 0, usize::MAX)?;
     let graph = teams_graph(state).await.map_err(fail)?;
-    let chats = graph.chat_directory(query).await.map_err(fail)?;
-    Ok(serde_json::json!({"chats": chats.into_iter().take(25).collect::<Vec<_>>()}))
+    let mut chats = graph.chat_directory(query).await.map_err(fail)?;
+    chats.sort_by(|a, b| {
+        b["last_updated"]
+            .as_str()
+            .unwrap_or("")
+            .cmp(a["last_updated"].as_str().unwrap_or(""))
+    });
+    let total = chats.len();
+    let page: Vec<_> = chats.into_iter().skip(offset).take(limit).collect();
+    let next = offset + page.len();
+    Ok(
+        serde_json::json!({"chats": page, "total": total, "offset": offset,
+        "next_offset": (next < total).then_some(next)}),
+    )
+}
+
+/// A count argument of a Teams read: `default` when absent, otherwise within `min(1)..=max`.
+fn teams_count(
+    args: &serde_json::Value,
+    key: &str,
+    default: usize,
+    max: usize,
+) -> std::result::Result<usize, String> {
+    match args.get(key) {
+        None | Some(serde_json::Value::Null) => Ok(default),
+        Some(value) => value
+            .as_u64()
+            .map(|n| n as usize)
+            .filter(|n| (usize::from(key != "offset")..=max).contains(n))
+            .ok_or_else(|| format!("[invalid_input] {key} must be a whole number up to {max}.")),
+    }
+}
+
+/// The window of a Teams read: `since`, `until` and the `before` cursor are days
+/// (`YYYY-MM-DD`, this computer's time zone) or RFC 3339 instants; `until` includes its day.
+fn teams_window(
+    args: &serde_json::Value,
+) -> std::result::Result<crate::adapters::chats::Window, String> {
+    use crate::adapters::chats;
+    let at = |key: &str, end_of_day: bool| match args.get(key) {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::String(text)) => chats::instant(text.trim(), end_of_day)
+            .map(Some)
+            .map_err(fail),
+        Some(_) => Err(format!("[invalid_input] {key} must be a date.")),
+    };
+    chats::Window::new(
+        at("since", false)?,
+        at("until", true)?,
+        at("before", false)?,
+    )
+    .map_err(fail)
+}
+
+/// A failed Teams read, with what Graph said when it refused.
+#[track_caller]
+fn teams_read_failed(error: anyhow::Error) -> String {
+    match crate::adapters::graph::http_status(&error) {
+        Some(403 | 404) => "[invalid_input] Microsoft Graph refused the read (the chat or message does not exist or does not list you).".into(),
+        Some(status) => format!("[network] Microsoft Graph answered HTTP {status}; nothing was read."),
+        None => fail(error),
+    }
+}
+
+/// A chat's messages, a single message (`chat` is its resource) or, with `mine`, the user's
+/// own across the chats this profile reads; newest first, read-only.
+async fn teams_messages(
+    state: &DesktopState,
+    args: &serde_json::Value,
+) -> std::result::Result<serde_json::Value, String> {
+    use crate::adapters::chats;
+    let mine = match args.get("mine") {
+        None | Some(serde_json::Value::Null) => false,
+        Some(value) => value
+            .as_bool()
+            .ok_or("[invalid_input] mine must be true or false.")?,
+    };
+    let chat = args
+        .get("chat")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|c| !c.is_empty());
+    if mine == chat.is_some() {
+        return Err("[invalid_input] Name one chat (an ID from teams chats, self or a message resource), or ask for your own messages with mine.".into());
+    }
+    let mut window = teams_window(args)?;
+    if mine {
+        window = window.bounded();
+    }
+    let limit = teams_count(args, "limit", chats::DEFAULT_LIMIT, chats::MAX_LIMIT)?;
+    let graph = teams_graph(state).await.map_err(fail)?;
+    let page = match chat {
+        Some(chat) if chat.starts_with("chats/") => graph.chat_message(chat).await,
+        Some(chat) => graph.chat_messages(chat, window, limit).await,
+        None => graph.own_chat_messages(window, limit).await,
+    }
+    .map_err(teams_read_failed)?;
+    let mut value = serde_json::json!(page);
+    value["chat"] = serde_json::json!(chat);
+    value["mine"] = serde_json::json!(mine);
+    value["window"] = window.describe();
+    Ok(value)
+}
+
+/// Messages matching a text in the chats this profile reads; read-only.
+async fn teams_search(
+    state: &DesktopState,
+    args: &serde_json::Value,
+) -> std::result::Result<serde_json::Value, String> {
+    use crate::adapters::chats;
+    let query = args
+        .get("query")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    let chats_named = match args.get("chats") {
+        None | Some(serde_json::Value::Null) => Vec::new(),
+        Some(serde_json::Value::Array(items)) if items.len() <= 20 => items
+            .iter()
+            .map(|v| v.as_str().map(str::to_owned))
+            .collect::<Option<Vec<_>>>()
+            .ok_or("[invalid_input] chats is a list of chat IDs.")?,
+        Some(_) => return Err("[invalid_input] chats is a list of at most 20 chat IDs.".into()),
+    };
+    let from = match args.get("from") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(serde_json::Value::String(name))
+            if !name.trim().is_empty()
+                && name.chars().count() <= 120
+                && !name.chars().any(char::is_control) =>
+        {
+            Some(name.trim().to_owned())
+        }
+        Some(_) => return Err("[invalid_input] from is part of a person's name.".into()),
+    };
+    let window = teams_window(args)?;
+    let limit = teams_count(
+        args,
+        "limit",
+        chats::DEFAULT_SEARCH_LIMIT,
+        chats::MAX_SEARCH_LIMIT,
+    )?;
+    let graph = teams_graph(state).await.map_err(fail)?;
+    let filter = chats::SearchFilter {
+        chats: chats_named,
+        from,
+        window,
+    };
+    let result = graph
+        .search_messages(query, &filter, limit)
+        .await
+        .map_err(teams_read_failed)?;
+    let mut value = serde_json::json!(result);
+    value["query"] = serde_json::json!(query.trim());
+    value["window"] = window.describe();
+    Ok(value)
 }
 
 /// Post a message the user wrote, once, in a chat they belong to.
@@ -1069,10 +1228,68 @@ async fn chat(
     input: SimulationRequest,
 ) -> std::result::Result<SimulationResult, String> {
     consumers::stage(state).await;
+    let teams = simulation_teams(state, &input).await;
     // Every provider call carries its own deadline; maximum-effort reasoning takes minutes.
-    local_chat::chat(state.settings.config_path(), input)
+    local_chat::chat(state.settings.config_path(), input, teams)
         .await
         .map_err(fail)
+}
+
+/// The Microsoft session a simulation reads the user's own Teams messages with, when one of
+/// the sources it may read is that source: the running assistant's, or a token the profile's
+/// session gives for this simulation. Otherwise why there is none.
+async fn simulation_teams(state: &DesktopState, input: &SimulationRequest) -> local_chat::Teams {
+    use local_chat::Teams;
+    let wanted = state.settings.map().is_ok_and(|map| {
+        map.resources.iter().any(|r| {
+            r.enabled
+                && r.external_processing
+                && matches!(
+                    &r.access,
+                    Access::Tool {
+                        tool: crate::tools::ToolSpec::TeamsMessages {}
+                    }
+                )
+                && (input.sources.is_empty() || input.sources.contains(&r.id))
+        })
+    });
+    if !wanted {
+        return Teams::Unused;
+    }
+    if let Some(graph) = state.activity_graph.lock().await.clone() {
+        return Teams::Session(graph.token.clone());
+    }
+    let signed_in = state.settings.config().is_ok_and(|config| {
+        Store::has_token(&config.server.data_dir.join("assistant.db")).unwrap_or(false)
+    });
+    if !signed_in {
+        return Teams::Missing(
+            "this profile has no Microsoft session; sign in with pta auth microsoft login",
+        );
+    }
+    let graph = match profile_graph(state).await {
+        Ok(graph) => graph,
+        Err(_) => {
+            return Teams::Missing(
+                "the profile's Microsoft session is in use by another process; try again",
+            );
+        }
+    };
+    match graph.token.access_token().await {
+        Ok(token) => Teams::Session(Arc::new(local_chat::FixedToken(token))),
+        Err(error)
+            if error
+                .downcast_ref::<crate::adapters::oauth::AuthorizationRequired>()
+                .is_some() =>
+        {
+            Teams::Missing(
+                "the Microsoft session needs renewal; run pta auth microsoft login, then finish",
+            )
+        }
+        Err(_) => Teams::Missing(
+            "the Microsoft session could not be renewed; check pta test connectivity",
+        ),
+    }
 }
 
 async fn begin_github_login(

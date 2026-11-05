@@ -1796,6 +1796,8 @@ impl Pipeline {
                 } => "own Teams messages",
                 _ => "Azure DevOps activity",
             };
+            // A simulation without the host's Microsoft session says why it read no message.
+            let missing = read.as_ref().err().and_then(|error| error.0);
             let read = read
                 .ok()
                 .and_then(|raw| serde_json::from_str::<crate::evidence::Evidence>(&raw).ok());
@@ -1813,8 +1815,16 @@ impl Pipeline {
                     registry.partial = true;
                     audit.step(
                         "activity review",
-                        format!("{} could not be read", source.id),
+                        match missing {
+                            Some(reason) => format!("{} could not be read: {reason}", source.id),
+                            None => format!("{} could not be read", source.id),
+                        },
                     );
+                    if let Some(reason) = missing {
+                        registry
+                            .warnings
+                            .push(format!("Your own Teams messages were not read: {reason}."));
+                    }
                     unread.push(what);
                 }
             }
