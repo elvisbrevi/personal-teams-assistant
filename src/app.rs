@@ -633,13 +633,27 @@ fn validate_local(config: &Config, map: &KnowledgeMap) -> Result<()> {
     Ok(())
 }
 
+/// The example registration, the desktop template and a user not verified yet are nobody's
+/// identity.
+fn placeholder_identity(value: &str) -> bool {
+    uuid::Uuid::parse_str(value).is_ok_and(|id| id.as_u128() <= 3)
+}
+
+/// A Teams database stays with the organization, client and user it was opened for. One opened
+/// under the example registration (a first sign-in attempt creates it) belongs to nobody while
+/// it holds no Microsoft session, so the real registration may still replace the example.
 fn protect_identity(previous: &Config, next: &Config) -> Result<()> {
-    let changed = previous.graph.tenant_id != next.graph.tenant_id
-        || previous.graph.client_id != next.graph.client_id
-        || (previous.graph.user_id != uuid::Uuid::nil().to_string()
-            && previous.graph.user_id != next.graph.user_id);
+    let (before, after) = (&previous.graph, &next.graph);
+    let differs = |before: &str, after: &str| before != after;
+    let replaced = |before: &str, after: &str| before != after && !placeholder_identity(before);
+    let changed = replaced(&before.tenant_id, &after.tenant_id)
+        || replaced(&before.client_id, &after.client_id)
+        || replaced(&before.user_id, &after.user_id);
+    let registered = differs(&before.tenant_id, &after.tenant_id)
+        || differs(&before.client_id, &after.client_id);
+    let db = previous.server.data_dir.join("assistant.db");
     ensure!(
-        !changed || !previous.server.data_dir.join("assistant.db").exists(),
+        !db.exists() || (!changed && !(registered && Store::has_token(&db).unwrap_or(true))),
         "cannot reuse a Teams database with another organization, client, or user"
     );
     Ok(())
@@ -2233,9 +2247,35 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut previous = Config::desktop_template().unwrap();
         previous.server.data_dir = dir.path().to_path_buf();
+        previous.graph.tenant_id = uuid::Uuid::new_v4().to_string();
         let mut next = previous.clone();
         next.graph.tenant_id = uuid::Uuid::new_v4().to_string();
         assert!(protect_identity(&previous, &next).is_ok());
+        Store::open(&dir.path().join("assistant.db")).unwrap();
+        assert!(protect_identity(&previous, &next).is_err());
+    }
+
+    #[test]
+    fn the_example_registration_gives_way_to_the_real_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut previous = Config::desktop_template().unwrap();
+        previous.server.data_dir = dir.path().to_path_buf();
+        let mut next = previous.clone();
+        next.graph.tenant_id = uuid::Uuid::new_v4().to_string();
+        next.graph.client_id = uuid::Uuid::new_v4().to_string();
+        next.graph.user_id = uuid::Uuid::new_v4().to_string();
+        // A first sign-in attempt under the example registration leaves a database behind.
+        let store = Store::open(&dir.path().join("assistant.db")).unwrap();
+        assert!(protect_identity(&previous, &next).is_ok());
+        // A Microsoft session in it means the database is somebody's.
+        store.put_token(b"session").unwrap();
+        assert!(protect_identity(&previous, &next).is_err());
+        // The verified user still completes a connected registration.
+        let mut connected = next.clone();
+        connected.graph.user_id = uuid::Uuid::nil().to_string();
+        assert!(protect_identity(&connected, &next).is_ok());
+        // A database that cannot be read is never handed over.
+        drop(store);
         fs::write(dir.path().join("assistant.db"), "").unwrap();
         assert!(protect_identity(&previous, &next).is_err());
     }
