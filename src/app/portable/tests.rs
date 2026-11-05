@@ -983,3 +983,58 @@ async fn coordinator_records_are_read_through_an_account_authorized_operation_on
             .contains("Invalid arguments")
     );
 }
+
+#[tokio::test]
+async fn the_accounts_teams_reading_scope_reaches_a_second_computer_but_not_its_reception() {
+    let root = tempfile::tempdir().unwrap();
+    let pair = pair(root.path(), None).await;
+    configure(&pair.coordinator);
+    let mut coordinator = config_of(&pair.coordinator);
+    coordinator.graph.discover_all_chats = true;
+    coordinator.teams_reading = crate::config::TeamsReading {
+        all_chats: true,
+        personal_chat: true,
+        chats: vec!["19:shared@thread.v2".into()],
+    };
+    let saved = save(&pair.coordinator, &coordinator, &map_of(&pair.coordinator)).await;
+    assert!(saved.ok, "{:?}", saved.message);
+
+    // A computer freshly signed in reads what the account lets it read, and receives nothing.
+    assert!(sync(&pair.native, json!({})).await.ok);
+    let native = config_of(&pair.native);
+    assert_eq!(native.teams_reading, coordinator.teams_reading);
+    assert!(!native.graph.discover_all_chats);
+    assert!(native.graph.allowed_chats.is_empty() && native.graph.self_chat.is_none());
+
+    // From that computer the scope may narrow, never widen.
+    let mut narrowed = native.clone();
+    narrowed.teams_reading.all_chats = false;
+    let reply = save(&pair.native, &narrowed, &map_of(&pair.native)).await;
+    assert!(reply.ok, "{:?}", reply.message);
+    assert!(!config_of(&pair.coordinator).teams_reading.all_chats);
+    assert!(config_of(&pair.coordinator).graph.discover_all_chats);
+    let mut widened = config_of(&pair.native);
+    widened
+        .teams_reading
+        .chats
+        .push("19:other@thread.v2".into());
+    let refused = save(&pair.native, &widened, &map_of(&pair.native)).await;
+    assert!(!refused.ok);
+    assert!(refused.message.unwrap().contains("teams_reading"));
+    assert_eq!(
+        config_of(&pair.coordinator).teams_reading.chats,
+        ["19:shared@thread.v2"]
+    );
+
+    // Turned off at the account, it is off on the second computer too.
+    let mut off = config_of(&pair.coordinator);
+    off.teams_reading = Default::default();
+    assert!(
+        save(&pair.coordinator, &off, &map_of(&pair.coordinator))
+            .await
+            .ok
+    );
+    let synced = sync(&pair.native, json!({})).await;
+    assert!(synced.ok, "{:?}", synced.message);
+    assert!(config_of(&pair.native).teams_reading.is_default());
+}

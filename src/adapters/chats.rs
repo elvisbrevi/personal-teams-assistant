@@ -1,7 +1,8 @@
 //! Reading Teams chats for the operator and agents: a chat's history, the user's own messages
 //! across chats and message search. Every read is a GET (search is Microsoft Search's read
 //! POST) with the delegated `Chat.Read` scope already granted, and only chats this profile may
-//! read (`Graph::allowed_collection`) are read. Nothing is sent and nothing is stored.
+//! read on request (`Graph::readable_on_request`: those it receives plus the account's reading
+//! scope) are read. Nothing is sent and nothing is stored.
 
 use super::{graph::Graph, teams};
 use anyhow::{Context, Result, ensure};
@@ -235,9 +236,9 @@ impl Graph {
             ReadRefusal("Name the chat: an ID from teams chats, or self.")
         );
         ensure!(
-            self.allowed_collection(&format!("chats/{id}/messages")),
+            self.readable_on_request(&format!("chats/{id}/messages")),
             ReadRefusal(
-                "This profile may not read that chat: it is not the personal chat or in graph.allowed_chats, and graph.discover_all_chats is off."
+                "This profile may not read that chat: neither this computer (graph.discover_all_chats, graph.allowed_chats, the personal chat) nor the account (teams_reading) lets it read that chat."
             )
         );
         Ok(id)
@@ -910,5 +911,56 @@ mod tests {
                 preview: teams::plain_text("<p>¿Qué es el <b>estado</b> 10?</p>"),
             }]
         );
+    }
+
+    #[test]
+    fn the_accounts_reading_scope_widens_reads_on_request_and_never_reception() {
+        struct NoToken;
+        #[async_trait::async_trait]
+        impl super::super::oauth::AccessToken for NoToken {
+            async fn access_token(&self) -> Result<String> {
+                anyhow::bail!("no Graph session")
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(crate::state::Store::open(&dir.path().join("cache.db")).unwrap());
+        let graph = |reading: crate::config::TeamsReading| {
+            let mut config = crate::config::Config::desktop_template().unwrap();
+            config.teams_reading = reading;
+            Graph {
+                client: reqwest::Client::new(),
+                token: Arc::new(NoToken),
+                config: Arc::new(config),
+                store: store.clone(),
+                base_url: "https://graph.microsoft.com/v1.0".into(),
+                client_state: String::new(),
+            }
+        };
+        // A computer that receives nothing reads nothing on request.
+        let local = graph(Default::default());
+        assert!(local.readable_chat("self").is_err());
+        assert!(local.readable_chat("19:shared@thread.v2").is_err());
+
+        let listed = graph(crate::config::TeamsReading {
+            personal_chat: true,
+            chats: vec!["19:shared@thread.v2".into()],
+            ..Default::default()
+        });
+        assert_eq!(listed.readable_chat("self").unwrap(), "48:notes");
+        assert!(listed.readable_chat("19:shared@thread.v2").is_ok());
+        assert!(listed.readable_chat("19:other@thread.v2").is_err());
+        let all = graph(crate::config::TeamsReading {
+            all_chats: true,
+            ..Default::default()
+        });
+        assert!(
+            all.readable_chat("self").is_ok() && all.readable_chat("19:other@thread.v2").is_ok()
+        );
+        // Receiving, recovering and sending keep this computer's own scope.
+        for graph in [&listed, &all] {
+            assert!(!graph.allowed_collection("chats/19:shared@thread.v2/messages"));
+            assert!(!graph.allowed_collection("chats/48:notes/messages"));
+            assert!(!graph.allowed_collection(&graph.user_messages_resource()));
+        }
     }
 }

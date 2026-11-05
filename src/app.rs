@@ -322,6 +322,17 @@ impl std::ops::Deref for TeamsGraph {
 }
 async fn teams_graph(state: &DesktopState) -> Result<TeamsGraph> {
     if let Some(graph) = state.activity_graph.lock().await.clone() {
+        // The account's reading scope applies to reads as soon as it changes, without a restart.
+        let reading = state.settings.config().map(|c| c.teams_reading);
+        if let Ok(reading) = reading
+            && reading != graph.config.teams_reading
+        {
+            let mut config = (*graph.config).clone();
+            config.teams_reading = reading;
+            let mut graph = (*graph).clone();
+            graph.config = Arc::new(config);
+            return Ok(TeamsGraph::Service(Arc::new(graph)));
+        }
         return Ok(TeamsGraph::Service(graph));
     }
     Ok(TeamsGraph::Profile(profile_graph(state).await?))

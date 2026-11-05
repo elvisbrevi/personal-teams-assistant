@@ -307,7 +307,7 @@
           </div>
           <div id="panel-account-config" class="panel" hidden>
             <div class="panel-head"><h2>Account configuration</h2><span id="account-config-state" class="badge muted"></span></div>
-            <p class="hint">Your preferences, model choices, sources and their audiences, contexts, questions and verified notes follow your account. Folders, credentials, sign-ins and tunnels stay on each computer. Synchronize from the account indicator in the sidebar.</p>
+            <p class="hint">Your preferences, model choices, sources and their audiences, contexts, questions, verified notes and the Teams chats read on request follow your account. Folders, credentials, sign-ins, tunnels and the chats each computer receives stay on each computer. Synchronize from the account indicator in the sidebar.</p>
             <p id="account-standing" class="callout warn" role="status" hidden></p>
             <p id="account-config-summary" class="hint" role="status"></p>
             <p id="account-config-problem" class="callout warn" role="status" hidden></p>
@@ -327,15 +327,26 @@
             <div class="panel-head"><h2>Microsoft Teams and Entra</h2><span id="microsoft-state" class="badge muted"></span></div>
             <p class="hint">Use your existing Entra registration (<em>Mobile and desktop</em> platform with <code>http://localhost</code> and delegated permissions). The user ID is filled in when you connect the account.</p>
             <p class="hint">These three IDs follow your account to other computers; each computer still connects to Microsoft separately.</p>
-            <p class="hint">Only one machine receives and answers Teams on its own; any computer signed in to Microsoft reads and sends when you ask. <button id="teams-machine-open" type="button" class="link-button">Choose it in Machines<svg class="icon" aria-hidden="true"><use href="#i-arrow"/></svg></button></p>
+            <p class="hint">Only one machine receives and answers Teams on its own; any computer signed in to Microsoft reads the chats your account allows and sends when you ask. <button id="teams-machine-open" type="button" class="link-button">Choose it in Machines<svg class="icon" aria-hidden="true"><use href="#i-arrow"/></svg></button></p>
             <p id="teams-identity-error" class="callout warn" role="status" hidden></p>
             <div class="grid">
               <label>Entra tenant ID<input id="tenant-id" class="cfg" spellcheck="false"></label>
               <label>Entra client ID<input id="client-id" class="cfg" spellcheck="false"></label>
               <label>Teams user ID<input id="user-id" class="cfg" spellcheck="false"></label>
             </div>
-            <label class="check"><input id="discover-chats" class="cfg" type="checkbox"> Discover all my authorized chats</label>
-            <label id="allowed-chats-field">Allowed chats, one per line <small>Used only if you do not discover all chats.</small><textarea id="allowed-chats" class="cfg" rows="3" spellcheck="false"></textarea></label>
+            <fieldset id="teams-reception">
+              <legend>Receive and answer <span class="badge muted">This computer</span></legend>
+              <p class="hint">The chats this computer receives and answers while it runs the assistant. Each computer keeps its own.</p>
+              <label class="check"><input id="discover-chats" class="cfg" type="checkbox"> Discover all my authorized chats</label>
+              <label id="allowed-chats-field">Allowed chats, one per line <small>Used only if you do not discover all chats.</small><textarea id="allowed-chats" class="cfg" rows="3" spellcheck="false"></textarea></label>
+            </fieldset>
+            <fieldset id="teams-reading">
+              <legend>Read on request <span class="badge info">Account</span></legend>
+              <p class="hint">Chats every computer signed in to your account may read when you or your agents ask, each with its own Microsoft sign-in. It never changes which chats are received or answered. A computer that synchronizes through its coordinator can only narrow it.</p>
+              <label class="check"><input id="reading-all-chats" class="cfg" type="checkbox"> All my authorized chats</label>
+              <label class="check" id="reading-personal-chat-field"><input id="reading-personal-chat" class="cfg" type="checkbox"> My personal chat</label>
+              <label id="reading-chats-field">Other chats, one per line <small>Used only if you do not read all chats.</small><textarea id="reading-chats" class="cfg" rows="3" spellcheck="false"></textarea></label>
+            </fieldset>
             <div class="actions"><button id="teams-login" class="secondary">Connect Microsoft account</button></div>
           </div>
           <div class="panel" id="panel-self-chat">

@@ -55,6 +55,10 @@ Configuration
                            Teams message style: config set message_style.enabled true (and .label,
                            .position, .accent, .band, .label_color, .icon, .stripe_width,
                            .text_size, .label_size).
+                           Teams chats every computer of the account may read on request (follows the
+                           account): config set teams_reading.all_chats true (and .personal_chat,
+                           .chats [\"CHAT_ID\",...]). graph.discover_all_chats, graph.allowed_chats and
+                           the personal chat stay this computer's own reception.
   config apply|validate    Applies or validates {config,map,tunnel_config} as JSON or TOML on stdin.
   config import FILE       Imports an existing config.toml (with the assistant stopped).
   credentials list         This installation's internal credentials and their origin, without values. For `is the secret X
@@ -1300,6 +1304,17 @@ fn lookup<'a>(value: &'a Value, key: &str) -> Result<&'a Value> {
     }
     Ok(found)
 }
+/// Sections left out of the configuration while they hold their defaults, filled in so they
+/// can still be read and edited by path.
+fn with_default_sections(config: &mut Value) -> Result<()> {
+    if config.get("message_style").is_none() {
+        config["message_style"] = serde_json::to_value(crate::config::MessageStyle::default())?;
+    }
+    if config.get("teams_reading").is_none() {
+        config["teams_reading"] = serde_json::to_value(crate::config::TeamsReading::default())?;
+    }
+    Ok(())
+}
 fn assign(value: &mut Value, key: &str, next: Value) -> Result<()> {
     let parts: Vec<_> = key.split('.').collect();
     let mut found = value;
@@ -2411,18 +2426,14 @@ async fn execute(mut args: Vec<String>) -> Result<Reply> {
             return Ok(snap);
         }
         ("config", "get") => {
+            with_default_sections(&mut data["config"])?;
             snap.data = lookup(&data["config"], positional(&args, 2)?)?.clone();
             return Ok(snap);
         }
         ("config", "set") => {
             // A section left out while it holds its defaults can still be edited by path.
             let key = positional(&args, 2)?;
-            if key.split('.').next() == Some("message_style")
-                && data["config"].get("message_style").is_none()
-            {
-                data["config"]["message_style"] =
-                    serde_json::to_value(crate::config::MessageStyle::default())?;
-            }
+            with_default_sections(&mut data["config"])?;
             assign(
                 &mut data["config"],
                 key,

@@ -895,6 +895,12 @@ impl Graph {
                 .any(|c| resource == format!("chats/{c}/messages"))
             || (self.config.graph.discover_all_chats && resource.starts_with("chats/"))
     }
+    /// Whether a read on request (`teams messages|search|chats`) may read a chat collection:
+    /// what this profile receives, plus the account's reading scope. Never used to receive,
+    /// subscribe, recover or send.
+    pub fn readable_on_request(&self, collection: &str) -> bool {
+        self.allowed_collection(collection) || self.config.teams_reading.reads(collection)
+    }
     pub(super) async fn request(
         &self,
         method: Method,
@@ -1021,7 +1027,7 @@ impl Graph {
             found.push(
                 json!({"id":id,"type":chat["chatType"],"topic":topic,"members":members,
                 "last_updated":chat["lastUpdatedDateTime"],
-                "readable":self.allowed_collection(&format!("chats/{id}/messages"))}),
+                "readable":self.readable_on_request(&format!("chats/{id}/messages"))}),
             );
         }
         Ok(found)
