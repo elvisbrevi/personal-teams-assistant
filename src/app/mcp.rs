@@ -7,14 +7,16 @@
 //! need the user's confirmation: through MCP elicitation when the client offers it (the user
 //! answers the client, not the agent), otherwise with `confirmed: true`, which the agent may
 //! set only after the user approved that exact action. A client that declares elicitation but
-//! cannot show the question (Claude Code under a host without dialogs answers `cancel` at once)
-//! falls back to `confirmed: true`; an explicit `decline` always stops the action.
+//! cannot show the question falls back to `confirmed: true`: Claude Code under a host without
+//! dialogs answers `cancel` at once, and the Claude desktop app declines for the user before a
+//! person could have read it. A `decline` the user had time to give always stops the action.
 //!
 //! stdout carries only protocol messages; nothing else is printed.
 
 use super::control::Reply;
 use serde_json::{Value, json};
 use std::collections::VecDeque;
+use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines, Stdin, Stdout};
 
 const PROTOCOLS: [&str; 3] = ["2025-06-18", "2025-03-26", "2024-11-05"];
@@ -35,10 +37,15 @@ enum Answer {
     Unanswered,
 }
 
-fn answer(reply: &Value) -> Answer {
+/// No person reads a confirmation and answers it sooner than this.
+const READING: Duration = Duration::from_secs(1);
+
+/// `after` is how long the client took to reply. A refusal sooner than a person could have
+/// read the question is the client's own, not the user's: the question was never shown.
+fn answer(reply: &Value, after: Duration) -> Answer {
     match reply["result"]["action"].as_str() {
         Some("accept") if reply["result"]["content"]["confirm"] == true => Answer::Approved,
-        Some("accept" | "decline") => Answer::Refused,
+        Some("accept" | "decline") if after >= READING => Answer::Refused,
         _ => Answer::Unanswered,
     }
 }
@@ -100,11 +107,12 @@ impl Server {
         if self.send(request).await.is_err() {
             return Answer::Unanswered;
         }
+        let asked = Instant::now();
         while let Some(message) = self.next_from_client().await {
             if message.get("id").and_then(Value::as_str) == Some(id.as_str())
                 && message.get("method").is_none()
             {
-                return answer(&message);
+                return answer(&message, asked.elapsed());
             }
             self.queued.push_back(message);
         }
@@ -238,38 +246,73 @@ pub(super) fn config() -> Reply {
 
 #[cfg(test)]
 mod tests {
-    use super::{Answer, answer};
+    use super::{Answer, READING, answer};
     use serde_json::json;
+    use std::time::Duration;
 
     #[test]
     fn only_an_explicit_answer_overrides_the_confirmed_argument() {
         let reply = |result: serde_json::Value| json!({"jsonrpc": "2.0", "id": "confirm-1", "result": result});
+        let read = Duration::from_secs(5);
         assert_eq!(
-            answer(&reply(
-                json!({"action": "accept", "content": {"confirm": true}})
-            )),
+            answer(
+                &reply(json!({"action": "accept", "content": {"confirm": true}})),
+                read
+            ),
             Answer::Approved
         );
         assert_eq!(
-            answer(&reply(
-                json!({"action": "accept", "content": {"confirm": false}})
-            )),
+            answer(
+                &reply(json!({"action": "accept", "content": {"confirm": false}})),
+                read
+            ),
             Answer::Refused
         );
         assert_eq!(
-            answer(&reply(json!({"action": "decline"}))),
+            answer(&reply(json!({"action": "decline"})), read),
             Answer::Refused
         );
         // Claude Code answers `cancel` at once when its host shows no dialogs.
         assert_eq!(
-            answer(&reply(json!({"action": "cancel"}))),
+            answer(&reply(json!({"action": "cancel"})), Duration::ZERO),
             Answer::Unanswered
         );
         assert_eq!(
             answer(
-                &json!({"jsonrpc": "2.0", "id": "confirm-1", "error": {"code": -32601, "message": "Method not found"}})
+                &json!({"jsonrpc": "2.0", "id": "confirm-1", "error": {"code": -32601, "message": "Method not found"}}),
+                read
             ),
             Answer::Unanswered
+        );
+    }
+
+    #[test]
+    fn a_refusal_sooner_than_a_person_reads_is_the_clients_not_the_users() {
+        let reply = |result: serde_json::Value| json!({"jsonrpc": "2.0", "id": "confirm-1", "result": result});
+        // The Claude desktop app declines for the user without showing the question.
+        let at_once = Duration::from_millis(400);
+        assert_eq!(
+            answer(&reply(json!({"action": "decline"})), at_once),
+            Answer::Unanswered
+        );
+        assert_eq!(
+            answer(
+                &reply(json!({"action": "accept", "content": {"confirm": false}})),
+                at_once
+            ),
+            Answer::Unanswered
+        );
+        assert_eq!(
+            answer(&reply(json!({"action": "decline"})), READING),
+            Answer::Refused
+        );
+        // An approval is the client's word that the user said yes, however soon.
+        assert_eq!(
+            answer(
+                &reply(json!({"action": "accept", "content": {"confirm": true}})),
+                at_once
+            ),
+            Answer::Approved
         );
     }
 
