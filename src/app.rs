@@ -586,6 +586,16 @@ pub(crate) fn read_config(path: &Path) -> Result<Config> {
 
 pub(crate) fn write_private(path: &Path, content: &str) -> Result<()> {
     let temp = path.with_extension(format!("tmp-{}", uuid::Uuid::new_v4()));
+    let written =
+        write_temporary(&temp, content).and_then(|()| security::replace_private_file(&temp, path));
+    if written.is_err() {
+        // A write that failed halfway leaves no stray file beside the one it meant to replace.
+        let _ = fs::remove_file(&temp);
+    }
+    written
+}
+
+fn write_temporary(temp: &Path, content: &str) -> Result<()> {
     let mut options = fs::OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
@@ -593,8 +603,8 @@ pub(crate) fn write_private(path: &Path, content: &str) -> Result<()> {
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600);
     }
-    let mut file = options.open(&temp)?;
-    security::protect_file(&temp)?;
+    let mut file = options.open(temp)?;
+    security::protect_file(temp)?;
     {
         use std::io::Write;
         file.write_all(content.as_bytes())?;
@@ -603,9 +613,8 @@ pub(crate) fn write_private(path: &Path, content: &str) -> Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&temp, fs::Permissions::from_mode(0o600))?;
+        fs::set_permissions(temp, fs::Permissions::from_mode(0o600))?;
     }
-    security::replace_private_file(&temp, path)?;
     Ok(())
 }
 
@@ -2286,6 +2295,26 @@ mod tests {
         drop(store);
         fs::write(dir.path().join("assistant.db"), "").unwrap();
         assert!(protect_identity(&previous, &next).is_err());
+    }
+
+    #[test]
+    fn a_private_write_that_fails_leaves_no_temporary_file() {
+        let dir = tempfile::tempdir().unwrap();
+        // The target is a directory with content, so the final replacement fails.
+        let target = dir.path().join("revision.json");
+        fs::create_dir(&target).unwrap();
+        fs::write(target.join("kept"), "x").unwrap();
+        assert!(write_private(&target, "{}").is_err());
+        let left: Vec<_> = fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(left, ["revision.json"]);
+        write_private(&dir.path().join("other.json"), "{}").unwrap();
+        assert_eq!(
+            fs::read_to_string(dir.path().join("other.json")).unwrap(),
+            "{}"
+        );
     }
 
     #[test]
