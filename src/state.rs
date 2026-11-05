@@ -1,4 +1,4 @@
-use crate::store::audit::{self, AuditEntry, AuditStore, LocalAudit};
+use crate::store::audit::{self, AuditEntry, AuditStore, Listing, LocalAudit};
 use anyhow::Result;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
@@ -292,10 +292,108 @@ impl Store {
             for row in stmt.query_map([limit.min(1000)], |r| Ok(serde_json::json!({"time":r.get::<_,i64>(0)?,"kind":r.get::<_,String>(1)?,"detail":r.get::<_,String>(2)?})))? { out.push(row?); }
             return Ok(out);
         }
-        // The worker's in-flight messages, then the finished ones from the audit history.
-        let mut stmt = db.prepare("SELECT resource,status,audit,created_at FROM jobs WHERE status IN ('pending','processing','refining','sending') AND (?1 IS NULL OR resource=?1) ORDER BY created_at DESC LIMIT ?2")?;
+        let store = Self { db: Mutex::new(db) };
+        let listing = Listing {
+            resource,
+            limit,
+            ..Default::default()
+        };
+        for mut entry in store.listed(&listing)? {
+            if !content {
+                redact(&mut entry.audit);
+            }
+            out.push(serde_json::json!({"resource":entry.resource,"status":entry.status,"created_at":entry.created_at,"audit":entry.audit}));
+        }
+        Ok(out)
+    }
+    /// A page of the messages a listing selects, newest first: in-flight and finished ones,
+    /// `next_cursor` (the last one's resource) when more remain, how many the window holds and
+    /// when the oldest kept message was received. Nothing is ever deleted from the audit, so
+    /// the cursor reaches the first message. A page stops early before 1.5 MB of JSON.
+    pub fn inspect_page(
+        path: &Path,
+        listing: &Listing,
+        content: bool,
+    ) -> Result<serde_json::Value> {
+        if !path.exists() {
+            return Ok(
+                serde_json::json!({"entries":[],"next_cursor":null,"total":0,"oldest_at":null}),
+            );
+        }
+        let db = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        let (total, oldest): (i64, Option<i64>) = db.query_row(
+            &format!(
+                "SELECT COUNT(*),(SELECT MIN(created_at) FROM jobs) FROM jobs WHERE {}",
+                Listing {
+                    after: None,
+                    ..listing.clone()
+                }
+                .condition(1)
+            ),
+            rusqlite::params_from_iter(
+                Listing {
+                    after: None,
+                    ..listing.clone()
+                }
+                .parameters(),
+            ),
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        let store = Self { db: Mutex::new(db) };
+        let limit = listing.limit.clamp(1, 1000);
+        let mut entries = store.listed(&Listing {
+            limit: limit + 1,
+            ..listing.clone()
+        })?;
+        let mut more = entries.len() > limit;
+        entries.truncate(limit);
+        let (mut out, mut size) = (Vec::new(), 0);
+        for mut entry in entries {
+            if !content {
+                redact(&mut entry.audit);
+            }
+            let value = serde_json::json!({"resource":entry.resource,"status":entry.status,"created_at":entry.created_at,"audit":entry.audit});
+            size += value.to_string().len();
+            if size > 1_500_000 && !out.is_empty() {
+                more = true;
+                break;
+            }
+            out.push(value);
+        }
+        let next_cursor = more
+            .then(|| {
+                out.last()
+                    .and_then(|e| e["resource"].as_str().map(str::to_owned))
+            })
+            .flatten();
+        Ok(
+            serde_json::json!({"entries":out,"next_cursor":next_cursor,"total":total,"oldest_at":oldest}),
+        )
+    }
+    /// When a message was received, to list the ones before it.
+    pub fn received_at(path: &Path, resource: &str) -> Result<Option<i64>> {
+        use rusqlite::OptionalExtension;
+        if !path.exists() {
+            return Ok(None);
+        }
+        let db = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        Ok(db
+            .query_row(
+                "SELECT created_at FROM jobs WHERE resource=?1",
+                [resource],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+    /// The worker's in-flight messages, then the finished ones from the audit history, merged
+    /// in the listing's order.
+    fn listed(&self, listing: &Listing) -> Result<Vec<AuditEntry>> {
+        let limit = listing.limit.min(1000);
+        let db = self.db.lock().unwrap();
+        let mut stmt = db.prepare(&format!("SELECT resource,status,audit,created_at FROM jobs WHERE status IN ('pending','processing','refining','sending') AND {} ORDER BY created_at DESC, resource DESC LIMIT ?6", listing.condition(1)))?;
+        let [a, b, c, d, e] = listing.parameters();
         let mut entries = Vec::new();
-        for row in stmt.query_map(params![resource, limit.min(1000)], |r| {
+        for row in stmt.query_map(params![a, b, c, d, e, limit as i64], |r| {
             Ok((
                 r.get::<_, String>(0)?,
                 r.get::<_, String>(1)?,
@@ -312,17 +410,18 @@ impl Store {
             });
         }
         drop(stmt);
-        let store = Self { db: Mutex::new(db) };
-        entries.extend(LocalAudit::new(&store).entries(resource, limit)?);
-        entries.sort_by_key(|e| std::cmp::Reverse(e.created_at));
-        entries.truncate(limit.min(1000));
-        for mut entry in entries {
-            if !content {
-                redact(&mut entry.audit);
-            }
-            out.push(serde_json::json!({"resource":entry.resource,"status":entry.status,"created_at":entry.created_at,"audit":entry.audit}));
-        }
-        Ok(out)
+        drop(db);
+        entries.extend(LocalAudit::new(self).listing(&Listing {
+            limit,
+            ..listing.clone()
+        })?);
+        entries.sort_by(|a, b| {
+            b.created_at
+                .cmp(&a.created_at)
+                .then_with(|| b.resource.cmp(&a.resource))
+        });
+        entries.truncate(limit);
+        Ok(entries)
     }
     pub fn has_unresolved_output(&self, conversation: &str) -> Result<bool> {
         Ok(self.db.lock().unwrap().query_row(
@@ -668,6 +767,84 @@ mod tests {
             Store::inspect(&path, false, 1, None, true).unwrap().len(),
             1
         );
+    }
+    #[test]
+    fn audit_pages_reach_the_first_message_through_their_cursor() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("assistant.db");
+        let store = Store::open(&path).unwrap();
+        // Five messages, three of them received in the same second, and one still in flight.
+        for (resource, age) in [
+            ("m1", 300),
+            ("m2", 200),
+            ("m3", 100),
+            ("m4", 100),
+            ("m5", 100),
+        ] {
+            store.enqueue(resource).unwrap();
+            store
+                .connection()
+                .execute(
+                    "UPDATE jobs SET created_at=1700000000-?2 WHERE resource=?1",
+                    rusqlite::params![resource, age],
+                )
+                .unwrap();
+            if resource != "m5" {
+                LocalAudit::new(&store)
+                    .record(
+                        resource,
+                        &Audit {
+                            status: "ignored".into(),
+                            reason: "ineligible_message".into(),
+                            ..Default::default()
+                        },
+                    )
+                    .unwrap();
+            }
+        }
+        let page = |after: Option<(i64, &str)>, until: Option<i64>| {
+            Store::inspect_page(
+                &path,
+                &Listing {
+                    after,
+                    until,
+                    limit: 2,
+                    ..Default::default()
+                },
+                false,
+            )
+            .unwrap()
+        };
+        let resources = |page: &serde_json::Value| -> Vec<String> {
+            page["entries"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|e| e["resource"].as_str().unwrap().to_owned())
+                .collect()
+        };
+        let mut seen = Vec::new();
+        let mut cursor: Option<String> = None;
+        loop {
+            let at = cursor
+                .as_deref()
+                .map(|c| Store::received_at(&path, c).unwrap().unwrap());
+            let next = page(at.zip(cursor.as_deref()), None);
+            assert_eq!(next["total"], 5);
+            assert_eq!(next["oldest_at"], 1_700_000_000 - 300);
+            seen.extend(resources(&next));
+            match next["next_cursor"].as_str() {
+                Some(c) => cursor = Some(c.to_owned()),
+                None => break,
+            }
+        }
+        assert_eq!(seen, ["m5", "m4", "m3", "m2", "m1"]);
+        // A date cursor keeps what was received before it.
+        assert_eq!(
+            resources(&page(None, Some(1_700_000_000 - 150))),
+            ["m2", "m1"]
+        );
+        assert!(Store::received_at(&path, "unknown").unwrap().is_none());
     }
     #[test]
     fn activity_index_survives_restart() {

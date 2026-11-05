@@ -391,6 +391,55 @@ fn teams_window(
     .map_err(fail)
 }
 
+/// A page of the audit, newest first: `since`/`until` are days or instants and `before` a
+/// cursor, the resource of the last message listed (or a day or instant).
+fn audit_list(
+    state: &DesktopState,
+    args: &serde_json::Value,
+) -> std::result::Result<serde_json::Value, String> {
+    use crate::adapters::chats::instant;
+    let config = state.settings.config().map_err(fail)?;
+    let db = config.server.data_dir.join("assistant.db");
+    let text = |key: &str| {
+        args.get(key)
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+    };
+    let at = |key: &str, end_of_day: bool| {
+        text(key)
+            .map(|t| instant(t, end_of_day).map(|at| at.timestamp()))
+            .transpose()
+            .map_err(fail)
+    };
+    let since = at("since", false)?;
+    let mut until = at("until", true)?;
+    let mut after = None;
+    if let Some(before) = text("before") {
+        match instant(before, false) {
+            Ok(at) => until = Some(until.map_or(at.timestamp(), |u| u.min(at.timestamp()))),
+            Err(_) => {
+                let received = Store::received_at(&db, before)
+                    .map_err(fail)?
+                    .ok_or("[invalid_input] before names no message of the audit: use next_cursor, a resource from audit list, or a date.")?;
+                after = Some((received, before));
+            }
+        }
+    }
+    let listing = crate::store::audit::Listing {
+        resource: None,
+        since,
+        until,
+        after,
+        limit: teams_count(args, "limit", 50, 1000)?,
+    };
+    let content = args
+        .get("content")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    Store::inspect_page(&db, &listing, content).map_err(fail)
+}
+
 /// A failed Teams read, with what Graph said when it refused.
 #[track_caller]
 fn teams_read_failed(error: anyhow::Error) -> String {
@@ -1960,6 +2009,49 @@ mod tests {
                 .unwrap_or_default()
                 .contains("enable a source")
         );
+    }
+
+    #[tokio::test]
+    async fn the_audit_list_pages_with_a_message_or_a_date_cursor() {
+        let root = tempfile::tempdir().unwrap();
+        let host = variables::tests::host(root.path());
+        let db = host
+            .state
+            .settings
+            .config()
+            .unwrap()
+            .server
+            .data_dir
+            .join("assistant.db");
+        let store = Store::open(&db).unwrap();
+        for (resource, at) in [
+            ("chats/c/messages/1", 1_700_000_000),
+            ("chats/c/messages/2", 1_700_000_100),
+        ] {
+            store.enqueue(resource).unwrap();
+            store
+                .connection()
+                .execute(
+                    "UPDATE jobs SET created_at=?2 WHERE resource=?1",
+                    rusqlite::params![resource, at],
+                )
+                .unwrap();
+        }
+        let list = |args: serde_json::Value| {
+            variables::tests::call(&host, authority::Transport::Local, "audit_list", args)
+        };
+        let first = list(serde_json::json!({"limit": 1})).await;
+        assert!(first.ok, "{:?}", first.message);
+        assert_eq!(first.data["entries"][0]["resource"], "chats/c/messages/2");
+        assert_eq!(first.data["next_cursor"], "chats/c/messages/2");
+        assert_eq!(first.data["total"], 2);
+        let next = list(serde_json::json!({"limit": 1, "before": first.data["next_cursor"]})).await;
+        assert_eq!(next.data["entries"][0]["resource"], "chats/c/messages/1");
+        assert!(next.data["next_cursor"].is_null());
+        let dated = list(serde_json::json!({"before": "2023-11-14T22:14:00Z"})).await;
+        assert_eq!(dated.data["entries"].as_array().unwrap().len(), 1);
+        let unknown = list(serde_json::json!({"before": "chats/c/messages/9"})).await;
+        assert_eq!(unknown.code, "invalid_input", "{:?}", unknown.message);
     }
 
     #[test]

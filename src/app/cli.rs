@@ -70,7 +70,10 @@ Language models
   test providers           Tests each active model with synthetic data (uses quota or API credit).
 
 Messages and diagnostics
-  audit list [--limit N] [--content]   Received messages, their outcome and the step log.
+  audit list [--limit N] [--content] [--since DATE] [--until DATE] [--before CURSOR]
+                           Received messages, newest first, their outcome and the step log: 50 by default, at
+                           most 1000 per page; next_cursor (a message resource) goes to --before for older ones;
+                           total and oldest_at say what the window and the audit hold (nothing is deleted).
   audit show RESOURCE [--content]      One message; --content includes question and answer.
   answer refine RESOURCE [--context-stdin] [--source ID]...  Writes the answer to a message that was not
                            answered (informational, a request for you) or rewrites an unsent one (withheld,
@@ -1797,14 +1800,19 @@ fn validate_args(args: &[String]) -> Result<()> {
         (
             "--since",
             p.as_slice().starts_with(&["teams", "messages"])
-                || p.as_slice().starts_with(&["teams", "search"]),
+                || p.as_slice().starts_with(&["teams", "search"])
+                || p.as_slice() == ["audit", "list"],
         ),
         (
             "--until",
             p.as_slice().starts_with(&["teams", "messages"])
-                || p.as_slice().starts_with(&["teams", "search"]),
+                || p.as_slice().starts_with(&["teams", "search"])
+                || p.as_slice() == ["audit", "list"],
         ),
-        ("--before", p.as_slice().starts_with(&["teams", "messages"])),
+        (
+            "--before",
+            p.as_slice().starts_with(&["teams", "messages"]) || p.as_slice() == ["audit", "list"],
+        ),
         ("--mine", p.as_slice() == ["teams", "messages"]),
         ("--chat", p.as_slice().starts_with(&["teams", "search"])),
         ("--from", p.as_slice().starts_with(&["teams", "search"])),
@@ -1929,7 +1937,7 @@ async fn execute(mut args: Vec<String>) -> Result<Reply> {
         }
         "capabilities" => {
             return Ok(Reply::success(
-                json!({"contract":control::CONTRACT,"commands":HELP,"skill_version":env!("CARGO_PKG_VERSION"),"activity_registration_support":true,"web_support":true,"web_access_support":true,"knowledge_index_support":true,"mcp_support":true,"tools_support":true,"todo_support":true,"implementation_support":true,"machine_pairing_support":true,"machine_login_support":true,"machine_management_support":true,"account_variables_support":true,"account_portable_support":true,"account_authority_support":true,"shared_accounts_support":true,"cloud_store_support":true,"cloud_mirror_support":true,"cloud_disconnect_support":true,"cloud_primary_support":true,"cloud_migration_support":true,"cloud_installations_support":true,"cloud_handoff_support":true,"cloud_delivery_support":true,"cloud_restore_support":true,"cloud_conflicts_support":true,"cloud_lost_support":true,"cloud_repair_support":true,"teams_read_support":true}),
+                json!({"contract":control::CONTRACT,"commands":HELP,"skill_version":env!("CARGO_PKG_VERSION"),"activity_registration_support":true,"web_support":true,"web_access_support":true,"knowledge_index_support":true,"mcp_support":true,"tools_support":true,"todo_support":true,"implementation_support":true,"machine_pairing_support":true,"machine_login_support":true,"machine_management_support":true,"account_variables_support":true,"account_portable_support":true,"account_authority_support":true,"shared_accounts_support":true,"cloud_store_support":true,"cloud_mirror_support":true,"cloud_disconnect_support":true,"cloud_primary_support":true,"cloud_migration_support":true,"cloud_installations_support":true,"cloud_handoff_support":true,"cloud_delivery_support":true,"cloud_restore_support":true,"cloud_conflicts_support":true,"cloud_lost_support":true,"cloud_repair_support":true,"teams_read_support":true,"audit_pages_support":true}),
             ));
         }
         "skill" => return crate::app::skill::command(action, args.get(2).map(String::as_str)),
@@ -2155,7 +2163,8 @@ async fn execute(mut args: Vec<String>) -> Result<Reply> {
         ("credentials", "delete") => Some("delete_credential"),
         ("repos", "clone") => Some("clone_github_repository"),
         ("repos", "sync") => Some("update_github_repository"),
-        ("audit", "list" | "show") => Some("audit"),
+        ("audit", "list") => Some("audit_list"),
+        ("audit", "show") => Some("audit"),
         ("logs", _) => Some("logs"),
         _ => None,
     };
@@ -2181,6 +2190,11 @@ async fn execute(mut args: Vec<String>) -> Result<Reply> {
                 json!({"full_name":positional(&args,2)?,"alias":positional(&args,3)?})
             }
             "update_github_repository" => json!({"alias":positional(&args,2)?}),
+            "audit_list" => {
+                json!({"limit": option(&args, "--limit").map(str::parse::<u64>).transpose().context("invalid limit")?,
+                    "content": args.iter().any(|a| a == "--content"), "since": option(&args, "--since"),
+                    "until": option(&args, "--until"), "before": option(&args, "--before")})
+            }
             "audit" | "logs" => {
                 let limit = args
                     .iter()
@@ -3230,6 +3244,16 @@ mod help_tests {
             &["tunnel", "status"],
             &["test", "providers"],
             &["audit", "list"],
+            &[
+                "audit",
+                "list",
+                "--before",
+                "2026-10-13",
+                "--since",
+                "2026-09-01",
+                "--limit",
+                "1000",
+            ],
             &["answer", "refine", "resource"],
             &["answer", "send", "resource"],
             &["teams", "chats"],

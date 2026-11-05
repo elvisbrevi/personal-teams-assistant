@@ -31,12 +31,60 @@ pub struct AuditEntry {
     pub audit: serde_json::Value,
 }
 
+/// Which messages a listing returns, the most recently received first (ties by resource,
+/// descending): received in `[since, until)` and, with `after`, older than that message.
+#[derive(Clone, Debug, Default)]
+pub struct Listing<'a> {
+    pub resource: Option<&'a str>,
+    /// Unix seconds.
+    pub since: Option<i64>,
+    pub until: Option<i64>,
+    /// A message already listed (its reception time and resource): only older ones.
+    pub after: Option<(i64, &'a str)>,
+    pub limit: usize,
+}
+
+impl Listing<'_> {
+    /// The SQL condition on `jobs` and its parameters from `?first`, in the listing's order.
+    pub(crate) fn condition(&self, first: usize) -> String {
+        let n = |i: usize| first + i;
+        format!(
+            "(?{a} IS NULL OR resource=?{a}) AND (?{b} IS NULL OR created_at>=?{b}) AND (?{c} IS NULL OR created_at<?{c}) AND (?{d} IS NULL OR created_at<?{d} OR (created_at=?{d} AND resource<?{e}))",
+            a = n(0),
+            b = n(1),
+            c = n(2),
+            d = n(3),
+            e = n(4)
+        )
+    }
+    pub(crate) fn parameters(&self) -> [rusqlite::types::Value; 5] {
+        use rusqlite::types::Value;
+        let text = |v: Option<&str>| v.map_or(Value::Null, |s| Value::Text(s.to_owned()));
+        let number = |v: Option<i64>| v.map_or(Value::Null, Value::Integer);
+        [
+            text(self.resource),
+            number(self.since),
+            number(self.until),
+            number(self.after.map(|(at, _)| at)),
+            text(self.after.map(|(_, resource)| resource)),
+        ]
+    }
+}
+
 pub trait AuditStore: Send + Sync {
     /// Keep the finished audit of a message, its status being `audit.status`, replacing an
     /// earlier one; an in-flight status is refused.
     fn record(&self, resource: &str, audit: &Audit) -> Result<()>;
     /// Finished messages, the most recently received first; `resource` keeps that one.
-    fn entries(&self, resource: Option<&str>, limit: usize) -> Result<Vec<AuditEntry>>;
+    fn entries(&self, resource: Option<&str>, limit: usize) -> Result<Vec<AuditEntry>> {
+        self.listing(&Listing {
+            resource,
+            limit,
+            ..Default::default()
+        })
+    }
+    /// Finished messages a listing selects, at most `limit` (and 1000).
+    fn listing(&self, listing: &Listing) -> Result<Vec<AuditEntry>>;
     /// Set (or clear) the user's judgment of a finished message without changing anything
     /// else in its audit. False when no finished message has that resource.
     fn set_feedback(&self, resource: &str, feedback: Option<&Feedback>) -> Result<bool>;
@@ -99,17 +147,21 @@ impl AuditStore for LocalAudit<'_> {
         Ok(())
     }
 
-    fn entries(&self, resource: Option<&str>, limit: usize) -> Result<Vec<AuditEntry>> {
+    fn listing(&self, listing: &Listing) -> Result<Vec<AuditEntry>> {
         let db = self.store.connection();
-        let mut stmt = db.prepare("SELECT resource,status,audit,created_at FROM jobs WHERE status NOT IN ('pending','processing','refining','sending') AND (?1 IS NULL OR resource=?1) ORDER BY created_at DESC LIMIT ?2")?;
-        let rows = stmt.query_map(params![resource, limit.min(1000)], |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, Option<String>>(2)?,
-                r.get::<_, i64>(3)?,
-            ))
-        })?;
+        let mut stmt = db.prepare(&format!("SELECT resource,status,audit,created_at FROM jobs WHERE status NOT IN ('pending','processing','refining','sending') AND {} ORDER BY created_at DESC, resource DESC LIMIT ?6", listing.condition(1)))?;
+        let [a, b, c, d, e] = listing.parameters();
+        let rows = stmt.query_map(
+            params![a, b, c, d, e, listing.limit.min(1000) as i64],
+            |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, Option<String>>(2)?,
+                    r.get::<_, i64>(3)?,
+                ))
+            },
+        )?;
         let mut out = Vec::new();
         for row in rows {
             let (resource, status, text, created_at) = row?;
@@ -151,6 +203,7 @@ pub(crate) mod contract {
 
     pub(crate) fn run(store: &dyn AuditStore) {
         finished_messages_are_kept_and_replaced(store);
+        listings_page_by_time_and_cursor(store);
         in_flight_statuses_are_refused(store);
         feedback_changes_only_itself(store);
         questions_are_associated_only_with_unanswered_messages(store);
@@ -198,6 +251,39 @@ pub(crate) mod contract {
         assert_eq!(two[0].status, "dry_run");
         assert_eq!(two[0].audit["status"], "dry_run");
         assert!(store.entries(Some("unknown"), 10).unwrap().is_empty());
+    }
+
+    fn listings_page_by_time_and_cursor(store: &dyn AuditStore) {
+        let all = store.entries(None, 10).unwrap();
+        assert!(all.len() >= 2);
+        // Received in the same second: the resource breaks the tie, so a cursor misses none.
+        let (newest, next) = (&all[0], &all[1]);
+        let after = store
+            .listing(&Listing {
+                after: Some((newest.created_at, &newest.resource)),
+                limit: 10,
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(after[0].resource, next.resource);
+        assert!(after.iter().all(|e| e.resource != newest.resource));
+        let window = |since, until| {
+            store
+                .listing(&Listing {
+                    since,
+                    until,
+                    limit: 10,
+                    ..Default::default()
+                })
+                .unwrap()
+                .len()
+        };
+        assert_eq!(window(Some(newest.created_at + 1), None), 0);
+        assert_eq!(window(None, Some(newest.created_at)), 0);
+        assert_eq!(
+            window(Some(newest.created_at), Some(newest.created_at + 1)),
+            all.len()
+        );
     }
 
     fn in_flight_statuses_are_refused(store: &dyn AuditStore) {
