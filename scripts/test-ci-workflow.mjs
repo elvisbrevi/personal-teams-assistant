@@ -212,7 +212,8 @@ assert(windows.includes('python scripts/test-windows-startup.py'), 'Windows chec
 assert.deepEqual(workflow.permissions, { contents: 'read' });
 assert(!source.includes('secrets.'), 'ci.yml uses no secrets');
 for (const [id, job] of Object.entries(jobs)) {
-  assert(['ubuntu-latest', 'macos-latest', 'windows-latest'].includes(job['runs-on']), `${id}: standard runner`);
+  assert(['ubuntu-latest', 'macos-latest', 'windows-latest'].includes(job['runs-on'])
+    || (id === 'ui' && job['runs-on'] === 'ubuntu-24.04'), `${id}: standard runner`);
   for (const step of job.steps) {
     if (step.uses) assert.match(step.uses, /^[\w.-]+\/[\w./-]+@[0-9a-f]{40}$/, `${id}: ${step.uses} pinned by commit`);
   }
