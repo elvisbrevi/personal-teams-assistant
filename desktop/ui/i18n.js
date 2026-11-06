@@ -4,6 +4,16 @@
 const UI_LANGUAGES = ['es', 'en'];
 
 const UI_CATALOG = { es: {
+  "Connect an agent": "Conectar un agente",
+  "An agent anywhere (a cloud session, a phone, another computer) can use this account at this address after you sign in in the browser. It works as in this portal, but it never sees a value, approves a launcher or a destination, or updates a computer.": "Un agente en cualquier lugar (una sesión en la nube, un teléfono, otro computador) puede usar esta cuenta en esta dirección después de que inicies sesión en el navegador. Trabaja como en este portal, pero nunca ve un valor, aprueba un lanzador o un destino, ni actualiza un computador.",
+  "Copy address": "Copiar dirección",
+  "How to add it to an agent": "Cómo agregarla a un agente",
+  "This computer is not signed in to a portal, so there is no address yet. Agents on this computer use the local server: run pta mcp config to see how to add it.": "Este computador no ha iniciado sesión en un portal, así que aún no hay dirección. Los agentes de este computador usan el servidor local: ejecuta pta mcp config para ver cómo agregarlo.",
+  "Claude Code:": "Claude Code:",
+  "Other agents: add a remote MCP server (Streamable HTTP) with this address. The agent opens the browser for you to sign in; no key is copied.": "Otros agentes: agrega un servidor MCP remoto (Streamable HTTP) con esta dirección. El agente abre el navegador para que inicies sesión; no se copia ninguna clave.",
+  "On a computer where this app is installed, the local server (pta mcp) needs no browser and keeps that computer's own permissions.": "En un computador donde esta aplicación está instalada, el servidor local (pta mcp) no necesita navegador y conserva los permisos propios de ese computador.",
+  "Address copied.": "Dirección copiada.",
+  "The address could not be copied. Select it and copy it by hand.": "No se pudo copiar la dirección. Selecciónala y cópiala a mano.",
   "Cloud storage": "Almacenamiento en la nube",
   "Your account's encrypted copy in Cloudflare. Records are sealed on this computer with the account's content key, which never leaves it; everything keeps working from this computer's own data.": "La copia cifrada de tu cuenta en Cloudflare. Los registros se sellan en este computador con la clave de contenido de la cuenta, que nunca sale de él; todo sigue funcionando con los datos de este computador.",
   "Make the account store the source": "Hacer del almacén de cuenta la fuente",

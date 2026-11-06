@@ -1118,3 +1118,9 @@ body.directory-picker-open { overflow: hidden; }
 @media (max-width: 680px) {
   :root[data-style="minimal"] nav button[aria-current="page"] { background: var(--inverse); color: var(--inverse-text); }
 }
+
+/* Settings › Advanced › Connect an agent: the remote endpoint's address and how to add it. */
+.agent-endpoint { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; margin: .5rem 0; }
+.agent-endpoint code { min-width: 0; font-size: var(--fs-md); }
+.agent-steps { margin: .5rem 0 0; padding-left: 1.2rem; font-size: var(--fs-md); }
+.agent-steps li { margin: .35rem 0; overflow-wrap: anywhere; }

@@ -1649,7 +1649,8 @@ fn detail_schema(github: bool) -> Value {
 
 pub(super) fn catalog() -> Value {
     json!(TOOLS.iter().map(|tool| json!({"name":tool.name,"title":tool.title,"description":tool.description,
-        "inputSchema":(tool.schema)(),"authority":"authenticated profile; operator maintenance is local only; ordinary shared accounts support their own API configuration; local coding/provider execution requires owner authority", "effect":match tool.effect { Effect::Read => "read", Effect::Local => "local", Effect::External => "needs confirmation" }
+        "inputSchema":(tool.schema)(),"authority":"authenticated profile; operator maintenance is local only; ordinary shared accounts support their own API configuration; local coding/provider execution requires owner authority", "effect":match tool.effect { Effect::Read => "read", Effect::Local => "local", Effect::External => "needs confirmation" },
+        "remote":match super::agent::tool(tool.name) { super::agent::Remote::Offered => "offered", super::agent::Remote::Denied(reason) => reason },
     })).collect::<Vec<_>>())
 }
 
@@ -1723,13 +1724,46 @@ fn data(reply: anyhow::Result<Reply>) -> Result<Value, String> {
             .unwrap_or_else(|| format!("The operation failed ({}).", reply.code)))
     }
 }
+/// Where a tool's host operations go. Without one, they go to this computer's host over the
+/// local control channel (the CLI and `pta mcp`); the portal's remote endpoint sets one that
+/// forwards each operation to the signed-in account's host with the agent's authority.
+pub(super) type Dispatch = std::sync::Arc<
+    dyn Fn(
+            super::control::Request,
+        )
+            -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<Reply>> + Send>>
+        + Send
+        + Sync,
+>;
+tokio::task_local! {
+    static DISPATCH: Dispatch;
+}
+/// Run a tool with its host operations sent to `dispatch`.
+pub(super) async fn run_with(
+    dispatch: Dispatch,
+    name: &str,
+    args: &Value,
+) -> Result<Value, String> {
+    DISPATCH.scope(dispatch, run(name, args)).await
+}
+async fn call(method: &str, args: Value, revision: Option<String>) -> anyhow::Result<Reply> {
+    match DISPATCH.try_with(std::sync::Arc::clone) {
+        Ok(dispatch) => {
+            let mut request = super::control::Request::new(method);
+            request.args = args;
+            request.revision = revision;
+            dispatch(request).await
+        }
+        Err(_) => cli::call(method, args, revision, true).await,
+    }
+}
 async fn ipc(method: &str, args: Value) -> Result<Value, String> {
-    data(cli::call(method, args, None, true).await)
+    data(call(method, args, None).await)
 }
 /// Change the profile through the host: read a snapshot, apply `change` to its configuration
 /// and map, and save them with the snapshot's revision (a concurrent edit is refused).
 async fn edit(change: impl FnOnce(&mut Value) -> Result<(), String>) -> Result<Value, String> {
-    let snap = cli::snapshot()
+    let snap = call("snapshot", json!({}), None)
         .await
         .map_err(|_| "The host could not be reached; check pta status.".to_owned())?;
     if !snap.ok {
@@ -1739,7 +1773,7 @@ async fn edit(change: impl FnOnce(&mut Value) -> Result<(), String>) -> Result<V
     }
     let mut profile = json!({"config": snap.data["config"], "map": snap.data["map"], "tunnel_config": snap.data["tunnel_config"]});
     change(&mut profile)?;
-    data(cli::call("save_settings", profile, snap.revision, true).await)?;
+    data(call("save_settings", profile, snap.revision).await)?;
     Ok(json!({"saved": true}))
 }
 /// The map's organization, as an object.
@@ -1794,7 +1828,7 @@ pub(super) async fn run(name: &str, args: &Value) -> Result<Value, String> {
     validate(name, args)?;
     if name == "machine_login_finish" {
         // Pending approval is a state to report, not a failure.
-        let reply = cli::call(name, json!({}), None, true)
+        let reply = call(name, json!({}), None)
             .await
             .map_err(|_| "The host could not be reached; check pta status.".to_string())?;
         return if reply.code == "authorization_pending" {
@@ -1892,7 +1926,7 @@ pub(super) async fn run(name: &str, args: &Value) -> Result<Value, String> {
             ipc(name, args).await
         }
         "finish_azure_cli_login" => {
-            let reply = cli::call(name, args.clone(), None, true).await.map_err(|_| "The host could not be reached; check pta status.".to_string())?;
+            let reply = call(name, args.clone(), None).await.map_err(|_| "The host could not be reached; check pta status.".to_string())?;
             if reply.code == "authorization_pending" { Ok(reply.data) } else { data(Ok(reply)) }
         }
         "status" => {

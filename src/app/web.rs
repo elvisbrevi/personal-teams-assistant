@@ -21,6 +21,7 @@ use std::{
 use tokio::sync::Semaphore;
 
 mod access;
+mod agents;
 mod enrollment;
 mod profiles;
 mod store;
@@ -28,6 +29,11 @@ use profiles::{Worker, create_profile, profile_dir};
 use store::{Account, accounts};
 pub(super) fn admin(args: &[String]) -> Result<control::Reply> {
     store::admin(args)
+}
+/// The public origin of this installation's portal, when it serves one behind the edge identity.
+pub(super) fn portal_origin(profile: &Path) -> Option<String> {
+    let settings = settings(&profile.join("web")).ok()?;
+    (settings.access.is_some() && settings.https()).then(|| settings.origin())
 }
 pub(super) fn profile_command(binary: &Path, dir: &Path) -> std::process::Command {
     profiles::worker_command(binary, dir).into_std()
@@ -328,6 +334,8 @@ struct Portal {
     access: Option<access::Verifier>,
     workers: Mutex<HashMap<String, Worker>>,
     identities: Mutex<()>,
+    /// The remote MCP endpoint's sealing key and confirmations in flight.
+    agents: agents::Agents,
 }
 impl Portal {
     fn new(root: PathBuf, binary: PathBuf) -> Result<Self> {
@@ -348,6 +356,7 @@ impl Portal {
             access,
             workers: Mutex::new(HashMap::new()),
             identities: Mutex::new(()),
+            agents: agents::Agents::new(),
         })
     }
     fn origin(&self, headers: &HeaderMap) -> bool {
@@ -534,6 +543,14 @@ fn router(portal: Arc<Portal>) -> Router {
         .route("/api/control", post(command))
         .route("/api/machines", post(machine_command))
         .route("/api/enrollment", post(enrollment::browser))
+        // The remote MCP endpoint for agents: the same edge identity, never the session cookie.
+        .route(
+            "/mcp",
+            post(agents::post)
+                .get(agents::other)
+                .delete(agents::other)
+                .layer(DefaultBodyLimit::max(agents::BODY_LIMIT)),
+        )
         .route(
             "/webhooks/{id}/graph/{kind}",
             post(webhook).layer(DefaultBodyLimit::max(256_000)),
@@ -756,7 +773,7 @@ async fn command(
     State(portal): State<Arc<Portal>>,
     Extension(identity): Extension<access::Verified>,
     headers: HeaderMap,
-    Json(mut request): Json<control::Request>,
+    Json(request): Json<control::Request>,
 ) -> Response {
     let (account, _) = match portal.authenticate(&headers, &identity, true).await {
         Ok(value) => value,
@@ -765,6 +782,20 @@ async fn command(
     let Ok(_permit) = portal.requests.try_acquire() else {
         return StatusCode::TOO_MANY_REQUESTS.into_response();
     };
+    match forward(&portal, &account, request, authority::Transport::Browser).await {
+        Ok(reply) => Json(reply).into_response(),
+        Err(status) => status.into_response(),
+    }
+}
+
+/// Send one operation to the account's own host with `transport`'s authority, after the portal's
+/// per-account checks. The browser API and the remote MCP endpoint share it.
+async fn forward(
+    portal: &Arc<Portal>,
+    account: &Account,
+    mut request: control::Request,
+    transport: authority::Transport,
+) -> std::result::Result<control::Reply, StatusCode> {
     let _identity = if matches!(
         request.method.as_str(),
         "save_settings" | "import_existing" | "finish_microsoft" | "start_assistant" | "restart"
@@ -773,7 +804,7 @@ async fn command(
     } else {
         None
     };
-    if let Err(error) = portal.check_request(&account, &request) {
+    if let Err(error) = portal.check_request(account, &request) {
         let message = match error.to_string().as_str() {
             message
                 if message.starts_with("The portal operator")
@@ -787,60 +818,51 @@ async fn command(
             }
             _ => "Invalid request for this profile.".into(),
         };
-        return Json(control::Reply::error("invalid_input", 2, &message)).into_response();
+        return Ok(control::Reply::error("invalid_input", 2, &message));
     }
     // These actions refer to the requesting browser, not a window/browser on the server.
     if request.method == "activity_open" {
-        return Json(control::Reply::success(json!({"id":request.args["id"]}))).into_response();
+        return Ok(control::Reply::success(json!({"id":request.args["id"]})));
     }
     if request.method == "open_github_login" {
-        return Json(control::Reply::success(
+        return Ok(control::Reply::success(
             json!({"url":"https://github.com/login/device"}),
-        ))
-        .into_response();
+        ));
     }
     if request.method == "open_azure_cli_login" {
-        return Json(control::Reply::success(
+        return Ok(control::Reply::success(
             json!({"url":"https://microsoft.com/devicelogin"}),
-        ))
-        .into_response();
+        ));
     }
     if request.method == "connect_microsoft" {
         request.args["open"] = json!(false);
     }
-    let dir = match portal.worker(&account).await {
-        Ok(dir) => dir,
-        Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
-    };
+    let dir = portal
+        .worker(account)
+        .await
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
     if matches!(request.method.as_str(), "start_assistant" | "restart")
         && let Ok(config) = LocalSettings::at(&dir).config()
-        && portal.unique_identity(&account, &config).is_err()
+        && portal.unique_identity(account, &config).is_err()
     {
-        return Json(control::Reply::error(
+        return Ok(control::Reply::error(
             "state_conflict",
             6,
             "This Teams account already belongs to another profile.",
-        ))
-        .into_response();
+        ));
     }
     let method = request.method.clone();
-    let mut reply = match control::client_scoped(
-        request,
-        &dir,
-        &account.id,
-        &account.version,
-        authority::Transport::Browser,
-    )
-    .await
-    {
-        Ok(reply) => reply,
-        Err(_) => return StatusCode::BAD_GATEWAY.into_response(),
-    };
+    let mut reply =
+        match control::client_scoped(request, &dir, &account.id, &account.version, transport).await
+        {
+            Ok(reply) => reply,
+            Err(_) => return Err(StatusCode::BAD_GATEWAY),
+        };
     if reply.ok
         && method == "finish_microsoft"
         && reply.data["connected"] == true
         && let Ok(config) = LocalSettings::at(&dir).config()
-        && portal.unique_identity(&account, &config).is_err()
+        && portal.unique_identity(account, &config).is_err()
     {
         let _ = control::client_at(control::Request::new("microsoft_logout"), &dir).await;
         reply = control::Reply::error(
@@ -856,11 +878,11 @@ async fn command(
         )
     {
         let _ = portal.resume(
-            &account,
+            account,
             matches!(method.as_str(), "start_assistant" | "restart"),
         );
     }
-    Json(reply).into_response()
+    Ok(reply)
 }
 
 /// Machine-to-machine transport uses its own account-bound credentials, never browser cookies.

@@ -29,6 +29,7 @@ use std::{
 use tokio::sync::{Mutex, oneshot, watch};
 
 mod activity;
+mod agent;
 mod authority;
 mod azure_cli;
 pub mod cli;

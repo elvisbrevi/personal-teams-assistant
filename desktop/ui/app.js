@@ -158,7 +158,7 @@ function showTab(name, anchor) {
   if (name === 'knowledge') loadKnowledge().catch(fail);
   if (name === 'todo') loadTodo();
   if (name === 'agent-history') loadAgentHistory();
-  if (name === 'settings') { loadMachines().catch(fail); loadVariables(); loadAccountConfig(); loadUpdates(); loadCloud(); }
+  if (name === 'settings') { loadMachines().catch(fail); loadVariables(); loadAccountConfig(); loadUpdates(); loadCloud(); loadAgentEndpoint(); }
   const target = anchor && document.getElementById(anchor);
   // A panel inside a tab (a Settings section, an Activities view) opens that tab first.
   const owner = target && document.querySelector(`[aria-controls="${target.closest('[role=tabpanel]')?.id}"]`);
@@ -2699,6 +2699,40 @@ $('#cloud-demote').onclick = event => busy(event.currentTarget, async () => {
 });
 
 $('#cloud-refresh').onclick = event => busy(event.currentTarget, loadCloud);
+
+/**
+ * Settings › Advanced › Connect an agent. The remote MCP endpoint lives on the account's portal:
+ * this page's own origin in the browser, or the coordinator this computer is signed in to.
+ */
+async function agentEndpoint() {
+  if (window.ptaTransport.browser) return `${window.location.origin}/mcp`;
+  const settings = await invoke('machine_settings').catch(() => null);
+  const origin = settings?.coordinator_origin || settings?.coordinator || '';
+  try {
+    const url = new URL(origin);
+    return url.protocol === 'https:' ? `${url.origin}/mcp` : '';
+  } catch { return ''; }
+}
+function agentCommand(text) {
+  return el('code', { textContent: text, translate: 'no' });
+}
+async function loadAgentEndpoint() {
+  const address = await agentEndpoint();
+  $('#agent-endpoint').hidden = !address;
+  $('#agent-endpoint-url').textContent = address;
+  const missing = $('#agent-endpoint-missing');
+  missing.hidden = Boolean(address);
+  missing.replaceChildren(t('This computer is not signed in to a portal, so there is no address yet. Agents on this computer use the local server: run pta mcp config to see how to add it.'));
+  $('#agent-endpoint-help').hidden = !address;
+  $('#agent-step-claude').replaceChildren(t('Claude Code:'), ' ', agentCommand(`claude mcp add --transport http personal-teams-assistant ${address}`));
+  $('#agent-step-other').replaceChildren(t('Other agents: add a remote MCP server (Streamable HTTP) with this address. The agent opens the browser for you to sign in; no key is copied.'));
+  $('#agent-step-local').replaceChildren(t('On a computer where this app is installed, the local server (pta mcp) needs no browser and keeps that computer\'s own permissions.'));
+}
+$('#agent-endpoint-copy').onclick = async () => {
+  const copied = await copy($('#agent-endpoint-url').textContent);
+  if (copied) notify(t('Address copied.'), 'ok');
+  else fail(t('The address could not be copied. Select it and copy it by hand.'));
+};
 
 $('#cloud-connect').onclick = event => busy(event.currentTarget, async () => {
   const endpoint = $('#cloud-endpoint').value.trim();

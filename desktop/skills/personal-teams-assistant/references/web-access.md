@@ -129,6 +129,22 @@ pta web configure < /private/path/access-settings.json
 Run this helper from a checkout of the project's `main` branch; Cargo installs
 the binaries and embedded skill, while the setup script stays in the repository.
 
+### Remote MCP endpoint for agents (0.10.64)
+
+To let agents with nothing installed (a cloud session, a phone, another computer)
+use the account through the portal's `/mcp` endpoint, rerun the helper with
+`--managed-oauth`, adding `--oauth-redirect-uri URL` once for each exact HTTPS
+callback of a hosted agent client (loopback callbacks of local clients are always
+allowed). It turns on Cloudflare Access managed OAuth on the same panel application,
+with the same Allow policy and GitHub provider, five-minute access tokens and the
+panel's twelve-hour session, and reads it back. Access resolves the client's token
+into the same signed assertion a browser login produces, so the portal needs no
+restart, no OAuth server and no client secret. The agent then adds
+`https://assistant.example.com/mcp` as a remote MCP server and signs in through the
+browser once. Without `--managed-oauth` the helper leaves the setting as it is.
+The endpoint refuses browser requests and the portal's session cookie, and offers
+only the agent's tools: see [mcp.md](mcp.md).
+
 The real helper-generated settings contain `bind`, `public_url`, `session_hours`,
 `owner_github_id` and `access` (`issuer`, `audience`, `account_id`, `github_idp_id`). Audience/provider
 IDs come from actual Cloudflare resources; never invent them. Configuration takes
