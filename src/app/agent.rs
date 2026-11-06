@@ -1,0 +1,343 @@
+//! The remote agent transport: what an agent reaching the portal's MCP endpoint (`/mcp`) may do.
+//!
+//! The caller is always an agent, never a person, so its authority is the account's portal
+//! allowlist intersected with the tool catalog, minus everything that only a person at the GUI
+//! or the owner at their own computer may do: revealing a value, approving a launcher or a
+//! delivery destination, defining or running launchers on the shared server, staging or applying
+//! updates, key custody, the host's own enrollment and every operator command. A tool is offered
+//! only when it is classified here; a tool added to the catalog later is denied until someone
+//! classifies it.
+use anyhow::{Result, ensure};
+
+/// Whether a catalog tool is offered on the remote endpoint.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Remote {
+    /// Offered: it still runs under the portal's allowlist and every check of the host.
+    Offered,
+    /// Never offered, for the reason given.
+    Denied(&'static str),
+}
+use Remote::{Denied, Offered};
+
+pub(super) const UNCLASSIFIED: &str =
+    "This tool is not available to a remote agent until it is classified.";
+const HOST_SIGN_IN: &str =
+    "Command-line sign-ins of a computer are done by the person at that computer.";
+const HOST_DESKTOP: &str = "This tool opens something on the host's own desktop.";
+const HOST_MACHINE: &str =
+    "This tool changes or enrolls the host computer itself; the person does it there.";
+const UPDATES: &str = "Updates are local maintenance of each computer.";
+const LAUNCHERS: &str =
+    "Launchers are defined and run only on the owner's own computer, never on the shared server.";
+const CUSTODY: &str =
+    "The account store's keys, installations and lifecycle stay with the person in the GUI.";
+const MIGRATION: &str = "Moving a computer's own credentials is done at that computer.";
+const PORTAL: &str = "The portal does not offer this operation to the account.";
+
+/// Every tool of the catalog, offered or denied. A test walks the catalog against this list.
+pub(super) const TOOLS: &[(&str, Remote)] = &[
+    ("github_cli_status", Offered),
+    ("begin_azure_cli_login", Denied(HOST_SIGN_IN)),
+    ("finish_azure_cli_login", Denied(HOST_SIGN_IN)),
+    ("cancel_azure_cli_login", Denied(HOST_SIGN_IN)),
+    ("azure_cli_status", Offered),
+    ("implementation_request_catalog", Offered),
+    ("implementation_request_start", Offered),
+    ("implementation_request_status", Offered),
+    ("implementation_history", Offered),
+    ("implementation_sessions", Offered),
+    ("implementation_open_session", Denied(HOST_DESKTOP)),
+    ("implementation_mobile_session", Offered),
+    ("list_github_issues", Offered),
+    ("variable_list", Offered),
+    ("variable_search", Offered),
+    ("variable_sync", Offered),
+    ("variable_sync_status", Offered),
+    ("account_sync", Offered),
+    ("portable_sync", Offered),
+    ("portable_status", Offered),
+    ("setup_status", Offered),
+    ("account_records", Denied(PORTAL)),
+    ("variable_entry_request", Offered),
+    ("variable_entry_status", Offered),
+    ("variable_entry_cancel", Offered),
+    ("variable_update", Offered),
+    ("variable_usage", Offered),
+    ("variable_rename", Offered),
+    ("variable_rotation_request", Offered),
+    ("variable_delete", Offered),
+    ("consumer_list", Offered),
+    ("consumer_bind", Offered),
+    ("migration_inspect", Offered),
+    ("migration_status", Offered),
+    ("migration_run", Denied(MIGRATION)),
+    ("update_status", Offered),
+    ("update_check", Denied(UPDATES)),
+    ("update_stage", Denied(UPDATES)),
+    ("cloud_status", Offered),
+    ("cloud_connect", Denied(CUSTODY)),
+    ("cloud_migrate", Denied(CUSTODY)),
+    ("cloud_rollback", Denied(CUSTODY)),
+    ("cloud_erase", Denied(CUSTODY)),
+    ("cloud_installations", Offered),
+    ("cloud_conflicts", Offered),
+    ("cloud_resolve", Offered),
+    ("cloud_backups", Offered),
+    ("cloud_restore", Denied(CUSTODY)),
+    ("cloud_token", Offered),
+    ("cloud_revoke", Denied(CUSTODY)),
+    ("cloud_repair", Offered),
+    ("cloud_lost", Denied(CUSTODY)),
+    ("cloud_rotate_key", Denied(CUSTODY)),
+    ("cloud_disconnect", Denied(CUSTODY)),
+    ("cloud_promote", Denied(CUSTODY)),
+    ("cloud_pull", Offered),
+    ("cloud_verify", Offered),
+    ("update_apply", Denied(UPDATES)),
+    ("update_cancel", Denied(UPDATES)),
+    ("update_dismiss", Denied(UPDATES)),
+    ("consumer_unbind", Offered),
+    ("consumer_check", Offered),
+    ("launcher_define", Denied(LAUNCHERS)),
+    ("launcher_remove", Denied(LAUNCHERS)),
+    ("launcher_run", Denied(LAUNCHERS)),
+    ("delivery_list", Offered),
+    ("delivery_define", Offered),
+    ("delivery_remove", Offered),
+    ("variable_deliver", Offered),
+    ("machine_list", Offered),
+    ("machine_detail", Offered),
+    ("machine_directories", Offered),
+    ("machine_update", Offered),
+    ("machine_revoke", Offered),
+    ("machine_settings", Denied(HOST_MACHINE)),
+    ("machine_browse", Denied(HOST_MACHINE)),
+    ("machine_save", Denied(HOST_MACHINE)),
+    ("machine_connect", Denied(HOST_MACHINE)),
+    ("machine_login", Denied(HOST_MACHINE)),
+    ("machine_login_status", Denied(HOST_MACHINE)),
+    ("machine_login_finish", Denied(HOST_MACHINE)),
+    ("machine_login_cancel", Denied(HOST_MACHINE)),
+    ("machine_disconnect", Denied(HOST_MACHINE)),
+    ("machine_assistant", Offered),
+    ("machine_teams", Offered),
+    ("implementation_prepare", Offered),
+    ("implementation_catalog", Offered),
+    ("implementation_browse", Offered),
+    ("implementation_runs", Offered),
+    ("implementation_cancel", Offered),
+    ("implementation_start", Offered),
+    ("implementation_creation", Offered),
+    ("implementation_create", Offered),
+    ("get_github_issue", Offered),
+    ("open_work_item", Denied(HOST_DESKTOP)),
+    ("list_azure_hus", Offered),
+    ("list_github_epics", Offered),
+    ("get_azure_hu", Offered),
+    ("list_azure_tasks", Offered),
+    ("get_azure_task", Offered),
+    ("get_github_epic", Offered),
+    ("status", Offered),
+    ("messages_list", Offered),
+    ("message_show", Offered),
+    ("sources_list", Offered),
+    ("contexts_list", Offered),
+    ("questions_list", Offered),
+    ("people_list", Offered),
+    ("notes_search", Offered),
+    ("knowledge_search", Offered),
+    ("index_status", Offered),
+    ("activity_status", Offered),
+    ("activity_history", Offered),
+    ("activity_settings", Offered),
+    ("message_style", Offered),
+    ("teams_reading", Offered),
+    ("chat_simulate", Offered),
+    ("note_save", Offered),
+    ("note_remove", Offered),
+    ("context_save", Offered),
+    ("context_remove", Offered),
+    ("question_save", Offered),
+    ("question_remove", Offered),
+    ("question_associate", Offered),
+    ("person_save", Offered),
+    ("person_remove", Offered),
+    ("work_item_guides_list", Offered),
+    ("work_item_guide_save", Offered),
+    ("work_item_guide_remove", Offered),
+    ("organization_show", Offered),
+    ("organization_update", Offered),
+    ("organization_entry_save", Offered),
+    ("organization_entry_remove", Offered),
+    ("agent_prompts_list", Offered),
+    ("agent_prompt_update", Offered),
+    ("agent_prompt_reset", Offered),
+    ("answer_rate", Offered),
+    ("answer_draft", Offered),
+    ("index_refresh", Offered),
+    ("answer_send", Offered),
+    ("teams_chats", Denied(PORTAL)),
+    ("teams_messages", Denied(PORTAL)),
+    ("teams_search", Denied(PORTAL)),
+    ("teams_post", Denied(PORTAL)),
+    ("activity_run", Offered),
+    ("activity_settings_update", Offered),
+    ("message_style_update", Offered),
+    ("teams_reading_update", Offered),
+    ("source_authorize", Offered),
+    ("assistant_mode", Offered),
+    ("assistant_control", Offered),
+];
+
+/// How the remote endpoint treats a tool; anything not listed is denied.
+pub(super) fn tool(name: &str) -> Remote {
+    TOOLS
+        .iter()
+        .find(|(tool, _)| *tool == name)
+        .map_or(Denied(UNCLASSIFIED), |(_, remote)| *remote)
+}
+
+/// The host operations the offered tools use. The host refuses any other operation on this
+/// transport, whatever reaches it.
+pub(super) const METHODS: &[&str] = &[
+    "snapshot",
+    "save_settings",
+    "azure_cli_status",
+    "github_cli_status",
+    "implementation_request_catalog",
+    "implementation_request_start",
+    "implementation_request_status",
+    "implementation_history",
+    "implementation_sessions",
+    "implementation_mobile_session",
+    "implementation_prepare",
+    "implementation_catalog",
+    "implementation_browse",
+    "implementation_runs",
+    "implementation_cancel",
+    "implementation_start",
+    "implementation_creation",
+    "implementation_create",
+    "list_github_issues",
+    "get_github_issue",
+    "list_azure_hus",
+    "list_github_epics",
+    "get_azure_hu",
+    "list_azure_tasks",
+    "get_azure_task",
+    "get_github_epic",
+    "variable_list",
+    "variable_sync",
+    "variable_sync_status",
+    "account_sync",
+    "portable_sync",
+    "portable_status",
+    "setup_readiness",
+    "variable_entry_start",
+    "variable_entry_status",
+    "variable_entry_cancel",
+    "variable_update",
+    "variable_usage",
+    "variable_rename",
+    "variable_rotation_start",
+    "variable_delete",
+    "variable_consumer_list",
+    "variable_consumer_bind",
+    "variable_consumer_unbind",
+    "variable_consumer_check",
+    "variable_migration_inspect",
+    "variable_migration_status",
+    "crate_update_status",
+    "cloud_status",
+    "cloud_installations",
+    "cloud_conflicts",
+    "cloud_backups",
+    "cloud_verify",
+    "cloud_token",
+    "cloud_resolve",
+    "cloud_pull",
+    "cloud_repair",
+    "variable_delivery_list",
+    "variable_delivery_define",
+    "variable_delivery_remove",
+    "variable_deliver",
+    "machine_list",
+    "machine_detail",
+    "machine_directories",
+    "machine_update",
+    "machine_revoke",
+    "machine_assistant",
+    "machine_teams",
+    "audit_list",
+    "audit",
+    "notes_list",
+    "notes_save",
+    "notes_remove",
+    "knowledge_search",
+    "index_status",
+    "index_refresh",
+    "activity_status",
+    "activity_history",
+    "activity_run",
+    "chat",
+    "question_associate",
+    "answer_feedback",
+    "answer_refine",
+    "answer_send",
+    "start_assistant",
+    "stop_assistant",
+    "restart",
+];
+
+/// Never reachable by an agent, even if a later change lists one of them above: a value
+/// shown or entered, an approval, launchers, key custody, updates and local administration.
+pub(super) const NEVER: &[&str] = &[
+    "variable_reveal",
+    "variable_create",
+    "variable_entry_complete",
+    "variable_audit",
+    "variable_verify",
+    "variable_key_backup",
+    "variable_key_restore",
+    "variable_key_rotate",
+    "variable_launcher_approve",
+    "variable_launcher_define",
+    "variable_launcher_remove",
+    "variable_launcher_run",
+    "variable_delivery_approve",
+    "variable_migration_run",
+    "crate_update_check",
+    "crate_update_stage",
+    "crate_update_apply",
+    "crate_update_cancel",
+    "crate_update_dismiss",
+    "cloud_rotate_key",
+    "cloud_lost",
+    "cloud_connect",
+    "cloud_erase",
+    "cloud_restore",
+    "set_credential",
+    "delete_credential",
+    "machine_connect",
+    "machine_login",
+    "machine_save",
+    "machine_register",
+    "machine_protocol",
+    "app_quit",
+    "app_open",
+    "app_hide",
+];
+
+pub(super) const DENIED: &str = "This operation is not available to a remote agent.";
+
+/// The host's check for the agent transport.
+pub(super) fn check_method(method: &str) -> Result<()> {
+    ensure!(
+        METHODS.contains(&method) && !NEVER.contains(&method),
+        "{DENIED}"
+    );
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests;

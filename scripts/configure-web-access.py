@@ -4,6 +4,11 @@
 Secrets come from CLOUDFLARE_API_TOKEN[_FILE] and
 PTA_ACCESS_GITHUB_CLIENT_ID[_FILE]/PTA_ACCESS_GITHUB_CLIENT_SECRET[_FILE].
 The repository GitHub connection and existing tunnels/DNS are never changed.
+
+--managed-oauth turns on Access managed OAuth for the portal application, so an agent with
+nothing installed signs in through the browser and reaches the portal's remote MCP endpoint
+(`/mcp`). Access then resolves its opaque token and sends the origin the same signed
+assertion as a browser login; the portal stores no client secret and runs no OAuth server.
 """
 import argparse
 import fnmatch
@@ -26,6 +31,10 @@ PANEL_POLICY = "Authorized GitHub identities"
 CALLBACK_POLICY = "Graph callback only"
 ASSET_POLICY = "Public icon only"
 MACHINE_POLICY = "Authenticated machine protocol only"
+# Managed OAuth: short access tokens, the panel's own session length, and clients registered
+# only for loopback redirects or the exact HTTPS callbacks the operator lists.
+OAUTH_TOKEN_LIFETIME = "5m"
+OAUTH_SESSION = "12h"
 
 
 class SetupError(Exception):
@@ -128,6 +137,24 @@ def normalized_policy(policy):
     return {key: policy.get(key, []) for key in ["name", "decision", "include", "require", "exclude"]}
 
 
+def redirect_uris(values):
+    """Exact HTTPS callbacks an agent's OAuth client may register; a trailing `*` after a path is allowed."""
+    uris = sorted(set(values or []))
+    if len(uris) > 20:
+        raise SetupError("At most 20 OAuth redirect URIs are allowed.")
+    for uri in uris:
+        if not re.fullmatch(r"https://[a-z0-9-]+(?:\.[a-z0-9-]+)+(?::[0-9]{1,5})?/[A-Za-z0-9._~/-]*\*?", uri):
+            raise SetupError("OAuth redirect URIs must be exact HTTPS URLs with a path (no query, fragment or host wildcard).")
+    return uris
+
+
+def oauth_configuration(args):
+    return {"enabled":True,
+        "dynamic_client_registration":{"enabled":True,"allow_any_on_localhost":True,"allow_any_on_loopback":True,
+            "allowed_uris":redirect_uris(args.oauth_redirect_uri)},
+        "grant":{"access_token_lifetime":OAUTH_TOKEN_LIFETIME,"session_duration":OAUTH_SESSION}}
+
+
 def upsert_app(token, base, previous, definition):
     if previous:
         policies = result(token, "GET", f"{base}/apps/{previous['id']}/policies")
@@ -145,6 +172,8 @@ def upsert_app(token, base, previous, definition):
         raise SetupError("Access policy readback did not match; deployment must wait for inspection.")
     if definition.get("http_only_cookie_attribute") and actual.get("http_only_cookie_attribute") is not True:
         raise SetupError("Access cookie readback did not confirm HttpOnly; deployment must wait for inspection.")
+    if "oauth_configuration" in definition and (actual.get("oauth_configuration") or {}).get("enabled") is not True:
+        raise SetupError("Access managed OAuth readback did not confirm it is on; deployment must wait for inspection.")
     return actual
 
 
@@ -158,6 +187,10 @@ def configure(args):
     if len(args.allow_email) != 1:
         raise SetupError("A private installation accepts exactly one owner email.")
     callbacks = callback_paths(args.callbacks_file, args.hostname)
+    managed_oauth = getattr(args, "managed_oauth", False)
+    if getattr(args, "oauth_redirect_uri", None) and not managed_oauth:
+        raise SetupError("--oauth-redirect-uri needs --managed-oauth.")
+    oauth = oauth_configuration(args) if managed_oauth else None
     emails = sorted(set(args.allow_email or []))
     if not emails or any(not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", email) for email in emails):
         raise SetupError("Provide the explicit authorized GitHub email allowlist; everyone/domain-wide admission is forbidden.")
@@ -204,6 +237,7 @@ def configure(args):
         print(json.dumps({"writes":False,"team_domain":auth_domain,"dedicated_github_provider_exists":bool(provider),
             "oauth_callback":"https://" + auth_domain + "/cdn-cgi/access/callback",
             "applications":definitions,"authorized_identity_count":len(emails),
+            "managed_oauth":oauth,"mcp_endpoint":"https://" + args.hostname + "/mcp" if oauth else None,
             "required_permissions":[APP_WRITE, IDP_WRITE]}, indent=2))
         return
     if not provider:
@@ -218,17 +252,23 @@ def configure(args):
     for item in definitions[1:]:
         upsert_app(token, base, by_domain.get(item["domain"]), {**item,"type":"self_hosted","app_launcher_visible":False,
             "policies":[{"name":policy_names[item["domain"]],"decision":"bypass","include":[{"everyone":{}}]}]})
-    main = upsert_app(token, base, by_domain.get(args.hostname), {**definitions[0],"type":"self_hosted",
+    panel = {**definitions[0],"type":"self_hosted",
         "session_duration":"12h","app_launcher_visible":False,"allowed_idps":[provider["id"]],
         "auto_redirect_to_identity":True,"http_only_cookie_attribute":True,
         "policies":[{"name":PANEL_POLICY,"decision":"allow", "include":[{"email":{"email":email}} for email in emails],
-            "require":[{"login_method":{"id":provider["id"]}}]}]})
+            "require":[{"login_method":{"id":provider["id"]}}]}]}
+    if oauth:
+        # The same application, policy and identity provider: OAuth is another way to carry the login.
+        panel["oauth_configuration"] = oauth
+    main = upsert_app(token, base, by_domain.get(args.hostname), panel)
     if not re.fullmatch(r"[0-9a-f]{64}", main.get("aud", "")):
         raise SetupError("Cloudflare returned an invalid application audience.")
     settings = {"bind":"127.0.0.1:38656","public_url":"https://" + args.hostname,"session_hours":12,"owner_github_id":args.owner_github_id,
         "access":{"issuer":"https://" + auth_domain,"audience":main["aud"],"account_id":account,"github_idp_id":provider["id"]}}
     private_json(args.settings_file, settings)
     print(f"Access configuration read back successfully. Private settings: {args.settings_file.resolve()}. GitHub authorization, local identity association, Mac deployment and browser QA still need verification.")
+    if oauth:
+        print(f"Managed OAuth is on: agents add https://{args.hostname}/mcp as a remote MCP server and sign in through the browser.")
 
 
 def main():
@@ -239,6 +279,10 @@ def main():
     parser.add_argument("--allow-email", action="append", required=True)
     parser.add_argument("--callbacks-file", type=Path, required=True)
     parser.add_argument("--settings-file", type=Path)
+    parser.add_argument("--managed-oauth", action="store_true",
+        help="turn on Access managed OAuth so agents reach the remote MCP endpoint (/mcp) after a browser sign-in")
+    parser.add_argument("--oauth-redirect-uri", action="append",
+        help="an exact HTTPS OAuth callback of an agent client (loopback callbacks are always allowed); repeatable")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
     if not args.dry_run and not args.settings_file:

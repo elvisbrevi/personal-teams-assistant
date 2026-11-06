@@ -411,7 +411,8 @@ Agents
   capabilities             Contract and commands as JSON.
   mcp                      Model Context Protocol server over stdio for agents (Codex, Claude Code): every
                            operation of the app as a tool; sending, access and mode changes
-                           need the user's confirmation. mcp config prints how to add it to each agent.
+                           need the user's confirmation. mcp config prints how to add it, and the
+                           portal's remote endpoint (/mcp) for agents with nothing installed.
   skill show|path|install DIRECTORY     Operating manual for agents.
 
 Options
@@ -3003,7 +3004,7 @@ pub async fn run() -> i32 {
             Some(&"config") => {
                 println!(
                     "{}",
-                    serde_json::to_string_pretty(&super::mcp::config()).unwrap()
+                    serde_json::to_string_pretty(&super::mcp::config().await).unwrap()
                 );
                 return 0;
             }

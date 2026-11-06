@@ -231,7 +231,8 @@ pub(super) async fn operate(host: &Arc<Host>, request: &control::Request) -> Rep
         }
     };
     let shared = invocation.scope.shared && !invocation.scope.owner;
-    let browser = invocation.transport == Transport::Browser;
+    // A remote agent is not at this computer: like the browser, it gets no local owner view.
+    let browser = matches!(invocation.transport, Transport::Browser | Transport::Agent);
     let local = !browser && invocation.scope.owner;
 
     // The exchanges with the coordinator come first: they are what tells the standing.
@@ -286,6 +287,7 @@ pub(super) async fn operate(host: &Arc<Host>, request: &control::Request) -> Rep
         "client": match invocation.transport {
             Transport::Browser => "browser",
             Transport::Window => "window",
+            Transport::Agent => "agent",
             _ => "local",
         },
         "local_owner": local,

@@ -76,6 +76,7 @@ src/                          core: pipeline, Graph adapters, LLM, knowledge, to
   app/skill.rs                skill texts embedded with include_str!
   app/notes.rs                notes, ratings, knowledge search and index status/refresh operations
   app/mcp.rs                  `pta mcp`: Model Context Protocol server over stdio for agents
+  app/agent.rs                what the portal's remote MCP endpoint offers an agent (`Transport::Agent`)
   app/tools/                  shared operation catalog and CLI/MCP adapters; todo.rs owns To-Do host reads
   app/activity.rs             host scheduler and asynchronous daily snapshot IPC; no Graph or model
   mirror.rs, mirror/          the account store mirror's core (phase 3b): the content key (`key.rs`), sealing and
@@ -264,7 +265,7 @@ retain their owning host; machine session summaries and call results retain thei
 existing machine checks. Graph callbacks still select only the exact bound profile.
 
 IPC descriptors advertise additive `account_authority_support`, an account/version
-binding and separate random local, browser and machine credentials. The portal
+binding and separate random local, browser, machine and agent credentials. The portal
 checks the expected binding before forwarding and uses only the appropriate
 scoped credential. The host repeats browser operation/path checks and limits
 machine authority to the existing coordinator protocol; nested calls retain their
@@ -300,6 +301,75 @@ controlling the same OS account. No container sandbox is introduced here and non
 variables are used only through the consumers of [Account variables](#account-variables),
 which never run generic processes for a shared account.
 
+### Remote MCP endpoint (0.10.64)
+
+`POST /mcp` on the portal listener (`app/web/agents.rs`) serves the tool catalog of `pta mcp` over
+Streamable HTTP to an agent with nothing installed: a cloud session, a phone, a computer without
+the host. It is a separate transport, `Transport::Agent`, because its caller is always an agent,
+never a person.
+
+- **Admission.** The browser API's edge identity and nothing else: `secure_headers` verifies exactly
+  one `Cf-Access-Jwt-Assertion` (RS256, pinned issuer and application audience, `access.rs`) and
+  the endpoint maps it to an enabled, admitted account whose binding matches and whose issuance
+  cutoff it passes, exactly as `/login` does. The account comes only from that identity; tool
+  arguments naming an account, profile or transport are refused. A request that carries an
+  `Origin`, a `Cookie` (so the portal's session cookie never authenticates an agent) or browser
+  fetch metadata (`Sec-Fetch-*`) is refused with 403. Non-browser clients obtain the assertion
+  through Cloudflare Access managed OAuth for the portal's own application: the client receives a
+  401 pointing to Access's discovery metadata, the user signs in through the browser with the same
+  policy and identity provider, and Access resolves the client's opaque token into the same signed
+  assertion a browser login produces. The host runs no OAuth server and stores no client secret.
+  `scripts/configure-web-access.py --managed-oauth [--oauth-redirect-uri URL]...` turns it on
+  (`oauth_configuration`: dynamic client registration for loopback redirects and the exact HTTPS
+  callbacks listed, five-minute access tokens, the panel's twelve-hour session) and reads it back.
+- **Protocol.** JSON-RPC over POST, one message per request (no batches), the protocol versions of
+  the stdio server (`MCP-Protocol-Version` is checked when sent). `initialize`, `ping`,
+  `tools/list` and `tools/call` share the stdio server's code (`mcp::initialized`, `listed`,
+  `outcome`, `approved`): the same capabilities, server information, tool definitions and result
+  shapes; the instructions are the stdio ones plus a paragraph on what the remote endpoint leaves to
+  the GUI. Stateless: `initialize` returns an `Mcp-Session-Id` that is an HMAC-sealed note of the
+  account, its version, the identity subject, whether the client declared elicitation and an expiry
+  (twelve hours, key random per portal process); a session of another account, a forged or expired
+  one answers 404 so the client initializes again. GET and DELETE answer 405.
+- **Authority.** `agent.rs` classifies every catalog tool as offered or denied with a reason;
+  `tools/list` shows only offered tools, a denied tool returns its reason without reaching a host,
+  and a tool added to the catalog later is denied until classified (a test walks the catalog).
+  Offered tools are the account's portal allowlist intersected with the catalog: reading, notes,
+  contexts, people, guides, the organization, answers, daily records, variables' metadata, protected
+  entry and rotation requests, consumers, delivery destinations (proposal only), machines and
+  implementation runs. Denied: launchers, updates, the account store's keys, installations and
+  lifecycle, moving a computer's own credentials, the host computer's own enrollment, directories,
+  CLI sign-ins and desktop actions, Teams reads and posts (not in the portal allowlist). Each tool
+  runs through `tools::run`, the same adapter as stdio, with its host operations sent by a
+  task-local `tools::Dispatch` to `web::forward` (the browser API's own forwarding: the portal's
+  per-account allowlist, identity and resume checks) with the agent's scoped IPC credential. The
+  host refuses on this transport every operation outside `agent::METHODS` and always those in
+  `agent::NEVER` (`variable_reveal`, `variable_create`, `variable_entry_complete`, launcher and
+  delivery approval, launcher definition and runs, key custody, update check, staging and apply,
+  credentials, machine registration, `app_quit`), then repeats the browser's bound-request checks.
+  Variables accept `variable_entry_start` and `variable_rotation_start` from the agent (the user
+  types the value in the GUI), never a value-bearing call; readiness treats the agent like the
+  browser (no local owner view). The window, browser and local transports are unchanged.
+- **Confirmation.** The stdio rule: when the session says the client declared elicitation and the
+  request accepts `text/event-stream`, the `tools/call` answer is an event stream that first carries
+  `elicitation/create`; the client posts its answer as a JSON-RPC response, delivered only to a
+  confirmation of the same account (at most 64 in flight, eight per account, five minutes), and the
+  stream ends with the tool's result. Otherwise, or after an unanswered question, `confirmed: true`
+  decides, exactly as on stdio.
+- **Computers.** Tools that act on a computer (implementation runs, machine management, directories)
+  go once to the account's host, which sends them once through the existing worker protocol to the
+  enrolled, online computer the arguments name, within its allowed roots; nothing in the protocol,
+  enrollment or Teams lease changes. A tool runs at most two minutes (five for model-backed ones);
+  a timeout is reported with the advice to read state first and is never replayed.
+- **Bounds and logs.** Bodies over 256 KB are refused; 120 requests per minute per account and 600
+  for the endpoint (the portal's sliding limiter); the portal's request semaphore bounds concurrent
+  runs. Each request logs one stderr line `remote_mcp operation=… code=… ms=…`: the operation is the
+  catalog's own tool name or a known method, never caller text, and no argument, result or value is
+  logged.
+- **Surfaces.** Settings › Advanced › Connect an agent shows the address (the portal's origin in
+  the browser, the coordinator's in the window) with Copy address and how to add it; `pta mcp
+  config` prints both transports, and the skill's `references/mcp.md` says when to use each.
+
 ### Account variables
 
 A stored variable is the only secret an assistant account owns directly. Its user-facing fields are exactly a **name**, a **description** and a **value**; the host adds an entry ID, a version, timestamps and the encryption version as implementation metadata. There is no credential type, TOKEN/KEY suffix or key-pair structure, and no automatic import of existing credentials (the opt-in [migration](#credential-migration) copies selected ones). Existing application credentials, `STATE_ENCRYPTION_KEY` and the Teams OAuth vault are untouched.
@@ -315,7 +385,7 @@ A stored variable is the only secret an assistant account owns directly. Its use
 - **Protected entry.** A value reaches the host only from the GUI's masked field (a textarea masked by the engine with an explicit «Show the value while I type» choice) or from the CLI's standard input, which must be a pipe, never a terminal, never an argument (one final line break is not part of the value). No MCP tool, tool argument or result carries a value. An agent calls `variable_entry_request` with a name and description; the host keeps that request in memory for 15 minutes (at most 20 open, one per name; a host restart abandons it), the user completes it in Settings › Variables or with `pta variables entry complete REQUEST`, and the agent only reads `variable_entry_status`. Completion uses the request ID as the entry ID, so repeating it is a replay.
 - **Authority.** Operations resolve the account from the host's binding, never from arguments (account, profile and transport arguments are rejected). Each portal account has its own profile, host, store and key directory; the portal allowlist includes the variable methods for ordinary accounts. Failures are logged by operation name, code and duration only. Migration of existing credentials is [its own workflow](#credential-migration).
 - **Edit, rotate and delete.** `variable_update` takes the entry ID, the **version the caller saw** and a new description, a new value or both; the GUI sends them as two independent edits. A rotation keeps the ID, name and description (references keep working) and seals the value again under the new revision. A different current version is a conflict (`state_conflict`, exit 6) that names the version now stored and changes nothing, except that an identical repeat of an update whose reply was lost (current version = seen + 1 with the same content) is reported as `replayed`. An update that changes nothing is refused. `variable_rename` takes the ID, the seen version and a new name under the same rules as creation (unique in the account without regard to case; a case-only change of its own name is allowed): because the name is part of the record's authenticated data, the host opens and reseals the value under the new name and revision inside one transaction, so the value never leaves the store and `variable_verify` keeps passing. Bindings and launchers refer to entry IDs and follow the new name; a launcher run pinned to the earlier version fails as after any edit. A name the installation's application reads by name (`DEEPSEEK_API_KEY`, a `[secrets]` reference target, the Microsoft setup identifiers) cannot be renamed away nor taken by another entry: that would change which value the application uses, which only a binding or the reference itself decides. Installations signed in to the coordinator check their own configuration before forwarding and the coordinator checks its own; another computer's `[secrets]` reference to the old name stops resolving until it is repointed. `variable_delete` takes the same version, writes a **tombstone** (ID, name, deletion version and time; never a value) and removes the row in one transaction: a stale write, a replay of the creation or any later resolution of that ID fails with «was deleted» instead of bringing it back, an identical repeat of the delete is a replay, and the name becomes free again for a new entry with a new ID. Deletion does not revoke the credential at its external provider and cannot retract a value a program already received; the GUI and the tool say so.
-- **Reveal and copy (human only).** `variable_reveal` is the only operation that returns a value, and only for one entry of the current account after an explicit tap in the GUI (Reveal, or Copy value). The in-process window marks its calls with its own transport (`Window`, `authority::from_window`) and the browser has `Browser`; a call without a marked invocation (a spawned task, the tray, a scheduler) counts as `Local`, so nothing reveals by default; the CLI, MCP, tools and `pta tools call` share the control endpoint's local token with agents (`Local`) and are refused, as are machines. A refusal leaves a `denied_client` audit event. The browser reply carries `Cache-Control: no-store` like every account reply. The GUI keeps a revealed value only in memory and the DOM, never in storage, a URL or history, and clears it on Hide, on changing tab or Settings category, when the page is hidden or unloaded, on logout and after 30 seconds. Copy writes the exact value (line breaks included) without showing it in a notice, and a minute later clears the clipboard only if it still holds exactly that value (compared by SHA-256 fingerprint, best effort; unrelated clipboard contents are left alone). There is no agent-facing reveal, copy or read tool.
+- **Reveal and copy (human only).** `variable_reveal` is the only operation that returns a value, and only for one entry of the current account after an explicit tap in the GUI (Reveal, or Copy value). The in-process window marks its calls with its own transport (`Window`, `authority::from_window`) and the browser has `Browser`; a call without a marked invocation (a spawned task, the tray, a scheduler) counts as `Local`, so nothing reveals by default; the CLI, MCP, tools and `pta tools call` share the control endpoint's local token with agents (`Local`) and are refused, as are machines and the portal's remote MCP endpoint (`Agent`). A refusal leaves a `denied_client` audit event. The browser reply carries `Cache-Control: no-store` like every account reply. The GUI keeps a revealed value only in memory and the DOM, never in storage, a URL or history, and clears it on Hide, on changing tab or Settings category, when the page is hidden or unloaded, on logout and after 30 seconds. Copy writes the exact value (line breaks included) without showing it in a notice, and a minute later clears the clipboard only if it still holds exactly that value (compared by SHA-256 fingerprint, best effort; unrelated clipboard contents are left alone). There is no agent-facing reveal, copy or read tool.
 - **Protected replacement.** An agent that needs a value changed calls `variable_rotation_request` (MCP; `variable_rotation_start` on the host) with the entry ID; the request records the version it saw and the user completes it like a creation (GUI or `pta variables entry complete REQUEST`). Completion rotates only if the entry is still at that version, so a typed value never overwrites a newer state.
 - **Consumers.** A variable is used only through a consumer chosen in code (`consumers.rs`); the variable stays generic and the consumer's rules apply at use. Operations `variable_consumer_list|bind|unbind|check` and `variable_launcher_define|remove|run` (same dispatch, profile-lock bypass, `account_variables_support` gate and authority as the other `variable_*` methods; machines are refused; the portal allowlist admits the four `variable_consumer_*` methods, never launchers). Every use re-runs `authority::invocation` (live account binding and admission) and resolves the entry ID now: a deleted entry is a `state_conflict` («was deleted»), a pinned `version` that no longer matches is a conflict naming the current one, another account's ID is absent, and nothing falls back to another account, the environment or a stored credential. Results carry the reference (ID, name, version) and a status, never a value; uses and changes append `bind`, `unbind`, `use`, `launcher_define` and `launcher_remove` audit events.
   - *Built-in consumer `deepseek`.* A binding (table `consumer_bindings`: account, consumer, slot, entry ID; account-qualified, kept even after the entry is deleted so it fails closed) makes the DeepSeek API key come from the variable. `security` consults an installed `AccountSecrets` source before the environment, files and system store for configured application credentials (`secret_source` reports `variable`); a bound credential whose entry is gone, unreadable or invalid is an error, never another source. The host installs the resolver at start (`consumers::install`), so the service chain, local chat and `pta test providers` use it. The value is validated when chosen and at each use (8-256 visible ASCII characters, no spaces) and is held only by the running chain: a running assistant keeps the key it read at start, so bind, unbind and rotation report `restart_required`. `check` sends `GET /models` with the key as a bearer token to the fixed `https://api.deepseek.com` (no redirects, 15 s) and returns `ok`, `rejected`, `failed` or `unreachable`. Binding and `check` need confirmation (MCP, `confirmed:true`, CLI `--confirmed`); the GUI tap is the confirmation (Settings › Variables › Where variables are used).
@@ -668,6 +738,7 @@ Answer rules (also in `AGENTS.md`): the user's own Wiki documentation can back a
 
 ## 9. Cross-cutting security
 
+- Transports are authenticated, never declared: the control endpoint's local, browser, machine and agent tokens (`authority::Transport`), the window's in-process mark and the portal's edge assertion decide authority; arguments never do. The remote MCP endpoint's agent transport is narrower than the browser's: it can never reveal or type a value, approve, define or run launchers, stage or apply updates, hold keys or administer the portal, and it refuses browser requests ([Remote MCP endpoint](#remote-mcp-endpoint-01064)).
 - No model withholds answers or grants permissions: the model chain classifies the intent of ambiguous messages (a step that can leave a message unanswered), decides whether a question about the user's work is an activity review, rewrites follow-ups, chooses a tool among authorized ones and picks references among verified ones. Audiences, paths, URLs, tools and limits are checked in code; sensitive data, IDs, unverified URLs and size are enforced by code (`Redactor`, `complete_answer`, `valid_answer`).
 - Questions, documents, results and conversation history reach the models as untrusted data.
 - Azure task reads and daily snapshots never create or change Azure work items. Legacy write credentials/attempts are preserved; old plans cannot write (§6.10–11). Model decisions grant no permissions.
@@ -741,6 +812,8 @@ responses and no redirects; these tools make no external writes and change no au
 | 6 | `state_conflict` / `revision_conflict` / `contract_mismatch` | Incompatible revision, contract or version |
 
 **MCP** (`app/mcp.rs`, `pta mcp`; `pta mcp config` prints the client configuration). A Model Context Protocol server over stdio (JSON-RPC, protocol 2025-06-18 with 2025-03-26 and 2024-11-05 accepted) that exposes the app's operations as tools, each a call to the same IPC contract (`cli::call`, profile edits through `snapshot` + `save_settings` with its revision), so every check stays in the host. stdout carries only protocol messages. Tools are `Read`, `Local` (notes, contexts, questions, people, work item guides, agent prompts, ratings, answer drafts, index refresh, daily task snapshots and their schedule) or `External` (sending to Teams, source authorization, the mode and the assistant's state). An `External` tool needs the user's confirmation: when the client declared MCP elicitation, the server sends `elicitation/create` with the action in plain words and runs it only on `accept` with `confirm: true` (messages arriving meanwhile are queued and handled after), whatever the agent sent; `decline` (or `accept` without `confirm: true`) stops it whatever the agent sent. A question that gets no answer falls back to the rule for clients without elicitation, because Claude Code declares the capability whether or not its host can show the question: `cancel` or an error reply (print mode answers `cancel` at once), and a refusal sooner than a person could have read the question (under one second: in the desktop app's Code tab and SDK sessions Claude Code forwards the question to its host, which declines for the user without showing it). Without elicitation, or after such an unanswered question, it refuses until called with `confirmed: true`, which the server's instructions and the skill allow only after the user approved that exact action. Tool annotations mark `readOnlyHint` and `destructiveHint`/`openWorldHint` accordingly. A host left from an update is replaced first, keeping the assistant's state, like any `pta` command.
+
+**Remote MCP** (`app/web/agents.rs`, `POST /mcp` on the portal; [§3](#remote-mcp-endpoint-01064)). The same catalog, protocol helpers and confirmation rule over Streamable HTTP for agents with nothing installed, with the agent transport's narrower authority. `pta mcp config` prints, beside the stdio configuration, `remote`: the address (this installation's portal origin, or the coordinator's when the host is running and signed in), the Claude Code and Codex lines, a JSON client entry, the offered tools, and `transports` saying when to use each. `pta tools list` marks each tool `remote: offered` or the reason it is denied.
 
 To add an operation: a method in `control::operate` (window or browser only through `host.shell`, so it works headless) (and in the lists allowed during login if it is a read) → a tool in `app/tools/mod.rs` (schema, effect, adapter and, if External, confirmation text), automatically available through CLI tools and MCP → optionally a dedicated CLI command (`HELP`, `validate_args`, mapping and `help_documents_every_accepted_command`) → if it changes a schema an older host does not understand, announce it in `Endpoint` like `wiki_support` → document it in the skill.
 
@@ -842,6 +915,8 @@ To add an operation: a method in `control::operate` (window or browser only thro
 - **Reception stays on each computer; reading on request follows the account (2026-11-05).** A second computer of the account refused `pta teams messages self` until «Discover all my authorized chats» was ticked there by hand. Carrying `graph.discover_all_chats`/`graph.allowed_chats` with the account would have let an edit on any computer widen what the machine that answers Teams subscribes to, receives, answers and sends to, because `allowed_collection` gates all of that. The account's separate `teams_reading` widens only the operator's reads on request, made with each computer's own Microsoft session; it starts off, replicas may only narrow it, and once set an older host cannot install the account configuration until it is updated.
 
 ## 15. Known limits
+
+The remote MCP endpoint offers only what the portal forwards for the account: Teams reads and posts (`teams_chats`, `teams_messages`, `teams_search`, `teams_post`) and `account_records` are not in the portal's allowlist, so a remote agent cannot use them; an agent on a computer with the host uses `pta mcp` for them. Its sessions are sealed with a key held in memory, so a portal restart makes clients initialize again (they receive 404 for the old `Mcp-Session-Id`, as the protocol expects). In the application window, Settings › Advanced › Connect an agent shows an address only when the installation is signed in to a coordinator.
 
 The Teams message style (`[message_style]`) was checked with the Adaptive Cards renderer, not in every Teams client: a client without the `Icon` or `CodeBlock` element shows their fallbacks (an emoji, monospace lines), and a client that ignores card background images shows no stripe. It stays on the installation where it was set: it is not one of the account's portable settings.
 

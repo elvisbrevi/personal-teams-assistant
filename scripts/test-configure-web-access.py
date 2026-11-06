@@ -102,6 +102,52 @@ class SetupTests(unittest.TestCase):
         self.assertFalse(any(method == "POST" for method, _, _ in self.calls))
         self.assertEqual(len(self.apps), 9)
 
+    def test_managed_oauth_is_opt_in_on_the_panel_application_only(self):
+        self.run_setup()
+        self.assertTrue(all("oauth_configuration" not in (data or {}) for _, _, data in self.calls))
+        self.calls.clear()
+        self.args.managed_oauth = True
+        self.args.oauth_redirect_uri = ["https://agent.example.test/api/mcp/auth_callback"]
+        output = self.run_setup()
+        writes = [data for method, _, data in self.calls if method in ("POST", "PUT") and data and data.get("type") == "self_hosted"]
+        main = [data for data in writes if data["domain"] == self.args.hostname]
+        self.assertEqual(len(main), 1)
+        oauth = main[0]["oauth_configuration"]
+        self.assertTrue(oauth["enabled"])
+        self.assertEqual(oauth["dynamic_client_registration"]["allowed_uris"], ["https://agent.example.test/api/mcp/auth_callback"])
+        self.assertTrue(oauth["dynamic_client_registration"]["allow_any_on_loopback"])
+        self.assertEqual(oauth["grant"]["access_token_lifetime"], setup.OAUTH_TOKEN_LIFETIME)
+        # Same policy and identity provider: OAuth only carries the same login.
+        self.assertEqual(main[0]["policies"][0]["require"], [{"login_method":{"id":PROVIDER}}])
+        self.assertTrue(all("oauth_configuration" not in data for data in writes if data["domain"] != self.args.hostname))
+        self.assertIn("/mcp", output)
+        settings = json.loads(self.args.settings_file.read_text())
+        self.assertNotIn("oauth", json.dumps(settings))
+
+    def test_managed_oauth_needs_its_readback_and_exact_redirects(self):
+        self.args.managed_oauth = True
+        self.args.oauth_redirect_uri = []
+        def dropped(token, method, path, data=None):
+            response = self.fake_api(token, method, path, data)
+            value = response["result"]
+            if method == "GET" and isinstance(value, dict) and value.get("domain") == self.args.hostname:
+                response["result"] = {k: v for k, v in value.items() if k != "oauth_configuration"}
+            return response
+        with patch.object(setup, "api", dropped), contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaisesRegex(setup.SetupError, "managed OAuth"):
+                setup.configure(self.args)
+        self.assertFalse(self.args.settings_file.exists())
+        for uri in ["http://agent.example.test/cb", "https://*.example.test/cb", "https://agent.example.test/cb?x=1", "https://agent.example.test"]:
+            self.calls.clear()
+            self.args.oauth_redirect_uri = [uri]
+            with self.assertRaises(setup.SetupError):
+                self.run_setup()
+            self.assertFalse(self.calls)
+        self.args.managed_oauth = False
+        self.args.oauth_redirect_uri = ["https://agent.example.test/cb"]
+        with self.assertRaises(setup.SetupError):
+            self.run_setup()
+
     def test_cookie_readback_is_required_before_writing_settings(self):
         def missing_cookie(token, method, path, data=None):
             response = self.fake_api(token, method, path, data)
