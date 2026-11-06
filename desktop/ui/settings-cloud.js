@@ -184,7 +184,7 @@ $('#cloud-expiry-save').onclick = event => busy(event.currentTarget, async () =>
 function renderCloudInstallations() {
   const list = $('#cloud-installation-list');
   list.replaceChildren(...cloudInstallations.map(entry => {
-    const state = entry.current ? badge(t('This computer'), 'ok') : entry.revoked_at ? badge(t('Access revoked'), 'muted') : badge(t('Connected'), 'ok');
+    const state = entry.current ? badge(t('This computer'), 'ok') : entry.revoked_at ? badge(t('Access revoked'), 'muted') : badge(t('Linked'), 'ok');
     const seen = entry.revoked_at
       ? t('Revoked {when}.', { when: ago(entry.revoked_at * 1000) })
       : t('Version {version}, connected {enrolled}, last seen {seen}.', { version: entry.host_version, enrolled: ago(entry.enrolled_at * 1000), seen: ago(entry.last_seen_at * 1000) });
