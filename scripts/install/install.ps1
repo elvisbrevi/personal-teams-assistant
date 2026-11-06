@@ -355,7 +355,8 @@ function Register-Integrations {
         $mcp = if ($tool -eq 'claude') { @('mcp', 'add', '--scope', 'user', $Package, '--', $command, 'mcp') } else { @('mcp', 'add', $Package, '--', $command, 'mcp') }
         if (-not $WantIntegrations) {
             Say "  ${tool}: $Cli skill install `"$skill`""
-            Say "  ${tool}: $tool $(($mcp | ForEach-Object { if ($_ -match '\s') { "`"$_`"" } else { $_ } }) -join ' ')"
+            $shown = foreach ($word in $mcp) { if ($word -match '\s') { '"' + $word + '"' } else { $word } }
+            Say ("  ${tool}: $tool " + ($shown -join ' '))
             continue
         }
         if (Test-Path -LiteralPath $skill) {
