@@ -1,10 +1,12 @@
 //! Local installation maintenance: which release of this crate exists, how this installation was
-//! installed and a verified, matched host/CLI pair built next to it.
+//! installed and a verified, matched host/CLI pair built (or, for an archive installation,
+//! downloaded from the release) next to it.
 //!
-//! Nothing here depends on the application. The registry, the crate and the installation root are
-//! fixed or derived from the running executable; no caller supplies a URL, crate, registry, target
-//! directory or command. Building only ever writes under a staging directory and a build cache the
-//! caller chooses, so the executables that are installed (and running) are never touched.
+//! Nothing here depends on the application. The registry, the crate, the release address and the
+//! installation root are fixed or derived from the package and the running executable; no caller
+//! supplies a URL, crate, registry, target directory or command. Staging only ever writes under a
+//! staging directory and a build cache the caller chooses, so the executables that are installed
+//! (and running) are never touched.
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
@@ -187,6 +189,9 @@ pub struct Installation {
     /// Installed from the release's prebuilt archive with `cargo binstall`, which records the
     /// package in `.crates.toml` only: an update fetches the archive instead of building.
     pub prebuilt: bool,
+    /// Installed by the install scripts from the release archive (`install.json`): an update
+    /// downloads that archive for `target` without Cargo.
+    pub archive: bool,
 }
 
 #[derive(Deserialize)]
@@ -281,8 +286,6 @@ fn prebuilt_records(root: &Path) -> std::result::Result<Records, String> {
 /// The record `scripts/install/install.sh` and `install.ps1` write in the installation root, next
 /// to `bin/`: the third kind of installation, from this repository's release archive.
 pub const ARCHIVE_RECORD: &str = "install.json";
-/// What the status shows for an archive installation until its updates exist (#216).
-pub const ARCHIVE_DIAGNOSTIC: &str = "This installation came from the release archive (the install command from the portal, install.sh or install.ps1). Updating it from here is not available yet; run the install command again to upgrade it.";
 
 /// An installation the install scripts made: the package, version and target of the archive.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -302,7 +305,7 @@ struct ArchiveRecord {
     bins: Vec<String>,
 }
 
-fn valid_target(target: &str) -> bool {
+pub(crate) fn valid_target(target: &str) -> bool {
     !target.is_empty()
         && target.len() <= 64
         && target
@@ -383,9 +386,18 @@ pub fn inspect(exe: &Path) -> std::result::Result<Installation, String> {
         .ok_or("This executable is not in a Cargo installation root.")?
         .to_path_buf();
     if let Some(archive) = archive(exe) {
-        // Staging and applying an archive release come with #216; until then it is reported, not
-        // updated, and never mistaken for a Cargo installation.
-        return Err(archive.map_or_else(|reason| reason, |_| ARCHIVE_DIAGNOSTIC.to_owned()));
+        // The install scripts' record: updated from the release archive, never through Cargo.
+        let archive = archive?;
+        return Ok(Installation {
+            root: archive.root,
+            version: archive.version,
+            features: Vec::new(),
+            all_features: false,
+            no_default_features: false,
+            target: Some(archive.target),
+            prebuilt: false,
+            archive: true,
+        });
     }
     let (records, prebuilt) = read_records(&root)?;
     let (version, record) = own_record(records)?;
@@ -431,6 +443,7 @@ pub fn inspect(exe: &Path) -> std::result::Result<Installation, String> {
         no_default_features: record.no_default_features,
         target,
         prebuilt,
+        archive: false,
     })
 }
 
@@ -767,6 +780,15 @@ pub struct Digest {
     pub size: u64,
 }
 
+/// The release archive a pair was unpacked from, as downloaded and checked.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ArchiveFile {
+    pub name: String,
+    pub sha256: String,
+    pub size: u64,
+}
+
 /// What was staged: enough to recognize the pair again and to install exactly it later.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -779,6 +801,10 @@ pub struct Manifest {
     pub no_default_features: bool,
     pub target: Option<String>,
     pub binaries: BTreeMap<String, Digest>,
+    /// Present only for an archive installation; omitted otherwise, so a Cargo installation's
+    /// manifest (and the journal that embeds it) stays readable by earlier versions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archive: Option<ArchiveFile>,
 }
 
 pub(crate) fn exe_name(name: &str) -> String {
@@ -831,6 +857,27 @@ pub async fn verify(
             && record.no_default_features == wanted.no_default_features,
         "The staged build does not use the installed feature choice."
     );
+    let binaries = verify_pair(root, version, env).await?;
+    Ok(Manifest {
+        schema: 1,
+        version: version.to_string(),
+        staged_at: now,
+        features,
+        all_features: wanted.all_features,
+        no_default_features: wanted.no_default_features,
+        target: wanted.target.clone(),
+        binaries,
+        archive: None,
+    })
+}
+
+/// Digests both executables under `root/bin` and checks that they report `version`. Executes only
+/// the two staged programs, with the given environment, and only to read their version.
+pub async fn verify_pair(
+    root: &Path,
+    version: &Version,
+    env: &[(OsString, OsString)],
+) -> Result<BTreeMap<String, Digest>> {
     let mut binaries = BTreeMap::new();
     for name in [CRATE, CLI] {
         let path = root.join("bin").join(exe_name(name));
@@ -850,16 +897,7 @@ pub async fn verify(
         reported.trim() == format!("{CRATE} {version}"),
         "The staged application reports a different version."
     );
-    Ok(Manifest {
-        schema: 1,
-        version: version.to_string(),
-        staged_at: now,
-        features,
-        all_features: wanted.all_features,
-        no_default_features: wanted.no_default_features,
-        target: wanted.target.clone(),
-        binaries,
-    })
+    Ok(binaries)
 }
 
 /// A cheap check that the staged files are still there with the recorded sizes.
@@ -878,6 +916,7 @@ pub fn unchanged(root: &Path, manifest: &Manifest) -> bool {
 }
 
 pub mod apply;
+pub mod release;
 
 #[cfg(test)]
 mod tests;

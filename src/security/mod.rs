@@ -229,6 +229,30 @@ fn validate_secret(name: &str, value: &str) -> Result<()> {
     Ok(())
 }
 
+/// Whether this installation keeps any credential in the macOS Keychain. Metadata only: the
+/// Apple-signed `security` tool lists the service without decrypting anything, so no permission
+/// dialog opens. Each build of this package carries its own ad-hoc signature, so the Keychain asks
+/// the person again before a new version may read those items; an unattended update therefore
+/// waits for the person on such a Mac. Always false on other systems and with the file store.
+pub fn keychain_in_use() -> bool {
+    #[cfg(target_os = "macos")]
+    if !prefers_files()
+        && let Some(profile) = active_profile()
+    {
+        return std::process::Command::new("/usr/bin/security")
+            .args([
+                "find-generic-password",
+                "-s",
+                &format!("personal-teams-assistant.{profile}"),
+            ])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success());
+    }
+    false
+}
+
 pub fn secret_source(name: &str) -> Result<Option<&'static str>> {
     validate_name(name)?;
     if let Some(source) = account_source()

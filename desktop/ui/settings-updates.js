@@ -58,9 +58,15 @@ function renderUpdates() {
     $('#update-progress').textContent = t(APPLY_PROGRESS[apply.state], { version: apply.to });
   } else if (building) {
     const crates = stage?.progress?.crates ?? 0;
+    const mb = bytes => (bytes / 1048576).toFixed(1);
+    const received = stage?.progress?.received ?? 0, total = stage?.progress?.total;
     $('#update-progress').textContent = stage?.phase === 'verifying'
       ? t('Verifying the new application and pta pair…')
-      : t('Building version {version} ({n} packages compiled)…', { version: stage?.version ?? '', n: crates });
+      : stage?.phase === 'downloading'
+        ? total
+          ? t('Downloading version {version} ({received} of {total} MB)…', { version: stage?.version ?? '', received: mb(received), total: mb(total) })
+          : t('Downloading version {version}…', { version: stage?.version ?? '' })
+        : t('Building version {version} ({n} packages compiled)…', { version: stage?.version ?? '', n: crates });
   } else if (u.state === 'staged' || u.state === 'deferred') {
     $('#update-progress').textContent = t('Version {version} is built and verified. It is not installed yet: the installed version keeps running.', { version: u.staged.version });
   }
@@ -105,12 +111,32 @@ function renderUpdates() {
     $('#update-offer-title').textContent = prepared ? t('A new version is prepared') : t('A new version is available');
     $('#update-offer-text').textContent = prepared
       ? t('Version {available} is prepared and verified. Installing it replaces the application and pta and restarts the application; if the new version is not healthy, the previous one is restored.', { available: u.available })
-      : t('Version {available} is available; this computer runs {running}. Preparing it builds it next to the installed one without changing anything.', { available: u.available, running: u.running });
+      : u.install?.kind === 'archive'
+        ? t('Version {available} is available; this computer runs {running}. Preparing it downloads its release archive, checks it and puts it next to the installed one without changing anything.', { available: u.available, running: u.running })
+        : t('Version {available} is available; this computer runs {running}. Preparing it builds it next to the installed one without changing anything.', { available: u.available, running: u.running });
     $('#update-offer-stage').hidden = prepared;
     $('#update-offer-apply').hidden = !canApply;
     $('#update-offer-apply').textContent = updateInstallArmed ? t('Tap again to install and restart') : t('Install update');
   }
   $('#update-offer-stage').disabled = !u.can_stage;
+  renderUnattended(u, managed);
+}
+
+/** The per-computer choice of unattended updating: only on this computer's own page. */
+function renderUnattended(u, managed) {
+  const choice = u.unattended;
+  const shown = !managed && Boolean(choice) && (choice.available || choice.enabled);
+  $('#update-unattended').hidden = !shown;
+  if (!shown) return;
+  $('#update-unattended-toggle').checked = Boolean(choice.enabled);
+  $('#update-unattended-toggle').disabled = !choice.available && !choice.enabled;
+  const skipped = choice.skipped;
+  const note = choice.waiting ? sentences(choice.waiting)
+    : skipped?.reason === 'failed' ? t('Version {version} is not installed by itself again: its installation was rolled back. Install it yourself, or wait for a newer release.', { version: skipped.version })
+      : skipped?.reason === 'cancelled' ? t('Version {version} is not installed by itself because you cancelled its wait. Install it yourself, or wait for a newer release.', { version: skipped.version })
+        : '';
+  $('#update-unattended-note').hidden = !note || !choice.enabled;
+  $('#update-unattended-note').textContent = note;
 }
 
 async function stageUpdate() {
@@ -155,6 +181,12 @@ $('#update-apply').onclick = installUpdate;
 $('#update-offer-apply').onclick = installUpdate;
 $('#update-cancel').onclick = e => updating(e, cancelUpdate);
 $('#update-dismiss').onclick = e => updating(e, dismissUpdate);
+$('#update-unattended-toggle').onchange = event => {
+  const toggle = /** @type {HTMLInputElement} */ (event.currentTarget);
+  busy(toggle, async () => {
+    updates = await invoke('crate_update_unattended', { enabled: toggle.checked });
+  }).finally(() => loadUpdates());
+};
 $('#update-offer-dismiss').onclick = e => updating(e, dismissUpdate);
 setTimeout(loadUpdates, 1500);
 setInterval(() => { if (current) loadUpdates(); }, 5 * 60_000);

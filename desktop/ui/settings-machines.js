@@ -23,6 +23,18 @@ function renderMachineRoots() {
     return el('div', { class: 'implementation-path' }, el('code', { textContent: path }), remove);
   }));
 }
+/** What a machine last reported about its version and updates; older hosts report nothing. */
+function updateSummary(machine) {
+  const version = machine.version ? t('Version {version}', { version: machine.version }) : t('Version unknown');
+  const update = machine.update;
+  if (!update) return version;
+  const parts = [version];
+  if (update.failed) parts.push(t('update {version} failed and was rolled back', { version: update.failed }));
+  else if (update.state === 'applying') parts.push(t('installing an update'));
+  else if (update.pending) parts.push(t('update {version} pending', { version: update.pending }));
+  parts.push(update.unattended ? t('updates itself') : t('updates when asked'));
+  return parts.join(' · ');
+}
 function renderTeamsMachines(fleet) {
   for (const id of ['machine-list']) {
     const list = $('#' + id);
@@ -59,7 +71,8 @@ function renderTeamsMachines(fleet) {
       return el('div', { class: 'machine-choice' },
         el('label', { class: 'check' }, radio, el('strong', { textContent: machine.name }), el('span', { textContent: machine.os })),
         badge(machine.trust === 'revoked' ? t('Revoked') : machine.presence === 'unknown' ? t('Status unknown') : machine.online ? t('Online') : t('Offline'), machine.online && machine.trust !== 'revoked' ? 'ok' : 'muted'),
-        el('span', { class: 'hint', textContent: machine.online ? phaseText : t('Last reported assistant state: {state}', { state: phaseText }) }), el('div', { class: 'machine-actions' }, control, manage));
+        el('span', { class: 'hint', textContent: machine.online ? phaseText : t('Last reported assistant state: {state}', { state: phaseText }) }),
+        el('span', { class: 'hint', textContent: updateSummary(machine) }), el('div', { class: 'machine-actions' }, control, manage));
     }));
   }
 }
@@ -98,6 +111,8 @@ async function editAccountMachine(machine, trigger) {
     el('div', { class: 'directory-picker-body' },
       el('p', { textContent: `${detail.os} · ${detail.presence === 'online' ? t('Online') : detail.presence === 'offline' ? t('Offline') : t('Status unknown')}` }),
       el('p', { class: 'hint', textContent: detail.last_seen ? t('Last seen: {time}', { time: new Date(detail.last_seen * 1000).toLocaleString(uiLocale()) }) : t('Status unknown') }),
+      el('p', { class: 'hint', textContent: updateSummary(detail) }),
+      el('p', { class: 'hint', textContent: t('Each computer updates itself on its own; updates are not started from here.') }),
       el('label', {}, t('Machine name'), name), el('h3', { textContent: t('Allowed directory roots') }), roots, choose,
       el('p', { class: 'hint', textContent: t('Empty roots grant no execution access. Revocation denies future account access; a running program may retain information already received.') })),
     el('div', { class: 'directory-picker-footer' }, revoke, save));

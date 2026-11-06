@@ -1,6 +1,6 @@
 [package]
 name = "personal-teams-assistant"
-version = "0.11.4"
+version = "0.11.5"
 edition = "2024"
 rust-version = "1.95"
 build = "build.rs"
@@ -62,6 +62,7 @@ aws-lc-rs = "1"
 base64 = "0.22"
 chrono = { version = "0.4", features = ["serde"] }
 chrono-tz = "0.10"
+flate2 = { version = "1.1", default-features = false, features = ["rust_backend"] }
 fs2 = "0.4"
 futures-util = { version = "0.3", features = ["sink"] }
 rand = "0.9"
@@ -74,6 +75,7 @@ serde_json = "1"
 serde_yaml = "0.9"
 sha2 = "0.10"
 subtle = "2"
+tar = { version = "0.4", default-features = false }
 tempfile = "3"
 tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["compat"] }
@@ -83,6 +85,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = "2"
 uuid = { version = "1", features = ["v4"] }
+zip = { version = "9.4", default-features = false, features = ["deflate-flate2"] }
 tiberius = { version = "0.13", default-features = false, features = ["rustls", "tds73"] }
 
 [target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]

@@ -622,7 +622,7 @@
           </div>
           <div class="panel" id="panel-updates">
             <div class="panel-head"><h2>Updates</h2><span id="update-state" class="badge muted"></span><button id="update-check" type="button" class="secondary">Check now</button></div>
-            <p id="update-intro" class="hint">Preparing an update builds it, or downloads the release's archive when the application came from cargo binstall, and verifies it next to the installed version, which keeps running. Installing it waits for work in progress, replaces the application and pta together, restarts the application and restores the previous version if the new one is not healthy.</p>
+            <p id="update-intro" class="hint">Preparing an update builds it, or downloads the release's archive when the application came from the install command or cargo binstall, and verifies it next to the installed version, which keeps running. Installing it waits for work in progress, replaces the application and pta together, restarts the application and restores the previous version if the new one is not healthy.</p>
             <p id="update-managed" class="callout" role="status" hidden></p>
             <p id="update-diagnostic" class="callout warn" role="status" hidden></p>
             <div id="update-versions" class="list"></div>
@@ -630,6 +630,11 @@
             <div id="update-deferred" class="callout" role="status" hidden><div><p id="update-deferred-text"></p><ul id="update-deferred-reasons"></ul></div></div>
             <p id="update-error" class="callout warn" role="status" hidden></p>
             <details id="update-tail" hidden><summary>Last build output</summary><pre id="update-tail-text" translate="no"></pre></details>
+            <div id="update-unattended" hidden>
+              <label class="check"><input id="update-unattended-toggle" type="checkbox"> Install new versions by themselves on this computer</label>
+              <p class="hint">Off unless you turn it on, and only for this computer. When a newer release exists it is prepared and installed when nothing would be interrupted; it waits while the Microsoft session needs renewal, the previous version is restored if the new one is not healthy, and a release that failed is not tried again by itself.</p>
+              <p id="update-unattended-note" class="callout" role="status" hidden></p>
+            </div>
             <div id="update-result" class="callout" role="status" hidden><div><p id="update-result-text"></p><p id="update-result-error" hidden></p><ul id="update-result-notes"></ul></div></div>
             <div class="actions"><button id="update-stage" type="button" disabled>Prepare update</button><button id="update-apply" type="button" hidden>Install update</button><button id="update-cancel" type="button" class="secondary" hidden>Cancel the wait</button><button id="update-dismiss" type="button" class="secondary" hidden>Dismiss notice</button></div>
           </div>

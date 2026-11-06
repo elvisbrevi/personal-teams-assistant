@@ -21,7 +21,7 @@ import { browserMicrosoftLogin } from './dialogs.js';
  *   'cloud_resolve' | 'cloud_restore' | 'cloud_revoke' | 'cloud_rollback' | 'cloud_rotate_key' |
  *   'cloud_status' | 'cloud_token' | 'cloud_verify' | 'connect_microsoft' | 'crate_update_apply' |
  *   'crate_update_cancel' | 'crate_update_check' | 'crate_update_dismiss' | 'crate_update_stage' |
- *   'crate_update_status' | 'disconnect_github' | 'finish_azure_cli_login' |
+ *   'crate_update_status' | 'crate_update_unattended' | 'disconnect_github' | 'finish_azure_cli_login' |
  *   'finish_github_login' | 'finish_microsoft' | 'get_azure_hu' | 'get_azure_task' |
  *   'get_github_epic' | 'get_github_issue' | 'github_cli_status' | 'github_repositories' |
  *   'implementation_browse' | 'implementation_cancel' | 'implementation_catalog' |

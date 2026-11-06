@@ -96,7 +96,9 @@ check "  and target ($target)" grep -q "\"target\": \"$target\"" "$record"
 check "  with the archive's digest" grep -q "\"sha256\": \"$(sha "$dist/$archive")\"" "$record"
 update=$(pta --json update status 2>&1 || true)
 check "the updater recognizes the archive kind" sh -c 'printf "%s" "$0" | grep -q "\"kind\":\"archive\""' "$update"
-check "  and does not offer staging" sh -c 'printf "%s" "$0" | grep -q "\"can_stage\":false"' "$update"
+check "  as a supported installation it updates itself" sh -c 'printf "%s" "$0" | grep -q "\"supported\":true"' "$update"
+check "  with unattended updates off by default" sh -c 'printf "%s" "$0" | grep -q "\"unattended\":{[^}]*\"enabled\":false"' "$update"
+check "  and says how to turn them on" said "update unattended on --confirmed"
 case "${SHELL:-/bin/sh}" in
     */zsh) shell_flags=-lic ;;
     *) shell_flags=-lc ;;
@@ -121,8 +123,10 @@ check "a failed upgrade is refused" sh -c '! sh "$0" --root "$1" --test-source "
 check "  and leaves the installation working" sh -c '"$0/bin/pta" --version | grep -q "$1"' "$root" "$version"
 check "  and its record unchanged" test "$(sha "$record")" = "$before"
 rm -f "$root/bin/pta"
-if run --test-source "$work/source"; then pass "running it again succeeds"; else bad "running it again succeeds"; cat "$work/out"; fi
+if run --test-source "$work/source" --unattended-updates; then pass "running it again succeeds"; else bad "running it again succeeds"; cat "$work/out"; fi
 check "it repaired a missing binary" cmp -s "$root/bin/pta" "$work/pta.before"
+update=$(pta --json update status 2>&1 || true)
+check "--unattended-updates turned unattended updates on" sh -c 'printf "%s" "$0" | grep -q "\"unattended\":{[^}]*\"enabled\":true"' "$update"
 for file in "$HOME/.profile" "$HOME/.bash_profile" "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.zprofile"; do
     [ -f "$file" ] || continue
     count=$(grep -c "personal-teams-assistant (install.sh) >>>" "$file" || true)

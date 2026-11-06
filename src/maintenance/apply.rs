@@ -7,7 +7,7 @@
 //! one to take. Files are named by the journal's ID, so a leftover of an earlier attempt can never
 //! be mistaken for this one. Every observable point calls the `hook`, which production leaves empty
 //! and tests use to inject failures at exactly that point.
-use super::{CLI, CRATE, Digest, Manifest, digest, exe_name};
+use super::{ARCHIVE_RECORD, ArchiveFile, CLI, CRATE, Digest, Manifest, digest, exe_name};
 use anyhow::{Context, Result, anyhow, ensure};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
@@ -26,7 +26,8 @@ const SCHEMA: u32 = 1;
 /// its helper rather than an interrupted update.
 pub const GRACE_SECONDS: i64 = 60;
 const BINARIES: [&str; 2] = [CRATE, CLI];
-const RECORDS: [&str; 2] = [".crates.toml", ".crates2.json"];
+/// The installation's records a rollback puts back: Cargo's two, and the install scripts' own.
+const RECORDS: [&str; 3] = [".crates.toml", ".crates2.json", ARCHIVE_RECORD];
 const RETRIES: u32 = 20;
 const SMALL_FILE: u64 = 1 << 20;
 const MARGIN: u64 = 64 << 20;
@@ -76,6 +77,14 @@ pub struct Intent {
     /// through the manager.
     #[serde(default)]
     pub service: bool,
+    /// The assistant was running but its Microsoft session needed renewal, so it was not answering
+    /// and cannot start again until the person signs in: its restart is attempted once and does not
+    /// count against the new version's health.
+    #[serde(default)]
+    pub degraded: bool,
+    /// Started by unattended updating rather than by a person's request.
+    #[serde(default)]
+    pub unattended: bool,
 }
 
 /// What a running host reports about itself.
@@ -540,6 +549,31 @@ fn merge_records(root: &Path, staged: &Path, id: &str) -> Result<()> {
     Ok(())
 }
 
+/// Rewrites the install scripts' record for the archive now installed: version, archive, digest
+/// and time; every other field (target, repository, binaries, ones a later script adds) is kept.
+fn archive_record(root: &Path, version: &str, archive: &ArchiveFile, id: &str) -> Result<()> {
+    let path = root.join(ARCHIVE_RECORD);
+    let text = fs::read_to_string(&path).context("The installation record cannot be read.")?;
+    let mut record: serde_json::Map<String, serde_json::Value> =
+        serde_json::from_str(&text).context("The installation record is not valid.")?;
+    record.insert("version".into(), version.into());
+    record.insert("archive".into(), archive.name.clone().into());
+    record.insert("sha256".into(), archive.sha256.clone().into());
+    record.insert(
+        "installed_at".into(),
+        chrono::Utc::now()
+            .format("%Y-%m-%dT%H:%M:%SZ")
+            .to_string()
+            .into(),
+    );
+    atomic(
+        root,
+        ARCHIVE_RECORD,
+        id,
+        &format!("{}\n", serde_json::to_string_pretty(&record)?),
+    )
+}
+
 fn atomic(dir: &Path, name: &str, id: &str, content: &str) -> Result<()> {
     let temp = dir.join(format!(".{name}.{id}.new"));
     fs::write(&temp, content)?;
@@ -805,9 +839,20 @@ impl Apply {
         self.save()
     }
 
-    /// Ends successfully: the new pair is healthy. Leftovers are removed without insisting; what
-    /// a running program still holds is swept later.
+    /// Ends successfully: the new pair is healthy. An archive installation's record names the new
+    /// version first (a rollback restores it from the safety copy if anything after fails).
+    /// Leftovers are removed without insisting; what a running program still holds is swept later.
     pub fn commit(&mut self) -> Result<()> {
+        if let Some(archive) = self.journal.manifest.archive.clone() {
+            self.at("record")?;
+            archive_record(
+                &self.journal.root,
+                &self.journal.to,
+                &archive,
+                &self.journal.id,
+            )?;
+            self.step("record")?;
+        }
         self.phase(Phase::Committed)?;
         for name in BINARIES {
             let _ = fs::remove_file(self.path(name, "previous"));
@@ -947,8 +992,12 @@ pub fn describe(journal: &Journal) -> serde_json::Value {
         "started_at": journal.started_at, "finished_at": journal.finished_at,
         "error": journal.error, "data_restored": journal.data_restored,
         "notes": journal.notes,
-        "recovery": (journal.phase == Phase::Failed).then_some(
-            "Reinstall the exact version with `cargo install personal-teams-assistant --version X.Y.Z --locked --force`, then start the application. Your data and credentials were not removed."),
+        "recovery": (journal.phase == Phase::Failed).then_some(if journal.manifest.archive.is_some() {
+            "Run the install command again with --version X.Y.Z (install.sh) or -Version X.Y.Z (install.ps1) for the version you want, then start the application. Your data and credentials were not removed."
+        } else {
+            "Reinstall the exact version with `cargo install personal-teams-assistant --version X.Y.Z --locked --force`, then start the application. Your data and credentials were not removed."
+        }),
+        "unattended": journal.intent.unattended,
     })
 }
 

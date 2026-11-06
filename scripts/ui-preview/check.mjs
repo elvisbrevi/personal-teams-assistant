@@ -985,6 +985,7 @@ for (const [label, viewport] of [['desktop', { width: 1440, height: 900 }], ['ph
   check(`${label}: Teams settings lead to the one machine list`, await page.getAttribute('#settings-tab-machines', 'aria-selected') === 'true' && await page.locator('#panel-teams-machine').count() === 0);
   await page.waitForSelector('#machine-list input[type=radio]');
   check(`${label}: existing Teams machine is selected by default`, await page.locator('#machine-list input:checked').inputValue() === '11111111-1111-4111-8111-111111111111');
+  check(`${label}: each machine shows its reported version and update state, an older one as unknown`, await page.locator('#machine-list').innerText().then(text => text.includes('Versión 0.11.5 · actualización 0.11.6 pendiente · se actualiza solo') && text.includes('Versión desconocida')));
   await page.check('#machine-list input[value="22222222-2222-4222-8222-222222222222"]');
   await page.waitForFunction(() => window.__ptaTeamsMachine && !document.querySelector('#machine-list input').disabled);
   check(`${label}: Teams machine is configured separately from implementation`, await page.evaluate(() => window.__ptaTeamsMachine === '22222222-2222-4222-8222-222222222222'));
@@ -1811,6 +1812,15 @@ for (const [label, viewport] of [['desktop', { width: 1440, height: 900 }], ['ph
   await page.evaluate(axeSource);
   check(`${label}: the updates panel passes axe`, (await scan(page)).length === 0, JSON.stringify(await scan(page)));
   check(`${label}: the updates panel keeps the phone boundary`, await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+  // Unattended updating: off by default, this computer only, changed only by an explicit choice.
+  const unattended = panel.locator('#update-unattended-toggle');
+  check(`${label}: unattended updating is offered, off by default`, await unattended.isVisible() && !(await unattended.isChecked()) && await page.evaluate(() => !window.__ptaUpdateCalls.some(c => c.method === 'unattended')));
+  check(`${label}: its choice is labelled in Spanish`, await panel.locator('#update-unattended').innerText().then(text => text.includes('Instalar las nuevas versiones solas en este computador') && text.includes('solo para este computador')));
+  await unattended.check();
+  await page.waitForFunction(() => window.__ptaUpdateCalls.some(c => c.method === 'unattended'));
+  check(`${label}: turning it on sends only the choice`, await page.evaluate(() => JSON.stringify(window.__ptaUpdateCalls.filter(c => c.method === 'unattended')) === '[{"method":"unattended","enabled":true}]') && await unattended.isChecked());
+  await page.evaluate(axeSource);
+  check(`${label}: the unattended choice passes axe`, (await scan(page)).length === 0, JSON.stringify(await scan(page)));
   await panel.locator('#update-dismiss').click();
   await offer.waitFor({ state: 'hidden' });
   check(`${label}: dismissing hides the notice for that release`, await page.evaluate(() => window.__ptaUpdateCalls.at(-1).method === 'dismiss' && window.__ptaUpdateCalls.at(-1).version === '0.9.14'));
@@ -1824,6 +1834,7 @@ for (const [label, viewport] of [['desktop', { width: 1440, height: 900 }], ['ph
   await panel.waitFor();
   await panel.locator('#update-managed', { hasText: 'operador' }).waitFor({ timeout: 5000 }).catch(() => {});
   check('shared account sees the managed-server notice instead of an install button', await panel.locator('#update-managed').innerText().then(text => text.includes('operador')) && await panel.locator('#update-stage').isHidden() && await panel.locator('#update-check').isHidden() && await page.locator('#update-offer').isHidden());
+  check('shared account cannot choose unattended updating', await panel.locator('#update-unattended').isHidden());
   await page.evaluate(axeSource);
   check('shared account updates panel passes axe', (await scan(page)).length === 0, JSON.stringify(await scan(page)));
   await context.close();

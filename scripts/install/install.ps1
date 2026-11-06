@@ -32,6 +32,9 @@ Installation root (default: %LOCALAPPDATA%\Programs\personal-teams-assistant).
 .PARAMETER Integrations
 Also install the skill and register `pta mcp` with the coding CLIs found; otherwise the commands
 are printed.
+.PARAMETER UnattendedUpdates
+Let this computer install newer releases by itself when nothing would be interrupted (off unless
+you pass this; change it later with `pta update unattended on|off --confirmed` or the local page).
 .PARAMETER NoService
 Do not register the host to start at login.
 .PARAMETER NoBrowser
@@ -47,6 +50,7 @@ param(
     [string] $Version = '',
     [string] $Root = '',
     [switch] $Integrations,
+    [switch] $UnattendedUpdates,
     [switch] $NoService,
     [switch] $NoBrowser,
     [switch] $Uninstall,
@@ -56,6 +60,7 @@ param(
 Set-StrictMode -Version 1.0
 # The switches as plain script values, read by the functions below.
 $WantIntegrations = $Integrations.IsPresent
+$WantUnattended = $UnattendedUpdates.IsPresent
 $SkipService = $NoService.IsPresent
 $SkipBrowser = $NoBrowser.IsPresent
 $ErrorActionPreference = 'Stop'
@@ -287,6 +292,25 @@ function Install-PtaService {
     }
 }
 
+# Unattended updating is turned on only when the person passed -UnattendedUpdates.
+function Enable-UnattendedUpdates {
+    if (-not $WantUnattended) {
+        Say "Unattended updates are off. To let this computer install new releases by itself: $Cli update unattended on --confirmed"
+        return
+    }
+    if (-not (Start-PtaHost)) {
+        Warn "The host did not start, so unattended updates were not turned on. Later: $Cli update unattended on --confirmed"
+        return
+    }
+    $reply = Get-PtaReply 'update' 'unattended' 'on' '--confirmed'
+    if (-not $reply -or -not $reply.ok) {
+        $message = if ($reply) { $reply.message } else { 'no answer' }
+        Warn "Unattended updates were not turned on: $message"
+        return
+    }
+    Say 'Unattended updates are on: this computer installs new releases by itself when nothing would be interrupted.'
+}
+
 # ---------------------------------------------------------------------------------------------
 # PATH for new shells: the user PATH in the registry, keeping its type and every other entry.
 
@@ -505,6 +529,7 @@ function Install-Archive {
 
     Add-UserPath
     if ($SkipService) { Say 'Not registered to start at login (-NoService).' } else { Install-PtaService }
+    Enable-UnattendedUpdates
     if ($Origin) { Join-Account }
     Say ''
     Say 'Skill and MCP for coding CLIs on this computer:'

@@ -122,23 +122,33 @@ async fn in_memory(host: &Host) -> Vec<String> {
     reasons
 }
 
-fn intent_of(
-    env: &Environment,
-    running: bool,
-    subscriptions: u64,
-    tunnel: bool,
-    service: bool,
-) -> Intent {
-    Intent {
-        launch: env.launch.clone(),
-        assistant: running,
-        subscriptions,
-        tunnel,
-        service,
-    }
+/// Whether the assistant runs now and whether its Microsoft session is known to need renewal: such
+/// an assistant still reports running but cannot start again after a restart until the person
+/// signs in. Read from what the token renewal recorded; nothing is asked of Microsoft.
+async fn assistant_state(host: &Host, data: &Path) -> (bool, bool) {
+    let running = host
+        .state
+        .running
+        .lock()
+        .await
+        .as_ref()
+        .is_some_and(|r| !r.task.is_finished())
+        || *host.state.phase.borrow() == super::super::AssistantPhase::Running;
+    let renewal =
+        crate::state::Store::session_needs_renewal(&data.join("assistant.db")).unwrap_or(false);
+    (running, renewal)
 }
 
-pub(super) async fn request(host: &Arc<Host>, env: &Environment, requested: &str) -> Reply {
+/// Asks for the prepared `requested` version to be installed. `unattended` marks a request of
+/// unattended updating, which also waits while the Microsoft session needs renewal (a restart would
+/// turn an assistant that still answers into a stopped one); a person's request proceeds and only
+/// stops counting the assistant against the new version's health.
+pub(super) async fn request(
+    host: &Arc<Host>,
+    env: &Environment,
+    requested: &str,
+    unattended: bool,
+) -> Reply {
     let Some(version) = Version::parse(requested) else {
         return Reply::error("invalid_input", 2, "That is not a release version.");
     };
@@ -212,7 +222,14 @@ pub(super) async fn request(host: &Arc<Host>, env: &Environment, requested: &str
     if operations.is_none() {
         reasons.push("A change or request is being processed.".into());
     }
+    let (assistant, renewal) = assistant_state(host, &profiles[0].data).await;
+    if unattended && assistant && renewal {
+        reasons.push(super::RENEWAL.into());
+    }
     if !reasons.is_empty() {
+        let before = saved.deferred.as_ref().map(|d| d.reasons.clone());
+        let changed = before.as_ref() != Some(&reasons);
+        let detail = reasons.join(" ");
         let _ = save(&dir, |saved| {
             // The wait began with the first deferral, not with each look.
             let since = saved
@@ -224,19 +241,27 @@ pub(super) async fn request(host: &Arc<Host>, env: &Environment, requested: &str
                 version: version.to_string(),
                 at: since,
                 reasons,
+                unattended,
             });
         });
+        if unattended && changed {
+            audit(
+                &dir,
+                "unattended_deferred",
+                Some(version),
+                Some(detail),
+                None,
+            );
+        }
         return Reply::success(status(host, env));
     }
     if let Err(error) = journal::preflight(&dir, &installation.root, &manifest, &profiles) {
         return Reply::error("not_ready", 3, &error.to_string());
     }
-    let (running, tunnel, subscriptions) = {
+    let (tunnel, subscriptions) = {
         let running = host.state.running.lock().await;
-        let active = running.as_ref().is_some_and(|r| !r.task.is_finished());
         let data = profiles[0].data.join("assistant.db");
         (
-            active,
             running.as_ref().is_some_and(|r| r.tunnel.is_some()),
             crate::state::Store::subscription_health(&data).map_or(0, |(count, _)| count as u64),
         )
@@ -266,13 +291,24 @@ pub(super) async fn request(host: &Arc<Host>, env: &Environment, requested: &str
         manifest,
         &installation.root,
         &base,
-        intent_of(env, running, subscriptions, tunnel, service),
+        Intent {
+            launch: env.launch.clone(),
+            assistant,
+            subscriptions,
+            tunnel,
+            service,
+            degraded: assistant && renewal,
+            unattended,
+        },
         profiles,
     );
     if journal::write(&dir, &entry).is_err() {
         return Reply::error("operation_failed", 1, "The update could not be recorded.");
     }
     let _ = save(&dir, |saved| saved.deferred = None);
+    if unattended {
+        audit(&dir, "unattended_apply", Some(version), None, None);
+    }
     if !env.manual
         && let Err(error) = spawn(&base)
     {
@@ -294,8 +330,33 @@ pub(super) fn cancel(host: &Host, env: &Environment) -> Reply {
             "The update is already being applied and cannot be cancelled.",
         );
     }
-    match save(&dir, |saved| saved.deferred = None) {
-        Ok(()) => Reply::success(status(host, env)),
+    // Cancelling what unattended updating asked for keeps it from asking again for that release.
+    let unattended = load(&dir)
+        .deferred
+        .filter(|d| d.unattended)
+        .map(|d| d.version);
+    match save(&dir, |saved| {
+        saved.deferred = None;
+        if let Some(version) = &unattended {
+            saved.skip = Some(super::Skip {
+                version: version.clone(),
+                reason: "cancelled".into(),
+                at: now(),
+            });
+        }
+    }) {
+        Ok(()) => {
+            if let Some(version) = unattended {
+                audit(
+                    &dir,
+                    "unattended_cancelled",
+                    Version::parse(&version),
+                    None,
+                    None,
+                );
+            }
+            Reply::success(status(host, env))
+        }
         Err(_) => Reply::error("operation_failed", 1, "The choice could not be saved."),
     }
 }
@@ -392,12 +453,14 @@ pub(super) async fn drive_with(apply: &mut Apply, platform: &impl Platform, tune
     let reasons = journal::busy(&apply.journal.profiles);
     if !reasons.is_empty() {
         let (version, at) = (apply.journal.to.clone(), now());
+        let unattended = apply.journal.intent.unattended;
         let _ = fs::remove_file(dir.join(journal::JOURNAL));
         let _ = save(&dir, |saved| {
             saved.deferred = Some(Deferred {
                 version,
                 at,
                 reasons,
+                unattended,
             })
         });
         return Outcome::Deferred;
@@ -430,16 +493,25 @@ pub(super) async fn drive_with(apply: &mut Apply, platform: &impl Platform, tune
         return roll_back(apply, platform, tune, &reason).await;
     }
     apply.journal.notes = platform.follow_up();
+    if intent.degraded {
+        apply.journal.notes.push(
+            "The assistant was not answering before the update because its Microsoft session needs renewal. Sign in to Microsoft again, then start the assistant.".into(),
+        );
+    }
     if apply.commit().is_err() {
         return roll_back(apply, platform, tune, "The update could not be recorded.").await;
     }
     Outcome::Committed
 }
 
+/// «As healthy as before». An assistant whose Microsoft session already needed renewal was not
+/// answering and cannot start until the person signs in, so it does not count against the new
+/// version (nor do the subscriptions it could not renew).
 fn healthy(now: &Health, intent: &Intent, version: &str) -> bool {
+    let assistant = intent.assistant && !intent.degraded;
     now.version == version
-        && (!intent.assistant || now.assistant)
-        && (intent.subscriptions == 0 || now.subscriptions > 0)
+        && (!assistant || now.assistant)
+        && (!assistant || intent.subscriptions == 0 || now.subscriptions > 0)
         && (now.tunnel || !intent.tunnel)
 }
 
@@ -460,7 +532,7 @@ async fn wait_healthy(
         {
             if !asked && intent.assistant && !health.assistant {
                 asked = true;
-                if platform.start_assistant().await.is_err() {
+                if platform.start_assistant().await.is_err() && !intent.degraded {
                     return Err(format!("The assistant did not start on version {version}."));
                 }
             }
@@ -692,10 +764,15 @@ pub(super) async fn retry_deferred(host: Arc<Host>) {
         tokio::time::sleep(Duration::from_secs(30)).await;
         let env = environment();
         let dir = directory(&host);
-        let Some(deferred) = load(&dir).deferred else {
+        let saved = load(&dir);
+        let Some(deferred) = saved.deferred.clone() else {
             continue;
         };
-        let reply = request(&host, &env, &deferred.version).await;
+        if deferred.unattended && !super::unattended_on(&saved) {
+            let _ = save(&dir, |saved| saved.deferred = None);
+            continue;
+        }
+        let reply = request(&host, &env, &deferred.version, deferred.unattended).await;
         // A request that can no longer be honored (a newer release, files gone) is dropped.
         if !reply.ok && matches!(reply.code.as_str(), "state_conflict" | "not_ready") {
             let _ = save(&dir, |saved| saved.deferred = None);

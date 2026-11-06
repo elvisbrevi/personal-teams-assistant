@@ -85,6 +85,7 @@ fn a_remote_agent_is_refused_what_only_a_person_or_the_owners_computer_may_do() 
         "crate_update_check",
         "crate_update_stage",
         "crate_update_apply",
+        "crate_update_unattended",
         "cloud_rotate_key",
         "set_credential",
         "delete_credential",

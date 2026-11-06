@@ -339,14 +339,22 @@ Updates (this computer only; the shared server's operator updates it separately)
   update stage VERSION --confirmed
                            Builds that exact release with Cargo (locked dependencies, same features and target as this
                            installation) in this profile's maintenance directory and verifies the application and pta
-                           pair. It installs nothing and needs the owner of this computer. Progress: update status.
+                           pair; an installation made by the install command downloads that release's archive for its
+                           target from this package's repository instead and checks its published SHA-256. It installs
+                           nothing and needs the owner of this computer. Progress: update status.
   update apply VERSION --confirmed
                            Installs the prepared version: waits for work in progress (it never interrupts an answer, a send,
                            an implementation or a migration), then replaces the application and pta together, restarts the
                            application the way it was running and restores the assistant. If the new version does not start
                            and report healthy, the previous pair is put back. Success is reported only after the health
                            check; poll update status (it reads the update journal while the application restarts).
-  update cancel            Cancels an apply request that is waiting for work to finish.
+  update cancel            Cancels an apply request that is waiting for work to finish (one unattended updating made is
+                           then not asked for again for that release).
+  update unattended on|off --confirmed
+                           Turns unattended updating on or off for this computer only (off by default; never
+                           synchronized). When on, the application prepares and installs a newer release by itself when
+                           nothing would be interrupted, waits while the Microsoft session needs renewal, restores the
+                           previous version if the new one is not healthy and never retries a release that failed.
   update dismiss VERSION   Hides the notice for that release.
 
 Personal chat
@@ -608,6 +616,30 @@ async fn update_command(args: &[String]) -> Result<Reply> {
             None => call("crate_update_status", json!({}), None, true).await,
         },
         Some("check") => call("crate_update_check", json!({}), None, true).await,
+        Some("unattended") => {
+            let enabled = match words.get(2).copied() {
+                Some("on") => true,
+                Some("off") => false,
+                _ => anyhow::bail!("say on or off; consult --help"),
+            };
+            if let Some(reply) = unconfirmed(
+                args,
+                if enabled {
+                    "Turn unattended updating on for this computer? Newer releases are then prepared and installed without asking, when nothing would be interrupted.".into()
+                } else {
+                    "Turn unattended updating off for this computer?".into()
+                },
+            ) {
+                return Ok(reply);
+            }
+            call(
+                "crate_update_unattended",
+                json!({"enabled":enabled}),
+                None,
+                true,
+            )
+            .await
+        }
         Some("cancel") => call("crate_update_cancel", json!({}), None, true).await,
         Some("dismiss") => {
             call(
@@ -1562,6 +1594,7 @@ fn validate_args(args: &[String]) -> Result<()> {
             | ["service", "status" | "install" | "uninstall"]
             | ["update", "status" | "check" | "cancel"]
             | ["update", "stage" | "apply" | "dismiss", _]
+            | ["update", "unattended", "on" | "off"]
             | ["setup", "status"]
             | ["account", "status" | "sync"]
             | ["account", "records", "status" | "history"]
@@ -1784,6 +1817,7 @@ fn validate_args(args: &[String]) -> Result<()> {
                     .starts_with(&["cloud", "installations", "revoke"])
                 || p.as_slice().starts_with(&["update", "stage"])
                 || p.as_slice().starts_with(&["update", "apply"])
+                || p.as_slice().starts_with(&["update", "unattended"])
                 || p.as_slice() == ["service", "install"]
                 || p.as_slice() == ["service", "uninstall"]
                 || p.as_slice().starts_with(&["variables", "migrate", "run"])
@@ -3374,6 +3408,10 @@ mod wiki_tests {
             assert!(check(args).is_err(), "{args:?}");
         }
         assert!(check(&["account", "sync", "--reset"]).is_ok());
+        assert!(check(&["update", "unattended", "on", "--confirmed"]).is_ok());
+        assert!(check(&["update", "unattended", "off", "--confirmed"]).is_ok());
+        assert!(check(&["update", "unattended", "maybe"]).is_err());
+        assert!(check(&["update", "unattended"]).is_err());
     }
 }
 #[cfg(test)]
@@ -3387,6 +3425,7 @@ mod help_tests {
             &["service", "status"],
             &["service", "install"],
             &["service", "uninstall"],
+            &["update", "unattended", "on"],
             &["mcp"],
             &["mcp", "config"],
             &["tools", "list"],
