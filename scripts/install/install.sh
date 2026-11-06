@@ -14,7 +14,7 @@
 # installation root and moves it into place (a failure leaves the previous installation working);
 # writes the archive installation record; puts `pta` on the path of new shells; registers the host
 # to start at login (`pta service install`); and, with --origin, starts the browser sign-in
-# (`pta auth machine login`) so the approval page opens for «Trust this machine».
+# (`pta auth machine login`) so the approval page opens for "Trust this machine".
 #
 # The command carries no secret: only the coordinator's public HTTPS origin. Running it again
 # repairs or upgrades the same installation; the profile (settings, credentials, Microsoft

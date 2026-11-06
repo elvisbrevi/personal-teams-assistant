@@ -17,7 +17,7 @@ installed and signed in; unpacks into a temporary directory inside the installat
 it into place (a failure leaves the previous installation working); writes the archive
 installation record; adds the bin directory to the user PATH through the registry (never setx);
 registers the host to start at login (`pta service install`, a scheduled task, no console window);
-and, with -Origin, starts the browser sign-in so the approval page opens for «Trust this machine».
+and, with -Origin, starts the browser sign-in so the approval page opens for "Trust this machine".
 
 The command carries no secret: only the coordinator's public HTTPS origin. Running it again
 repairs or upgrades the same installation; the profile (settings, credentials, Microsoft session,
@@ -54,6 +54,10 @@ param(
 )
 
 Set-StrictMode -Version 1.0
+# The switches as plain script values, read by the functions below.
+$WantIntegrations = $Integrations.IsPresent
+$SkipService = $NoService.IsPresent
+$SkipBrowser = $NoBrowser.IsPresent
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
@@ -349,7 +353,7 @@ function Register-Integrations {
         $found = $true
         $skill = Join-Path $env:USERPROFILE ".$tool\skills\$Package"
         $mcp = if ($tool -eq 'claude') { @('mcp', 'add', '--scope', 'user', $Package, '--', $command, 'mcp') } else { @('mcp', 'add', $Package, '--', $command, 'mcp') }
-        if (-not $Integrations) {
+        if (-not $WantIntegrations) {
             Say "  ${tool}: $Cli skill install `"$skill`""
             Say "  ${tool}: $tool $(($mcp | ForEach-Object { if ($_ -match '\s') { "`"$_`"" } else { $_ } }) -join ' ')"
             continue
@@ -369,7 +373,7 @@ function Register-Integrations {
     }
     if (-not $found) {
         Say "No coding CLI (Claude Code, Codex) was found. For any agent, '$Cli mcp config' prints how to add '$Cli mcp'."
-    } elseif (-not $Integrations) {
+    } elseif (-not $WantIntegrations) {
         Say 'Run them yourself, or run this command again with -Integrations.'
     }
 }
@@ -396,7 +400,7 @@ function Join-Account {
     Say ''
     Say "Approve this computer in your browser: $url"
     Say "Check that the page shows the code $($reply.data.code), then choose Trust this machine."
-    if ($NoBrowser) { Say 'Open that link on any device where you are signed in to the portal.' }
+    if ($SkipBrowser) { Say 'Open that link on any device where you are signed in to the portal.' }
     else { Start-Process $url }
     Say 'Waiting for the approval (up to ten minutes)...'
     $finished = Get-PtaReply 'auth' 'machine' 'finish' '--wait'
@@ -498,7 +502,7 @@ function Install-Archive {
     Say "Installed $((Invoke-Pta '--version').Text) in $Bin."
 
     Add-UserPath
-    if ($NoService) { Say 'Not registered to start at login (-NoService).' } else { Install-PtaService }
+    if ($SkipService) { Say 'Not registered to start at login (-NoService).' } else { Install-PtaService }
     if ($Origin) { Join-Account }
     Say ''
     Say 'Skill and MCP for coding CLIs on this computer:'
