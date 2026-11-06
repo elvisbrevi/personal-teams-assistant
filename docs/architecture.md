@@ -347,9 +347,14 @@ never a person.
   401 pointing to Access's discovery metadata, the user signs in through the browser with the same
   policy and identity provider, and Access resolves the client's opaque token into the same signed
   assertion a browser login produces. The host runs no OAuth server and stores no client secret.
-  `scripts/configure-web-access.py --managed-oauth [--oauth-redirect-uri URL]...` turns it on
-  (`oauth_configuration`: dynamic client registration for loopback redirects and the exact HTTPS
-  callbacks listed, five-minute access tokens, the panel's twelve-hour session) and reads it back.
+  `scripts/configure-web-access.py --managed-oauth-only [--oauth-redirect-uri URL]...` turns it on
+  and `--managed-oauth-off` turns it off: with only `Access: Apps and Policies Write`, they resend
+  the panel application as read with only `oauth_configuration` changed (dynamic client
+  registration for localhost and loopback redirects and the exact HTTPS callbacks listed; the
+  grant as read), dropping only the generated `id`, `aud`, `created_at` and `updated_at`, and fail
+  if the readback of the application or its policies differs elsewhere; `--report FILE` keeps a
+  private, secret-free record. The full run's `--managed-oauth` sets the same with five-minute
+  tokens and a twelve-hour grant, but also rewrites the Allow policy with its one email.
 - **Protocol.** JSON-RPC over POST, one message per request (no batches), the protocol versions of
   the stdio server (`MCP-Protocol-Version` is checked when sent). `initialize`, `ping`,
   `tools/list` and `tools/call` share the stdio server's code (`mcp::initialized`, `listed`,

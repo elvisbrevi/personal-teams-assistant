@@ -6,6 +6,7 @@ import importlib.util
 import io
 import json
 import os
+import sys
 import tempfile
 import unittest
 import urllib.error
@@ -222,6 +223,187 @@ class SetupTests(unittest.TestCase):
             self.assertIn(permission,str(caught.exception))
             self.assertIn("POST " + path,str(caught.exception))
             self.assertNotIn("synthetic",str(caught.exception))
+
+
+APP_ID = "0d9f5e2a-7c1b-4f3e-9a2d-6b8c4e1f0a37"
+POLICY_ID = "5c2e9b1a-3d4f-4e6a-8b7c-1f0e2d3c4b5a"
+
+
+class ManagedOAuthOnlyTests(unittest.TestCase):
+    """The narrow mode against a double shaped like production: two include rules, one GitHub provider."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.report = Path(self.temp.name) / "private" / "report.json"
+        self.hostname = "assistant.example.com"
+        self.policy = {"id":POLICY_ID,"name":setup.PANEL_POLICY,"decision":"allow","precedence":1,"reusable":False,
+            "include":[{"email":{"email":"owner@example.test"}},{"email":{"email":"second@example.test"}}],
+            "require":[{"login_method":{"id":PROVIDER}}],"exclude":[],
+            "created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z"}
+        self.panel = {"id":APP_ID,"aud":"c" * 64,"name":setup.APP_NAME,"domain":self.hostname,"type":"self_hosted",
+            "self_hosted_domains":[self.hostname],"destinations":[{"type":"public","uri":self.hostname}],
+            "session_duration":"12h","allowed_idps":[PROVIDER],"auto_redirect_to_identity":True,
+            "http_only_cookie_attribute":True,"app_launcher_visible":False,"policies":[dict(self.policy)],
+            "tags":[],"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z"}
+        self.apps = {APP_ID:self.panel,
+            "asset":{"id":"asset","name":setup.APP_NAME + " asset favicon.png","domain":self.hostname + "/favicon.png",
+                "type":"self_hosted","policies":[]},
+            "elsewhere":{"id":"elsewhere","name":"another team app","domain":"other.example.org","type":"self_hosted"}}
+        self.calls = []
+        self.puts = 0
+        self.env = patch.dict(os.environ, {"CLOUDFLARE_API_TOKEN":"synthetic-api-secret"}, clear=True)
+        self.env.start()
+        self.addCleanup(self.env.stop)
+
+    def args(self, enable=True, **extra):
+        values = dict(account_id=ACCOUNT, hostname=self.hostname, oauth_redirect_uri=None, report=self.report,
+            dry_run=False, managed_oauth_only=enable, managed_oauth_off=not enable)
+        values.update(extra)
+        return argparse.Namespace(**values)
+
+    def fake_api(self, token, method, path, data=None):
+        self.calls.append((method, path, json.loads(json.dumps(data)) if data is not None else None))
+        base = f"/accounts/{ACCOUNT}/access"
+        self.assertFalse(path.startswith(base + "/identity_providers") or path.startswith(base + "/organizations"))
+        if path.startswith(base + "/apps?"):
+            return {"success":True,"result":json.loads(json.dumps(list(self.apps.values())))}
+        suffix = path.removeprefix(base + "/apps/")
+        ident = suffix.split('/')[0]
+        if method == "PUT":
+            # Like Cloudflare's schema: generated fields are not part of the update body.
+            for field in setup.READ_ONLY_APP_FIELDS:
+                self.assertNotIn(field, data)
+            self.puts += 1
+            previous = self.apps[ident]
+            self.apps[ident] = {"id":ident,"aud":previous["aud"],"created_at":previous["created_at"],
+                "updated_at":"2026-11-06T00:00:00Z",**json.loads(json.dumps(data))}
+        app = self.apps[ident]
+        value = app.get("policies", []) if suffix.endswith("/policies") else app
+        return {"success":True,"result":json.loads(json.dumps(value))}
+
+    def run_narrow(self, args, api=None):
+        output = io.StringIO()
+        with patch.object(setup, "api", api or self.fake_api), contextlib.redirect_stdout(output):
+            setup.run_narrow(args)
+        self.assertNotIn("synthetic-api-secret", output.getvalue())
+        return json.loads(output.getvalue())
+
+    def test_one_update_differs_only_in_oauth_and_preserves_policies_byte_for_byte(self):
+        read = json.loads(json.dumps(self.panel))
+        policies = json.dumps(read["policies"])
+        self.run_narrow(self.args(oauth_redirect_uri=["https://agent.example.test/api/mcp/auth_callback"]))
+        puts = [(path, data) for method, path, data in self.calls if method != "GET"]
+        self.assertEqual(len(puts), 1)
+        path, body = puts[0]
+        self.assertEqual(path, f"/accounts/{ACCOUNT}/access/apps/{APP_ID}")
+        expected = {key: value for key, value in read.items() if key not in setup.READ_ONLY_APP_FIELDS}
+        self.assertEqual({k: v for k, v in body.items() if k != "oauth_configuration"},
+            {k: v for k, v in expected.items() if k != "oauth_configuration"})
+        self.assertEqual(json.dumps(body["policies"]), policies)
+        self.assertEqual(body["oauth_configuration"], {"enabled":True,"dynamic_client_registration":{"enabled":True,
+            "allow_any_on_localhost":True,"allow_any_on_loopback":True,
+            "allowed_uris":["https://agent.example.test/api/mcp/auth_callback"]}})
+        report = json.loads(self.report.read_text())
+        self.assertEqual(self.report.stat().st_mode & 0o777, 0o600)
+        self.assertTrue(report["ok"])
+        self.assertTrue(report["writes"])
+        self.assertEqual(report["mcp_endpoint"], "https://assistant.example.com/mcp")
+        self.assertEqual(list(report["changes"]), ["oauth_configuration"])
+        self.assertTrue(report["readback"]["policies_preserved"])
+        self.assertEqual(report["read"]["policies"]["count"], 1)
+        self.assertEqual(report["read"]["policies"]["digest"], report["readback"]["policies"]["digest"])
+        # Secret-free and without the people the include rules name.
+        for text in ["synthetic-api-secret", "owner@example.test", "second@example.test"]:
+            self.assertNotIn(text, self.report.read_text())
+
+    def test_production_state_keeps_grant_as_read_and_a_second_run_writes_nothing(self):
+        self.panel["oauth_configuration"] = {"enabled":False,"grant":{"session_duration":"12h"}}
+        self.run_narrow(self.args())
+        oauth = self.apps[APP_ID]["oauth_configuration"]
+        self.assertEqual(oauth["grant"], {"session_duration":"12h"})
+        self.assertEqual(oauth["dynamic_client_registration"]["allowed_uris"], [])
+        self.calls.clear()
+        report = self.run_narrow(self.args())
+        self.assertEqual(self.puts, 1)
+        self.assertFalse(report["writes"])
+        self.assertEqual(report["changes"], {})
+        self.assertTrue(report["managed_oauth_enabled"])
+
+    def test_off_reverses_only_enabled_and_is_a_no_op_when_already_off(self):
+        self.run_narrow(self.args())
+        policies = json.dumps(self.apps[APP_ID]["policies"])
+        self.run_narrow(self.args(enable=False))
+        oauth = self.apps[APP_ID]["oauth_configuration"]
+        self.assertFalse(oauth["enabled"])
+        self.assertTrue(oauth["dynamic_client_registration"]["allow_any_on_loopback"])
+        self.assertEqual(json.dumps(self.apps[APP_ID]["policies"]), policies)
+        self.assertEqual(self.puts, 2)
+        report = self.run_narrow(self.args(enable=False))
+        self.assertEqual(self.puts, 2)
+        self.assertFalse(report["managed_oauth_enabled"])
+        with self.assertRaises(setup.SetupError):
+            self.run_narrow(self.args(enable=False, oauth_redirect_uri=["https://agent.example.test/cb"]))
+
+    def test_dry_run_reads_only(self):
+        report = self.run_narrow(self.args(dry_run=True))
+        self.assertTrue(all(method == "GET" for method, _, _ in self.calls))
+        self.assertFalse(report["writes"])
+        self.assertTrue(report["dry_run"])
+        self.assertIn("oauth_configuration", report["changes"])
+        self.assertTrue(json.loads(self.report.read_text())["ok"])
+
+    def test_readback_that_differs_fails_and_the_report_is_not_a_success(self):
+        changes = [
+            lambda app: {**app, "policies":[{**app["policies"][0], "include":app["policies"][0]["include"][:1]}]},
+            lambda app: {**app, "allowed_idps":[]},
+            lambda app: {**app, "aud":"d" * 64},
+            lambda app: {k: v for k, v in app.items() if k != "oauth_configuration"},
+        ]
+        for change in changes:
+            self.setUp()
+            def drifted(token, method, path, data=None, change=change):
+                response = self.fake_api(token, method, path, data)
+                if self.puts and method == "GET" and path.endswith(APP_ID):
+                    response["result"] = change(response["result"])
+                if self.puts and method == "GET" and path.endswith("/policies"):
+                    response["result"] = change({"policies":response["result"]}).get("policies", [])
+                return response
+            with self.assertRaises(setup.SetupError):
+                self.run_narrow(self.args(), api=drifted)
+            self.assertEqual(self.puts, 1)
+            report = json.loads(self.report.read_text())
+            self.assertFalse(report["ok"])
+            self.assertIn("error", report)
+
+    def test_missing_duplicated_foreign_or_unmanaged_applications_are_refused_before_any_write(self):
+        cases = [
+            lambda: self.apps.pop(APP_ID),
+            lambda: self.apps.update({"copy":{**self.panel, "id":"copy"}}),
+            lambda: self.panel.update({"type":"bookmark"}),
+            lambda: self.apps.update({"foreign":{"id":"foreign","name":"other application","domain":"*.example.com","type":"self_hosted"}}),
+            lambda: self.apps.update({"foreign":{"id":"foreign","name":"other application","domain":self.hostname + "/api/*","type":"self_hosted"}}),
+            lambda: self.panel["policies"].append({"id":"other","name":"unmanaged","decision":"allow","include":[{"everyone":{}}]}),
+            lambda: self.panel.update({"self_hosted_domains":[self.hostname, "extra.example.com"]}),
+        ]
+        for case in cases:
+            self.setUp()
+            case()
+            with self.assertRaises(setup.SetupError):
+                self.run_narrow(self.args())
+            self.assertTrue(all(method == "GET" for method, _, _ in self.calls))
+            self.assertFalse(json.loads(self.report.read_text())["ok"])
+
+    def test_cli_keeps_narrow_and_full_modes_apart(self):
+        script = str(Path(__file__).with_name("configure-web-access.py"))
+        base = ["--hostname", self.hostname, "--dry-run"]
+        for extra in [["--managed-oauth-only", "--managed-oauth-off"], ["--managed-oauth-only", "--allow-email", "a@example.test"],
+                ["--managed-oauth-off", "--callbacks-file", "x"], ["--managed-oauth-only", "--managed-oauth"],
+                ["--report", "x"], []]:
+            with patch.object(sys, "argv", [script] + base + extra), contextlib.redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit) as caught:
+                    setup.main()
+            self.assertEqual(caught.exception.code, 2)
 
 
 if __name__ == "__main__":

@@ -132,16 +132,51 @@ the binaries and embedded skill, while the setup script stays in the repository.
 ### Remote MCP endpoint for agents (0.10.64)
 
 To let agents with nothing installed (a cloud session, a phone, another computer)
-use the account through the portal's `/mcp` endpoint, rerun the helper with
-`--managed-oauth`, adding `--oauth-redirect-uri URL` once for each exact HTTPS
-callback of a hosted agent client (loopback callbacks of local clients are always
-allowed). It turns on Cloudflare Access managed OAuth on the same panel application,
-with the same Allow policy and GitHub provider, five-minute access tokens and the
-panel's twelve-hour session, and reads it back. Access resolves the client's token
-into the same signed assertion a browser login produces, so the portal needs no
-restart, no OAuth server and no client secret. The agent then adds
-`https://assistant.example.com/mcp` as a remote MCP server and signs in through the
-browser once. Without `--managed-oauth` the helper leaves the setting as it is.
+use the account through the portal's `/mcp` endpoint, turn on Cloudflare Access
+managed OAuth on the existing panel application with the narrow mode, which changes
+nothing else:
+
+```sh
+python3 scripts/configure-web-access.py --managed-oauth-only \
+  --account-id YOUR_ACCOUNT_ID --hostname assistant.example.com \
+  --report /private/path/managed-oauth.json --dry-run
+python3 scripts/configure-web-access.py --managed-oauth-only \
+  --account-id YOUR_ACCOUNT_ID --hostname assistant.example.com \
+  --report /private/path/managed-oauth.json
+python3 scripts/configure-web-access.py --managed-oauth-off \
+  --account-id YOUR_ACCOUNT_ID --hostname assistant.example.com \
+  --report /private/path/managed-oauth.json
+```
+
+It needs only `CLOUDFLARE_API_TOKEN[_FILE]` with `Access: Apps and Policies Write`
+(`--account-id` or `CLOUDFLARE_ACCOUNT_ID`); it never reads or writes the identity
+provider, the callbacks or the settings file. It finds the panel application by its
+managed name and exact hostname and refuses, before any write, one that is missing,
+duplicated, not self-hosted or carrying policies other than its Allow policy, and any
+overlapping or unmanaged application. It sends the application back as read with only
+`oauth_configuration` changed: dynamic client registration on, any localhost and
+loopback redirect allowed, plus each exact HTTPS callback given with
+`--oauth-redirect-uri URL` (repeatable) for a hosted agent client; the grant (session
+length and access token lifetime) stays as read, so an application left at its
+defaults keeps the application session and the default token lifetime. It then reads
+the application and its policies back and fails if anything but managed OAuth differs.
+`--managed-oauth-off` sets only `enabled` to false. A run that would change nothing
+writes nothing. `--report FILE` (0600) records the application read, its policies'
+names, IDs and digest (not the identities they admit), what changed, the readback and
+the endpoint, without secrets; the same record is printed.
+
+Access resolves the client's token into the same signed assertion a browser login
+produces, so the portal needs no restart, no OAuth server and no client secret. The
+agent then adds `https://assistant.example.com/mcp` as a remote MCP server and signs in
+through the browser once.
+
+The full helper's `--managed-oauth` (with `--oauth-redirect-uri`) also turns it on, but
+re-applies the whole portal configuration: the Graph, icon and machine bypass
+applications, the dedicated GitHub provider, and the panel's Allow policy rewritten
+with the one `--allow-email` given (an additional account admitted at the edge would
+lose that admission), five-minute access tokens and a twelve-hour grant, and new
+private settings. Use it only when configuring the portal as a whole; without
+`--managed-oauth` it leaves the setting as it is.
 The endpoint refuses browser requests and the portal's session cookie, and offers
 only the agent's tools: see [mcp.md](mcp.md).
 
