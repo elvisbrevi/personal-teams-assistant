@@ -1,13 +1,14 @@
-//! Local installation maintenance: update discovery and staging.
+//! Local installation maintenance: update discovery, staging and unattended updating.
 //!
 //! A check is a bounded, read-only look at the pinned public registry. Staging builds the newest
-//! release with Cargo into a directory of this profile while the installed executables keep
+//! release with Cargo (or, for an archive installation, downloads its release archive from this
+//! package's repository) into a directory of this profile while the installed executables keep
 //! running, then verifies the matched host/CLI pair; it replaces nothing and installs nothing.
 //! Only the genuine local owner of the installation (the control endpoint's own token or the
-//! local page, on a profile that is not a shared portal account) can check or stage; a
-//! portal session, a machine credential or an ordinary account only sees that the server's
-//! updates are managed by its operator. The shared server's own timer (`scripts/vps-update.py`)
-//! is independent of everything here.
+//! local page, on a profile that is not a shared portal account) can check, stage or turn
+//! unattended updating on; a portal session, a machine credential or an ordinary account only sees
+//! that the server's updates are managed by its operator. The shared server's own timer
+//! (`scripts/vps-update.py`) is independent of everything here.
 use super::{
     authority::{self, Transport},
     control::{self, Reply},
@@ -24,8 +25,20 @@ const BUILD_CACHE: &str = "target";
 /// Above this the cache is removed before the next build, which then compiles everything again.
 const MAX_BUILD_CACHE: u64 = 8 << 30;
 const AUTO_AFTER: u64 = 90;
-const AUTO_EVERY: u64 = 6 * 60 * 60;
-const AUTO_DUE: i64 = 12 * 60 * 60;
+/// How often the background loop looks: the registry only when a check is due, unattended updating
+/// on every pass.
+const AUTO_EVERY: u64 = 10 * 60;
+/// A registry check is due this long after the last one.
+const AUTO_DUE: i64 = 6 * 60 * 60;
+/// An unattended staging that failed (a release whose archive is not published yet, a network
+/// failure) is tried again after this pause, never in a tight loop.
+const RETRY_STAGE: i64 = 60 * 60;
+/// How many unattended-updating events the status keeps.
+const HISTORY: usize = 50;
+/// Why an unattended update waits while the assistant's Microsoft session needs renewal.
+pub(super) const RENEWAL: &str = "The Microsoft session needs renewal, so the assistant would not start again after a restart. Sign in to Microsoft again (Settings > Microsoft Teams, or pta auth microsoft login); the update is installed afterwards.";
+/// Why an unattended update waits for the person on a Mac whose credentials are in the Keychain.
+const KEYCHAIN: &str = "On this Mac the Keychain asks to allow each new version of the application before it may read the saved credentials, so the prepared version waits for you: install it from Settings > Advanced > Updates (or pta update apply) and choose Always Allow when macOS asks.";
 const MANAGED: &str =
     "Updates for this server are applied by its operator; there is nothing to install from here.";
 const LOCAL_ONLY: &str = "Updating this installation needs the local owner of the computer: use the application (the local page pta app open shows) or pta on that computer.";
@@ -49,6 +62,10 @@ pub(super) struct Environment {
     pub launch: Vec<String>,
     /// Tests drive the helper themselves: nothing is spawned.
     pub manual: bool,
+    /// Where release archives come from: this package's repository (tests use a local double).
+    pub release: Option<core::release::Source>,
+    /// Whether the Keychain holds this installation's credentials; `None` detects it (macOS).
+    pub keychain: Option<bool>,
 }
 
 #[cfg(test)]
@@ -69,6 +86,8 @@ fn environment() -> Environment {
             .filter(|a| matches!(a.as_str(), "--headless" | "--host" | "--service"))
             .collect(),
         manual: false,
+        release: core::release::Source::official().ok(),
+        keychain: None,
     }
 }
 
@@ -87,6 +106,18 @@ struct Saved {
     stage: Option<Stage>,
     /// An apply request that waits for work in progress to end.
     deferred: Option<Deferred>,
+    /// The per-computer choice of unattended updating. Never part of the account's portable
+    /// configuration: only the local owner changes it, on this computer.
+    unattended: Option<Unattended>,
+    /// A release unattended updating does not try on its own: one whose installation failed and
+    /// was rolled back, or whose unattended request the person cancelled.
+    skip: Option<Skip>,
+    /// Why the prepared release waits for the person instead of being installed unattended.
+    waiting: Option<String>,
+    /// The last update whose outcome was recorded.
+    observed: Option<String>,
+    /// The audit of unattended updating: changes of the setting and every attempt, newest last.
+    history: Vec<Event>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -94,6 +125,37 @@ struct Deferred {
     version: String,
     at: i64,
     reasons: Vec<String>,
+    /// Requested by unattended updating rather than by the person.
+    #[serde(default)]
+    unattended: bool,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct Unattended {
+    enabled: bool,
+    changed_at: i64,
+    /// `cli` or `local_page`.
+    by: String,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct Skip {
+    version: String,
+    /// `failed` or `cancelled`.
+    reason: String,
+    at: i64,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct Event {
+    at: i64,
+    event: String,
+    #[serde(default)]
+    version: Option<String>,
+    #[serde(default)]
+    detail: Option<String>,
+    #[serde(default)]
+    by: Option<String>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -109,6 +171,11 @@ struct Stage {
     current: Option<String>,
     error: Option<String>,
     tail: Vec<String>,
+    /// Bytes of the release archive received and announced while downloading.
+    #[serde(default)]
+    received: u64,
+    #[serde(default)]
+    total: Option<u64>,
 }
 
 /// Progress of a build in this process, by profile.
@@ -138,6 +205,32 @@ fn save(dir: &Path, edit: impl FnOnce(&mut Saved)) -> Result<()> {
     saved.schema = SCHEMA;
     edit(&mut saved);
     write_private(&dir.join("status.json"), &serde_json::to_string(&saved)?)
+}
+
+/// Appends to the audit of unattended updating (bounded) and to the log.
+fn audit(
+    dir: &Path,
+    event: &str,
+    version: Option<Version>,
+    detail: Option<String>,
+    by: Option<&str>,
+) {
+    tracing::info!(event = "update_audit", kind = event, version = ?version.map(|v| v.to_string()));
+    let _ = save(dir, |saved| {
+        saved.history.push(Event {
+            at: now(),
+            event: event.to_owned(),
+            version: version.map(|v| v.to_string()),
+            detail,
+            by: by.map(str::to_owned),
+        });
+        let extra = saved.history.len().saturating_sub(HISTORY);
+        saved.history.drain(..extra);
+    });
+}
+
+fn unattended_on(saved: &Saved) -> bool {
+    saved.unattended.as_ref().is_some_and(|u| u.enabled)
 }
 
 fn staged_dir(dir: &Path, version: &str) -> PathBuf {
@@ -170,7 +263,8 @@ fn stage_json(stage: &Stage) -> Value {
     json!({
         "version": stage.version, "state": stage.state, "phase": stage.phase,
         "started_at": stage.started_at, "finished_at": stage.finished_at,
-        "progress": {"crates": stage.crates, "current": stage.current},
+        "progress": {"crates": stage.crates, "current": stage.current,
+            "received": stage.received, "total": stage.total},
         "error": stage.error, "tail": stage.tail,
     })
 }
@@ -195,12 +289,7 @@ fn status(host: &Host, env: &Environment) -> Value {
     let last = journal::read(&dir);
     let applying = last.as_ref().is_some_and(|j| !j.phase.finished());
     let installation = core::inspect(&env.exe);
-    let archive = core::archive(&env.exe).and_then(Result::ok);
-    let installed = installation
-        .as_ref()
-        .ok()
-        .map(|i| i.version)
-        .or(archive.as_ref().map(|a| a.version));
+    let installed = installation.as_ref().ok().map(|i| i.version);
     let offer = available(saved.latest.as_deref(), env.running, installed);
     let in_flight = live().get(dir.parent().unwrap()).cloned();
     // A build recorded as running by a process that is gone was interrupted.
@@ -247,15 +336,24 @@ fn status(host: &Host, env: &Environment) -> Value {
         && !applying
         && unsupported.is_none()
         && matches!(state, "staged" | "deferred");
-    let install = match (&installation, &archive) {
-        (Ok(i), _) => json!({"supported":true,"kind":if i.prebuilt {"binstall"} else {"cargo"},
+    let install = match &installation {
+        Ok(i) => json!({"supported":true,"kind":kind(i),
             "features":i.features,"all_features":i.all_features,
             "no_default_features":i.no_default_features,"target":i.target,"prebuilt":i.prebuilt}),
-        (Err(diagnostic), Some(a)) => {
-            json!({"supported":false,"kind":"archive","target":a.target,"diagnostic":diagnostic})
-        }
-        (Err(diagnostic), None) => json!({"supported":false,"diagnostic":diagnostic}),
+        Err(diagnostic) => json!({"supported":false,"diagnostic":diagnostic}),
     };
+    let unattended = json!({
+        "enabled": unattended_on(&saved),
+        "available": installation.is_ok() && unsupported.is_none(),
+        "changed_at": saved.unattended.as_ref().map(|u| u.changed_at),
+        "changed_by": saved.unattended.as_ref().map(|u| u.by.clone()),
+        "waiting": saved.waiting.as_ref().filter(|_| unattended_on(&saved) && state == "staged"),
+        "skipped": saved.skip.as_ref().filter(|s| offer.is_some_and(|o| o.to_string() == s.version))
+            .map(|s| json!({"version": s.version, "reason": s.reason, "at": s.at})),
+        "history": saved.history.iter().rev().take(10).map(|e| json!({
+            "at": e.at, "event": e.event, "version": e.version, "detail": e.detail, "by": e.by,
+        })).collect::<Vec<_>>(),
+    });
     // A failure about a release that is no longer on offer is stale.
     let shown = recorded
         .filter(|s| s.state == "staging" || offer.is_some_and(|o| o.to_string() == s.version));
@@ -275,8 +373,9 @@ fn status(host: &Host, env: &Environment) -> Value {
         "apply_unsupported": unsupported,
         "apply": result,
         "deferred": saved.deferred.as_ref().filter(|_| state == "deferred").map(|d| json!({
-            "version": d.version, "since": d.at, "reasons": d.reasons,
+            "version": d.version, "since": d.at, "reasons": d.reasons, "unattended": d.unattended,
         })),
+        "unattended": unattended,
         "stage": shown.as_ref().map(stage_json),
         "staged": manifest.map(|m| json!({
             "version": m.version, "staged_at": m.staged_at, "features": m.features,
@@ -284,6 +383,65 @@ fn status(host: &Host, env: &Environment) -> Value {
             "binaries": m.binaries.keys().collect::<Vec<_>>(),
         })),
     })
+}
+
+fn kind(installation: &Installation) -> &'static str {
+    if installation.archive {
+        "archive"
+    } else if installation.prebuilt {
+        "binstall"
+    } else {
+        "cargo"
+    }
+}
+
+/// What a worker reports to its coordinator with each poll: the update state of this computer,
+/// from local files only (no network, nothing undone). Versions only; never a path or an error
+/// text. The portal shows it and cannot act on it.
+pub(super) fn report(host: &Host) -> Value {
+    // A shared portal account's host is the operator's server: its updates are not the account's.
+    if !is_local_owner(&host.state.authority, Transport::Local) {
+        return Value::Null;
+    }
+    let env = environment();
+    let dir = directory(host);
+    let saved = load(&dir);
+    let Ok(installation) = core::inspect(&env.exe) else {
+        return json!({"state": "unsupported", "pending": null, "failed": null,
+            "unattended": unattended_on(&saved)});
+    };
+    let offer = available(
+        saved.latest.as_deref(),
+        env.running,
+        Some(installation.version),
+    );
+    let last = journal::read(&dir);
+    let state = if last.as_ref().is_some_and(|j| !j.phase.finished()) {
+        "applying"
+    } else if live().contains_key(dir.parent().unwrap()) {
+        "staging"
+    } else if saved.deferred.is_some() && offer.is_some() {
+        "deferred"
+    } else if staged(&dir, &saved, offer).is_some() {
+        "staged"
+    } else if offer.is_some() {
+        "available"
+    } else {
+        "current"
+    };
+    // A failed installation of a release that is still newer than what runs.
+    let failed = saved
+        .skip
+        .as_ref()
+        .filter(|s| s.reason == "failed")
+        .map(|s| s.version.clone())
+        .or_else(|| {
+            last.filter(|j| matches!(j.phase, journal::Phase::RolledBack | journal::Phase::Failed))
+                .map(|j| j.to)
+        })
+        .filter(|v| Version::parse(v).is_some_and(|v| v > installation.version.max(env.running)));
+    json!({"state": state, "pending": offer.map(|v| v.to_string()), "failed": failed,
+        "unattended": unattended_on(&saved)})
 }
 
 /// What a portal session or an ordinary account sees: only that the server is managed.
@@ -305,6 +463,12 @@ struct NoArgs {}
 #[serde(deny_unknown_fields)]
 struct VersionArgs {
     version: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UnattendedArgs {
+    enabled: bool,
 }
 
 pub(super) async fn operate(host: &Arc<Host>, request: &control::Request) -> Reply {
@@ -330,7 +494,7 @@ pub(super) async fn operate(host: &Arc<Host>, request: &control::Request) -> Rep
             ),
         },
         "crate_update_apply" => match serde_json::from_value::<VersionArgs>(request.args.clone()) {
-            Ok(args) => apply::request(host, &env, &args.version).await,
+            Ok(args) => apply::request(host, &env, &args.version, false).await,
             Err(_) => Reply::error(
                 "invalid_input",
                 2,
@@ -341,6 +505,23 @@ pub(super) async fn operate(host: &Arc<Host>, request: &control::Request) -> Rep
             Ok(_) => apply::cancel(host, &env),
             Err(_) => Reply::error("invalid_input", 2, "This operation takes no arguments."),
         },
+        "crate_update_unattended" => {
+            match serde_json::from_value::<UnattendedArgs>(request.args.clone()) {
+                Ok(args) => {
+                    let by = if invocation.transport == Transport::Window {
+                        "local_page"
+                    } else {
+                        "cli"
+                    };
+                    set_unattended(host, &env, args.enabled, by)
+                }
+                Err(_) => Reply::error(
+                    "invalid_input",
+                    2,
+                    "Say whether unattended updating is on (enabled: true or false).",
+                ),
+            }
+        }
         "crate_update_dismiss" => match serde_json::from_value::<VersionArgs>(request.args.clone())
         {
             Ok(args) => dismiss(host, &env, &args.version),
@@ -400,6 +581,53 @@ fn dismiss(host: &Host, env: &Environment, version: &str) -> Reply {
         Ok(()) => Reply::success(status(host, env)),
         Err(_) => Reply::error("operation_failed", 1, "The choice could not be saved."),
     }
+}
+
+/// Turns unattended updating on or off for this computer. Only the local owner reaches this: the
+/// setting is never synchronized, and a portal session, a machine credential or a remote agent is
+/// refused before it.
+fn set_unattended(host: &Host, env: &Environment, enabled: bool, by: &str) -> Reply {
+    if enabled {
+        if let Err(diagnostic) = core::inspect(&env.exe) {
+            return Reply::error("not_ready", 3, &diagnostic);
+        }
+        if let Some(diagnostic) = apply::unsupported(env) {
+            return Reply::error("not_ready", 3, diagnostic);
+        }
+    }
+    let dir = directory(host);
+    let changed = unattended_on(&load(&dir)) != enabled;
+    let saved = save(&dir, |saved| {
+        saved.unattended = Some(Unattended {
+            enabled,
+            changed_at: now(),
+            by: by.to_owned(),
+        });
+        if !enabled {
+            saved.waiting = None;
+            // What unattended updating asked for and still waits is withdrawn with it.
+            if saved.deferred.as_ref().is_some_and(|d| d.unattended) {
+                saved.deferred = None;
+            }
+        }
+    });
+    if saved.is_err() {
+        return Reply::error("operation_failed", 1, "The choice could not be saved.");
+    }
+    if changed {
+        audit(
+            &dir,
+            if enabled {
+                "unattended_on"
+            } else {
+                "unattended_off"
+            },
+            None,
+            None,
+            Some(by),
+        );
+    }
+    Reply::success(status(host, env))
 }
 
 /// Where Cargo (or one of its tools) is: the build's own `PATH` first, then the place `rustup`
@@ -469,6 +697,8 @@ async fn stage(host: &Host, env: &Environment, requested: &str) -> Reply {
                 current: None,
                 error: None,
                 tail: Vec::new(),
+                received: 0,
+                total: None,
             },
         );
     }
@@ -494,41 +724,26 @@ async fn stage(host: &Host, env: &Environment, requested: &str) -> Reply {
     if version <= env.running.max(installation.version) {
         return Reply::error("state_conflict", 6, "That version is already installed.");
     }
-    let Some(cargo) = find_tool(&env.variables, "cargo") else {
-        return Reply::error(
-            "not_ready",
-            3,
-            "Cargo was not found. Install the Rust toolchain from https://rustup.rs and try again.",
-        );
-    };
-    if installation.prebuilt && find_tool(&env.variables, "cargo-binstall").is_none() {
-        return Reply::error(
-            "not_ready",
-            3,
-            "This installation came from `cargo binstall`, which was not found. Install cargo-binstall again and try again.",
-        );
-    }
-    let mut build_env = core::build_environment(env.variables.clone());
-    if installation.prebuilt {
-        // Fetching the release's own archive reports nothing to third parties.
-        build_env.push(("BINSTALL_DISABLE_TELEMETRY".into(), "true".into()));
-    }
-    match core::cargo_version(&cargo, &build_env).await {
-        Err(message) => return Reply::error("not_ready", 3, &message),
-        Ok(have) => {
-            // A prebuilt archive needs no compiler of the release's own age.
-            let need = release.rust_version.filter(|_| !installation.prebuilt);
-            if let Some(need) = need.filter(|need| have < *need) {
-                return Reply::error(
-                    "not_ready",
-                    3,
-                    &format!(
-                        "Version {version} needs Rust {need} or newer; this computer has {have}. Run `rustup update` and try again."
-                    ),
-                );
-            }
+    let (cargo, source, build_env) = if installation.archive {
+        // An archive installation downloads the release's own archive: no Cargo, no compiler.
+        let Some(source) = env.release.clone() else {
+            return Reply::error(
+                "not_ready",
+                3,
+                "This package's release address could not be derived, so the update cannot be downloaded. Run the install command again to upgrade.",
+            );
+        };
+        (
+            None,
+            Some(source),
+            core::build_environment(env.variables.clone()),
+        )
+    } else {
+        match cargo_checks(env, &installation, &release, version).await {
+            Ok((cargo, build_env)) => (Some(cargo), None, build_env),
+            Err(reply) => return *reply,
         }
-    }
+    };
     // Only one prepared pair is kept: this build replaces any earlier one.
     let partial = dir.join("staged").join(format!("{version}.partial"));
     let prepared = security::private_dir(&dir)
@@ -550,7 +765,12 @@ async fn stage(host: &Host, env: &Environment, requested: &str) -> Reply {
     let stage = {
         let mut running = live();
         let stage = running.get_mut(&profile).expect("registered above");
-        stage.phase = "building".into();
+        stage.phase = if source.is_some() {
+            "downloading"
+        } else {
+            "building"
+        }
+        .into();
         stage.clone()
     };
     let _ = save(&dir, |saved| saved.stage = Some(stage));
@@ -561,6 +781,7 @@ async fn stage(host: &Host, env: &Environment, requested: &str) -> Reply {
         version,
         installation,
         cargo,
+        source,
         build_env,
         partial,
         started,
@@ -570,13 +791,62 @@ async fn stage(host: &Host, env: &Environment, requested: &str) -> Reply {
     Reply::success(status(host, env))
 }
 
+/// Cargo and the build environment for a Cargo or `cargo binstall` installation, or why the build
+/// cannot start.
+async fn cargo_checks(
+    env: &Environment,
+    installation: &Installation,
+    release: &core::Release,
+    version: Version,
+) -> std::result::Result<(PathBuf, Vec<(OsString, OsString)>), Box<Reply>> {
+    let Some(cargo) = find_tool(&env.variables, "cargo") else {
+        return Err(Box::new(Reply::error(
+            "not_ready",
+            3,
+            "Cargo was not found. Install the Rust toolchain from https://rustup.rs and try again.",
+        )));
+    };
+    if installation.prebuilt && find_tool(&env.variables, "cargo-binstall").is_none() {
+        return Err(Box::new(Reply::error(
+            "not_ready",
+            3,
+            "This installation came from `cargo binstall`, which was not found. Install cargo-binstall again and try again.",
+        )));
+    }
+    let mut build_env = core::build_environment(env.variables.clone());
+    if installation.prebuilt {
+        // Fetching the release's own archive reports nothing to third parties.
+        build_env.push(("BINSTALL_DISABLE_TELEMETRY".into(), "true".into()));
+    }
+    match core::cargo_version(&cargo, &build_env).await {
+        Err(message) => return Err(Box::new(Reply::error("not_ready", 3, &message))),
+        Ok(have) => {
+            // A prebuilt archive needs no compiler of the release's own age.
+            let need = release.rust_version.filter(|_| !installation.prebuilt);
+            if let Some(need) = need.filter(|need| have < *need) {
+                return Err(Box::new(Reply::error(
+                    "not_ready",
+                    3,
+                    &format!(
+                        "Version {version} needs Rust {need} or newer; this computer has {have}. Run `rustup update` and try again."
+                    ),
+                )));
+            }
+        }
+    }
+    Ok((cargo, build_env))
+}
+
 /// One staging build, run in the background.
 struct Work {
     dir: PathBuf,
     profile: PathBuf,
     version: Version,
     installation: Installation,
-    cargo: PathBuf,
+    /// Cargo, for a Cargo or `cargo binstall` installation.
+    cargo: Option<PathBuf>,
+    /// The release source, for an archive installation.
+    source: Option<core::release::Source>,
     build_env: Vec<(OsString, OsString)>,
     partial: PathBuf,
     started: i64,
@@ -591,49 +861,10 @@ impl Work {
     }
 
     async fn run(self) {
-        let root = self.partial.join("root");
-        let cache = self.dir.join(BUILD_CACHE);
-        let trimmed = cache.clone();
-        let _ = tokio::task::spawn_blocking(move || {
-            if core::tree_size(&trimmed) > MAX_BUILD_CACHE {
-                let _ = fs::remove_dir_all(&trimmed);
-            }
-            security::private_dir(&trimmed)
-        })
-        .await;
-        let args = core::install_args(&self.installation, &self.version, &root, &cache);
-        let built = core::build(
-            &self.cargo,
-            &args,
-            &self.build_env,
-            &self.dir,
-            Duration::from_secs(core::BUILD_SECONDS),
-            |progress| {
-                self.update(|stage| {
-                    stage.crates = progress.crates;
-                    stage.current = progress.current.clone();
-                })
-            },
-        )
-        .await;
-        let outcome = match built {
-            Err(failure) => {
-                // A full disk is the one failure the cache itself may cause: give the space back.
-                if failure
-                    .tail
-                    .iter()
-                    .any(|line| line.contains("No space left on device"))
-                {
-                    let _ = tokio::task::spawn_blocking(move || fs::remove_dir_all(cache)).await;
-                }
-                Err((failure.reason, failure.tail))
-            }
-            Ok(()) => {
-                self.update(|stage| stage.phase = "verifying".into());
-                self.seal(&root)
-                    .await
-                    .map_err(|e| (e.to_string(), Vec::new()))
-            }
+        let outcome = match (&self.cargo, &self.source) {
+            (_, Some(source)) => self.download(source).await,
+            (Some(cargo), None) => self.build(cargo).await,
+            (None, None) => Err(("Nothing can prepare this update.".to_owned(), Vec::new())),
         };
         let finished = now();
         let (state, error, tail) = match &outcome {
@@ -652,26 +883,101 @@ impl Work {
                 started_at: self.started,
                 finished_at: Some(finished),
                 crates: progress.as_ref().map_or(0, |p| p.crates),
-                current: progress.and_then(|p| p.current),
+                current: progress.as_ref().and_then(|p| p.current.clone()),
                 error,
                 tail,
+                received: progress.as_ref().map_or(0, |p| p.received),
+                total: progress.and_then(|p| p.total),
             });
         });
     }
 
-    /// Verifies the pair Cargo built and moves it to its final place.
-    async fn seal(&self, root: &Path) -> Result<()> {
-        let manifest = core::verify(
-            root,
+    /// Downloads, checks and unpacks the release archive for the installation's own target.
+    async fn download(
+        &self,
+        source: &core::release::Source,
+    ) -> std::result::Result<(), (String, Vec<String>)> {
+        let target = self.installation.target.clone().unwrap_or_default();
+        let manifest = core::release::stage(
+            source,
             &self.version,
-            &self.installation,
+            &target,
+            &self.partial,
             &self.build_env,
             now(),
+            |received, total| {
+                self.update(|stage| {
+                    stage.received = received;
+                    stage.total = total;
+                })
+            },
         )
-        .await?;
+        .await
+        .map_err(|e| (e.to_string(), Vec::new()))?;
+        self.place(&manifest)
+            .map_err(|e| (e.to_string(), Vec::new()))
+    }
+
+    async fn build(&self, cargo: &Path) -> std::result::Result<(), (String, Vec<String>)> {
+        let root = self.partial.join("root");
+        let cache = self.dir.join(BUILD_CACHE);
+        let trimmed = cache.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            if core::tree_size(&trimmed) > MAX_BUILD_CACHE {
+                let _ = fs::remove_dir_all(&trimmed);
+            }
+            security::private_dir(&trimmed)
+        })
+        .await;
+        let args = core::install_args(&self.installation, &self.version, &root, &cache);
+        let built = core::build(
+            cargo,
+            &args,
+            &self.build_env,
+            &self.dir,
+            Duration::from_secs(core::BUILD_SECONDS),
+            |progress| {
+                self.update(|stage| {
+                    stage.crates = progress.crates;
+                    stage.current = progress.current.clone();
+                })
+            },
+        )
+        .await;
+        match built {
+            Err(failure) => {
+                // A full disk is the one failure the cache itself may cause: give the space back.
+                if failure
+                    .tail
+                    .iter()
+                    .any(|line| line.contains("No space left on device"))
+                {
+                    let _ = tokio::task::spawn_blocking(move || fs::remove_dir_all(cache)).await;
+                }
+                Err((failure.reason, failure.tail))
+            }
+            Ok(()) => {
+                self.update(|stage| stage.phase = "verifying".into());
+                let manifest = core::verify(
+                    &root,
+                    &self.version,
+                    &self.installation,
+                    &self.build_env,
+                    now(),
+                )
+                .await
+                .map_err(|e| (e.to_string(), Vec::new()))?;
+                self.place(&manifest)
+                    .map_err(|e| (e.to_string(), Vec::new()))
+            }
+        }
+    }
+
+    /// Stores the manifest of a verified pair and moves it to its final place.
+    fn place(&self, manifest: &Manifest) -> Result<()> {
         write_private(
             &self.partial.join("manifest.json"),
-            &serde_json::to_string(&manifest)?,
+            &serde_json::to_string(manifest)?,
         )?;
         let finished = staged_dir(&self.dir, &self.version.to_string());
         fs::rename(&self.partial, &finished)
@@ -683,8 +989,9 @@ impl Work {
 // ---------------------------------------------------------------------------------------------
 // The daily check.
 
-/// Looks for a newer release now and then on the owner's own installation. Read-only: nothing is
-/// ever downloaded, built or installed without an explicit request.
+/// Looks for a newer release now and then on the owner's own installation. Read-only unless the
+/// owner turned unattended updating on for this computer: then a newer release is prepared and
+/// installed when nothing would be interrupted.
 pub(super) async fn schedule(host: Arc<Host>) {
     if !is_local_owner(&host.state.authority, Transport::Local) {
         return;
@@ -704,8 +1011,186 @@ async fn daily(host: Arc<Host>) {
         if due && core::inspect(&env.exe).is_ok() {
             let _ = refresh(&host, &env).await;
         }
+        let _ = unattended(&host, &env).await;
         tidy(&host);
         tokio::time::sleep(Duration::from_secs(AUTO_EVERY)).await;
+    }
+}
+
+/// What one pass of unattended updating did.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum Pass {
+    Off,
+    Unsupported,
+    /// An update or a staging is in progress.
+    Busy,
+    Current,
+    /// The release failed before, or the person cancelled its unattended request.
+    Skipped,
+    /// A failed staging of this release waits before it is tried again.
+    Pausing,
+    Staging,
+    /// Waiting for work in progress (or the Microsoft session) before installing.
+    Deferred,
+    /// Waiting for the person: installing would ask the Keychain.
+    Interactive,
+    Applying,
+}
+
+/// Whether installing a new version here would make the Keychain ask the person.
+fn keychain(env: &Environment) -> bool {
+    env.keychain.unwrap_or_else(security::keychain_in_use)
+}
+
+/// Records, once, how the last update ended. A version whose installation was rolled back or failed
+/// is not tried again on its own.
+fn observe(dir: &Path, last: Option<&journal::Journal>) {
+    let Some(last) = last.filter(|j| j.phase.finished()) else {
+        return;
+    };
+    if load(dir).observed.as_deref() == Some(last.id.as_str()) {
+        return;
+    }
+    let failed = last.phase != journal::Phase::Committed;
+    let _ = save(dir, |saved| {
+        saved.observed = Some(last.id.clone());
+        if failed {
+            saved.skip = Some(Skip {
+                version: last.to.clone(),
+                reason: "failed".into(),
+                at: now(),
+            });
+        }
+    });
+    if last.intent.unattended {
+        let outcome = match last.phase {
+            journal::Phase::Committed => "installed",
+            journal::Phase::RolledBack => "rolled_back",
+            _ => "failed",
+        };
+        audit(
+            dir,
+            "unattended_result",
+            Version::parse(&last.to),
+            Some(
+                last.error
+                    .as_ref()
+                    .map_or_else(|| outcome.to_owned(), |e| format!("{outcome}: {e}")),
+            ),
+            None,
+        );
+    }
+}
+
+/// One pass of unattended updating: prepare the newest release, then ask to install it through
+/// the ordinary request, which defers while work is in progress. Nothing happens unless the local
+/// owner turned it on for this computer.
+pub(super) async fn unattended(host: &Arc<Host>, env: &Environment) -> Pass {
+    let dir = directory(host);
+    if !unattended_on(&load(&dir)) {
+        return Pass::Off;
+    }
+    let Ok(installation) = core::inspect(&env.exe) else {
+        return Pass::Unsupported;
+    };
+    if apply::unsupported(env).is_some() {
+        return Pass::Unsupported;
+    }
+    let _ = journal::recover(&dir, now());
+    let last = journal::read(&dir);
+    if last.as_ref().is_some_and(|j| !j.phase.finished()) {
+        return Pass::Busy;
+    }
+    observe(&dir, last.as_ref());
+    let saved = load(&dir);
+    let Some(offer) = available(
+        saved.latest.as_deref(),
+        env.running,
+        Some(installation.version),
+    ) else {
+        return Pass::Current;
+    };
+    if saved
+        .skip
+        .as_ref()
+        .is_some_and(|s| s.version == offer.to_string())
+    {
+        return Pass::Skipped;
+    }
+    if live().contains_key(dir.parent().unwrap()) {
+        return Pass::Busy;
+    }
+    if staged(&dir, &saved, Some(offer)).is_none() {
+        let paused = saved.stage.as_ref().is_some_and(|s| {
+            s.version == offer.to_string()
+                && s.state == "failed"
+                && s.finished_at.is_some_and(|at| now() - at < RETRY_STAGE)
+        });
+        if paused {
+            return Pass::Pausing;
+        }
+        let reply = stage(host, env, &offer.to_string()).await;
+        if !reply.ok {
+            // Refused before it began (the registry unreachable, a newer release meanwhile): the
+            // same pause as a failed download, so a lasting problem is not retried every pass.
+            let message = reply.message.clone();
+            let _ = save(&dir, |saved| {
+                saved.stage = Some(Stage {
+                    version: offer.to_string(),
+                    state: "failed".into(),
+                    phase: "done".into(),
+                    started_at: now(),
+                    finished_at: Some(now()),
+                    crates: 0,
+                    current: None,
+                    error: message,
+                    tail: Vec::new(),
+                    received: 0,
+                    total: None,
+                })
+            });
+        }
+        audit(
+            &dir,
+            "unattended_stage",
+            Some(offer),
+            (!reply.ok).then(|| reply.message.clone().unwrap_or_default()),
+            None,
+        );
+        return Pass::Staging;
+    }
+    if saved.deferred.is_some() {
+        return Pass::Deferred;
+    }
+    if keychain(env) {
+        if saved.waiting.as_deref() != Some(KEYCHAIN) {
+            let _ = save(&dir, |saved| saved.waiting = Some(KEYCHAIN.into()));
+            audit(
+                &dir,
+                "unattended_waiting",
+                Some(offer),
+                Some(KEYCHAIN.into()),
+                None,
+            );
+        }
+        return Pass::Interactive;
+    }
+    let _ = save(&dir, |saved| saved.waiting = None);
+    let reply = apply::request(host, env, &offer.to_string(), true).await;
+    if !reply.ok {
+        audit(
+            &dir,
+            "unattended_apply",
+            Some(offer),
+            reply.message.clone(),
+            None,
+        );
+        return Pass::Busy;
+    }
+    if reply.data["state"] == "deferred" {
+        Pass::Deferred
+    } else {
+        Pass::Applying
     }
 }
 

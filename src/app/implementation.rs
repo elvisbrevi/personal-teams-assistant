@@ -66,6 +66,51 @@ struct Machine {
     /// What the machine last said it holds of the account store.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     store_held: Option<StoreHeld>,
+    /// The version the machine's host runs, as its last poll reported it; none from older hosts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    host_version: Option<String>,
+    /// Its update state as its last poll reported it; none from older hosts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    update: Option<UpdateReport>,
+}
+/// A machine's update state as it reports it: shown in the portal, never acted on there.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UpdateReport {
+    /// `current`, `available`, `staging`, `staged`, `deferred`, `applying` or `unsupported`.
+    state: String,
+    /// The newer release waiting to be installed.
+    #[serde(default)]
+    pending: Option<String>,
+    /// A newer release whose installation failed and was rolled back.
+    #[serde(default)]
+    failed: Option<String>,
+    #[serde(default)]
+    unattended: bool,
+}
+impl UpdateReport {
+    const STATES: [&str; 7] = [
+        "current",
+        "available",
+        "staging",
+        "staged",
+        "deferred",
+        "applying",
+        "unsupported",
+    ];
+    /// What a poll carries, or nothing when it is not exactly a report: a version is a release
+    /// number and the state one of the fixed words, so no text of the machine reaches the portal.
+    fn parse(value: &Value) -> Option<Self> {
+        let report: Self = serde_json::from_value(value.clone()).ok()?;
+        let version = |v: &Option<String>| {
+            v.as_deref()
+                .is_none_or(|v| crate::maintenance::Version::parse(v).is_some())
+        };
+        (Self::STATES.contains(&report.state.as_str())
+            && version(&report.pending)
+            && version(&report.failed))
+        .then_some(report)
+    }
 }
 /// A machine's account store credentials as it last reported them: its service token's
 /// fingerprint and its content key's active version, never the values.
@@ -1383,6 +1428,87 @@ mod tests {
             .await
             .is_err()
         );
+    }
+    #[tokio::test]
+    async fn worker_polls_report_version_and_update_state_and_older_workers_read_as_unknown() {
+        let root = tempfile::tempdir().unwrap();
+        let host = host(root.path());
+        let worker = uuid::Uuid::new_v4().to_string();
+        let registration =
+            fleet::register(&host, &json!({"id":worker,"name":"Worker","os":"macos"}))
+                .await
+                .unwrap();
+        let token = registration["token"].as_str().unwrap();
+        let detail = |host: Arc<Host>, worker: String| async move {
+            operation(&host, "machine_detail", &json!({"machine":worker}))
+                .await
+                .unwrap()
+        };
+        // An older worker sends neither field.
+        fleet::protocol(&host, &json!({"id":worker,"token":token,"action":"poll"}))
+            .await
+            .unwrap();
+        let older = detail(host.clone(), worker.clone()).await;
+        assert_eq!(older["version"], Value::Null);
+        assert_eq!(older["update"], Value::Null);
+        // A current worker reports its running version and update state.
+        let report = json!({"state":"staged","pending":"0.11.6","failed":null,"unattended":true});
+        fleet::protocol(
+            &host,
+            &json!({"id":worker,"token":token,"action":"poll","host_version":"0.11.5","update":report}),
+        )
+        .await
+        .unwrap();
+        let current = detail(host.clone(), worker.clone()).await;
+        assert_eq!(current["version"], "0.11.5");
+        assert_eq!(current["update"]["state"], "staged");
+        assert_eq!(current["update"]["pending"], "0.11.6");
+        assert_eq!(current["update"]["unattended"], true);
+        let list = operation(&host, "machine_list", &json!({})).await.unwrap();
+        let listed = list["machines"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["id"] == worker.as_str())
+            .unwrap();
+        assert_eq!(listed["version"], "0.11.5");
+        assert_eq!(listed["update"]["state"], "staged");
+        // This computer's own row carries its version too.
+        assert_eq!(list["machines"][0]["version"], env!("CARGO_PKG_VERSION"));
+        // Anything that is not exactly a report (free text, unknown fields, a non-version) is
+        // dropped rather than shown.
+        for update in [
+            json!({"state":"rm -rf /","pending":null}),
+            json!({"state":"staged","pending":"latest"}),
+            json!({"state":"staged","note":"text from the machine"}),
+            json!("staged"),
+        ] {
+            fleet::protocol(
+                &host,
+                &json!({"id":worker,"token":token,"action":"poll","host_version":"v-next","update":update}),
+            )
+            .await
+            .unwrap();
+            let shown = detail(host.clone(), worker.clone()).await;
+            assert_eq!(shown["version"], Value::Null, "{update}");
+            assert_eq!(shown["update"], Value::Null, "{update}");
+        }
+        // Reporting is all a poll does: no update operation is reachable through the protocol.
+        for method in [
+            "crate_update_apply",
+            "crate_update_stage",
+            "crate_update_unattended",
+        ] {
+            assert!(
+                fleet::protocol(
+                    &host,
+                    &json!({"id":worker,"token":token,"action":"call","method":method,"args":{}}),
+                )
+                .await
+                .is_err(),
+                "{method}"
+            );
+        }
     }
     #[tokio::test]
     async fn directory_configuration_browse_preserves_execution_and_profile_boundaries() {

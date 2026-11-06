@@ -83,7 +83,8 @@ try {
     Check '  with the archive digest' ($record.sha256 -eq (Get-FileHash (Join-Path $Dist $archive) -Algorithm SHA256).Hash.ToLowerInvariant())
     $update = Pta --json update status
     Check 'the updater recognizes the archive kind' ($update -match '"kind":"archive"')
-    Check '  and does not offer staging' ($update -match '"can_stage":false')
+    Check '  as a supported installation it updates itself' ($update -match '"supported":true')
+    Check '  with unattended updates off by default' ($update -match '"unattended":\{[^}]*"enabled":false')
     Check 'the user PATH (registry) starts with the bin directory' ((UserPath).Split(';')[0] -eq (Join-Path $root 'bin'))
     Check '  and keeps every previous entry' ((UserPath).EndsWith($pathBefore))
     $found = & powershell.exe -NoProfile -Command "`$env:Path = [Environment]::GetEnvironmentVariable('Path','Machine') + ';' + [Environment]::GetEnvironmentVariable('Path','User'); (Get-Command pta.exe).Source"
@@ -102,9 +103,10 @@ try {
     Check 'a failed upgrade is refused' ((Run-Installer -TestSource (Join-Path $work 'tampered')) -ne 0)
     Check '  and leaves the installation working' ((Pta --version) -match [regex]::Escape($Version))
     Check '  and its record unchanged' ((Get-FileHash (Join-Path $root 'install.json')).Hash -eq $before)
-    $code = Run-Installer -TestSource (Join-Path $work 'source')
+    $code = Run-Installer -TestSource (Join-Path $work 'source') -UnattendedUpdates
     Check 'running it again succeeds' ($code -eq 0)
     if ($code -ne 0) { Get-Content $out | Write-Host }
+    Check '-UnattendedUpdates turned unattended updates on' ((Pta --json update status) -match '"unattended":\{[^}]*"enabled":true')
     Check 'the bin directory is on the user PATH once' (@((UserPath).Split(';') | Where-Object { $_ -eq (Join-Path $root 'bin') }).Count -eq 1)
     Check 'the same machine identity is kept' ((Pta --json tools call machine_settings | ConvertFrom-Json).data.id -eq $machine)
     $status = Pta --json service status | ConvertFrom-Json

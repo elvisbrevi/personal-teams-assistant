@@ -266,6 +266,25 @@ impl Store {
             |r| r.get(0),
         )?)
     }
+    /// What the token renewal records when Entra refuses the saved Microsoft session.
+    pub const RENEWAL_REQUIRED: &'static str = "renewal_required";
+    /// Whether the saved Microsoft session is known to need interactive renewal: the last
+    /// authorization event is a refused renewal (a new sign-in records `authorized`). Read-only;
+    /// it asks Microsoft nothing.
+    pub fn session_needs_renewal(path: &Path) -> Result<bool> {
+        if !path.exists() || !Self::has_token(path)? {
+            return Ok(false);
+        }
+        let db = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        let last: Option<String> = db
+            .query_row(
+                "SELECT detail FROM events WHERE kind='oauth' ORDER BY id DESC LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(last.as_deref() == Some(Self::RENEWAL_REQUIRED))
+    }
     pub fn logout(path: &Path) -> Result<()> {
         if !path.exists() {
             return Ok(());

@@ -316,6 +316,7 @@ pub(super) const NEVER: &[&str] = &[
     "crate_update_apply",
     "crate_update_cancel",
     "crate_update_dismiss",
+    "crate_update_unattended",
     "cloud_rotate_key",
     "cloud_lost",
     "cloud_connect",

@@ -123,12 +123,20 @@ A source of the account that this computer cannot read because its repository ha
 _Avoid_: broken source, missing source
 
 **Prepared update**:
-A newer stable release of this package built next to the installed one and verified as a matched application and `pta` pair; it is not installed, and the installed version keeps running until the user applies it.
+A newer stable release of this package built (or, for an archive installation, downloaded from the release and checked against its published digest) next to the installed one and verified as a matched application and `pta` pair; it is not installed, and the installed version keeps running until it is applied.
 _Avoid_: downloaded update, installed update
 
 **Applied update**:
 A prepared update that was installed, restarted and found healthy; only the update journal's `committed` outcome says so, never the installed version alone. An unhealthy or interrupted one is rolled back to the previous matched application and `pta` pair.
 _Avoid_: finished update, upgrade
+
+**Archive installation**:
+An installation the one-command installer made from the release's prebuilt archive, recorded in `install.json`; it updates from that release's archive for its own target, without Cargo.
+_Avoid_: binary install, portable install
+
+**Unattended updating**:
+A per-computer choice, off unless the local owner turns it on, under which the application prepares and applies a newer release by itself when nothing would be interrupted; a release that was rolled back is not tried again by itself.
+_Avoid_: auto-update, automatic upgrade
 
 ### Organization
 

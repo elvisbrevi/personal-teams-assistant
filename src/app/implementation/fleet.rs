@@ -331,6 +331,8 @@ pub(in crate::app) async fn register(host: &Arc<Host>, args: &Value) -> Result<V
             .map(|(key, _)| key.clone())
             .unwrap_or_default(),
         store_held: None,
+        host_version: None,
+        update: None,
     });
     state.save(&data)?;
     drop(data);
@@ -415,6 +417,14 @@ pub(in crate::app) async fn protocol(host: &Arc<Host>, args: &Value) -> Result<V
                 .get("assistant_phase")
                 .map(|phase| serde_json::from_value(phase.clone()))
                 .transpose()?;
+        }
+        if args["action"] == "poll" {
+            // Older hosts send neither, and read as unknown.
+            machine.host_version = args["host_version"]
+                .as_str()
+                .filter(|v| crate::maintenance::Version::parse(v).is_some())
+                .map(str::to_owned);
+            machine.update = super::UpdateReport::parse(&args["update"]);
         }
         state.save(&data)?;
     }
@@ -791,7 +801,8 @@ async fn poll(host: Arc<Host>) {
             let roots = state.registry.lock().await.settings.roots.clone();
             let polled = remote(
                 &connection,
-                json!({"action":"poll","id":own,"results":results,"sessions":sessions,"session_cursor":next,"assistant_phase":assistant_phase,"management_support":true,"roots":roots}),
+                json!({"action":"poll","id":own,"results":results,"sessions":sessions,"session_cursor":next,"assistant_phase":assistant_phase,"management_support":true,"roots":roots,
+                    "host_version":env!("CARGO_PKG_VERSION"),"update":crate::app::maintenance::report(&host)}),
             )
             .await;
             standing::note(&host.state, &polled);
@@ -959,6 +970,8 @@ mod tests {
             store_installation: String::new(),
             store_key: String::new(),
             store_held: None,
+            host_version: None,
+            update: None,
         });
         data.teams_machine = worker.clone();
         assert!(leased(&mut data, &worker));

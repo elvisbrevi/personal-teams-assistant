@@ -173,7 +173,8 @@
   let teamsMachine = machineId;
   const machinePhases = { [machineId]: "stopped", [remoteMachineId]: "stopped" };
   let remoteName = 'Preview Mac', remoteRoots = [], remoteRevoked = false;
-  const machineMetadata = (id, name, os, local) => ({ id, name, os, local, trust: !local && remoteRevoked ? 'revoked' : 'trusted', online: !(!local && (window.__ptaMachineOffline || remoteRevoked)), presence: !local && (window.__ptaMachineOffline || remoteRevoked) ? 'offline' : 'online', last_seen: Math.floor(Date.now() / 1000), roots: local ? machineSettings.roots : remoteRoots, capabilities: { management: true, directories: true, assistant: true }, assistant_phase: machinePhases[id] });
+  const machineMetadata = (id, name, os, local) => ({ id, name, os, local, trust: !local && remoteRevoked ? 'revoked' : 'trusted', online: !(!local && (window.__ptaMachineOffline || remoteRevoked)), presence: !local && (window.__ptaMachineOffline || remoteRevoked) ? 'offline' : 'online', last_seen: Math.floor(Date.now() / 1000), roots: local ? machineSettings.roots : remoteRoots, capabilities: { management: true, directories: true, assistant: true }, assistant_phase: machinePhases[id],
+    version: local ? '0.11.5' : null, update: local ? { state: 'staged', pending: '0.11.6', failed: null, unattended: true } : null });
   let machineSettings = { id: machineId, name: 'Preview server', coordinator: null, roots: ['/work'] };
   const azureCli = () => {
     const state = window.__ptaAzureCliState || (scenario === 'fresh' ? 'not_authenticated' : 'authenticated');
@@ -219,6 +220,7 @@
   let updateDismissed = false;
   // The host's journal of an installation in progress or finished; null before any.
   let updateApply = null;
+  let updateUnattended = false;
   const updateView = () => {
     if (sharedAccount) return { managed: 'server', running: '0.9.13', can_stage: false, message: 'Updates for this server are applied by its operator; there is nothing to install from here.' };
     const failed = updateState === 'failed';
@@ -232,6 +234,7 @@
         error: failed ? 'Cargo could not build this release. Install a C compiler and linker (for example `build-essential` on Debian and Ubuntu, or Xcode\'s command line tools on macOS) and try again.' : null,
         tail: failed ? ['error: linker `cc` not found'] : [] },
       staged: ['staged', 'deferred'].includes(updateState) ? { version: '0.9.14', staged_at: 2, features: ['gui'], no_default_features: false, target: null, binaries: ['personal-teams-assistant', 'pta'] } : null,
+      unattended: { enabled: updateUnattended, available: true, changed_at: null, changed_by: null, waiting: null, skipped: null, history: [] },
     };
   };
   const destinations = [{ id: 'blog-editor-openai', description: 'Blog editor: OpenAI key <b>not markup</b>', url: 'https://editor.example.test/api/import/secrets/OPENAI_API_KEY',
@@ -482,6 +485,11 @@
     crate_update_cancel: () => {
       window.__ptaUpdateCalls.push({ method: 'cancel' });
       updateState = 'staged';
+      return structuredClone(updateView());
+    },
+    crate_update_unattended: args => {
+      window.__ptaUpdateCalls.push({ method: 'unattended', ...args });
+      updateUnattended = Boolean(args.enabled);
       return structuredClone(updateView());
     },
     crate_update_dismiss: args => {

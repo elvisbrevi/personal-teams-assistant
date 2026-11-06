@@ -46,6 +46,10 @@ Usage: install.sh [options]
   --root DIR       Installation root (default: ~/.local/share/personal-teams-assistant).
   --integrations   Also install the skill and register `pta mcp` with the coding CLIs found
                    (Claude Code, Codex). Without it the commands are printed instead.
+  --unattended-updates
+                   Let this computer install newer releases by itself when nothing would be
+                   interrupted (off unless you pass this; change it later with
+                   'pta update unattended on|off --confirmed' or the local page).
   --no-service     Do not register the host to start at login.
   --no-browser     Print the approval link instead of opening the browser.
   --uninstall      Remove the service entry, the binaries and the PATH entry; keep the profile.
@@ -297,6 +301,24 @@ install_service() {
         warn "The service manager did not start the host now; it starts at your next login."
         start_host || true
     fi
+}
+
+# Unattended updating is turned on only when the person passed --unattended-updates.
+unattended_updates() {
+    if [ "$UNATTENDED" != yes ]; then
+        say "Unattended updates are off. To let this computer install new releases by itself: $CLI update unattended on --confirmed"
+        return 0
+    fi
+    start_host || {
+        warn "The host did not start, so unattended updates were not turned on. Later: $CLI update unattended on --confirmed"
+        return 1
+    }
+    reply=$(run_pta --json update unattended on --confirmed 2>&1) || {
+        message=$(printf '%s' "$reply" | json_string message)
+        warn "Unattended updates were not turned on: ${message:-$reply}"
+        return 1
+    }
+    say "Unattended updates are on: this computer installs new releases by itself when nothing would be interrupted."
 }
 
 # ---------------------------------------------------------------------------------------------
@@ -586,6 +608,7 @@ do_install() {
     else
         install_service || true
     fi
+    unattended_updates || true
     if [ -n "$ORIGIN" ]; then
         join_account || true
     fi
@@ -620,6 +643,7 @@ main() {
     VERSION=
     ROOT=${PTA_INSTALL_ROOT:-}
     INTEGRATIONS=no
+    UNATTENDED=no
     NO_SERVICE=no
     NO_BROWSER=no
     UNINSTALL=no
@@ -633,6 +657,7 @@ main() {
             --root) [ $# -ge 2 ] || fail "--root needs a value."; ROOT=$2; shift ;;
             --root=*) ROOT=${1#*=} ;;
             --integrations) INTEGRATIONS=yes ;;
+            --unattended-updates) UNATTENDED=yes ;;
             --no-service) NO_SERVICE=yes ;;
             --no-browser) NO_BROWSER=yes ;;
             --uninstall) UNINSTALL=yes ;;

@@ -108,6 +108,7 @@ impl Fixture {
             no_default_features: true,
             target: None,
             binaries,
+            archive: None,
         }
     }
 
@@ -124,6 +125,8 @@ impl Fixture {
                 subscriptions: 1,
                 tunnel: false,
                 service: false,
+                degraded: false,
+                unattended: false,
             },
             self.profiles(),
         )
@@ -672,4 +675,170 @@ fn only_the_helpers_own_restart_is_a_hand_over_for_a_host_the_service_manager_st
     old["intent"].as_object_mut().unwrap().remove("service");
     let read: Journal = serde_json::from_value(serde_json::Value::Object(old)).unwrap();
     assert!(!read.intent.service);
+}
+
+/// An archive installation: the install scripts' record instead of Cargo's.
+fn archive_fixture() -> (Fixture, String) {
+    let f = Fixture::new();
+    for name in [".crates2.json", ".crates.toml"] {
+        fs::remove_file(f.root.join(name)).unwrap();
+        fs::remove_file(f.staged.join(name)).unwrap();
+    }
+    let record = serde_json::to_string_pretty(&json!({
+        "schema": 1, "kind": "archive", "package": CRATE, "version": "0.9.13",
+        "target": "x86_64-unknown-linux-gnu", "bins": [CRATE, CLI],
+        "repository": "https://github.com/elvisbrevi/personal-teams-assistant",
+        "archive": "personal-teams-assistant-x86_64-unknown-linux-gnu-v0.9.13.tgz",
+        "sha256": "1".repeat(64), "installed_at": "2026-11-01T00:00:00Z",
+    }))
+    .unwrap();
+    fs::write(f.root.join(super::super::ARCHIVE_RECORD), &record).unwrap();
+    (f, record)
+}
+
+fn archive_apply(f: &Fixture) -> Apply {
+    let mut journal = f.journal();
+    journal.manifest.target = Some("x86_64-unknown-linux-gnu".into());
+    journal.manifest.archive = Some(ArchiveFile {
+        name: "personal-teams-assistant-x86_64-unknown-linux-gnu-v0.9.14.tgz".into(),
+        sha256: "2".repeat(64),
+        size: 42,
+    });
+    Apply::new(&f.maintenance, journal).without_pause()
+}
+
+#[test]
+fn an_archive_installations_record_names_the_new_release_only_once_committed() {
+    let (f, before) = archive_fixture();
+    let record = f.root.join(super::super::ARCHIVE_RECORD);
+    let mut apply = archive_apply(&f);
+    apply.back_up().unwrap();
+    apply.replace().unwrap();
+    assert_eq!(f.bin(CRATE), NEW_HOST);
+    // Replaced, restarted and being verified: the record still names what was installed.
+    assert_eq!(fs::read_to_string(&record).unwrap(), before);
+    apply.commit().unwrap();
+    let after: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&record).unwrap()).unwrap();
+    assert_eq!(after["version"], "0.9.14");
+    assert_eq!(
+        after["archive"],
+        "personal-teams-assistant-x86_64-unknown-linux-gnu-v0.9.14.tgz"
+    );
+    assert_eq!(after["sha256"], "2".repeat(64));
+    assert_ne!(after["installed_at"], "2026-11-01T00:00:00Z");
+    // Everything else the scripts wrote is kept, and the scripts still recognize the record.
+    assert_eq!(after["kind"], "archive");
+    assert_eq!(after["target"], "x86_64-unknown-linux-gnu");
+    assert_eq!(
+        after["repository"],
+        "https://github.com/elvisbrevi/personal-teams-assistant"
+    );
+    assert!(
+        fs::read_to_string(&record)
+            .unwrap()
+            .contains("\"kind\": \"archive\"")
+    );
+    let installed = super::super::archive(&f.root.join("bin").join(exe_name(CLI)))
+        .unwrap()
+        .unwrap();
+    assert_eq!(installed.version, super::super::Version(0, 9, 14));
+    // No Cargo record appears for an archive installation.
+    assert!(!f.root.join(".crates2.json").exists());
+}
+
+#[test]
+fn a_rollback_or_a_failed_record_write_restores_the_archive_record() {
+    // Rolled back after the replacement: the record is the one from before, byte for byte.
+    let (f, before) = archive_fixture();
+    let record = f.root.join(super::super::ARCHIVE_RECORD);
+    let mut apply = archive_apply(&f);
+    apply.back_up().unwrap();
+    apply.replace().unwrap();
+    apply.roll_back().unwrap();
+    assert_eq!(fs::read_to_string(&record).unwrap(), before);
+    assert_eq!(f.bin(CRATE), OLD_HOST);
+    assert_eq!(f.bin(CLI), OLD_CLI);
+
+    // The record cannot be written at commit: nothing is committed, and the rollback restores it.
+    let (f, before) = archive_fixture();
+    let record = f.root.join(super::super::ARCHIVE_RECORD);
+    let mut apply = archive_apply(&f).with_hook(|point| {
+        if point == "record" {
+            Err(io::Error::other("injected"))
+        } else {
+            Ok(())
+        }
+    });
+    apply.back_up().unwrap();
+    apply.replace().unwrap();
+    assert!(apply.commit().is_err());
+    assert_ne!(apply.journal.phase, Phase::Committed);
+    apply.roll_back().unwrap();
+    assert_eq!(fs::read_to_string(&record).unwrap(), before);
+
+    // Interrupted after the record was written but before the commit was recorded: recovery puts
+    // the previous record back with the previous pair.
+    let (f, before) = archive_fixture();
+    let record = f.root.join(super::super::ARCHIVE_RECORD);
+    let mut apply = archive_apply(&f);
+    apply.back_up().unwrap();
+    apply.replace().unwrap();
+    archive_record(
+        &f.root,
+        "0.9.14",
+        apply.journal.manifest.archive.as_ref().unwrap(),
+        "job1",
+    )
+    .unwrap();
+    apply.journal.updated_at = 0;
+    write(&f.maintenance, &apply.journal).unwrap();
+    drop(apply);
+    assert_eq!(
+        recover(&f.maintenance, now()).unwrap(),
+        Recovery::RolledBack
+    );
+    assert_eq!(fs::read_to_string(&record).unwrap(), before);
+    f.assert_previous_pair();
+}
+
+impl Fixture {
+    fn assert_previous_pair(&self) {
+        assert_eq!(self.bin(CRATE), OLD_HOST);
+        assert_eq!(self.bin(CLI), OLD_CLI);
+    }
+}
+
+/// On Windows a running executable can be renamed but one held without sharing cannot: an archive
+/// installation's update then fails cleanly and leaves both executables and its record intact.
+#[cfg(windows)]
+#[test]
+fn windows_locked_executable_of_an_archive_installation() {
+    use std::os::windows::fs::OpenOptionsExt;
+    let (f, before) = archive_fixture();
+    let record = f.root.join(super::super::ARCHIVE_RECORD);
+    let running = fs::OpenOptions::new()
+        .read(true)
+        .share_mode(1 | 4)
+        .open(f.root.join("bin").join(exe_name(CRATE)))
+        .unwrap();
+    let mut apply = archive_apply(&f);
+    apply.back_up().unwrap();
+    apply.replace().unwrap();
+    drop(running);
+    apply.roll_back().unwrap();
+    f.assert_previous_pair();
+    assert_eq!(fs::read_to_string(&record).unwrap(), before);
+    let held = fs::OpenOptions::new()
+        .read(true)
+        .share_mode(0)
+        .open(f.root.join("bin").join(exe_name(CLI)))
+        .unwrap();
+    let mut apply = archive_apply(&f);
+    apply.journal.id = "job2".into();
+    assert!(apply.back_up().and_then(|()| apply.replace()).is_err());
+    drop(held);
+    apply.roll_back().unwrap();
+    f.assert_previous_pair();
+    assert_eq!(fs::read_to_string(&record).unwrap(), before);
 }

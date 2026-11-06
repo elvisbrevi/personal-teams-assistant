@@ -17,7 +17,8 @@ fn summary(machine: &Machine) -> Value {
         "presence":if !online {"offline"} else if machine.assistant_phase.is_none() {"unknown"} else {"online"},
         "last_seen":machine.seen,"last_known":!online,"assistant_phase":machine.assistant_phase,
         "capabilities":{"management":machine.management_support,"directories":machine.management_support,"implementation":machine.management_support,"assistant":machine.assistant_phase.is_some()},
-        "roots":if machine.revoked {Vec::new()} else {machine.roots.clone()}})
+        "roots":if machine.revoked {Vec::new()} else {machine.roots.clone()},
+        "version":machine.host_version,"update":machine.update})
 }
 
 pub(super) async fn list(host: &Arc<Host>) -> Result<Value> {
@@ -28,6 +29,7 @@ pub(super) async fn list(host: &Arc<Host>) -> Result<Value> {
     let local = json!({"id":data.id,"name":data.settings.name,"os":std::env::consts::OS,
         "online":true,"local":true,"presence":"online","trust":"trusted","last_seen":now(),"last_known":false,
         "assistant_phase":*host.state.phase.borrow(),"roots":data.settings.roots,
+        "version":env!("CARGO_PKG_VERSION"),"update":crate::app::maintenance::report(host),
         "capabilities":{"management":true,"directories":config.server.webhook_prefix.is_empty(),"implementation":authority::invocation(&host.state)?.scope.owner,"assistant":true}});
     let mut machines = vec![local];
     machines.extend(

@@ -498,6 +498,7 @@ mod processes {
             no_default_features: true,
             target: None,
             prebuilt: false,
+            archive: false,
         }
     }
 }
@@ -735,7 +736,7 @@ fn write_archive(root: &Path, version: &str, bins: &[&str]) {
 }
 
 #[test]
-fn an_archive_installation_is_recognized_but_not_updated_from_here_yet() {
+fn an_archive_installation_is_recognized_and_updated_from_its_release_archive() {
     let dir = tempfile::tempdir().unwrap();
     write_archive(dir.path(), "0.11.4", &["personal-teams-assistant", "pta"]);
     let exe = dir.path().join("bin").join(exe_name(CLI));
@@ -743,8 +744,16 @@ fn an_archive_installation_is_recognized_but_not_updated_from_here_yet() {
     assert_eq!(archive.version, v("0.11.4"));
     assert_eq!(archive.target, "x86_64-unknown-linux-gnu");
     assert_eq!(archive.root, dir.path());
-    // Not a Cargo installation, and the diagnostic says what to do instead.
-    assert_eq!(inspect(&exe).unwrap_err(), ARCHIVE_DIAGNOSTIC);
+    // Not a Cargo installation: an archive one, for the recorded target, with no feature choice.
+    let installation = inspect(&exe).unwrap();
+    assert!(installation.archive && !installation.prebuilt);
+    assert_eq!(installation.version, v("0.11.4"));
+    assert_eq!(installation.root, dir.path());
+    assert_eq!(
+        installation.target.as_deref(),
+        Some("x86_64-unknown-linux-gnu")
+    );
+    assert!(installation.features.is_empty());
 
     // Windows names keep working.
     write_archive(

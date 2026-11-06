@@ -53,6 +53,8 @@ pub struct OAuth {
     vault: Vault,
     tokens: Mutex<Option<Tokens>>,
     pending: Mutex<HashMap<String, Pending>>,
+    /// The rejected renewal was already recorded (once per change, not once per poll).
+    renewal_recorded: std::sync::atomic::AtomicBool,
 }
 /// Public desktop client: system browser, PKCE and loopback redirect, no client secret.
 impl OAuth {
@@ -83,6 +85,7 @@ impl OAuth {
             vault,
             tokens: Mutex::new(tokens),
             pending: Mutex::new(HashMap::new()),
+            renewal_recorded: std::sync::atomic::AtomicBool::new(false),
         })
     }
     pub async fn begin_desktop(&self, redirect_uri: &str) -> Result<(String, String)> {
@@ -218,6 +221,8 @@ impl OAuth {
             .put_token(&self.vault.seal(&serde_json::to_vec(&tokens)?)?)?;
         *guard = Some(tokens);
         self.store.event("oauth", "authorized")?;
+        self.renewal_recorded
+            .store(false, std::sync::atomic::Ordering::Relaxed);
         Ok(user_id.to_owned())
     }
 }
@@ -229,12 +234,28 @@ impl AccessToken for OAuth {
         if current.expires_at > chrono::Utc::now().timestamp() + 120 {
             return Ok(current.access_token.clone());
         }
-        let response = self
+        let response = match self
             .exchange(vec![
                 ("grant_type", "refresh_token".into()),
                 ("refresh_token", current.refresh_token.clone()),
             ])
-            .await?;
+            .await
+        {
+            Ok(response) => response,
+            Err(error) => {
+                // Entra refused the saved session: remember it, so the host knows the assistant
+                // cannot start again until the person signs in (an update defers on it). No new
+                // request is made; this only records the answer of the renewal that just failed.
+                if error.downcast_ref::<AuthorizationRequired>().is_some()
+                    && !self
+                        .renewal_recorded
+                        .swap(true, std::sync::atomic::Ordering::Relaxed)
+                {
+                    let _ = self.store.event("oauth", Store::RENEWAL_REQUIRED);
+                }
+                return Err(error);
+            }
+        };
         let tokens = Tokens {
             access_token: response.access_token,
             refresh_token: response
@@ -298,7 +319,7 @@ mod tests {
                         "error_description":"private provider text invalid_grant test-old-refresh"
                     })),
                 )
-                .expect(1)
+                .expect(if needs_authorization { 2 } else { 1 })
                 .mount(&server)
                 .await;
             let error = oauth.access_token().await.unwrap_err();
@@ -308,6 +329,27 @@ mod tests {
             );
             assert!(!error.to_string().contains("test-old-refresh"));
             assert_eq!(store.token().unwrap().unwrap(), sealed);
+            // Only a refused renewal marks the session as needing renewal; a provider or network
+            // failure does not.
+            let path = dir.path().join("tokens.db");
+            assert_eq!(
+                Store::session_needs_renewal(&path).unwrap(),
+                needs_authorization,
+                "{code}"
+            );
+            if needs_authorization {
+                // Recorded once, not once per poll.
+                let _ = oauth.access_token().await;
+                let rows: i64 = rusqlite::Connection::open(&path)
+                    .unwrap()
+                    .query_row("SELECT count(*) FROM events WHERE kind='oauth'", [], |r| {
+                        r.get(0)
+                    })
+                    .unwrap();
+                assert_eq!(rows, 1);
+                store.event("oauth", "authorized").unwrap();
+                assert!(!Store::session_needs_renewal(&path).unwrap());
+            }
         }
     }
     #[tokio::test]

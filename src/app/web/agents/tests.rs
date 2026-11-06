@@ -768,7 +768,12 @@ async fn two_accounts_cannot_see_or_change_each_others_data_and_no_value_leaves(
             .contains(registered.data["token"].as_str().unwrap())
     );
     // The host computer's own enrollment and maintenance are not the agent's.
-    for method in ["machine_save", "machine_connect", "crate_update_stage"] {
+    for method in [
+        "machine_save",
+        "machine_connect",
+        "crate_update_stage",
+        "crate_update_unattended",
+    ] {
         assert!(
             !invoke(alice, Agent, method, json!({})).await.ok,
             "{method}"
