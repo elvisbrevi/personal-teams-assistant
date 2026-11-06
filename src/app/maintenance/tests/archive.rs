@@ -106,7 +106,8 @@ fn renew(f: &mut Fixture, edit: impl FnOnce(&mut Environment)) {
 fn bins(f: &Fixture) -> Vec<u8> {
     [core::CRATE, core::CLI]
         .iter()
-        .flat_map(|name| fs::read(f.install.join("bin").join(core::exe_name(name))).unwrap())
+        // As the fixture writes them: without `.exe`, also on Windows.
+        .flat_map(|name| fs::read(f.install.join("bin").join(name)).unwrap())
         .collect()
 }
 
