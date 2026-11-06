@@ -3,13 +3,17 @@ const fs = require('node:fs');
 const path = require('node:path');
 const test = require('node:test');
 const vm = require('node:vm');
-const source = fs.readFileSync(path.join(__dirname, '../desktop/ui/app.js'), 'utf8');
-const i18n = fs.readFileSync(path.join(__dirname, '../desktop/ui/i18n.js'), 'utf8');
-const style = fs.readFileSync(path.join(__dirname, '../desktop/ui/style.css'), 'utf8');
+const ui = path.join(__dirname, '../desktop/ui');
+const read = file => fs.readFileSync(path.join(ui, file), 'utf8');
+/** A module's code as a script: its imports and export list removed, so a test supplies what it imports. */
+const script = file => read(file).replace(/^import [\s\S]*?from '[^']+';$/gm, '').replace(/^export \{[\s\S]*?\};$/gm, '');
+const sessions = read('sessions.js'), todo = read('todo.js'), activities = read('activities.js');
+const i18n = `${script('catalog.js')}\n${script('i18n.js')}`;
+const style = read('style.css');
 
 test('mobile sessions connect through the provider instead of disabling the opener', () => {
   const context = vm.createContext({ t: key => key, encodeURIComponent });
-  vm.runInContext(source.slice(source.indexOf('function sessionDestination('), source.indexOf('\nfunction sessionIsMobile(')), context);
+  vm.runInContext(sessions.slice(sessions.indexOf('function sessionDestination('), sessions.indexOf('\nfunction sessionIsMobile(')), context);
   const session = { provider: 'codex', session_id: '11111111-1111-4111-8111-111111111111' };
   context.session = session;
   assert.equal(vm.runInContext('sessionDestination(session, false).url', context), 'codex://threads/11111111-1111-4111-8111-111111111111');
@@ -24,7 +28,7 @@ test('mobile sessions connect through the provider instead of disabling the open
 
 test('PWA app and web links keep the user gesture without asking the server to open a window', () => {
   const context = vm.createContext({ el: (tag, props) => ({ tag, ...props }) });
-  vm.runInContext(source.slice(source.indexOf('function mobileSessionLink('), source.indexOf('\nfunction showMobileSession(')), context);
+  vm.runInContext(sessions.slice(sessions.indexOf('function mobileSessionLink('), sessions.indexOf('\nfunction showMobileSession(')), context);
   for (const url of ['https://claude.ai/code/session_123', 'claude://code/session_123']) {
     context.url = url;
     const anchor = vm.runInContext("mobileSessionLink('Open', url)", context);
@@ -53,8 +57,8 @@ test('every To-Do card opens its own detail after the list is rendered', async (
     loadTodoDetail: () => opened.push(vm.runInContext('todoSelection.item.id', context)),
   });
   vm.runInContext('let todoRequest = 0, todoLimit = 10, todoSelection, todoListScroll, todoReturnFocus;\nconst TODO_LIMITS = [10, 25, 50, 100];\n' +
-    source.slice(source.indexOf('function todoStateStyle('), source.indexOf('\nfunction closeTodoDetail(')) +
-    source.slice(source.indexOf('async function loadTodo('), source.indexOf('// ---------------------------------------------------------------- implementation')), context);
+    todo.slice(todo.indexOf('function todoStateStyle('), todo.indexOf('\nfunction closeTodoDetail(')) +
+    todo.slice(todo.indexOf('async function loadTodo('), todo.indexOf('\n/** @param {any} value */\nfunction setTodoLimit(')), context);
   await vm.runInContext('loadTodo()', context);
   for (const card of $('#todo-list').children) await card.children[0].children[0].children[0].onclick();
   assert.deepEqual(opened, [7, 8, 9]);
@@ -62,7 +66,7 @@ test('every To-Do card opens its own detail after the list is rendered', async (
 
 test('a To-Do card shows the two recorded dates nearest to today, or when it was created', () => {
   const context = vm.createContext({ t: x => x, tx: x => x, todoDate: (name, value) => `${name}=${value}` });
-  vm.runInContext(source.slice(source.indexOf('function todoCardDates('), source.indexOf('\nfunction todoItem(')), context);
+  vm.runInContext(todo.slice(todo.indexOf('function todoCardDates('), todo.indexOf('\nfunction todoItem(')), context);
   const day = offset => new Date(Date.now() + offset * 86400000).toISOString();
   const [far, soon, past] = [day(40), day(3), day(-10)];
   const item = { created_at: day(-60), dates: [
@@ -87,7 +91,7 @@ test('a task-category item opens task detail and workflow states get distinct co
     t: x => x, tx: x => x, loadTodoDetail: () => opened.push(vm.runInContext('todoSelection.task', context)),
   });
   vm.runInContext('let todoSelection, todoListScroll, todoReturnFocus;\n' +
-    source.slice(source.indexOf('function todoStateStyle('), source.indexOf('\nfunction closeTodoDetail(')), context);
+    todo.slice(todo.indexOf('function todoStateStyle('), todo.indexOf('\nfunction closeTodoDetail(')), context);
   const card = vm.runInContext(`todoItem(${JSON.stringify({ id: 41176, title: 'Development Bug', kind: 'Development Bug', category: 'task', state: 'Done', project: 'Payments', created_at: null, dates: [] })})`, context);
   assert.equal(card.class, 'todo-item done');
   assert.equal(card.children[1].children[0].tone, 'ok');
@@ -113,14 +117,14 @@ test('a task-category item opens task detail and workflow states get distinct co
 test('To-Do work item actions include a copy button that copies the original URL', async () => {
   const copied = [], notices = [];
   const context = vm.createContext({
-    window: { ptaTransport: { browser: true } },
+    transport: { browser: true },
     el: (tag, props, ...children) => ({ tag, ...props, children }),
     icon: name => ({ icon: name }), t: key => key,
     copy: async url => { copied.push(url); return true; },
     busy: async (_button, task) => task(),
     done: message => notices.push(['ok', message]), fail: message => notices.push(['error', message]),
   });
-  vm.runInContext(source.slice(source.indexOf('function todoOriginal('), source.indexOf('\nlet todoDetailRequest')), context);
+  vm.runInContext(todo.slice(todo.indexOf('function todoOriginal('), todo.indexOf('\nlet todoDetailRequest')), context);
   const actions = vm.runInContext("todoOriginal({ id: 41176, url: 'https://dev.azure.com/example/_workitems/edit/41176' })", context);
   assert.equal(actions.class, 'todo-actions');
   assert.equal(actions.children[0].children[0].icon, 'wrench');
@@ -144,7 +148,7 @@ test('days below or above the hours target and empty days can all be opened', as
     openActivityDay: async day => opened.push(day), fail: assert.fail,
   });
   vm.runInContext(i18n, context);
-  vm.runInContext('let activityDaysScroll, activityDayFocus;\n' + source.slice(source.indexOf('function activityDayCard('), source.indexOf('\nfunction showActivityView(')), context);
+  vm.runInContext('let activityDaysScroll, activityDayFocus;\n' + activities.slice(activities.indexOf('function activityDayCard('), activities.indexOf('\nfunction showActivityView(')), context);
   for (const [tasks, hours] of [[0, 0], [2, 3], [10, 30]]) {
     context.day = { day: '2026-10-14', tasks, hours, target_hours: 9 };
     const card = vm.runInContext('activityDayCard(day)', context);
@@ -156,8 +160,8 @@ test('days below or above the hours target and empty days can all be opened', as
 
 test('browser activity navigation needs no native window operation', async () => {
   const calls = [], tabs = [];
-  const context = vm.createContext({ window: { ptaTransport: { browser: true, invoke: async (...args) => calls.push(args) } }, showTab: (...args) => tabs.push(args) });
-  vm.runInContext(source.slice(0, source.indexOf('\nconst $ =')), context);
+  const context = vm.createContext({ transport: { browser: true, invoke: async (...args) => calls.push(args) }, showTab: (...args) => tabs.push(args) });
+  vm.runInContext(script('control.js'), context);
   const result = await vm.runInContext("invoke('activity_open')", context);
   assert.equal(result.visible, true);
   assert.deepEqual(calls, []);

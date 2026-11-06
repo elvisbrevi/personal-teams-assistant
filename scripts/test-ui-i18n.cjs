@@ -6,9 +6,14 @@ const test = require('node:test');
 const vm = require('node:vm');
 
 const ui = path.join(__dirname, '../desktop/ui');
-const app = fs.readFileSync(path.join(ui, 'app.js'), 'utf8');
+// Every module of the GUI (the catalog is data, not source text).
+const modules = fs.readdirSync(ui).filter(file => file.endsWith('.js') && file !== 'catalog.js').sort();
+const app = modules.map(file => fs.readFileSync(path.join(ui, file), 'utf8')).join('\n');
 const html = fs.readFileSync(path.join(ui, 'index.html'), 'utf8');
-const i18n = fs.readFileSync(path.join(ui, 'i18n.js'), 'utf8');
+/** A module's code as a script: its imports and export list removed (the catalog and i18n share one context). */
+const script = file => fs.readFileSync(path.join(ui, file), 'utf8')
+  .replace(/^import [\s\S]*?from '[^']+';$/gm, '').replace(/^export \{[\s\S]*?\};$/gm, '');
+const i18n = `${script('catalog.js')}\n${script('i18n.js')}`;
 
 function load(language, device = 'es-CL') {
   const context = vm.createContext({ localStorage: { getItem: () => language, setItem() {} }, navigator: { language: device }, Intl });
@@ -18,7 +23,7 @@ function load(language, device = 'es-CL') {
 
 const unescape = text => text.replace(/\\(.)/g, '$1');
 const literal = String.raw`(['"\`])((?:\\.|(?!\1)[^\\])*)\1`;
-/** Keys passed as literals to t() and tn() in app.js. */
+/** Keys passed as literals to t() and tn() in every module. */
 function scriptKeys() {
   const keys = [];
   for (const m of app.matchAll(new RegExp(String.raw`\bt\(\s*${literal}`, 'g'))) keys.push(unescape(m[2]));
@@ -59,6 +64,7 @@ const placeholders = text => [...text.matchAll(/\{(\w+)\}/g)].map(m => m[1]).sor
 test('every interface string has a Spanish translation', () => {
   const spanish = load('es').catalog.es;
   const keys = [...new Set([...scriptKeys(), ...pageKeys()])];
+  assert.ok(modules.length > 30 && modules.includes('app.js'), `only ${modules.length} modules found`);
   assert.ok(keys.length > 400, `only ${keys.length} keys found; the extraction broke`);
   assert.deepEqual(keys.filter(key => !(key in spanish)), []);
   for (const key of keys) assert.deepEqual(placeholders(spanish[key]), placeholders(key), key);

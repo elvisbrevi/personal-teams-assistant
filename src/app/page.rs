@@ -365,15 +365,21 @@ fn router(host: Arc<Host>) -> Router {
         .route("/index.html", get(index))
         .route("/open", get(exchange))
         .route("/signed-out", get(|| async { signed_out() }))
-        .route("/app.js", get(app_js))
-        .route("/transport.js", get(transport_js))
         .route("/api/session", get(session))
         .route("/api/control", post(command));
-    // The GUI's other files need no session (`gui_assets::ASSETS`).
+    // The GUI's modules need this page's session; its other files need none (`gui_assets::ASSETS`).
+    let router = gui_assets::session_scripts().fold(router, |router, asset| {
+        router.route(
+            &format!("/{}", asset.file),
+            get(move |host: State<Arc<Host>>, headers: HeaderMap| {
+                script(host, headers, asset.file)
+            }),
+        )
+    });
     let router = gui_assets::public().fold(router, |router, asset| {
         router.route(
             &format!("/{}", asset.file),
-            get(move || async move { gui_assets::serve(asset.file) }),
+            get(move |headers: HeaderMap| async move { gui_assets::serve(asset.file, &headers) }),
         )
     });
     router
@@ -421,7 +427,10 @@ async fn guard(
         next.run(request).await
     };
     let headers = response.headers_mut();
-    headers.insert(header::CACHE_CONTROL, "no-store".parse().unwrap());
+    // Nothing is stored but the GUI's files, which carry their own rule (`gui_assets::CACHE_RULE`).
+    if !headers.contains_key(header::CACHE_CONTROL) {
+        headers.insert(header::CACHE_CONTROL, "no-store".parse().unwrap());
+    }
     headers.insert(header::CONTENT_SECURITY_POLICY, "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'".parse().unwrap());
     headers.insert(header::X_CONTENT_TYPE_OPTIONS, "nosniff".parse().unwrap());
     headers.insert(header::REFERRER_POLICY, "no-referrer".parse().unwrap());
@@ -443,7 +452,7 @@ fn document() -> Response {
 
 /// Shown without a session: a used, expired or missing sign-in. It names the next step and
 /// never offers a link that signs in.
-const SIGNED_OUT: &str = "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Personal Teams Assistant</title><link rel=\"stylesheet\" href=\"/style.css\"><script src=\"/i18n.js\" defer></script></head><body><main class=\"panel\"><h1>Open the assistant again</h1><p role=\"alert\">This page's sign-in ended or was already used. Open it again from this computer with the command below, or by starting the application.</p><p><code>pta app open</code></p></main></body></html>";
+const SIGNED_OUT: &str = "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Personal Teams Assistant</title><link rel=\"stylesheet\" href=\"/style.css\"><script type=\"module\" src=\"/i18n.js\"></script></head><body><main class=\"panel\"><h1>Open the assistant again</h1><p role=\"alert\">This page's sign-in ended or was already used. Open it again from this computer with the command below, or by starting the application.</p><p><code>pta app open</code></p></main></body></html>";
 
 fn signed_out() -> Response {
     (
@@ -498,18 +507,12 @@ fn asset_owned(content_type: &'static str, content: String) -> Response {
     ([(header::CONTENT_TYPE, content_type)], content).into_response()
 }
 
-async fn app_js(State(host): State<Arc<Host>>, headers: HeaderMap) -> Response {
+/// One of the GUI's modules, only with this page's session.
+async fn script(State(host): State<Arc<Host>>, headers: HeaderMap, file: &'static str) -> Response {
     if host.state.page.session(&headers).is_none() {
         return StatusCode::UNAUTHORIZED.into_response();
     }
-    gui_assets::serve("app.js")
-}
-
-async fn transport_js(State(host): State<Arc<Host>>, headers: HeaderMap) -> Response {
-    if host.state.page.session(&headers).is_none() {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
-    gui_assets::serve("transport.js")
+    gui_assets::serve(file, &headers)
 }
 
 async fn session(State(host): State<Arc<Host>>, headers: HeaderMap) -> Response {

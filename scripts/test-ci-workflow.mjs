@@ -75,6 +75,9 @@ for (const [files, expected] of [
   [['.github/workflows/ci.yml'], { rust: 'true', ui: 'true', cloud: 'true', platform: 'true' }],
   [['.github/workflows/release.yml'], { rust: 'true', ui: 'true', cloud: 'true', platform: 'true' }],
   [['scripts/test-ci-workflow.mjs'], { ui: 'true', platform: 'false' }],
+  // The type check's configuration lives with the scripts, outside the served directory.
+  [['scripts/ui-types/jsconfig.json', 'scripts/ui-types/check.mjs'], { ui: 'true' }],
+  [['desktop/ui/control.js', 'desktop/ui/catalog.js'], { gui: 'true', ui: 'true' }],
   [['scripts/test-windows-startup.py'], { ui: 'true', platform: 'true' }],
   [['docs/architecture.md', 'README.md'], {}],
   [['cloud/src/index.ts'], { cloud: 'true' }],
@@ -262,6 +265,17 @@ for (const [hit, downloads] of [['true', false], ['', true], ['false', true]]) {
     rmSync(temp, { recursive: true, force: true });
   }
 }
+// Every module is syntax-checked on its own and type-checked by a pinned TypeScript installed
+// outside the repository: tsc over every module, then the strict rules of the typed ones.
+const syntax = ui.find(step => step.name === 'GUI syntax').run;
+assert.match(syntax, /for module in desktop\/ui\/\*\.js; do/);
+assert.match(syntax, /bun build "\$module" --no-bundle/);
+assert.match(String(jobs.ui.env.TYPESCRIPT_VERSION), /^\d+\.\d+\.\d+$/);
+const types = ui.find(step => step.name === 'GUI types');
+assert.equal(types.env.UI_TYPES_DEPS, '${{ runner.temp }}/pta-ui-types');
+assert(types.run.includes('"typescript@$TYPESCRIPT_VERSION"'));
+assert(types.run.includes('tsc" --noEmit --checkJs -p scripts/ui-types/jsconfig.json'));
+assert(types.run.includes('node scripts/ui-types/check.mjs'));
 const save = ui.find(step => step.uses?.startsWith('actions/cache/save@'));
 assert.equal(save.if, `github.ref == 'refs/heads/main' && steps.${restore.id}.outputs.cache-hit != 'true'`);
 assert.equal(save.with.key, `\${{ steps.${restore.id}.outputs.cache-primary-key }}`);

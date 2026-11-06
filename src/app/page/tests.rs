@@ -308,15 +308,14 @@ async fn forged_expired_and_missing_codes_and_sessions_open_nothing() {
     .await;
     assert_eq!(expired.status(), StatusCode::UNAUTHORIZED);
 
-    // Without a session neither the document, the scripts nor the API answer.
-    for path in [
-        "/",
-        "/index.html",
-        "/app.js",
-        "/transport.js",
-        "/api/session",
-    ] {
-        let response = send(&host, get(&host, path).body(Body::empty()).unwrap()).await;
+    // Without a session neither the document, its modules nor the API answer.
+    let modules = gui_assets::session_scripts().map(|asset| format!("/{}", asset.file));
+    for path in ["/", "/index.html", "/api/session"]
+        .map(str::to_owned)
+        .into_iter()
+        .chain(modules)
+    {
+        let response = send(&host, get(&host, &path).body(Body::empty()).unwrap()).await;
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{path}");
     }
     let forged_cookie = format!(
@@ -692,12 +691,15 @@ async fn the_page_binds_loopback_only_and_never_for_a_portal_account() {
 }
 
 /// Every GUI file, from the binary and from a development directory: the same paths, content
-/// types and security headers, `no-store` included; only the bytes come from disk.
+/// types, security headers and caching rule; only the bytes (and so the tags) come from disk.
 #[tokio::test]
 async fn gui_assets_are_served_by_the_local_page_from_the_binary_or_a_development_directory() {
     use crate::app::gui_assets::{
         ASSETS,
-        tests::{DevelopmentDir, assert_secure_headers, edited_copy, expected},
+        tests::{
+            DevelopmentDir, assert_gui_file_headers, assert_secure_headers, edited_copy, expected,
+            expected_etag,
+        },
     };
     let root = tempfile::tempdir().unwrap();
     let host = host(root.path(), 21_009, true);
@@ -719,7 +721,24 @@ async fn gui_assets_are_served_by_the_local_page_from_the_binary_or_a_developmen
                 asset.content_type,
                 "{what}"
             );
-            assert_secure_headers(&response, &what);
+            assert_gui_file_headers(&response, asset, source.as_deref(), &what);
+            if asset.file != "index.html" {
+                // A cached copy is used again only after this page's session confirms its tag.
+                let tag = expected_etag(source.as_deref(), asset);
+                let mut again = get(&host, &path).header(header::IF_NONE_MATCH, &tag);
+                if asset.session {
+                    again = authed(again, &signed);
+                }
+                let again = send(&host, again.body(Body::empty()).unwrap()).await;
+                assert_eq!(again.status(), StatusCode::NOT_MODIFIED, "{what}");
+                assert_eq!(again.headers()[header::ETAG], tag.as_str(), "{what}");
+                if asset.session {
+                    let unsigned = get(&host, &path).header(header::IF_NONE_MATCH, &tag);
+                    let refused = send(&host, unsigned.body(Body::empty()).unwrap()).await;
+                    assert_eq!(refused.status(), StatusCode::UNAUTHORIZED, "{what}");
+                    assert_secure_headers(&refused, &what);
+                }
+            }
             let served = axum::body::to_bytes(response.into_body(), 4_000_000)
                 .await
                 .unwrap();
@@ -729,7 +748,10 @@ async fn gui_assets_are_served_by_the_local_page_from_the_binary_or_a_developmen
                 let served = String::from_utf8(served.to_vec()).unwrap();
                 let file = String::from_utf8(file).unwrap();
                 assert!(served.contains("<meta name=\"pta-transport\" content=\"local\">"));
-                assert!(served.contains("src=\"transport.js\""), "{what}");
+                assert!(
+                    served.contains("<script type=\"module\" src=\"app.js\""),
+                    "{what}"
+                );
                 assert_eq!(
                     served.replacen("\n  <meta name=\"pta-transport\" content=\"local\">", "", 1),
                     file

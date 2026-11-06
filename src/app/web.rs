@@ -496,21 +496,32 @@ const PUBLIC_ASSETS: [&str; 5] = [
 ];
 
 fn router(portal: Arc<Portal>) -> Router {
-    // The GUI's files without a session (`gui_assets::ASSETS`): the stylesheet, the catalog
-    // (it also translates the denied-login page and holds no account data) and, public
-    // (`PUBLIC_ASSETS`), the tab icon, the iOS home-screen icon and the PWA manifest.
+    // The GUI's files without a session (`gui_assets::ASSETS`): the stylesheet, the translation
+    // and its catalog (they also translate the denied-login page and hold no account data) and,
+    // public (`PUBLIC_ASSETS`), the tab icon, the iOS home-screen icon and the PWA manifest.
     let router = gui_assets::public().fold(Router::new(), |router, asset| {
         router.route(
             &format!("/{}", asset.file),
-            get(move || async move { gui_assets::serve(asset.file) }),
+            get(move |headers: HeaderMap| async move { gui_assets::serve(asset.file, &headers) }),
+        )
+    });
+    // The GUI's modules, only with a portal session.
+    let router = gui_assets::session_scripts().fold(router, |router, asset| {
+        router.route(
+            &format!("/{}", asset.file),
+            get(
+                move |portal: State<Arc<Portal>>,
+                      identity: Extension<access::Verified>,
+                      headers: HeaderMap| {
+                    script(portal, identity, headers, asset.file)
+                },
+            ),
         )
     });
     router
         .route("/", get(index))
         .route("/index.html", get(index))
         .route("/login", get(login))
-        .route("/app.js", get(app_js))
-        .route("/transport.js", get(transport_js))
         .route("/api/session", get(session))
         .route("/api/logout", post(logout))
         .route("/api/control", post(command))
@@ -583,7 +594,10 @@ async fn secure_headers(
             "max-age=31536000".parse().unwrap(),
         );
     }
-    headers.insert(header::CACHE_CONTROL, "no-store".parse().unwrap());
+    // Nothing is stored but the GUI's files, which carry their own rule (`gui_assets::CACHE_RULE`).
+    if !headers.contains_key(header::CACHE_CONTROL) {
+        headers.insert(header::CACHE_CONTROL, "no-store".parse().unwrap());
+    }
     headers.insert(header::CONTENT_SECURITY_POLICY, "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'".parse().unwrap());
     headers.insert(header::X_CONTENT_TYPE_OPTIONS, "nosniff".parse().unwrap());
     headers.insert(header::REFERRER_POLICY, "no-referrer".parse().unwrap());
@@ -611,27 +625,19 @@ async fn index(
     {
         return Redirect::to(&format!("/login{}", enroll_query(&uri))).into_response();
     }
-    gui_assets::serve("index.html")
+    gui_assets::serve("index.html", &headers)
 }
-async fn app_js(
+/// One of the GUI's modules, only with a portal session.
+async fn script(
     State(portal): State<Arc<Portal>>,
     Extension(identity): Extension<access::Verified>,
     headers: HeaderMap,
+    file: &'static str,
 ) -> Response {
     if let Err(status) = portal.authenticate(&headers, &identity, false).await {
         return status.into_response();
     }
-    gui_assets::serve("app.js")
-}
-async fn transport_js(
-    State(portal): State<Arc<Portal>>,
-    Extension(identity): Extension<access::Verified>,
-    headers: HeaderMap,
-) -> Response {
-    if let Err(status) = portal.authenticate(&headers, &identity, false).await {
-        return status.into_response();
-    }
-    gui_assets::serve("transport.js")
+    gui_assets::serve(file, &headers)
 }
 // Access handles the interactive login. This endpoint only creates a CSRF-bound
 // local session for a verified, explicitly associated GitHub identity.
@@ -652,7 +658,7 @@ async fn login(
     let Some(account) = entry else {
         return (
             StatusCode::FORBIDDEN,
-            asset("text/html; charset=utf-8", "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Personal Teams Assistant</title><link rel=\"stylesheet\" href=\"/style.css\"><script src=\"/i18n.js\" defer></script></head><body><main class=\"panel\"><h1>Account access unavailable</h1><p role=\"alert\">Your GitHub identity has no enabled local account. Contact the portal operator.</p><a href=\"/cdn-cgi/access/logout\">Sign out</a></main></body></html>"),
+            asset("text/html; charset=utf-8", "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Personal Teams Assistant</title><link rel=\"stylesheet\" href=\"/style.css\"><script type=\"module\" src=\"/i18n.js\"></script></head><body><main class=\"panel\"><h1>Account access unavailable</h1><p role=\"alert\">Your GitHub identity has no enabled local account. Contact the portal operator.</p><a href=\"/cdn-cgi/access/logout\">Sign out</a></main></body></html>"),
         )
             .into_response();
     };
@@ -671,7 +677,7 @@ async fn login(
         Err(status) => return status.into_response(),
     };
     // End the cross-site OAuth navigation so Strict cookies accompany asset/API requests.
-    let mut response = gui_assets::serve("index.html");
+    let mut response = gui_assets::serve("index.html", &headers);
     response.headers_mut().insert(
         header::SET_COOKIE,
         portal

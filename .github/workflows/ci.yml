@@ -204,6 +204,8 @@ jobs:
       # Pinned preview tools; Chromium's cache is keyed by the Playwright version that downloads it.
       PLAYWRIGHT_CORE_VERSION: 1.58.2
       AXE_CORE_VERSION: 4.14.0
+      # The GUI's type checker, installed outside the repository like the preview tools.
+      TYPESCRIPT_VERSION: 6.0.3
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -212,8 +214,19 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
+      # Every module of the GUI (native ES modules, no bundle), each on its own.
       - name: GUI syntax
-        run: bun build desktop/ui/app.js --no-bundle --outfile "$RUNNER_TEMP/app-check.js"
+        run: |
+          for module in desktop/ui/*.js; do
+            bun build "$module" --no-bundle --outfile "$RUNNER_TEMP/syntax/$(basename "$module")"
+          done
+      - name: GUI types
+        env:
+          UI_TYPES_DEPS: ${{ runner.temp }}/pta-ui-types
+        run: |
+          npm install --prefix "$UI_TYPES_DEPS" --no-save --no-audit --no-fund "typescript@$TYPESCRIPT_VERSION"
+          "$UI_TYPES_DEPS/node_modules/.bin/tsc" --noEmit --checkJs -p scripts/ui-types/jsconfig.json
+          node scripts/ui-types/check.mjs
       - name: GUI logic and translations
         run: node --test scripts/test-activity-ui.cjs scripts/test-ui-i18n.cjs scripts/test-ui-themes.cjs
       - name: Script tests
