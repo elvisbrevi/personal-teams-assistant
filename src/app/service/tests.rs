@@ -91,7 +91,11 @@ fn one_entry_per_profile_and_its_name_reveals_no_path() {
 #[test]
 fn the_launch_agent_starts_the_host_in_the_background_with_a_minimal_path() {
     let root = tempfile::tempdir().unwrap();
-    let t = target(Manager::Launchd, root.path(), true);
+    let mut t = target(Manager::Launchd, root.path(), true);
+    // A Mac's paths, whatever the test runs on (a Windows drive letter is no PATH entry).
+    t.exe = PathBuf::from("/Users/synthetic/.cargo/bin/personal-teams-assistant");
+    t.home = PathBuf::from("/Users/synthetic");
+    t.profile = PathBuf::from("/Users/synthetic/Profiles/work & play");
     let plist = t.definition();
     assert!(plist.contains(MARKER));
     assert!(plist.contains(&format!("<string>{}</string>", t.name())));
