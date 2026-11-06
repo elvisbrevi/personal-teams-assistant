@@ -1594,6 +1594,7 @@ fn validate_args(args: &[String]) -> Result<()> {
             | ["service", "status" | "install" | "uninstall"]
             | ["update", "status" | "check" | "cancel"]
             | ["update", "stage" | "apply" | "dismiss", _]
+            | ["update", "unattended", "on" | "off"]
             | ["setup", "status"]
             | ["account", "status" | "sync"]
             | ["account", "records", "status" | "history"]
@@ -1816,6 +1817,7 @@ fn validate_args(args: &[String]) -> Result<()> {
                     .starts_with(&["cloud", "installations", "revoke"])
                 || p.as_slice().starts_with(&["update", "stage"])
                 || p.as_slice().starts_with(&["update", "apply"])
+                || p.as_slice().starts_with(&["update", "unattended"])
                 || p.as_slice() == ["service", "install"]
                 || p.as_slice() == ["service", "uninstall"]
                 || p.as_slice().starts_with(&["variables", "migrate", "run"])
@@ -3406,6 +3408,10 @@ mod wiki_tests {
             assert!(check(args).is_err(), "{args:?}");
         }
         assert!(check(&["account", "sync", "--reset"]).is_ok());
+        assert!(check(&["update", "unattended", "on", "--confirmed"]).is_ok());
+        assert!(check(&["update", "unattended", "off", "--confirmed"]).is_ok());
+        assert!(check(&["update", "unattended", "maybe"]).is_err());
+        assert!(check(&["update", "unattended"]).is_err());
     }
 }
 #[cfg(test)]
@@ -3419,6 +3425,7 @@ mod help_tests {
             &["service", "status"],
             &["service", "install"],
             &["service", "uninstall"],
+            &["update", "unattended", "on"],
             &["mcp"],
             &["mcp", "config"],
             &["tools", "list"],
