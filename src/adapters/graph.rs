@@ -1114,13 +1114,31 @@ impl Graph {
         } else {
             None
         };
-        if let Some(nonce) = &nonce {
-            content = format!(
-                "{content}<p><a href=\"https://personalteams.invalid/output/{nonce}\">PTA</a></p>"
-            );
-        }
-        ensure!(content.len() <= 27_800, PostRefusal::TooLong);
-        let mut body = json!({"body":{"contentType":"html","content":content}});
+        let marker = nonce
+            .as_ref()
+            .map(|nonce| {
+                format!("<p><a href=\"https://personalteams.invalid/output/{nonce}\">PTA</a></p>")
+            })
+            .unwrap_or_default();
+        // The configured style, like the assistant's answers. Graph mentions live in the HTML
+        // body, so a message with mentions, or a card that does not fit, stays plain HTML.
+        let card = if mentioned.is_empty() {
+            super::card::message(
+                &text,
+                &self.config.message_style,
+                self.config.llm.language,
+                &marker,
+            )
+        } else {
+            None
+        };
+        content.push_str(&marker);
+        ensure!(
+            card.is_some() || content.len() <= 27_800,
+            PostRefusal::TooLong
+        );
+        let mut body =
+            card.unwrap_or_else(|| json!({"body":{"contentType":"html","content":content}}));
         if !mentioned.is_empty() {
             body["mentions"] = mentioned
                 .iter()
