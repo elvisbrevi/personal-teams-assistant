@@ -121,7 +121,7 @@ jobs:
             esac
             # The one list of platform-sensitive paths: code that differs on macOS or Windows
             # (credential store, process spawning, private-file permissions, the browser opener, update staging and
-            # apply, native startup), the Windows startup check, the dependency manifest, lock and
+            # apply, native startup, the login service), the Windows startup check, the dependency manifest, lock and
             # toolchain (a version-only bump excepted), and the workflows. scripts/test-ci-workflow.mjs
             # requires every source file with Windows- or macOS-only code to match it.
             [ "$bump" = false ] || continue
@@ -131,6 +131,7 @@ jobs:
               src/main.rs | src/bin/* | src/app.rs | src/app/headless.rs | src/app/page.rs | src/app/control.rs | \
               src/security/* | src/maintenance.rs | src/maintenance/* | src/app/maintenance.rs | src/app/maintenance/* | \
               src/app/cloud/restore.rs | src/consumers.rs | src/app/azure_cli.rs | src/app/github.rs | src/app/github_cli.rs | \
+              src/app/service.rs | src/app/service/* | tests/service.rs | \
               src/llm/agent.rs | src/llm/implementation.rs | src/llm/implementation/*)
                 platform=true
                 platform_paths="$platform_paths $file" ;;
@@ -165,6 +166,14 @@ jobs:
       - if: github.event_name != 'push'
         run: cargo clippy --locked --all-targets -- -D warnings
       - run: cargo test --locked
+      # A runner has no login session: lingering gives the runner's user its systemd manager.
+      - name: Start at login through a real systemd user manager (temporary profile)
+        if: github.event_name != 'push'
+        run: |
+          sudo loginctl enable-linger "$USER"
+          export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+          for _ in $(seq 1 30); do [ -S "$XDG_RUNTIME_DIR/bus" ] && break; sleep 1; done
+          PTA_SERVICE_LIVE_TEST=1 cargo test --locked --test service -- --nocapture
       # Builds the .crate exactly as crates.io receives it; the release publishes it without
       # building again.
       - name: Package as crates.io receives it
@@ -314,6 +323,8 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo clippy --locked --all-targets -- -D warnings
       - run: cargo test --locked
+      - name: Start at login through launchd (temporary profile)
+        run: PTA_SERVICE_LIVE_TEST=1 cargo test --locked --test service -- --nocapture
 
   windows:
     name: Windows (informative)
@@ -362,6 +373,10 @@ jobs:
       # platform-neutral and Windows-specific unit tests of the same workflows.
       - name: Account variables, synchronization, migration, updates and readiness on Windows
         run: cargo test --locked --lib -- variables consumers portable standing migration maintenance readiness
+      - name: Start at login through the Task Scheduler (temporary profile)
+        run: |
+          cargo test --locked --lib service
+          PTA_SERVICE_LIVE_TEST=1 cargo test --locked --test service -- --nocapture
 
   security:
     name: Security

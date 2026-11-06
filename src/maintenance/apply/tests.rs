@@ -123,6 +123,7 @@ impl Fixture {
                 assistant: true,
                 subscriptions: 1,
                 tunnel: false,
+                service: false,
             },
             self.profiles(),
         )
@@ -639,4 +640,36 @@ fn startup_is_blocked_while_an_update_runs_and_unblocked_after_recovery() {
         "interrupted before any change: undone"
     );
     assert_eq!(read(&f.maintenance).unwrap().phase, Phase::RolledBack);
+}
+
+#[test]
+fn only_the_helpers_own_restart_is_a_hand_over_for_a_host_the_service_manager_starts() {
+    let f = Fixture::new();
+    let mut journal = f.journal();
+    // No update: nothing to hand over.
+    assert!(!handover(&f.maintenance));
+    write(&f.maintenance, &journal).unwrap();
+    mark_handover(&f.maintenance, &journal.id).unwrap();
+    // The helper has not stopped the previous host yet.
+    assert!(!handover(&f.maintenance));
+    for phase in [Phase::Restarting, Phase::Verifying, Phase::RollingBack] {
+        journal.phase = phase;
+        write(&f.maintenance, &journal).unwrap();
+        assert!(handover(&f.maintenance), "{phase:?}");
+    }
+    // Another update's mark, or a finished update, never lets a host start in the middle.
+    mark_handover(&f.maintenance, "another").unwrap();
+    assert!(!handover(&f.maintenance));
+    mark_handover(&f.maintenance, &journal.id).unwrap();
+    journal.phase = Phase::Committed;
+    write(&f.maintenance, &journal).unwrap();
+    assert!(!handover(&f.maintenance));
+    clear_handover(&f.maintenance);
+    assert!(!f.maintenance.join(HANDOVER).exists());
+    // A journal written before the service existed still reads.
+    let old = serde_json::to_value(&journal).unwrap();
+    let mut old = old.as_object().unwrap().clone();
+    old["intent"].as_object_mut().unwrap().remove("service");
+    let read: Journal = serde_json::from_value(serde_json::Value::Object(old)).unwrap();
+    assert!(!read.intent.service);
 }

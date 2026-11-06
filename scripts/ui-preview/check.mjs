@@ -1984,6 +1984,40 @@ for (const [label, options] of [['desktop', {}], ['phone', { context: { viewport
   check(`${label}: cloud storage has no browser errors`, errors.length === 0, errors.join('; '));
   await context.close();
 }
+// Start at login: the owner registers and removes this computer's entry with explicit presses;
+// a shared portal account never sees the control.
+for (const [label, viewport] of [['desktop', { width: 1440, height: 900 }], ['phone', { width: 393, height: 852 }]]) {
+  const { context, page, errors } = await open({ axe: true, context: { viewport, ...(label === 'phone' ? { isMobile: true, hasTouch: true } : {}) } });
+  await page.evaluate(() => showTab('settings', 'panel-service'));
+  const panel = page.locator('#panel-service');
+  await panel.waitFor();
+  check(`${label}: start at login is off and offers to turn it on`, (await panel.locator('#service-state').innerText()) === 'Apagado'
+    && await panel.locator('#service-install').isVisible() && await panel.locator('#service-uninstall').isHidden()
+    && await page.evaluate(() => !window.__ptaServiceCalls.includes('install')));
+  await panel.locator('#service-install').click();
+  await page.waitForFunction(() => window.__ptaServiceCalls.includes('install'));
+  await panel.locator('#service-uninstall').waitFor();
+  check(`${label}: once installed it names the manager and the entry, and says when lingering is needed`, (await panel.locator('#service-state').innerText()) === 'Activado'
+    && (await panel.locator('#service-rows').innerText()).includes('Unidad de usuario de systemd')
+    && (await panel.locator('#service-notes').innerText()).includes('loginctl enable-linger')
+    && await panel.locator('#service-install').isHidden());
+  await page.evaluate(axeSource);
+  check(`${label}: start at login passes axe`, (await scan(page)).length === 0, JSON.stringify(await scan(page)));
+  check(`${label}: start at login keeps the phone boundary`, await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+  await panel.locator('#service-uninstall').click();
+  await panel.locator('#service-install').waitFor();
+  check(`${label}: removing it turns it off`, (await panel.locator('#service-state').innerText()) === 'Apagado' && await page.evaluate(() => window.__ptaServiceCalls.includes('uninstall')));
+  check(`${label}: start at login has no browser errors`, errors.length === 0, errors.join('; '));
+  await context.close();
+}
+{
+  const { context, page, errors } = await open({}, 'account');
+  await page.evaluate(() => showTab('settings'));
+  await page.waitForTimeout(300);
+  check('portal account: no start-at-login control', await page.locator('#panel-service').isHidden());
+  check('portal account: start at login has no browser errors', errors.length === 0, errors.join('; '));
+  await context.close();
+}
 await browser.close();
 fs.writeFileSync(`${out}/flows.json`, JSON.stringify(results, null, 1));
 const failed = results.filter(r => !r.ok).length;

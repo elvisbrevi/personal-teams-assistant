@@ -847,6 +847,10 @@ async fn dispatch_inner(host: &Arc<Host>, request: Request) -> Reply {
             }
         };
     }
+    if service::handles(&request.method) {
+        // The operating system's service manager; no profile edit.
+        return service::operate(host, &request).await;
+    }
     if maintenance::handles(&request.method) {
         // Independent of profile edits: a build can take many minutes.
         return maintenance::operate(host, &request).await;
@@ -1116,17 +1120,22 @@ async fn operate(
             page::open(host).map_err(fail)?;
             json!({"visible":true,"target":"browser"})
         }
+        // The person's start and stop are remembered, so a host the service manager starts at
+        // login knows whether to start the assistant again (`service::restore`).
         "start_assistant" => {
             start(state).await.map_err(fail)?;
+            service::remember(state.settings.profile(), true);
             json!({"running":true})
         }
         "stop_assistant" => {
             stop(state).await.map_err(fail)?;
+            service::remember(state.settings.profile(), false);
             json!({"running":false})
         }
         "restart" => {
             stop(state).await.map_err(fail)?;
             start(state).await.map_err(fail)?;
+            service::remember(state.settings.profile(), true);
             json!({"running":true})
         }
         "save_settings" => {

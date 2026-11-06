@@ -29,7 +29,14 @@ impl Shell for HeadlessShell {
 
 /// Runs the host. `open_page`: a person launched the application, so its page opens in the
 /// system browser once the host is ready (when this computer has a browser session).
-pub(crate) fn run(host_lock: fs::File, start_service: bool, open_page: bool) -> Result<()> {
+/// `restore`: the service manager started it at login, so the assistant runs again only if the
+/// person left it running and this computer still holds the Teams selection and lease.
+pub(crate) fn run(
+    host_lock: fs::File,
+    start_service: bool,
+    open_page: bool,
+    restore: bool,
+) -> Result<()> {
     tokio::runtime::Runtime::new()?.block_on(async move {
         let config_dir = control::profile_dir()?;
         configure_credentials(&config_dir)?;
@@ -50,6 +57,9 @@ pub(crate) fn run(host_lock: fs::File, start_service: bool, open_page: bool) -> 
         tracing::info!(event = "headless_host_ready");
         if open_page && host.shell.browser() && page::open(&host).is_err() {
             tracing::warn!(event = "local_page_not_opened");
+        }
+        if restore {
+            tokio::spawn(service::restore(host.clone(), service::restore_pause()));
         }
         if start_service {
             // Keep the host alive on failure so `pta status/doctor/audit` can diagnose it.
