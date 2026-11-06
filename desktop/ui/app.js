@@ -7,7 +7,7 @@ const READS = ['snapshot', 'chat', 'github_repositories', 'self_chat_status', 'l
 // changes made elsewhere (e.g. with `pta`).
 let lastRevision = null;
 async function invoke(method, args = {}) {
-  if (window.ptaTransport.browser && method === 'activity_open') {
+  if ((window.ptaTransport.browser || window.ptaTransport.local) && method === 'activity_open') {
     showTab('registration');
     return { visible: true };
   }

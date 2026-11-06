@@ -308,6 +308,9 @@ fn start_host(app: &tauri::App, host_lock: fs::File) -> Result<Arc<Host>> {
     });
     consumers::install(&host);
     tauri::async_runtime::spawn(cloud::run(host.clone()));
+    if let Some(page) = page::launch(host.clone()) {
+        tauri::async_runtime::spawn(page);
+    }
     tauri::async_runtime::spawn(control::launch(host.clone(), host_lock)?);
     Ok(host)
 }

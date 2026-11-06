@@ -89,6 +89,9 @@ fn a_remote_agent_is_refused_what_only_a_person_or_the_owners_computer_may_do() 
         "machine_connect",
         "teams_post",
         "app_quit",
+        // The owner's local page: opening it or obtaining its code, key or session.
+        "app_open",
+        "app_hide",
         "logs",
         "import_existing",
         "test_providers",

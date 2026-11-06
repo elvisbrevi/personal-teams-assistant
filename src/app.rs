@@ -48,6 +48,7 @@ mod maintenance;
 mod mcp;
 mod migration;
 mod notes;
+mod page;
 mod portable;
 mod readiness;
 mod skill;
@@ -61,8 +62,14 @@ pub(crate) trait Shell: Send + Sync {
     fn headless(&self) -> bool;
     fn show(&self) -> Result<()>;
     fn hide(&self) -> Result<()>;
-    /// Open a URL in the user's browser. A headless host only returns the URL to the caller.
+    /// Open a URL in the user's browser. A headless host without a browser session only
+    /// returns the URL to the caller.
     fn open_url(&self, url: &str) -> Result<()>;
+    /// Whether `open_url` reaches a browser a person sees on this computer; the local page
+    /// opens only then.
+    fn browser(&self) -> bool {
+        !self.headless()
+    }
     fn exit(&self);
     fn notify_activity(&self, _title: &str, _body: &str, _entry: Option<&str>) -> Result<()> {
         Ok(())
@@ -126,6 +133,8 @@ pub(crate) struct DesktopState {
     portable: portable::State,
     standing: standing::State,
     cloud: cloud::State,
+    /// The owner's GUI in the system browser (`page.rs`).
+    page: page::Page,
 }
 
 #[derive(Serialize)]
@@ -808,6 +817,7 @@ pub(crate) fn init_state(config_dir: &Path, data_dir: &Path) -> Result<DesktopSt
         portable: portable::State::new(&config_dir),
         standing: standing::State::default(),
         cloud: cloud::State::default(),
+        page: page::Page::default(),
         operations: Mutex::new(()),
         loaded_config: Mutex::new(None),
         settings,
@@ -1864,14 +1874,18 @@ pub fn run() {
         }
     }
     if control::existing_host().is_ok() {
-        if headless {
-            eprintln!("Another host already owns this profile.");
+        // Launching the application again opens the running host's page in the browser.
+        let opened = !args.iter().any(|a| a == "--host")
+            && tokio::runtime::Runtime::new().is_ok_and(|runtime| {
+                runtime
+                    .block_on(control::client(control::Request::new("app_open"), false))
+                    .is_ok_and(|reply| reply.ok)
+            });
+        if headless && !opened {
+            eprintln!(
+                "Another host already owns this profile. Run pta app open in a desktop session to open its page."
+            );
             std::process::exit(1);
-        }
-        if !args.iter().any(|a| a == "--host")
-            && let Ok(runtime) = tokio::runtime::Runtime::new()
-        {
-            let _ = runtime.block_on(control::client(control::Request::new("app_open"), false));
         }
         return;
     }

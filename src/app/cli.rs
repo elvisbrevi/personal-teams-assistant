@@ -23,7 +23,10 @@ Assistant (Teams service)
   doctor [--offline]       Checks configuration, credentials and account (--offline: local files only).
 
 Application (host)
-  app open|hide|quit       Shows or hides the window, or closes the host (stopping the assistant and tunnel first).
+  app open [--window]|hide|quit
+                           Opens this computer's GUI in the system browser (the host signs it in itself; --window
+                           shows the native window instead), hides the window, or closes the host (stopping the
+                           assistant and tunnel first).
 
 Web portal
   Requires Cloudflare Access and a dedicated GitHub OAuth App; see pta skill show.
@@ -302,7 +305,8 @@ Account variables
                            [--arg ARG ...] [--timeout SECONDS] --confirmed
                            Proposes a program to receive the named variables as environment variables of that one
                            process (never arguments). Protected settings such as PATH or LD_* are refused. It runs
-                           nothing until the user approves it in the application window (Settings › Credentials).
+                           nothing until the user approves it in the application (Settings › Credentials;
+                           pta app open shows it).
   variables launcher run NAME [--pin ENV=VERSION ...] --confirmed
                            Runs it with the values resolved now; prints status and references, never output or values.
   variables launcher remove NAME [--confirmed]
@@ -1349,6 +1353,7 @@ fn validate_args(args: &[String]) -> Result<()> {
             | "--non-interactive"
             | "--offline"
             | "--no-browser"
+            | "--window"
             | "--wait"
             | "--content"
             | "--current-profile"
@@ -1659,6 +1664,7 @@ fn validate_args(args: &[String]) -> Result<()> {
     for (flag, allowed) in [
         ("--offline", p[0] == "doctor"),
         ("--no-browser", p[0] == "auth" && p.get(2) == Some(&"login")),
+        ("--window", p.as_slice() == ["app", "open"]),
         ("--wait", p[0] == "auth" && p.get(2) == Some(&"finish")),
         (
             "--replace-settings",
@@ -2254,6 +2260,7 @@ async fn execute(mut args: Vec<String>) -> Result<Reply> {
     if let Some(method) = direct {
         let value = match method {
             "chat" => json!({"input":input()?}),
+            "app_open" if args.iter().any(|a| a == "--window") => json!({"window":true}),
             "self_chat_enable" => json!({"id":args.get(2)}),
             "self_chat_reconcile" => {
                 json!({"nonce":positional(&args,2)?,"id":positional(&args,3)?})

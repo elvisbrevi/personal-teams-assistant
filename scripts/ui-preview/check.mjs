@@ -87,6 +87,29 @@ async function open(options = {}, scenario = 'full') {
 const axeSummary = {};
 const scan = page => page.evaluate(async () => (await axe.run(document, { runOnly: { type: 'tag', values: ['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa', 'wcag22aa'] } })).violations
   .map(v => ({ id: v.id, impact: v.impact, nodes: v.nodes.length, sample: v.nodes[0]?.target?.join(' ') })));
+// The owner's local page: the same GUI over fetch with the window's behavior, not the portal's.
+for (const [label, ctx] of [['desktop', {}], ['phone', { viewport: { width: 393, height: 852 }, isMobile: true, hasTouch: true }], ['dark', { colorScheme: 'dark' }]]) {
+  // The fragment of the address the sign-in page moves to carries the session key (synthetic).
+  const { context, page, errors } = await open({ axe: true, context: ctx }, 'full&transport=local#k=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');
+  check(`local page ${label}: the key leaves the address and every API call carries it`, await page.evaluate(() => window.location.hash === ''
+    && window.__ptaLocalSessionKey === 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' && window.__ptaLocalRequests.every(r => r.key === 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa')));
+  check(`local page ${label}: picks the local transport, not Tauri or the portal`, await page.evaluate(() => window.ptaTransport.local === true && window.ptaTransport.browser === false && !window.__TAURI__));
+  check(`local page ${label}: every call carries the session cookie and the CSRF token`, await page.evaluate(() => window.__ptaLocalRequests.length > 0
+    && window.__ptaLocalRequests.every(r => r.csrf === 'synthetic-csrf-token' && r.credentials === 'same-origin')));
+  check(`local page ${label}: no portal account or sign out`, await page.locator('#web-account').isHidden() && await page.locator('#web-logout-settings').isHidden());
+  await page.evaluate(() => invoke('activity_open'));
+  check(`local page ${label}: activities open in the page`, await page.evaluate(() => tab === 'registration' && !window.__ptaCalls.includes('activity_open')));
+  await page.evaluate(axeSource);
+  for (const section of ['overview', 'settings']) {
+    await page.evaluate(t => showTab(t), section);
+    await page.waitForTimeout(300);
+    const violations = await scan(page);
+    check(`local page ${label}: ${section} passes axe`, violations.length === 0, JSON.stringify(violations));
+  }
+  check(`local page ${label}: no client errors`, errors.length === 0, errors.join('; '));
+  await context.close();
+}
+
 for (const [label, ctx] of [['desktop-light', {}], ['desktop-dark', { colorScheme: 'dark' }], ['phone', { viewport: { width: 393, height: 852 }, isMobile: true, hasTouch: true }]]) {
   const { context, page } = await open({ axe: true, context: ctx });
   await page.evaluate(axeSource);
