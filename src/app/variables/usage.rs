@@ -149,7 +149,7 @@ pub(super) async fn usage(host: &Arc<Host>, request: &control::Request) -> Reply
     let reason = if !usable {
         standing["recovery"].as_str().unwrap_or_default().to_owned()
     } else if !launchers_here {
-        "Launchers run only on the owner's trusted machine, from its application window or local CLI.".to_owned()
+        "Launchers run only on the owner's trusted machine, from its application (window or local page) or local CLI.".to_owned()
     } else {
         String::new()
     };

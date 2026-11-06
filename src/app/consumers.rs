@@ -214,7 +214,7 @@ async fn run(
                     store.audit("launcher", None, "denied_client");
                 }
                 return Err(vault::Error::Conflict(
-                    "Launchers run only from this machine's application window or local CLI."
+                    "Launchers run only from this machine's application (window or local page) or local CLI."
                         .into(),
                 ));
             }
@@ -233,7 +233,7 @@ async fn run(
                     store.audit("launcher_approve", None, "denied_client");
                 }
                 return Err(vault::Error::Conflict(
-                    "Only the user approves a launcher, in this machine's application window or the owner's portal."
+                    "Only the user approves a launcher, in this machine's application (its window or the page pta app open shows) or the owner's portal."
                         .into(),
                 ));
             }

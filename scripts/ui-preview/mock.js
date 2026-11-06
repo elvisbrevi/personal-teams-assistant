@@ -746,15 +746,33 @@
   window.__ptaVariableDeletes = [];
   // Another client changing an entry: the next write that names the old version must conflict.
   window.__ptaVariableChangedElsewhere = id => { const variable = variables.find(v => v.id === id); touch(variable); variable.description = `${variable.description} (edited elsewhere)`; };
+  const invoke = async (_cmd, { request }) => {
+    window.__ptaCalls.push(request.method);
+    await delay(40);
+    const handler = handlers[request.method];
+    if (!handler) return { ok: false, code: 'not_ready', message: `mock: ${request.method} not implemented` };
+    const data = await handler(request.args || {});
+    return reply(data, ['finish_azure_cli_login', 'machine_login_finish'].includes(request.method) && data.pending ? { ok: false, code: 'authorization_pending' } : {});
+  };
+  if (params.get('transport') === 'local') {
+    // The owner's local page (src/app/page.rs): no Tauri bridge, the same contract over fetch
+    // with a session cookie (implied here) and the anti-CSRF header.
+    const realFetch = window.fetch.bind(window);
+    const json = value => new Response(JSON.stringify(value), { headers: { 'Content-Type': 'application/json' } });
+    window.__ptaLocalRequests = [];
+    window.fetch = async (input, options = {}) => {
+      const target = typeof input === 'string' ? input : input.url;
+      if (target === '/api/session') return json({ csrf_token: 'synthetic-csrf-token', local: true });
+      if (target === '/api/control' && options.method === 'POST') {
+        window.__ptaLocalRequests.push({ csrf: options.headers?.['X-PTA-CSRF'], credentials: options.credentials });
+        return json(await invoke('command', { request: JSON.parse(options.body) }));
+      }
+      return realFetch(input, options);
+    };
+    return;
+  }
   window.__TAURI__ = {
-    core: { invoke: async (_cmd, { request }) => {
-      window.__ptaCalls.push(request.method);
-      await delay(40);
-      const handler = handlers[request.method];
-      if (!handler) return { ok: false, code: 'not_ready', message: `mock: ${request.method} not implemented` };
-      const data = await handler(request.args || {});
-      return reply(data, ['finish_azure_cli_login', 'machine_login_finish'].includes(request.method) && data.pending ? { ok: false, code: 'authorization_pending' } : {});
-    } },
+    core: { invoke },
     event: { listen: () => Promise.resolve(() => {}) },
   };
 })();

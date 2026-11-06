@@ -3,7 +3,11 @@
 //! `pta app quit`, SIGTERM or Ctrl-C, which stop the service and its tunnel first.
 use super::*;
 
-struct HeadlessShell(watch::Sender<bool>);
+struct HeadlessShell {
+    quit: watch::Sender<bool>,
+    /// A desktop session this host can open the system browser in (`page::browser_session`).
+    browser: bool,
+}
 
 impl Shell for HeadlessShell {
     fn headless(&self) -> bool {
@@ -15,12 +19,19 @@ impl Shell for HeadlessShell {
     fn hide(&self) -> Result<()> {
         self.show()
     }
-    fn open_url(&self, _url: &str) -> Result<()> {
-        // The URL is returned to the caller, who opens it on any device.
-        Ok(())
+    fn open_url(&self, url: &str) -> Result<()> {
+        if self.browser {
+            page::system_browser(url)
+        } else {
+            // The URL is returned to the caller, who opens it on any device.
+            Ok(())
+        }
+    }
+    fn browser(&self) -> bool {
+        self.browser
     }
     fn exit(&self) {
-        let _ = self.0.send(true);
+        let _ = self.quit.send(true);
     }
 }
 
@@ -31,10 +42,16 @@ pub(crate) fn run(host_lock: fs::File, start_service: bool) -> Result<()> {
         let (quit, mut quit_requested) = watch::channel(false);
         let host = Arc::new(Host {
             state: init_state(&config_dir, &control::default_data_dir()?)?,
-            shell: Box::new(HeadlessShell(quit)),
+            shell: Box::new(HeadlessShell {
+                quit,
+                browser: page::browser_session(),
+            }),
         });
         consumers::install(&host);
         tokio::spawn(cloud::run(host.clone()));
+        if let Some(page) = page::launch(host.clone()) {
+            tokio::spawn(page);
+        }
         tokio::spawn(control::launch(host.clone(), host_lock)?);
         tracing::info!(event = "headless_host_ready");
         if start_service {
@@ -82,7 +99,10 @@ mod tests {
         let (quit, mut quit_requested) = watch::channel(false);
         let host = Arc::new(Host {
             state: init_state(&dir.path().join("profile"), &dir.path().join("data")).unwrap(),
-            shell: Box::new(HeadlessShell(quit)),
+            shell: Box::new(HeadlessShell {
+                quit,
+                browser: false,
+            }),
         });
         let reply = control::dispatch(&host, control::Request::new("app_open")).await;
         assert_eq!((reply.ok, reply.exit_code), (false, 3));

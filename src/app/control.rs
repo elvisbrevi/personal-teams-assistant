@@ -1443,10 +1443,15 @@ async fn operate(
                 .map_err(fail)?
             )
         }
-        "app_open" => {
-            host.shell.show().map_err(fail)?;
-            json!({"visible":true})
-        }
+        "app_open" => match page::open(host) {
+            Ok(opened) => opened,
+            // Until the window is removed, a window build without its page still shows it.
+            Err(_) if !host.shell.headless() && !host.state.page.available() => {
+                host.shell.show().map_err(fail)?;
+                json!({"visible":true,"target":"window"})
+            }
+            Err(error) => return Err(fail(error)),
+        },
         "app_hide" => {
             host.shell.hide().map_err(fail)?;
             json!({"visible":false})

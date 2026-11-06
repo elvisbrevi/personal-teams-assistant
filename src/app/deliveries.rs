@@ -255,7 +255,7 @@ async fn run(
             result?;
             Ok(json!({
                 "destination": view(&destination, &catalog),
-                "next": "Nothing is sent until the user reviews this destination and approves it in Settings > Variables > Where variables are used > Delivery destinations (the application window or the portal). No tool can approve it.",
+                "next": "Nothing is sent until the user reviews this destination and approves it in Settings > Variables > Where variables are used > Delivery destinations (this computer's application, in its window or the page pta app open shows, or the portal). No tool can approve it.",
             }))
         }
         "variable_delivery_approve" => {
@@ -267,7 +267,7 @@ async fn run(
             ) {
                 audit(host, "delivery_approve", None, "denied_client");
                 return Err(denied(
-                    "Only the user approves a delivery destination, in the application window or the portal.",
+                    "Only the user approves a delivery destination, in this computer's application (its window or the page pta app open shows) or the portal.",
                 ));
             }
             let a: ApproveArgs = parse(args)?;
@@ -335,7 +335,7 @@ async fn deliver(
     rules::validate(&destination)?;
     if !destination.approved() {
         return Err(denied(
-            "This destination waits for the user's approval in Settings > Variables (application window or portal); nothing was sent.",
+            "This destination waits for the user's approval in Settings > Variables (this computer's application window or page, or the portal); nothing was sent.",
         ));
     }
     let variable = uuid::Uuid::parse_str(&a.variable)
