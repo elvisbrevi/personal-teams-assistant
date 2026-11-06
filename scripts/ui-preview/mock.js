@@ -762,9 +762,12 @@
     window.__ptaLocalRequests = [];
     window.fetch = async (input, options = {}) => {
       const target = typeof input === 'string' ? input : input.url;
-      if (target === '/api/session') return json({ csrf_token: 'synthetic-csrf-token', local: true });
+      if (target === '/api/session') {
+        window.__ptaLocalSessionKey = options.headers?.['X-PTA-Key'];
+        return json({ csrf_token: 'synthetic-csrf-token', local: true });
+      }
       if (target === '/api/control' && options.method === 'POST') {
-        window.__ptaLocalRequests.push({ csrf: options.headers?.['X-PTA-CSRF'], credentials: options.credentials });
+        window.__ptaLocalRequests.push({ csrf: options.headers?.['X-PTA-CSRF'], key: options.headers?.['X-PTA-Key'], credentials: options.credentials });
         return json(await invoke('command', { request: JSON.parse(options.body) }));
       }
       return realFetch(input, options);

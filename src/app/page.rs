@@ -2,18 +2,22 @@
 //!
 //! Every host of the installation's own profile serves `desktop/ui` and the control contract on
 //! `127.0.0.1` at a port derived from the profile, for the person at this computer. Only the
-//! host opens it: `app_open` hands the system browser (through `Shell::open_url`) a single-use
-//! code that expires within a minute, and the page exchanges it for an HttpOnly, SameSite=Strict
-//! browser-session cookie. The code never appears in a reply, a log or a diagnostic, so the
-//! control endpoint's local token, which agents share, never reaches the window's authority.
-//! Calls from the page run as `Transport::Window`; nothing else widens.
+//! host opens it: `app_open` writes a single-use code that expires within a minute into an
+//! owner-only handoff file and hands the system browser (through `Shell::open_url`) only that
+//! file's `file://` address, so the code never travels in a process argument other OS users can
+//! read. The page exchanges it for an HttpOnly, SameSite=Strict browser-session cookie plus a
+//! second secret in the URL fragment that only this origin's script keeps (cookies ignore ports,
+//! so another server on `127.0.0.1` receives the cookie but never the fragment). The code and the
+//! secrets never appear in a reply, a log or a diagnostic, so the control endpoint's local token,
+//! which agents share, never reaches the window's authority. Calls from the page run as
+//! `Transport::Window`; nothing else widens.
 use super::*;
 use axum::{
     Json,
     extract::DefaultBodyLimit,
     http::{HeaderMap, Method, Uri, header},
     middleware::{self, Next},
-    response::{IntoResponse, Redirect, Response},
+    response::{IntoResponse, Response},
     routing::post,
 };
 use rand::RngCore;
@@ -47,15 +51,38 @@ const TOO_SOON: &str =
 pub(super) struct Page {
     address: OnceLock<SocketAddr>,
     cookie: OnceLock<String>,
-    codes: Lock<Vec<(String, Instant)>>,
+    codes: Lock<Vec<Code>>,
+    /// Where handoff files are written: `<profile>/page-open`, owner-only.
+    handoff: OnceLock<PathBuf>,
     sessions: Lock<HashMap<String, Session>>,
     opened: Lock<Option<Instant>>,
+}
+
+struct Code {
+    digest: String,
+    expires: Instant,
+    file: PathBuf,
 }
 
 #[derive(Clone)]
 struct Session {
     csrf: String,
+    /// Required with the cookie on the API; delivered only in the exchange's URL fragment.
+    key: String,
     expires: Instant,
+}
+
+/// Where a profile's handoff files live; emptied when the host starts.
+pub(super) fn handoff_dir(profile: &Path) -> PathBuf {
+    profile.join("page-open")
+}
+
+/// An owner-only page that sends the browser to the exchange address. Only its `file://`
+/// address leaves the host; the code stays inside the file.
+fn handoff(url: &str) -> String {
+    format!(
+        "<!doctype html><html><head><meta charset=\"utf-8\"><meta name=\"referrer\" content=\"no-referrer\"><meta http-equiv=\"refresh\" content=\"0;url={url}\"><title>Personal Teams Assistant</title></head><body><a href=\"{url}\">Personal Teams Assistant</a></body></html>"
+    )
 }
 
 fn digest(value: &str) -> String {
@@ -150,6 +177,14 @@ pub(super) fn launch(host: Arc<Host>) -> Option<impl std::future::Future<Output 
     };
     let address = listener.local_addr().ok()?;
     let page = &host.state.page;
+    // Handoff files of a previous host hold codes nothing accepts any more.
+    let handoff = handoff_dir(&scope.profile);
+    let _ = fs::remove_dir_all(&handoff);
+    if security::private_dir(&handoff).is_err() {
+        tracing::warn!(event = "local_page_unavailable");
+        return None;
+    }
+    page.handoff.set(handoff).ok()?;
     page.address.set(address).ok()?;
     page.cookie.set(cookie_name(&scope.profile)).ok()?;
     tracing::info!(event = "local_page_ready", port = address.port());
@@ -163,9 +198,9 @@ pub(super) fn launch(host: Arc<Host>) -> Option<impl std::future::Future<Output 
 
 /// `app_open`: the host opens its own page in the system browser with a fresh code. The reply
 /// says only that it opened; the address with the code exists only in the browser's hands.
-pub(super) fn open(host: &Host) -> Result<Value> {
+pub(super) fn open(host: &Arc<Host>) -> Result<Value> {
     let page = &host.state.page;
-    let Some(address) = page.address.get() else {
+    let (Some(address), Some(directory)) = (page.address.get(), page.handoff.get()) else {
         return Err(SetupError(UNAVAILABLE).into());
     };
     if !host.shell.browser() {
@@ -180,22 +215,64 @@ pub(super) fn open(host: &Host) -> Result<Value> {
         *opened = Some(now);
     }
     let code = random();
+    let file = directory.join(format!("open-{}.html", random()));
+    write_private(
+        &file,
+        &handoff(&format!("http://{address}/open?code={code}")),
+    )
+    .map_err(|_| SetupError(UNAVAILABLE))?;
+    let location = url::Url::from_file_path(&file).map_err(|_| SetupError(UNAVAILABLE))?;
     {
         let mut codes = page.codes.lock().unwrap_or_else(|e| e.into_inner());
-        codes.retain(|(_, expires)| *expires > now);
-        codes.push((digest(&code), now + CODE_LIFETIME));
+        codes.push(Code {
+            digest: digest(&code),
+            expires: now + CODE_LIFETIME,
+            file,
+        });
         let excess = codes.len().saturating_sub(MAX_CODES);
-        codes.drain(..excess);
+        for dropped in codes.drain(..excess) {
+            let _ = fs::remove_file(dropped.file);
+        }
     }
-    host.shell
-        .open_url(&format!("http://{address}/open?code={code}"))
-        .map_err(|_| SetupError(NO_BROWSER))?;
+    page.prune();
+    // The handoff file goes when its code expires, even if nobody redeems it.
+    if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+        let host = Arc::downgrade(host);
+        runtime.spawn(async move {
+            tokio::time::sleep(CODE_LIFETIME + Duration::from_secs(1)).await;
+            if let Some(host) = host.upgrade() {
+                host.state.page.prune();
+            }
+        });
+    }
+    if host.shell.open_url(location.as_str()).is_err() {
+        page.prune_all();
+        return Err(SetupError(NO_BROWSER).into());
+    }
     Ok(json!({"opened": true, "target": "browser"}))
 }
 
 impl Page {
     pub(super) fn available(&self) -> bool {
         self.address.get().is_some()
+    }
+    /// Removes expired codes and their handoff files.
+    fn prune(&self) {
+        let now = Instant::now();
+        let mut codes = self.codes.lock().unwrap_or_else(|e| e.into_inner());
+        codes.retain(|code| {
+            let live = code.expires > now;
+            if !live {
+                let _ = fs::remove_file(&code.file);
+            }
+            live
+        });
+    }
+    fn prune_all(&self) {
+        let mut codes = self.codes.lock().unwrap_or_else(|e| e.into_inner());
+        for code in codes.drain(..) {
+            let _ = fs::remove_file(code.file);
+        }
     }
     /// Consumes a code: valid once, before it expires; an expired or reused one opens nothing.
     fn redeem(&self, code: &str) -> bool {
@@ -204,16 +281,22 @@ impl Page {
         }
         let key = digest(code);
         let now = Instant::now();
-        let mut codes = self.codes.lock().unwrap_or_else(|e| e.into_inner());
-        let found = codes.iter().position(|(stored, _)| *stored == key);
-        let valid = found.is_some_and(|i| codes[i].1 > now);
-        if let Some(i) = found {
-            codes.remove(i);
-        }
-        codes.retain(|(_, expires)| *expires > now);
+        let valid = {
+            let mut codes = self.codes.lock().unwrap_or_else(|e| e.into_inner());
+            match codes.iter().position(|stored| stored.digest == key) {
+                Some(i) => {
+                    let code = codes.remove(i);
+                    let _ = fs::remove_file(&code.file);
+                    code.expires > now
+                }
+                None => false,
+            }
+        };
+        self.prune();
         valid
     }
-    fn issue(&self) -> String {
+    /// A new session: the cookie's token and the fragment's key.
+    fn issue(&self) -> (String, String) {
         let token = random();
         let now = Instant::now();
         let mut sessions = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
@@ -228,14 +311,23 @@ impl Page {
                 None => break,
             };
         }
+        let key = random();
         sessions.insert(
             digest(&token),
             Session {
                 csrf: security::random_secret(),
+                key: key.clone(),
                 expires: now + SESSION_LIFETIME,
             },
         );
-        token
+        (token, key)
+    }
+    /// The cookie's session, and only when the request also carries its key: what another
+    /// server on `127.0.0.1` that received the cookie cannot add.
+    fn keyed(&self, headers: &HeaderMap) -> Option<Session> {
+        let session = self.session(headers)?;
+        let key = headers.get("x-pta-key").and_then(|h| h.to_str().ok())?;
+        security::constant_eq(key, &session.key).then_some(session)
     }
     fn session(&self, headers: &HeaderMap) -> Option<Session> {
         let name = self.cookie.get()?;
@@ -274,6 +366,7 @@ fn router(host: Arc<Host>) -> Router {
         .route("/", get(index))
         .route("/index.html", get(index))
         .route("/open", get(exchange))
+        .route("/signed-out", get(|| async { signed_out() }))
         .route(
             "/style.css",
             get(|| async {
@@ -351,10 +444,15 @@ async fn guard(
         None => request.method() != Method::POST,
         Some(origin) => origin.to_str().ok() == page.origin().as_deref(),
     };
+    // The handoff file navigates from `file://`, which browsers mark cross-site; the exchange
+    // still needs a valid single-use code, the exact Host and no foreign Origin.
+    let exchange = request.method() == Method::GET && request.uri().path() == "/open";
     let site_ok = headers
         .get("sec-fetch-site")
         .and_then(|h| h.to_str().ok())
-        .is_none_or(|site| matches!(site, "same-origin" | "none"));
+        .is_none_or(|site| {
+            matches!(site, "same-origin" | "none") || (exchange && site == "cross-site")
+        });
     let mut response = if !host_ok {
         StatusCode::MISDIRECTED_REQUEST.into_response()
     } else if !origin_ok || !site_ok {
@@ -403,7 +501,8 @@ async fn index(State(host): State<Arc<Host>>, headers: HeaderMap) -> Response {
 }
 
 /// Exchanges the host's code for a browser-session cookie (no `Max-Age`: closing the browser
-/// ends it) and leaves the code out of the address bar and history.
+/// ends it) and the session's key, which only the fragment of the page's next address carries
+/// (a fragment is never sent to a server); the code leaves the address bar and history.
 async fn exchange(State(host): State<Arc<Host>>, uri: Uri) -> Response {
     let page = &host.state.page;
     let code = uri
@@ -416,8 +515,16 @@ async fn exchange(State(host): State<Arc<Host>>, uri: Uri) -> Response {
     if !page.redeem(code) {
         return signed_out();
     }
-    let token = page.issue();
-    let mut response = Redirect::to("/").into_response();
+    let (token, key) = page.issue();
+    // A page of this origin, not a redirect: the navigation from `file://` is cross-site, so a
+    // SameSite=Strict cookie would not accompany a redirect's target. This page's own
+    // navigation to `/` is same-site and carries it.
+    let mut response = asset_owned(
+        "text/html; charset=utf-8",
+        format!(
+            "<!doctype html><html><head><meta charset=\"utf-8\"><meta http-equiv=\"refresh\" content=\"0;url=/#k={key}\"><title>Personal Teams Assistant</title></head><body></body></html>"
+        ),
+    );
     response.headers_mut().insert(
         header::SET_COOKIE,
         format!("{name}={token}; Path=/; HttpOnly; SameSite=Strict")
@@ -425,6 +532,10 @@ async fn exchange(State(host): State<Arc<Host>>, uri: Uri) -> Response {
             .unwrap(),
     );
     response
+}
+
+fn asset_owned(content_type: &'static str, content: String) -> Response {
+    ([(header::CONTENT_TYPE, content_type)], content).into_response()
 }
 
 async fn app_js(State(host): State<Arc<Host>>, headers: HeaderMap) -> Response {
@@ -448,7 +559,7 @@ async fn transport_js(State(host): State<Arc<Host>>, headers: HeaderMap) -> Resp
 }
 
 async fn session(State(host): State<Arc<Host>>, headers: HeaderMap) -> Response {
-    match host.state.page.session(&headers) {
+    match host.state.page.keyed(&headers) {
         Some(session) => Json(json!({"csrf_token": session.csrf, "local": true})).into_response(),
         None => StatusCode::UNAUTHORIZED.into_response(),
     }
@@ -460,7 +571,7 @@ async fn command(
     headers: HeaderMap,
     Json(request): Json<control::Request>,
 ) -> Response {
-    let Some(session) = host.state.page.session(&headers) else {
+    let Some(session) = host.state.page.keyed(&headers) else {
         return StatusCode::UNAUTHORIZED.into_response();
     };
     let csrf = headers.get("x-pta-csrf").and_then(|h| h.to_str().ok());

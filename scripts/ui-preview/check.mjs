@@ -89,7 +89,10 @@ const scan = page => page.evaluate(async () => (await axe.run(document, { runOnl
   .map(v => ({ id: v.id, impact: v.impact, nodes: v.nodes.length, sample: v.nodes[0]?.target?.join(' ') })));
 // The owner's local page: the same GUI over fetch with the window's behavior, not the portal's.
 for (const [label, ctx] of [['desktop', {}], ['phone', { viewport: { width: 393, height: 852 }, isMobile: true, hasTouch: true }], ['dark', { colorScheme: 'dark' }]]) {
-  const { context, page, errors } = await open({ axe: true, context: ctx }, 'full&transport=local');
+  // The fragment of the address the sign-in page moves to carries the session key (synthetic).
+  const { context, page, errors } = await open({ axe: true, context: ctx }, 'full&transport=local#k=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');
+  check(`local page ${label}: the key leaves the address and every API call carries it`, await page.evaluate(() => window.location.hash === ''
+    && window.__ptaLocalSessionKey === 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' && window.__ptaLocalRequests.every(r => r.key === 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa')));
   check(`local page ${label}: picks the local transport, not Tauri or the portal`, await page.evaluate(() => window.ptaTransport.local === true && window.ptaTransport.browser === false && !window.__TAURI__));
   check(`local page ${label}: every call carries the session cookie and the CSRF token`, await page.evaluate(() => window.__ptaLocalRequests.length > 0
     && window.__ptaLocalRequests.every(r => r.csrf === 'synthetic-csrf-token' && r.credentials === 'same-origin')));

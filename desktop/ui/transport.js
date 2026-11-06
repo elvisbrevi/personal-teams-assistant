@@ -9,12 +9,25 @@
     return;
   }
   const local = document.querySelector('meta[name="pta-transport"]')?.content === 'local';
+  // The local page's session key arrives once, in the fragment of the address the sign-in page moves to: kept in
+  // this origin's sessionStorage (another server on 127.0.0.1 gets the cookie, never this) and
+  // removed from the address. A new tab has no key and asks for a new sign-in.
+  let key = null;
+  if (local) {
+    const given = /^#k=([0-9a-f]{64})$/.exec(window.location.hash)?.[1];
+    if (given) window.history.replaceState(null, '', window.location.pathname + window.location.search);
+    try {
+      if (given) sessionStorage.setItem('pta-local-key', given);
+      key = sessionStorage.getItem('pta-local-key') || given || null;
+    } catch { key = given || null; }
+  }
   let identity;
   async function response(path, options = {}) {
-    const reply = await fetch(path, { credentials: 'same-origin', cache: 'no-store', ...options });
+    const headers = { ...(options.headers || {}), ...(key ? { 'X-PTA-Key': key } : {}) };
+    const reply = await fetch(path, { credentials: 'same-origin', cache: 'no-store', ...options, headers });
     if (reply.status === 401 && local) {
-      // Only the host opens a new sign-in (pta app open); the page explains it.
-      window.location.replace('/');
+      // Only the host opens a new sign-in (pta app open); this page explains it.
+      window.location.replace('/signed-out');
       throw new Error('Your session has expired. Sign in again.');
     }
     if (reply.status === 401) {
