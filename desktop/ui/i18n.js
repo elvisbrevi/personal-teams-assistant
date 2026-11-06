@@ -1394,6 +1394,8 @@ const UI_CATALOG = { es: {
   "The systemd user manager is not available in this session (systemctl --user does not answer).": "El gestor de usuario de systemd no está disponible en esta sesión (systemctl --user no responde).",
   "Log in to a session with systemd, or enable lingering with loginctl enable-linger, and try again.": "Inicia una sesión con systemd, o activa la permanencia con loginctl enable-linger, e inténtalo de nuevo.",
   "An entry with this name exists that pta did not create; it was left unchanged.": "Existe una entrada con este nombre que pta no creó; se dejó sin cambios.",
+  "This host runs with the isolated profile's private home, as pta starts it, so it cannot register an entry for your login.": "Esta aplicación funciona con el directorio privado del perfil aislado, como la inicia pta, así que no puede registrar una entrada para tu inicio de sesión.",
+  "Quit it with pta app quit, start personal-teams-assistant --host from your own session with PTA_PROFILE_DIR set, and try again.": "Ciérrala con pta app quit, inicia personal-teams-assistant --host desde tu propia sesión con PTA_PROFILE_DIR definido e inténtalo de nuevo.",
   "Remove it with the operating system's tools first.": "Elimínala primero con las herramientas del sistema operativo.",
   "The service is running with another executable or profile.": "El servicio está funcionando con otro ejecutable u otro perfil.",
   "Quit the host with pta app quit, then install the service again.": "Cierra la aplicación con pta app quit y luego vuelve a instalar el servicio.",

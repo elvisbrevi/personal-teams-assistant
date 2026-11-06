@@ -629,3 +629,11 @@ async fn a_login_never_starts_the_assistant_without_the_intent_or_the_teams_leas
     // The intent is kept for a later login on which this computer holds Teams again.
     assert!(intended(&profile));
 }
+
+#[test]
+fn a_host_with_the_profiles_private_home_cannot_register_the_users_entry() {
+    let root = tempfile::tempdir().unwrap();
+    let profile = root.path().join("profile");
+    // HOME is never under a profile in a person's session.
+    assert!(!sandboxed(&profile));
+}

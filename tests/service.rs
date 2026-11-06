@@ -20,6 +20,19 @@ fn live() -> bool {
 struct Profile {
     _root: tempfile::TempDir,
     dir: PathBuf,
+    /// Hosts this test started itself, reaped at the end.
+    hosts: std::cell::RefCell<Vec<std::process::Child>>,
+}
+
+impl Drop for Profile {
+    fn drop(&mut self) {
+        for mut host in self.hosts.take() {
+            if !matches!(host.try_wait(), Ok(Some(_))) {
+                let _ = host.kill();
+            }
+            let _ = host.wait();
+        }
+    }
 }
 
 impl Profile {
@@ -27,7 +40,11 @@ impl Profile {
         let root = tempfile::tempdir().unwrap();
         let dir = root.path().join("profile");
         std::fs::create_dir_all(&dir).unwrap();
-        Self { _root: root, dir }
+        Self {
+            _root: root,
+            dir,
+            hosts: Default::default(),
+        }
     }
 
     fn pta(&self, args: &[&str]) -> (i32, Value) {
@@ -73,6 +90,25 @@ impl Profile {
         }
         eprintln!("service live test: {what} did not happen within {limit:?}");
         false
+    }
+
+    /// Starts the host the way a person does in their own session (with its variables), unless
+    /// one owns the profile. The host `pta` starts for an isolated profile is sandboxed and
+    /// cannot register the user's entry.
+    fn start_host(&self) -> bool {
+        if self.host_running() {
+            return true;
+        }
+        let host = Command::new(env!("CARGO_BIN_EXE_personal-teams-assistant"))
+            .arg("--host")
+            .env("PTA_PROFILE_DIR", &self.dir)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        self.hosts.borrow_mut().push(host);
+        self.wait(true, "the host starting", Duration::from_secs(60))
     }
 
     fn quit(&self) {
@@ -134,6 +170,7 @@ struct Cleanup<'a> {
 
 impl Drop for Cleanup<'_> {
     fn drop(&mut self) {
+        self.profile.start_host();
         let _ = self.profile.pta(&["service", "uninstall", "--confirmed"]);
         self.profile.quit();
         if let Some(name) = &self.name {
@@ -169,6 +206,7 @@ fn a_login_starts_the_host_through_the_service_manager_and_uninstall_removes_onl
         profile: &profile,
         name: None,
     };
+    assert!(profile.start_host(), "the host did not start");
     let before = profile.ok(&["service", "status"]);
     assert_eq!(before["supported"], true, "{before}");
     assert_eq!(before["installed"], false, "{before}");
@@ -240,6 +278,7 @@ fn a_login_starts_the_host_through_the_service_manager_and_uninstall_removes_onl
     }
 
     // Uninstall removes the entry; a host it runs keeps running until it quits.
+    assert!(profile.start_host(), "the host did not start");
     let removed = profile.ok(&["service", "uninstall", "--confirmed"]);
     assert_eq!(removed["installed"], false, "{removed}");
     assert_eq!(removed["changed"], true, "{removed}");

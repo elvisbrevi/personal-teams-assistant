@@ -695,6 +695,7 @@ type Refusal = (&'static str, String);
 
 const FOREIGN: &str = "An entry with this name exists that pta did not create; it was left unchanged. Remove it with the operating system's tools first.";
 const UNAVAILABLE: &str = "The systemd user manager is not available in this session (systemctl --user does not answer). Log in to a session with systemd, or enable lingering with loginctl enable-linger, and try again.";
+const SANDBOXED: &str = "This host runs with the isolated profile's private home, as pta starts it, so it cannot register an entry for your login. Quit it with pta app quit, start personal-teams-assistant --host from your own session with PTA_PROFILE_DIR set, and try again.";
 const RUNNING_OTHER: &str = "The service is running with another executable or profile. Quit the host with pta app quit, then install the service again.";
 
 fn failed(what: &str) -> Refusal {
@@ -948,6 +949,14 @@ fn unsupported() -> Value {
 }
 
 /// The executable an entry should start: this host's own.
+/// A host `pta` started for an isolated profile runs with that profile's private home and
+/// without the session's variables, so it cannot see or register the user's own entry.
+fn sandboxed(profile: &Path) -> bool {
+    std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
+        .map(PathBuf::from)
+        .is_some_and(|home| home.starts_with(profile))
+}
+
 fn own_target(host: &Host) -> Option<Target> {
     let exe = std::env::current_exe().ok()?;
     Target::detect(host.state.settings.profile(), &exe).ok()
@@ -966,6 +975,9 @@ pub(super) async fn operate(host: &Arc<Host>, request: &control::Request) -> Rep
         .is_some_and(|args| !args.is_empty())
     {
         return Reply::error("invalid_input", 2, "This operation takes no arguments.");
+    }
+    if sandboxed(host.state.settings.profile()) {
+        return Reply::error("not_ready", 3, SANDBOXED);
     }
     let Some(target) = own_target(host) else {
         return Reply::success(unsupported());
