@@ -102,8 +102,8 @@ jobs:
         if: ${{ !contains(matrix.target, 'windows') }}
         env:
           PTA_INSTALL_TEST_TARGET: ${{ matrix.target }}
-          # A release already published with archives: the real download path, read-only.
-          PTA_INSTALL_TEST_RELEASE: 0.11.1
+          # A release published with all four archives: the real download path, read-only.
+          PTA_INSTALL_TEST_RELEASE: 0.11.0
         run: |
           version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
           if [ "$RUNNER_OS" = Linux ]; then
@@ -117,7 +117,7 @@ jobs:
         if: ${{ contains(matrix.target, 'windows') }}
         shell: pwsh
         env:
-          PTA_INSTALL_TEST_RELEASE: 0.11.1
+          PTA_INSTALL_TEST_RELEASE: 0.11.0
         run: |
           $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.*)"$' | Select-Object -First 1).Matches[0].Groups[1].Value
           powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/install/test-install.ps1 -Dist dist -Version $version
