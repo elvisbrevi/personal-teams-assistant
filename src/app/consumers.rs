@@ -4,7 +4,7 @@
 //! of use: a deleted, rotated-since-chosen or foreign reference fails and never falls back to
 //! another account, the environment or a stored credential. No operation returns a value.
 //! Built-in consumers (DeepSeek) are available to the account's GUI, CLI and MCP. Launchers run a
-//! local program and exist only on the trusted personal machine: the application window or the
+//! local program and exist only on the trusted personal machine: the local page or the
 //! local CLI of an installation owner, inside its allowed roots.
 use super::{authority, control::Reply, implementation, variables as vars, *};
 use crate::store::settings::SettingsStore;
@@ -214,8 +214,7 @@ async fn run(
                     store.audit("launcher", None, "denied_client");
                 }
                 return Err(vault::Error::Conflict(
-                    "Launchers run only from this machine's application (window or local page) or local CLI."
-                        .into(),
+                    "Launchers run only from this machine's local page or local CLI.".into(),
                 ));
             }
         }
@@ -233,7 +232,7 @@ async fn run(
                     store.audit("launcher_approve", None, "denied_client");
                 }
                 return Err(vault::Error::Conflict(
-                    "Only the user approves a launcher, in this machine's application (its window or the page pta app open shows) or the owner's portal."
+                    "Only the user approves a launcher, in this machine's application (the local page pta app open shows) or the owner's portal."
                         .into(),
                 ));
             }

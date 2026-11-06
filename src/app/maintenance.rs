@@ -4,7 +4,7 @@
 //! release with Cargo into a directory of this profile while the installed executables keep
 //! running, then verifies the matched host/CLI pair; it replaces nothing and installs nothing.
 //! Only the genuine local owner of the installation (the control endpoint's own token or the
-//! application window, on a profile that is not a shared portal account) can check or stage; a
+//! local page, on a profile that is not a shared portal account) can check or stage; a
 //! portal session, a machine credential or an ordinary account only sees that the server's
 //! updates are managed by its operator. The shared server's own timer (`scripts/vps-update.py`)
 //! is independent of everything here.
@@ -28,7 +28,7 @@ const AUTO_EVERY: u64 = 6 * 60 * 60;
 const AUTO_DUE: i64 = 12 * 60 * 60;
 const MANAGED: &str =
     "Updates for this server are applied by its operator; there is nothing to install from here.";
-const LOCAL_ONLY: &str = "Updating this installation needs the local owner of the computer: use the application (its window or the page pta app open shows) or pta on that computer.";
+const LOCAL_ONLY: &str = "Updating this installation needs the local owner of the computer: use the application (the local page pta app open shows) or pta on that computer.";
 
 pub(super) fn handles(method: &str) -> bool {
     method.starts_with("crate_update_")

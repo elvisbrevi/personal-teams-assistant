@@ -518,7 +518,6 @@ pub(super) const PORTAL_METHODS: &[&str] = &[
     "start_assistant",
     "stop_assistant",
     "restart",
-    "dismiss_restart_offer",
     "validate",
     "save_settings",
     "import_existing",

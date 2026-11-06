@@ -944,7 +944,7 @@ pub fn describe(journal: &Journal) -> serde_json::Value {
         "error": journal.error, "data_restored": journal.data_restored,
         "notes": journal.notes,
         "recovery": (journal.phase == Phase::Failed).then_some(
-            "Reinstall the exact version with `cargo install personal-teams-assistant --version X.Y.Z --locked --force` (add --no-default-features for a headless installation), then start the application. Your data and credentials were not removed."),
+            "Reinstall the exact version with `cargo install personal-teams-assistant --version X.Y.Z --locked --force`, then start the application. Your data and credentials were not removed."),
     })
 }
 

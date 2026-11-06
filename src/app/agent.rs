@@ -325,7 +325,6 @@ pub(super) const NEVER: &[&str] = &[
     "machine_protocol",
     "app_quit",
     "app_open",
-    "app_hide",
 ];
 
 pub(super) const DENIED: &str = "This operation is not available to a remote agent.";

@@ -22,7 +22,7 @@ Ask it, for example, which work you did in the last two weeks that no task recor
 
 To-Do cards and work item details also offer **Implement**. Choose an enrolled machine, working directories, context and an installed Codex, Claude Code or OpenCode V2 agent, model and effort. HUs, backlog bugs and GitHub epics propose children for you to review and create; tasks (any task-category type) and ordinary GitHub issues implement the selected item. Every execution retains its real agent session, state and start/end times in SQLite, with app links where supported. Machines connect to your account's portal; Settings selects the single machine allowed to read and reply through Teams. See the [implementation workflow](desktop/skills/personal-teams-assistant/references/tools-and-todo.md#implement-work-items-and-inspect-agent-sessions) for enrollment, permissions and supported session links.
 
-The app and its answers to Teams follow the configured language, Spanish or English (`llm.language`); the CLI and audit log are in English. The GUI also works on phones: the web portal has a floating tab bar, follows the system's light or dark mode (or the one you choose in Settings › General) and installs on the home screen with its own icon.
+The app and its answers to Teams follow the configured language, Spanish or English (`llm.language`); the CLI and audit log are in English. The interface is a web page: on your computer it opens in the system browser, and your web portal serves it on any other device. On phones the portal has a floating tab bar, follows the system's light or dark mode (or the one you choose in Settings › General) and installs on the home screen with its own icon.
 
 <p align="center">
   <picture>
@@ -39,10 +39,10 @@ Activities can save the user's existing Azure tasks on a daily or interval sched
 
 ## Installation
 
-One Cargo package, `personal-teams-assistant`, installs everything: the tray/menu bar app and host `personal-teams-assistant`, the `pta` CLI and the agent skill built into `pta`.
+One Cargo package, `personal-teams-assistant`, installs everything: the host `personal-teams-assistant` with its web interface, the `pta` CLI and the agent skill built into `pta`. It is the same build and the same command on macOS, Windows and Linux, with no window, tray or GTK/WebKit packages: launching `personal-teams-assistant` starts the host and opens its interface in the system browser.
 
 ```sh
-cargo binstall personal-teams-assistant           # prebuilt on macOS and Windows; compiles elsewhere
+cargo binstall personal-teams-assistant           # prebuilt on macOS, Windows and Linux
 cargo install personal-teams-assistant --locked   # from crates.io, compiled here
 cargo install --path . --locked                   # from this checkout
 ```
@@ -57,16 +57,15 @@ cargo install personal-teams-assistant --locked
 pta status
 ```
 
-Requirements: Rust (version pinned in `rust-toolchain.toml`), the native prerequisites of Tauri 2, Git and `~/.cargo/bin` in `PATH`. To receive Teams messages you also need a stable HTTPS URL that reaches the local port (e.g. `cloudflared` with a token) and the computer on.
+Requirements: Rust (version pinned in `rust-toolchain.toml`, with a C compiler and linker to compile), Git and `~/.cargo/bin` in `PATH`. To receive Teams messages you also need a stable HTTPS URL that reaches the local port (e.g. `cloudflared` with a token) and the computer on.
 
-On Linux or a server, install the **headless** variant (no Tauri or WebKit) and operate it only with `pta`:
+On a server, install it the same way, run the host in the foreground and operate it with `pta` or the portal:
 
 ```sh
-cargo install personal-teams-assistant --no-default-features --locked
-personal-teams-assistant --headless --start    # foreground; fits a systemd service
+personal-teams-assistant --start    # foreground; `--start` starts the assistant; fits a systemd service
 ```
 
-Its credentials are stored with `pta credentials set` in private profile files or come from `NAME`/`NAME_FILE` variables. The Microsoft login is completed from any device with `pta auth microsoft finish --redirect 'URL'`. Details in the [architecture](docs/architecture.md#headless-host-linux-and-servers). Never keep two instances of the same account active.
+Its credentials are stored with `pta credentials set` in private profile files or come from `NAME`/`NAME_FILE` variables. The Microsoft login is completed from any device with `pta auth microsoft finish --redirect 'URL'`. Details in the [architecture](docs/architecture.md#headless-host). Never keep two instances of the same account active.
 
 Each assistant account can also keep **stored variables** (a name, a description and an encrypted value) for its own use: add, edit, reveal, copy and delete them in Settings > Credentials > Variables (reveal and copy are human-only) or with `pta variables create NAME --description TEXT` / `pta variables update ID --expected-version N` (value on a protected stdin pipe), and let an agent discover them by name and description without ever seeing a value (`pta variables list|search`, MCP `variable_*`). A computer signed in to the account keeps a metadata-only copy of the catalog in step with the coordinator (`pta variables sync|status`, Synchronize now in the GUI); values are never copied. Operators back up and rotate their keys with `pta variables key backup|restore|rotate`; see the [architecture](docs/architecture.md#account-variables) and the [skill reference](desktop/skills/personal-teams-assistant/references/variables.md).
 
@@ -93,7 +92,7 @@ To connect another computer you own, enter your portal's HTTPS address on that c
 
 Operators configure their own Cloudflare Access/Tunnel, HTTPS and edge HSTS, SSH keys and host firewall. The app sends hostname-only HSTS on HTTPS origin responses. Installing the crate does not provision or harden a server.
 
-Profiles share the trusted operator's OS account. Selected coding directories and provider permissions are not OS isolation for untrusted code. The [security policy](SECURITY.md) documents these limits, upstream desktop dependency notices and private vulnerability reporting; the [web setup guide](desktop/skills/personal-teams-assistant/references/web-access.md) covers deployment.
+Profiles share the trusted operator's OS account. Selected coding directories and provider permissions are not OS isolation for untrusted code. The [security policy](SECURITY.md) documents these limits, upstream dependency notices and private vulnerability reporting; the [web setup guide](desktop/skills/personal-teams-assistant/references/web-access.md) covers deployment.
 
 ### Update
 
@@ -212,21 +211,21 @@ and a dedicated GitHub OAuth App. Before updating a password-based portal,
 prepare Access using the [migration guide](desktop/skills/personal-teams-assistant/references/web-access.md),
 update the host and CLI together, then associate existing users with their
 verified GitHub identities.
-The native app, CLI, Microsoft session and existing profiles are preserved.
+The host, CLI, Microsoft session and existing profiles are preserved.
 
 ```sh
 cargo install personal-teams-assistant --locked
 pta status
 ```
 
-Cargo runs nothing after installing, so the previous version keeps running until the new one is first used. The first `pta` command (any; `pta status` will do) or opening the app detects that the installed binary changed, stops the previous host (assistant and tunnel) and, if the assistant was running, asks whether to keep it running with the new version (in the app, with a notice in the window). Without an interactive terminal (`--non-interactive`, `--json`, systemd) it keeps the previous state.
+Cargo runs nothing after installing, so the previous version keeps running until the new one is first used. The first `pta` command (any; `pta status` will do) or launching `personal-teams-assistant` detects that the installed binary changed, stops the previous host (assistant and tunnel) and, if the assistant was running, asks on the terminal whether to keep it running with the new version. Without an interactive terminal (`--non-interactive`, `--json`, systemd) it keeps the previous state.
 
 From 0.6.1 on, a profile saved by the app no longer has the `[jev]` section that older versions require: do not go back to an older version with the same profile.
 
 ## Quick use
 
 ```sh
-personal-teams-assistant          # opens the window (or pta app open)
+personal-teams-assistant          # starts the host and opens the GUI in the browser (or pta app open)
 pta help                          # every command, with its description
 pta status                        # running? host, assistant, mode, Teams and models
 pta start                         # starts the assistant

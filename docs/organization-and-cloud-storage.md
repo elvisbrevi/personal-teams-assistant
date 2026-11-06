@@ -507,7 +507,7 @@ Taken before phase 4b (2026-11-03):
     (language, style, model chain, policies, message style, daily activity, sources, contexts,
     questions, people, prompts, the organization, the notes) is the account's.
 20. **Launchers approved in the portal.** The owner of an unshared profile may approve a launcher
-    in their own portal session (`Browser` transport) as in the window: the command, arguments,
+    in their own portal session (`Browser` transport) as on the local page: the command, arguments,
     folder and variables are shown, the digest must match, and any change needs a new approval.
     Ordinary accounts, the CLI, the MCP and machine credentials still cannot approve, and defining,
     removing and running stay on the machine itself.

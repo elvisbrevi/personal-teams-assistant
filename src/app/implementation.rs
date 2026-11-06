@@ -518,7 +518,7 @@ async fn operation(host: &Arc<Host>, method: &str, args: &Value) -> Result<Value
                 .session_id
                 .context("The agent has not reported a session ID yet.")?;
             ensure!(
-                !host.shell.headless(),
+                host.shell.browser(),
                 "This host has no desktop. Open the session from a desktop device with access to this machine."
             );
             match run.launch.request.provider.as_str() {
@@ -1259,15 +1259,6 @@ mod tests {
     }
     struct TestShell;
     impl Shell for TestShell {
-        fn headless(&self) -> bool {
-            true
-        }
-        fn show(&self) -> Result<()> {
-            Ok(())
-        }
-        fn hide(&self) -> Result<()> {
-            Ok(())
-        }
         fn open_url(&self, _: &str) -> Result<()> {
             Ok(())
         }

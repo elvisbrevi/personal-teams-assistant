@@ -1,7 +1,7 @@
-// Serves desktop/ui (or another copy of it) with a mocked Tauri bridge, synthetic data and the
-// portal's CSP, so the GUI can be seen and tested without a host, a profile or credentials.
+// Serves desktop/ui (or another copy of it) as the owner's local page over a mocked host, with
+// synthetic data and the portal's CSP, so the GUI can be seen and tested without a host, a profile
+// or credentials.
 // Usage: node scripts/ui-preview/server.mjs [ui-dir] [port]   then open http://127.0.0.1:4173/?scenario=full|fresh
-// (add &transport=local for the owner's local page instead of the window)
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -15,16 +15,16 @@ const csp = "default-src 'self'; script-src 'self'; style-src 'self'; img-src 's
 const types = { '.js': 'text/javascript', '.css': 'text/css', '.html': 'text/html', '.svg': 'image/svg+xml', '.png': 'image/png', '.webmanifest': 'application/manifest+json' };
 
 http.createServer((req, res) => {
-  const { pathname, searchParams } = new URL(req.url, 'http://localhost');
+  const { pathname } = new URL(req.url, 'http://localhost');
   let file = pathname;
   let body;
   if (pathname === '/' || pathname === '/index.html') {
     file = 'index.html';
-    // The mock must exist before transport.js picks the Tauri bridge. ?transport=local marks the
-    // document the way the owner's local page does (src/app/page.rs).
+    // The mock must exist before transport.js picks its transport; the document is marked the way
+    // the owner's local page marks it (src/app/page.rs).
     body = fs.readFileSync(path.join(ui, file), 'utf8')
-      .replace('<script src="transport.js"', '<script src="/__fixture.js"></script><script src="/__mock.js"></script><script src="transport.js"');
-    if (searchParams.get('transport') === 'local') body = body.replace('<head>', '<head>\n  <meta name="pta-transport" content="local">');
+      .replace('<script src="transport.js"', '<script src="/__fixture.js"></script><script src="/__mock.js"></script><script src="transport.js"')
+      .replace('<head>', '<head>\n  <meta name="pta-transport" content="local">');
   } else if (pathname === '/__mock.js') {
     body = fs.readFileSync(path.join(here, 'mock.js'));
   } else if (pathname === '/__fixture.js') {

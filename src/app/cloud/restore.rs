@@ -222,7 +222,7 @@ pub(super) async fn operate_restore(host: &Arc<Host>, args: RestoreArgs) -> Repl
         return Reply::error(
             "authority_denied",
             6,
-            "Restoring a backup restarts the application: do it from this computer's window or its local CLI, as its owner.",
+            "Restoring a backup restarts the application: do it from this computer's local page or its local CLI, as its owner.",
         );
     }
     let profile = host.state.settings.profile().to_path_buf();

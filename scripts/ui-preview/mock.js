@@ -1,4 +1,5 @@
-// Mocked Tauri bridge with synthetic data (no real profile, account or credential).
+// The host mocked behind the local page's fetch transport, with synthetic data (no real profile,
+// account or credential).
 // ?scenario=full: a configured, running profile with messages and activities; ?scenario=fresh: a new profile.
 // Saves are recorded in window.__ptaLastSave and every method called in window.__ptaCalls.
 (() => {
@@ -754,9 +755,10 @@
     const data = await handler(request.args || {});
     return reply(data, ['finish_azure_cli_login', 'machine_login_finish'].includes(request.method) && data.pending ? { ok: false, code: 'authorization_pending' } : {});
   };
-  if (params.get('transport') === 'local') {
-    // The owner's local page (src/app/page.rs): no Tauri bridge, the same contract over fetch
-    // with a session cookie (implied here) and the anti-CSRF header.
+  {
+    // The owner's local page (src/app/page.rs): the control contract over fetch with a session
+    // cookie (implied here), the session key and the anti-CSRF header. Portal checks switch
+    // `ptaTransport.browser` on after load.
     const realFetch = window.fetch.bind(window);
     const json = value => new Response(JSON.stringify(value), { headers: { 'Content-Type': 'application/json' } });
     window.__ptaLocalRequests = [];
@@ -772,10 +774,5 @@
       }
       return realFetch(input, options);
     };
-    return;
   }
-  window.__TAURI__ = {
-    core: { invoke },
-    event: { listen: () => Promise.resolve(() => {}) },
-  };
 })();

@@ -253,9 +253,6 @@ pub(super) fn open(host: &Arc<Host>) -> Result<Value> {
 }
 
 impl Page {
-    pub(super) fn available(&self) -> bool {
-        self.address.get().is_some()
-    }
     /// Removes expired codes and their handoff files.
     fn prune(&self) {
         let now = Instant::now();

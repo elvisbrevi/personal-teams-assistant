@@ -1,5 +1,5 @@
 //! Host operations for delivery destinations: an agent may propose one, only a person at the GUI
-//! (the application window or an authenticated portal browser) approves it, and a delivery is
+//! (the owner's local page or an authenticated portal browser) approves it, and a delivery is
 //! performed by this host, which resolves the value live, sends it and returns only a status.
 //! No operation takes or returns a value, and no response body or header reaches the caller.
 use super::{authority, control::Reply, implementation, standing, variables as vars, *};
@@ -267,7 +267,7 @@ async fn run(
             ) {
                 audit(host, "delivery_approve", None, "denied_client");
                 return Err(denied(
-                    "Only the user approves a delivery destination, in this computer's application (its window or the page pta app open shows) or the portal.",
+                    "Only the user approves a delivery destination, in this computer's application (the local page pta app open shows) or the portal.",
                 ));
             }
             let a: ApproveArgs = parse(args)?;
@@ -335,7 +335,7 @@ async fn deliver(
     rules::validate(&destination)?;
     if !destination.approved() {
         return Err(denied(
-            "This destination waits for the user's approval in Settings > Variables (this computer's application window or page, or the portal); nothing was sent.",
+            "This destination waits for the user's approval in Settings > Variables (this computer's local page, or the portal); nothing was sent.",
         ));
     }
     let variable = uuid::Uuid::parse_str(&a.variable)

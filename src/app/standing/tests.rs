@@ -22,15 +22,6 @@ const REJECTED: u8 = 2;
 
 struct TestShell;
 impl Shell for TestShell {
-    fn headless(&self) -> bool {
-        true
-    }
-    fn show(&self) -> Result<()> {
-        Ok(())
-    }
-    fn hide(&self) -> Result<()> {
-        Ok(())
-    }
     fn open_url(&self, _: &str) -> Result<()> {
         Ok(())
     }

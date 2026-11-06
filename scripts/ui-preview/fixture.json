@@ -344,7 +344,6 @@
    "resources": []
   },
   "microsoft_connected": false,
-  "restart_offer": false,
   "revision": "29f46a7b1faba700c253ba9f4fb3da0fff829de758b17a2e0e01fce1fbaba397",
   "running": false,
   "subscription_issue": null,

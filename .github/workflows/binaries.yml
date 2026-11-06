@@ -27,15 +27,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # One package, one build and one archive name on every target (the host has no window):
+        # binstall resolves all four from [package.metadata.binstall]. The oldest supported Linux
+        # image keeps the glibc requirement low.
         include:
-          # The desktop platforms get the default build (GUI and CLI): binstall installs these.
-          - { os: macos-latest, target: aarch64-apple-darwin, name: personal-teams-assistant }
-          - { os: macos-latest, target: x86_64-apple-darwin, name: personal-teams-assistant }
-          - { os: windows-latest, target: x86_64-pc-windows-msvc, name: personal-teams-assistant }
-          # Linux runs headless. Its own name keeps binstall off it: binstall would record a default
-          # (GUI) install, so it falls back to compiling instead. The oldest supported image keeps
-          # the glibc requirement low.
-          - { os: ubuntu-22.04, target: x86_64-unknown-linux-gnu, name: personal-teams-assistant-headless, flags: --no-default-features }
+          - { os: macos-latest, target: aarch64-apple-darwin }
+          - { os: macos-latest, target: x86_64-apple-darwin }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc }
+          - { os: ubuntu-22.04, target: x86_64-unknown-linux-gnu }
     env:
       TARGET: ${{ matrix.target }}
     defaults:
@@ -48,10 +47,10 @@ jobs:
       - name: Rust toolchain from rust-toolchain.toml
         run: rustup toolchain install && rustup target add "$TARGET" && rustc --version
       - name: Release build
-        run: cargo build --release --locked --target "$TARGET" ${{ matrix.flags }}
+        run: cargo build --release --locked --target "$TARGET"
       - name: Archive
         env:
-          NAME: ${{ matrix.name }}
+          NAME: personal-teams-assistant
         run: |
           version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
           dir="$NAME-$TARGET-v$version"

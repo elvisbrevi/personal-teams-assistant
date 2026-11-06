@@ -2064,15 +2064,6 @@ async fn the_account_store_goes_only_to_the_key_a_trusted_sign_in_started_with()
 
 pub(super) struct NativeShell;
 impl Shell for NativeShell {
-    fn headless(&self) -> bool {
-        true
-    }
-    fn show(&self) -> Result<()> {
-        Ok(())
-    }
-    fn hide(&self) -> Result<()> {
-        Ok(())
-    }
     fn open_url(&self, _: &str) -> Result<()> {
         panic!("A headless installation returns the approval URL instead of opening it.")
     }

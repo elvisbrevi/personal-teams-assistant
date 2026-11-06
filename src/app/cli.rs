@@ -23,10 +23,8 @@ Assistant (Teams service)
   doctor [--offline]       Checks configuration, credentials and account (--offline: local files only).
 
 Application (host)
-  app open [--window]|hide|quit
-                           Opens this computer's GUI in the system browser (the host signs it in itself; --window
-                           shows the native window instead), hides the window, or closes the host (stopping the
-                           assistant and tunnel first).
+  app open|quit            Opens this computer's GUI in the system browser (the host signs it in itself), or
+                           closes the host (stopping the assistant and tunnel first).
 
 Web portal
   Requires Cloudflare Access and a dedicated GitHub OAuth App; see pta skill show.
@@ -205,7 +203,7 @@ Account store (Cloudflare)
                            migrate, promote and rollback), whether each can be restored, the copies kept before earlier
                            restores and the last restore's outcome.
   cloud restore NAME --confirmed
-                           Owner, at this computer only (window or local CLI). Checks the backup (its manifest, that
+                           Owner, at this computer only (local page or local CLI). Checks the backup (its manifest, that
                            every file goes back inside this profile or its data directory, that each database is
                            intact, that this version can read it), refuses while work a restart would interrupt is
                            running, then restarts the application: before anything opens it copies the current data to
@@ -232,7 +230,7 @@ Account store (Cloudflare)
   cloud lost --machine ID --confirmed
                            Owner or enabled portal account, on the account's coordinator. For a lost or stolen computer:
                            revokes its machine here and its installation in the account store, replaces the service token
-                           with the approved launcher cloud-token-rotate (from this machine's window or local CLI) and
+                           with the approved launcher cloud-token-rotate (from this machine's local page or local CLI) and
                            rotates the content key; the other computers receive both within a minute. Each step's outcome
                            is kept: repeating it for the same computer continues where it stopped.
   cloud promote --confirmed   Owner or enabled portal account, from mirror. Sends what is pending, verifies the copy, backs up this profile and only
@@ -1353,7 +1351,6 @@ fn validate_args(args: &[String]) -> Result<()> {
             | "--non-interactive"
             | "--offline"
             | "--no-browser"
-            | "--window"
             | "--wait"
             | "--content"
             | "--current-profile"
@@ -1519,7 +1516,7 @@ fn validate_args(args: &[String]) -> Result<()> {
             | "logs"
             | "chat"
             | "help"]
-            | ["app", "open" | "hide" | "quit"]
+            | ["app", "open" | "quit"]
             | ["mcp"]
             | ["mcp", "config"]
             | ["tools", "list"]
@@ -1664,7 +1661,6 @@ fn validate_args(args: &[String]) -> Result<()> {
     for (flag, allowed) in [
         ("--offline", p[0] == "doctor"),
         ("--no-browser", p[0] == "auth" && p.get(2) == Some(&"login")),
-        ("--window", p.as_slice() == ["app", "open"]),
         ("--wait", p[0] == "auth" && p.get(2) == Some(&"finish")),
         (
             "--replace-settings",
@@ -2235,7 +2231,6 @@ async fn execute(mut args: Vec<String>) -> Result<Reply> {
         ("stop", _) => Some("stop_assistant"),
         ("restart", _) => Some("restart"),
         ("app", "open") => Some("app_open"),
-        ("app", "hide") => Some("app_hide"),
         ("app", "quit") => Some("app_quit"),
         ("github", "repos") => Some("github_repositories"),
         ("llm", "providers") => Some("llm_providers"),
@@ -2260,7 +2255,6 @@ async fn execute(mut args: Vec<String>) -> Result<Reply> {
     if let Some(method) = direct {
         let value = match method {
             "chat" => json!({"input":input()?}),
-            "app_open" if args.iter().any(|a| a == "--window") => json!({"window":true}),
             "self_chat_enable" => json!({"id":args.get(2)}),
             "self_chat_reconcile" => {
                 json!({"nonce":positional(&args,2)?,"id":positional(&args,3)?})

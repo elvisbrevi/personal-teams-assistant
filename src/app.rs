@@ -40,8 +40,6 @@ mod deliveries;
 mod diagnostics;
 mod github;
 mod github_cli;
-#[cfg(feature = "gui")]
-mod gui;
 mod headless;
 pub(crate) mod implementation;
 mod maintenance;
@@ -57,26 +55,18 @@ mod tools;
 mod variables;
 mod web;
 
-/// What the process owning the host can do beyond operations: a Tauri window, or nothing.
+/// What the process owning the host can do beyond operations: open the system browser and quit.
+/// There is no window; the owner's GUI is the local page (`page.rs`) in the system browser.
 pub(crate) trait Shell: Send + Sync {
-    fn headless(&self) -> bool;
-    fn show(&self) -> Result<()>;
-    fn hide(&self) -> Result<()>;
-    /// Open a URL in the user's browser. A headless host without a browser session only
-    /// returns the URL to the caller.
+    /// Open a URL in the user's browser. A host without a browser session only returns the
+    /// URL to the caller.
     fn open_url(&self, url: &str) -> Result<()>;
     /// Whether `open_url` reaches a browser a person sees on this computer; the local page
-    /// opens only then.
+    /// opens only then, and so do the desktop apps of a coding agent's session.
     fn browser(&self) -> bool {
-        !self.headless()
+        false
     }
     fn exit(&self);
-    fn notify_activity(&self, _title: &str, _body: &str, _entry: Option<&str>) -> Result<()> {
-        Ok(())
-    }
-    fn open_activity(&self, _entry: Option<&str>) -> Result<()> {
-        self.show()
-    }
 }
 
 /// The single owner of a profile: settings, credentials, the service and its UI shell.
@@ -94,7 +84,7 @@ struct Running {
 }
 
 /// Where the assistant service is in its lifecycle. `start`/`stop` and the service ending on
-/// its own publish it, so the tray and the window follow changes made by any client.
+/// its own publish it, so every client follows changes made by any other.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum AssistantPhase {
@@ -122,9 +112,6 @@ pub(crate) struct DesktopState {
     microsoft_login: Mutex<Option<tokio::task::JoinHandle<std::result::Result<(), String>>>>,
     microsoft_redirect: Mutex<Option<String>>,
     github_api: Mutex<()>,
-    /// This host replaced an outdated one whose assistant was running: the window asks
-    /// whether to keep it running.
-    restart_offer: std::sync::atomic::AtomicBool,
     activity_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
     activity_graph: Mutex<Option<Arc<crate::adapters::graph::Graph>>>,
     activity_recovered: Mutex<Option<PathBuf>>,
@@ -144,6 +131,7 @@ struct Snapshot {
     loaded_config: Option<Config>,
     host_version: String,
     host_running: bool,
+    /// Always true: every host runs without a window (kept for clients that read it).
     headless: bool,
     profile: PathBuf,
     tunnel_running: bool,
@@ -157,7 +145,6 @@ struct Snapshot {
     subscription_issue: Option<String>,
     github_connected: bool,
     tunnel_config: String,
-    restart_offer: bool,
     /// The built-in cases with their default texts, for editors (additive).
     cases: &'static [crate::cases::BuiltIn],
     /// The implementation agents' built-in prompts with their default instructions (additive).
@@ -829,7 +816,6 @@ pub(crate) fn init_state(config_dir: &Path, data_dir: &Path) -> Result<DesktopSt
         microsoft_login: Mutex::new(None),
         microsoft_redirect: Mutex::new(None),
         github_api: Mutex::new(()),
-        restart_offer: std::sync::atomic::AtomicBool::new(false),
         activity_task: Mutex::new(None),
         activity_graph: Mutex::new(None),
         activity_recovered: Mutex::new(None),
@@ -919,7 +905,7 @@ async fn snapshot(host: &Host) -> std::result::Result<Snapshot, String> {
             .filter(|_| running.is_some()),
         host_version: env!("CARGO_PKG_VERSION").into(),
         host_running: true,
-        headless: host.shell.headless(),
+        headless: true,
         profile: state.settings.profile().to_path_buf(),
         tunnel_running: running.as_ref().is_some_and(|r| r.tunnel.is_some()),
         microsoft_connected: Store::has_token(&config.server.data_dir.join("assistant.db"))
@@ -934,9 +920,6 @@ async fn snapshot(host: &Host) -> std::result::Result<Snapshot, String> {
             .map_err(fail)?
             .is_some(),
         tunnel_config: state.settings.tunnel().unwrap_or_default(),
-        restart_offer: state
-            .restart_offer
-            .load(std::sync::atomic::Ordering::Relaxed),
         cases: &crate::cases::BUILT_IN,
         agent_prompts: &crate::agent_prompts::BUILT_IN,
     })
@@ -1793,8 +1776,6 @@ fn import_secret_from_stdin(name: &str) -> Result<()> {
     security::put_desktop_secret("default", name, value)
 }
 
-/// Entry point of the `personal-teams-assistant` binary. Without the `gui` feature, or with `--headless`
-/// (or `PTA_HEADLESS=1`), the host runs without a window and is operated only through `pta`.
 /// After an update stopped a running assistant, ask on the terminal whether to keep it
 /// running with the new build. Without a terminal (or when asked not to prompt) the previous
 /// state is kept.
@@ -1812,6 +1793,10 @@ pub(crate) fn keep_running_after_update(interactive: bool) -> bool {
     !matches!(answer.trim().to_lowercase().as_str(), "n" | "no")
 }
 
+/// Entry point of the `personal-teams-assistant` binary. The host always runs without a window:
+/// its owner's GUI is the local page in the system browser, and `pta` operates it. `--headless`
+/// and `PTA_HEADLESS` are accepted and ignored, so launchers, units and updates of installations
+/// that used them keep working.
 pub fn run() {
     if std::env::var_os("PERSONAL_TEAMS_GIT_ASKPASS").is_some() {
         github::askpass();
@@ -1850,9 +1835,10 @@ pub fn run() {
         }
         return;
     }
-    let headless = !cfg!(feature = "gui")
-        || args.iter().any(|a| a == "--headless")
-        || std::env::var_os("PTA_HEADLESS").is_some_and(|v| !v.is_empty() && v != "0");
+    // Started by `pta` or the update's helper (not by a person launching the application): no
+    // page opens by itself.
+    let background =
+        args.iter().any(|a| a == "--host") || std::env::var_os(maintenance::HANDOVER).is_some();
     // A new `cargo install` replaced this executable while the previous build keeps running:
     // stop that host (assistant and tunnel first) and take its place.
     let mut previous_running = false;
@@ -1867,21 +1853,23 @@ pub fn run() {
             Ok(Ok(running)) => previous_running = running,
             _ => {
                 eprintln!(
-                    "Could not stop the previous version of the host. Quit it from its menu and retry."
+                    "Could not stop the previous version of the host. Quit it with pta app quit and retry."
                 );
                 std::process::exit(1);
             }
         }
     }
     if control::existing_host().is_ok() {
+        if background {
+            return;
+        }
         // Launching the application again opens the running host's page in the browser.
-        let opened = !args.iter().any(|a| a == "--host")
-            && tokio::runtime::Runtime::new().is_ok_and(|runtime| {
-                runtime
-                    .block_on(control::client(control::Request::new("app_open"), false))
-                    .is_ok_and(|reply| reply.ok)
-            });
-        if headless && !opened {
+        let opened = tokio::runtime::Runtime::new().is_ok_and(|runtime| {
+            runtime
+                .block_on(control::client(control::Request::new("app_open"), false))
+                .is_ok_and(|reply| reply.ok)
+        });
+        if !opened {
             eprintln!(
                 "Another host already owns this profile. Run pta app open in a desktop session to open its page."
             );
@@ -1918,15 +1906,10 @@ pub fn run() {
         .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stderr()))
         .try_init()
         .ok();
-    #[cfg(feature = "gui")]
-    if !headless {
-        gui::run(host_lock, previous_running);
-        return;
-    }
     let start = args.iter().any(|a| a == "--start")
         || (previous_running && keep_running_after_update(true));
     // Startup errors carry no credential values; show the chain to the operator.
-    if let Err(error) = headless::run(host_lock, start) {
+    if let Err(error) = headless::run(host_lock, start, !background) {
         eprintln!("Headless host stopped: {error:#}");
         std::process::exit(1);
     }

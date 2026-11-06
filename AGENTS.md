@@ -16,8 +16,8 @@ Every directory input, selector or hierarchy browser uses the shared directory s
 
 ## Priorities
 
-- The product is a single Cargo package, `personal-teams-assistant`: the GUI and host `personal-teams-assistant`, the `pta` CLI and its skill. The same binary runs without a window (`--headless`, or built with `--no-default-features` for Linux). There are no other crates, `.app`/`.dmg`/installer bundles or standalone server.
-- Tauri is used only in `src/app/gui.rs` (resources in `desktop/`); operations go through `Host`/`Shell` and must build with and without the `gui` feature.
+- The product is a single Cargo package, `personal-teams-assistant`: the host `personal-teams-assistant` with its web interface (the owner's local page in the system browser, and the portal), the `pta` CLI and its skill. The host has no window and is the same build on every operating system; the `gui` feature is empty and deprecated, kept only so older installations still update. There are no other crates, `.app`/`.dmg`/installer bundles or standalone server.
+- The GUI is `desktop/ui/`, served by `src/app/page.rs` (local page) and `src/app/web.rs` (portal); operations go through `Host`/`Shell`, never through the GUI alone.
 - Delivery priority is the CLI and its shared core. If the GUI falls behind, note it in the architecture's «Known limits»; its parity does not block CLI work. Do not reinstall, publish or update the GUI unless the user asks.
 - Everything in the repository is in English: code, comments, documentation, prompts, the GUI's source text, CLI messages, IPC messages, diagnostics and audit steps. What the user reads follows `llm.language` (Spanish by default): the GUI (translated at runtime by `desktop/ui/i18n.js`, whose catalog is the only Spanish UI text), what the assistant writes to Teams, and the activity drafts and issues it writes for the user. Every new GUI string goes through `t()`/`tn()` (or static HTML) and gets its catalog entry; `scripts/test-ui-i18n.cjs` fails otherwise. Detecting messages without a model keeps Spanish and English phrases, because users write in both.
 
@@ -45,11 +45,11 @@ Before starting work on a branch or creating a branch or worktree from `main`, u
 
 GitHub Actions is the gate and the delivery ([delivery](docs/delivery.md)). Develop, open a pull request, wait for its **CI result** check to pass and merge it: `gh pr merge --auto --merge --delete-branch` waits for CI. Never bypass the check (`--admin`) or merge with CI failing.
 
-Pull requests gate on Linux: **CI result** waits for Linux, security, and the UI and cloud jobs when their paths change. macOS (required) and Windows (informative) run only when a pull request touches a platform-sensitive path (the one list is in the `Changes` job of `ci.yml`: credential store, process spawning, private-file permissions, update staging and apply, native startup, `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`, `build.rs`, `.github/`) and weekly. A release candidate pushed to `main` also runs macOS, which the release waits for, but not Windows, so publication does not wait for it. Code that adds a `cfg(windows)`, `cfg(not(unix))` or `target_os = "windows"`/`"macos"` branch in a file not yet on the list must add it; `bun scripts/test-ci-workflow.mjs` fails otherwise.
+Pull requests gate on Linux: **CI result** waits for Linux, security, and the UI and cloud jobs when their paths change. macOS (required) and Windows (informative) run only when a pull request touches a platform-sensitive path (the one list is in the `Changes` job of `ci.yml`: credential store, process spawning, private-file permissions, update staging and apply, host startup, `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`, `build.rs`, `.github/`) and weekly. A release candidate pushed to `main` also runs macOS, which the release waits for, but not Windows, so publication does not wait for it. Code that adds a `cfg(windows)`, `cfg(not(unix))` or `target_os = "windows"`/`"macos"` branch in a file not yet on the list must add it; `bun scripts/test-ci-workflow.mjs` fails otherwise.
 
-Merging delivers: a version bump (`Cargo.toml`, `Cargo.lock`, `desktop/tauri.conf.json`) is published to crates.io by `release.yml` once CI passed on `main`, with its tag and GitHub release; the server's updater installs it within minutes; a change under `site/` is published by Cloudflare. Do not publish, tag or install on the server by hand; do it only as the fallback in [delivery](docs/delivery.md#when-the-automatic-path-fails), when the automatic path itself failed.
+Merging delivers: a version bump (`Cargo.toml`, `Cargo.lock`) is published to crates.io by `release.yml` once CI passed on `main`, with its tag and GitHub release; the server's updater installs it within minutes; a change under `site/` is published by Cloudflare. Do not publish, tag or install on the server by hand; do it only as the fallback in [delivery](docs/delivery.md#when-the-automatic-path-fails), when the automatic path itself failed.
 
-When delivering product changes, include a new, unpublished version in all three version files before opening the pull request. A merge and push alone do not publish an existing version. Verify the new crates.io version and the server's running version and health before reporting delivery complete; distinguish merged, published and installed.
+When delivering product changes, include a new, unpublished version in both version files (`Cargo.toml`, `Cargo.lock`) before opening the pull request. A merge and push alone do not publish an existing version. Verify the new crates.io version and the server's running version and health before reporting delivery complete; distinguish merged, published and installed.
 
 Workflows use only GitHub-hosted standard runners (free while the repository is public): no larger, paid or self-hosted runners, and never a runner on the server. `ci.yml` has no secrets because pull requests from forks run it; grant other permissions per job, only where needed.
 
@@ -58,9 +58,7 @@ Run the checks locally before pushing, as fast feedback (CI runs the same on Lin
 ```sh
 cargo fmt --all --check
 cargo clippy --all-targets -- -D warnings
-cargo clippy --all-targets --no-default-features -- -D warnings
 cargo test
-cargo test --no-default-features
 bun build desktop/ui/app.js --no-bundle --outfile /tmp/app-check.js   # if the GUI changed
 node --test scripts/test-activity-ui.cjs scripts/test-ui-i18n.cjs scripts/test-ui-themes.cjs  # if the GUI changed
 ```

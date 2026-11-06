@@ -152,7 +152,8 @@ pub(super) fn isolated_profile_dir() -> Result<Option<PathBuf>> {
         .map(Option::flatten)
 }
 
-/// Profile directory shared by GUI, headless host and CLI; matches Tauri's app_config_dir.
+/// Profile directory shared by the host and the CLI. It is where window builds kept the profile
+/// (Tauri's app_config_dir for the same identifier), so existing profiles keep working.
 pub fn profile_dir() -> Result<PathBuf> {
     if let Some(dir) = isolated_profile_dir()? {
         return Ok(dir);
@@ -169,8 +170,8 @@ fn standard_profile_dir() -> Result<PathBuf> {
     let base = xdg_dir("XDG_CONFIG_HOME", ".config")?;
     Ok(base.join(IDENTIFIER))
 }
-/// Data directory for a new profile; matches Tauri's app_data_dir. Existing profiles keep
-/// `server.data_dir`.
+/// Data directory for a new profile; where window builds kept it (Tauri's app_data_dir).
+/// Existing profiles keep `server.data_dir`.
 pub fn default_data_dir() -> Result<PathBuf> {
     if let Some(dir) = isolated_profile_dir()? {
         return Ok(dir.join("data"));
@@ -305,7 +306,7 @@ pub async fn retire_outdated_host() -> Result<bool> {
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    anyhow::bail!("previous host did not stop; quit it from its menu and retry")
+    anyhow::bail!("previous host did not stop; quit it with pta app quit and retry")
 }
 /// The installed host executable used by this CLI.
 pub fn installed_host() -> Result<PathBuf> {
@@ -645,7 +646,7 @@ fn claim_at(dir: &Path) -> Result<fs::File> {
     Ok(lock)
 }
 /// Publish the control endpoint and return the server future; the caller spawns it on
-/// its runtime (Tauri's or the headless Tokio runtime).
+/// its runtime (the host's Tokio runtime).
 pub(crate) fn launch(
     host: Arc<Host>,
     lock: fs::File,
@@ -888,7 +889,6 @@ async fn dispatch_inner(host: &Arc<Host>, request: Request) -> Reply {
             "activity_pending",
             "activity_open",
             "app_open",
-            "app_hide",
             "app_quit",
         ]
         .contains(&request.method.as_str())
@@ -939,7 +939,6 @@ async fn dispatch_inner(host: &Arc<Host>, request: Request) -> Reply {
             "finish_microsoft",
             "cancel_microsoft",
             "app_open",
-            "app_hide",
         ]
         .contains(&request.method.as_str())
     {
@@ -993,7 +992,6 @@ async fn dispatch_inner(host: &Arc<Host>, request: Request) -> Reply {
             "open_azure_cli_login",
             "disconnect_github",
             "app_open",
-            "app_hide",
             "app_quit",
         ]
         .contains(&request.method.as_str())
@@ -1114,30 +1112,19 @@ async fn operate(
                 uuid::Uuid::parse_str(id)
                     .map_err(|_| "[invalid_input] Invalid activity ID.".to_string())?;
             }
-            host.shell.open_activity(id).map_err(fail)?;
-            json!({"visible":true})
+            // The activities are a tab of the GUI: the local page opens on this computer.
+            page::open(host).map_err(fail)?;
+            json!({"visible":true,"target":"browser"})
         }
         "start_assistant" => {
-            state
-                .restart_offer
-                .store(false, std::sync::atomic::Ordering::Relaxed);
             start(state).await.map_err(fail)?;
             json!({"running":true})
-        }
-        "dismiss_restart_offer" => {
-            state
-                .restart_offer
-                .store(false, std::sync::atomic::Ordering::Relaxed);
-            json!({"restart_offer":false})
         }
         "stop_assistant" => {
             stop(state).await.map_err(fail)?;
             json!({"running":false})
         }
         "restart" => {
-            state
-                .restart_offer
-                .store(false, std::sync::atomic::Ordering::Relaxed);
             stop(state).await.map_err(fail)?;
             start(state).await.map_err(fail)?;
             json!({"running":true})
@@ -1311,7 +1298,7 @@ async fn operate(
             )
             .await?;
             let mut reply = json!({"pending":true,"authorization_url":url,"provider":"microsoft"});
-            if host.shell.headless() {
+            if !host.shell.browser() {
                 reply["remote_browser"] = json!(
                     "If the browser runs on another machine, copy the final http://localhost address it fails to open and run: pta auth microsoft finish --redirect 'URL'"
                 );
@@ -1453,24 +1440,7 @@ async fn operate(
                 .map_err(fail)?
             )
         }
-        // The native window, while a window build still has one.
-        "app_open" if args.get("window").and_then(Value::as_bool) == Some(true) => {
-            host.shell.show().map_err(fail)?;
-            json!({"visible":true,"target":"window"})
-        }
-        "app_open" => match page::open(host) {
-            Ok(opened) => opened,
-            // Until the window is removed, a window build without its page still shows it.
-            Err(_) if !host.shell.headless() && !host.state.page.available() => {
-                host.shell.show().map_err(fail)?;
-                json!({"visible":true,"target":"window"})
-            }
-            Err(error) => return Err(fail(error)),
-        },
-        "app_hide" => {
-            host.shell.hide().map_err(fail)?;
-            json!({"visible":false})
-        }
+        "app_open" => page::open(host).map_err(fail)?,
         "app_quit" => {
             state.azure_login.lock().await.take();
             activity::shutdown(state).await;
