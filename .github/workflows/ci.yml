@@ -1,4 +1,5 @@
-# Full checks on pull requests and weekly; tests/package/security on pushes to main.
+# Pull requests gate on Linux; macOS and Windows run weekly, on platform-sensitive changes and for
+# a release candidate on main. Pushes to main test, package and audit the release commit.
 # Standard GitHub-hosted runners only: free without a minute cap while the repository is public.
 # No secrets: pull requests from forks run here too. See docs/delivery.md.
 name: CI
@@ -34,6 +35,7 @@ jobs:
       rust: ${{ steps.filter.outputs.rust }}
       ui: ${{ steps.filter.outputs.ui }}
       cloud: ${{ steps.filter.outputs.cloud }}
+      platform: ${{ steps.filter.outputs.platform }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -49,25 +51,30 @@ jobs:
             echo "rust=$1" >> "$GITHUB_OUTPUT"
             echo "ui=$2" >> "$GITHUB_OUTPUT"
             echo "cloud=$3" >> "$GITHUB_OUTPUT"
-            echo "Rust checks: $1. UI and script checks: $2. Cloud Worker checks: $3. Reason: $4." | tee -a "$GITHUB_STEP_SUMMARY"
+            echo "platform=$4" >> "$GITHUB_OUTPUT"
+            echo "Rust checks: $1. UI and script checks: $2. Cloud Worker checks: $3. macOS and Windows: $4. Reason: $5." | tee -a "$GITHUB_STEP_SUMMARY"
             exit 0
           }
           # Weekly checks refresh the full matrix and its trusted main-branch caches.
-          [ "$EVENT" != schedule ] || verdict true true true "weekly full verification"
-          # A release candidate must run Linux tests and package verification even without a diff.
+          [ "$EVENT" != schedule ] || verdict true true true true "weekly full verification"
+          # A release candidate runs every platform, and Linux tests and packages it even without a diff.
           if [ "$EVENT" = push ] && [ "$REF" = refs/heads/main ]; then
             version=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["package"]["version"])')
             code=$(curl -sS -A "personal-teams-assistant-ci (github.com/$GITHUB_REPOSITORY)" -o /dev/null -w '%{http_code}' \
               "https://crates.io/api/v1/crates/personal-teams-assistant/$version" || echo 000)
-            [ "$code" = 200 ] || verdict true true true "version $version is not on crates.io (HTTP $code), so it will be released"
+            [ "$code" = 200 ] || verdict true true true true "version $version is not on crates.io (HTTP $code), so it will be released"
           fi
+          # Any other push to main was already checked on every platform it needed by its pull request.
+          if [ "$EVENT" = push ]; then pr_platform=false; else pr_platform=true; fi
           if [ -z "$BASE" ] || [ -z "${BASE//0/}" ] || ! git fetch --quiet --no-tags --depth=1 origin "$BASE"; then
-            verdict true true true "no base commit to compare with"
+            verdict true true true "$pr_platform" "no base commit to compare with"
           fi
           files=$(git diff --name-only "$BASE" "$GITHUB_SHA")
           rust=false
           ui=false
           cloud=false
+          platform=false
+          platform_paths=
           while IFS= read -r file; do
             case "$file" in
               # Not part of the binary or its checks: the landing (Cloudflare publishes it),
@@ -80,8 +87,30 @@ jobs:
               .github/*) rust=true; ui=true; cloud=true ;;
               *) rust=true ;;
             esac
+            # The one list of platform-sensitive paths: code that differs on macOS or Windows
+            # (credential store, process spawning, private-file permissions, update staging and
+            # apply, native startup and window), the Windows startup check, the dependency manifest,
+            # lock and toolchain, and the workflows. scripts/test-ci-workflow.mjs requires every
+            # source file with Windows- or macOS-only code to match it.
+            case "$file" in
+              Cargo.toml | Cargo.lock | rust-toolchain.toml | build.rs | .github/* | \
+              desktop/tauri.conf.json | desktop/Info.plist | desktop/capabilities/* | desktop/icons/* | \
+              scripts/test-windows-startup.py | tests/account_authority.rs | \
+              src/main.rs | src/bin/* | src/app.rs | src/app/gui.rs | src/app/headless.rs | src/app/control.rs | \
+              src/security/* | src/maintenance.rs | src/maintenance/* | src/app/maintenance.rs | src/app/maintenance/* | \
+              src/app/cloud/restore.rs | src/consumers.rs | src/app/azure_cli.rs | src/app/github.rs | src/app/github_cli.rs | \
+              src/llm/agent.rs | src/llm/implementation.rs | src/llm/implementation/*)
+                platform=true
+                platform_paths="$platform_paths $file" ;;
+            esac
           done <<< "$files"
-          verdict "$rust" "$ui" "$cloud" "changed paths"
+          if [ "$EVENT" = push ]; then
+            verdict "$rust" "$ui" "$cloud" false "changed paths; macOS and Windows run on main only for a release candidate"
+          elif [ "$platform" = true ]; then
+            verdict "$rust" "$ui" "$cloud" true "changed paths; platform-sensitive:$platform_paths"
+          else
+            verdict "$rust" "$ui" "$cloud" false "changed paths; none is platform-sensitive"
+          fi
 
   linux:
     name: Linux
@@ -132,6 +161,10 @@ jobs:
     if: github.event_name != 'push' && needs.changes.outputs.ui == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      # Pinned preview tools; Chromium's cache is keyed by the Playwright version that downloads it.
+      PLAYWRIGHT_CORE_VERSION: 1.58.2
+      AXE_CORE_VERSION: 4.14.0
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -152,11 +185,34 @@ jobs:
           python3 scripts/test-rehearse-cloud-migration.py
           python3 scripts/test-vps-update.py
       # Playwright and axe-core stay outside the repository, as in docs/ui-design-conventions.md.
-      - name: Playwright Chromium and axe-core
+      - name: Playwright and axe-core
         run: |
           npm install --prefix "$RUNNER_TEMP/pta-ui-preview" --no-save --no-audit --no-fund \
-            playwright-core@1.58.2 axe-core@4.14.0
-          "$RUNNER_TEMP/pta-ui-preview/node_modules/.bin/playwright-core" install --with-deps chromium
+            "playwright-core@$PLAYWRIGHT_CORE_VERSION" "axe-core@$AXE_CORE_VERSION"
+      - name: Restore Playwright's Chromium
+        id: chromium
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-chromium-${{ runner.os }}-${{ env.PLAYWRIGHT_CORE_VERSION }}
+      # Chromium downloads only on a cache miss; its system libraries are installed either way.
+      - name: Chromium and its system libraries
+        env:
+          CACHE_HIT: ${{ steps.chromium.outputs.cache-hit }}
+        run: |
+          playwright="$RUNNER_TEMP/pta-ui-preview/node_modules/.bin/playwright-core"
+          if [ "$CACHE_HIT" = true ]; then
+            "$playwright" install-deps chromium
+          else
+            "$playwright" install --with-deps chromium
+          fi
+      # Only main (the weekly run) saves, so pull requests restore a trusted cache.
+      - name: Save Playwright's Chromium
+        if: github.ref == 'refs/heads/main' && steps.chromium.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ steps.chromium.outputs.cache-primary-key }}
       - name: GUI preview checks (axe WCAG 2.2 AA and interactions, synthetic data)
         env:
           UI_PREVIEW_DEPS: ${{ runner.temp }}/pta-ui-preview
@@ -201,10 +257,11 @@ jobs:
           bunx wrangler deploy --dry-run --outdir "$RUNNER_TEMP/cloud-production"
           bunx wrangler deploy --dry-run --env staging --outdir "$RUNNER_TEMP/cloud-staging"
 
+  # Required whenever it runs: weekly, on a platform-sensitive change and for a release candidate.
   macos:
     name: macOS
     needs: changes
-    if: github.event_name != 'push' && needs.changes.outputs.rust == 'true'
+    if: needs.changes.outputs.platform == 'true'
     runs-on: macos-latest
     timeout-minutes: 60
     steps:
@@ -222,10 +279,11 @@ jobs:
   windows:
     name: Windows (informative)
     needs: changes
-    if: github.event_name != 'push' && needs.changes.outputs.rust == 'true'
+    if: needs.changes.outputs.platform == 'true'
     runs-on: windows-latest
     timeout-minutes: 60
-    # Native startup is exercised before merging and weekly; Windows remains informative.
+    # Native startup is exercised on platform-sensitive changes, weekly and for a release candidate;
+    # Windows remains informative.
     continue-on-error: true
     defaults:
       run:

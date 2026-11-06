@@ -4,10 +4,10 @@ Agents develop, open a pull request, wait for CI and merge. Everything after the
 
 ```mermaid
 flowchart LR
-  PR[pull request] --> CI[ci.yml: full checks for changed paths] --> M[merge to main]
+  PR[pull request] --> CI[ci.yml: Linux gate, macOS/Windows on platform changes] --> M[merge to main]
   M --> CF[Cloudflare Workers Builds: site/ only] --> L[landing]
   M --> CW[Cloudflare Workers Builds: cloud/ only] --> W[account store Worker]
-  M --> CI2[ci.yml on main: Linux tests/package + security] --> R[release.yml: new version?] --> C[crates.io + tag + GitHub release]
+  M --> CI2[ci.yml on main: Linux tests/package + security; every platform for a release candidate] --> R[release.yml: new version?] --> C[crates.io + tag + GitHub release]
   C --> B[binaries.yml: archives for cargo binstall]
   C --> U[server timer: vps-update.py] --> P[web portal on the new version]
 ```
@@ -26,11 +26,11 @@ Runs on every pull request, every push to `main` and weekly, with `contents: rea
 
 | Event | Checks |
 | --- | --- |
-| Pull request | Full checks for changed paths: Linux lint/tests/package, UI/scripts, the cloud Worker, macOS and native Windows; security always runs |
-| Push to `main` | Linux tests with and without GUI and verified Cargo package when Rust/package inputs changed or a new version needs publication; security always runs |
+| Pull request | Gated on Linux: Linux lint/tests/package, UI/scripts and the cloud Worker for changed paths; macOS and native Windows only when a platform-sensitive path changed; security always runs |
+| Push to `main` | Linux tests with and without GUI and verified Cargo package when Rust/package inputs changed or a new version needs publication; macOS and Windows only for a release candidate (a version crates.io does not have yet); security always runs |
 | Weekly | Full Linux/UI/cloud Worker/macOS/Windows/security matrix on `main`, also refreshing trusted shared caches |
 
-Formatting, clippy, browser previews, macOS and the clean native Windows installation run on the PR instead of repeating after each merge; Windows remains informative. Linux still tests the exact merged commit with both feature sets and verifies the `.crate` before publication. Cross-platform and browser checks on the final `main` combination run weekly rather than on every push. This is not reuse of a PR's success or artifacts: the release still requires successful Linux verification on its exact `main` commit.
+A pull request that changes only platform-neutral Rust finishes in about the time the Linux job takes: `CI result` does not wait for macOS or Windows. Formatting, clippy and browser previews run on the PR instead of repeating after each merge. macOS and the clean native Windows installation run on a platform-sensitive PR, weekly and on a release candidate; macOS is required whenever it runs and Windows remains informative. Linux still tests the exact merged commit with both feature sets and verifies the `.crate` before publication. Browser checks on the final `main` combination run weekly rather than on every push. This is not reuse of a PR's success or artifacts: the release still requires a passing `CI result` with Linux verification on its exact `main` commit, and that run includes macOS and Windows.
 
 `Changes` decides what a change needs by comparing it with its base:
 
@@ -43,21 +43,32 @@ Formatting, clippy, browser previews, macOS and the clean native Windows install
 | `.github/` | run | run | run |
 | anything else (`src/`, `tests/`, `Cargo.*`, `build.rs`, `desktop/`, …) | run | skipped unless also above | skipped unless also above |
 
-A push to `main` whose `Cargo.toml` version crates.io does not have yet always requests Linux tests/package verification, even when the diff would skip it. Without a base to compare with (a new branch, a force push), all path flags are enabled; the event policy above still applies. Weekly runs enable every flag without a diff.
+On a pull request, macOS and Windows run when any changed path is platform-sensitive. The list lives in one `case` of the `Changes` step, and the step summary names the paths that matched:
+
+- the dependency manifest, lock and toolchain: `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`, `build.rs`;
+- the workflows: `.github/`;
+- the native window and its bundle configuration: `desktop/tauri.conf.json`, `desktop/Info.plist`, `desktop/capabilities/`, `desktop/icons/`, and native startup: `src/main.rs`, `src/bin/`, `src/app.rs`, `src/app/gui.rs`, `src/app/headless.rs`, `src/app/control.rs`, `scripts/test-windows-startup.py`;
+- the credential store, process spawning and private-file permissions: `src/security/`, `src/consumers.rs`, `src/app/cloud/restore.rs`, `src/app/azure_cli.rs`, `src/app/github.rs`, `src/app/github_cli.rs`, `src/llm/agent.rs`, `src/llm/implementation.rs`, `src/llm/implementation/`;
+- update staging and apply: `src/maintenance.rs`, `src/maintenance/`, `src/app/maintenance.rs`, `src/app/maintenance/`;
+- the operator admission fixture the Windows job runs: `tests/account_authority.rs`.
+
+`scripts/test-ci-workflow.mjs` fails when a Rust source with Windows- or macOS-only code (`cfg(windows)`, `cfg(not(unix))`, `target_os = "windows"` or `"macos"`) is not on that list, so a new platform branch must be added to it. A file with only `cfg(unix)` code is exercised by Linux.
+
+A push to `main` whose `Cargo.toml` version crates.io does not have yet is a release candidate: it requests Linux tests/package verification even when the diff would skip it, and macOS and Windows. Any other push to `main` never runs macOS or Windows, because its pull request already did when it mattered. Without a base to compare with (a new branch, a force push), all path flags are enabled, and on a pull request macOS and Windows too; the event policy above still applies. Weekly runs enable every flag without a diff.
 
 | Job | Runner | What it runs |
 | --- | --- | --- |
 | Linux | `ubuntu-latest` | Tauri 2 system libraries; versions agree (`Cargo.toml`, `desktop/tauri.conf.json`; `--locked` checks `Cargo.lock`); `cargo fmt --check` and clippy only on PR/weekly runs; tests with and without `gui` and `cargo package --locked` on every selected run (the `.crate` as crates.io receives it, built from the package) |
-| UI and scripts | `ubuntu-latest` | PR/weekly only: `bun scripts/test-ci-workflow.mjs` (actual workflow routing and merge gate); `bun build desktop/ui/app.js`; `node --test scripts/test-activity-ui.cjs scripts/test-ui-i18n.cjs scripts/test-ui-themes.cjs` (the last one checks the contrast of every palette, mode and style); the Python script tests; `scripts/ui-preview/check.mjs` with Playwright's Chromium (axe WCAG 2.2 AA on every section, mode, palette and phone, plus the interaction checks; any violation fails); the results are an artifact for 7 days |
+| UI and scripts | `ubuntu-latest` | PR/weekly only: `bun scripts/test-ci-workflow.mjs` (actual workflow routing and merge gate); `bun build desktop/ui/app.js`; `node --test scripts/test-activity-ui.cjs scripts/test-ui-i18n.cjs scripts/test-ui-themes.cjs` (the last one checks the contrast of every palette, mode and style); the Python script tests; Playwright's Chromium restored from a cache keyed by the pinned `playwright-core` version (downloaded only on a miss; its system libraries are installed either way; only `main`, that is the weekly run, saves the cache); `scripts/ui-preview/check.mjs` with that Chromium (axe WCAG 2.2 AA on every section, mode, palette and phone, plus the interaction checks; any violation fails); the results are an artifact for 7 days |
 | Cloud Worker | `ubuntu-latest` | PR/weekly only, in `cloud/`: `bun install --frozen-lockfile`, `tsc --noEmit`, the Worker's tests inside the Workers runtime (`@cloudflare/vitest-plugin`, Miniflare, synthetic Access keys; contract tests include cross-account attempts) and a `wrangler deploy --dry-run` bundle of both environments; no secrets |
-| macOS | `macos-latest` | PR/weekly only: clippy and tests with `gui` |
-| Windows (informative) | `windows-latest` | PR/weekly only: clean release `cargo install --path . --locked`; PE stack fields and native GUI open/status/close/reopen/quit/relaunch with Teams stopped; clippy with `gui`; headless operator admission/binding/recovery/revocation fixture through the real CLI; browser-assisted machine sign-in/trust tests (`machine_login`: two accounts, verifier, replay, expiry, denial, revocation, installation proof and native finish with Windows paths, locks and OS reporting); account machine management (two accounts, two machines, offline presence, roots and revocation); account variables, catalog and configuration synchronization, account standing, credential migration, readiness and local updates (including replacing running and locked executables, journal recovery and rollback); `continue-on-error`, so a failure shows but blocks nothing |
+| macOS | `macos-latest` | Platform-sensitive PR, weekly and release candidate only: clippy and tests with `gui`; required whenever it runs |
+| Windows (informative) | `windows-latest` | Platform-sensitive PR, weekly and release candidate only: clean release `cargo install --path . --locked`; PE stack fields and native GUI open/status/close/reopen/quit/relaunch with Teams stopped; clippy with `gui`; headless operator admission/binding/recovery/revocation fixture through the real CLI; browser-assisted machine sign-in/trust tests (`machine_login`: two accounts, verifier, replay, expiry, denial, revocation, installation proof and native finish with Windows paths, locks and OS reporting); account machine management (two accounts, two machines, offline presence, roots and revocation); account variables, catalog and configuration synchronization, account standing, credential migration, readiness and local updates (including replacing running and locked executables, journal recovery and rollback); `continue-on-error`, so a failure shows but blocks nothing |
 | Security | `ubuntu-latest` | GitHub dependency review on PRs; full-history and working-tree Gitleaks scan with a pinned checksum-verified release; `cargo audit` against RustSec; no repository secrets |
-| CI result | `ubuntu-latest` | fails if a required job failed or was cancelled; skipped jobs pass. It is the one check to require before merging |
+| CI result | `ubuntu-latest` | fails if a required job failed or was cancelled; skipped jobs pass, and Windows only warns. It is the one check to require before merging and the run the release waits for |
 
-Rust jobs cache dependencies with `Swatinem/rust-cache`, saved only from `main` (pull requests restore it). Third-party actions are pinned to a commit.
+Rust jobs cache dependencies with `Swatinem/rust-cache`, and the UI job caches Playwright's Chromium with `actions/cache`; both are saved only from `main` (pull requests restore them). Third-party actions are pinned to a commit with a version comment.
 
-Weekly runs execute the full matrix and require all mandatory results, including security. `scripts/test-ci-workflow.mjs` exercises the YAML's actual change filter with synthetic Git/registry inputs, event conditions and required-job failure handling; run it with the existing Bun runtime. GitHub secret scanning, push protection, vulnerability alerts and automated security updates are enabled for the public repository; Dependabot proposes Cargo and Actions updates weekly. Audit output retains upstream maintenance/GUI notices, documented in [SECURITY.md](../SECURITY.md); known-vulnerability failures block delivery.
+Weekly runs execute the full matrix and require all mandatory results, including security. `scripts/test-ci-workflow.mjs` exercises the YAML's actual change filter with synthetic Git/registry inputs (including the platform-sensitive list and its step summary), event conditions, the Chromium cache step, pinned actions and standard runners, and required-job failure handling; run it with the existing Bun runtime. GitHub secret scanning, push protection, vulnerability alerts and automated security updates are enabled for the public repository; Dependabot proposes Cargo and Actions updates weekly. Audit output retains upstream maintenance/GUI notices, documented in [SECURITY.md](../SECURITY.md); known-vulnerability failures block delivery.
 
 ### Measured times
 
@@ -76,13 +87,15 @@ Wall-clock times on standard runners, from the pull request that added CI (no ca
 | Release, publishing | | |
 | Server update (build, restart, healthy) | about 5 min build (four jobs) | 2 min 18 s (four jobs) – 3 min 33 s (two jobs) build, then about 7 s to healthy |
 
+Measured on pull requests on 2026-11-06, before the Linux gate: Linux 5 to 6 min, UI and scripts 6 to 15 min (most of it reinstalling Playwright's Chromium, now cached), macOS 2 to 5 min, Windows (informative) about 20 min, which `CI result` used to wait for on every Rust change.
+
 In the Linux job the slowest steps are clippy with `gui` (about 2 min without cache), `cargo test` with `gui` (about 2 min) and `cargo package` (about 70 s).
 
 ## Release (`.github/workflows/release.yml`)
 
 Runs on every push to `main` (and by hand, `workflow_dispatch`, on the head of `main`):
 
-1. **Version and CI.** Reads the version in `Cargo.toml`. If crates.io already has it, it stops: nothing to publish (most runs end here in seconds). Otherwise it waits for this commit's CI run and requires it to have passed with the Linux job run (not skipped).
+1. **Version and CI.** Reads the version in `Cargo.toml`. If crates.io already has it, it stops: nothing to publish (most runs end here in seconds). Otherwise it waits for this commit's CI run and requires it to have passed (`CI result`, which on a release candidate includes macOS and the informative Windows job) with the Linux job run (not skipped).
 2. **Publish to crates.io**, in the `release` environment: a short-lived token from crates.io **Trusted Publishing** (OIDC, `rust-lang/crates-io-auth-action`), then `cargo publish --locked --no-verify` (CI already built, tested and packaged that commit).
 3. **Tag and GitHub release** `vX.Y.Z` on that commit, with generated notes (`contents: write` only in this job).
 4. **Prebuilt binaries** (`binaries.yml`, called by the release): a release build of both binaries per target on standard runners — `aarch64-apple-darwin` and `x86_64-apple-darwin` (`macos-latest`) and `x86_64-pc-windows-msvc` with the GUI, `x86_64-unknown-linux-gnu` headless on `ubuntu-22.04` (older glibc) — archived as `personal-teams-assistant-<target>-vX.Y.Z.tgz` (`.zip` on Windows; `personal-teams-assistant-headless-…` on Linux) with a `.sha256` each. The build jobs only read; a final job checks every archive names the version and its sum, signs GitHub build provenance (`gh attestation verify FILE --repo elvisbrevi/personal-teams-assistant`) and uploads them to the release. `[package.metadata.binstall]` in `Cargo.toml` points `cargo binstall` at the macOS and Windows archives; on Linux, or for a target whose build failed, binstall compiles like `cargo install` (the third-party `quick-install` strategy is disabled). A pull request that changes `binaries.yml` builds every archive without uploading.

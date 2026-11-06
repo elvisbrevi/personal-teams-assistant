@@ -45,13 +45,15 @@ Before starting work on a branch or creating a branch or worktree from `main`, u
 
 GitHub Actions is the gate and the delivery ([delivery](docs/delivery.md)). Develop, open a pull request, wait for its **CI result** check to pass and merge it: `gh pr merge --auto --merge --delete-branch` waits for CI. Never bypass the check (`--admin`) or merge with CI failing.
 
+Pull requests gate on Linux: **CI result** waits for Linux, security, and the UI and cloud jobs when their paths change. macOS (required) and Windows (informative) run only when a pull request touches a platform-sensitive path (the one list is in the `Changes` job of `ci.yml`: credential store, process spawning, private-file permissions, update staging and apply, native startup, `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`, `build.rs`, `.github/`), weekly, and on a release candidate pushed to `main`, which the release waits for. Code that adds a `cfg(windows)`, `cfg(not(unix))` or `target_os = "windows"`/`"macos"` branch in a file not yet on the list must add it; `bun scripts/test-ci-workflow.mjs` fails otherwise.
+
 Merging delivers: a version bump (`Cargo.toml`, `Cargo.lock`, `desktop/tauri.conf.json`) is published to crates.io by `release.yml` once CI passed on `main`, with its tag and GitHub release; the server's updater installs it within minutes; a change under `site/` is published by Cloudflare. Do not publish, tag or install on the server by hand; do it only as the fallback in [delivery](docs/delivery.md#when-the-automatic-path-fails), when the automatic path itself failed.
 
 When delivering product changes, include a new, unpublished version in all three version files before opening the pull request. A merge and push alone do not publish an existing version. Verify the new crates.io version and the server's running version and health before reporting delivery complete; distinguish merged, published and installed.
 
 Workflows use only GitHub-hosted standard runners (free while the repository is public): no larger, paid or self-hosted runners, and never a runner on the server. `ci.yml` has no secrets because pull requests from forks run it; grant other permissions per job, only where needed.
 
-Run the checks locally before pushing, as fast feedback (CI runs the same on Linux, plus macOS and an informative Windows build):
+Run the checks locally before pushing, as fast feedback (CI runs the same on Linux, plus macOS and an informative Windows build when the change is platform-sensitive):
 
 ```sh
 cargo fmt --all --check
