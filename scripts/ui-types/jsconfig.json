@@ -1,0 +1,17 @@
+{
+  // The GUI's type check (docs/ui-design-conventions.md §11): every module under the loose rules a
+  // view module follows. TypeScript is a development tool installed outside the repository:
+  //   tsc -p scripts/ui-types/jsconfig.json     (check.mjs adds the strict rules of the typed modules)
+  "compilerOptions": {
+    "target": "es2023",
+    "module": "es2022",
+    "moduleResolution": "bundler",
+    "lib": ["es2023", "dom", "dom.iterable"],
+    "allowJs": true,
+    "checkJs": true,
+    "noEmit": true,
+    "strict": false,
+    "skipLibCheck": true
+  },
+  "include": ["../../desktop/ui/*.js", "dom.d.ts"]
+}

@@ -19,7 +19,7 @@ Every directory input, selector or hierarchy browser uses the shared directory s
 - The product is a single Cargo package, `personal-teams-assistant`: the host `personal-teams-assistant` with its web interface (the owner's local page in the system browser, and the portal), the `pta` CLI and its skill. The host has no window and is the same build on every operating system; the `gui` feature is empty and deprecated, kept only so older installations still update. There are no other crates, `.app`/`.dmg`/installer bundles or standalone server.
 - The GUI is `desktop/ui/`, served by `src/app/page.rs` (local page) and `src/app/web.rs` (portal); operations go through `Host`/`Shell`, never through the GUI alone.
 - Delivery priority is the CLI and its shared core. If the GUI falls behind, note it in the architecture's «Known limits»; its parity does not block CLI work. Do not reinstall, publish or update the GUI unless the user asks.
-- Everything in the repository is in English: code, comments, documentation, prompts, the GUI's source text, CLI messages, IPC messages, diagnostics and audit steps. What the user reads follows `llm.language` (Spanish by default): the GUI (translated at runtime by `desktop/ui/i18n.js`, whose catalog is the only Spanish UI text), what the assistant writes to Teams, and the activity drafts and issues it writes for the user. Every new GUI string goes through `t()`/`tn()` (or static HTML) and gets its catalog entry; `scripts/test-ui-i18n.cjs` fails otherwise. Detecting messages without a model keeps Spanish and English phrases, because users write in both.
+- Everything in the repository is in English: code, comments, documentation, prompts, the GUI's source text, CLI messages, IPC messages, diagnostics and audit steps. What the user reads follows `llm.language` (Spanish by default): the GUI (translated at runtime by `desktop/ui/i18n.js`, whose catalog `desktop/ui/catalog.js` is the only Spanish UI text), what the assistant writes to Teams, and the activity drafts and issues it writes for the user. Every new GUI string goes through `t()`/`tn()` (or static HTML) and gets its catalog entry; `scripts/test-ui-i18n.cjs` fails otherwise. Detecting messages without a model keeps Spanish and English phrases, because users write in both.
 
 ## Invariants that must not be broken
 
@@ -59,11 +59,12 @@ Run the checks locally before pushing, as fast feedback (CI runs the same on Lin
 cargo fmt --all --check
 cargo clippy --all-targets -- -D warnings
 cargo test
-bun build desktop/ui/app.js --no-bundle --outfile /tmp/app-check.js   # if the GUI changed
+for m in desktop/ui/*.js; do bun build "$m" --no-bundle --outfile "/tmp/ui-check/${m##*/}"; done   # if the GUI changed
 node --test scripts/test-activity-ui.cjs scripts/test-ui-i18n.cjs scripts/test-ui-themes.cjs  # if the GUI changed
+node scripts/ui-types/check.mjs   # if the GUI changed; TypeScript installed outside the repository (docs/ui-design-conventions.md §10)
 ```
 
-A change that touches only `desktop/ui/` needs no clippy or full test run: `cargo test --lib gui_assets` runs the Rust tests that read GUI files (served assets, CSP, the local page's document marker), which is what CI runs for it.
+A change that touches only `desktop/ui/` needs no clippy or full test run: `cargo test --lib gui_assets` runs the Rust tests that read GUI files (served assets, CSP, the local page's document marker, the module graph and its preloads, file sizes, the caching rule), which is what CI runs for it.
 
 If the GUI changed and Playwright is available, also run the preview checks in [the GUI design conventions](docs/ui-design-conventions.md#10-verification) (axe WCAG 2.2 AA scans and interaction checks with synthetic data). For GUI work, the loop is: `node scripts/ui-preview/server.mjs` (synthetic mocks; the page reloads when a GUI file changes), or `scripts/dev-host.sh` for a real debug host on a disposable profile that serves `desktop/ui` from disk (`PTA_DEV_UI_DIR`, debug builds only), so a browser refresh shows an edit without a Rust build.
 

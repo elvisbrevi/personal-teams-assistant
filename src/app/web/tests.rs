@@ -519,20 +519,21 @@ pub(super) async fn fake_host(portal: &Portal, account: &Account) -> (MockServer
 #[tokio::test]
 async fn access_bootstraps_the_existing_profile_without_a_password_form() {
     let (_dir, portal, entries, _server) = configured_fixture().await;
-    for uri in [
-        "/",
-        "/login",
-        "/api/session",
-        "/app.js",
-        "/i18n.js",
-        "/transport.js",
-        "/style.css",
-    ] {
+    let files = gui_assets::ASSETS
+        .iter()
+        .filter(|asset| !PUBLIC_ASSETS.contains(&format!("/{}", asset.file).as_str()))
+        .map(|asset| format!("/{}", asset.file));
+    for uri in ["/", "/login", "/api/session"]
+        .map(str::to_owned)
+        .into_iter()
+        .chain(files)
+    {
         assert_eq!(
-            send(&portal, "GET", uri, None, None, None, Value::Null)
+            send(&portal, "GET", &uri, None, None, None, Value::Null)
                 .await
                 .status(),
-            StatusCode::UNAUTHORIZED
+            StatusCode::UNAUTHORIZED,
+            "{uri}"
         );
     }
     let mut auth = TestSession {
@@ -557,7 +558,7 @@ async fn access_bootstraps_the_existing_profile_without_a_password_form() {
     assert!(cookie.contains("HttpOnly") && cookie.contains("SameSite=Strict"));
     auth.cookie = cookie.split(';').next().unwrap().into();
     let body = to_bytes(response.into_body(), 2_000_000).await.unwrap();
-    assert!(String::from_utf8_lossy(&body).contains("transport.js"));
+    assert!(String::from_utf8_lossy(&body).contains("<script type=\"module\" src=\"app.js\""));
     assert!(!String::from_utf8_lossy(&body).contains("web-password-form"));
     let data = json_body(
         send(
@@ -644,7 +645,12 @@ async fn the_pwa_manifest_and_its_icons_are_served_without_access() {
         let response = send(&portal, "GET", uri, None, None, None, Value::Null).await;
         assert_eq!(response.status(), StatusCode::OK, "{uri}");
         assert_eq!(response.headers()[header::CONTENT_TYPE], kind, "{uri}");
-        assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+        // Like every GUI file but the document: kept by the browser only to revalidate it.
+        assert_eq!(
+            response.headers()[header::CACHE_CONTROL],
+            gui_assets::CACHE_RULE
+        );
+        assert!(response.headers().contains_key(header::ETAG), "{uri}");
     }
     let manifest = json_body(
         send(
@@ -3224,14 +3230,32 @@ async fn variable_catalogs_are_served_per_account_to_that_accounts_machines_only
 }
 
 /// Every GUI file in the portal, from the binary and from a development directory: the same
-/// paths, content types and security headers, `no-store` included; only the bytes come from disk.
+/// paths, content types, security headers and caching rule; only the bytes (and so the tags) come
+/// from disk.
 #[tokio::test]
 async fn gui_assets_are_served_by_the_portal_from_the_binary_or_a_development_directory() {
     use crate::app::gui_assets::{
         ASSETS,
-        tests::{DevelopmentDir, assert_secure_headers, edited_copy, expected},
+        tests::{
+            DevelopmentDir, assert_gui_file_headers, assert_secure_headers, edited_copy, expected,
+            expected_etag,
+        },
     };
     let (_dir, portal, entries, _server) = configured_fixture().await;
+    // A request for a file the browser holds, with its tag.
+    let conditional = |path: &str, tag: &str, auth: Option<&TestSession>| {
+        let mut request = Request::builder()
+            .method("GET")
+            .uri(path)
+            .header(header::HOST, "localhost:38656")
+            .header(header::IF_NONE_MATCH, tag);
+        if let Some(auth) = auth {
+            request = request
+                .header("cf-access-jwt-assertion", &auth.assertion)
+                .header(header::COOKIE, &auth.cookie);
+        }
+        router(portal.clone()).oneshot(request.body(Body::empty()).unwrap())
+    };
     let (auth, _csrf) = session_cookie(&portal, &entries[0]).await;
     let copy = edited_copy();
     // The paths that skip Access are GUI files.
@@ -3253,13 +3277,25 @@ async fn gui_assets_are_served_by_the_portal_from_the_binary_or_a_development_di
                 asset.content_type,
                 "{what}"
             );
-            assert_secure_headers(&response, &what);
+            assert_gui_file_headers(&response, asset, source.as_deref(), &what);
             let served = to_bytes(response.into_body(), 4_000_000).await.unwrap();
             assert_eq!(
                 served.as_ref(),
                 expected(source.as_deref(), asset).as_slice(),
                 "{what}"
             );
+            if asset.file != "index.html" {
+                // A cached copy is used again only after a portal session confirms its tag.
+                let tag = expected_etag(source.as_deref(), asset);
+                let again = conditional(&path, &tag, Some(&auth)).await.unwrap();
+                assert_eq!(again.status(), StatusCode::NOT_MODIFIED, "{what}");
+                assert_eq!(again.headers()[header::ETAG], tag.as_str(), "{what}");
+                if asset.session {
+                    let refused = conditional(&path, &tag, None).await.unwrap();
+                    assert_eq!(refused.status(), StatusCode::UNAUTHORIZED, "{what}");
+                    assert_secure_headers(&refused, &what);
+                }
+            }
             if asset.session {
                 let refused = send(&portal, "GET", &path, None, None, None, Value::Null).await;
                 assert_eq!(refused.status(), StatusCode::UNAUTHORIZED, "{what}");
@@ -3269,7 +3305,9 @@ async fn gui_assets_are_served_by_the_portal_from_the_binary_or_a_development_di
         assert_eq!(index.status(), StatusCode::OK);
         assert_secure_headers(&index, "/");
         let served = to_bytes(index.into_body(), 4_000_000).await.unwrap();
-        assert!(String::from_utf8_lossy(&served).contains("src=\"transport.js\""));
+        assert!(
+            String::from_utf8_lossy(&served).contains("<script type=\"module\" src=\"app.js\"")
+        );
         assert!(!String::from_utf8_lossy(&served).contains("pta-transport"));
     }
 }

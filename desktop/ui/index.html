@@ -13,9 +13,44 @@
   <link rel="apple-touch-icon" href="apple-touch-icon.png">
   <link rel="manifest" href="manifest.webmanifest" crossorigin="use-credentials">
   <link rel="stylesheet" href="style.css">
-  <script src="transport.js" defer></script>
-  <script src="i18n.js" defer></script>
-  <script src="app.js" defer></script>
+  <!-- The GUI is native ES modules: one entry, and every module of its static graph preloaded so
+       they download in parallel instead of one import level at a time, at low priority so they do
+       not compete with the stylesheet for the first paint. -->
+  <script type="module" src="app.js" fetchpriority="low"></script>
+  <link rel="modulepreload" href="transport.js" fetchpriority="low">
+  <link rel="modulepreload" href="catalog.js" fetchpriority="low">
+  <link rel="modulepreload" href="i18n.js" fetchpriority="low">
+  <link rel="modulepreload" href="state.js" fetchpriority="low">
+  <link rel="modulepreload" href="dom.js" fetchpriority="low">
+  <link rel="modulepreload" href="markdown.js" fetchpriority="low">
+  <link rel="modulepreload" href="settings-general.js" fetchpriority="low">
+  <link rel="modulepreload" href="settings-models.js" fetchpriority="low">
+  <link rel="modulepreload" href="settings-daily.js" fetchpriority="low">
+  <link rel="modulepreload" href="directory-sheet.js" fetchpriority="low">
+  <link rel="modulepreload" href="knowledge-map.js" fetchpriority="low">
+  <link rel="modulepreload" href="knowledge.js" fetchpriority="low">
+  <link rel="modulepreload" href="messages.js" fetchpriority="low">
+  <link rel="modulepreload" href="guides.js" fetchpriority="low">
+  <link rel="modulepreload" href="chat.js" fetchpriority="low">
+  <link rel="modulepreload" href="profile.js" fetchpriority="low">
+  <link rel="modulepreload" href="home.js" fetchpriority="low">
+  <link rel="modulepreload" href="sessions.js" fetchpriority="low">
+  <link rel="modulepreload" href="implementation.js" fetchpriority="low">
+  <link rel="modulepreload" href="activities.js" fetchpriority="low">
+  <link rel="modulepreload" href="todo.js" fetchpriority="low">
+  <link rel="modulepreload" href="settings-migration.js" fetchpriority="low">
+  <link rel="modulepreload" href="settings-variables.js" fetchpriority="low">
+  <link rel="modulepreload" href="settings-cloud.js" fetchpriority="low">
+  <link rel="modulepreload" href="settings-account.js" fetchpriority="low">
+  <link rel="modulepreload" href="settings-machines.js" fetchpriority="low">
+  <link rel="modulepreload" href="settings-updates.js" fetchpriority="low">
+  <link rel="modulepreload" href="settings-service.js" fetchpriority="low">
+  <link rel="modulepreload" href="nav.js" fetchpriority="low">
+  <link rel="modulepreload" href="todo-request.js" fetchpriority="low">
+  <link rel="modulepreload" href="notices.js" fetchpriority="low">
+  <link rel="modulepreload" href="dialogs.js" fetchpriority="low">
+  <link rel="modulepreload" href="control.js" fetchpriority="low">
+  <link rel="modulepreload" href="appearance.js" fetchpriority="low">
 </head>
 <body>
   <svg class="sprite" aria-hidden="true">

@@ -37,16 +37,23 @@ http.createServer((req, res) => {
   }
   if (pathname === '/' || pathname === '/index.html') {
     file = 'index.html';
-    // The mock must exist before transport.js picks its transport; the document is marked the way
-    // the owner's local page marks it (src/app/page.rs).
-    body = fs.readFileSync(path.join(ui, file), 'utf8')
-      .replace('<script src="transport.js"', '<script src="/__fixture.js"></script><script src="/__mock.js"></script><script src="/__reload.js"></script><script src="transport.js"')
+    // The mock must exist before transport.js picks its transport (classic scripts run before any
+    // module); the harness's module, after the entry, exposes what the checks reach. The document
+    // is marked the way the owner's local page marks it (src/app/page.rs).
+    body = fs.readFileSync(path.join(ui, file), 'utf8');
+    const entry = body.match(/<script type="module" src="app\.js"[^>]*><\/script>/)?.[0];
+    if (!entry) { res.writeHead(500); res.end(`${file} no longer loads app.js as a module`); return; }
+    body = body
+      .replace(entry, `<script src="/__fixture.js"></script><script src="/__mock.js"></script><script src="/__reload.js"></script>${entry}<script type="module" src="/__expose.js"></script>`)
       .replace('<head>', '<head>\n  <meta name="pta-transport" content="local">');
   } else if (pathname === '/__reload.js') {
     body = reload;
     file = 'reload.js';
   } else if (pathname === '/__mock.js') {
     body = fs.readFileSync(path.join(here, 'mock.js'));
+  } else if (pathname === '/__expose.js') {
+    body = fs.readFileSync(path.join(here, 'expose.js'));
+    file = 'expose.js';
   } else if (pathname === '/__fixture.js') {
     const fixture = JSON.parse(fs.readFileSync(path.join(here, 'fixture.json'), 'utf8'));
     fixture.snapshot.host_version = fs.readFileSync(path.join(here, '../../Cargo.toml'), 'utf8').match(/^version = "([^"]+)"/m)[1];
