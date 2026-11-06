@@ -1443,6 +1443,11 @@ async fn operate(
                 .map_err(fail)?
             )
         }
+        // The native window, while a window build still has one.
+        "app_open" if args.get("window").and_then(Value::as_bool) == Some(true) => {
+            host.shell.show().map_err(fail)?;
+            json!({"visible":true,"target":"window"})
+        }
         "app_open" => match page::open(host) {
             Ok(opened) => opened,
             // Until the window is removed, a window build without its page still shows it.

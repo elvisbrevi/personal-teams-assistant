@@ -115,6 +115,11 @@ mod tests {
         assert_eq!(detail["operation"], "app_open");
         assert_eq!(detail["code"], "not_ready");
         assert_eq!(detail["causes"][0]["chain"][0]["type"], "precondition");
+        // There is no native window to show either.
+        let mut window = control::Request::new("app_open");
+        window.args = serde_json::json!({"window": true});
+        let reply = control::dispatch(&host, window).await;
+        assert_eq!((reply.ok, reply.code.as_str()), (false, "not_ready"));
         let reply = control::dispatch(&host, control::Request::new("app_quit")).await;
         assert!(reply.ok);
         tokio::time::timeout(std::time::Duration::from_secs(2), quit_requested.changed())
