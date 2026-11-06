@@ -311,6 +311,11 @@ fn uuid(text: &str) -> Result<()> {
     Ok(())
 }
 impl State {
+    /// Another machine takes the Teams selection (tests of what this one may then do).
+    #[cfg(test)]
+    pub(in crate::app) async fn select_teams_machine(&self, id: &str) {
+        self.registry.lock().await.teams_machine = id.into();
+    }
     pub(super) fn new(profile: &Path) -> Result<Self> {
         let root = profile.join("implementation");
         security::private_dir(&root)?;

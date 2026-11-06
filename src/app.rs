@@ -49,6 +49,7 @@ mod notes;
 mod page;
 mod portable;
 mod readiness;
+pub(crate) mod service;
 mod skill;
 mod standing;
 mod tools;
@@ -1802,7 +1803,13 @@ pub fn run() {
         github::askpass();
         return;
     }
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    // A service manager that cannot set variables (the Windows Task Scheduler) names an isolated
+    // profile with `--profile-dir`; it means exactly `PTA_PROFILE_DIR`.
+    let (args, profile) = service::profile_argument(std::env::args().skip(1).collect());
+    if let Some(profile) = profile {
+        // SAFETY: nothing else runs yet; every thread and runtime starts after this point.
+        unsafe { std::env::set_var("PTA_PROFILE_DIR", profile) };
+    }
     // Lets an update verify a staged build without starting a host.
     if args.as_slice() == ["--version"] {
         println!("{} {}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
@@ -1835,10 +1842,18 @@ pub fn run() {
         }
         return;
     }
-    // Started by `pta` or the update's helper (not by a person launching the application): no
-    // page opens by itself.
-    let background =
-        args.iter().any(|a| a == "--host") || std::env::var_os(maintenance::HANDOVER).is_some();
+    // Started at login by the entry `pta service install` created.
+    let service = args.iter().any(|a| a == service::FLAG);
+    // The update's helper starts the new host itself, or through the service manager, which
+    // cannot pass it a variable: then the journal it holds names the hand-over.
+    let handover = std::env::var_os(maintenance::HANDOVER).is_some()
+        || (service
+            && control::profile_dir().is_ok_and(|profile| {
+                crate::maintenance::apply::handover(&profile.join(crate::maintenance::DIRECTORY))
+            }));
+    // Started by `pta`, the service manager or the update's helper (not by a person launching
+    // the application): no page opens by itself.
+    let background = args.iter().any(|a| a == "--host") || service || handover;
     // A new `cargo install` replaced this executable while the previous build keeps running:
     // stop that host (assistant and tunnel first) and take its place.
     let mut previous_running = false;
@@ -1878,7 +1893,7 @@ pub fn run() {
         return;
     }
     // Never start a host between the two halves of an update; undo one that was interrupted.
-    if std::env::var_os(maintenance::HANDOVER).is_none()
+    if !handover
         && let Ok(profile) = control::profile_dir()
         && let Some(reason) =
             crate::maintenance::apply::startup_block(&profile.join(crate::maintenance::DIRECTORY))
@@ -1906,10 +1921,17 @@ pub fn run() {
         .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stderr()))
         .try_init()
         .ok();
-    let start = args.iter().any(|a| a == "--start")
-        || (previous_running && keep_running_after_update(true));
+    let keep = previous_running && keep_running_after_update(true);
+    if previous_running
+        && !keep
+        && let Ok(profile) = control::profile_dir()
+    {
+        // The person chose not to keep it running: a later login does not start it either.
+        service::remember(&profile, false);
+    }
+    let start = args.iter().any(|a| a == "--start") || keep;
     // Startup errors carry no credential values; show the chain to the operator.
-    if let Err(error) = headless::run(host_lock, start, !background) {
+    if let Err(error) = headless::run(host_lock, start, !background, service && !start) {
         eprintln!("Headless host stopped: {error:#}");
         std::process::exit(1);
     }

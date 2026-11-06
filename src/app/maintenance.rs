@@ -44,7 +44,8 @@ pub(super) struct Environment {
     pub exe: PathBuf,
     pub variables: Vec<(OsString, OsString)>,
     pub running: Version,
-    /// The flags this host was started with that a restart must repeat (`--headless`, `--host`).
+    /// The flags this host was started with that a restart must repeat (`--headless`, `--host`,
+    /// `--service`).
     pub launch: Vec<String>,
     /// Tests drive the helper themselves: nothing is spawned.
     pub manual: bool,
@@ -65,7 +66,7 @@ fn environment() -> Environment {
         running: Version::parse(env!("CARGO_PKG_VERSION")).expect("a stable package version"),
         launch: std::env::args()
             .skip(1)
-            .filter(|a| matches!(a.as_str(), "--headless" | "--host"))
+            .filter(|a| matches!(a.as_str(), "--headless" | "--host" | "--service"))
             .collect(),
         manual: false,
     }

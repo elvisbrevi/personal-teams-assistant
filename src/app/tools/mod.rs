@@ -433,6 +433,27 @@ pub(super) const TOOLS: &[Tool] = &[
         },
     },
     Tool {
+        name: "service_status",
+        title: "Start at login status",
+        description: "Whether this profile has an entry in this computer's service manager that starts the host when the user logs in (macOS LaunchAgent, Linux systemd user unit, Windows scheduled task at logon): installed, whether it starts this executable for this profile (current), whether the manager runs it now, the manager's last error and, on Linux, whether lingering keeps it running without a session. Shows no path. Needs the owner of this computer.",
+        effect: Effect::Read,
+        schema: none,
+    },
+    Tool {
+        name: "service_install",
+        title: "Start the host at login",
+        description: "Register the host of this profile to start when the user logs in on this computer, per user and without administrator rights; exactly one entry per profile, and repeating it changes nothing. The host starts in the background (no page opens) and never starts the assistant because of the entry: after a login the assistant runs only if it was running before and this computer still holds the Teams selection and lease. The definition holds no account variable or credential. An update restarts a host the entry runs through the service manager. Needs the user's confirmation and the owner of this computer.",
+        effect: Effect::External,
+        schema: || object(json!({"confirmed":confirmed()}), &[]),
+    },
+    Tool {
+        name: "service_uninstall",
+        title: "Stop starting the host at login",
+        description: "Remove the entry service_install created for this profile, and nothing else. A host the entry runs now keeps running until it quits; nothing starts it at the next login. Needs the user's confirmation and the owner of this computer.",
+        effect: Effect::External,
+        schema: || object(json!({"confirmed":confirmed()}), &[]),
+    },
+    Tool {
         name: "update_status",
         title: "Installation update status",
         description: "The installed, running and available versions of this package on this computer, how this installation was built (features and target; or why it cannot be updated from here), the last check and the state of any prepared update (staging, staged, failed) with build progress. On a shared server it only says the operator manages updates. Reads local state; makes no network call. A prepared update is not an installed one: the installed version keeps running unchanged.",
@@ -1874,6 +1895,8 @@ pub(super) async fn run(name: &str, args: &Value) -> Result<Value, String> {
             args.as_object_mut().unwrap().remove("confirmed");
             ipc(name, args).await
         }
+        "service_status" => ipc("service_status", json!({})).await,
+        "service_install" | "service_uninstall" => ipc(name, json!({})).await,
         "update_status" => ipc("crate_update_status", args.clone()).await,
         "update_check" => ipc("crate_update_check", args.clone()).await,
         "update_dismiss" => ipc("crate_update_dismiss", args.clone()).await,
@@ -2292,6 +2315,8 @@ pub(super) fn confirmation(name: &str, args: &Value) -> Option<String> {
             "Use variable {} as the {} credential? It is sent only to that consumer's fixed destination.",
             args["variable"], args["consumer"]
         ),
+        "service_install" => "Register the host to start when you log in on this computer? It never starts the assistant by itself.".into(),
+        "service_uninstall" => "Remove the entry that starts the host when you log in on this computer?".into(),
         "update_stage" => format!(
             "Build version {} of this package with Cargo on this computer (nothing is installed)?",
             args["version"].as_str().unwrap_or_default()

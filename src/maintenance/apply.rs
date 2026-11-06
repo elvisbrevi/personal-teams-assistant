@@ -72,6 +72,10 @@ pub struct Intent {
     pub assistant: bool,
     pub subscriptions: u64,
     pub tunnel: bool,
+    /// The service manager runs the host (`pta service install`): it is stopped and started
+    /// through the manager.
+    #[serde(default)]
+    pub service: bool,
 }
 
 /// What a running host reports about itself.
@@ -946,6 +950,29 @@ pub fn describe(journal: &Journal) -> serde_json::Value {
         "recovery": (journal.phase == Phase::Failed).then_some(
             "Reinstall the exact version with `cargo install personal-teams-assistant --version X.Y.Z --locked --force`, then start the application. Your data and credentials were not removed."),
     })
+}
+
+/// Names the update whose helper starts the new host through the service manager, which cannot
+/// give that host a variable the way the helper does (`PTA_UPDATE_HANDOVER`).
+const HANDOVER: &str = "handover";
+
+pub fn mark_handover(dir: &Path, id: &str) -> Result<()> {
+    atomic(dir, HANDOVER, id, id)
+}
+
+pub fn clear_handover(dir: &Path) {
+    let _ = fs::remove_file(dir.join(HANDOVER));
+}
+
+/// Whether a host starting now is the one the helper of the unfinished update asked for.
+pub fn handover(dir: &Path) -> bool {
+    let Some(journal) = read(dir).filter(|j| !j.phase.finished()) else {
+        return false;
+    };
+    matches!(
+        journal.phase,
+        Phase::Restarting | Phase::Verifying | Phase::RollingBack
+    ) && fs::read_to_string(dir.join(HANDOVER)).is_ok_and(|id| id.trim() == journal.id)
 }
 
 /// Refuses to start a host while an update is in progress and undoes an interrupted one first.

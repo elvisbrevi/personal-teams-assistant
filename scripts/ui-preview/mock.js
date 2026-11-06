@@ -199,6 +199,21 @@
   const touch = variable => { variable.version += 1; variable.updated_at = secs(NOW); };
   // Consumers: the one built-in registry entry (as the host reports it) and one launcher an agent proposed.
   let consumerBinding = null;
+  // Start at login: the owner's computer (Linux, lingering off); a shared portal account is refused.
+  let serviceInstalled = false;
+  window.__ptaServiceCalls = [];
+  const serviceView = () => ({
+    supported: true, manager: 'systemd', name: 'personal-teams-assistant-0a1b2c3d4e5f.service',
+    installed: serviceInstalled, current: serviceInstalled, running: false, last_error: null,
+    linger: serviceInstalled ? false : null, this_host: false,
+    notes: serviceInstalled ? ['Lingering is off, so the host runs only while you are logged in. To keep it running without a session, run loginctl enable-linger.'] : [],
+  });
+  const serviceCall = (method, installed) => {
+    if (sharedAccount) throw new Error('Starting the host at login is set up by the owner of this computer, with pta or the application\'s page on that computer.');
+    window.__ptaServiceCalls.push(method);
+    if (installed !== undefined) serviceInstalled = installed;
+    return structuredClone(serviceView());
+  };
   // Updates: a local owner is offered 0.9.14 over the running 0.9.13; a shared account only sees the managed notice.
   let updateState = 'idle';
   let updateDismissed = false;
@@ -440,6 +455,9 @@
       return { sync: structuredClone(sync), changes: { added: 0, updated: 0, removed: 0 } };
     },
     // An installation signed in to an account: the account configuration it loaded, and Synchronize now.
+    service_status: () => serviceCall('status'),
+    service_install: () => serviceCall('install', true),
+    service_uninstall: () => serviceCall('uninstall', false),
     crate_update_status: () => structuredClone(updateView()),
     crate_update_check: () => structuredClone(updateView()),
     crate_update_stage: args => {

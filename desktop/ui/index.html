@@ -584,6 +584,14 @@
             <div id="update-result" class="callout" role="status" hidden><div><p id="update-result-text"></p><p id="update-result-error" hidden></p><ul id="update-result-notes"></ul></div></div>
             <div class="actions"><button id="update-stage" type="button" disabled>Prepare update</button><button id="update-apply" type="button" hidden>Install update</button><button id="update-cancel" type="button" class="secondary" hidden>Cancel the wait</button><button id="update-dismiss" type="button" class="secondary" hidden>Dismiss notice</button></div>
           </div>
+          <div class="panel" id="panel-service" hidden>
+            <div class="panel-head"><h2>Start at login</h2><span id="service-state" class="badge muted"></span></div>
+            <p class="hint">The application starts in the background when you log in to this computer, without opening this page. It never starts the assistant by itself: after a login the assistant runs only if it was running before and this computer still holds the Teams selection.</p>
+            <div id="service-rows" class="list"></div>
+            <p id="service-error" class="callout warn" role="status" hidden></p>
+            <ul id="service-notes" class="hint"></ul>
+            <div class="actions"><button id="service-install" type="button">Start at login</button><button id="service-uninstall" type="button" class="secondary" hidden>Stop starting at login</button></div>
+          </div>
           <div class="panel" id="panel-embeddings">
             <h2>Semantic search</h2>
             <p class="hint">Optional. Embeddings add retrieval by meaning to the text search of repositories, notes, questions and evaluated requests; those texts are sent to this endpoint. Without them, the language model still recognizes equivalent questions.</p>
