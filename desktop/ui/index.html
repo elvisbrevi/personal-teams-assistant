@@ -413,6 +413,20 @@
             <div class="panel-head"><h2>Machines</h2><button id="machines-refresh" class="secondary small">Refresh machines</button></div>
             <p class="hint">Manage your account's trusted machines here. Trust, allowed directories and Teams responsibility are separate choices.</p>
             <p id="machine-connect-hint" class="hint">To add this computer to your account, choose Sign in in the sidebar: you sign in in the browser and choose Trust this machine once.</p>
+            <details class="fold" id="machine-join" hidden>
+              <summary>Connect this computer</summary>
+              <p class="hint">Run this command in a terminal on the computer you want to add (PowerShell on Windows). It installs the assistant for your user, without administrator rights or Rust, starts it when you log in and opens this portal's sign-in page there. The command holds no password or key.</p>
+              <div id="machine-join-system" class="segmented" role="group" aria-label="Operating system">
+                <button type="button" data-system="macos" aria-pressed="true"><span translate="no">macOS</span></button>
+                <button type="button" data-system="linux" aria-pressed="false"><span translate="no">Linux</span></button>
+                <button type="button" data-system="windows" aria-pressed="false"><span translate="no">Windows</span></button>
+              </div>
+              <div class="agent-endpoint">
+                <code id="machine-join-command" translate="no"></code>
+                <button id="machine-join-copy" type="button" class="secondary small">Copy command</button>
+              </div>
+              <p class="hint">The request then appears on that sign-in page with the code the terminal shows: check it and choose Trust this machine. Trust grants no directories, Teams responsibility or assistant start; choose those here afterwards. To remove it, run the script again with --uninstall; the computer's profile is kept.</p>
+            </details>
             <div class="grid">
               <label>Machine name<input id="machine-name" maxlength="100"></label>
             </div>

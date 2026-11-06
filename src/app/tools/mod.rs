@@ -907,6 +907,13 @@ pub(super) const TOOLS: &[Tool] = &[
         },
     },
     Tool {
+        name: "machine_join_command",
+        title: "Command to connect a computer",
+        description: "The one command that installs the prebuilt release on another computer (macOS, Linux or Windows, no Rust or administrator rights), starts it at login and opens the sign-in page for Trust this machine on your coordinator. Built from the coordinator's public HTTPS origin and this package's repository; it holds no secret. In the portal it uses the portal's own origin; on a connected computer, its coordinator's.",
+        effect: Effect::Read,
+        schema: none,
+    },
+    Tool {
         name: "machine_login_status",
         title: "Check computer sign-in",
         description: "Read the pending sign-in state without finishing it: pending, approved, denied, expired or none, with the public approval URL and code. Never returns credentials.",

@@ -716,3 +716,81 @@ async fn cargo_prerequisites_are_probed() {
     processes::script(&cargo, "echo garbage");
     assert!(cargo_version(&cargo, &[]).await.is_err());
 }
+
+/// The record as `scripts/install/install.sh` and `install.ps1` write it.
+fn write_archive(root: &Path, version: &str, bins: &[&str]) {
+    std::fs::create_dir_all(root.join("bin")).unwrap();
+    let record = serde_json::json!({
+        "schema": 1, "kind": "archive", "package": CRATE, "version": version,
+        "target": "x86_64-unknown-linux-gnu", "bins": bins,
+        "repository": "https://github.com/example/personal-teams-assistant",
+        "archive": format!("{CRATE}-x86_64-unknown-linux-gnu-v{version}.tgz"),
+        "sha256": "0".repeat(64), "installed_at": "2026-11-06T12:00:00Z",
+    });
+    std::fs::write(
+        root.join(ARCHIVE_RECORD),
+        serde_json::to_string_pretty(&record).unwrap(),
+    )
+    .unwrap();
+}
+
+#[test]
+fn an_archive_installation_is_recognized_but_not_updated_from_here_yet() {
+    let dir = tempfile::tempdir().unwrap();
+    write_archive(dir.path(), "0.11.4", &["personal-teams-assistant", "pta"]);
+    let exe = dir.path().join("bin").join(exe_name(CLI));
+    let archive = archive(&exe).unwrap().unwrap();
+    assert_eq!(archive.version, v("0.11.4"));
+    assert_eq!(archive.target, "x86_64-unknown-linux-gnu");
+    assert_eq!(archive.root, dir.path());
+    // Not a Cargo installation, and the diagnostic says what to do instead.
+    assert_eq!(inspect(&exe).unwrap_err(), ARCHIVE_DIAGNOSTIC);
+
+    // Windows names keep working.
+    write_archive(
+        dir.path(),
+        "0.11.4",
+        &["personal-teams-assistant.exe", "pta.exe"],
+    );
+    assert!(archive_ok(&exe));
+    // Anything else in the record is refused, never guessed.
+    for (field, value) in [
+        ("kind", serde_json::json!("cargo")),
+        ("package", serde_json::json!("other-package")),
+        ("schema", serde_json::json!(2)),
+        ("version", serde_json::json!("0.11.4-beta.1")),
+        ("target", serde_json::json!("x86_64 linux; rm")),
+        ("bins", serde_json::json!(["pta"])),
+    ] {
+        let path = dir.path().join(ARCHIVE_RECORD);
+        let mut record: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let original = record[field].clone();
+        record[field] = value;
+        std::fs::write(&path, record.to_string()).unwrap();
+        let reason = inspect(&exe).unwrap_err();
+        assert!(reason.contains("record is not valid"), "{field}: {reason}");
+        assert!(!archive_ok(&exe), "{field}");
+        record[field] = original;
+        std::fs::write(&path, record.to_string()).unwrap();
+    }
+    std::fs::write(dir.path().join(ARCHIVE_RECORD), "not json").unwrap();
+    assert!(!archive_ok(&exe));
+}
+
+fn archive_ok(exe: &Path) -> bool {
+    archive(exe).is_some_and(|a| a.is_ok())
+}
+
+#[test]
+fn cargos_own_record_wins_over_an_archive_record_and_no_record_is_no_archive() {
+    let dir = tempfile::tempdir().unwrap();
+    let exe = dir.path().join("bin").join(exe_name(CLI));
+    assert!(archive(&exe).is_none());
+    write_archive(dir.path(), "0.11.4", &["personal-teams-assistant", "pta"]);
+    write_records(dir.path(), &crates_io("0.11.2"), full_record());
+    assert!(archive(&exe).is_none());
+    assert_eq!(inspect(&exe).unwrap().version, v("0.11.2"));
+    // An executable outside a bin directory has no installation of any kind.
+    assert!(archive(&dir.path().join(exe_name(CLI))).is_none());
+}

@@ -195,7 +195,12 @@ fn status(host: &Host, env: &Environment) -> Value {
     let last = journal::read(&dir);
     let applying = last.as_ref().is_some_and(|j| !j.phase.finished());
     let installation = core::inspect(&env.exe);
-    let installed = installation.as_ref().ok().map(|i| i.version);
+    let archive = core::archive(&env.exe).and_then(Result::ok);
+    let installed = installation
+        .as_ref()
+        .ok()
+        .map(|i| i.version)
+        .or(archive.as_ref().map(|a| a.version));
     let offer = available(saved.latest.as_deref(), env.running, installed);
     let in_flight = live().get(dir.parent().unwrap()).cloned();
     // A build recorded as running by a process that is gone was interrupted.
@@ -242,10 +247,14 @@ fn status(host: &Host, env: &Environment) -> Value {
         && !applying
         && unsupported.is_none()
         && matches!(state, "staged" | "deferred");
-    let install = match &installation {
-        Ok(i) => json!({"supported":true,"features":i.features,"all_features":i.all_features,
+    let install = match (&installation, &archive) {
+        (Ok(i), _) => json!({"supported":true,"kind":if i.prebuilt {"binstall"} else {"cargo"},
+            "features":i.features,"all_features":i.all_features,
             "no_default_features":i.no_default_features,"target":i.target,"prebuilt":i.prebuilt}),
-        Err(diagnostic) => json!({"supported":false,"diagnostic":diagnostic}),
+        (Err(diagnostic), Some(a)) => {
+            json!({"supported":false,"kind":"archive","target":a.target,"diagnostic":diagnostic})
+        }
+        (Err(diagnostic), None) => json!({"supported":false,"diagnostic":diagnostic}),
     };
     // A failure about a release that is no longer on offer is stale.
     let shown = recorded

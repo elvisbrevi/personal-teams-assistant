@@ -785,6 +785,21 @@ async fn forward(
             json!({"url":"https://github.com/login/device"}),
         ));
     }
+    // The command that joins a computer names this portal's own public origin, never the host's.
+    if request.method == "machine_join_command" {
+        return Ok(if portal.settings.https() {
+            match implementation::join::commands(&portal.settings.origin()) {
+                Ok(data) => control::Reply::success(data),
+                Err(error) => control::Reply::error("not_ready", 3, &error.to_string()),
+            }
+        } else {
+            control::Reply::error(
+                "not_ready",
+                3,
+                "The portal needs its public HTTPS address before a computer can join it.",
+            )
+        });
+    }
     if request.method == "open_azure_cli_login" {
         return Ok(control::Reply::success(
             json!({"url":"https://microsoft.com/devicelogin"}),

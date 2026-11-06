@@ -267,6 +267,13 @@
         directories: !args.path ? ['/work'] : args.path === '/work' ? ['/work/application', '/work/documentation'] : [] };
     },
     machine_settings: () => structuredClone(machineSettings),
+    // Built by the portal from its own origin (src/app/implementation/join.rs); synthetic here.
+    machine_join_command: () => {
+      const base = 'https://github.com/example/personal-teams-assistant/releases/latest/download';
+      const unix = `curl --proto '=https' --tlsv1.2 -fsSL ${base}/install.sh | sh -s -- --origin https://assistant.example.com`;
+      return { origin: 'https://assistant.example.com', commands: { macos: unix, linux: unix,
+        windows: `Invoke-RestMethod -UseBasicParsing ${base}/install.ps1 -OutFile "$env:TEMP\\pta-install.ps1"; powershell -NoProfile -ExecutionPolicy Bypass -File "$env:TEMP\\pta-install.ps1" -Origin https://assistant.example.com` } };
+    },
     machine_list: () => ({ this_machine: machineId, teams_machine: teamsMachine, machines: [
       machineMetadata(machineId, machineSettings.name, 'linux', true),
       machineMetadata(remoteMachineId, remoteName, 'macos', false),

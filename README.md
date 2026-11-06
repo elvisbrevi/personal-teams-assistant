@@ -39,7 +39,25 @@ Activities can save the user's existing Azure tasks on a daily or interval sched
 
 ## Installation
 
-One Cargo package, `personal-teams-assistant`, installs everything: the host `personal-teams-assistant` with its web interface, the `pta` CLI and the agent skill built into `pta`. It is the same build and the same command on macOS, Windows and Linux, with no window, tray or GTK/WebKit packages: launching `personal-teams-assistant` starts the host and opens its interface in the system browser.
+One package, `personal-teams-assistant`, installs everything: the host `personal-teams-assistant` with its web interface, the `pta` CLI and the agent skill built into `pta`. It is the same build on macOS, Windows and Linux, with no window, tray or GTK/WebKit packages: launching `personal-teams-assistant` starts the host and opens its interface in the system browser.
+
+### One command, no Rust
+
+To add a computer to your account, copy the command from your portal (Settings › Machines › **Connect this computer**) and run it on that computer. It looks like this, with your portal's address:
+
+```sh
+# macOS and Linux
+curl --proto '=https' --tlsv1.2 -fsSL https://github.com/elvisbrevi/personal-teams-assistant/releases/latest/download/install.sh | sh -s -- --origin https://your-portal.example
+```
+
+```powershell
+# Windows (PowerShell, no administrator rights)
+Invoke-RestMethod -UseBasicParsing https://github.com/elvisbrevi/personal-teams-assistant/releases/latest/download/install.ps1 -OutFile "$env:TEMP\pta-install.ps1"; powershell -NoProfile -ExecutionPolicy Bypass -File "$env:TEMP\pta-install.ps1" -Origin https://your-portal.example
+```
+
+The script downloads the release's prebuilt archive for this computer, checks it against its published SHA-256 (and its build provenance when the GitHub CLI is signed in) before running anything, installs both binaries for your user (`~/.local/share/personal-teams-assistant/bin`, or `%LOCALAPPDATA%\Programs\personal-teams-assistant\bin`), puts `pta` on the path of new terminals, starts the host at login (`pta service install`) and opens your portal's sign-in page, where you check the code and choose **Trust this machine**. The command holds no secret; trust grants no directories, Teams responsibility or assistant start. An existing profile is kept as it is, and running the command again repairs or upgrades the same installation. Without `--origin` it only installs. Add `--integrations` (`-Integrations`) to also install the skill and register `pta mcp` with Claude Code or Codex; otherwise it prints those commands. `--uninstall` (`-Uninstall`) removes the service, the binaries and the path entry and keeps the profile. If the computer already has a Cargo installation, the script stops and says how to switch. Details in the [architecture](docs/architecture.md#one-command-installation).
+
+### With Cargo
 
 ```sh
 cargo binstall personal-teams-assistant           # prebuilt on macOS, Windows and Linux

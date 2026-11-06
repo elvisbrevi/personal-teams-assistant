@@ -456,6 +456,8 @@ pub(super) const PORTAL_METHODS: &[&str] = &[
     "variable_migration_run",
     "variable_migration_status",
     "machine_list",
+    // Answered by the portal itself from its own public origin (`web::forward`); read-only.
+    "machine_join_command",
     "machine_detail",
     "machine_directories",
     "machine_update",

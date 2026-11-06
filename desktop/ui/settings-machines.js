@@ -4,7 +4,7 @@ import { t, tx, uiLocale } from './i18n.js';
 import { invoke, rawInvoke } from './control.js';
 import { $, badge, el, field, sleep } from './dom.js';
 import { live, tab } from './state.js';
-import { busy, done, fail } from './notices.js';
+import { busy, done, fail, notify } from './notices.js';
 import { copy } from './markdown.js';
 import { implementationForm, implementationRuns } from './implementation.js';
 import { chooseDirectories } from './directory-sheet.js';
@@ -115,7 +115,41 @@ async function loadMachines() {
   $('#machine-connect-hint').hidden = transport.browser || Boolean(settings.coordinator);
   $('#machine-disconnect').disabled = !settings.coordinator;
   renderTeamsMachines(fleet);
+  await loadJoinCommand();
 }
+
+/** Settings › Machines › Connect this computer (portal only): the portal's own install command.
+ *  @type {{commands?: Record<string, string>} | null} */
+let joinCommands = null;
+function visitorSystem() {
+  const platform = /** @type {any} */ (navigator).userAgentData?.platform || navigator.userAgent;
+  return /win/i.test(platform) ? 'windows' : /mac|iphone|ipad/i.test(platform) ? 'macos' : 'linux';
+}
+/** @param {string} system */
+function showJoinCommand(system) {
+  for (const button of document.querySelectorAll('#machine-join-system button')) {
+    button.setAttribute('aria-pressed', String(/** @type {HTMLElement} */ (button).dataset.system === system));
+  }
+  $('#machine-join-command').textContent = joinCommands?.commands?.[system] ?? '';
+}
+async function loadJoinCommand() {
+  joinCommands = transport.browser ? await invoke('machine_join_command').catch(() => null) : null;
+  $('#machine-join').hidden = !joinCommands?.commands;
+  if (!joinCommands?.commands) return;
+  const pressed = /** @type {HTMLElement | null} */ (document.querySelector('#machine-join-system [aria-pressed="true"]'));
+  showJoinCommand($('#machine-join').dataset.chosen && pressed?.dataset.system ? pressed.dataset.system : visitorSystem());
+}
+for (const button of document.querySelectorAll('#machine-join-system button')) {
+  /** @type {HTMLElement} */ (button).onclick = () => {
+    $('#machine-join').dataset.chosen = 'true';
+    showJoinCommand(/** @type {HTMLElement} */ (button).dataset.system ?? 'linux');
+  };
+}
+$('#machine-join-copy').onclick = async () => {
+  const copied = await copy($('#machine-join-command').textContent ?? '');
+  if (copied) notify(t('Command copied. Paste it into a terminal on the computer to add.'), 'ok');
+  else fail(t('The command could not be copied. Select it and copy it by hand.'));
+};
 // The modal dialog shows progress; loadMachines then decides whether Connect stays available.
 
 /** Browser-assisted sign-in: the host keeps the verifier; this dialog only sees the public link and code.
@@ -175,4 +209,4 @@ async function machineLogin(url) {
 /** @param {any} value */
 function setMachineRoots(value) { machineRoots = value; }
 
-export { machineRoots, renderMachineRoots, loadMachines, machineLogin, setMachineRoots };
+export { machineRoots, renderMachineRoots, loadMachines, loadJoinCommand, machineLogin, setMachineRoots };

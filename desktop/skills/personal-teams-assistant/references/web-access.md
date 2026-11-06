@@ -213,6 +213,34 @@ disabled identities, JWT rejection, logout/replay/expiration, exact Graph callba
 and the local page's and CLI's behavior. Use synthetic data and existing status reads; never
 send real Teams messages as a smoke test.
 
+## Connect a computer with one command (0.11.4+)
+
+The normal path for a computer that does not have the app yet: no Rust, compiler or
+administrator rights.
+
+1. In the portal, open Settings › Machines › Connect this computer (or call
+   `machine_join_command`, read-only, from the portal's MCP endpoint or a computer already
+   connected to the coordinator). It returns the command for macOS, Linux and Windows, built from
+   the portal's own HTTPS origin and the package's repository; it holds no secret:
+   - macOS and Linux: `curl --proto '=https' --tlsv1.2 -fsSL https://github.com/elvisbrevi/personal-teams-assistant/releases/latest/download/install.sh | sh -s -- --origin https://your-portal.example`
+   - Windows (PowerShell): `Invoke-RestMethod -UseBasicParsing …/install.ps1 -OutFile "$env:TEMP\pta-install.ps1"; powershell -NoProfile -ExecutionPolicy Bypass -File "$env:TEMP\pta-install.ps1" -Origin https://your-portal.example`
+2. The person runs it on the computer to add. The script checks the archive's SHA-256 (and
+   provenance with `gh` when it is signed in) before running anything, installs both binaries for
+   the user, puts `pta` on the path of new terminals, starts the host at login and runs
+   `pta auth machine login ORIGIN`, opening the approval page and printing its code. It then waits
+   for `pta auth machine finish --wait`.
+3. The person checks the code on that page and chooses Trust this machine, as below. Then choose
+   the computer's allowed directories (and separately Teams), as below.
+
+Options: `--version X.Y.Z`, `--root DIR`, `--no-service`, `--no-browser`, `--integrations`
+(also `pta skill install` and the `pta mcp` registration for Claude Code and Codex; without it
+the script prints those commands) and `--uninstall` (service, binaries and path entry removed,
+profile kept); on Windows `-Version`, `-Root`, `-NoService`, `-NoBrowser`, `-Integrations`,
+`-Uninstall`. Running it again repairs or upgrades the same installation and keeps the machine
+identity; an existing profile is adopted; a Cargo installation of the package makes it stop with
+the commands to switch. An agent never runs the command for the user on another computer and never
+asks for a credential: the command needs none.
+
 ## Add a computer you own by signing in (0.9.12+)
 
 This is the normal path for a new installation, with or without a desktop session. Both the

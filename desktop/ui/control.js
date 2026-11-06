@@ -32,7 +32,7 @@ import { browserMicrosoftLogin } from './dialogs.js';
  *   'implementation_start' | 'import_existing' | 'index_refresh' | 'index_status' |
  *   'list_azure_hus' | 'list_azure_tasks' | 'list_github_epics' | 'list_github_issues' |
  *   'llm_providers' | 'machine_assistant' | 'machine_browse' | 'machine_detail' |
- *   'machine_directories' | 'machine_disconnect' | 'machine_list' | 'machine_login' |
+ *   'machine_directories' | 'machine_disconnect' | 'machine_join_command' | 'machine_list' | 'machine_login' |
  *   'machine_login_cancel' | 'machine_login_finish' | 'machine_revoke' | 'machine_save' |
  *   'machine_settings' | 'machine_teams' | 'machine_update' | 'notes_list' | 'notes_remove' |
  *   'notes_save' | 'open_azure_cli_login' | 'open_github_login' | 'open_work_item' |
