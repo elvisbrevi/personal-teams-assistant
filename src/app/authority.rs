@@ -31,6 +31,9 @@ pub(super) enum Transport {
     Window,
     Browser,
     Machine,
+    /// The portal's remote MCP endpoint: an agent signed in through the edge identity, with the
+    /// account's portal allowlist intersected with the tool catalog (`agent.rs`).
+    Agent,
 }
 
 #[derive(Clone)]
@@ -131,6 +134,10 @@ pub(super) fn authorize(state: &DesktopState, request: &control::Request) -> Res
     match invocation.transport {
         Transport::Local | Transport::Window => {}
         Transport::Browser => web::check_bound_request(&invocation.scope, request)?,
+        Transport::Agent => {
+            agent::check_method(&request.method)?;
+            web::check_bound_request(&invocation.scope, request)?;
+        }
         Transport::Machine => ensure!(
             matches!(
                 request.method.as_str(),

@@ -72,6 +72,9 @@ struct Endpoint {
     browser_token: String,
     #[serde(default)]
     machine_token: String,
+    /// The portal's remote MCP endpoint forwards with this token (`Transport::Agent`).
+    #[serde(default)]
+    agent_token: String,
     #[serde(default)]
     machine_pairing_support: bool,
     #[serde(default)]
@@ -451,6 +454,7 @@ async fn client_with_transport(
             match transport {
                 authority::Transport::Browser => &endpoint.browser_token,
                 authority::Transport::Machine => &endpoint.machine_token,
+                authority::Transport::Agent => &endpoint.agent_token,
                 authority::Transport::Local | authority::Transport::Window => {
                     anyhow::bail!("Invalid scoped transport.")
                 }
@@ -618,6 +622,7 @@ struct LocalState {
     token: String,
     browser_token: String,
     machine_token: String,
+    agent_token: String,
     _lock: fs::File,
 }
 pub fn claim() -> Result<fs::File> {
@@ -656,6 +661,7 @@ pub(crate) fn launch(
     let token = security::random_secret();
     let browser_token = security::random_secret();
     let machine_token = security::random_secret();
+    let agent_token = security::random_secret();
     write_private(
         &dir.join("control.json"),
         &serde_json::to_string(&Endpoint {
@@ -664,6 +670,7 @@ pub(crate) fn launch(
             account_binding: host.state.authority.account.clone(),
             browser_token: browser_token.clone(),
             machine_token: machine_token.clone(),
+            agent_token: agent_token.clone(),
             wiki_support: true,
             activity_registration_support: true,
             web_support: true,
@@ -702,6 +709,7 @@ pub(crate) fn launch(
             token,
             browser_token,
             machine_token,
+            agent_token,
             _lock: lock,
         }));
     Ok(async move {
@@ -728,6 +736,8 @@ async fn endpoint(
         authority::Transport::Browser
     } else if authorized(&headers, &local.machine_token) {
         authority::Transport::Machine
+    } else if authorized(&headers, &local.agent_token) {
+        authority::Transport::Agent
     } else {
         return Err(StatusCode::FORBIDDEN);
     };
@@ -1560,6 +1570,7 @@ mod tests {
                 account_binding: None,
                 browser_token: String::new(),
                 machine_token: String::new(),
+                agent_token: String::new(),
             })
             .unwrap(),
         )
@@ -1603,6 +1614,7 @@ mod tests {
                 account_binding: None,
                 browser_token: String::new(),
                 machine_token: String::new(),
+                agent_token: String::new(),
             })
             .unwrap(),
         )
@@ -1661,6 +1673,7 @@ mod tests {
                     account_binding: None,
                     browser_token: String::new(),
                     machine_token: String::new(),
+                    agent_token: String::new(),
                 })
                 .unwrap(),
             )

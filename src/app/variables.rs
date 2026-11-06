@@ -429,22 +429,28 @@ fn run(host: &Host, method: &str, args: &Value) -> std::result::Result<Value, va
     // own workflow. Operator key custody is local to the installation.
     let allowed = match method {
         "variable_list"
-        | "variable_create"
         | "variable_update"
         | "variable_rename"
         | "variable_delete"
         | "variable_entry_status"
-        | "variable_entry_complete"
         | "variable_entry_cancel" => transport != authority::Transport::Machine,
+        // A value is typed only by a person: a remote agent never carries one in an argument.
+        "variable_create" | "variable_entry_complete" => !matches!(
+            transport,
+            authority::Transport::Machine | authority::Transport::Agent
+        ),
         // Only a person at the GUI reads a value back; the CLI, MCP and tools share the local
         // channel with agents, so that channel can never reveal one.
         "variable_reveal" => matches!(
             transport,
             authority::Transport::Window | authority::Transport::Browser
         ),
-        "variable_entry_start"
-        | "variable_rotation_start"
-        | "variable_audit"
+        // An agent asks for a value; the user types it in the GUI or pipes it to the CLI.
+        "variable_entry_start" | "variable_rotation_start" => matches!(
+            transport,
+            authority::Transport::Local | authority::Transport::Agent
+        ),
+        "variable_audit"
         | "variable_verify"
         | "variable_key_backup"
         | "variable_key_restore"

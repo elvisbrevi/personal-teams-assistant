@@ -1,6 +1,15 @@
-`pta mcp` is a Model Context Protocol server over stdio: an agent (Claude Code, Codex or any MCP client) operates the app with the same operations as the GUI and `pta`, through the host's IPC contract, so audiences, checks and records stay the host's own. It starts the host when needed and replaces one left from an update, keeping the assistant's state.
+The app's tool catalog reaches agents through two MCP transports. Both run the same tools, with the same definitions, confirmations and result shapes, against the account's own host, so audiences, checks and records stay the host's own.
 
-**Activate it.** `pta mcp config` prints the exact command for this installation. Claude Code: `claude mcp add --scope user personal-teams-assistant -- pta mcp` (then `/mcp` shows it). Codex: add to `~/.codex/config.toml`:
+| Transport | Where the agent runs | Authority | Add it |
+| --- | --- | --- | --- |
+| `pta mcp` (stdio) | On a computer where the host is installed | That computer's local channel: every tool | `claude mcp add --scope user personal-teams-assistant -- pta mcp` |
+| Remote (`https://PORTAL/mcp`, Streamable HTTP) | Anywhere, with nothing installed: a cloud session, a phone, another computer | The account's portal tools, as an agent: never reveal or type a value, approve, launchers, updates, key custody, enrolling the host or operator commands | `claude mcp add --transport http --scope user personal-teams-assistant https://PORTAL/mcp` |
+
+**When to use each.** Use `pta mcp` wherever `pta` is installed: it needs no browser, works with that computer's directories, provider logins and launchers, and starts the host when needed (replacing one left from an update, keeping the assistant's state). Use the remote endpoint when the agent runs where nothing of the app is installed; `pta mcp config` prints its address under `remote` (the portal's origin, or the coordinator this computer is signed in to), and the app shows it in Settings › Advanced › Connect an agent with a copy action.
+
+**Remote endpoint.** The client signs in through the browser the first time (the portal's identity provider, through Cloudflare Access managed OAuth); nothing is installed and no key is copied. Only what `tools/list` returns is available; any other tool answers with the reason, and the user does those things in the GUI. Confirmations work as below: the server asks the user through the client when it supports elicitation, otherwise `confirmed: true` after the user approved. Tools that act on a computer (implementation runs, machine management, directories) go once to the enrolled computer the arguments name, within its allowed roots; after a timeout read `machine_detail` or `implementation_runs` before deciding to repeat anything. A protected entry or rotation requested here is completed by the user in Settings › Variables. Requests are rate-limited per account (120 per minute) and bounded in size (256 KB) and time (two minutes, five for model-backed tools). The operator turns it on with `scripts/configure-web-access.py --managed-oauth` ([web-access.md](web-access.md)).
+
+**Activate the stdio server.** `pta mcp config` prints the exact command for this installation. Claude Code: `claude mcp add --scope user personal-teams-assistant -- pta mcp` (then `/mcp` shows it). Codex: add to `~/.codex/config.toml`:
 
 ```toml
 [mcp_servers.personal-teams-assistant]

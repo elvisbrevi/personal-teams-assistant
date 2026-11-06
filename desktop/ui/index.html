@@ -468,6 +468,23 @@
         </div>
 
         <div id="settings-advanced" class="settings-group" role="tabpanel" aria-labelledby="settings-tab-advanced" data-settings-group="advanced" hidden>
+          <div class="panel" id="panel-agents">
+            <h2>Connect an agent</h2>
+            <p class="hint">An agent anywhere (a cloud session, a phone, another computer) can use this account at this address after you sign in in the browser. It works as in this portal, but it never sees a value, approves a launcher or a destination, or updates a computer.</p>
+            <div id="agent-endpoint" class="agent-endpoint" hidden>
+              <code id="agent-endpoint-url" translate="no"></code>
+              <button id="agent-endpoint-copy" type="button" class="secondary small">Copy address</button>
+            </div>
+            <p id="agent-endpoint-missing" class="hint" hidden></p>
+            <details class="fold" id="agent-endpoint-help">
+              <summary>How to add it to an agent</summary>
+              <ol class="agent-steps">
+                <li id="agent-step-claude"></li>
+                <li id="agent-step-other"></li>
+                <li id="agent-step-local"></li>
+              </ol>
+            </details>
+          </div>
           <div class="panel" id="panel-migration">
             <div class="panel-head"><h2>Move existing credentials</h2><button id="migration-refresh" type="button" class="secondary">Review</button></div>
             <p class="hint">Copy credentials this computer already uses into your account. You choose each one; values are never shown or given to your agents, and the originals are never changed or deleted.</p>

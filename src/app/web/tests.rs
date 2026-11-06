@@ -10,7 +10,7 @@ use wiremock::{
     matchers::{method, path},
 };
 
-fn fixture() -> (tempfile::TempDir, Arc<Portal>, Vec<Account>) {
+pub(super) fn fixture() -> (tempfile::TempDir, Arc<Portal>, Vec<Account>) {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("profile/web");
     security::private_dir(&root).unwrap();
@@ -354,7 +354,7 @@ async fn https_responses_include_hostname_only_hsts() {
         "max-age=31536000"
     );
 }
-async fn send(
+pub(super) async fn send(
     portal: &Arc<Portal>,
     method: &str,
     uri: &str,
@@ -390,14 +390,15 @@ async fn send(
         .await
         .unwrap()
 }
-async fn json_body(response: Response) -> Value {
+pub(super) async fn json_body(response: Response) -> Value {
     serde_json::from_slice(&to_bytes(response.into_body(), 2_000_000).await.unwrap()).unwrap()
 }
-struct TestSession {
-    cookie: String,
-    assertion: String,
+pub(super) struct TestSession {
+    pub(super) cookie: String,
+    pub(super) assertion: String,
 }
-async fn configured_fixture() -> (tempfile::TempDir, Arc<Portal>, Vec<Account>, MockServer) {
+pub(super) async fn configured_fixture()
+-> (tempfile::TempDir, Arc<Portal>, Vec<Account>, MockServer) {
     let (dir, portal, mut entries) = fixture();
     for entry in &mut entries {
         entry.authorized = true;
@@ -456,10 +457,13 @@ async fn configured_fixture() -> (tempfile::TempDir, Arc<Portal>, Vec<Account>, 
     Arc::get_mut(&mut portal).unwrap().access = Some(verifier);
     (dir, portal, entries, server)
 }
-fn assertion(account: &Account) -> String {
+pub(super) fn assertion(account: &Account) -> String {
     access::tests::token(&access::tests::claims(&account.id), "synthetic-key")
 }
-async fn session_cookie(portal: &Arc<Portal>, account: &Account) -> (TestSession, String) {
+pub(super) async fn session_cookie(
+    portal: &Arc<Portal>,
+    account: &Account,
+) -> (TestSession, String) {
     let assertion = assertion(account);
     let identity = portal
         .access
@@ -477,7 +481,7 @@ async fn session_cookie(portal: &Arc<Portal>, account: &Account) -> (TestSession
         session.csrf,
     )
 }
-async fn fake_host(portal: &Portal, account: &Account) -> (MockServer, fs::File) {
+pub(super) async fn fake_host(portal: &Portal, account: &Account) -> (MockServer, fs::File) {
     let server = MockServer::start().await;
     let dir = profile_dir(&portal.root, account);
     let mut config = read_config(&dir.join("config.toml")).unwrap();
@@ -497,7 +501,7 @@ async fn fake_host(portal: &Portal, account: &Account) -> (MockServer, fs::File)
         &json!({"contract":1,"port":port,"token":"synthetic-ipc-token",
         "wiki_support":true,"activity_registration_support":true,"web_support":true,"web_access_support":true,"implementation_support":true,"machine_pairing_support":true,
         "machine_login_support":true,"machine_management_support":true,"shared_accounts_support":true,"account_authority_support":true,"account_variables_support":true,"account_portable_support":true,"account_binding":{"id":account.id,"version":account.version},
-        "browser_token":"synthetic-browser-token","machine_token":"synthetic-machine-token"})
+        "browser_token":"synthetic-browser-token","machine_token":"synthetic-machine-token","agent_token":"synthetic-agent-token"})
         .to_string(),
     )
     .unwrap();
@@ -2058,7 +2062,7 @@ async fn the_account_store_goes_only_to_the_key_a_trusted_sign_in_started_with()
     }
 }
 
-struct NativeShell;
+pub(super) struct NativeShell;
 impl Shell for NativeShell {
     fn open_url(&self, _: &str) -> Result<()> {
         panic!("A headless installation returns the approval URL instead of opening it.")

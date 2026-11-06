@@ -359,6 +359,16 @@ check('axe: no WCAG 2.2 AA violations in any scan', !Object.keys(totals).length,
   check('ArrowRight selects the next settings section', await page.getAttribute('#settings-tab-models', 'aria-selected') === 'true' && await page.evaluate(() => document.activeElement.id) === 'settings-tab-models');
   await page.keyboard.press('End');
   check('End selects the last section', await page.getAttribute('#settings-tab-advanced', 'aria-selected') === 'true');
+  // Connect an agent: without a portal there is no address, only how to use the local server.
+  await page.waitForTimeout(200);
+  check('without a portal, Connect an agent explains the local server instead of an address',
+    await page.isHidden('#agent-endpoint') && await page.isVisible('#agent-endpoint-missing'));
+  await page.evaluate(async () => { await invoke('machine_save', { coordinator: 'https://assistant.example.com' }); await loadAgentEndpoint(); });
+  check('with a portal, Connect an agent shows its /mcp address with a copy action and how to add it',
+    await page.textContent('#agent-endpoint-url') === 'https://assistant.example.com/mcp'
+      && await page.isVisible('#agent-endpoint-copy')
+      && (await page.textContent('#agent-step-claude')).includes('claude mcp add --transport http personal-teams-assistant https://assistant.example.com/mcp'));
+  await page.evaluate(async () => { await invoke('machine_save', { coordinator: null }); await loadAgentEndpoint(); });
   // Repeated providers survive model selection, reordering, removal and saving.
   await page.click('#settings-tab-models');
   const modelCount = await page.locator('#llm-chain > li').count();
