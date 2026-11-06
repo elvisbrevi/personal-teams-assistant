@@ -320,25 +320,26 @@ public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint Msg, UIntPtr wP
     [PtaInstall.Environment]::SendMessageTimeout([IntPtr] 0xffff, 0x1A, [UIntPtr]::Zero, 'Environment', 2, 5000, [ref] $result) | Out-Null
 }
 
-function Get-PathEntries([string] $Value) {
-    return @($Value -split ';' | Where-Object { $_ -ne '' })
-}
+function Test-OurEntry([string] $Entry) { return $Entry.TrimEnd('\') -ieq $Bin }
 
+# The value is kept as it is, empty entries and separators included: adding prepends one entry and
+# removing takes out only that entry, so an install and an uninstall leave it byte for byte.
 function Add-UserPath {
-    $entries = Get-PathEntries (Get-UserPath)
-    if ($entries | Where-Object { $_.TrimEnd('\') -ieq $Bin }) {
+    $current = Get-UserPath
+    if (@($current -split ';' | Where-Object { Test-OurEntry $_ }).Count -gt 0) {
         Say "$Bin is already on your user PATH."
     } else {
-        Set-UserPath ((@($Bin) + $entries) -join ';')
+        Set-UserPath $(if ($current) { "$Bin;$current" } else { $Bin })
         Say "Added $Bin to your user PATH (new terminals see it)."
     }
-    if (-not (($env:Path -split ';') | Where-Object { $_.TrimEnd('\') -ieq $Bin })) { $env:Path = "$Bin;$env:Path" }
+    if (-not (($env:Path -split ';') | Where-Object { Test-OurEntry $_ })) { $env:Path = "$Bin;$env:Path" }
 }
 
 function Remove-UserPath {
-    $entries = Get-PathEntries (Get-UserPath)
-    $kept = @($entries | Where-Object { $_.TrimEnd('\') -ine $Bin })
-    if ($kept.Count -ne $entries.Count) { Set-UserPath ($kept -join ';') }
+    $current = Get-UserPath
+    $parts = @($current -split ';')
+    $kept = @($parts | Where-Object { -not (Test-OurEntry $_) })
+    if ($kept.Count -ne $parts.Count) { Set-UserPath ($kept -join ';') }
 }
 
 # ---------------------------------------------------------------------------------------------
