@@ -1053,6 +1053,7 @@ const UI_CATALOG = { es: {
   'Public URL missing': 'Falta la URL pública',
   'Microsoft account': 'Cuenta de Microsoft',
   'Connected': 'Conectada',
+  'Linked': 'Vinculado',
   'Not connected': 'No conectada',
   'Reads and answers as you': 'Lee y responde como tú',
   'Connect it in Settings': 'Conéctala en Ajustes',
