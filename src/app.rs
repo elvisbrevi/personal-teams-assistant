@@ -40,6 +40,7 @@ mod deliveries;
 mod diagnostics;
 mod github;
 mod github_cli;
+mod gui_assets;
 mod headless;
 pub(crate) mod implementation;
 mod maintenance;

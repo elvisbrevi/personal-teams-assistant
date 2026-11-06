@@ -187,6 +187,7 @@ pub(super) fn launch(host: Arc<Host>) -> Option<impl std::future::Future<Output 
     page.handoff.set(handoff).ok()?;
     page.address.set(address).ok()?;
     page.cookie.set(cookie_name(&scope.profile)).ok()?;
+    gui_assets::resolve();
     tracing::info!(event = "local_page_ready", port = address.port());
     let router = router(host.clone());
     Some(async move {
@@ -359,58 +360,23 @@ impl Page {
 }
 
 fn router(host: Arc<Host>) -> Router {
-    Router::new()
+    let router = Router::new()
         .route("/", get(index))
         .route("/index.html", get(index))
         .route("/open", get(exchange))
         .route("/signed-out", get(|| async { signed_out() }))
-        .route(
-            "/style.css",
-            get(|| async {
-                asset(
-                    "text/css; charset=utf-8",
-                    include_str!("../../desktop/ui/style.css"),
-                )
-            }),
-        )
-        .route(
-            "/i18n.js",
-            get(|| async {
-                asset(
-                    "text/javascript; charset=utf-8",
-                    include_str!("../../desktop/ui/i18n.js"),
-                )
-            }),
-        )
-        .route(
-            "/favicon.png",
-            get(|| async { png(include_bytes!("../../desktop/ui/favicon.png")) }),
-        )
-        .route(
-            "/manifest.webmanifest",
-            get(|| async {
-                asset(
-                    "application/manifest+json",
-                    include_str!("../../desktop/ui/manifest.webmanifest"),
-                )
-            }),
-        )
-        .route(
-            "/apple-touch-icon.png",
-            get(|| async { png(include_bytes!("../../desktop/ui/apple-touch-icon.png")) }),
-        )
-        .route(
-            "/icon-192.png",
-            get(|| async { png(include_bytes!("../../desktop/ui/icon-192.png")) }),
-        )
-        .route(
-            "/icon-512.png",
-            get(|| async { png(include_bytes!("../../desktop/ui/icon-512.png")) }),
-        )
         .route("/app.js", get(app_js))
         .route("/transport.js", get(transport_js))
         .route("/api/session", get(session))
-        .route("/api/control", post(command))
+        .route("/api/control", post(command));
+    // The GUI's other files need no session (`gui_assets::ASSETS`).
+    let router = gui_assets::public().fold(router, |router, asset| {
+        router.route(
+            &format!("/{}", asset.file),
+            get(move || async move { gui_assets::serve(asset.file) }),
+        )
+    });
+    router
         .layer(DefaultBodyLimit::max(1_000_000))
         .layer(middleware::from_fn_with_state(host.clone(), guard))
         .with_state(host)
@@ -418,9 +384,6 @@ fn router(host: Arc<Host>) -> Router {
 
 fn asset(content_type: &'static str, content: &'static str) -> Response {
     ([(header::CONTENT_TYPE, content_type)], content).into_response()
-}
-fn png(content: &'static [u8]) -> Response {
-    ([(header::CONTENT_TYPE, "image/png")], content).into_response()
 }
 
 /// DNS rebinding and cross-origin requests stop here: the `Host` must be this exact loopback
@@ -467,15 +430,15 @@ async fn guard(
 }
 
 /// The shared GUI document, marked so `transport.js` picks this page's transport.
-fn document() -> &'static str {
-    static DOCUMENT: OnceLock<String> = OnceLock::new();
-    DOCUMENT.get_or_init(|| {
-        include_str!("../../desktop/ui/index.html").replacen(
+fn document() -> Response {
+    match gui_assets::text("index.html") {
+        Some(text) => gui_assets::document(text.replacen(
             "<head>",
             "<head>\n  <meta name=\"pta-transport\" content=\"local\">",
             1,
-        )
-    })
+        )),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
 }
 
 /// Shown without a session: a used, expired or missing sign-in. It names the next step and
@@ -494,7 +457,7 @@ async fn index(State(host): State<Arc<Host>>, headers: HeaderMap) -> Response {
     if host.state.page.session(&headers).is_none() {
         return signed_out();
     }
-    asset("text/html; charset=utf-8", document())
+    document()
 }
 
 /// Exchanges the host's code for a browser-session cookie (no `Max-Age`: closing the browser
@@ -539,20 +502,14 @@ async fn app_js(State(host): State<Arc<Host>>, headers: HeaderMap) -> Response {
     if host.state.page.session(&headers).is_none() {
         return StatusCode::UNAUTHORIZED.into_response();
     }
-    asset(
-        "text/javascript; charset=utf-8",
-        include_str!("../../desktop/ui/app.js"),
-    )
+    gui_assets::serve("app.js")
 }
 
 async fn transport_js(State(host): State<Arc<Host>>, headers: HeaderMap) -> Response {
     if host.state.page.session(&headers).is_none() {
         return StatusCode::UNAUTHORIZED.into_response();
     }
-    asset(
-        "text/javascript; charset=utf-8",
-        include_str!("../../desktop/ui/transport.js"),
-    )
+    gui_assets::serve("transport.js")
 }
 
 async fn session(State(host): State<Arc<Host>>, headers: HeaderMap) -> Response {

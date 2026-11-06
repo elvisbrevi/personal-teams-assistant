@@ -39,13 +39,16 @@ A pull request that changes only platform-neutral Rust finishes in about the tim
 | only `site/`, `docs/`, `.agents/`, `.claude/`, `AGENTS.md`, `CLAUDE.md`, `CONTEXT.md`, `README.md`, `LICENSE`, `.gitignore` | skipped | skipped | skipped |
 | `cloud/` | skipped | skipped | run |
 | `scripts/` | skipped | run | skipped |
-| `desktop/ui/` | run | run | skipped |
+| `desktop/ui/` | GUI asset tests only (below) | run | skipped |
+| `Cargo.toml`, `Cargo.lock` changing only this package's version | GUI asset tests only (below) | skipped | skipped |
 | `.github/` | run | run | run |
 | anything else (`src/`, `tests/`, `Cargo.*`, `build.rs`, `desktop/`, …) | run | skipped unless also above | skipped unless also above |
 
+When nothing else asks for the Rust checks, a change to `desktop/ui/` or a version-only bump (the one a GUI change is delivered with: `Changes` parses both sides of `Cargo.toml` and `Cargo.lock` and compares them without this package's version) runs the **GUI assets (Rust)** job instead of Linux: no clippy and no full suite, only `cargo test --locked --lib gui_assets`, which is every Rust test that reads a GUI file (`app::gui_assets`: each file under `desktop/ui` is served and each served path has a file; the portal's and the local page's served assets with the CSP, `no-store` and the other headers, from the binary and from a development directory; the local page's document marker). `scripts/test-ci-workflow.mjs` fails if Rust code outside `app::gui_assets` reads `desktop/ui`. Any other Rust change runs Linux, whose full suite includes those tests.
+
 On a pull request, macOS and Windows run when any changed path is platform-sensitive. The list lives in one `case` of the `Changes` step, which sets the `macos` and `windows` outputs from it, and the step summary names the paths that matched:
 
-- the dependency manifest, lock and toolchain: `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`, `build.rs`;
+- the dependency manifest, lock and toolchain: `Cargo.toml`, `Cargo.lock` (except a version-only bump), `rust-toolchain.toml`, `build.rs`;
 - the workflows: `.github/`;
 - host startup and the Windows startup check: `src/main.rs`, `src/bin/`, `src/app.rs`, `src/app/headless.rs`, `src/app/control.rs`, `scripts/test-windows-startup.py`, and the local page's browser opener: `src/app/page.rs`;
 - the credential store, process spawning and private-file permissions: `src/security/`, `src/consumers.rs`, `src/app/cloud/restore.rs`, `src/app/azure_cli.rs`, `src/app/github.rs`, `src/app/github_cli.rs`, `src/llm/agent.rs`, `src/llm/implementation.rs`, `src/llm/implementation/`;
@@ -59,6 +62,7 @@ A push to `main` whose `Cargo.toml` version crates.io does not have yet is a rel
 | Job | Runner | What it runs |
 | --- | --- | --- |
 | Linux | `ubuntu-latest` | No system libraries beyond the runner's; `--locked` checks that `Cargo.lock` agrees with `Cargo.toml`; `cargo fmt --check` and `cargo clippy --locked --all-targets -- -D warnings` only on PR/weekly runs; `cargo test --locked` and `cargo package --locked` on every selected run (the `.crate` as crates.io receives it, built from the package) |
+| GUI assets (Rust) | `ubuntu-latest` | Only when `desktop/ui/` or a version-only bump is all the Rust side of a change: `cargo test --locked --lib gui_assets`, restoring the Linux job's cache from `main` |
 | UI and scripts | `ubuntu-latest` | PR/weekly only: `bun scripts/test-ci-workflow.mjs` (actual workflow routing and merge gate); `bun build desktop/ui/app.js`; `node --test scripts/test-activity-ui.cjs scripts/test-ui-i18n.cjs scripts/test-ui-themes.cjs` (the last one checks the contrast of every palette, mode and style); the Python script tests; Playwright's Chromium restored from a cache keyed by the pinned `playwright-core` version (downloaded only on a miss; its system libraries are installed either way; only `main`, that is the weekly run, saves the cache); `scripts/ui-preview/check.mjs` with that Chromium (axe WCAG 2.2 AA on every section, mode, palette and phone, plus the interaction checks; any violation fails); the results are an artifact for 7 days |
 | Cloud Worker | `ubuntu-latest` | PR/weekly only, in `cloud/`: `bun install --frozen-lockfile`, `tsc --noEmit`, the Worker's tests inside the Workers runtime (`@cloudflare/vitest-plugin`, Miniflare, synthetic Access keys; contract tests include cross-account attempts) and a `wrangler deploy --dry-run` bundle of both environments; no secrets |
 | macOS | `macos-latest` | Platform-sensitive PR, weekly and release candidate only: clippy and tests; required whenever it runs |

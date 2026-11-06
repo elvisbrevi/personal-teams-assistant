@@ -33,6 +33,7 @@ jobs:
     timeout-minutes: 5
     outputs:
       rust: ${{ steps.filter.outputs.rust }}
+      gui: ${{ steps.filter.outputs.gui }}
       ui: ${{ steps.filter.outputs.ui }}
       cloud: ${{ steps.filter.outputs.cloud }}
       macos: ${{ steps.filter.outputs.macos }}
@@ -48,14 +49,36 @@ jobs:
           REF: ${{ github.ref }}
           BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
         run: |
+          # gui: the Rust tests that read GUI files, for a change that needs no other Rust check
+          # (see the gui job). Every verdict without a diff runs the full Rust checks instead.
+          gui=false
           verdict() {
             echo "rust=$1" >> "$GITHUB_OUTPUT"
+            if [ "$1" = true ]; then gui=false; fi
+            echo "gui=$gui" >> "$GITHUB_OUTPUT"
             echo "ui=$2" >> "$GITHUB_OUTPUT"
             echo "cloud=$3" >> "$GITHUB_OUTPUT"
             echo "macos=$4" >> "$GITHUB_OUTPUT"
             echo "windows=$5" >> "$GITHUB_OUTPUT"
-            echo "Rust checks: $1. UI and script checks: $2. Cloud Worker checks: $3. macOS: $4. Windows: $5. Reason: $6." | tee -a "$GITHUB_STEP_SUMMARY"
+            echo "Rust checks: $1. GUI asset tests only: $gui. UI and script checks: $2. Cloud Worker checks: $3. macOS: $4. Windows: $5. Reason: $6." | tee -a "$GITHUB_STEP_SUMMARY"
             exit 0
+          }
+          # A change to Cargo.toml or Cargo.lock that only moves this package's version (the bump a
+          # GUI change delivers with) builds nothing new: it is neither a Rust nor a platform change.
+          version_only() {
+            OLD=$(git show "$BASE:$1") NEW=$(git show "$GITHUB_SHA:$1") python3 -c '
+          import os, sys, tomllib
+          def without_version(text):
+              data = tomllib.loads(text)
+              packages = data.get("package", [])
+              for package in packages if isinstance(packages, list) else [packages]:
+                  if sys.argv[1] == "Cargo.toml" or package.get("name") == "personal-teams-assistant":
+                      package.pop("version", None)
+              return data
+          if not os.environ["OLD"].strip() or not os.environ["NEW"].strip():
+              sys.exit(1)
+          sys.exit(0 if without_version(os.environ["OLD"]) == without_version(os.environ["NEW"]) else 1)
+          ' "$1"
           }
           # Weekly checks refresh the full matrix and its trusted main-branch caches.
           [ "$EVENT" != schedule ] || verdict true true true true true "weekly full verification"
@@ -80,6 +103,8 @@ jobs:
           platform=false
           platform_paths=
           while IFS= read -r file; do
+            bump=false
+            case "$file" in Cargo.toml | Cargo.lock) if version_only "$file"; then bump=true; fi ;; esac
             case "$file" in
               # Not part of the binary or its checks: the landing (Cloudflare publishes it),
               # documentation and agent instructions.
@@ -87,15 +112,19 @@ jobs:
               # The account store Worker: its own checks; Workers Builds publishes it.
               cloud/*) cloud=true ;;
               scripts/*) ui=true ;;
-              desktop/ui/*) rust=true; ui=true ;;
+              # The GUI's files: the UI job, and the Rust tests that read them (served assets, CSP,
+              # the local page's document marker) instead of clippy and the whole Rust suite.
+              desktop/ui/*) gui=true; ui=true ;;
+              Cargo.toml | Cargo.lock) if [ "$bump" = true ]; then gui=true; else rust=true; fi ;;
               .github/*) rust=true; ui=true; cloud=true ;;
               *) rust=true ;;
             esac
             # The one list of platform-sensitive paths: code that differs on macOS or Windows
             # (credential store, process spawning, private-file permissions, the browser opener, update staging and
             # apply, native startup, the login service), the Windows startup check, the dependency manifest, lock and
-            # toolchain, and the workflows. scripts/test-ci-workflow.mjs requires every source file
-            # with Windows- or macOS-only code to match it.
+            # toolchain (a version-only bump excepted), and the workflows. scripts/test-ci-workflow.mjs
+            # requires every source file with Windows- or macOS-only code to match it.
+            [ "$bump" = false ] || continue
             case "$file" in
               Cargo.toml | Cargo.lock | rust-toolchain.toml | build.rs | .github/* | \
               scripts/test-windows-startup.py | tests/account_authority.rs | \
@@ -149,6 +178,28 @@ jobs:
       # building again.
       - name: Package as crates.io receives it
         run: cargo package --locked
+
+  # A change that needs no other Rust check (only desktop/ui, or a version-only bump) still runs
+  # every Rust test that reads a GUI file: they are named gui_assets (app::gui_assets and the
+  # listeners' served-asset tests), and scripts/test-ci-workflow.mjs keeps desktop/ui read only there.
+  gui:
+    name: GUI assets (Rust)
+    needs: changes
+    if: needs.changes.outputs.gui == 'true' && needs.changes.outputs.rust != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Rust toolchain from rust-toolchain.toml
+        run: rustup toolchain install && rustc --version
+      # The Linux job's cache from main: the same build, so only the changed crate compiles.
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: linux
+          save-if: false
+      - run: cargo test --locked --lib gui_assets
 
   ui:
     name: UI and scripts
@@ -367,7 +418,7 @@ jobs:
   result:
     name: CI result
     if: always()
-    needs: [changes, linux, ui, cloud, macos, windows, security]
+    needs: [changes, linux, gui, ui, cloud, macos, windows, security]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
