@@ -35,14 +35,20 @@ function filter(event, files, { published = true, base = 'a'.repeat(40), summary
     });
     assert.equal(result.status, 0, result.stderr);
     if (summary) return readFileSync(join(temp, 'summary'), 'utf8');
-    return Object.fromEntries(readFileSync(join(temp, 'output'), 'utf8').trim().split('\n')
+    const outputs = Object.fromEntries(readFileSync(join(temp, 'output'), 'utf8').trim().split('\n')
       .map(line => line.split('=')));
+    // Off a release candidate, macOS and Windows share one verdict, so the tables below name it once.
+    if (outputs.macos === outputs.windows) {
+      const { macos, windows, ...rest } = outputs;
+      return { ...rest, platform: macos };
+    }
+    return outputs;
   } finally {
     rmSync(temp, { recursive: true, force: true });
   }
 }
 
-// `platform` is the pull-request verdict; a push to main that is not a release candidate never
+// `platform` is the pull-request verdict for both macOS and Windows; a push to main that is not a release candidate never
 // runs macOS or Windows, because its pull request already did when it mattered.
 const neutral = { rust: 'false', ui: 'false', cloud: 'false', platform: 'false' };
 for (const [files, expected] of [
@@ -70,9 +76,9 @@ for (const [files, expected] of [
   assert.deepEqual(filter('pull_request', files), { ...neutral, ...expected }, `pull_request: ${files}`);
   assert.deepEqual(filter('push', files), { ...neutral, ...expected, platform: 'false' }, `push: ${files}`);
 }
-assert.match(filter('pull_request', ['src/pipeline.rs'], { summary: true }), /macOS and Windows: false\. .*none is platform-sensitive/);
+assert.match(filter('pull_request', ['src/pipeline.rs'], { summary: true }), /macOS: false\. Windows: false\. .*none is platform-sensitive/);
 assert.match(filter('pull_request', ['src/pipeline.rs', 'Cargo.lock'], { summary: true }),
-  /macOS and Windows: true\. Reason: changed paths; platform-sensitive: Cargo\.lock\.\n$/);
+  /macOS: true\. Windows: true\. Reason: changed paths; platform-sensitive: Cargo\.lock\.\n$/);
 
 // The list is the only place that names platform-sensitive paths, and it must cover every source
 // file whose code differs on Windows or macOS.
@@ -93,25 +99,32 @@ for (const path of native) {
 assert.equal(source.match(/^ *platform=true$/gm).length, 1, 'one list of platform-sensitive paths');
 
 const all = { rust: 'true', ui: 'true', cloud: 'true', platform: 'true' };
-// A release candidate on main runs every platform before release.yml publishes it.
-assert.deepEqual(filter('push', [], { published: false }), all);
-assert.deepEqual(filter('push', ['docs/delivery.md'], { published: false }), all);
+// A release candidate on main runs Linux and macOS, required, before release.yml publishes it, but
+// not the informative Windows job, which would delay every publication.
+const candidate = { rust: 'true', ui: 'true', cloud: 'true', macos: 'true', windows: 'false' };
+assert.deepEqual(filter('push', [], { published: false }), candidate);
+assert.deepEqual(filter('push', ['docs/delivery.md'], { published: false }), candidate);
+assert.deepEqual(filter('push', ['Cargo.toml', 'Cargo.lock', 'src/security/mod.rs'], { published: false }), candidate);
+assert.match(filter('push', [], { published: false, summary: true }), /macOS: true\. Windows: false\. .*will be released/);
 assert.deepEqual(filter('pull_request', [], { base: '' }), all);
 assert.deepEqual(filter('push', [], { base: '' }), { ...all, platform: 'false' });
 
 for (const event of ['pull_request', 'push', 'schedule']) {
-  const outputs = { rust: 'true', ui: 'true', cloud: 'true', platform: 'true' };
+  const outputs = { rust: 'true', ui: 'true', cloud: 'true', macos: 'true', windows: 'true' };
   assert(enabled(jobs.linux.if, event, outputs), `${event}: final Linux verification`);
   assert(enabled(jobs.security.if, event, outputs), `${event}: security must run`);
   for (const id of ['ui', 'cloud']) {
     assert.equal(enabled(jobs[id].if, event, outputs), event !== 'push', `${event}: ${id}`);
     assert.equal(enabled(jobs[id].if, event, { ...outputs, ui: 'false', cloud: 'false' }), false);
   }
-  // macOS and Windows follow only the platform verdict, on every event.
+  // macOS and Windows each follow only their own verdict, on every event.
   for (const id of ['macos', 'windows']) {
     assert.equal(enabled(jobs[id].if, event, outputs), true, `${event}: ${id}`);
-    assert.equal(enabled(jobs[id].if, event, { ...outputs, platform: 'false' }), false, `${event}: ${id}`);
+    assert.equal(enabled(jobs[id].if, event, { ...outputs, [id]: 'false' }), false, `${event}: ${id}`);
   }
+  const releaseCandidate = { ...outputs, windows: 'false' };
+  assert.equal(enabled(jobs.macos.if, event, releaseCandidate), true);
+  assert.equal(enabled(jobs.windows.if, event, releaseCandidate), false);
   // The Worker job holds no secrets and runs on a standard runner.
   assert.equal(jobs.cloud['runs-on'], 'ubuntu-latest');
   assert(!JSON.stringify(jobs.cloud).includes('secrets.'), 'the Worker job uses no secrets');
@@ -196,4 +209,4 @@ for (const line of source.split('\n').filter(line => /^\s*(- )?uses: /.test(line
   assert.match(line, /@[0-9a-f]{40} # v\d+(\.\d+)*$/, `version comment: ${line.trim()}`);
 }
 
-console.log('CI policy passed: Linux PR gate, platform paths, weekly and release-candidate matrix, main tests/package, Chromium cache, the Worker job and required-job failures.');
+console.log('CI policy passed: Linux PR gate, platform paths, weekly matrix, macOS without Windows for a release candidate, main tests/package, Chromium cache, the Worker job and required-job failures.');

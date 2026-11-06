@@ -1,5 +1,5 @@
-# Pull requests gate on Linux; macOS and Windows run weekly, on platform-sensitive changes and for
-# a release candidate on main. Pushes to main test, package and audit the release commit.
+# Pull requests gate on Linux; macOS and Windows run weekly and on platform-sensitive changes, and
+# macOS also for a release candidate on main. Pushes to main test, package and audit the release commit.
 # Standard GitHub-hosted runners only: free without a minute cap while the repository is public.
 # No secrets: pull requests from forks run here too. See docs/delivery.md.
 name: CI
@@ -35,7 +35,8 @@ jobs:
       rust: ${{ steps.filter.outputs.rust }}
       ui: ${{ steps.filter.outputs.ui }}
       cloud: ${{ steps.filter.outputs.cloud }}
-      platform: ${{ steps.filter.outputs.platform }}
+      macos: ${{ steps.filter.outputs.macos }}
+      windows: ${{ steps.filter.outputs.windows }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -51,23 +52,26 @@ jobs:
             echo "rust=$1" >> "$GITHUB_OUTPUT"
             echo "ui=$2" >> "$GITHUB_OUTPUT"
             echo "cloud=$3" >> "$GITHUB_OUTPUT"
-            echo "platform=$4" >> "$GITHUB_OUTPUT"
-            echo "Rust checks: $1. UI and script checks: $2. Cloud Worker checks: $3. macOS and Windows: $4. Reason: $5." | tee -a "$GITHUB_STEP_SUMMARY"
+            echo "macos=$4" >> "$GITHUB_OUTPUT"
+            echo "windows=$5" >> "$GITHUB_OUTPUT"
+            echo "Rust checks: $1. UI and script checks: $2. Cloud Worker checks: $3. macOS: $4. Windows: $5. Reason: $6." | tee -a "$GITHUB_STEP_SUMMARY"
             exit 0
           }
           # Weekly checks refresh the full matrix and its trusted main-branch caches.
-          [ "$EVENT" != schedule ] || verdict true true true true "weekly full verification"
-          # A release candidate runs every platform, and Linux tests and packages it even without a diff.
+          [ "$EVENT" != schedule ] || verdict true true true true true "weekly full verification"
+          # A release candidate runs Linux tests and package verification even without a diff, and
+          # macOS (required, in parallel with Linux). Not Windows: it is informative and would delay
+          # every publication by its 20 minutes.
           if [ "$EVENT" = push ] && [ "$REF" = refs/heads/main ]; then
             version=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["package"]["version"])')
             code=$(curl -sS -A "personal-teams-assistant-ci (github.com/$GITHUB_REPOSITORY)" -o /dev/null -w '%{http_code}' \
               "https://crates.io/api/v1/crates/personal-teams-assistant/$version" || echo 000)
-            [ "$code" = 200 ] || verdict true true true true "version $version is not on crates.io (HTTP $code), so it will be released"
+            [ "$code" = 200 ] || verdict true true true true false "version $version is not on crates.io (HTTP $code), so it will be released"
           fi
           # Any other push to main was already checked on every platform it needed by its pull request.
           if [ "$EVENT" = push ]; then pr_platform=false; else pr_platform=true; fi
           if [ -z "$BASE" ] || [ -z "${BASE//0/}" ] || ! git fetch --quiet --no-tags --depth=1 origin "$BASE"; then
-            verdict true true true "$pr_platform" "no base commit to compare with"
+            verdict true true true "$pr_platform" "$pr_platform" "no base commit to compare with"
           fi
           files=$(git diff --name-only "$BASE" "$GITHUB_SHA")
           rust=false
@@ -105,11 +109,11 @@ jobs:
             esac
           done <<< "$files"
           if [ "$EVENT" = push ]; then
-            verdict "$rust" "$ui" "$cloud" false "changed paths; macOS and Windows run on main only for a release candidate"
+            verdict "$rust" "$ui" "$cloud" false false "changed paths; on main, macOS runs only for a release candidate"
           elif [ "$platform" = true ]; then
-            verdict "$rust" "$ui" "$cloud" true "changed paths; platform-sensitive:$platform_paths"
+            verdict "$rust" "$ui" "$cloud" true true "changed paths; platform-sensitive:$platform_paths"
           else
-            verdict "$rust" "$ui" "$cloud" false "changed paths; none is platform-sensitive"
+            verdict "$rust" "$ui" "$cloud" false false "changed paths; none is platform-sensitive"
           fi
 
   linux:
@@ -261,7 +265,7 @@ jobs:
   macos:
     name: macOS
     needs: changes
-    if: needs.changes.outputs.platform == 'true'
+    if: needs.changes.outputs.macos == 'true'
     runs-on: macos-latest
     timeout-minutes: 60
     steps:
@@ -279,11 +283,11 @@ jobs:
   windows:
     name: Windows (informative)
     needs: changes
-    if: needs.changes.outputs.platform == 'true'
+    if: needs.changes.outputs.windows == 'true'
     runs-on: windows-latest
     timeout-minutes: 60
-    # Native startup is exercised on platform-sensitive changes, weekly and for a release candidate;
-    # Windows remains informative.
+    # Native startup is exercised on platform-sensitive pull requests and weekly, never for a release
+    # candidate (it would delay publication and cannot block it); Windows remains informative.
     continue-on-error: true
     defaults:
       run:
