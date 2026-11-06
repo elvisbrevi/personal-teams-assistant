@@ -1,6 +1,6 @@
 # GUI design conventions
 
-The standard every change to `desktop/ui/` follows, so the native window, the web portal and the phone layout stay one consistent work tool. The architecture (§11) says what each section does; this document says how it looks and behaves. The default visual language is a sticker sheet: playful neobrutalism kept at the density of a work tool. Each device can choose another style and palette (§7); every rule here holds in all of them, and what only one style does is named.
+The standard every change to `desktop/ui/` follows, so the owner's local page, the web portal and the phone layout stay one consistent work tool. The architecture (§11) says what each section does; this document says how it looks and behaves. The default visual language is a sticker sheet: playful neobrutalism kept at the density of a work tool. Each device can choose another style and palette (§7); every rule here holds in all of them, and what only one style does is named.
 
 ## 1. Character
 
@@ -13,9 +13,9 @@ The standard every change to `desktop/ui/` follows, so the native window, the we
 
 ## 2. Platform constraints
 
-- Five code assets only: `index.html`, `style.css`, `app.js`, `i18n.js`, `transport.js`, plus the icons and the PWA manifest: `favicon.png` (browser tab), `apple-touch-icon.png` (180 px, iOS home screen, a full-bleed square cut just inside the tile so iOS's mask meets its rim), `icon-192.png`, `icon-512.png` (the tile with transparent corners) and `manifest.webmanifest` (all embedded by `gui.rs` and served by `web.rs` without Cloudflare Access: WebKit fetches a page's icons without cookies, so each is listed in `PUBLIC_ASSETS` and has an exact Access Bypass app from `scripts/configure-web-access.py`). They are rendered from `desktop/icons/source/app.png` (the glossy face tile on white, 1254 px, kept out of the crate) with `node scripts/render-icons.mjs`, which knows where the tile sits in that image and also writes the desktop app's icons (`desktop/icons/32x32.png`, `128x128.png`, `icon.ico`, also the tray icon) and the landing's. The sidebar's brand mark is `icon-192.png`; inside the interface the face is drawn flat (Home's state, empty lists). A new file needs both and their tests; a new icon also needs `PUBLIC_ASSETS` and the helper's list.
+- Five code assets only: `index.html`, `style.css`, `app.js`, `i18n.js`, `transport.js`, plus the icons and the PWA manifest: `favicon.png` (browser tab), `apple-touch-icon.png` (180 px, iOS home screen, a full-bleed square cut just inside the tile so iOS's mask meets its rim), `icon-192.png`, `icon-512.png` (the tile with transparent corners) and `manifest.webmanifest` (all embedded by `page.rs` and `web.rs`; the portal serves them without Cloudflare Access: WebKit fetches a page's icons without cookies, so each is listed in `PUBLIC_ASSETS` and has an exact Access Bypass app from `scripts/configure-web-access.py`). They are rendered from `desktop/icons/source/app.png` (the glossy face tile on white, 1254 px, kept out of the crate) with `node scripts/render-icons.mjs`, which knows where the tile sits in that image and also writes the landing's. The sidebar's brand mark is `icon-192.png`; inside the interface the face is drawn flat (Home's state, empty lists). A new file needs both and their tests; a new icon also needs `PUBLIC_ASSETS` and the helper's list.
 - The CSP forbids inline styles and scripts and `innerHTML`: build nodes with `el()`, set dynamic geometry through CSSOM properties (`node.style.width = …`), no `style=` attributes. No external fonts, images or scripts.
-- The same code runs in WKWebView (macOS), WebView2/WebKitGTK and the portal's browsers: no engine-specific APIs. The tokens need `light-dark()` (Safari 17.5, Chromium 123, Firefox 120 or later). A clicked button is not focused in WebKit, so do not rely on `document.activeElement` after a click (pass the context explicitly, as `markDirty({ target })` does).
+- The same code runs in every current browser, on the local page and in the portal (Safari, Chromium-based browsers and Firefox): no engine-specific APIs. The tokens need `light-dark()` (Safari 17.5, Chromium 123, Firefox 120 or later). A clicked button is not focused in WebKit, so do not rely on `document.activeElement` after a click (pass the context explicitly, as `markDirty({ target })` does).
 - Every operation goes through `invoke()` and the IPC contract; there are no GUI-only methods.
 
 ## 3. Language and copy
@@ -78,7 +78,7 @@ The standard every change to `desktop/ui/` follows, so the native window, the we
   restores filters, list position and focus. Keep assignment, type-specific content and discussion
   visible; fold all fields and history. Parse provider HTML in the core into safe rich-text trees, rebuild from allowed elements and turn
   images into original links; never mount provider scripts, styles or image URLs.
-- Links to Azure DevOps, Wiki and Teams artifacts use `link()` (opens in the portal, copies in the native window). To-Do link icons explicitly open the item: a new tab in the portal, the default browser through the validated `open_work_item` host operation in the native window.
+- Links to Azure DevOps, Wiki and Teams artifacts use `link()` (opens in the portal, copies on the local page). To-Do link icons explicitly open the item: a new tab in the portal, the default browser through the validated `open_work_item` host operation on the local page.
 
 ## 7. Tokens
 
@@ -117,11 +117,11 @@ Run the checks of `AGENTS.md` (`bun build`, `node --test scripts/test-activity-u
 
 ```sh
 npm install --prefix /tmp/pta-ui-preview playwright-core axe-core   # once, outside the repository
-node scripts/ui-preview/server.mjs "" 4173 &                         # current desktop/ui with synthetic data
+node scripts/ui-preview/server.mjs "" 4173 &                         # current desktop/ui as the local page, synthetic data
 node scripts/ui-preview/check.mjs 4173 /tmp/ui-check                 # axe WCAG 2.2 AA + interaction checks
 node scripts/ui-preview/shoot.mjs 4173 /tmp/ui-shots                 # screenshots: light, dark, fresh, phone, tablet
 ```
 
-`check.mjs` fails on any failed interaction check or axe violation (it also scans every palette in light and dark, rotating the styles); CI runs it on every change to the GUI or its scripts. `PTA_UI_CHROMIUM` points at a Chromium executable when Playwright's own browsers are not installed. To compare with a previous version, export it (`git show REV:desktop/ui/FILE`) into a directory, serve it on another port and run `check.mjs PORT OUT --axe-only`. The mock (`scripts/ui-preview/mock.js`) only knows the IPC methods the screens read and the safe writes; extend it when a screen needs a new one, with synthetic data only.
+`check.mjs` fails on any failed interaction check or axe violation (it also scans every palette in light and dark, rotating the styles); CI runs it on every change to the GUI or its scripts. `PTA_UI_CHROMIUM` points at a Chromium executable when Playwright's own browsers are not installed. To compare with a previous version, export it (`git show REV:desktop/ui/FILE`) into a directory, serve it on another port and run `check.mjs PORT OUT --axe-only`. The server serves the GUI as the owner's local page (with the portal's CSP) over a mocked host behind its fetch transport, so no host, profile or credential is involved. The mock (`scripts/ui-preview/mock.js`) only knows the IPC methods the screens read and the safe writes; extend it when a screen needs a new one, with synthetic data only.
 
 Stored variables use an eye icon with Reveal/Hide text and an accessible pressed state. Values stay hidden until an explicit action and clear on navigation, a hidden page and after 30 seconds. Existing application credentials migrate before use; there is no separate Credentials editor. Cross-account credential migration remains under Advanced.

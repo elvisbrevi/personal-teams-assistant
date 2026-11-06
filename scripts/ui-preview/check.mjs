@@ -87,13 +87,13 @@ async function open(options = {}, scenario = 'full') {
 const axeSummary = {};
 const scan = page => page.evaluate(async () => (await axe.run(document, { runOnly: { type: 'tag', values: ['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa', 'wcag22aa'] } })).violations
   .map(v => ({ id: v.id, impact: v.impact, nodes: v.nodes.length, sample: v.nodes[0]?.target?.join(' ') })));
-// The owner's local page: the same GUI over fetch with the window's behavior, not the portal's.
+// The owner's local page: the same GUI over fetch with the owner's authority, not the portal's.
 for (const [label, ctx] of [['desktop', {}], ['phone', { viewport: { width: 393, height: 852 }, isMobile: true, hasTouch: true }], ['dark', { colorScheme: 'dark' }]]) {
   // The fragment of the address the sign-in page moves to carries the session key (synthetic).
-  const { context, page, errors } = await open({ axe: true, context: ctx }, 'full&transport=local#k=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');
+  const { context, page, errors } = await open({ axe: true, context: ctx }, 'full#k=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');
   check(`local page ${label}: the key leaves the address and every API call carries it`, await page.evaluate(() => window.location.hash === ''
     && window.__ptaLocalSessionKey === 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' && window.__ptaLocalRequests.every(r => r.key === 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa')));
-  check(`local page ${label}: picks the local transport, not Tauri or the portal`, await page.evaluate(() => window.ptaTransport.local === true && window.ptaTransport.browser === false && !window.__TAURI__));
+  check(`local page ${label}: picks the local transport, not the portal`, await page.evaluate(() => window.ptaTransport.local === true && window.ptaTransport.browser === false && !window.__TAURI__));
   check(`local page ${label}: every call carries the session cookie and the CSRF token`, await page.evaluate(() => window.__ptaLocalRequests.length > 0
     && window.__ptaLocalRequests.every(r => r.csrf === 'synthetic-csrf-token' && r.credentials === 'same-origin')));
   check(`local page ${label}: no portal account or sign out`, await page.locator('#web-account').isHidden() && await page.locator('#web-logout-settings').isHidden());
@@ -1761,7 +1761,7 @@ for (const [label, viewport] of [['desktop', { width: 1440, height: 900 }], ['ph
   check(`${label}: success is reported from the journal with the reconnect instruction`, await panel.locator('#update-result').innerText().then(text => text.includes('La versión 0.9.14 está instalada y funciona bien') && text.includes('Se actualizó 1 copia instalada') && text.includes('reconecta o reinicia su servidor MCP')));
   await page.evaluate(() => { window.__ptaUpdateSet('staged', { state: 'rolled_back', phase: 'rolled_back', error: 'Version 0.9.14 did not become healthy in time.' }); return loadUpdates(); });
   check(`${label}: a rollback says the previous version runs again and why`, await panel.locator('#update-result').innerText().then(text => text.includes('La versión 0.9.14 no se conservó y la versión 0.9.13 funciona de nuevo') && text.includes('0.9.14')) && await panel.locator('#update-result').getAttribute('class').then(c => c.includes('warn')));
-  await page.evaluate(() => { window.__ptaUpdateSet('idle', { state: 'failed', phase: 'failed', error: 'The previous version 0.9.13 does not start.', recovery: 'Reinstall the exact version with `cargo install personal-teams-assistant --version X.Y.Z --locked --force` (add --no-default-features for a headless installation), then start the application.' }); return loadUpdates(); });
+  await page.evaluate(() => { window.__ptaUpdateSet('idle', { state: 'failed', phase: 'failed', error: 'The previous version 0.9.13 does not start.', recovery: 'Reinstall the exact version with `cargo install personal-teams-assistant --version X.Y.Z --locked --force`, then start the application.' }); return loadUpdates(); });
   check(`${label}: a failed update gives the recovery path`, await panel.locator('#update-result-error').innerText().then(text => text.includes('cargo install')) && await panel.locator('#update-result-text').innerText().then(text => text.includes('necesita tu atención')));
   await page.evaluate(axeSource);
   check(`${label}: update outcomes pass axe`, (await scan(page)).length === 0, JSON.stringify(await scan(page)));

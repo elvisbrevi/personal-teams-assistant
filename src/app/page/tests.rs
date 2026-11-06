@@ -15,15 +15,6 @@ struct Desktop {
     browser: bool,
 }
 impl Shell for Desktop {
-    fn headless(&self) -> bool {
-        true
-    }
-    fn show(&self) -> Result<()> {
-        Err(SetupError("no window").into())
-    }
-    fn hide(&self) -> Result<()> {
-        self.show()
-    }
     fn open_url(&self, url: &str) -> Result<()> {
         OPENED.with(|opened| opened.borrow_mut().push(url.to_owned()));
         Ok(())
@@ -659,7 +650,7 @@ async fn each_profile_has_its_own_address_cookie_and_sessions() {
         shell: Box::new(Desktop { browser: true }),
     });
     assert!(restarted.state.page.sessions.lock().unwrap().is_empty());
-    assert!(!restarted.state.page.available());
+    assert!(restarted.state.page.address.get().is_none());
 }
 
 #[tokio::test]
@@ -697,5 +688,5 @@ async fn the_page_binds_loopback_only_and_never_for_a_portal_account() {
     });
     assert!(shared.state.authority.shared);
     assert!(launch(shared.clone()).is_none());
-    assert!(!shared.state.page.available());
+    assert!(shared.state.page.address.get().is_none());
 }

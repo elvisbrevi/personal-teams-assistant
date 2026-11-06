@@ -7,7 +7,7 @@
   <title>Personal Teams Assistant — answers in Teams as you</title>
   <meta name="description" content="Self-hosted personal assistant for Microsoft Teams: owner-only web access, locally approved machines, authorized sources and code checks before sending.">
   <meta property="og:title" content="Personal Teams Assistant">
-  <meta property="og:description" content="Answers in Teams as you, and only with what you authorize. Tray app, phone-ready web portal, CLI and headless host in a single Cargo package.">
+  <meta property="og:description" content="Answers in Teams as you, and only with what you authorize. A web interface in your browser and on your phone, a CLI and an MCP server in a single Cargo package.">
   <meta property="og:type" content="website">
   <meta property="og:url" content="https://teams-assistant.elvisbrevi.cl/">
   <meta property="og:image" content="https://teams-assistant.elvisbrevi.cl/assets/app-overview-light.jpg">
@@ -53,7 +53,7 @@
             <a class="button secondary" href="https://github.com/elvisbrevi/personal-teams-assistant">View the code</a>
             <a class="button secondary" href="https://crates.io/crates/personal-teams-assistant">crates.io</a>
           </div>
-          <p class="fine">Open source (MIT) · Tray app on macOS and Windows · Web portal for your phone · Headless on Linux and servers · Replies in English or Spanish</p>
+          <p class="fine">Open source (MIT) · macOS, Windows and Linux · Opens in your browser · Web portal for your phone · Replies in English or Spanish</p>
         </div>
         <div class="hero-shots">
           <figure class="window">
@@ -110,7 +110,7 @@
           <article><span class="tile orange"><svg class="icon"><use href="#i-check"/></svg></span><h3>Daily activity records</h3><p>Save existing Azure tasks by day, with verified links and registered hours. Schedule read-only snapshots and review saved days in Activities or with <code>pta activity</code>.</p></article>
           <article><span class="tile yellow"><svg class="icon"><use href="#i-eye"/></svg></span><h3>Observation mode</h3><p>Start with drafts that are never sent. Review them in the app, rate them, keep the good ones as examples, and turn on sending once you trust them.</p></article>
           <article><span class="tile pink"><svg class="icon"><use href="#i-inbox"/></svg></span><h3>Every message, explained</h3><p>What it decided, how it read the question, which model answered, what failed first and a log of every step, in the Messages tab or with <code>pta audit</code>.</p></article>
-          <article><span class="tile sky"><svg class="icon"><use href="#i-phone"/></svg></span><h3>On your desk and in your pocket</h3><p>The tray app and your own private portal behind Cloudflare Access share one interface: add it to your phone's home screen and use it in light or dark.</p></article>
+          <article><span class="tile sky"><svg class="icon"><use href="#i-phone"/></svg></span><h3>On your desk and in your pocket</h3><p>On your computer it opens in your browser; your own private portal behind Cloudflare Access serves the same interface everywhere else: add it to your phone's home screen and use it in light or dark.</p></article>
           <article><span class="tile lime"><svg class="icon"><use href="#i-chip"/></svg></span><h3>App, CLI and agents</h3><p>The <code>pta</code> CLI with stable JSON output, a built-in skill, and <code>pta mcp</code>: an MCP server so Claude Code, Codex or any client can operate it. Sending, access changes and implementation actions are marked for confirmation.</p></article>
         </div>
         <div class="screens">
@@ -159,24 +159,23 @@
       <div class="wrap">
         <header class="section-head">
           <h2>A single Cargo package</h2>
-          <p>It installs the app, the host and the <code>pta</code> CLI on your own machine. You supply the accounts, credentials and hosting; your profile carries over between versions.</p>
+          <p>It installs the host with its web interface and the <code>pta</code> CLI on your own machine. You supply the accounts, credentials and hosting; your profile carries over between versions.</p>
         </header>
         <div class="platforms">
           <article class="platform">
-            <h3>macOS and Windows</h3>
-            <p>Tray app, host and CLI. <a href="https://github.com/cargo-bins/cargo-binstall">cargo binstall</a> downloads the prebuilt release in seconds; <code>cargo install</code> compiles it and needs the Tauri 2 prerequisites. Both need Rust and Git.</p>
+            <h3>macOS, Windows and Linux</h3>
+            <p>The same build everywhere, with no window or system GUI libraries. <a href="https://github.com/cargo-bins/cargo-binstall">cargo binstall</a> downloads the prebuilt release in seconds; <code>cargo install</code> compiles it. Both need Rust and Git.</p>
             <pre tabindex="0"><code><span class="comment"># prebuilt, in seconds</span>
 <span class="cmd">cargo binstall personal-teams-assistant</span>
 <span class="comment"># or compiled here</span>
 <span class="cmd">cargo install personal-teams-assistant --locked</span>
-<span class="cmd">personal-teams-assistant</span>  <span class="comment"># opens the app</span></code></pre>
+<span class="cmd">personal-teams-assistant</span>  <span class="comment"># opens it in your browser</span></code></pre>
           </article>
           <article class="platform">
-            <h3>Linux and servers</h3>
-            <p>No Tauri or WebKit: it is operated with <code>pta</code>, runs as a systemd service and can serve the web portal.</p>
-            <pre tabindex="0"><code><span class="cmd">cargo install personal-teams-assistant \
-  --no-default-features --locked</span>
-<span class="cmd">personal-teams-assistant --headless --start</span></code></pre>
+            <h3>Servers</h3>
+            <p>The same install, operated with <code>pta</code>: it runs as a systemd service and can serve the web portal for your phone.</p>
+            <pre tabindex="0"><code><span class="cmd">cargo install personal-teams-assistant --locked</span>
+<span class="cmd">personal-teams-assistant --start</span></code></pre>
           </article>
         </div>
         <ol class="steps">

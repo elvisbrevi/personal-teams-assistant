@@ -26,7 +26,8 @@ pub(super) struct Scope {
 pub(super) enum Transport {
     /// The control endpoint's local token: the CLI, MCP and anything an agent can run.
     Local,
-    /// The application's own window, reaching the host in process.
+    /// The owner's local page (`page.rs`), reaching the host in process: a person at this
+    /// computer's GUI. Named after the window it replaced.
     Window,
     Browser,
     Machine,
@@ -49,8 +50,8 @@ pub(super) async fn within<T>(
     CURRENT.scope(invocation, operation).await
 }
 
-/// Marks a call from the application's own window or the owner's local page (`page.rs`), the
-/// only callers treated as a person at this computer's GUI. Anything that runs without a marked
+/// Marks a call from the owner's local page (`page.rs`), the only caller treated as a person at
+/// this computer's GUI. Anything that runs without a marked
 /// invocation counts as the local channel.
 pub(super) async fn from_window<T>(
     state: &DesktopState,

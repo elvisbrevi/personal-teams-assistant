@@ -266,6 +266,48 @@ fn the_build_cache_size_counts_nested_files() {
 }
 
 #[test]
+fn every_feature_an_installation_may_replay_still_exists_and_builds_the_same_package() {
+    // An update rebuilds with the flags the installation was recorded with; Cargo rejects a
+    // feature the new release no longer declares, so a deprecated feature stays, empty.
+    let manifest: toml::Table = toml::from_str(include_str!("../../Cargo.toml")).unwrap();
+    let features = manifest["features"].as_table().unwrap();
+    for feature in FEATURES {
+        assert_eq!(
+            features.get(feature).and_then(toml::Value::as_array),
+            Some(&Vec::new()),
+            "{feature} must remain an empty feature"
+        );
+    }
+    assert_eq!(features["default"].as_array(), Some(&Vec::new()));
+    // Records written by window builds (`--features gui`) and by headless ones
+    // (`--no-default-features`) are both supported and replayed as they are.
+    for (features, no_default) in [(vec!["gui"], false), (vec![], true), (vec![], false)] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut record = full_record();
+        record["features"] = json!(features);
+        record["no_default_features"] = json!(no_default);
+        write_records(dir.path(), &crates_io("0.10.63"), record);
+        let installation = inspect(&dir.path().join("bin").join(exe_name(CLI))).unwrap();
+        let args = install_args(
+            &installation,
+            &v("0.11.0"),
+            Path::new("/r"),
+            Path::new("/t"),
+        );
+        assert_eq!(
+            args.iter().any(|a| a == "--no-default-features"),
+            no_default,
+            "{features:?}"
+        );
+        assert_eq!(
+            args.windows(2)
+                .any(|w| w[0] == "--features" && w[1] == "gui"),
+            features == ["gui"]
+        );
+    }
+}
+
+#[test]
 fn a_headless_install_is_rebuilt_headless() {
     let dir = tempfile::tempdir().unwrap();
     write_records(dir.path(), &crates_io("0.9.13"), full_record());

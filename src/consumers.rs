@@ -319,13 +319,13 @@ pub struct Launcher {
     pub env: BTreeMap<String, String>,
     pub timeout_seconds: u64,
     pub created_at: i64,
-    /// When a person approved this exact definition in this computer's application (its window or the page pta app open shows) or the owner's portal. A definition
+    /// When a person approved this exact definition in this computer's application (the local page pta app open shows) or the owner's portal. A definition
     /// (which an agent can propose) never runs before that.
     #[serde(default)]
     pub approved_at: Option<i64>,
 }
 
-const AWAITING_APPROVAL: &str = "This launcher waits for the user's approval in this computer's application (its window or the page pta app open shows) or the owner's portal (Settings › Credentials › Variables); nothing was run.";
+const AWAITING_APPROVAL: &str = "This launcher waits for the user's approval in this computer's application (the local page pta app open shows) or the owner's portal (Settings › Credentials › Variables); nothing was run.";
 
 /// Refuses a launcher no person approved yet, before any value is resolved for it.
 pub fn ensure_approved(launcher: &Launcher) -> Result<()> {

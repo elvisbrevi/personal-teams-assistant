@@ -12,6 +12,7 @@ Profiles share the trusted operator's OS account. They are not containers or ind
 
 ## Deployment
 
+- The interface is a web page the host serves; there is no native window. On the owner's computer it is the local page on `127.0.0.1`, which opens only through a single-use code of at most a minute that the host writes into an owner-only file, checks `Host`, `Origin` and `Sec-Fetch-Site`, and keeps its session in an HttpOnly, SameSite=Strict cookie plus a key held only by the page. Anywhere else it is the portal.
 - Keep the browser listener and private IPC on loopback. Protect the complete panel hostname and API with Cloudflare Access, one owner email and the dedicated GitHub provider. Preserve only the documented exact callback/icon/machine protocol exceptions; each dynamic exception authenticates independently.
 - Use HTTPS, Secure/HttpOnly/SameSite cookies and the existing Origin/CSRF checks. The origin sends hostname-only HSTS; configure edge headers separately for Access-generated responses. Do not enable parent-domain HSTS preload/includeSubDomains without reviewing the other hosts.
 - Use SSH keys and an inbound firewall. Keep remote desktops bound to loopback and behind an authenticated gateway. Verify a working key session before disabling SSH passwords.
@@ -30,7 +31,7 @@ The RSA fixture in `src/app/web/access/synthetic-rsa.der` is deliberately public
 
 ### Upstream maintenance notices
 
-The security update removes the reported vulnerable TLS/crypto dependencies, updates Tokio and upgrades JWT validation to 10.3+ for [the GitHub JWT type-confusion advisory](https://github.com/advisories/GHSA-h395-gr6q-cpjc), which was not in the RustSec findings. Both advisory sources must be checked. RustSec still reports maintenance notices for transitive GUI/parser crates, plus [GLib's Variant type-confusion notice](https://rustsec.org/advisories/RUSTSEC-2024-0429.html) in Tauri's Linux GTK 3 stack. The app does not call the affected Variant API directly. This is an upstream desktop limitation, not a clean bill of health for that stack; the Linux server uses `--no-default-features` and does not include GTK/GLib. Keep the notices visible in dependency audits and reassess when upstream replacements are available.
+The security update removes the reported vulnerable TLS/crypto dependencies, updates Tokio and upgrades JWT validation to 10.3+ for [the GitHub JWT type-confusion advisory](https://github.com/advisories/GHSA-h395-gr6q-cpjc), which was not in the RustSec findings. Both advisory sources must be checked. The host has no native GUI stack (its interface is the web page above), so `Cargo.lock` holds no Tauri, GTK, GLib or WebKit crates on any operating system. Keep any maintenance notice RustSec reports for transitive crates visible in dependency audits and reassess it when upstream replacements are available.
 
 Application accounts and profile directories are not an operating-system sandbox.
 Different people sharing a computer need distinct OS security contexts; switching

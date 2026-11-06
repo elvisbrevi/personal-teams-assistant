@@ -332,7 +332,7 @@ async fn token(host: &Arc<Host>, record: &mut Record, connected: bool) {
         record.set(
             "token",
             "pending",
-            "Launchers run only from the coordinator's own window or local CLI: run pta cloud lost again there (or pta variables launcher run cloud-token-rotate --confirmed).",
+            "Launchers run only from the coordinator's own local page or local CLI: run pta cloud lost again there (or pta variables launcher run cloud-token-rotate --confirmed).",
         );
         return;
     }

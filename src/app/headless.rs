@@ -1,6 +1,7 @@
-//! Host without a window, for Linux servers and remote use. Same profile, contract and
-//! operations as the GUI; `pta` is the only interface. Runs in the foreground until
-//! `pta app quit`, SIGTERM or Ctrl-C, which stop the service and its tunnel first.
+//! The host process on every operating system: no window. Its owner's GUI is the local page in
+//! the system browser (`page.rs`), and `pta`, `pta mcp` and the portal operate it through the
+//! same contract. Runs until `pta app quit`, SIGTERM or Ctrl-C, which stop the service and its
+//! tunnel first.
 use super::*;
 
 struct HeadlessShell {
@@ -10,15 +11,6 @@ struct HeadlessShell {
 }
 
 impl Shell for HeadlessShell {
-    fn headless(&self) -> bool {
-        true
-    }
-    fn show(&self) -> Result<()> {
-        Err(SetupError("This host runs without a window; operate it with pta.").into())
-    }
-    fn hide(&self) -> Result<()> {
-        self.show()
-    }
     fn open_url(&self, url: &str) -> Result<()> {
         if self.browser {
             page::system_browser(url)
@@ -35,7 +27,9 @@ impl Shell for HeadlessShell {
     }
 }
 
-pub(crate) fn run(host_lock: fs::File, start_service: bool) -> Result<()> {
+/// Runs the host. `open_page`: a person launched the application, so its page opens in the
+/// system browser once the host is ready (when this computer has a browser session).
+pub(crate) fn run(host_lock: fs::File, start_service: bool, open_page: bool) -> Result<()> {
     tokio::runtime::Runtime::new()?.block_on(async move {
         let config_dir = control::profile_dir()?;
         configure_credentials(&config_dir)?;
@@ -54,6 +48,9 @@ pub(crate) fn run(host_lock: fs::File, start_service: bool) -> Result<()> {
         }
         tokio::spawn(control::launch(host.clone(), host_lock)?);
         tracing::info!(event = "headless_host_ready");
+        if open_page && host.shell.browser() && page::open(&host).is_err() {
+            tracing::warn!(event = "local_page_not_opened");
+        }
         if start_service {
             // Keep the host alive on failure so `pta status/doctor/audit` can diagnose it.
             let reply = control::dispatch(&host, control::Request::new("start_assistant")).await;
@@ -94,7 +91,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn headless_host_has_no_window_and_quit_requests_shutdown() {
+    async fn host_without_a_browser_session_explains_how_to_open_its_page_and_quits() {
         let dir = tempfile::tempdir().unwrap();
         let (quit, mut quit_requested) = watch::channel(false);
         let host = Arc::new(Host {
@@ -115,10 +112,8 @@ mod tests {
         assert_eq!(detail["operation"], "app_open");
         assert_eq!(detail["code"], "not_ready");
         assert_eq!(detail["causes"][0]["chain"][0]["type"], "precondition");
-        // There is no native window to show either.
-        let mut window = control::Request::new("app_open");
-        window.args = serde_json::json!({"window": true});
-        let reply = control::dispatch(&host, window).await;
+        // The activities open in the same page, so they need a browser too.
+        let reply = control::dispatch(&host, control::Request::new("activity_open")).await;
         assert_eq!((reply.ok, reply.code.as_str()), (false, "not_ready"));
         let reply = control::dispatch(&host, control::Request::new("app_quit")).await;
         assert!(reply.ok);

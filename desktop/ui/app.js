@@ -7,7 +7,7 @@ const READS = ['snapshot', 'chat', 'github_repositories', 'self_chat_status', 'l
 // changes made elsewhere (e.g. with `pta`).
 let lastRevision = null;
 async function invoke(method, args = {}) {
-  if ((window.ptaTransport.browser || window.ptaTransport.local) && method === 'activity_open') {
+  if (method === 'activity_open') {
     showTab('registration');
     return { visible: true };
   }
@@ -1476,8 +1476,7 @@ function renderLive() {
   $('#hero').className = `panel hero ${state.tone}${motion}`;
   $('#hero-title').textContent = state.title;
   $('#hero-detail').textContent = state.detail;
-  $('#version').textContent = `v${s.host_version}${s.headless ? ` · ${t('headless')}` : ''}`;
-  $('#restart-offer').hidden = !s.restart_offer;
+  $('#version').textContent = `v${s.host_version}`;
   $('#start').hidden = s.running;
   $('#restart').hidden = $('#stop').hidden = !s.running;
   for (const button of [$('#start'), $('#restart'), $('#stop')]) button.disabled = Boolean(transition) || button.classList.contains('busy');
@@ -2251,7 +2250,7 @@ function renderCloudBackups() {
   if (data.pending) lines.push(t('A restore is waiting for the application to restart.'));
   else if (outcome?.ok) lines.push(t('Last restore {when}: {n} files put back; the data from just before is kept in {copy}.', { when: ago(outcome.finished_at * 1000), n: outcome.files, copy: outcome.before }));
   else if (outcome) lines.push(t('The last restore did not complete: {problem}', { problem: tx(outcome.error) }));
-  if (data.backups?.length && !data.restores_here) lines.push(t('Restore from this computer\'s own window or with pta cloud restore NAME --confirmed.'));
+  if (data.backups?.length && !data.restores_here) lines.push(t('Restore from this computer\'s own local page or with pta cloud restore NAME --confirmed.'));
   $('#cloud-backups-summary').textContent = lines.join(' ');
   $('#cloud-backups-summary').hidden = !lines.length;
   $('#cloud-backup-list').replaceChildren(...(data.backups ?? []).map(entry => {
@@ -5515,12 +5514,6 @@ $('#restart').onclick = () => busy($('#restart'), async () => {
   done(t('Assistant restarted with the saved settings.'));
 });
 $('#stop').onclick = () => busy($('#stop'), async () => { await invoke('stop_assistant'); await refreshLive(); done(t('Assistant stopped.')); });
-$('#offer-start').onclick = () => busy($('#offer-start'), async () => {
-  await invoke('start_assistant'); await refreshLive(); done(t('The assistant keeps running with the new version.'));
-});
-$('#offer-dismiss').onclick = () => busy($('#offer-dismiss'), async () => {
-  await invoke('dismiss_restart_offer'); await refreshLive(); notify(t('The assistant stays stopped. You can start it whenever you want.'));
-});
 $('#activity-all').onclick = () => showTab('messages');
 $('#activity-notice-open').onclick = () => busy($('#activity-notice-open'), () => invoke('activity_open'));
 $('#activity-settings').onclick = () => showTab('settings', 'panel-registration');
@@ -5547,20 +5540,6 @@ $('#activity-task-back').onclick = () => {
 $('#activity-detail-refresh').onclick = () => loadActivityTask();
 setInterval(() => { if (current && (tab === 'registration' || activityRunning)) loadRegistration().catch(() => {}); }, 5_000);
 
-if (window.__TAURI__?.event?.listen) {
-  // Pushed on every start/stop, including from the tray and `pta`.
-  window.__TAURI__.event.listen('assistant-phase', event => {
-    transition = transitions[event.payload] ? event.payload : null;
-    // Once settled, render from a fresh snapshot rather than the one from before the change.
-    if (transition || !current) renderLive();
-    else refreshLive().catch(() => renderLive());
-  });
-  window.__TAURI__.event.listen('assistant-error', event => fail(event.payload));
-  window.__TAURI__.event.listen('activity-registration', () => loadRegistration().catch(fail));
-  window.__TAURI__.event.listen('activity-open', event => {
-    showTab('registration');
-  });
-}
 $('#messages-refresh').onclick = () => busy($('#messages-refresh'), loadMessages);
 document.querySelectorAll('#messages-filters button').forEach(button => { button.onclick = () => setFilter(button.dataset.filter); });
 $('#messages-hide-ineligible').onchange = renderMessages;

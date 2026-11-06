@@ -1,11 +1,11 @@
 [package]
 name = "personal-teams-assistant"
-version = "0.10.63"
+version = "0.11.0"
 edition = "2024"
 rust-version = "1.95"
 build = "build.rs"
 default-run = "personal-teams-assistant"
-description = "Personal Microsoft Teams knowledge assistant: desktop tray app, headless host and `pta` CLI"
+description = "Personal Microsoft Teams knowledge assistant: a host with a web interface, the `pta` CLI and an MCP server"
 license = "MIT"
 readme = "README.md"
 repository = "https://github.com/elvisbrevi/personal-teams-assistant"
@@ -20,18 +20,13 @@ include = [
     "/src/**",
     "/config.example.toml",
     "/knowledge-map.example.toml",
-    "/desktop/tauri.conf.json",
-    "/desktop/Info.plist",
-    "/desktop/capabilities/**",
-    "/desktop/icons/*.png",
-    "/desktop/icons/*.ico",
     "/desktop/ui/**",
     "/desktop/skills/**",
 ]
 
 # `cargo binstall personal-teams-assistant` downloads the archive binaries.yml attaches to the GitHub
-# release (macOS and Windows, default features) instead of compiling; elsewhere, or when a release
-# has no archive for the target, it compiles like `cargo install`. Third-party builds are not used.
+# release (macOS, Windows and Linux; one build, no features) instead of compiling; when a release has
+# no archive for the target, it compiles like `cargo install`. Third-party builds are not used.
 [package.metadata.binstall]
 pkg-url = "{ repo }/releases/download/v{ version }/{ name }-{ target }-v{ version }{ archive-suffix }"
 bin-dir = "{ name }-{ target }-v{ version }/{ bin }{ binary-ext }"
@@ -50,10 +45,12 @@ name = "pta"
 path = "src/bin/pta.rs"
 
 [features]
-# Tray/window GUI. Build with --no-default-features for a headless host (Linux servers):
-# no Tauri/WebKit, operated only through `pta`.
-default = ["gui"]
-gui = ["dep:tauri", "dep:tauri-plugin-opener", "dep:tauri-build", "dep:notify-rust"]
+# One build on every operating system: the host has no window. `gui` is deprecated, does nothing and
+# is no longer a default; it stays so that an installation whose Cargo record carries `--features gui`
+# (or `--all-features`) still updates with the flags it was installed with. Default features and
+# `--no-default-features` build the same package.
+default = []
+gui = []
 
 [dependencies]
 anyhow = "1"
@@ -77,8 +74,6 @@ serde_json = "1"
 serde_yaml = "0.9"
 sha2 = "0.10"
 subtle = "2"
-tauri = { version = "2", features = ["tray-icon"], optional = true }
-tauri-plugin-opener = { version = "2", optional = true }
 tempfile = "3"
 tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["compat"] }
@@ -88,14 +83,10 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = "2"
 uuid = { version = "1", features = ["v4"] }
-notify-rust = { version = "4.18.2", optional = true }
 tiberius = { version = "0.13", default-features = false, features = ["rustls", "tds73"] }
 
 [target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
 keyring = "4.2"
-
-[build-dependencies]
-tauri-build = { version = "2", features = [], optional = true }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "test-util"] }

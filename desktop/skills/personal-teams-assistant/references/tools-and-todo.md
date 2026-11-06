@@ -105,8 +105,8 @@ On phones, four daily destinations plus More keep the floating bar at five targe
 reveals Knowledge and Test chat, and closes on selection, outside click or Escape. Read failures and partial coverage appear inline. Changing
 filters discards stale responses.
 
-The link icon opens a new browser tab in the portal and the default browser in the native
-app (`open_work_item`, also a CLI/MCP tool taking `{"url":"…"}`). Its adjacent copy icon copies
+The link icon opens a new browser tab in the portal and the default browser on the local
+page (`open_work_item`, also a CLI/MCP tool taking `{"url":"…"}`). Its adjacent copy icon copies
 the work item's URL to the clipboard. The host accepts only canonical HTTPS Azure work-item
 and GitHub issue links. These local reads work with Teams stopped, use no model, and do not
 change any source audience or authorize external processing.
@@ -127,7 +127,7 @@ opens the same `get_azure_task` detail as Activities, including custom process t
 Back restores the preceding detail, filter, scroll and focus. Nested navigation works from
 Activities as well. Plain-text Markdown and Markdown embedded in preformatted evidence use
 the safe Markdown renderer, while explicit code remains code. Bare HTTPS URLs in comments
-and rich text become validated links with the same browser/native behavior.
+and rich text become validated links with the same portal/local page behavior.
 Other related work item types keep their original provider links and remain filterable.
 
 ## Existing Azure tasks by user and day

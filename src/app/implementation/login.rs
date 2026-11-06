@@ -250,7 +250,7 @@ pub(in crate::app) async fn begin_at(
     }
     let current = pending.as_ref().unwrap();
     let opened =
-        open && !host.shell.headless() && host.shell.open_url(&current.approval_url()).is_ok();
+        open && host.shell.browser() && host.shell.open_url(&current.approval_url()).is_ok();
     let mut value = current.public("pending");
     value["opened"] = json!(opened);
     value["machine"] = json!({"id":id,"name":name,"os":std::env::consts::OS});

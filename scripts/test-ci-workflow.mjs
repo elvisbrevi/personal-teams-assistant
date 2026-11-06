@@ -69,8 +69,10 @@ for (const [files, expected] of [
   [['src/maintenance/apply.rs'], { rust: 'true', platform: 'true' }],
   [['src/app/maintenance/apply.rs'], { rust: 'true', platform: 'true' }],
   [['src/llm/implementation/codex.rs'], { rust: 'true', platform: 'true' }],
-  [['src/app/gui.rs'], { rust: 'true', platform: 'true' }],
-  [['desktop/tauri.conf.json'], { rust: 'true', platform: 'true' }],
+  [['src/app/headless.rs'], { rust: 'true', platform: 'true' }],
+  [['src/app/page.rs'], { rust: 'true', platform: 'true' }],
+  // The GUI's files and icons are the same on every platform.
+  [['desktop/ui/favicon.png'], { rust: 'true', ui: 'true', platform: 'false' }],
   [['src/pipeline.rs', 'src/consumers.rs'], { rust: 'true', platform: 'true' }],
 ]) {
   assert.deepEqual(filter('pull_request', files), { ...neutral, ...expected }, `pull_request: ${files}`);
@@ -130,11 +132,14 @@ for (const event of ['pull_request', 'push', 'schedule']) {
   assert(!JSON.stringify(jobs.cloud).includes('secrets.'), 'the Worker job uses no secrets');
   const commands = jobs.linux.steps.filter(step => step.run && enabled(step.if, event, outputs))
     .map(step => step.run);
-  for (const command of ['cargo test --locked', 'cargo test --locked --no-default-features', 'cargo package --locked']) {
+  for (const command of ['cargo test --locked', 'cargo package --locked']) {
     assert(commands.includes(command), `${event}: ${command} must verify the final commit`);
   }
   assert.equal(commands.includes('cargo fmt --all --check'), event !== 'push');
   assert.equal(commands.some(command => command.startsWith('cargo clippy')), event !== 'push');
+  // One build: each check runs once, without a feature matrix or the window's system libraries.
+  assert.equal(commands.filter(command => command.startsWith('cargo clippy')).length, event === 'push' ? 0 : 1);
+  assert.equal(commands.filter(command => command.startsWith('cargo test')).length, 1);
 }
 
 assert.deepEqual(filter('schedule', []), all);
@@ -196,6 +201,13 @@ const save = ui.find(step => step.uses?.startsWith('actions/cache/save@'));
 assert.equal(save.if, `github.ref == 'refs/heads/main' && steps.${restore.id}.outputs.cache-hit != 'true'`);
 assert.equal(save.with.key, `\${{ steps.${restore.id}.outputs.cache-primary-key }}`);
 
+// No job installs the window's system libraries, checks a third version file or builds a feature matrix.
+for (const banned of ['webkit2gtk', 'libgtk', 'appindicator', 'tauri', 'Versions agree', '--no-default-features', '--all-features']) {
+  assert(!source.toLowerCase().includes(banned.toLowerCase()), `ci.yml mentions ${banned}`);
+}
+const windows = jobs.windows.steps.filter(step => step.run).map(step => step.run).join('\n');
+assert(windows.includes('python scripts/test-windows-startup.py'), 'Windows checks headless startup, quit and relaunch');
+
 // Standard GitHub-hosted runners, no secrets, actions pinned by commit, permissions per job.
 assert.deepEqual(workflow.permissions, { contents: 'read' });
 assert(!source.includes('secrets.'), 'ci.yml uses no secrets');
@@ -209,4 +221,26 @@ for (const line of source.split('\n').filter(line => /^\s*(- )?uses: /.test(line
   assert.match(line, /@[0-9a-f]{40} # v\d+(\.\d+)*$/, `version comment: ${line.trim()}`);
 }
 
-console.log('CI policy passed: Linux PR gate, platform paths, weekly matrix, macOS without Windows for a release candidate, main tests/package, Chromium cache, the Worker job and required-job failures.');
+// Release archives: one package, one build and one archive name on all four targets, which
+// [package.metadata.binstall] resolves (the overrides change only the Windows archive format).
+const binaries = Bun.YAML.parse(readFileSync(new URL('../.github/workflows/binaries.yml', import.meta.url), 'utf8'));
+const manifest = Bun.TOML.parse(readFileSync(new URL('../Cargo.toml', import.meta.url), 'utf8'));
+const targets = binaries.jobs.build.strategy.matrix.include;
+assert.deepEqual(targets.map(entry => entry.target).sort(),
+  ['aarch64-apple-darwin', 'x86_64-apple-darwin', 'x86_64-pc-windows-msvc', 'x86_64-unknown-linux-gnu']);
+for (const entry of targets) assert.deepEqual(Object.keys(entry).sort(), ['os', 'target'], `${entry.target}: no flags or own name`);
+const build = binaries.jobs.build.steps.find(step => step.name === 'Release build').run;
+assert.equal(build, 'cargo build --release --locked --target "$TARGET"');
+const archive = binaries.jobs.build.steps.find(step => step.name === 'Archive');
+assert.equal(archive.env.NAME, manifest.package.name);
+assert(archive.run.includes('dir="$NAME-$TARGET-v$version"'));
+const binstall = manifest.package.metadata.binstall;
+assert.equal(binstall['pkg-url'], '{ repo }/releases/download/v{ version }/{ name }-{ target }-v{ version }{ archive-suffix }');
+assert.equal(binstall['bin-dir'], '{ name }-{ target }-v{ version }/{ bin }{ binary-ext }');
+assert.deepEqual(Object.keys(binstall.overrides), ['x86_64-pc-windows-msvc']);
+assert.deepEqual(binstall.overrides['x86_64-pc-windows-msvc'], { 'pkg-fmt': 'zip' });
+// The version lives in Cargo.toml and Cargo.lock only.
+assert.deepEqual(manifest.features, { default: [], gui: [] }, 'gui stays as an empty, deprecated feature');
+assert(!manifest.package.include.some(path => path.includes('tauri') || path.includes('Info.plist') || path.includes('capabilities')));
+
+console.log('CI policy passed: Linux PR gate, platform paths, weekly matrix, macOS without Windows for a release candidate, main tests/package, Chromium cache, the Worker job, required-job failures and one release archive per target.');

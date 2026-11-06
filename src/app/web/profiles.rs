@@ -421,7 +421,6 @@ impl Portal {
             "start_assistant",
             "stop_assistant",
             "restart",
-            "dismiss_restart_offer",
             "validate",
             "save_settings",
             "import_existing",

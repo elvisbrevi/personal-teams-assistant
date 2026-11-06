@@ -11,8 +11,6 @@
 *.pem
 *.key
 .DS_Store
-/desktop/gen/
-/gen/
 .wrangler/
 /.claude/worktrees/
 /.claude/settings.local.json

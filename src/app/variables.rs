@@ -2,7 +2,7 @@
 //!
 //! A value enters only through protected entry (the GUI's masked field or CLI standard input) and
 //! is returned by exactly one operation, `variable_reveal`, which only a person at the GUI (the
-//! application window or an authenticated portal browser) can invoke: never the CLI, MCP, tools
+//! owner's local page or an authenticated portal browser) can invoke: never the CLI, MCP, tools
 //! or machines. An agent starts a protected-entry request (to store or to replace a value) by
 //! name or ID and later reads only its state.
 use super::{authority, consumers, control::Reply, *};

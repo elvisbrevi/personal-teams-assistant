@@ -1,5 +1,5 @@
 // Renders the app icon (desktop/icons/source/app.png: the lime face tile on a white background, kept
-// outside the crate) to the images the portal, the landing and the desktop app use. iOS gets a full-bleed square cut just inside the tile, so its own
+// outside the crate) to the images the GUI (local page and portal), the PWA and the landing use. iOS gets a full-bleed square cut just inside the tile, so its own
 // rounded mask meets the tile's glossy rim; browsers and the PWA manifest get the tile with
 // transparent corners. Usage: node scripts/render-icons.mjs   (Playwright from scripts/ui-preview/deps.mjs)
 import fs from 'node:fs';
@@ -20,25 +20,7 @@ const outputs = [
   // The landing's brand mark, tab icon and home-screen icon.
   { name: 'site/public/assets/icon.png', size: 256, inset: 0 },
   { name: 'site/public/assets/apple-touch-icon.png', size: 180, inset: 16, opaque: true },
-  // The desktop app: window and tray icon (bundle.icon in tauri.conf.json), and Windows' icon.
-  { name: 'desktop/icons/32x32.png', size: 32, inset: 0 },
-  { name: 'desktop/icons/128x128.png', size: 128, inset: 0 },
-  { name: 'desktop/icons/icon.ico', sizes: [16, 24, 32, 48, 64, 256], inset: 0 },
 ];
-/** An ICO file whose entries are PNG images (Windows Vista and later read them). */
-function ico(pngs) {
-  const header = Buffer.alloc(6 + 16 * pngs.length);
-  header.writeUInt16LE(0, 0); header.writeUInt16LE(1, 2); header.writeUInt16LE(pngs.length, 4);
-  let offset = header.length;
-  pngs.forEach(({ size, data }, index) => {
-    const entry = 6 + 16 * index;
-    header.writeUInt8(size >= 256 ? 0 : size, entry); header.writeUInt8(size >= 256 ? 0 : size, entry + 1);
-    header.writeUInt16LE(1, entry + 4); header.writeUInt16LE(32, entry + 6);
-    header.writeUInt32LE(data.length, entry + 8); header.writeUInt32LE(offset, entry + 12);
-    offset += data.length;
-  });
-  return Buffer.concat([header, ...pngs.map(png => png.data)]);
-}
 const browser = await launch();
 const page = await browser.newPage();
 async function render(output) {
@@ -67,10 +49,7 @@ async function render(output) {
   return Buffer.from(data.split(',')[1], 'base64');
 }
 for (const output of outputs) {
-  const data = output.sizes
-    ? ico(await Promise.all(output.sizes.map(async size => ({ size, data: await render({ ...output, size }) }))))
-    : await render(output);
-  fs.writeFileSync(path.join(root, output.name), data);
-  console.log(`${output.name} (${output.sizes ? output.sizes.join(', ') : `${output.size} × ${output.size}`})`);
+  fs.writeFileSync(path.join(root, output.name), await render(output));
+  console.log(`${output.name} (${output.size} × ${output.size})`);
 }
 await browser.close();

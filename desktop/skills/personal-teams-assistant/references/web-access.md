@@ -1,8 +1,8 @@
 # Your private web installation
 
 The same host binary serves the existing GUI in a browser: Home, Messages,
-Activities, Knowledge, Test chat and Settings. Native Tauri and the CLI keep their
-private loopback IPC. The portal is `personal-teams-assistant --web`, behind the
+Activities, Knowledge, Test chat and Settings. This computer's local page and the CLI
+keep their own loopback channels. The portal is `personal-teams-assistant --web`, behind the
 existing dedicated Tunnel. Its HTTPS hostname and complete API must be protected
 by Cloudflare Access. GitHub owns the interactive sign-in; there is no second
 password form, public registration or password authentication endpoint.
@@ -194,19 +194,19 @@ hosts it owns on exit; a running desktop host remains owned by the desktop.
 Verify GitHub sign-in over HTTPS from the Mac and phone with no password form,
 owner and admitted second-account access, blocked unauthorized identities and
 disabled identities, JWT rejection, logout/replay/expiration, exact Graph callbacks,
-and native Tauri/CLI behavior. Use synthetic data and existing status reads; never
+and the local page's and CLI's behavior. Use synthetic data and existing status reads; never
 send real Teams messages as a smoke test.
 
 ## Add a computer you own by signing in (0.9.12+)
 
-This is the normal path for a new desktop, CLI or headless installation. Both the
+This is the normal path for a new installation, with or without a desktop session. Both the
 installation's CLI/host and the coordinator must advertise `machine_login_support: true`.
 
 1. On the computer to add, stop its Teams assistant. The app shows its sign-in screen at
    start (or choose Sign in in the sidebar): enter your coordinator's HTTPS origin and select
    Sign in, or run `pta auth machine login https://your-portal.example` (add `--no-browser` on a
-   headless host). Through MCP/CLI tools call `machine_login` with `url` (and `open: true`
-   on a desktop host). The origin is validated (HTTPS, no credentials, path or query) and
+   host without a browser session). Through MCP/CLI tools call `machine_login` with `url` (and `open: true`
+   on a host with a desktop session). The origin is validated (HTTPS, no credentials, path or query) and
    remembered for the next sign-in; there is no default coordinator.
 2. The host opens the system browser or returns a public approval URL
    (`https://your-portal.example/login?enroll=…`) and a confirmation code such as
@@ -260,7 +260,7 @@ Machine registration never sends a GitHub access token to a coordinator. Existin
 
 HTTPS origin responses include hostname-only HSTS. Configure matching edge HSTS for Access-generated responses without enabling parent-domain includeSubDomains or preload indiscriminately.
 
-Both CLI and host must advertise `machine_pairing_support: true` (0.9.4 or later). The portal refuses to reuse an older native/headless host, and IPC rejects machine connection before forwarding any request to one. This prevents an older host from falling back to GitHub-token enrollment. Browser sign-in likewise requires `machine_login_support: true` (0.9.12+) on the CLI and host before any sign-in operation is sent, and the portal never forwards a sign-in registration to an account host without it. An older coordinator answers the start request as unsupported; nothing falls back to GitHub-token enrollment.
+Both CLI and host must advertise `machine_pairing_support: true` (0.9.4 or later). The portal refuses to reuse an older host, and IPC rejects machine connection before forwarding any request to one. This prevents an older host from falling back to GitHub-token enrollment. Browser sign-in likewise requires `machine_login_support: true` (0.9.12+) on the CLI and host before any sign-in operation is sent, and the portal never forwards a sign-in registration to an account host without it. An older coordinator answers the start request as unsupported; nothing falls back to GitHub-token enrollment.
 
 ## Account and execution authority
 

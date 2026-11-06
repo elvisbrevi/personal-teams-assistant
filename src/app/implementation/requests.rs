@@ -342,7 +342,7 @@ async fn run(host: &Arc<Host>, request: Request, prepared: Value, directory: Pat
 }
 pub(super) async fn open_session(host: &Host, id: &str) -> Result<Value> {
     ensure!(
-        !host.shell.headless(),
+        host.shell.browser(),
         "This host has no desktop. Open the session on its execution machine."
     );
     let record = host

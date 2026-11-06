@@ -30,7 +30,8 @@ const SOURCES: [&str; 2] = [
     "registry+https://github.com/rust-lang/crates.io-index",
     "sparse+https://index.crates.io/",
 ];
-/// The only Cargo features this package has; anything else is a custom build.
+/// The only Cargo features this package has; anything else is a custom build. `gui` no longer
+/// does anything, but installations recorded with it replay it, so it must keep existing.
 const FEATURES: [&str; 1] = ["gui"];
 pub const BUILD_SECONDS: u64 = 60 * 60;
 const PROBE_SECONDS: u64 = 20;
@@ -576,7 +577,7 @@ pub fn hint(tail: &[String]) -> Option<&'static str> {
     [
         ("linker `cc` not found", "Install a C compiler and linker (for example `build-essential` on Debian and Ubuntu, or Xcode's command line tools on macOS) and try again."),
         ("linker `link.exe` not found", "Install the Visual Studio Build Tools with the C++ workload and try again."),
-        ("pkg-config", "Building the desktop app needs the GTK and WebKit development packages (see the README); or reinstall without the desktop app using `--no-default-features`."),
+        ("pkg-config", "The build could not find a system library through pkg-config. Install pkg-config and the C development tools (for example `build-essential pkg-config` on Debian and Ubuntu) and try again."),
         ("No space left on device", "There is not enough free disk space to build. Free some and try again."),
         ("failed to download", "Cargo could not download the package. Check the network connection and proxy settings and try again."),
         ("spurious network error", "Cargo could not reach the registry. Check the network connection and proxy settings and try again."),

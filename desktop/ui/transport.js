@@ -1,13 +1,8 @@
-// The GUI has one command contract in Tauri, the owner's local page and the portal. Session
-// tokens stay in HttpOnly cookies; only the anti-CSRF token is available to JavaScript.
-// `browser` means the portal: the person's device is not the host's computer. The local page
-// (`local`) is this computer's GUI in the system browser, with the window's behavior.
+// The GUI has one command contract on the owner's local page and in the portal. Session tokens
+// stay in HttpOnly cookies; only the anti-CSRF token is available to JavaScript. `browser` means
+// the portal: the person's device is not the host's computer. The local page (`local`) is this
+// computer's GUI in the system browser, with the owner's authority.
 (() => {
-  const native = window.__TAURI__?.core?.invoke;
-  if (native) {
-    window.ptaTransport = { browser: false, local: false, invoke: native };
-    return;
-  }
   const local = document.querySelector('meta[name="pta-transport"]')?.content === 'local';
   // The local page's session key arrives once, in the fragment of the address the sign-in page moves to: kept in
   // this origin's sessionStorage (another server on 127.0.0.1 gets the cookie, never this) and
