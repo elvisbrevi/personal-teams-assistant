@@ -138,6 +138,10 @@ struct Snapshot {
     profile: PathBuf,
     tunnel_running: bool,
     microsoft_connected: bool,
+    /// Whether the saved Microsoft session is known to need interactive renewal (Entra refused
+    /// its refresh token): the assistant may still report running, but cannot start again until
+    /// the person signs in. Read from the profile's records; asks Microsoft nothing (additive).
+    microsoft_session_needs_renewal: bool,
     teams_identity_error: Option<String>,
     config: Config,
     map: KnowledgeMap,
@@ -912,6 +916,10 @@ async fn snapshot(host: &Host) -> std::result::Result<Snapshot, String> {
         tunnel_running: running.as_ref().is_some_and(|r| r.tunnel.is_some()),
         microsoft_connected: Store::has_token(&config.server.data_dir.join("assistant.db"))
             .map_err(fail)?,
+        microsoft_session_needs_renewal: Store::session_needs_renewal(
+            &config.server.data_dir.join("assistant.db"),
+        )
+        .map_err(fail)?,
         config,
         map,
         credentials,

@@ -710,7 +710,17 @@ async fn unattended_updating_defers_while_the_microsoft_session_needs_renewal() 
     with_archive_pair(&mut f);
     let dir = directory(&f.host);
     enable(&dir);
+    let renewal = |f: &Fixture| {
+        let host = f.host.clone();
+        async move {
+            call(&host, Local, "snapshot", json!({})).await.data["microsoft_session_needs_renewal"]
+                .clone()
+        }
+    };
+    assert_eq!(renewal(&f).await, json!(false));
     needs_renewal(&f);
+    // `pta --json status` says so, for the server's updater (scripts/vps-update.py).
+    assert_eq!(renewal(&f).await, json!(true));
     assert_eq!(unattended(&f.host, &f.env).await, Pass::Deferred);
     let saved = load(&dir);
     assert_eq!(saved.deferred.as_ref().unwrap().reasons, [RENEWAL]);
@@ -723,6 +733,7 @@ async fn unattended_updating_defers_while_the_microsoft_session_needs_renewal() 
         .unwrap()
         .event("oauth", "authorized")
         .unwrap();
+    assert_eq!(renewal(&f).await, json!(false));
     let reply = apply::request(&f.host, &f.env, "0.9.14", true).await;
     assert_eq!(reply.data["state"], "applying", "{:?}", reply.message);
     assert!(!core::apply::read(&dir).unwrap().intent.degraded);
