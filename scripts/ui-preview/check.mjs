@@ -316,6 +316,20 @@ check('axe: no WCAG 2.2 AA violations in any scan', !Object.keys(totals).length,
   await page.click('#reading-all-chats');
   check('reading all chats hides the personal chat and the list', !(await page.isVisible('#reading-chats-field')) && !(await page.isVisible('#reading-personal-chat-field')));
   await page.click('#reading-all-chats');
+  // A change saved underneath the window (an account synchronization) waits while there are unsaved edits…
+  await page.evaluate(async () => {
+    window.__ptaChangeProfile(s => { s.config.teams_reading = { all_chats: true, personal_chat: true, chats: [] }; });
+    await pollLive();
+  });
+  check('a synchronized change never replaces unsaved edits', !(await page.isChecked('#reading-all-chats')) && await page.isVisible('#savebar'));
+  // …and reloads the form once there are none.
+  await page.click('#discard');
+  await page.evaluate(async () => {
+    window.__ptaChangeProfile(s => { s.config.teams_reading = { all_chats: false, personal_chat: false, chats: ['19:synced@thread.v2'] }; });
+    await pollLive();
+  });
+  check('a synchronized change shows in an open window without unsaved edits',
+    !(await page.isChecked('#reading-all-chats')) && !(await page.isChecked('#reading-personal-chat')) && (await page.inputValue('#reading-chats')) === '19:synced@thread.v2' && !(await page.isVisible('#savebar')));
   // Keyboard tabs
   await page.focus('#settings-tab-teams');
   await page.keyboard.press('ArrowRight');
