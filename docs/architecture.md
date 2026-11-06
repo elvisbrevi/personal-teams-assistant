@@ -49,6 +49,8 @@ src/                          core: pipeline, Graph adapters, LLM, knowledge, to
   app.rs                      host: Host/Shell, state, start/stop, OAuth, tunnel, settings, `run` entry
   app/headless.rs             the host process and its only shell: foreground, SIGTERM/Ctrl-C, `--start`
   app/page.rs, app/page/       the owner's local page: the GUI on loopback with the owner's authority
+  app/gui_assets.rs           the one list of desktop/ui files both listeners serve; debug builds read them
+                              from PTA_DEV_UI_DIR instead (development loop)
   app/web.rs, app/web/         browser GUI, Access-bound sessions, isolated per-user host processes;
                               enrollment.rs: browser approval of native machine sign-in
   app/control.rs              profile paths, IPC channel (contract 1), single dispatcher, update
@@ -104,7 +106,8 @@ scripts/rehearse-cloud-migration.py  rehearses migrate, promote, edits, rollback
                               against the staging Worker with a temporary service token (nothing secret copied)
 scripts/export-public.py      exports a snapshot without private history (requires gitleaks)
 scripts/ui-preview/           GUI preview as the owner's local page over a mocked host with synthetic data: screenshots,
-                              axe WCAG 2.2 AA scans and interaction checks (Playwright outside the repo)
+                              axe WCAG 2.2 AA scans and interaction checks (Playwright outside the repo); reloads on edits
+scripts/dev-host.sh           a debug host on a disposable profile with synthetic data, serving desktop/ui from disk
 scripts/vps-update.py         server updater: installs new crates.io releases, verifies, rolls back;
   systemd/                    its systemd user service and timer (docs/delivery.md)
 .github/workflows/            ci.yml (checks on Linux, macOS, Windows) and release.yml (crates.io)
@@ -830,6 +833,8 @@ responses and no redirects; these tools make no external writes and change no au
 To add an operation: a method in `control::operate` (the browser only through `host.shell`, so it works without a browser session) (and in the lists allowed during login if it is a read) → a tool in `app/tools/mod.rs` (schema, effect, adapter and, if External, confirmation text), automatically available through CLI tools and MCP → optionally a dedicated CLI command (`HELP`, `validate_args`, mapping and `help_documents_every_accepted_command`) → if it changes a schema an older host does not understand, announce it in `Endpoint` like `wiki_support` → document it in the skill.
 
 ## 11. GUI
+
+- **Serving.** `app::gui_assets::ASSETS` is the one list of the files under `desktop/ui` (a test fails when a file is missing from it or a listed file is missing); the portal and the local page route each one, and only the document, `app.js` and `transport.js` need the listener's session. Each listener's middleware adds the same headers whatever the source (`no-store`, the CSP, `nosniff`, `no-referrer`, `DENY`). Release builds serve the copies compiled into the binary. A debug build started with `PTA_DEV_UI_DIR` set to an absolute directory holding `index.html` reads each file from it on every request (logged as `gui_from_disk`); only plain file names directly inside it are read, so `..`, separators and links that resolve outside are refused, and a file missing there is a 404, never the embedded copy. The variable is read under `cfg(debug_assertions)` only and is on none of the allowlists a child inherits (the agents' `PASSED_ENV`, the portal accounts' `WORKER_ENV`, the update's build environment; tests check all three). `scripts/dev-host.sh` starts such a host on a temporary profile with an emptied environment and synthetic notes, and prints the single-use address its opener stand-in receives (docs/ui-design-conventions.md §10).
 
 - **To-Do**: daily work next to Home, with provider/type/state/count filters and pressable cards;
   Azure task-category types a work item guide lists with the bugs are included with them and open through task detail.

@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-mod agent;
+pub(crate) mod agent;
 mod deepseek;
 pub(crate) mod implementation;
 pub mod prompts;
