@@ -95,6 +95,9 @@ pub(super) const TOOLS: &[(&str, Remote)] = &[
     ("cloud_verify", Offered),
     ("update_apply", Denied(UPDATES)),
     ("update_cancel", Denied(UPDATES)),
+    ("service_status", Denied(HOST_MACHINE)),
+    ("service_install", Denied(HOST_MACHINE)),
+    ("service_uninstall", Denied(HOST_MACHINE)),
     ("update_dismiss", Denied(UPDATES)),
     ("consumer_unbind", Offered),
     ("consumer_check", Offered),
@@ -325,6 +328,9 @@ pub(super) const NEVER: &[&str] = &[
     "machine_protocol",
     "app_quit",
     "app_open",
+    "service_status",
+    "service_install",
+    "service_uninstall",
 ];
 
 pub(super) const DENIED: &str = "This operation is not available to a remote agent.";

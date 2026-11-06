@@ -160,4 +160,4 @@ setTimeout(loadUpdates, 1500);
 setInterval(() => { if (current) loadUpdates(); }, 5 * 60_000);
 setInterval(() => { if (['staging', 'applying', 'deferred'].includes(updates?.state)) loadUpdates(); }, 3_000);
 
-export { loadUpdates };
+export { sentences, loadUpdates };

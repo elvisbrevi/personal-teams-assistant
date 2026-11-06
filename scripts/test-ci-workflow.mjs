@@ -91,6 +91,8 @@ for (const [files, expected] of [
   [['src/llm/implementation/codex.rs'], { rust: 'true', platform: 'true' }],
   [['src/app/headless.rs'], { rust: 'true', platform: 'true' }],
   [['src/app/page.rs'], { rust: 'true', platform: 'true' }],
+  [['src/app/service.rs'], { rust: 'true', platform: 'true' }],
+  [['tests/service.rs'], { rust: 'true', platform: 'true' }],
   // The GUI's files and icons are the same on every platform.
   [['desktop/ui/favicon.png'], { gui: 'true', ui: 'true' }],
   [['src/pipeline.rs', 'src/consumers.rs'], { rust: 'true', platform: 'true' }],

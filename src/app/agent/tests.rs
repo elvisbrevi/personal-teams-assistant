@@ -36,6 +36,10 @@ fn a_remote_agent_is_refused_what_only_a_person_or_the_owners_computer_may_do() 
         "update_apply",
         "update_cancel",
         "update_dismiss",
+        // The host computer's own service entry.
+        "service_status",
+        "service_install",
+        "service_uninstall",
         // Key custody and the account store's lifecycle.
         "cloud_rotate_key",
         "cloud_lost",

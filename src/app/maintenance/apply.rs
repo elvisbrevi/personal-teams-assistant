@@ -19,7 +19,7 @@ pub(super) const FLAG: &str = "--maintenance-apply";
 /// Set by the helper on the host it starts, so that host is not mistaken for one started in the
 /// middle of an update.
 pub(crate) const HANDOVER: &str = "PTA_UPDATE_HANDOVER";
-const SERVICE: &str = "The application runs as a service under systemd, which would start a second copy when the update restarts it. Update it through the service: install the new version with `cargo install personal-teams-assistant --locked --force` and restart the service.";
+const SERVICE: &str = "The application runs under a systemd unit that pta did not install, which would start a second copy when the update restarts it. Update it through that unit (install the new version with `cargo install personal-teams-assistant --locked --force` and restart it), or replace the unit with pta service install, whose entries updates restart themselves.";
 
 /// Time limits, shortened by tests.
 #[derive(Clone, Copy)]
@@ -61,10 +61,16 @@ pub(super) trait Platform {
 // ---------------------------------------------------------------------------------------------
 // The request.
 
-/// A headless host started by systemd (a unit): the unit would start a second copy when the update
-/// restarts it. A window started from a desktop session is not a unit's service.
+/// A headless host started by a systemd unit someone wrote by hand (the shared server's, or one of
+/// older instructions): that unit would start a second copy when the update restarts it. The
+/// entry of `pta service install` starts the host with `--service` instead, and an update restarts
+/// it through its manager.
 pub(super) fn unsupported(env: &Environment) -> Option<&'static str> {
     (env.launch.iter().any(|flag| flag == "--headless")
+        && !env
+            .launch
+            .iter()
+            .any(|flag| flag == super::super::service::FLAG)
         && env
             .variables
             .iter()
@@ -116,12 +122,19 @@ async fn in_memory(host: &Host) -> Vec<String> {
     reasons
 }
 
-fn intent_of(env: &Environment, running: bool, subscriptions: u64, tunnel: bool) -> Intent {
+fn intent_of(
+    env: &Environment,
+    running: bool,
+    subscriptions: u64,
+    tunnel: bool,
+    service: bool,
+) -> Intent {
     Intent {
         launch: env.launch.clone(),
         assistant: running,
         subscriptions,
         tunnel,
+        service,
     }
 }
 
@@ -228,6 +241,22 @@ pub(super) async fn request(host: &Arc<Host>, env: &Environment, requested: &str
             crate::state::Store::subscription_health(&data).map_or(0, |(count, _)| count as u64),
         )
     };
+    // An entry of `pta service install` that starts the installed executable for this profile:
+    // the helper stops and starts the host through its manager, which then keeps tracking it.
+    let service = !env.manual && {
+        let (profile, exe) = (
+            host.state.settings.profile().to_path_buf(),
+            installation
+                .root
+                .join("bin")
+                .join(core::exe_name(core::CRATE)),
+        );
+        tokio::task::spawn_blocking(move || {
+            super::super::service::manages(&profile, &exe).is_some()
+        })
+        .await
+        .unwrap_or(false)
+    };
     let id = uuid::Uuid::new_v4().simple().to_string()[..12].to_owned();
     // The pair being replaced is the installed one; a rollback restores and waits for exactly it,
     // even when the host still runs an older version (restart_required).
@@ -237,7 +266,7 @@ pub(super) async fn request(host: &Arc<Host>, env: &Environment, requested: &str
         manifest,
         &installation.root,
         &base,
-        intent_of(env, running, subscriptions, tunnel),
+        intent_of(env, running, subscriptions, tunnel, service),
         profiles,
     );
     if journal::write(&dir, &entry).is_err() {
@@ -321,12 +350,22 @@ pub(crate) fn run_helper() -> i32 {
     let Some(entry) = journal::read(&dir).filter(|j| j.phase == Phase::Requested) else {
         return 2;
     };
+    let exe = entry.bin().join(core::exe_name(core::CRATE));
+    let service = entry
+        .intent
+        .service
+        .then(|| super::super::service::Target::detect(&profile, &exe).ok())
+        .flatten();
     let platform = Local {
         profile,
         root: entry.root.clone(),
         id: entry.id.clone(),
+        dir: dir.clone(),
+        service,
     };
-    match runtime.block_on(drive(&dir, &platform, Tune::default())) {
+    let outcome = runtime.block_on(drive(&dir, &platform, Tune::default()));
+    journal::clear_handover(&dir);
+    match outcome {
         Outcome::Failed => 1,
         _ => 0,
     }
@@ -540,6 +579,10 @@ struct Local {
     profile: PathBuf,
     root: PathBuf,
     id: String,
+    /// The maintenance directory.
+    dir: PathBuf,
+    /// The service manager's entry that runs the host, if one does.
+    service: Option<super::super::service::Target>,
 }
 
 impl Local {
@@ -554,8 +597,24 @@ impl Platform for Local {
             return true;
         }
         // The host exits right after replying; a lost reply is fine, the lock tells the outcome.
+        // The ordinary quit stops the assistant and the tunnel first; a host ending this way exits
+        // successfully, which no manager's entry restarts.
         let _ = control::retirement_request(control::Request::new("app_quit"), &self.profile).await;
         for _ in 0..600 {
+            if self.stopped().await {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        let Some(target) = self.service.clone() else {
+            return false;
+        };
+        // A host the manager runs that did not quit: the manager stops it.
+        let _ = tokio::task::spawn_blocking(move || {
+            super::super::service::stop(&target, &super::super::service::System)
+        })
+        .await;
+        for _ in 0..300 {
             if self.stopped().await {
                 return true;
             }
@@ -565,6 +624,16 @@ impl Platform for Local {
     }
 
     async fn start(&self, launch: &[String]) -> Result<()> {
+        if let Some(target) = self.service.clone() {
+            // The manager starts the host, so it tracks the new process (and does not keep
+            // believing the entry stopped); the journal names the hand-over for it.
+            journal::mark_handover(&self.dir, &self.id)?;
+            return tokio::task::spawn_blocking(move || {
+                super::super::service::start(&target, &super::super::service::System)
+            })
+            .await
+            .context("The application could not be started.")?;
+        }
         let exe = self.root.join("bin").join(core::exe_name(core::CRATE));
         let mut command = std::process::Command::new(exe);
         for flag in launch

@@ -316,6 +316,21 @@ Account variables
   variables key restore       Operator-local: master-key backup JSON on stdin; never replaces an existing key.
   variables key rotate        Operator-local: new master and data keys; keeps older masters for older backups.
 
+Start at login (this computer only, per user, no administrator rights)
+  service status           Whether this profile's entry exists in the operating system's service manager (a
+                           LaunchAgent on macOS, a systemd user unit on Linux, a scheduled task at logon on
+                           Windows), whether it starts this executable, whether it runs, the manager's last error
+                           and, on Linux, whether lingering is on. No path is shown.
+  service install --confirmed
+                           Registers the host to start when you log in (`--host --service`: no page opens). It
+                           never starts the assistant by itself: after a login the assistant runs only if it was
+                           running before and this computer still holds the Teams selection and lease. Exactly
+                           one entry per profile; repeating it changes nothing. On Linux the host runs only while
+                           you are logged in unless lingering is on (loginctl enable-linger).
+  service uninstall --confirmed
+                           Removes only the entry install created. A host it is running keeps running until it
+                           quits.
+
 Updates (this computer only; the shared server's operator updates it separately)
   update status            Installed, running and available versions, how this installation was built and the state of any
                            prepared update; reads local state only. Staging is not installation: the installed version
@@ -555,6 +570,29 @@ fn pairs<T>(
     Ok(map)
 }
 /// The account's portable configuration: synchronize it, see what is loaded, read retained records.
+async fn service_command(args: &[String]) -> Result<Reply> {
+    let action = args
+        .iter()
+        .filter(|a| !a.starts_with("--"))
+        .nth(1)
+        .map(String::as_str);
+    let (method, question) = match action {
+        Some("status") => return call("service_status", json!({}), None, true).await,
+        Some("install") => (
+            "service_install",
+            "Register the host to start when you log in on this computer (it never starts the assistant by itself)?",
+        ),
+        Some("uninstall") => (
+            "service_uninstall",
+            "Remove the entry that starts the host when you log in on this computer?",
+        ),
+        _ => anyhow::bail!("unknown command or invalid argument count"),
+    };
+    if let Some(reply) = unconfirmed(args, question.into()) {
+        return Ok(reply);
+    }
+    call(method, json!({}), None, true).await
+}
 async fn update_command(args: &[String]) -> Result<Reply> {
     let words = words(args);
     let version = || -> Result<&str> {
@@ -1521,6 +1559,7 @@ fn validate_args(args: &[String]) -> Result<()> {
             | ["mcp", "config"]
             | ["tools", "list"]
             | ["tools", "call", _]
+            | ["service", "status" | "install" | "uninstall"]
             | ["update", "status" | "check" | "cancel"]
             | ["update", "stage" | "apply" | "dismiss", _]
             | ["setup", "status"]
@@ -1745,6 +1784,8 @@ fn validate_args(args: &[String]) -> Result<()> {
                     .starts_with(&["cloud", "installations", "revoke"])
                 || p.as_slice().starts_with(&["update", "stage"])
                 || p.as_slice().starts_with(&["update", "apply"])
+                || p.as_slice() == ["service", "install"]
+                || p.as_slice() == ["service", "uninstall"]
                 || p.as_slice().starts_with(&["variables", "migrate", "run"])
                 || p.as_slice().starts_with(&["variables", "bind"])
                 || p.as_slice().starts_with(&["variables", "check"])
@@ -1917,6 +1958,10 @@ async fn retire_outdated_host(command: &str, action: &str, interactive: bool) ->
         return Ok(());
     }
     if !crate::app::keep_running_after_update(interactive) {
+        // A later login does not start it either.
+        if let Ok(profile) = control::profile_dir() {
+            crate::app::service::remember(&profile, false);
+        }
         eprintln!("The assistant stays stopped; start it with `pta start` whenever you want.");
         return Ok(());
     }
@@ -1966,6 +2011,9 @@ async fn execute(mut args: Vec<String>) -> Result<Reply> {
     if command == "update" {
         return update_command(&args).await;
     }
+    if command == "service" {
+        return service_command(&args).await;
+    }
     match command {
         "tools" => {
             if action == "list" {
@@ -1999,7 +2047,7 @@ async fn execute(mut args: Vec<String>) -> Result<Reply> {
         }
         "capabilities" => {
             return Ok(Reply::success(
-                json!({"contract":control::CONTRACT,"commands":HELP,"skill_version":env!("CARGO_PKG_VERSION"),"activity_registration_support":true,"web_support":true,"web_access_support":true,"knowledge_index_support":true,"mcp_support":true,"tools_support":true,"todo_support":true,"implementation_support":true,"machine_pairing_support":true,"machine_login_support":true,"machine_management_support":true,"account_variables_support":true,"account_portable_support":true,"account_authority_support":true,"shared_accounts_support":true,"cloud_store_support":true,"cloud_mirror_support":true,"cloud_disconnect_support":true,"cloud_primary_support":true,"cloud_migration_support":true,"cloud_installations_support":true,"cloud_handoff_support":true,"cloud_delivery_support":true,"cloud_restore_support":true,"cloud_conflicts_support":true,"cloud_lost_support":true,"cloud_repair_support":true,"teams_read_support":true,"audit_pages_support":true}),
+                json!({"contract":control::CONTRACT,"commands":HELP,"skill_version":env!("CARGO_PKG_VERSION"),"activity_registration_support":true,"web_support":true,"web_access_support":true,"knowledge_index_support":true,"mcp_support":true,"tools_support":true,"todo_support":true,"implementation_support":true,"machine_pairing_support":true,"machine_login_support":true,"machine_management_support":true,"account_variables_support":true,"account_portable_support":true,"account_authority_support":true,"shared_accounts_support":true,"cloud_store_support":true,"cloud_mirror_support":true,"cloud_disconnect_support":true,"cloud_primary_support":true,"cloud_migration_support":true,"cloud_installations_support":true,"cloud_handoff_support":true,"cloud_delivery_support":true,"cloud_restore_support":true,"cloud_conflicts_support":true,"cloud_lost_support":true,"cloud_repair_support":true,"teams_read_support":true,"audit_pages_support":true,"service_support":true}),
             ));
         }
         "skill" => return crate::app::skill::command(action, args.get(2).map(String::as_str)),
@@ -3336,6 +3384,9 @@ mod help_tests {
         let commands: &[&[&str]] = &[
             &["help"],
             &["capabilities"],
+            &["service", "status"],
+            &["service", "install"],
+            &["service", "uninstall"],
             &["mcp"],
             &["mcp", "config"],
             &["tools", "list"],

@@ -8,6 +8,7 @@ import { loadMachines } from './settings-machines.js';
 import { loadAccountConfig, loadAgentEndpoint } from './settings-account.js';
 import { clearRevealedVariable, loadVariables } from './settings-variables.js';
 import { loadUpdates } from './settings-updates.js';
+import { loadService } from './settings-service.js';
 import { loadCloud } from './settings-cloud.js';
 import { loadRegistration, renderActivityNotice } from './activities.js';
 import { loadActivity, loadMessages } from './messages.js';
@@ -30,7 +31,7 @@ function showTab(name, anchor) {
   if (name === 'knowledge') loadKnowledge().catch(fail);
   if (name === 'todo') loadTodo();
   if (name === 'agent-history') loadAgentHistory();
-  if (name === 'settings') { loadMachines().catch(fail); loadVariables(); loadAccountConfig(); loadUpdates(); loadCloud(); loadAgentEndpoint(); }
+  if (name === 'settings') { loadMachines().catch(fail); loadVariables(); loadAccountConfig(); loadUpdates(); loadService(); loadCloud(); loadAgentEndpoint(); }
   const target = anchor && document.getElementById(anchor);
   // A panel inside a tab (a Settings section, an Activities view) opens that tab first.
   const owner = target && document.querySelector(`[aria-controls="${target.closest('[role=tabpanel]')?.id}"]`);

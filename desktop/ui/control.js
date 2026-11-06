@@ -37,7 +37,7 @@ import { browserMicrosoftLogin } from './dialogs.js';
  *   'machine_settings' | 'machine_teams' | 'machine_update' | 'notes_list' | 'notes_remove' |
  *   'notes_save' | 'open_azure_cli_login' | 'open_github_login' | 'open_work_item' |
  *   'portable_status' | 'question_associate' | 'restart' | 'save_settings' | 'self_chat_disable' |
- *   'self_chat_enable' | 'self_chat_status' | 'setup_readiness' | 'snapshot' | 'start_assistant' |
+ *   'self_chat_enable' | 'self_chat_status' | 'service_install' | 'service_status' | 'service_uninstall' | 'setup_readiness' | 'snapshot' | 'start_assistant' |
  *   'stop_assistant' | 'test_self_chat' | 'update_github_repository' | 'variable_consumer_bind' |
  *   'variable_consumer_check' | 'variable_consumer_list' | 'variable_consumer_unbind' |
  *   'variable_create' | 'variable_delete' | 'variable_deliver' | 'variable_delivery_approve' |
