@@ -1,6 +1,6 @@
 // Run with Bun, already used by CI: exercise the actual workflow's routing and merge gate.
 import assert from 'node:assert/strict';
-import { mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -17,20 +17,32 @@ function enabled(condition, event, outputs) {
   );
 }
 
-function filter(event, files, { published = true, base = 'a'.repeat(40), summary = false } = {}) {
+// `manifests`: what `git show` returns for Cargo.toml and Cargo.lock at the base (`old`) and the
+// head (`new`); without it, it returns nothing, as for a file the base does not have.
+function filter(event, files, { published = true, base = 'a'.repeat(40), summary = false, manifests = {} } = {}) {
   const temp = mkdtempSync(join(tmpdir(), 'pta-ci-policy-'));
   try {
+    for (const [side, contents] of Object.entries(manifests)) {
+      mkdirSync(join(temp, side));
+      for (const [name, text] of Object.entries(contents)) writeFileSync(join(temp, side, name), text);
+    }
     // Only external inputs are synthetic; execute the filter from the real YAML unchanged.
     const script = `
       curl() { printf '%s' "$CI_TEST_HTTP"; }
-      git() { if [ "$1" = diff ]; then printf '%s\\n' "$CI_TEST_FILES"; fi; }
+      git() {
+        case "$1" in
+          diff) printf '%s\\n' "$CI_TEST_FILES" ;;
+          show) case "$2" in "$BASE":*) side=old ;; *) side=new ;; esac
+            cat "$CI_TEST_SHOW/$side/\${2#*:}" 2> /dev/null ;;
+        esac
+      }
       ${jobs.changes.steps.find(step => step.id === 'filter').run}
     `;
     const result = spawnSync('bash', ['-e', '-c', script], {
       cwd: new URL('..', import.meta.url), encoding: 'utf8',
       env: { ...process.env, EVENT: event, REF: 'refs/heads/main', BASE: base,
         GITHUB_SHA: 'b'.repeat(40), GITHUB_OUTPUT: join(temp, 'output'),
-        GITHUB_STEP_SUMMARY: join(temp, 'summary'), CI_TEST_FILES: files.join('\n'),
+        GITHUB_STEP_SUMMARY: join(temp, 'summary'), CI_TEST_FILES: files.join('\n'), CI_TEST_SHOW: temp,
         CI_TEST_HTTP: published ? '200' : '404' },
     });
     assert.equal(result.status, 0, result.stderr);
@@ -50,11 +62,16 @@ function filter(event, files, { published = true, base = 'a'.repeat(40), summary
 
 // `platform` is the pull-request verdict for both macOS and Windows; a push to main that is not a release candidate never
 // runs macOS or Windows, because its pull request already did when it mattered.
-const neutral = { rust: 'false', ui: 'false', cloud: 'false', platform: 'false' };
+const neutral = { rust: 'false', gui: 'false', ui: 'false', cloud: 'false', platform: 'false' };
 for (const [files, expected] of [
   [['src/pipeline.rs'], { rust: 'true', platform: 'false' }],
   [['src/app/web.rs', 'tests/integration.rs'], { rust: 'true', platform: 'false' }],
-  [['desktop/ui/app.js'], { rust: 'true', ui: 'true', platform: 'false' }],
+  // A GUI-only change skips clippy and the Rust suite but runs the Rust tests that read GUI files.
+  [['desktop/ui/app.js'], { gui: 'true', ui: 'true' }],
+  [['desktop/ui/app.js', 'desktop/ui/style.css', 'docs/ui-design-conventions.md'], { gui: 'true', ui: 'true' }],
+  [['desktop/ui/app.js', 'scripts/ui-preview/server.mjs'], { gui: 'true', ui: 'true' }],
+  // With any other Rust change the full suite runs, which includes those tests.
+  [['desktop/ui/app.js', 'src/app/web.rs'], { rust: 'true', ui: 'true' }],
   [['.github/workflows/ci.yml'], { rust: 'true', ui: 'true', cloud: 'true', platform: 'true' }],
   [['.github/workflows/release.yml'], { rust: 'true', ui: 'true', cloud: 'true', platform: 'true' }],
   [['scripts/test-ci-workflow.mjs'], { ui: 'true', platform: 'false' }],
@@ -72,13 +89,42 @@ for (const [files, expected] of [
   [['src/app/headless.rs'], { rust: 'true', platform: 'true' }],
   [['src/app/page.rs'], { rust: 'true', platform: 'true' }],
   // The GUI's files and icons are the same on every platform.
-  [['desktop/ui/favicon.png'], { rust: 'true', ui: 'true', platform: 'false' }],
+  [['desktop/ui/favicon.png'], { gui: 'true', ui: 'true' }],
   [['src/pipeline.rs', 'src/consumers.rs'], { rust: 'true', platform: 'true' }],
 ]) {
   assert.deepEqual(filter('pull_request', files), { ...neutral, ...expected }, `pull_request: ${files}`);
   assert.deepEqual(filter('push', files), { ...neutral, ...expected, platform: 'false' }, `push: ${files}`);
 }
 assert.match(filter('pull_request', ['src/pipeline.rs'], { summary: true }), /macOS: false\. Windows: false\. .*none is platform-sensitive/);
+assert.match(filter('pull_request', ['desktop/ui/app.js'], { summary: true }), /Rust checks: false\. GUI asset tests only: true\./);
+
+// The version bump a GUI change is delivered with is neither a Rust nor a platform change; any
+// other change to the manifest or the lock is both.
+const toml = readFileSync(new URL('../Cargo.toml', import.meta.url), 'utf8');
+const lock = readFileSync(new URL('../Cargo.lock', import.meta.url), 'utf8');
+const version = Bun.TOML.parse(toml).package.version;
+const ours = `name = "personal-teams-assistant"\nversion = "${version}"`;
+assert(lock.includes(ours), 'Cargo.lock names this package and its version');
+const bumped = {
+  'Cargo.toml': toml.replace(`\nversion = "${version}"`, '\nversion = "999.0.0"'),
+  'Cargo.lock': lock.replace(ours, 'name = "personal-teams-assistant"\nversion = "999.0.0"'),
+};
+assert.notEqual(bumped['Cargo.toml'], toml);
+const old = { 'Cargo.toml': toml, 'Cargo.lock': lock };
+const delivered = ['desktop/ui/app.js', 'Cargo.toml', 'Cargo.lock'];
+for (const event of ['pull_request', 'push']) {
+  assert.deepEqual(filter(event, delivered, { manifests: { old, new: bumped } }), { ...neutral, gui: 'true', ui: 'true' }, `${event}: GUI change and version bump`);
+  assert.deepEqual(filter(event, ['Cargo.toml', 'Cargo.lock'], { manifests: { old, new: bumped } }), { ...neutral, gui: 'true' }, `${event}: version bump`);
+  const expected = { ...neutral, rust: 'true', ui: 'true', platform: event === 'push' ? 'false' : 'true' };
+  for (const changed of [
+    { ...bumped, 'Cargo.toml': bumped['Cargo.toml'].replace('[dependencies]', '[dependencies]\nsynthetic-crate = "1"') },
+    { ...bumped, 'Cargo.lock': bumped['Cargo.lock'].replace(/(name = "serde"\nversion = ")[^"]+/, '$1999.0.0') },
+    { 'Cargo.toml': '' , 'Cargo.lock': '' },
+  ]) {
+    assert.notDeepEqual(changed, bumped);
+    assert.deepEqual(filter(event, delivered, { manifests: { old, new: changed } }), expected, `${event}: manifest change`);
+  }
+}
 assert.match(filter('pull_request', ['src/pipeline.rs', 'Cargo.lock'], { summary: true }),
   /macOS: true\. Windows: true\. Reason: changed paths; platform-sensitive: Cargo\.lock\.\n$/);
 
@@ -100,10 +146,10 @@ for (const path of native) {
 }
 assert.equal(source.match(/^ *platform=true$/gm).length, 1, 'one list of platform-sensitive paths');
 
-const all = { rust: 'true', ui: 'true', cloud: 'true', platform: 'true' };
+const all = { rust: 'true', gui: 'false', ui: 'true', cloud: 'true', platform: 'true' };
 // A release candidate on main runs Linux and macOS, required, before release.yml publishes it, but
 // not the informative Windows job, which would delay every publication.
-const candidate = { rust: 'true', ui: 'true', cloud: 'true', macos: 'true', windows: 'false' };
+const candidate = { rust: 'true', gui: 'false', ui: 'true', cloud: 'true', macos: 'true', windows: 'false' };
 assert.deepEqual(filter('push', [], { published: false }), candidate);
 assert.deepEqual(filter('push', ['docs/delivery.md'], { published: false }), candidate);
 assert.deepEqual(filter('push', ['Cargo.toml', 'Cargo.lock', 'src/security/mod.rs'], { published: false }), candidate);
@@ -151,10 +197,10 @@ assert.equal(jobs.changes.if, undefined, 'Weekly runs must reach the full matrix
 
 assert.equal(jobs.result.if, 'always()');
 assert.equal(jobs.result.name, 'CI result');
-for (const failed of [null, 'linux', 'security', 'changes', 'ui', 'cloud', 'macos', 'windows']) {
+for (const failed of [null, 'linux', 'gui', 'security', 'changes', 'ui', 'cloud', 'macos', 'windows']) {
   for (const outcome of ['failure', 'cancelled']) {
     const needs = Object.fromEntries(jobs.result.needs.map(id => [id, {
-      result: id === failed ? outcome : ['ui', 'cloud', 'macos', 'windows'].includes(id) ? 'skipped' : 'success',
+      result: id === failed ? outcome : ['gui', 'ui', 'cloud', 'macos', 'windows'].includes(id) ? 'skipped' : 'success',
     }]));
     const result = spawnSync('bash', ['-e', '-c', jobs.result.steps[0].run], {
       encoding: 'utf8', env: { ...process.env, NEEDS: JSON.stringify(needs), GITHUB_STEP_SUMMARY: '/dev/null' },
@@ -162,6 +208,25 @@ for (const failed of [null, 'linux', 'security', 'changes', 'ui', 'cloud', 'maco
     assert.equal(result.status, failed && failed !== 'windows' ? 1 : 0, `${failed}: ${result.stderr}`);
   }
 }
+// The narrowed job runs exactly the Rust tests named gui_assets, only when no full Rust run does,
+// and they are the only Rust code that reads desktop/ui.
+for (const event of ['pull_request', 'push']) {
+  assert.equal(enabled(jobs.gui.if, event, { rust: 'false', gui: 'true' }), true);
+  assert.equal(enabled(jobs.gui.if, event, { rust: 'true', gui: 'true' }), false);
+  assert.equal(enabled(jobs.gui.if, event, { rust: 'false', gui: 'false' }), false);
+}
+assert.deepEqual(jobs.gui.steps.filter(step => step.run?.startsWith('cargo')).map(step => step.run),
+  ['cargo test --locked --lib gui_assets']);
+assert(!JSON.stringify(jobs.gui).includes('clippy'));
+const readsGui = /include_(?:str|bytes)!\([^)]*desktop\/ui|"[^"\n]*desktop\/ui/;
+const guiReaders = [...rustFiles('src'), ...rustFiles('tests'), 'build.rs']
+  .filter(path => readsGui.test(readFileSync(new URL(`../${path}`, import.meta.url), 'utf8')));
+assert.deepEqual(guiReaders.sort(), ['src/app/gui_assets.rs', 'src/app/gui_assets/tests.rs'],
+  'only app::gui_assets reads desktop/ui; its tests are the ones the gui job runs');
+for (const listener of ['src/app/page/tests.rs', 'src/app/web/tests.rs']) {
+  assert.match(readFileSync(new URL(`../${listener}`, import.meta.url), 'utf8'), /async fn gui_assets_are_served_by_/, listener);
+}
+
 // The release waits for this workflow's run on the same commit and requires its Linux job.
 const release = readFileSync(new URL('../.github/workflows/release.yml', import.meta.url), 'utf8');
 assert(release.includes('actions/workflows/ci.yml/runs?head_sha=$GITHUB_SHA&event=push&branch=main'));
@@ -244,4 +309,4 @@ assert.deepEqual(binstall.overrides['x86_64-pc-windows-msvc'], { 'pkg-fmt': 'zip
 assert.deepEqual(manifest.features, { default: [], gui: [] }, 'gui stays as an empty, deprecated feature');
 assert(!manifest.package.include.some(path => path.includes('tauri') || path.includes('Info.plist') || path.includes('capabilities')));
 
-console.log('CI policy passed: Linux PR gate, platform paths, weekly matrix, macOS without Windows for a release candidate, main tests/package, Chromium cache, the Worker job, required-job failures and one release archive per target.');
+console.log('CI policy passed: Linux PR gate, GUI-only changes and version bumps without clippy or the Rust suite, platform paths, weekly matrix, macOS without Windows for a release candidate, main tests/package, Chromium cache, the Worker job, required-job failures and one release archive per target.');

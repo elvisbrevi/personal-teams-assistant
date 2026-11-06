@@ -3222,3 +3222,54 @@ async fn variable_catalogs_are_served_per_account_to_that_accounts_machines_only
         );
     }
 }
+
+/// Every GUI file in the portal, from the binary and from a development directory: the same
+/// paths, content types and security headers, `no-store` included; only the bytes come from disk.
+#[tokio::test]
+async fn gui_assets_are_served_by_the_portal_from_the_binary_or_a_development_directory() {
+    use crate::app::gui_assets::{
+        ASSETS,
+        tests::{DevelopmentDir, assert_secure_headers, edited_copy, expected},
+    };
+    let (_dir, portal, entries, _server) = configured_fixture().await;
+    let (auth, _csrf) = session_cookie(&portal, &entries[0]).await;
+    let copy = edited_copy();
+    // The paths that skip Access are GUI files.
+    for path in PUBLIC_ASSETS {
+        assert!(
+            ASSETS.iter().any(|a| format!("/{}", a.file) == path),
+            "{path}"
+        );
+    }
+    for source in [None, Some(copy.path().canonicalize().unwrap())] {
+        let _source = DevelopmentDir::set(source.as_deref());
+        for asset in ASSETS {
+            let path = format!("/{}", asset.file);
+            let response = send(&portal, "GET", &path, Some(&auth), None, None, Value::Null).await;
+            let what = format!("{path} from {source:?}");
+            assert_eq!(response.status(), StatusCode::OK, "{what}");
+            assert_eq!(
+                response.headers()[header::CONTENT_TYPE],
+                asset.content_type,
+                "{what}"
+            );
+            assert_secure_headers(&response, &what);
+            let served = to_bytes(response.into_body(), 4_000_000).await.unwrap();
+            assert_eq!(
+                served.as_ref(),
+                expected(source.as_deref(), asset).as_slice(),
+                "{what}"
+            );
+            if asset.session {
+                let refused = send(&portal, "GET", &path, None, None, None, Value::Null).await;
+                assert_eq!(refused.status(), StatusCode::UNAUTHORIZED, "{what}");
+            }
+        }
+        let index = send(&portal, "GET", "/", Some(&auth), None, None, Value::Null).await;
+        assert_eq!(index.status(), StatusCode::OK);
+        assert_secure_headers(&index, "/");
+        let served = to_bytes(index.into_body(), 4_000_000).await.unwrap();
+        assert!(String::from_utf8_lossy(&served).contains("src=\"transport.js\""));
+        assert!(!String::from_utf8_lossy(&served).contains("pta-transport"));
+    }
+}

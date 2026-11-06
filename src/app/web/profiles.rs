@@ -64,36 +64,39 @@ pub(super) fn create_profile(root: &Path, account: &Account) -> Result<()> {
     LocalSettings::at(&dir).save_config(&config)
 }
 
+/// What a portal account's host inherits from the operator's environment: networking and
+/// native loader setup, never the operator's app secrets or provider login variables. Each child
+/// owns its credential store and provider home.
+pub(in crate::app) const WORKER_ENV: &[&str] = &[
+    "PATH",
+    "SystemRoot",
+    "WINDIR",
+    "COMSPEC",
+    "PATHEXT",
+    "LANG",
+    "LC_ALL",
+    "TZ",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "NO_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "all_proxy",
+    "no_proxy",
+    "SSL_CERT_FILE",
+    "SSL_CERT_DIR",
+    "REQUESTS_CA_BUNDLE",
+    "CURL_CA_BUNDLE",
+    "NODE_EXTRA_CA_CERTS",
+    "LD_LIBRARY_PATH",
+    "DYLD_LIBRARY_PATH",
+];
+
 pub(super) fn worker_command(binary: &Path, dir: &Path) -> tokio::process::Command {
     let mut command = tokio::process::Command::new(binary);
     command.arg("--headless").env_clear();
-    // Keep networking and native loader setup, but never the operator's app secrets or
-    // provider login variables. Each child owns its credential store and provider home.
-    for name in [
-        "PATH",
-        "SystemRoot",
-        "WINDIR",
-        "COMSPEC",
-        "PATHEXT",
-        "LANG",
-        "LC_ALL",
-        "TZ",
-        "HTTP_PROXY",
-        "HTTPS_PROXY",
-        "ALL_PROXY",
-        "NO_PROXY",
-        "http_proxy",
-        "https_proxy",
-        "all_proxy",
-        "no_proxy",
-        "SSL_CERT_FILE",
-        "SSL_CERT_DIR",
-        "REQUESTS_CA_BUNDLE",
-        "CURL_CA_BUNDLE",
-        "NODE_EXTRA_CA_CERTS",
-        "LD_LIBRARY_PATH",
-        "DYLD_LIBRARY_PATH",
-    ] {
+    for name in WORKER_ENV {
         if let Some(value) = std::env::var_os(name) {
             command.env(name, value);
         }

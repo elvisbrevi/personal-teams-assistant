@@ -690,3 +690,72 @@ async fn the_page_binds_loopback_only_and_never_for_a_portal_account() {
     assert!(launch(shared.clone()).is_none());
     assert!(shared.state.page.address.get().is_none());
 }
+
+/// Every GUI file, from the binary and from a development directory: the same paths, content
+/// types and security headers, `no-store` included; only the bytes come from disk.
+#[tokio::test]
+async fn gui_assets_are_served_by_the_local_page_from_the_binary_or_a_development_directory() {
+    use crate::app::gui_assets::{
+        ASSETS,
+        tests::{DevelopmentDir, assert_secure_headers, edited_copy, expected},
+    };
+    let root = tempfile::tempdir().unwrap();
+    let host = host(root.path(), 21_009, true);
+    let signed = sign_in(&host).await;
+    let copy = edited_copy();
+    for source in [None, Some(copy.path().canonicalize().unwrap())] {
+        let _source = DevelopmentDir::set(source.as_deref());
+        for asset in ASSETS {
+            let path = format!("/{}", asset.file);
+            let mut request = get(&host, &path);
+            if asset.session {
+                request = authed(request, &signed);
+            }
+            let response = send(&host, request.body(Body::empty()).unwrap()).await;
+            let what = format!("{path} from {source:?}");
+            assert_eq!(response.status(), StatusCode::OK, "{what}");
+            assert_eq!(
+                response.headers()[header::CONTENT_TYPE],
+                asset.content_type,
+                "{what}"
+            );
+            assert_secure_headers(&response, &what);
+            let served = axum::body::to_bytes(response.into_body(), 4_000_000)
+                .await
+                .unwrap();
+            let file = expected(source.as_deref(), asset);
+            if asset.file == "index.html" {
+                // The document carries this page's transport marker and keeps its scripts.
+                let served = String::from_utf8(served.to_vec()).unwrap();
+                let file = String::from_utf8(file).unwrap();
+                assert!(served.contains("<meta name=\"pta-transport\" content=\"local\">"));
+                assert!(served.contains("src=\"transport.js\""), "{what}");
+                assert_eq!(
+                    served.replacen("\n  <meta name=\"pta-transport\" content=\"local\">", "", 1),
+                    file
+                );
+            } else {
+                assert_eq!(served.as_ref(), file.as_slice(), "{what}");
+            }
+        }
+        // The document's other path and the signed-out page carry the same headers.
+        let index = send(
+            &host,
+            authed(get(&host, "/"), &signed)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(index.status(), StatusCode::OK);
+        assert_secure_headers(&index, "/");
+        let signed_out = send(&host, get(&host, "/").body(Body::empty()).unwrap()).await;
+        assert_eq!(signed_out.status(), StatusCode::UNAUTHORIZED);
+        assert_secure_headers(&signed_out, "signed out");
+    }
+    // A file missing from the development directory is not found, never mixed in from the binary.
+    fs::remove_file(copy.path().join("style.css")).unwrap();
+    let _source = DevelopmentDir::set(Some(&copy.path().canonicalize().unwrap()));
+    let missing = send(&host, get(&host, "/style.css").body(Body::empty()).unwrap()).await;
+    assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+    assert_secure_headers(&missing, "missing");
+}

@@ -51,7 +51,7 @@ pub(super) const CODEX_DISABLED_FEATURES: [&str; 26] = [
 
 /// Variables a CLI needs to find its own login, configuration, locale and proxy. Host
 /// credentials (`NAME`, `NAME_FILE`) are never passed.
-const PASSED_ENV: [&str; 38] = [
+pub(crate) const PASSED_ENV: [&str; 38] = [
     "HOME",
     "USER",
     "LOGNAME",

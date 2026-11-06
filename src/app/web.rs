@@ -23,7 +23,7 @@ use tokio::sync::Semaphore;
 mod access;
 mod agents;
 mod enrollment;
-mod profiles;
+pub(super) mod profiles;
 mod store;
 use profiles::{Worker, create_profile, profile_dir};
 use store::{Account, accounts};
@@ -496,47 +496,20 @@ const PUBLIC_ASSETS: [&str; 5] = [
 ];
 
 fn router(portal: Arc<Portal>) -> Router {
-    Router::new()
+    // The GUI's files without a session (`gui_assets::ASSETS`): the stylesheet, the catalog
+    // (it also translates the denied-login page and holds no account data) and, public
+    // (`PUBLIC_ASSETS`), the tab icon, the iOS home-screen icon and the PWA manifest.
+    let router = gui_assets::public().fold(Router::new(), |router, asset| {
+        router.route(
+            &format!("/{}", asset.file),
+            get(move || async move { gui_assets::serve(asset.file) }),
+        )
+    });
+    router
         .route("/", get(index))
         .route("/index.html", get(index))
         .route("/login", get(login))
-        .route(
-            "/style.css",
-            get(|| async {
-                asset(
-                    "text/css; charset=utf-8",
-                    include_str!("../../desktop/ui/style.css"),
-                )
-            }),
-        )
-        // The tab icon, the iOS home-screen icon and the PWA manifest, public (`PUBLIC_ASSETS`).
-        .route(
-            "/favicon.png",
-            get(|| async { png(include_bytes!("../../desktop/ui/favicon.png")) }),
-        )
-        .route(
-            "/manifest.webmanifest",
-            get(|| async {
-                asset(
-                    "application/manifest+json",
-                    include_str!("../../desktop/ui/manifest.webmanifest"),
-                )
-            }),
-        )
-        .route(
-            "/apple-touch-icon.png",
-            get(|| async { png(include_bytes!("../../desktop/ui/apple-touch-icon.png")) }),
-        )
-        .route(
-            "/icon-192.png",
-            get(|| async { png(include_bytes!("../../desktop/ui/icon-192.png")) }),
-        )
-        .route(
-            "/icon-512.png",
-            get(|| async { png(include_bytes!("../../desktop/ui/icon-512.png")) }),
-        )
         .route("/app.js", get(app_js))
-        .route("/i18n.js", get(i18n_js))
         .route("/transport.js", get(transport_js))
         .route("/api/session", get(session))
         .route("/api/logout", post(logout))
@@ -564,9 +537,6 @@ fn router(portal: Arc<Portal>) -> Router {
 }
 fn asset(content_type: &'static str, content: &'static str) -> Response {
     ([(header::CONTENT_TYPE, content_type)], content).into_response()
-}
-fn png(content: &'static [u8]) -> Response {
-    ([(header::CONTENT_TYPE, "image/png")], content).into_response()
 }
 async fn secure_headers(
     State(portal): State<Arc<Portal>>,
@@ -641,10 +611,7 @@ async fn index(
     {
         return Redirect::to(&format!("/login{}", enroll_query(&uri))).into_response();
     }
-    asset(
-        "text/html; charset=utf-8",
-        include_str!("../../desktop/ui/index.html"),
-    )
+    gui_assets::serve("index.html")
 }
 async fn app_js(
     State(portal): State<Arc<Portal>>,
@@ -654,18 +621,7 @@ async fn app_js(
     if let Err(status) = portal.authenticate(&headers, &identity, false).await {
         return status.into_response();
     }
-    asset(
-        "text/javascript; charset=utf-8",
-        include_str!("../../desktop/ui/app.js"),
-    )
-}
-async fn i18n_js() -> Response {
-    // Also translates the denied-login page. The outer Access verifier still runs;
-    // this static catalog contains no account data.
-    asset(
-        "text/javascript; charset=utf-8",
-        include_str!("../../desktop/ui/i18n.js"),
-    )
+    gui_assets::serve("app.js")
 }
 async fn transport_js(
     State(portal): State<Arc<Portal>>,
@@ -675,10 +631,7 @@ async fn transport_js(
     if let Err(status) = portal.authenticate(&headers, &identity, false).await {
         return status.into_response();
     }
-    asset(
-        "text/javascript; charset=utf-8",
-        include_str!("../../desktop/ui/transport.js"),
-    )
+    gui_assets::serve("transport.js")
 }
 // Access handles the interactive login. This endpoint only creates a CSRF-bound
 // local session for a verified, explicitly associated GitHub identity.
@@ -718,10 +671,7 @@ async fn login(
         Err(status) => return status.into_response(),
     };
     // End the cross-site OAuth navigation so Strict cookies accompany asset/API requests.
-    let mut response = asset(
-        "text/html; charset=utf-8",
-        include_str!("../../desktop/ui/index.html"),
-    );
+    let mut response = gui_assets::serve("index.html");
     response.headers_mut().insert(
         header::SET_COOKIE,
         portal
@@ -1096,6 +1046,7 @@ pub(super) fn run() -> Result<()> {
     security::protect_file(&root.join("portal.lock"))?;
     lock.try_lock_exclusive()?;
     let portal = Arc::new(Portal::new(root, std::env::current_exe()?)?);
+    gui_assets::resolve();
     ensure!(
         portal.access.is_some() && portal.settings.owner_github_id.is_some(),
         "Configure your Cloudflare Access and owner_github_id locally before starting your private web portal."
