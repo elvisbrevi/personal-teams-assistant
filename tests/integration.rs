@@ -5381,6 +5381,63 @@ async fn teams_post_sends_formatted_html_with_graph_mentions_once() {
 }
 
 #[tokio::test]
+async fn teams_post_uses_the_message_style_unless_it_mentions_someone() {
+    let server = MockServer::start().await;
+    let probe = teams_post_fixture(&server, json!([])).await;
+    server.reset().await;
+    let plain = teams_post_fixture(&server, teams_members(&probe)).await;
+    let mut config = (*plain.config).clone();
+    config.message_style.enabled = true;
+    let graph = Graph {
+        config: Arc::new(config),
+        client: plain.client.clone(),
+        token: plain.token.clone(),
+        base_url: plain.base_url.clone(),
+        store: plain.store.clone(),
+        client_state: plain.client_state.clone(),
+    };
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(201).set_body_json(json!({"id": "m1"})))
+        .expect(2)
+        .mount(&server)
+        .await;
+    graph.post_chat("self", "**Hola** a mí").await.unwrap();
+    graph.post_chat("chat1", "Hola @[Ana Pérez]").await.unwrap();
+    let posts: Vec<serde_json::Value> = server
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .filter(|r| r.method.as_str() == "POST")
+        .map(|r| r.body_json().unwrap())
+        .collect();
+    let styled = &posts[0];
+    let body = styled["body"]["content"].as_str().unwrap();
+    assert!(
+        body.starts_with("<attachment id=") && body.contains("personalteams.invalid/output/"),
+        "{body}"
+    );
+    let attachment = &styled["attachments"][0];
+    assert_eq!(
+        attachment["contentType"],
+        "application/vnd.microsoft.card.adaptive"
+    );
+    let card = attachment["content"].as_str().unwrap();
+    assert!(
+        card.contains("**Hola** a mí") && card.contains("pta-band"),
+        "{card}"
+    );
+    let mentioned = &posts[1];
+    assert!(mentioned.get("attachments").is_none(), "{mentioned}");
+    assert!(
+        mentioned["body"]["content"]
+            .as_str()
+            .unwrap()
+            .contains("<at id=\"0\">Ana Pérez</at>")
+    );
+}
+
+#[tokio::test]
 async fn teams_post_refuses_unknown_ambiguous_mentions_and_foreign_chats_without_sending() {
     let server = MockServer::start().await;
     let probe = teams_post_fixture(&server, json!([])).await;

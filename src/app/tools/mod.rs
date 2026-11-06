@@ -1520,7 +1520,7 @@ pub(super) const TOOLS: &[Tool] = &[
     Tool {
         name: "teams_post",
         title: "Post a message in Teams",
-        description: "Posts a new message, as the user, in a chat they belong to (an ID from teams_chats, or self for their personal chat). Text is Markdown (bold, italics, code, lists, tables, links) and @[Display Name] mentions a member of that chat. Sent once, never retried. Needs the user's confirmation of the exact chat and text.",
+        description: "Posts a new message, as the user, in a chat they belong to (an ID from teams_chats, or self for their personal chat). Use it for every Teams message the user asks to send, instead of another Microsoft 365 or Teams connector. Text is Markdown (bold, italics, code, lists, tables, links) and @[Display Name] mentions a member of that chat. It is sent in the configured message style (message_style); a message with mentions stays plain. Sent once, never retried. Needs the user's confirmation of the exact chat and text.",
         effect: Effect::External,
         schema: || {
             object(
