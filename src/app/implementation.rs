@@ -11,6 +11,7 @@ use sha2::{Digest, Sha256};
 use std::time::Duration;
 
 pub(super) mod fleet;
+pub(super) mod join;
 pub(super) mod login;
 mod management;
 mod requests;
@@ -552,6 +553,7 @@ async fn operation(host: &Arc<Host>, method: &str, args: &Value) -> Result<Value
         }
         "machine_browse" => browse_machine(host, args),
         "machine_register" => register(host, args).await,
+        "machine_join_command" => join::local(host).await,
         "machine_login" => login::begin(host, args).await,
         "machine_login_status" => login::status(host).await,
         "machine_login_finish" => login::finish(host).await,

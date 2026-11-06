@@ -1249,6 +1249,27 @@ for (const [label, ctx] of [['machine-desktop', {}], ['machine-phone', { viewpor
   const { context, page, errors } = await open({ axe: true, context: ctx });
   await page.evaluate(() => showTab('settings', 'panel-machines'));
   check(`${label}: a link to the machines opens their Settings category`, await page.getAttribute('#settings-tab-machines', 'aria-selected') === 'true');
+  // Connect this computer: only the portal shows its install command, for the visitor's system first.
+  await page.waitForTimeout(150);
+  check(`${label}: the local page offers no install command`, await page.isHidden('#machine-join'));
+  await page.evaluate(async () => { window.ptaTransport.browser = true; await loadJoinCommand(); });
+  await page.click('#machine-join summary');
+  const joined = await page.textContent('#machine-join-command');
+  check(`${label}: the portal shows a one-line install command with its own origin`, await page.isVisible('#machine-join-command') && joined.includes('--origin https://assistant.example.com') && joined.startsWith('curl --proto'));
+  await page.getByRole('button', { name: 'Windows', exact: true }).click();
+  check(`${label}: another system is selectable and pressed`, (await page.textContent('#machine-join-command')).startsWith('Invoke-RestMethod')
+    && await page.getAttribute('#machine-join-system [data-system="windows"]', 'aria-pressed') === 'true'
+    && await page.getAttribute('#machine-join-system [data-system="linux"]', 'aria-pressed') === 'false');
+  await page.evaluate(() => loadJoinCommand());
+  check(`${label}: a refresh keeps the chosen system`, (await page.textContent('#machine-join-command')).startsWith('Invoke-RestMethod'));
+  await page.evaluate(() => Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText: async text => { window.__ptaCopiedJoinCommand = text; } } }));
+  await page.click('#machine-join-copy');
+  await page.locator('#notice', { hasText: 'Comando copiado' }).waitFor();
+  check(`${label}: the command is copied exactly as shown`, await page.evaluate(() => window.__ptaCopiedJoinCommand === document.querySelector('#machine-join-command').textContent));
+  check(`${label}: the install command stays within the phone boundary`, await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+  await page.evaluate(axeSource);
+  check(`${label}: Connect this computer passes axe`, (await scan(page)).length === 0, JSON.stringify(await scan(page)));
+  await page.evaluate(async () => { window.ptaTransport.browser = false; await loadJoinCommand(); });
   await page.getByRole('button', { name: 'Administrar máquina: Preview Mac', exact: true }).click();
   const editor = page.getByRole('dialog', { name: 'Administrar máquina', exact: true });
   await editor.waitFor();

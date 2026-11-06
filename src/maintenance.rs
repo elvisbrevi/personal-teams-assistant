@@ -275,6 +275,76 @@ fn prebuilt_records(root: &Path) -> std::result::Result<Records, String> {
     Ok(Records { installs })
 }
 
+// ---------------------------------------------------------------------------------------------
+// Archive installations.
+
+/// The record `scripts/install/install.sh` and `install.ps1` write in the installation root, next
+/// to `bin/`: the third kind of installation, from this repository's release archive.
+pub const ARCHIVE_RECORD: &str = "install.json";
+/// What the status shows for an archive installation until its updates exist (#216).
+pub const ARCHIVE_DIAGNOSTIC: &str = "This installation came from the release archive (the install command from the portal, install.sh or install.ps1). Updating it from here is not available yet; run the install command again to upgrade it.";
+
+/// An installation the install scripts made: the package, version and target of the archive.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Archive {
+    pub root: PathBuf,
+    pub version: Version,
+    pub target: String,
+}
+
+#[derive(Deserialize)]
+struct ArchiveRecord {
+    schema: u32,
+    kind: String,
+    package: String,
+    version: String,
+    target: String,
+    bins: Vec<String>,
+}
+
+fn valid_target(target: &str) -> bool {
+    !target.is_empty()
+        && target.len() <= 64
+        && target
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"_.-".contains(&b))
+}
+
+/// The archive installation `exe` belongs to: `None` when its root has no archive record (or has
+/// Cargo's own record, which wins), otherwise the record or why it is not valid.
+pub fn archive(exe: &Path) -> Option<std::result::Result<Archive, String>> {
+    let root = exe
+        .parent()
+        .filter(|p| p.file_name().is_some_and(|n| n == "bin"))?
+        .parent()?;
+    if root.join(".crates2.json").exists() {
+        return None;
+    }
+    let text = read_bounded(&root.join(ARCHIVE_RECORD))?;
+    let invalid = || {
+        "The archive installation record is not valid. Run the install command again to repair it."
+            .to_owned()
+    };
+    Some((|| {
+        let text = text.map_err(|_| invalid())?;
+        let record: ArchiveRecord = serde_json::from_str(&text).map_err(|_| invalid())?;
+        let bins: BTreeSet<&str> = record.bins.iter().map(|b| bin_name(b)).collect();
+        if record.schema != 1
+            || record.kind != "archive"
+            || record.package != CRATE
+            || bins != BTreeSet::from([CRATE, CLI])
+            || !valid_target(&record.target)
+        {
+            return Err(invalid());
+        }
+        Ok(Archive {
+            root: root.to_path_buf(),
+            version: Version::parse(&record.version).ok_or_else(invalid)?,
+            target: record.target,
+        })
+    })())
+}
+
 /// The one entry for this crate: its version, source and build choices.
 fn own_record(records: Records) -> std::result::Result<(Version, Record), String> {
     let mut found = records.installs.into_iter().filter_map(|(key, record)| {
@@ -312,6 +382,11 @@ pub fn inspect(exe: &Path) -> std::result::Result<Installation, String> {
         .parent()
         .ok_or("This executable is not in a Cargo installation root.")?
         .to_path_buf();
+    if let Some(archive) = archive(exe) {
+        // Staging and applying an archive release come with #216; until then it is reported, not
+        // updated, and never mistaken for a Cargo installation.
+        return Err(archive.map_or_else(|reason| reason, |_| ARCHIVE_DIAGNOSTIC.to_owned()));
+    }
     let (records, prebuilt) = read_records(&root)?;
     let (version, record) = own_record(records)?;
     let bins: BTreeSet<&str> = record.bins.iter().map(|b| bin_name(b)).collect();
@@ -342,10 +417,7 @@ pub fn inspect(exe: &Path) -> std::result::Result<Installation, String> {
         .target
         .filter(|t| Some(t.as_str()) != host)
         .filter(|t| !t.is_empty());
-    if target.as_deref().is_some_and(|t| {
-        !t.bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b"_.-".contains(&b))
-    }) {
+    if target.as_deref().is_some_and(|t| !valid_target(t)) {
         return Err("The recorded build target is not valid.".into());
     }
     let mut features = record.features;

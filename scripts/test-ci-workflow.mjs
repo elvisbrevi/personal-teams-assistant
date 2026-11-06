@@ -307,8 +307,29 @@ assert.equal(binstall['pkg-url'], '{ repo }/releases/download/v{ version }/{ nam
 assert.equal(binstall['bin-dir'], '{ name }-{ target }-v{ version }/{ bin }{ binary-ext }');
 assert.deepEqual(Object.keys(binstall.overrides), ['x86_64-pc-windows-msvc']);
 assert.deepEqual(binstall.overrides['x86_64-pc-windows-msvc'], { 'pkg-fmt': 'zip' });
+// The one-command installers: attached to every release with digests and provenance, run by each
+// build job against its own archive, and never in test mode outside those steps.
+assert(binaries.on.pull_request.paths.includes('scripts/install/**'), 'installer changes build and test the archives');
+const steps = binaries.jobs.build.steps;
+const unixInstaller = steps.find(step => step.name === 'Installer (macOS, Linux)');
+const windowsInstaller = steps.find(step => step.name === 'Installer (Windows PowerShell)');
+assert(unixInstaller.run.includes('sh scripts/install/test-install.sh dist'), 'macOS and Linux run install.sh on the archive just built');
+assert(windowsInstaller.run.includes('powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/install/test-install.ps1'), 'Windows runs install.ps1 under Windows PowerShell');
+assert(steps.indexOf(unixInstaller) > steps.indexOf(archive) && steps.indexOf(windowsInstaller) > steps.indexOf(archive));
+const publish = binaries.jobs.publish;
+const attach = publish.steps.find(step => step.name === 'Installer scripts and their digests');
+assert(attach.run.includes('for file in install.sh install.ps1') && attach.run.includes('sha256sum'), 'both scripts are attached with a digest');
+const attest = publish.steps.find(step => step.name === 'Build provenance attestation');
+for (const file of ['dist/install.sh', 'dist/install.ps1']) assert(attest.with['subject-path'].includes(file), `${file} has provenance`);
+assert(!JSON.stringify(publish).includes('PTA_INSTALL_TEST') && !JSON.stringify(binaries.jobs.lint).includes('PTA_INSTALL_TEST'), 'no release step enables the test source');
+assert(binaries.jobs.lint.steps.some(step => step.run?.includes('shellcheck')) && binaries.jobs.lint.steps.some(step => step.run?.includes('Invoke-ScriptAnalyzer')));
+for (const name of ['install.sh', 'install.ps1']) {
+  const script = readFileSync(new URL(`../scripts/install/${name}`, import.meta.url), 'utf8');
+  assert(script.includes(`'${manifest.package.repository.replace('https://github.com/', '')}'`) || script.includes(`"${manifest.package.repository.replace('https://github.com/', '')}"`), `${name} downloads from the package's own repository`);
+}
+
 // The version lives in Cargo.toml and Cargo.lock only.
 assert.deepEqual(manifest.features, { default: [], gui: [] }, 'gui stays as an empty, deprecated feature');
 assert(!manifest.package.include.some(path => path.includes('tauri') || path.includes('Info.plist') || path.includes('capabilities')));
 
-console.log('CI policy passed: Linux PR gate, GUI-only changes and version bumps without clippy or the Rust suite, platform paths, weekly matrix, macOS without Windows for a release candidate, main tests/package, Chromium cache, the Worker job, required-job failures and one release archive per target.');
+console.log('CI policy passed: Linux PR gate, GUI-only changes and version bumps without clippy or the Rust suite, platform paths, weekly matrix, macOS without Windows for a release candidate, main tests/package, Chromium cache, the Worker job, required-job failures, one release archive per target and the installers.');

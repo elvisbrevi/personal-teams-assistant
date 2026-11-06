@@ -201,6 +201,45 @@ async fn versions_are_reported_separately_and_only_a_newer_stable_release_is_off
 }
 
 #[tokio::test]
+async fn an_archive_installation_is_reported_with_its_kind_and_never_staged() {
+    let _serial = SERIAL.lock().await;
+    let server = registry(&[line("0.9.13", false), line("0.9.14", false)]).await;
+    let f = fixture(&server);
+    // What the install scripts leave: the archive record instead of Cargo's.
+    fs::remove_file(f.install.join(".crates2.json")).unwrap();
+    fs::write(
+        f.install.join(core::ARCHIVE_RECORD),
+        json!({"schema":1,"kind":"archive","package":core::CRATE,"version":"0.9.13",
+            "target":"x86_64-unknown-linux-gnu","bins":["personal-teams-assistant","pta"]})
+        .to_string(),
+    )
+    .unwrap();
+    let status = call(&f.host, Local, "crate_update_status", json!({})).await;
+    assert!(status.ok, "{:?}", status.message);
+    assert_eq!(status.data["installed"], "0.9.13");
+    assert_eq!(status.data["install"]["supported"], false);
+    assert_eq!(status.data["install"]["kind"], "archive");
+    assert_eq!(status.data["install"]["target"], "x86_64-unknown-linux-gnu");
+    assert_eq!(
+        status.data["install"]["diagnostic"],
+        core::ARCHIVE_DIAGNOSTIC
+    );
+    assert_eq!(status.data["can_stage"], false);
+    assert_eq!(status.data["can_apply"], false);
+    let staged = call(
+        &f.host,
+        Window,
+        "crate_update_stage",
+        json!({"version":"0.9.14"}),
+    )
+    .await;
+    assert_eq!(staged.code, "not_ready");
+    assert_eq!(staged.message.as_deref(), Some(core::ARCHIVE_DIAGNOSTIC));
+    assert!(f.arguments().is_none());
+    assert!(!f.staged().exists());
+}
+
+#[tokio::test]
 async fn equal_lower_yanked_and_prerelease_versions_are_not_offered() {
     let _serial = SERIAL.lock().await;
     for lines in [

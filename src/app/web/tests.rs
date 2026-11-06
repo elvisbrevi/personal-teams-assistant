@@ -3273,3 +3273,55 @@ async fn gui_assets_are_served_by_the_portal_from_the_binary_or_a_development_di
         assert!(!String::from_utf8_lossy(&served).contains("pta-transport"));
     }
 }
+
+#[tokio::test]
+async fn the_join_command_is_built_by_the_portal_from_its_own_origin_for_a_signed_in_account() {
+    let (_dir, portal, entries, _server) = configured_fixture().await;
+    let (alice, _alice_lock) = fake_host(&portal, &entries[0]).await;
+    let request = serde_json::to_value(control::Request::new("machine_join_command")).unwrap();
+    // Without a session nothing is shown.
+    let anonymous = send(
+        &portal,
+        "POST",
+        "/api/control",
+        None,
+        None,
+        Some("https://localhost:38656"),
+        request.clone(),
+    )
+    .await;
+    assert_ne!(anonymous.status(), StatusCode::OK);
+    let (cookie, csrf) = session_cookie(&portal, &entries[0]).await;
+    let data = json_body(
+        send(
+            &portal,
+            "POST",
+            "/api/control",
+            Some(&cookie),
+            Some(&csrf),
+            Some("https://localhost:38656"),
+            request,
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(data["ok"], true, "{data}");
+    assert_eq!(data["data"]["origin"], "https://localhost:38656");
+    let unix = data["data"]["commands"]["linux"].as_str().unwrap();
+    assert!(
+        unix.ends_with("| sh -s -- --origin https://localhost:38656"),
+        "{unix}"
+    );
+    assert!(unix.contains(&format!(
+        "{}/releases/latest/download/install.sh",
+        env!("CARGO_PKG_REPOSITORY")
+    )));
+    assert!(
+        data["data"]["commands"]["windows"]
+            .as_str()
+            .unwrap()
+            .ends_with("-Origin https://localhost:38656")
+    );
+    // The account's host is not asked: the origin is the portal's, never a host's setting.
+    assert!(alice.received_requests().await.unwrap().is_empty());
+}

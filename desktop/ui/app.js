@@ -1166,7 +1166,34 @@ async function loadMachines() {
   $('#machine-connect-hint').hidden = window.ptaTransport.browser || Boolean(settings.coordinator);
   $('#machine-disconnect').disabled = !settings.coordinator;
   renderTeamsMachines(fleet);
+  await loadJoinCommand();
 }
+
+/** Settings › Machines › Connect this computer (portal only): the portal's own install command. */
+let joinCommands = null;
+function visitorSystem() {
+  const platform = navigator.userAgentData?.platform || navigator.userAgent;
+  return /win/i.test(platform) ? 'windows' : /mac|iphone|ipad/i.test(platform) ? 'macos' : 'linux';
+}
+function showJoinCommand(system) {
+  for (const button of document.querySelectorAll('#machine-join-system button')) button.setAttribute('aria-pressed', String(button.dataset.system === system));
+  $('#machine-join-command').textContent = joinCommands?.commands?.[system] ?? '';
+}
+async function loadJoinCommand() {
+  joinCommands = window.ptaTransport.browser ? await invoke('machine_join_command').catch(() => null) : null;
+  $('#machine-join').hidden = !joinCommands?.commands;
+  if (!joinCommands?.commands) return;
+  const chosen = document.querySelector('#machine-join-system [aria-pressed="true"]')?.dataset.system;
+  showJoinCommand($('#machine-join').dataset.chosen ? chosen : visitorSystem());
+}
+for (const button of document.querySelectorAll('#machine-join-system button')) {
+  button.onclick = () => { $('#machine-join').dataset.chosen = 'true'; showJoinCommand(button.dataset.system); };
+}
+$('#machine-join-copy').onclick = async () => {
+  const copied = await copy($('#machine-join-command').textContent);
+  if (copied) notify(t('Command copied. Paste it into a terminal on the computer to add.'), 'ok');
+  else fail(t('The command could not be copied. Select it and copy it by hand.'));
+};
 
 // ---------------------------------------------------------------- settings sections
 
