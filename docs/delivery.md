@@ -47,7 +47,7 @@ On a pull request, macOS and Windows run when any changed path is platform-sensi
 
 - the dependency manifest, lock and toolchain: `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`, `build.rs`;
 - the workflows: `.github/`;
-- the native window and its bundle configuration: `desktop/tauri.conf.json`, `desktop/Info.plist`, `desktop/capabilities/`, `desktop/icons/`, and native startup: `src/main.rs`, `src/bin/`, `src/app.rs`, `src/app/gui.rs`, `src/app/headless.rs`, `src/app/control.rs`, `scripts/test-windows-startup.py`;
+- the native window and its bundle configuration: `desktop/tauri.conf.json`, `desktop/Info.plist`, `desktop/capabilities/`, `desktop/icons/`, and native startup: `src/main.rs`, `src/bin/`, `src/app.rs`, `src/app/gui.rs`, `src/app/headless.rs`, `src/app/control.rs`, `scripts/test-windows-startup.py`, and the local page's browser opener: `src/app/page.rs`;
 - the credential store, process spawning and private-file permissions: `src/security/`, `src/consumers.rs`, `src/app/cloud/restore.rs`, `src/app/azure_cli.rs`, `src/app/github.rs`, `src/app/github_cli.rs`, `src/llm/agent.rs`, `src/llm/implementation.rs`, `src/llm/implementation/`;
 - update staging and apply: `src/maintenance.rs`, `src/maintenance/`, `src/app/maintenance.rs`, `src/app/maintenance/`;
 - the operator admission fixture the Windows job runs: `tests/account_authority.rs`.

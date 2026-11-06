@@ -96,7 +96,7 @@ def main():
 
             try:
                 wait_for(descriptor.is_file)
-                assert call("app", "open")["visible"] is True
+                assert call("app", "open", "--window")["visible"] is True
                 window = wait_for(lambda: visible_window(process))
                 status = call("status")
                 assert status["host_running"] is True
@@ -106,7 +106,7 @@ def main():
                 # The native close button hides the window; reopening must reuse this host.
                 assert user32.PostMessageW(window, 0x0010, 0, 0)  # WM_CLOSE
                 wait_for(lambda: not visible_window(process))
-                assert call("app", "open")["visible"] is True
+                assert call("app", "open", "--window")["visible"] is True
                 wait_for(lambda: visible_window(process))
                 assert call("status")["running"] is False
                 call("app", "quit")

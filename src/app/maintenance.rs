@@ -28,7 +28,7 @@ const AUTO_EVERY: u64 = 6 * 60 * 60;
 const AUTO_DUE: i64 = 12 * 60 * 60;
 const MANAGED: &str =
     "Updates for this server are applied by its operator; there is nothing to install from here.";
-const LOCAL_ONLY: &str = "Updating this installation needs the local owner of the computer: use the application window or pta on that computer.";
+const LOCAL_ONLY: &str = "Updating this installation needs the local owner of the computer: use the application (its window or the page pta app open shows) or pta on that computer.";
 
 pub(super) fn handles(method: &str) -> bool {
     method.starts_with("crate_update_")
