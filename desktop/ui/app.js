@@ -41,6 +41,8 @@ let live;
 let readiness = null;
 let tab = 'overview';
 let dirty = false;
+/** The saved configuration and map the form was loaded from, to notice when they change underneath it. */
+let loadedProfile = null;
 let session = crypto.randomUUID();
 
 function el(tag, props = {}, ...children) {
@@ -1500,25 +1502,44 @@ function renderLive() {
   });
 }
 
+function profileKey(snapshot) { return JSON.stringify([snapshot.config, snapshot.map]); }
+
+/**
+ * Whether the saved configuration changed underneath a form without unsaved edits (an account
+ * synchronization, restored setup, `pta config set`): then the whole form reloads, so it shows what
+ * is saved and a later save cannot write an older copy over it.
+ */
+async function reloadIfChanged() {
+  if (!current || dirty || profileKey(live) === loadedProfile) return false;
+  await reload();
+  return true;
+}
+
 /** Refreshes persisted state without touching unsaved form edits. */
 async function refreshLive() {
   live = await invoke('snapshot');
   if (current) {
     current.credentials = live.credentials; current.github_connected = live.github_connected;
-    // Refresh restored setup without overwriting any unsaved form edits.
-    if (!dirty && ['tenant_id', 'client_id', 'user_id'].some(key => current.config.graph[key] !== live.config.graph[key])) {
-      // Reload the whole revision so a later save cannot overwrite another synchronized field.
-      await reload();
-      return;
-    }
+    if (await reloadIfChanged()) return;
   }
   renderLive();
   renderChatSources();
 }
 
+/** The regular poll: live state, and the form again when the saved configuration changed. */
+async function pollLive() {
+  if (!current) return;
+  try {
+    live = await invoke('snapshot');
+    if (!await reloadIfChanged()) renderLive();
+  } catch { /* the next tick retries */ }
+  if (tab === 'overview') loadActivity();
+}
+
 async function reload() {
   current = await invoke('snapshot');
   current.revision = lastRevision;
+  loadedProfile = profileKey(current);
   live = structuredClone(current);
   const config = current.config;
   // The interface follows the configured language; a change reloads the page once.
@@ -1552,11 +1573,7 @@ async function reload() {
   await Promise.all([loadChain(), loadSelfChat()]);
 }
 
-setInterval(async () => {
-  if (!current) return;
-  try { live = await invoke('snapshot'); renderLive(); } catch { /* the next tick retries */ }
-  if (tab === 'overview') loadActivity();
-}, 15_000);
+setInterval(pollLive, 15_000);
 
 // ---------------------------------------------------------------- settings
 
