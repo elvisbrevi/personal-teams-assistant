@@ -96,7 +96,7 @@ check "it checked the digest" said "matches its published SHA-256"
 check "it says the existing profile is used" said "Using the existing profile"
 check "it removed the stale binstall entry" said "Removed the stale cargo binstall entry"
 check "  keeping the other entry byte for byte" test "$(cat "$CARGO_HOME/binstall/crates-v1.json")" = "$other"
-check "  and leaving no temporary file" test -z "$(ls "$CARGO_HOME/binstall" | grep -v '^crates-v1.json$' || true)"
+check "  and leaving no temporary file" sh -c 'for f in "$0"/*; do [ "$f" = "$0/crates-v1.json" ] || [ ! -e "$f" ] || exit 1; done' "$CARGO_HOME/binstall"
 stale_after=$(sha "$CARGO_HOME/binstall/crates-v1.json")
 check "pta --version from the installed path" sh -c '"$0/bin/pta" --version | grep -q "$1"' "$root" "$version"
 check "both binaries are installed" test -x "$root/bin/personal-teams-assistant"
