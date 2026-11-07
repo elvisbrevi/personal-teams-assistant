@@ -239,7 +239,7 @@ function blockEditor(draft, saved) {
     }));
     checkPlaceholders();
     return [el('div', { class: 'field-block' }, el('label', { id: `block-chat-label-${key}`, textContent: t('Teams chat') }), chat, chatProblem,
-      el('p', { class: 'hint', textContent: t('Only chats you belong to; channels are not offered. It posts once per run, as you.') })),
+      el('small', { class: 'hint', textContent: t('Only chats you belong to; channels are not offered. It posts once per run, as you.') })),
     mentions,
     el('label', {}, t('Message'), el('small', { textContent: t('The members you mention are matched to the chat\'s members again when it posts.') }), template, counted(template, LIMITS.template)),
     el('p', { class: 'hint', textContent: t('Placeholders: {item} the work item, {link} its link, {pull_requests} its pull requests, {summary} the director\'s summary. Select one to insert it.') }),

@@ -149,7 +149,7 @@ function renderDirector(editable) {
   };
   machine.onchange = () => { director.machine = machine.value; load(); };
   $('#workflow-director').replaceChildren(
-    el('label', {}, t('Machine'), el('small', { textContent: t('Where the director\'s CLI runs.') }), machine),
+    el('label', {}, t('Machine'), ' ', el('small', { textContent: t('Where the director\'s CLI runs.') }), machine),
     el('label', {}, t('CLI'), provider), el('label', {}, t('Model'), model), el('label', {}, t('Effort'), effort), note);
   load();
 }

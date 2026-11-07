@@ -1073,6 +1073,25 @@ fn browser_allows_shared_implementation_tools_but_rejects_internal_worker_operat
     }
 }
 #[test]
+fn browser_lists_the_accounts_chats_for_workflow_notifications_but_never_posts() {
+    let (_dir, portal, entries) = fixture();
+    for entry in &entries {
+        assert!(
+            portal
+                .check_request(entry, &control::Request::new("teams_chats"))
+                .is_ok()
+        );
+        for method in ["teams_post", "teams_messages", "teams_search"] {
+            assert!(
+                portal
+                    .check_request(entry, &control::Request::new(method))
+                    .is_err(),
+                "{method}"
+            );
+        }
+    }
+}
+#[test]
 fn a_profile_cannot_import_or_save_another_users_paths_or_duplicate_teams_identity() {
     let (_dir, portal, entries) = fixture();
     let first = profile_dir(&portal.root, &entries[0]);
