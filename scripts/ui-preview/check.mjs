@@ -2216,7 +2216,8 @@ if (flag !== '--axe-only') for (const [label, viewport] of [['desktop', { width:
     && notification.block.mentions.join() === 'Marta Ruiz' && notification.block.template === 'Released: {link}' && notification.block.stage === 'done' && !('text' in notification.block), JSON.stringify(notification));
   // A launcher block lists the coordinator's approved launchers, with program and digest.
   await page.evaluate(() => invoke('variable_launcher_approve', { id: 'release-tool', digest: 'd'.repeat(64) }));
-  await page.click('#workflows-refresh');
+  // Reading the section again (showTab reloads it) lists what changed.
+  await page.evaluate(() => showTab('workflows', 'workflows-blocks'));
   await page.waitForTimeout(400);
   await page.click('#block-new');
   await block.locator('select').first().selectOption('launcher');
@@ -2229,7 +2230,8 @@ if (flag !== '--axe-only') for (const [label, viewport] of [['desktop', { width:
   check(`blocks ${label}: the launcher block is saved confirmed`, (await calls()).some(c => c.method === 'workflow_block_save' && c.block.id === 'release-in-test' && c.confirmed && c.block.launcher.digest === 'd'.repeat(64)));
   // Where launchers are not listed (another account's portal), the launcher editor says why.
   await page.evaluate(() => { window.__ptaLaunchersHidden = true; });
-  await page.click('#workflows-refresh');
+  // Reading the section again (showTab reloads it) lists what changed.
+  await page.evaluate(() => showTab('workflows', 'workflows-blocks'));
   await page.waitForTimeout(400);
   await page.click('#block-new');
   check(`blocks ${label}: launcher blocks are offered only on an owner transport`, await block.locator('select').first().locator('option[value="launcher"]').isDisabled()

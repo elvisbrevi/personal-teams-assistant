@@ -16,6 +16,8 @@
 //! the execution machine spells them (`absolute_on`, `under`), whatever system the coordinator
 //! runs.
 
+pub mod director;
+
 use anyhow::{Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -717,36 +719,42 @@ pub fn check(workflow: &mut Workflow, facts: &Facts) -> Result<Vec<String>> {
     }
     let agent = &workflow.agent;
     match &facts.agents {
-        Ok(catalog) => {
-            let provider = catalog["providers"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .find(|p| p["id"] == agent.provider.as_str() && p["available"] != false);
-            let Some(provider) = provider else {
-                bail!(
-                    "{} is not installed on the workflow's execution machine.",
-                    agent.provider
-                );
-            };
-            ensure!(
-                provider["models"].as_array().into_iter().flatten().any(|m| {
-                    m["id"] == agent.model.as_str()
-                        && m["efforts"]
-                            .as_array()
-                            .is_some_and(|e| e.iter().any(|e| e == agent.effort.as_str()))
-                }),
-                "{} on the execution machine has no model {} with effort {}.",
-                agent.provider,
-                agent.model,
-                agent.effort
-            );
-        }
+        Ok(catalog) => agent_installed(catalog, agent, "the workflow's execution machine")?,
         Err(reason) => warnings.push(format!(
             "The coding agent could not be verified on the machine ({reason}); it is checked again before a run."
         )),
     }
     Ok(warnings)
+}
+
+/// Whether a machine's installed CLIs (`implementation_catalog`) include the agent's provider
+/// with that model and effort; `place` names the machine in the refusal.
+pub fn agent_installed(catalog: &serde_json::Value, agent: &Agent, place: &str) -> Result<()> {
+    let provider = catalog["providers"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|p| p["id"] == agent.provider.as_str() && p["available"] != false);
+    let Some(provider) = provider else {
+        bail!("{} is not installed on {place}.", agent.provider);
+    };
+    ensure!(
+        provider["models"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|m| {
+                m["id"] == agent.model.as_str()
+                    && m["efforts"]
+                        .as_array()
+                        .is_some_and(|e| e.iter().any(|e| e == agent.effort.as_str()))
+            }),
+        "{} on {place} has no model {} with effort {}.",
+        agent.provider,
+        agent.model,
+        agent.effort
+    );
+    Ok(())
 }
 
 /// The components of an absolute directory as a machine of that spelling writes it, or none

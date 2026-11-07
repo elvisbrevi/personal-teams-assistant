@@ -1120,11 +1120,13 @@ async fn save_settings(
     mut map: KnowledgeMap,
     tunnel_config: String,
 ) -> std::result::Result<(), String> {
-    // Workflows and their blocks change only through their own operations, which check them
-    // against the machine, the catalog and the caller's authority: editors keep the stored ones.
+    // Workflows, their blocks and their settings change only through their own operations,
+    // which check them against the machine, the catalog, the process and the caller's
+    // authority: editors keep the stored ones.
     let stored = host.state.settings.map().map_err(fail)?;
     map.workflows = stored.workflows;
     map.workflow_blocks = stored.workflow_blocks;
+    map.workflow_settings = stored.workflow_settings;
     commit_settings(host, config, map, tunnel_config).await
 }
 

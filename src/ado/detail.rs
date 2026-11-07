@@ -393,12 +393,16 @@ async fn get_kind(
             {
                 continue;
             }
-            // Verify the type against this project's process, including closed HUs and bugs.
-            let mut kinds = BTreeSet::new();
-            for category in if task {
-                &["Microsoft.TaskCategory"][..]
+            // Verify the type against this project's process, including closed HUs and bugs, and
+            // keep the category it was found in.
+            let mut kinds = BTreeMap::new();
+            for (category, label) in if task {
+                &[("Microsoft.TaskCategory", "task")][..]
             } else {
-                &["Microsoft.RequirementCategory", "Microsoft.BugCategory"][..]
+                &[
+                    ("Microsoft.RequirementCategory", "requirement"),
+                    ("Microsoft.BugCategory", "bug"),
+                ][..]
             } {
                 match todo::metadata(
                     client,
@@ -414,34 +418,34 @@ async fn get_kind(
                 .await
                 {
                     Ok(reply) => {
-                        kinds.extend(
-                            reply["workItemTypes"]
-                                .as_array()
-                                .context("invalid work item category")?
-                                .iter()
-                                .filter_map(|k| k["name"].as_str().map(str::to_owned)),
-                        );
+                        for kind in reply["workItemTypes"]
+                            .as_array()
+                            .context("invalid work item category")?
+                            .iter()
+                            .filter_map(|k| k["name"].as_str())
+                        {
+                            kinds.entry(kind.to_owned()).or_insert(*label);
+                        }
                     }
                     Err(error) if error.to_string().ends_with("HTTP 404") => (),
                     Err(error) => return Err(error),
                 }
             }
-            ensure!(
-                kinds.contains(field(&item, "System.WorkItemType")),
-                if task {
+            let Some(category) = kinds.get(field(&item, "System.WorkItemType")).copied() else {
+                anyhow::bail!(if task {
                     "invalid work item type: select a task"
                 } else {
                     "invalid work item type: select an HU or bug"
-                }
-            );
+                });
+            };
             ensure!(
                 found.is_none(),
                 "invalid ambiguous work item ID: select a project and an Azure source with one organization"
             );
-            found = Some((source, project, item));
+            found = Some((source, project, item, category));
         }
     }
-    let (source, project, item) =
+    let (source, project, item, category) =
         found.context("invalid work item: not found in the configured Azure projects")?;
     let reference = item_reference(source, project, &item)?;
     let metadata = todo::metadata(
@@ -512,7 +516,7 @@ async fn get_kind(
             project: project.clone(),
             kind: field(&item, "System.WorkItemType").into(),
             state: field(&item, "System.State").into(),
-            category: String::new(),
+            category: category.into(),
             created_at: todo::timestamp(&item["fields"]["System.CreatedDate"]),
             dates,
         },
