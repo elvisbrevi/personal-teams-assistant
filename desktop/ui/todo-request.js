@@ -176,7 +176,7 @@ async function loadAgentHistory() {
     if (generation !== historyGeneration || tab !== 'agent-history') return;
     $('#agent-history-list').replaceChildren(...result.runs.map(agentRunCard));
     if (!result.runs.length) $('#agent-history-list').append(el('p', { class: 'empty', textContent: t('No agent executions recorded yet.') }));
-    $('#agent-history-progress').textContent = result.partial ? t('Showing the latest executions. Older records remain saved.') : tn(result.runs.length, '{count} execution', '{count} executions');
+    $('#agent-history-progress').textContent = result.partial ? t('Showing the latest executions. Older records remain saved.') : tn(result.runs.length, '{count} execution', '{count} executions', { count: result.runs.length });
   } catch (error) {
     if (generation !== historyGeneration) return;
     $('#agent-history-progress').textContent = '';
