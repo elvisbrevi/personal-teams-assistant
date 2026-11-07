@@ -2585,6 +2585,8 @@ const UI_CATALOG = { es: {
   "Check every {min} to {max} minutes.": "Revisa cada {min} a {max} minutos.",
   "Let {min} to {max} runs advance at once.": "Deja avanzar de {min} a {max} ejecuciones a la vez.",
   "Wait {min} to {max} days for pull requests.": "Espera de {min} a {max} días los pull requests.",
+  "Choose the chat again: its name must have 1 to {n} characters.": "Elige el chat de nuevo: su nombre debe tener de 1 a {n} caracteres.",
+  "Mention only members whose names have at most {n} characters.": "Menciona solo a miembros cuyo nombre tenga como máximo {n} caracteres."
 } };
 
 /** Host texts with a variable part (older runs and entries were stored in English). */

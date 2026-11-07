@@ -2198,7 +2198,7 @@ if (flag !== '--axe-only') for (const [label, viewport] of [['desktop', { width:
   await block.locator('input').first().fill('Tell the releases chat');
   await page.click('#block-chat-new');
   await page.waitForSelector(sheet);
-  check(`blocks ${label}: the chat sheet lists the personal chat and the user's chats`, await page.locator(`${sheet} .directory-picker-row`).count() === 4);
+  check(`blocks ${label}: the chat sheet lists the personal chat and the user's chats`, await page.locator(`${sheet} .directory-picker-row`).count() === 5);
   check(`blocks ${label}: the chat sheet passes axe`, (await scan(page)).length === 0, JSON.stringify(await scan(page)));
   await page.fill(`${sheet} input[type=search]`, 'releases');
   await page.locator(`${sheet} .directory-picker-row button`).first().click();
@@ -2214,6 +2214,21 @@ if (flag !== '--axe-only') for (const [label, viewport] of [['desktop', { width:
   const notification = (await calls()).find(c => c.method === 'workflow_block_save' && c.block.id === 'tell-the-releases-chat');
   check(`blocks ${label}: the notification is saved confirmed with its chat, mentions and template`, notification?.confirmed === true && notification.block.chat.id === '19:rel@thread.v2'
     && notification.block.mentions.join() === 'Marta Ruiz' && notification.block.template === 'Released: {link}' && notification.block.stage === 'done' && !('text' in notification.block), JSON.stringify(notification));
+  // A chat named by its many members is cut to the host's limit, and the block is accepted.
+  await page.click('#block-new');
+  await block.locator('select').first().selectOption('teams_notification');
+  await block.locator('input').first().fill('Tell the crowd');
+  await page.click('#block-chat-new');
+  await page.waitForSelector(sheet);
+  await page.fill(`${sheet} input[type=search]`, 'Synthetic member 01');
+  await page.locator(`${sheet} .directory-picker-row button`).first().click();
+  const crowdName = await page.textContent('#block-chat-new');
+  check(`blocks ${label}: a long chat name is cut to at most 200 characters with an ellipsis`, [...crowdName].length <= 200 && [...crowdName].length > 190 && crowdName.endsWith('…'), String([...crowdName].length));
+  await block.locator('textarea').fill('Done: {item}');
+  await block.locator('button', { hasText: 'Revisar y guardar' }).click();
+  await block.locator('button', { hasText: 'Confirmar y guardar' }).click();
+  await page.waitForSelector('[data-block="tell-the-crowd"]');
+  check(`blocks ${label}: the block with the cut name is accepted`, (await calls()).some(c => c.method === 'workflow_block_save' && c.block.id === 'tell-the-crowd' && [...c.block.chat.name].length <= 200 && c.block.chat.name.endsWith('…')));
   // A launcher block lists the coordinator's approved launchers, with program and digest.
   await page.evaluate(() => invoke('variable_launcher_approve', { id: 'release-tool', digest: 'd'.repeat(64) }));
   // Reading the section again (showTab reloads it) lists what changed.
@@ -2250,19 +2265,27 @@ if (flag !== '--axe-only') for (const [label, viewport] of [['desktop', { width:
   check(`workflow settings ${label}: the category passes axe`, (await scan(page)).length === 0, JSON.stringify(await scan(page)));
   await page.locator('#workflow-ready-states [data-project="Exports"] label', { hasText: 'Approved' }).locator('input').check();
   await page.fill('#workflow-interval', '10');
-  await page.fill('#workflow-concurrency', '9');
-  await page.click('#workflow-settings-save');
-  check(`workflow settings ${label}: values out of range are refused before sending`, await page.isVisible('#workflow-settings-problem') && !(await calls()).some(c => c.method === 'workflow_settings_update'));
-  await page.fill('#workflow-concurrency', '3');
   await page.selectOption('#workflow-director-model', 'claude-opus-5-5');
-  await page.click('#workflow-settings-save');
-  await page.waitForTimeout(400);
-  const update = (await calls()).find(c => c.method === 'workflow_settings_update');
-  check(`workflow settings ${label}: only what changed is saved: ready states, watcher and director`, update?.watch_interval_minutes === 10 && update.concurrency === 3
-    && !('pull_request_wait_days' in update) && JSON.stringify(update.ready_states) === '[{"organization":"https://dev.azure.com/contoso","project":"Exports","states":["Approved"]}]'
-    && update.director.model === 'claude-opus-5-5' && update.director.machine === '11111111-1111-4111-8111-111111111111', JSON.stringify(update));
+  check(`workflow settings ${label}: edits show the save bar and flag the category`, await page.isVisible('#savebar') && await page.isVisible('#settings-tab-workflows .flag.edited'));
   await page.click('#workflow-director-prompt');
   check(`workflow settings ${label}: the director's prompt opens in Guides and instructions`, await page.isVisible('#agent-guides') && await page.locator('#agent-prompts [data-prompt="direct"] details').evaluate(d => d.open));
+  await page.evaluate(() => showTab('settings', 'panel-workflow-ready'));
+  await page.waitForTimeout(500);
+  check(`workflow settings ${label}: unsaved edits survive leaving the category and coming back`, await page.inputValue('#workflow-interval') === '10'
+    && await page.locator('#workflow-ready-states [data-project="Exports"] label', { hasText: 'Approved' }).locator('input').isChecked()
+    && await page.inputValue('#workflow-director-model') === 'claude-opus-5-5' && !(await calls()).some(c => c.method === 'workflow_settings_update'));
+  await page.fill('#workflow-concurrency', '9');
+  await page.click('#save');
+  await page.waitForTimeout(300);
+  check(`workflow settings ${label}: values out of range are refused before sending`, await page.isVisible('#workflow-settings-problem') && !(await calls()).some(c => c.method === 'workflow_settings_update'));
+  await page.fill('#workflow-concurrency', '3');
+  await page.click('#save');
+  await page.waitForTimeout(600);
+  const update = (await calls()).find(c => c.method === 'workflow_settings_update');
+  check(`workflow settings ${label}: the save bar saves only what changed: ready states, watcher and director`, update?.watch_interval_minutes === 10 && update.concurrency === 3
+    && !('pull_request_wait_days' in update) && JSON.stringify(update.ready_states) === '[{"organization":"https://dev.azure.com/contoso","project":"Exports","states":["Approved"]}]'
+    && update.director.model === 'claude-opus-5-5' && update.director.machine === '11111111-1111-4111-8111-111111111111', JSON.stringify(update));
+  check(`workflow settings ${label}: saving clears the save bar`, await page.isHidden('#savebar') && await page.isHidden('#settings-tab-workflows .flag.edited'));
 
   // Home links to the ready states while an enabled workflow that starts by itself has none.
   await page.evaluate(async () => {
@@ -2280,6 +2303,16 @@ if (flag !== '--axe-only') for (const [label, viewport] of [['desktop', { width:
   check(`workflows ${label}: Home's row opens Settings › Workflows`, await page.getAttribute('#settings-tab-workflows', 'aria-selected') === 'true');
   check(`workflows ${label}: no page scrolls sideways`, await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
   check(`workflows ${label}: no client errors`, errors.length === 0, errors.join('; '));
+  await context.close();
+}
+// Home reads only the saved workflow settings: no machine catalog or process states.
+if (flag !== '--axe-only') {
+  const { context, page, errors } = await open();
+  await page.waitForTimeout(1200);
+  const homeCalls = await page.evaluate(() => ({ methods: window.__ptaCalls, workflow: window.__ptaWorkflowCalls }));
+  check('workflows Home: reads the saved workflow settings once and nothing heavier', homeCalls.methods.filter(m => m === 'workflow_settings').length === 1
+    && !homeCalls.workflow.some(c => c.method === 'workflow_settings' && c.project) && !homeCalls.methods.includes('implementation_catalog'), JSON.stringify(homeCalls.methods));
+  check('workflows Home: no client errors', errors.length === 0, errors.join('; '));
   await context.close();
 }
 // A computer signed in to a coordinator reads workflows but changes them there.

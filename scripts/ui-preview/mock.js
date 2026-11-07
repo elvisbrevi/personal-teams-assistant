@@ -280,6 +280,9 @@
     { id: '19:def@thread.v2', type: 'oneOnOne', topic: 'Ana Pérez', members: ['Ana Pérez'], last_updated: '2026-10-14T14:00:00Z', readable: true },
     { id: '19:rel@thread.v2', type: 'group', topic: 'Releases', members: ['Victoria Gómez', 'Marta Ruiz'], last_updated: '2026-10-13T10:00:00Z', readable: false },
   ];
+  // A chat without a topic is named by its members (Graph::chat_directory): longer than a block's chat name may be.
+  const crowd = Array.from({ length: 24 }, (_, i) => `Synthetic member ${String(i + 1).padStart(2, '0')}`);
+  teamsChats.push({ id: '19:crowd@thread.v2', type: 'group', topic: crowd.join(', '), members: crowd, last_updated: '2026-10-12T10:00:00Z', readable: false });
   let workflowSettings = { ready_states: scenario === 'full' ? [{ organization: org, project: 'Payments', states: ['Ready for development'] }] : [],
     watch_interval_minutes: 5, concurrency: 2, pull_request_wait_days: 7, director: { machine: '11111111-1111-4111-8111-111111111111', provider: 'claude', model: 'claude-sonnet-5-5', effort: 'medium' } };
   const processStates = { Payments: ['New', 'Ready for development', 'Developing', 'Awaiting validation', 'Finished'], Exports: ['New', 'Approved', 'Committed', 'Done'] };
@@ -326,6 +329,7 @@
       window.__ptaWorkflowCalls.push({ method: 'workflow_block_save', ...structuredClone(args) });
       const block = structuredClone(args.block);
       if (block.kind !== 'instruction' && !args.confirmed) throw new Error('Confirm this block with the user, then save it with confirmed: true.');
+      if (block.chat && [...block.chat.name].length > 200) throw new Error(`Teams notification block ${block.id} needs a chat ID as pta teams chats lists it and the chat's name (at most 200 characters).`);
       if (block.kind === 'launcher') {
         const launcher = launchers.find(l => l.id === block.launcher.id);
         if (!launcher?.approved) throw new Error(`Launcher ${block.launcher.id} is not approved yet; approve it first.`);
@@ -350,6 +354,7 @@
     // As src/app/workflows/director.rs answers: every value, the defaults and bounds; with a
     // project, its process's states.
     workflow_settings: args => {
+      window.__ptaWorkflowCalls.push({ method: 'workflow_settings', ...structuredClone(args) });
       const reply = { settings: structuredClone(workflowSettings), editable: true,
         defaults: { watch_interval_minutes: 5, concurrency: 2, pull_request_wait_days: 7, director: null, ready_states: [] },
         bounds: { watch_interval_minutes: [1, 60], concurrency: [1, 4], pull_request_wait_days: [1, 60], ready_states_per_project: 20, projects_with_ready_states: 50 } };
