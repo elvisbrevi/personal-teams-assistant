@@ -7,7 +7,8 @@ import { $, badge, el } from './dom.js';
 import { busy, done } from './notices.js';
 import { showTab } from './nav.js';
 import { applying } from './profile.js';
-import { changedAt, chooseFromList, loadWorkflows, slug, workflowData } from './workflows.js';
+import { chooseFromList } from './directory-sheet.js';
+import { changedAt, loadWorkflows, slug, workflowData } from './workflows.js';
 
 const KIND_NAMES = { instruction: t('Instruction'), teams_notification: t('Teams notification'), launcher: t('Launcher') };
 const STAGES = ['before_planning', 'plan_ready', 'children_created', 'child_done', 'pull_requests_completed', 'done', 'failed'];
