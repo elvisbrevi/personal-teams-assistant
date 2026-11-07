@@ -15,6 +15,10 @@ from pathlib import Path
 SCRIPT = Path(__file__).with_name("vps-update.py")
 
 # `pta`/`personal-teams-assistant` of one version; status describes the host the fake systemd runs.
+# World files: `unhealthy` lists versions whose assistant fails; `renewal` means the Microsoft session
+# needs renewal; `failing-polls` that no subscription is active and polls fail; `stopped` that the
+# assistant could not start at the last restart (with `renewal` or `cannot-start`);
+# `expire-on-restart` makes the session expire at the next restart.
 BINARY = """#!/bin/sh
 case "$1" in
   --version) echo "pta {version} (contract 1)" ;;
@@ -24,8 +28,11 @@ esac
 STATUS = """#!/bin/sh
 running=$(cat "$WORLD/running")
 if grep -qx "$running" "$WORLD/unhealthy" 2>/dev/null; then fine=false; subs=0; else fine=true; subs=1; fi
-printf '{"ok":true,"data":{"host_running":true,"host_version":"%s","running":%s,"active_subscriptions":%s,"tunnel_running":%s}}\\n' \
-  "$running" "$fine" "$subs" "$fine"
+[ -f "$WORLD/stopped" ] && fine=false
+renewal=false; [ -f "$WORLD/renewal" ] && renewal=true
+issue=null; if [ -f "$WORLD/failing-polls" ]; then subs=0; issue='"synthetic poll failure"'; fi
+printf '{"ok":true,"data":{"host_running":true,"host_version":"%s","running":%s,"active_subscriptions":%s,"tunnel_running":%s,"microsoft_session_needs_renewal":%s,"subscription_issue":%s}}\\n' \
+  "$running" "$fine" "$subs" "$fine" "$renewal" "$issue"
 """
 CARGO = """#!/bin/sh
 echo "cargo $*" >> "$WORLD/calls"
@@ -46,7 +53,10 @@ SYSTEMCTL = """#!/bin/sh
 echo "systemctl $*" >> "$WORLD/calls"
 case "$2" in
   is-active) cat "$WORLD/service"; [ "$(cat "$WORLD/service")" = active ] ;;
-  restart) if [ -f "$WORLD/broken-restart" ]; then echo none; else "$CARGO_HOME/bin/pta" --version | cut -d' ' -f2; fi > "$WORLD/running" ;;
+  restart)
+    if [ -f "$WORLD/broken-restart" ]; then echo none; else "$CARGO_HOME/bin/pta" --version | cut -d' ' -f2; fi > "$WORLD/running"
+    [ -f "$WORLD/expire-on-restart" ] && touch "$WORLD/renewal"
+    if [ -f "$WORLD/renewal" ] || [ -f "$WORLD/cannot-start" ]; then touch "$WORLD/stopped"; else rm -f "$WORLD/stopped"; fi ;;
 esac
 """
 
@@ -196,6 +206,8 @@ class Updater(unittest.TestCase):
         self.assertEqual((self.installed(), self.running()), ("0.7.28", "0.7.28"))
         self.assertIn("(path)", (self.cargo / ".crates.toml").read_text())
         self.assertIn("rolled back 0.7.29 -> 0.7.28", self.history())
+        self.assertIn("the assistant is not running", self.history())
+        self.assertIn("0.7.29", self.blocked())
         self.calls()
         code, output = self.run_update()
         self.assertEqual(code, 0)
@@ -205,6 +217,10 @@ class Updater(unittest.TestCase):
         self.assertEqual(self.run_update()[0], 0)
         self.assertEqual((self.installed(), self.running()), ("0.7.30", "0.7.30"))
 
+    def blocked(self):
+        path = self.state / "state.json"
+        return json.loads(path.read_text())["blocked"] if path.exists() else {}
+
     def test_rollback_that_cannot_recover_needs_a_person(self):
         self.publish("0.7.28", "0.7.29")
         (self.world / "broken-restart").touch()
@@ -212,6 +228,55 @@ class Updater(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertIn("ROLLBACK FAILED", self.history())
         self.assertEqual(self.installed(), "0.7.28")
+        # The host itself did not come back: that is never put down to the profile's state.
+        self.assertIn("0.7.29", self.blocked())
+
+    def test_defers_without_restarting_while_the_microsoft_session_needs_renewal(self):
+        self.publish("0.7.28", "0.7.29")
+        (self.world / "renewal").touch()
+        code, output = self.run_update("--check")
+        self.assertEqual(code, 0, output)
+        self.assertIn("the Microsoft session needs renewal", output)
+        for _ in range(2):
+            code, output = self.run_update()
+            self.assertEqual(code, 0, output)
+            self.assertIn("deferred 0.7.29: the Microsoft session needs renewal", output)
+            calls = " ".join(self.calls())
+            self.assertNotIn("cargo", calls)
+            self.assertNotIn("restart", calls)
+        # One line in history.log, however many runs meet the same deferral.
+        self.assertEqual(self.history().count("the Microsoft session needs renewal"), 1)
+        self.assertEqual((self.installed(), self.running()), ("0.7.28", "0.7.28"))
+        # Signed in again: the next run updates.
+        (self.world / "renewal").unlink()
+        self.assertEqual(self.run_update()[0], 0)
+        self.assertEqual((self.installed(), self.running()), ("0.7.29", "0.7.29"))
+
+    def test_a_session_expiring_at_the_restart_is_put_down_to_the_profile_not_the_release(self):
+        self.publish("0.7.28", "0.7.29")
+        (self.world / "expire-on-restart").touch()
+        code, output = self.run_update()
+        self.assertEqual(code, 2, output)
+        self.assertIn("fails the same way: the cause is the profile's state", self.history())
+        self.assertIn("needs renewal", self.history())
+        self.assertEqual(self.blocked(), {})
+        self.assertEqual(self.installed(), "0.7.28")
+        # The assistant no longer runs, so the next run does not require it and installs 0.7.29.
+        (self.world / "expire-on-restart").unlink()
+        self.calls()
+        self.assertEqual(self.run_update()[0], 0)
+        self.assertIn("cargo install personal-teams-assistant --version 0.7.29 --locked --no-default-features --force", self.calls())
+        self.assertEqual((self.installed(), self.running()), ("0.7.29", "0.7.29"))
+
+    def test_an_assistant_that_ran_only_nominally_is_not_required_after_the_restart(self):
+        self.publish("0.7.28", "0.7.29")
+        # Running, with no active subscription and failing polls; after the restart it cannot start.
+        (self.world / "failing-polls").touch()
+        (self.world / "cannot-start").touch()
+        code, output = self.run_update()
+        self.assertEqual(code, 0, output)
+        self.assertIn("updated 0.7.28 -> 0.7.29", self.history())
+        self.assertEqual((self.installed(), self.running()), ("0.7.29", "0.7.29"))
 
     def test_failed_install_keeps_the_portal_and_gives_up_after_three_attempts(self):
         self.publish("0.7.28", "0.7.29")

@@ -9,6 +9,13 @@ that version headless with `cargo install`, restarts the portal and waits until 
 reports the new host with the health it had before. If a step fails it restores the backup,
 restarts, and blocks that version until a newer one is published.
 
+The profile's state counts too: while the host reports that the Microsoft session needs renewal and
+the assistant still runs, it defers (a restart would turn an assistant that still answers into a
+stopped one). An assistant that ran only nominally before (session needing renewal, or no active
+subscription and failing polls) is not required to run after the restart, and when the previous
+version fails the health check for the same reason the new one did, the cause is the profile's
+state, so that version is not blocked.
+
 It only reads public crates.io data and the profile's databases (read-only): it opens no port and
 holds no token. The standard library is enough; the server runs it with `python3 -I`.
 
@@ -80,8 +87,17 @@ def log(message):
     print(message, flush=True)
 
 
-def record(event):
-    """Logs to the journal and keeps a line in history.log."""
+def record(event, once=False):
+    """Logs to the journal and keeps a line in history.log; `once` skips the line when it repeats
+    the last one (a deferral the timer meets every five minutes)."""
+    if once:
+        try:
+            lines = (STATE / "history.log").read_text(encoding="utf-8").splitlines()
+        except OSError:
+            lines = []
+        if lines and lines[-1].partition(" ")[2] == event:
+            log(event)
+            return
     with open(STATE / "history.log", "a", encoding="utf-8") as history:
         history.write(f"{datetime.now(timezone.utc).isoformat(timespec='seconds')} {event}\n")
     log(event)
@@ -146,34 +162,60 @@ def health():
         data = json.loads(run([str(BIN / "pta"), "--json", "status"], timeout=150).stdout).get("data") or {}
     except (OSError, subprocess.TimeoutExpired, ValueError, AttributeError):
         data = {}
+    subscriptions = data.get("active_subscriptions") or 0
+    # Hosts before 0.11.7 do not report the session's renewal; they read as not needing it.
+    renewal = data.get("microsoft_session_needs_renewal") is True
+    assistant = data.get("running") is True
     return {
         "host": data.get("host_running") is True,
         "version": parse(data.get("host_version")),
-        "assistant": data.get("running") is True,
-        "subscriptions": data.get("active_subscriptions") or 0,
+        "assistant": assistant,
+        "subscriptions": subscriptions,
         "tunnel": data.get("tunnel_running") is True,
+        "renewal": renewal,
+        # Running only in name: it cannot start again after a restart (the session needs a
+        # sign-in), or it holds no subscription while its polls fail.
+        "nominal": assistant and (renewal or (not subscriptions and bool(data.get("subscription_issue")))),
     }
 
 
-def healthy(now, before, version):
-    """The host runs `version` and is as healthy as before the update."""
-    if not now["host"] or now["version"] != version:
-        return False
+# Reasons the profile's assistant is not as healthy as before. Unlike the host not answering or
+# running another version, they can be the profile's state rather than the version's fault.
+ASSISTANT_REASONS = ("the assistant is not running", "no active Teams subscription", "the tunnel is not running")
+
+
+def unhealthy(now, before, version):
+    """Why the host is not running `version` as healthy as before the update; None when it is.
+    An assistant that ran only nominally before is not required to run now."""
+    if now is None:
+        return "the portal service is not active"
+    if not now["host"]:
+        return "the host is not answering"
+    if now["version"] != version:
+        return f"the host runs {show(now['version'])}"
+    if before.get("nominal"):
+        return None
     if before["assistant"] and not now["assistant"]:
-        return False
+        return ASSISTANT_REASONS[0]
     if before["subscriptions"] and not now["subscriptions"]:
-        return False
-    return now["tunnel"] or not before["tunnel"]
+        return ASSISTANT_REASONS[1]
+    if before["tunnel"] and not now["tunnel"]:
+        return ASSISTANT_REASONS[2]
+    return None
 
 
 def wait_healthy(before, version):
+    """None once the host is as healthy as before, otherwise the last reason it was not."""
     deadline = time.monotonic() + HEALTH_SECONDS
     while True:
         now = health() if service_active() else None
-        if now and healthy(now, before, version):
-            return True
+        reason = unhealthy(now, before, version)
+        if reason is None:
+            return None
         if time.monotonic() >= deadline:
-            return False
+            if now and now["renewal"]:
+                reason += " (the Microsoft session needs renewal)"
+            return reason
         time.sleep(POLL_SECONDS)
 
 
@@ -307,15 +349,24 @@ def save_state(state):
     os.replace(staged, STATE / "state.json")
 
 
-def roll_back(installed, target, reason, drill, before, state):
+def roll_back(installed, target, reason, drill, before, state, cause=None):
+    """Restores the previous binaries and verifies them. `cause` is why `target` was not healthy;
+    when the previous version fails for the same reason of the assistant, the profile's state is
+    to blame, not the release, and `target` is not blocked."""
     restore()
-    back = restart() and wait_healthy(before, installed)
-    if not drill:
+    back = wait_healthy(before, installed) if restart() else f"`systemctl --user restart {SERVICE}` failed"
+    profile_state = back is not None and back == cause and back.startswith(ASSISTANT_REASONS)
+    if not drill and not profile_state:
         state["blocked"][show(target)] = reason
         save_state(state)
-    if not back:
+    if profile_state:
+        record(f"ROLLBACK FAILED: {show(target)} {reason}, and {show(installed)} fails the same way: the cause is the "
+               f"profile's state, not the version, so {show(target)} is not blocked; the {show(installed)} binaries "
+               f"are restored: check `pta status` (sign in again if the Microsoft session needs renewal)")
+        return 2
+    if back is not None:
         record(f"ROLLBACK FAILED: {show(target)} {reason}; the {show(installed)} binaries are restored but "
-               f"the portal is not healthy: check `systemctl --user status {SERVICE}` and `pta status`")
+               f"the portal is not healthy ({back}): check `systemctl --user status {SERVICE}` and `pta status`")
         return 2
     if drill:
         record(f"rollback drill: {show(target)} was healthy, rolled back to {show(installed)}, which is healthy again")
@@ -351,6 +402,15 @@ def update(check=False, drill=False):
     if busy:
         log(f"deferred {target}: " + "; ".join(busy))
         return 0
+    before = health()
+    if before["assistant"] and before["renewal"]:
+        reason = (f"deferred {target}: the Microsoft session needs renewal and the assistant still runs; a restart "
+                  "would stop it until someone signs in to Microsoft again (`pta auth microsoft login`)")
+        if check:
+            log(reason)
+        else:
+            record(reason, once=True)
+        return 0
     if check:
         log(f"would update {show(installed)} -> {target}; {free_bytes() / GIB:.1f} GiB free, build cache {size(TARGET) / GIB:.1f} GiB")
         return 0
@@ -358,7 +418,6 @@ def update(check=False, drill=False):
         record(f"deferred {target}: less than {MIN_FREE / GIB:.0f} GiB free")
         return 0
 
-    before = health()
     backup()
     record(f"installing {target} (installed {show(installed)})")
     started = time.monotonic()
@@ -389,8 +448,10 @@ def update(check=False, drill=False):
     started = time.monotonic()
     if not restart():
         return roll_back(installed, latest, f"`systemctl --user restart {SERVICE}` failed", drill, before, state)
-    if not wait_healthy(before, latest):
-        return roll_back(installed, latest, f"not healthy within {HEALTH_SECONDS:.0f} s of the restart", drill, before, state)
+    cause = wait_healthy(before, latest)
+    if cause is not None:
+        return roll_back(installed, latest, f"not healthy within {HEALTH_SECONDS:.0f} s of the restart: {cause}",
+                         drill, before, state, cause)
     if drill:
         return roll_back(installed, latest, "drill", drill, before, state)
     state["attempts"].pop(target, None)
