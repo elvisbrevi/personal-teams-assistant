@@ -2234,7 +2234,7 @@ if (flag !== '--axe-only') for (const [label, viewport] of [['desktop', { width:
   await page.evaluate(() => showTab('workflows', 'workflows-blocks'));
   await page.waitForTimeout(400);
   await page.click('#block-new');
-  check(`blocks ${label}: launcher blocks are offered only on an owner transport`, await block.locator('select').first().locator('option[value="launcher"]').isDisabled()
+  check(`blocks ${label}: launcher blocks are offered only on an owner transport`, await block.locator('select').first().locator('option[value="launcher"]').evaluate(option => option.disabled)
     && /página local/.test(await block.textContent()));
   await page.evaluate(() => { window.__ptaLaunchersHidden = false; });
   await block.locator('button', { hasText: 'Descartar' }).click();
