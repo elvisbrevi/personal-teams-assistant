@@ -78,6 +78,12 @@ struct Machine {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     checkout_inspect: bool,
 }
+impl Machine {
+    /// Trusted and seen in its last polls (a worker polls every two seconds).
+    fn online(&self) -> bool {
+        !self.revoked && now() - self.seen < 35
+    }
+}
 /// A machine's update state as it reports it: shown in the portal, never acted on there.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -546,6 +552,8 @@ pub(super) struct MachineFacts {
     /// The coordinator (this installation) itself.
     pub own: bool,
     pub online: bool,
+    /// The operating system it reported: how it spells directories.
+    pub os: String,
     /// Its allowed roots, as it last reported them (this installation's own, read now).
     pub roots: Vec<PathBuf>,
     /// It answers `checkout_inspect`.
@@ -560,6 +568,7 @@ pub(super) async fn machine_facts(host: &Arc<Host>, id: &str) -> Result<Option<M
         return Ok(Some(MachineFacts {
             own: true,
             online: true,
+            os: std::env::consts::OS.into(),
             roots: own_roots,
             inspect: true,
         }));
@@ -570,7 +579,8 @@ pub(super) async fn machine_facts(host: &Arc<Host>, id: &str) -> Result<Option<M
         .find(|m| m.id == id && !m.revoked && m.account_version == version)
         .map(|m| MachineFacts {
             own: false,
-            online: now() - m.seen < 35,
+            online: m.online(),
+            os: m.os.clone(),
             roots: m.roots.clone(),
             inspect: m.checkout_inspect,
         }))
@@ -850,7 +860,7 @@ async fn local(host: &Arc<Host>, method: &str, args: &Value) -> Result<Value> {
         "machine_browse" => browse_machine(host, args),
         "checkout_inspect" => {
             let allowed = roots(host).await?;
-            Ok(checkout::inspect(args["path"].as_str(), &allowed))
+            checkout::inspect_all(&args["paths"], &allowed)
         }
         "machine_roots" => management::save_roots(host, args).await,
         "implementation_mobile_session" => mobile_session(host, args).await,

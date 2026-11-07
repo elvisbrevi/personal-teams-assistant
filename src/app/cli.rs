@@ -419,8 +419,8 @@ Knowledge
   workflows blocks list                  Blocks and the workflows that use them.
   workflows blocks save [--confirmed]    JSON on stdin: id, name, kind (instruction: text; teams_notification:
                            stage, chat {id, name}, mentions, template with {item} {link} {pull_requests}
-                           {summary}, needs --confirmed; launcher: stage, launcher {id, digest}, only from
-                           the local page or the owner's portal, never here).
+                           {summary}, needs --confirmed and a chat you belong to; launcher: stage, launcher
+                           {id, digest}, only from the local page or the owner's portal, never here).
   workflows blocks remove ID             Refused while a workflow uses it.
   workflows repositories --project NAME [--organization URL] [--source ID]
                            The project's Git repositories (read credential, cached five minutes).
@@ -781,13 +781,11 @@ async fn workflows_command(args: &[String]) -> Result<Reply> {
         (Some("blocks"), Some("list")) => ("workflow_blocks_list", json!({})),
         (Some("blocks"), Some("save")) => {
             let block = input()?;
-            // A block that acts is confirmed with the chat and the text it posts.
-            if block["kind"] == "teams_notification"
-                && let Some(reply) = unconfirmed(
-                    args,
-                    super::tools::confirmation("workflow_block_save", &json!({"block":block}))
-                        .unwrap_or_default(),
-                )
+            // A block that acts is confirmed with what it does (its chat and text, or its
+            // launcher), as MCP asks; an instruction block is saved without it.
+            if let Some(question) =
+                super::tools::confirmation("workflow_block_save", &json!({"block":block}))
+                && let Some(reply) = unconfirmed(args, question)
             {
                 return Ok(reply);
             }

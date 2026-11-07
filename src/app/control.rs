@@ -774,6 +774,33 @@ fn arg<T: serde::de::DeserializeOwned>(
     serde_json::from_value(value.get(name).cloned().unwrap_or(Value::Null))
         .map_err(|_| format!("invalid argument: {name}"))
 }
+/// The reply of an operation that failed with `message`: its `[invalid_input]`, `[conflict]`,
+/// `[not_ready]` or `[network]` prefix gives the code and exit status and is removed; `invalid`
+/// makes it invalid input whatever it says.
+pub(super) fn failure(message: &str, invalid: bool) -> Reply {
+    let (code, exit) = if invalid || message.starts_with("[invalid_input]") {
+        ("invalid_input", 2)
+    } else if message.starts_with("[conflict]") {
+        ("state_conflict", 6)
+    } else if message.starts_with("[not_ready]") {
+        ("not_ready", 3)
+    } else if message.starts_with("[network]") {
+        ("dependency_or_network", 5)
+    } else {
+        ("operation_failed", 1)
+    };
+    let prefix = format!(
+        "[{}] ",
+        match exit {
+            2 => "invalid_input",
+            3 => "not_ready",
+            5 => "network",
+            6 => "conflict",
+            _ => "error",
+        }
+    );
+    Reply::error(code, exit, message.strip_prefix(&prefix).unwrap_or(message))
+}
 pub(crate) async fn dispatch(host: &Arc<Host>, request: Request) -> Reply {
     // Reject before diagnostics: a failed account check must not read or write a
     // newly rebound account's paths, even to record the rejection.
@@ -1023,35 +1050,10 @@ async fn dispatch_inner(host: &Arc<Host>, request: Request) -> Reply {
     let result = operate(host, method, &args).await;
     let mut reply = match result {
         Ok(data) => Reply::success(data),
-        Err(message) => {
-            let (code, exit) = if message.starts_with("[invalid_input]")
-                || message.starts_with("invalid argument")
-                || method == "validate"
-            {
-                ("invalid_input", 2)
-            } else if message.starts_with("[conflict]") {
-                ("state_conflict", 6)
-            } else if message.starts_with("[not_ready]") {
-                ("not_ready", 3)
-            } else if message.starts_with("[network]") {
-                ("dependency_or_network", 5)
-            } else {
-                ("operation_failed", 1)
-            };
-            let message = message
-                .strip_prefix(&format!(
-                    "[{}] ",
-                    match exit {
-                        2 => "invalid_input",
-                        3 => "not_ready",
-                        5 => "network",
-                        6 => "conflict",
-                        _ => "error",
-                    }
-                ))
-                .unwrap_or(&message);
-            Reply::error(code, exit, message)
-        }
+        Err(message) => failure(
+            &message,
+            message.starts_with("invalid argument") || method == "validate",
+        ),
     };
     // No provider passed: fail, but keep each provider's failure class in `data`.
     if reply.ok

@@ -343,19 +343,24 @@ the GUI's settings) keep the stored workflows and blocks.
    organizations; a project with more than 1000 repositories fails instead of listing part.
 2. Choose the machine and the checkouts: `machine_list` gives the machine ID (the coordinator's
    own row for the coordinator); each repository needs the canonical directory of its checkout
-   on that machine, inside its allowed roots (`implementation_browse` lists them). Its installed
-   CLIs, models and efforts come from `implementation_catalog`.
+   on that machine, inside its allowed roots (`implementation_browse` lists them), written as
+   that machine spells it (`C:\Work\repo` for a Windows machine, `/Users/...` for a Mac,
+   whatever system the coordinator runs). Its installed CLIs, models and efforts come from
+   `implementation_catalog`.
 3. Save blocks first if the workflow uses any: `pta workflows blocks save` (MCP
    `workflow_block_save`), JSON on stdin with `id`, `name`, `kind` and that kind's fields:
-   - `instruction`: `text` (at most 8000 characters), no stage.
+   - `instruction`: `text` (at most 8000 characters), no stage; saved without confirmation.
    - `teams_notification`: `stage` (`before_planning`, `plan_ready`, `children_created`,
      `child_done`, `pull_requests_completed`, `done`, `failed`), `chat` `{id, name}` from
      `teams_chats`, `mentions` (member display names, at most 20) and `template` (at most 4000
      characters; only `{item}`, `{link}`, `{pull_requests}` and `{summary}`). Show the user the
      chat and the text and save it with `--confirmed` (MCP: the confirmation names them); the
-     reply echoes `chat`, `mentions` and `template`.
+     reply echoes `chat`, `mentions` and `template`. The chat must be one the user belongs to:
+     a chat `teams_chats` does not list is refused, and when no Microsoft session can read the
+     chats on the coordinator the block is saved with a warning in `warnings`. Mentions are
+     not checked when saving; they are matched to the chat's members when it posts.
    - `launcher`: `stage` and `launcher` `{id, digest}` of a launcher approved on the coordinator
-     with that program digest. Only the owner saves one, at the coordinator's local page or in
+     with that program digest, confirmed like a notification. Only the owner saves one, at the coordinator's local page or in
      their own portal session, as when approving a launcher: the CLI, MCP, the remote agent
      endpoint, machine credentials and shared portal accounts are refused.
 4. `pta workflows save` (MCP `workflow_save` with `workflow`), JSON on stdin: `id`, `name`,
@@ -365,14 +370,16 @@ the GUI's settings) keep the stored workflows and blocks.
    `agent` `{provider: codex|claude|opencode, model, effort}`, `instructions` (at most 8000
    characters) and `blocks` (existing block IDs, at most 10, in order). The host refuses an
    unknown project or repository, a repository name other than the catalog's, a checkout outside
-   the roots, a symbolic link alias (save the canonical directory the refusal names), a
-   directory that is not a Git checkout, an origin naming another repository, an agent, model or
+   the roots, a directory reached through a symbolic link below its root (save the canonical
+   directory the refusal names), two checkouts for one repository (keys are compared without
+   letter case), a directory that is not a Git checkout, an origin naming another repository, an agent, model or
    effort the machine does not have, a missing block and anything over the limits (50
    workflows, 100 blocks, 20 repositories). The reply's `warnings` list what could not be
-   verified: an offline machine or one whose version cannot inspect checkouts (its directories
-   are then checked only against the roots it last reported), a checkout without a readable
-   origin, an agent catalog the machine did not return. Relay them; the machine checks again
-   before a run.
+   verified or was adjusted: an offline machine or one whose version cannot inspect checkouts
+   (its directories are then checked only against the roots it last reported), a checkout
+   without a readable origin, an agent catalog the machine did not return, a directory saved as
+   the machine spells it (letter case on Windows or macOS). Relay them; the machine checks
+   again before a run.
 5. `pta workflows enable ID` / `disable ID` (MCP `workflow_save` with `id` and `enabled` only)
    change nothing else. `pta workflows list|show ID` and `pta workflows blocks list` (with
    `used_by`) read them. `pta workflows remove ID --confirmed` (MCP `workflow_remove`, needs

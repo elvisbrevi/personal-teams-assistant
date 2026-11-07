@@ -43,20 +43,7 @@ fn conflict(text: impl std::fmt::Display) -> String {
 pub(super) async fn operate(host: &Arc<Host>, request: &control::Request) -> control::Reply {
     match operation(host, &request.method, &request.args).await {
         Ok(data) => control::Reply::success(data),
-        Err(message) => {
-            let (code, exit, prefix) = if message.starts_with("[invalid_input] ") {
-                ("invalid_input", 2, "[invalid_input] ")
-            } else if message.starts_with("[conflict] ") {
-                ("state_conflict", 6, "[conflict] ")
-            } else if message.starts_with("[not_ready] ") {
-                ("not_ready", 3, "[not_ready] ")
-            } else if message.starts_with("[network] ") {
-                ("dependency_or_network", 5, "[network] ")
-            } else {
-                ("operation_failed", 1, "")
-            };
-            control::Reply::error(code, exit, message.strip_prefix(prefix).unwrap_or(&message))
-        }
+        Err(message) => control::failure(&message, false),
     }
 }
 
@@ -297,7 +284,12 @@ async fn save(host: &Arc<Host>, args: SaveArgs) -> Result<Value, String> {
             let mut workflow: Workflow = serde_json::from_value(value)
                 .map_err(|e| invalid(format!("Invalid workflow: {e}.")))?;
             workflow.updated_at = now();
+            // Refuses checkouts keyed twice by one repository, then keys them in lowercase.
             core::validate_workflow(&workflow).map_err(invalid)?;
+            workflow.checkouts = std::mem::take(&mut workflow.checkouts)
+                .into_iter()
+                .map(|(id, directory)| (id.to_lowercase(), directory))
+                .collect();
             // Everything the map alone can refuse, before any machine or catalog is read.
             let mut candidate = state.settings.map().map_err(fail)?;
             upsert(&mut candidate.workflows, workflow.clone(), |w| &w.id);
@@ -324,6 +316,12 @@ fn upsert<T>(items: &mut Vec<T>, item: T, id: impl Fn(&T) -> &String) {
     }
 }
 
+/// How long reading the project's catalog may take while a workflow is saved: with the one
+/// round of machine calls after it (at most 40 seconds, run together), the save answers within
+/// the control channel's 120-second client deadline, so nothing is committed after a client
+/// gave up waiting.
+const CATALOG_SECONDS: u64 = 60;
+
 /// Gather what the workflow is checked against and check it; returns the warnings.
 async fn verify(host: &Arc<Host>, workflow: &mut Workflow) -> Result<Vec<String>, String> {
     let state = &host.state;
@@ -340,81 +338,133 @@ async fn verify(host: &Arc<Host>, workflow: &mut Workflow) -> Result<Vec<String>
         // The shared server runs no coding agent for another account.
         authority::require_execution(state).map_err(|_| invalid(authority::EXECUTION_DENIED))?;
     }
-    let (project_known, catalog) = match tools::todo::repositories(
-        state,
-        None,
-        Some(&workflow.organization),
-        &workflow.project,
+    let listed = tokio::time::timeout(
+        std::time::Duration::from_secs(CATALOG_SECONDS),
+        tools::todo::repositories(state, None, Some(&workflow.organization), &workflow.project),
     )
     .await
-    {
+    .map_err(|_| {
+        "[network] The project's Git repositories could not be read in time.".to_owned()
+    })?;
+    let mut facts = Facts {
+        project_known: false,
+        catalog: Vec::new(),
+        os: machine.os.clone(),
+        roots: machine.roots.clone(),
+        agents: Err("not asked".into()),
+        checkouts: BTreeMap::new(),
+    };
+    match listed {
         Ok(listed) => {
             // The project's own spelling.
             if let Some(project) = listed["project"].as_str() {
                 workflow.project = project.to_owned();
             }
-            let catalog = serde_json::from_value(listed["repositories"].clone()).map_err(fail)?;
-            (true, catalog)
+            facts.catalog = serde_json::from_value(listed["repositories"].clone()).map_err(fail)?;
+            facts.project_known = true;
         }
-        Err(error) if error.starts_with("[invalid_input] invalid project") => (false, Vec::new()),
+        // Refused at once, without asking the machine anything.
+        Err(error) if error.starts_with("[invalid_input] invalid project") => {
+            return core::check(workflow, &facts).map_err(invalid);
+        }
         Err(error) => return Err(error),
-    };
-    let reachable = machine.own || machine.online;
-    let agents = if reachable {
-        implementation::machine_call(host, &workflow.machine, "implementation_catalog", json!({}))
+    }
+    let directories: Vec<(String, PathBuf)> = workflow
+        .repositories
+        .iter()
+        .filter_map(|r| {
+            let key = r.id.to_lowercase();
+            workflow.checkouts.get(&key).map(|d| (key, d.clone()))
+        })
+        .collect();
+    let paths: Vec<PathBuf> = directories.iter().map(|(_, d)| d.clone()).collect();
+    let agents = async {
+        if machine.own || machine.online {
+            implementation::machine_call(
+                host,
+                &workflow.machine,
+                "implementation_catalog",
+                json!({}),
+            )
             .await
             .map_err(|_| "the machine did not answer".to_owned())
-    } else {
-        Err("the machine is offline".to_owned())
-    };
-    let mut checkouts = BTreeMap::new();
-    if project_known {
-        for repository in &workflow.repositories {
-            let Some((_, directory)) = workflow
-                .checkouts
-                .iter()
-                .find(|(id, _)| id.eq_ignore_ascii_case(&repository.id))
-            else {
-                continue;
-            };
-            let inspection = inspect(host, &workflow.machine, &machine, directory).await;
-            checkouts.insert(repository.id.to_lowercase(), inspection);
+        } else {
+            Err("the machine is offline".to_owned())
         }
-    }
-    core::check(
-        workflow,
-        &Facts {
-            project_known,
-            catalog,
-            roots: machine.roots,
-            agents,
-            checkouts,
-        },
-    )
-    .map_err(invalid)
+    };
+    let (agents, inspections) =
+        tokio::join!(agents, inspect(host, &workflow.machine, &machine, &paths));
+    facts.agents = agents;
+    facts.checkouts = directories
+        .into_iter()
+        .map(|(key, _)| key)
+        .zip(inspections)
+        .collect();
+    core::check(workflow, &facts).map_err(invalid)
 }
 
-/// One checkout as the machine sees it: asked once with `checkout_inspect`, or unknown when the
-/// machine is offline or its version predates the call (it would not answer it).
+/// Every checkout as the machine sees it, asked in one `checkout_inspect` call, or unknown when
+/// the machine is offline, its version predates the call (it would not answer it) or its
+/// answer cannot be read.
 async fn inspect(
     host: &Arc<Host>,
     id: &str,
     machine: &implementation::MachineFacts,
-    directory: &Path,
-) -> Inspection {
+    directories: &[PathBuf],
+) -> Vec<Inspection> {
+    let unknown = |reason: &str| vec![Inspection::Unknown(reason.into()); directories.len()];
     if !(machine.own || machine.online) {
-        return Inspection::Unknown("the machine is offline".into());
+        return unknown("the machine is offline");
     }
     if !machine.inspect {
-        return Inspection::Unknown(
-            "the machine's version cannot inspect checkouts; update it".into(),
-        );
+        return unknown("the machine's version cannot inspect checkouts; update it");
     }
-    match implementation::machine_call(host, id, "checkout_inspect", json!({"path":directory}))
-        .await
+    let answer = match implementation::machine_call(
+        host,
+        id,
+        "checkout_inspect",
+        json!({"paths":directories}),
+    )
+    .await
     {
-        Ok(answer) => implementation::checkout::inspection(&answer),
-        Err(_) => Inspection::Unknown("the machine did not answer".into()),
+        Ok(answer) => answer,
+        Err(_) => return unknown("the machine did not answer"),
+    };
+    match answer["checkouts"].as_array() {
+        Some(answers) if answers.len() == directories.len() => answers
+            .iter()
+            .map(implementation::checkout::inspection)
+            .collect(),
+        _ => unknown("the machine's answer could not be read"),
+    }
+}
+
+/// The personal chat (Teams notes) is always the user's own.
+const PERSONAL_CHAT: &str = "48:notes";
+/// How long reading the user's chats may take while a block is saved.
+const CHATS_SECONDS: u64 = 60;
+
+/// Whether the user belongs to the chat, from the same chat list `pta teams chats` shows: a
+/// refusal when the list says no, a warning when it cannot be read here (no Microsoft session
+/// on this computer, or Graph did not answer). Mentions are resolved when a notification is
+/// posted, against that chat's members.
+async fn verify_chat(state: &DesktopState, chat: &str) -> Result<Option<String>, String> {
+    if chat == PERSONAL_CHAT {
+        return Ok(None);
+    }
+    let read = tokio::time::timeout(std::time::Duration::from_secs(CHATS_SECONDS), async {
+        let graph = teams_graph(state).await?;
+        graph.chat_directory(None).await
+    })
+    .await;
+    match read {
+        Ok(Ok(chats)) if chats.iter().any(|c| c["id"] == chat) => Ok(None),
+        Ok(Ok(_)) => Err(invalid(format!(
+            "You are not a member of the chat {chat}; choose one that pta teams chats lists."
+        ))),
+        _ => Ok(Some(format!(
+            "The chat {chat} could not be checked against your chats (no Microsoft session could read them here); it is checked again when the block posts."
+        ))),
     }
 }
 
@@ -425,15 +475,19 @@ async fn save_block(host: &Arc<Host>, args: BlockSaveArgs) -> Result<Value, Stri
         serde_json::from_value(args.block).map_err(|e| invalid(format!("Invalid block: {e}.")))?;
     block.updated_at = now();
     core::validate_block(&block).map_err(invalid)?;
+    let mut warnings = Vec::new();
+    // A block that acts is confirmed with what it does, on every surface.
+    if block.kind != Kind::Instruction && !args.confirmed {
+        return Err(invalid(format!(
+            "Confirm this block with the user, then save it with confirmed: {}.",
+            describe(&block)
+        )));
+    }
     match block.kind {
         Kind::Instruction => {}
         Kind::TeamsNotification => {
-            if !args.confirmed {
-                return Err(invalid(format!(
-                    "Confirm this Teams notification block with the user, then save it with confirmed: {}.",
-                    describe(&block)
-                )));
-            }
+            let chat = block.chat.clone().unwrap_or_default();
+            warnings.extend(verify_chat(state, &chat.id).await?);
         }
         Kind::Launcher => {
             let invocation = authority::invocation(state)
@@ -478,7 +532,7 @@ async fn save_block(host: &Arc<Host>, args: BlockSaveArgs) -> Result<Value, Stri
         Ok(())
     })
     .await?;
-    let mut reply = json!({"block":saved,"saved":true});
+    let mut reply = json!({"block":saved,"saved":true,"warnings":warnings});
     if saved.kind != Kind::Instruction {
         reply["confirmation"] = json!(describe(&saved));
     }

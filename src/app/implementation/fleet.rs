@@ -673,10 +673,7 @@ pub(super) async fn call(
             .await
             .machines
             .iter()
-            .any(|m| m.id == machine
-                && !m.revoked
-                && now() - m.seen < 35
-                && m.account_version == version),
+            .any(|m| m.id == machine && m.online() && m.account_version == version),
         "Execution machine is offline."
     );
     if matches!(

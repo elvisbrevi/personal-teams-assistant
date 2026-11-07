@@ -3449,7 +3449,8 @@ async fn only_the_owners_portal_session_saves_a_launcher_block() {
         );
     }
     let block = json!({"block":{"id":"desa","name":"Release in desa","kind":"launcher",
-        "stage":"pull_requests_completed","launcher":{"id":"release-desa","digest":digest}}});
+        "stage":"pull_requests_completed","launcher":{"id":"release-desa","digest":digest}},
+        "confirmed":true});
     async fn save(
         host: &Arc<Host>,
         transport: authority::Transport,

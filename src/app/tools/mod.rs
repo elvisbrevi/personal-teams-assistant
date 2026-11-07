@@ -1501,7 +1501,7 @@ pub(super) const TOOLS: &[Tool] = &[
     Tool {
         name: "workflow_block_save",
         title: "Save a workflow block",
-        description: "Adds or replaces a workflow block by id on the account's coordinator. kind instruction: text (at most 8000 characters), no stage. kind teams_notification: stage (before_planning, plan_ready, children_created, child_done, pull_requests_completed, done or failed), chat {id from teams_chats, name}, mentions (member display names, at most 20) and template (at most 4000 characters; placeholders {item}, {link}, {pull_requests}, {summary}); saving it needs the user's confirmation of that chat and text. kind launcher: stage and launcher {id, digest} of an approved launcher of the coordinator; only the owner saves one, in the local page or their own portal, so this tool is refused for it from MCP and the CLI. Limit: 100 blocks.",
+        description: "Adds or replaces a workflow block by id on the account's coordinator. kind instruction: text (at most 8000 characters), no stage. kind teams_notification: stage (before_planning, plan_ready, children_created, child_done, pull_requests_completed, done or failed), chat {id from teams_chats, name}, mentions (member display names, at most 20) and template (at most 4000 characters; placeholders {item}, {link}, {pull_requests}, {summary}); saving it needs the user's confirmation of that chat and text, and the chat must be one the user belongs to (checked against their chats when a Microsoft session can read them here; otherwise a warning); mentions are resolved against the chat's members when it posts. kind launcher: stage and launcher {id, digest} of an approved launcher of the coordinator; it needs confirmation too, and only the owner saves one, in the local page or their own portal, so this tool is refused for it from MCP and the CLI. An instruction block saves without confirmation. Limit: 100 blocks.",
         effect: Effect::External,
         schema: || {
             object(
@@ -2352,14 +2352,16 @@ pub(super) fn confirmation(name: &str, args: &Value) -> Option<String> {
             "Remove workflow {}? Its definition cannot be recovered.",
             args["id"].as_str().unwrap_or("this")
         ),
+        // Only a block that acts asks; an instruction block, or one the host will refuse as
+        // malformed, goes straight to the host.
         "workflow_block_save" => {
             match serde_json::from_value::<crate::workflows::Block>(args["block"].clone()) {
-                Ok(block) => format!(
+                Ok(block) if block.kind != crate::workflows::Kind::Instruction => format!(
                     "Save workflow block {}? {}.",
                     block.id,
                     super::workflows::describe(&block)
                 ),
-                Err(_) => "Save this workflow block?".into(),
+                _ => return None,
             }
         }
         "cloud_disconnect" => if args["forget_service_token"] == true {
@@ -2581,6 +2583,10 @@ mod tests {
                     tool.name
                 );
             }
+            // A block save asks by the block's kind (`the_catalog_lists_the_workflow_...`).
+            if tool.name == "workflow_block_save" {
+                continue;
+            }
             let ask = confirmation(
                 tool.name,
                 &json!({"resolution": {"action": "create"}, "mode": "active", "action": "start"}),
@@ -2637,6 +2643,18 @@ mod tests {
         )
         .unwrap();
         assert!(question.contains("Releases") && question.contains("{item} is out"));
+        let launcher = json!({"block":{"id":"desa","name":"Release","kind":"launcher","stage":"done",
+            "launcher":{"id":"release-desa","digest":"a".repeat(64)}}});
+        assert!(
+            confirmation("workflow_block_save", &launcher)
+                .unwrap()
+                .contains("release-desa")
+        );
+        // An instruction block, or a malformed one, does not ask: the host saves or refuses it.
+        let instruction =
+            json!({"block":{"id":"base","name":"Base","kind":"instruction","text":"Branch."}});
+        assert!(confirmation("workflow_block_save", &instruction).is_none());
+        assert!(confirmation("workflow_block_save", &json!({"block":{"kind":"poem"}})).is_none());
         assert!(
             confirmation("workflow_remove", &json!({"id":"payments"}))
                 .unwrap()

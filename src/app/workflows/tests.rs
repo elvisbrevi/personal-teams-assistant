@@ -126,6 +126,15 @@ async fn acting_blocks_are_authorized_when_they_are_saved() {
     assert!(confirmed.ok, "{:?}", confirmed.message);
     assert_eq!(confirmed.data["chat"]["name"], "Releases");
     assert_eq!(confirmed.data["template"], "{item} is released: {link}");
+    // Without a Microsoft session here, the chat is saved with a warning that it was not checked.
+    let warnings = confirmed.data["warnings"].as_array().unwrap();
+    assert_eq!(warnings.len(), 1);
+    assert!(
+        warnings[0]
+            .as_str()
+            .unwrap()
+            .contains("could not be checked")
+    );
 
     // A launcher block: only the owner at the GUI, for a launcher approved with that digest.
     consumers::add_test_launcher(&host.state, launcher("release-desa", true));
@@ -141,8 +150,18 @@ async fn acting_blocks_are_authorized_when_they_are_saved() {
         .await;
         assert!(!refused.ok, "{transport:?}");
     }
-    let from_cli = call(&host, Local, "workflow_block_save", json!({"block":block})).await;
+    let from_cli = call(
+        &host,
+        Local,
+        "workflow_block_save",
+        json!({"block":block,"confirmed":true}),
+    )
+    .await;
     assert_eq!(from_cli.code, "state_conflict");
+    // A launcher block is confirmed too, even by the owner at the GUI.
+    let unconfirmed = call(&host, Window, "workflow_block_save", json!({"block":block})).await;
+    assert_eq!(unconfirmed.code, "invalid_input");
+    assert!(unconfirmed.message.unwrap().contains("release-desa"));
     for (block, code) in [
         (
             launcher_block("desa", "release-desa", &"b".repeat(64)),
@@ -151,12 +170,24 @@ async fn acting_blocks_are_authorized_when_they_are_saved() {
         (launcher_block("desa", "waiting", DIGEST), "state_conflict"),
         (launcher_block("desa", "missing", DIGEST), "invalid_input"),
     ] {
-        let refused = call(&host, Window, "workflow_block_save", json!({"block":block})).await;
+        let refused = call(
+            &host,
+            Window,
+            "workflow_block_save",
+            json!({"block":block,"confirmed":true}),
+        )
+        .await;
         assert_eq!(refused.code, code, "{:?}", refused.message);
     }
     let map = host.state.settings.map().unwrap();
     assert!(!map.workflow_blocks.iter().any(|b| b.id == "desa"));
-    let approved = call(&host, Window, "workflow_block_save", json!({"block":block})).await;
+    let approved = call(
+        &host,
+        Window,
+        "workflow_block_save",
+        json!({"block":block,"confirmed":true}),
+    )
+    .await;
     assert!(approved.ok, "{:?}", approved.message);
     let listed = call(&host, Local, "workflow_blocks_list", json!({})).await;
     let ids: Vec<&str> = listed.data["blocks"]
@@ -396,12 +427,14 @@ async fn checkouts_are_inspected_by_their_machine_and_an_older_worker_is_unknown
         .unwrap();
     assert!(facts.own && facts.inspect);
     let canonical = repo.canonicalize().unwrap();
-    match inspect(&host, &own, &facts, &canonical).await {
+    match one(inspect(&host, &own, &facts, std::slice::from_ref(&canonical)).await) {
         Inspection::Answered {
             directory,
+            link,
             checkout,
             origin,
         } => {
+            assert!(!link);
             assert_eq!(directory, implementation::paths::plain(&canonical));
             assert!(checkout);
             assert_eq!(
@@ -412,14 +445,27 @@ async fn checkouts_are_inspected_by_their_machine_and_an_older_worker_is_unknown
         other => panic!("{other:?}"),
     }
     assert_eq!(
-        inspect(&host, &own, &facts, &outside).await,
+        one(inspect(&host, &own, &facts, std::slice::from_ref(&outside)).await),
         Inspection::Outside
     );
+    // Every checkout of a workflow is asked in one call, answers in order.
+    let all = inspect(
+        &host,
+        &own,
+        &facts,
+        &[canonical.clone(), outside.clone(), allowed.join("missing")],
+    )
+    .await;
+    assert!(matches!(
+        all[0],
+        Inspection::Answered { checkout: true, .. }
+    ));
+    assert_eq!(all[1..], [Inspection::Outside, Inspection::Missing]);
     #[cfg(unix)]
     {
         std::os::unix::fs::symlink(&outside, allowed.join("escape")).unwrap();
         assert_eq!(
-            inspect(&host, &own, &facts, &allowed.join("escape")).await,
+            one(inspect(&host, &own, &facts, &[allowed.join("escape")]).await),
             Inspection::Outside
         );
     }
@@ -438,7 +484,7 @@ async fn checkouts_are_inspected_by_their_machine_and_an_older_worker_is_unknown
         ..older
     };
     assert!(matches!(
-        inspect(&host, &worker, &online, &canonical).await,
+        one(inspect(&host, &worker, &online, std::slice::from_ref(&canonical)).await),
         Inspection::Unknown(reason) if reason.contains("version")
     ));
     let offline = implementation::MachineFacts {
@@ -447,7 +493,7 @@ async fn checkouts_are_inspected_by_their_machine_and_an_older_worker_is_unknown
         ..online
     };
     assert!(matches!(
-        inspect(&host, &worker, &offline, &canonical).await,
+        one(inspect(&host, &worker, &offline, std::slice::from_ref(&canonical)).await),
         Inspection::Unknown(reason) if reason.contains("offline")
     ));
     assert!(
@@ -456,6 +502,96 @@ async fn checkouts_are_inspected_by_their_machine_and_an_older_worker_is_unknown
             .unwrap()
             .is_none()
     );
+}
+
+fn one(mut inspections: Vec<Inspection>) -> Inspection {
+    assert_eq!(inspections.len(), 1);
+    inspections.remove(0)
+}
+
+struct SyntheticToken;
+#[async_trait::async_trait]
+impl crate::adapters::oauth::AccessToken for SyntheticToken {
+    async fn access_token(&self) -> Result<String> {
+        Ok("synthetic-graph-token".into())
+    }
+}
+
+#[tokio::test]
+async fn a_notification_names_only_a_chat_the_user_belongs_to() {
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{method, path},
+    };
+    let root = tempfile::tempdir().unwrap();
+    let host = host(root.path());
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/me/chats"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"value":[
+            {"id":"19:synthetic@thread.v2","topic":"Releases","chatType":"group","members":[]}
+        ]})))
+        .mount(&server)
+        .await;
+    // The session the running assistant would hold; a settings commit drops it, so each save
+    // below starts with it again.
+    let graph = Arc::new(crate::adapters::graph::Graph {
+        client: reqwest::Client::new(),
+        token: Arc::new(SyntheticToken),
+        base_url: server.uri(),
+        config: Arc::new(host.state.settings.config().unwrap()),
+        store: Arc::new(crate::state::Store::open(&root.path().join("graph.db")).unwrap()),
+        client_state: "synthetic-client-state-of-32-chars".into(),
+    });
+    let session = || async { *host.state.activity_graph.lock().await = Some(graph.clone()) };
+    session().await;
+    let member = call(
+        &host,
+        Local,
+        "workflow_block_save",
+        json!({"block":notification("notify"),"confirmed":true}),
+    )
+    .await;
+    assert!(member.ok, "{:?}", member.message);
+    assert_eq!(member.data["warnings"], json!([]));
+    let mut other = notification("other");
+    other["chat"] = json!({"id":"19:elsewhere@thread.v2","name":"Not mine"});
+    session().await;
+    let refused = call(
+        &host,
+        Local,
+        "workflow_block_save",
+        json!({"block":other,"confirmed":true}),
+    )
+    .await;
+    assert_eq!(refused.code, "invalid_input");
+    assert!(refused.message.unwrap().contains("not a member"));
+    let map = host.state.settings.map().unwrap();
+    assert_eq!(map.workflow_blocks.len(), 1);
+    // The personal chat is always the user's own.
+    let mut personal = notification("personal");
+    personal["chat"] = json!({"id":"48:notes","name":"Notes"});
+    let saved = call(
+        &host,
+        Local,
+        "workflow_block_save",
+        json!({"block":personal,"confirmed":true}),
+    )
+    .await;
+    assert!(saved.ok, "{:?}", saved.message);
+}
+
+#[tokio::test]
+async fn checkout_keys_are_normalized_before_anything_is_read() {
+    let root = tempfile::tempdir().unwrap();
+    let host = host(root.path());
+    let own = implementation::test_machine(&host, None).await;
+    let mut w = workflow("payments", &own);
+    w.checkouts
+        .insert(REPO.to_uppercase(), PathBuf::from("/work/other"));
+    let refused = call(&host, Local, "workflow_save", json!({"workflow":w})).await;
+    assert_eq!(refused.code, "invalid_input");
+    assert!(refused.message.unwrap().contains("two checkouts"));
 }
 
 #[test]

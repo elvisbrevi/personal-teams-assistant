@@ -7,15 +7,20 @@
 //! project's Git catalog), the execution machine, the checkout directory of each repository on
 //! it, the coding agent, its instructions and an ordered list of blocks. A block is an
 //! instruction the agents read, a Teams notification to one chat at one stage, or an approved
-//! launcher of the coordinator run at one stage. Nothing here grants anything: the host checks
-//! every directory, repository, agent, chat and launcher when a definition is saved (`check`)
-//! and again when it is used, and instructions reach the agents as untrusted input.
+//! launcher of the coordinator run at one stage. Nothing here grants anything: when a
+//! definition is saved the host checks its project, repositories, checkout directories and
+//! agent on the machine (`check`), a notification's chat against the user's chats when a
+//! Microsoft session can read them, and a launcher's approval; mentions are resolved against
+//! the chat's members only when a notification is posted. Everything is checked again when it
+//! is used, and instructions reach the agents as untrusted input. Directories are compared as
+//! the execution machine spells them (`absolute_on`, `under`), whatever system the coordinator
+//! runs.
 
 use anyhow::{Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet},
-    path::{Path, PathBuf},
+    path::PathBuf,
 };
 
 pub const MAX_WORKFLOWS: usize = 50;
@@ -343,18 +348,23 @@ pub fn validate_workflow(workflow: &Workflow) -> Result<()> {
         valid_uuid(&workflow.machine),
         "Workflow {id} needs the ID of its execution machine (pta tools call machine_list)."
     );
-    let mut directories = BTreeSet::new();
+    let mut keys = BTreeSet::new();
+    let mut directories: Vec<&str> = Vec::new();
     for (repository, directory) in &workflow.checkouts {
         ensure!(
             repositories.contains(&repository.to_lowercase()),
             "Workflow {id} has a checkout for repository {repository}, which it does not list."
         );
         ensure!(
-            directory.is_absolute()
-                && directory.as_os_str().len() <= 4096
-                && directories.insert(directory.clone()),
+            keys.insert(repository.to_lowercase()),
+            "Workflow {id} has two checkouts for repository {repository}."
+        );
+        let directory = directory.to_str().unwrap_or_default();
+        ensure!(
+            absolute(directory) && !directories.iter().any(|d| same_directory(d, directory)),
             "Workflow {id}: each checkout is a different absolute directory on the machine."
         );
+        directories.push(directory);
     }
     for repository in &workflow.repositories {
         ensure!(
@@ -568,16 +578,18 @@ pub fn origin_names(
 /// What the execution machine said about one checkout directory (`checkout_inspect`).
 #[derive(Clone, Debug, PartialEq)]
 pub enum Inspection {
-    /// The machine answered: the canonical directory, whether it is a Git checkout, and its
-    /// `origin` when it has a readable one.
+    /// The machine answered: the canonical directory, whether the path given goes through a
+    /// symbolic link below its root, whether it is a Git checkout, and its `origin` when it has
+    /// a readable one.
     Answered {
         directory: PathBuf,
+        link: bool,
         checkout: bool,
         origin: Option<String>,
     },
     /// The directory does not exist on the machine or is not a directory.
     Missing,
-    /// The directory, once its links are resolved, is outside the machine's allowed roots.
+    /// The directory is not under the machine's allowed roots, or resolves outside them.
     Outside,
     /// The machine could not answer (offline, or a version without `checkout_inspect`).
     Unknown(String),
@@ -589,23 +601,29 @@ pub struct Facts {
     /// The project is one of the enabled Azure source's configured organizations.
     pub project_known: bool,
     pub catalog: Vec<CatalogRepository>,
+    /// The operating system the machine reported (`linux`, `macos`, `windows`): how it spells
+    /// directories, whatever the coordinator's own system is.
+    pub os: String,
     /// The machine's allowed roots, as it last reported them (checked when it cannot answer).
     pub roots: Vec<PathBuf>,
     /// The machine's installed CLIs (`implementation_catalog`), or why they are unknown.
     pub agents: std::result::Result<serde_json::Value, String>,
-    /// Each repository ID's inspection.
+    /// Each repository ID's (lowercase) inspection.
     pub checkouts: BTreeMap<String, Inspection>,
 }
 
-/// Check a workflow against what the host found; the warnings are what could not be verified.
-pub fn check(workflow: &Workflow, facts: &Facts) -> Result<Vec<String>> {
+/// Check a workflow against what the host found; the warnings are what could not be verified
+/// or what was adjusted. A checkout the machine spells differently (letter case on a
+/// case-insensitive file system) is saved as the machine's canonical directory.
+pub fn check(workflow: &mut Workflow, facts: &Facts) -> Result<Vec<String>> {
     let mut warnings = Vec::new();
     ensure!(
         facts.project_known,
         "Project {} is not in the configured organizations of the enabled Azure source.",
         workflow.project
     );
-    for repository in &workflow.repositories {
+    let repositories = workflow.repositories.clone();
+    for repository in &repositories {
         let Some(known) = facts
             .catalog
             .iter()
@@ -624,44 +642,59 @@ pub fn check(workflow: &Workflow, facts: &Facts) -> Result<Vec<String>> {
             repository.id,
             known.name
         );
+        let key = repository.id.to_lowercase();
         let directory = workflow
             .checkouts
             .iter()
             .find(|(id, _)| id.eq_ignore_ascii_case(&repository.id))
-            .map(|(_, d)| d)
+            .map(|(_, d)| d.clone())
             .ok_or_else(|| {
                 anyhow::anyhow!("Repository {} needs its checkout directory.", known.name)
             })?;
-        let shown = directory.display();
-        match facts.checkouts.get(&repository.id.to_lowercase()) {
+        let text = directory.to_string_lossy().into_owned();
+        ensure!(
+            absolute_on(&text, &facts.os),
+            "{text} is not an absolute directory on this {} machine.",
+            facts.os
+        );
+        match facts.checkouts.get(&key) {
             Some(Inspection::Answered {
                 directory: canonical,
+                link,
                 checkout,
                 origin,
             }) => {
                 ensure!(
-                    canonical == directory,
-                    "{shown} is a symbolic link alias of {}; save the canonical directory.",
+                    !link,
+                    "{text} goes through a symbolic link (it names {}); save the canonical directory.",
                     canonical.display()
                 );
-                ensure!(*checkout, "{shown} is not a Git checkout.");
+                ensure!(*checkout, "{text} is not a Git checkout.");
                 match origin {
                     Some(origin) => ensure!(
                         origin_names(origin, &workflow.organization, &workflow.project, known),
-                        "The origin of {shown} ({origin}) names another repository than {}.",
+                        "The origin of {text} ({origin}) names another repository than {}.",
                         known.name
                     ),
                     None => warnings.push(format!(
-                        "{shown} has no readable origin remote, so it could not be verified as a checkout of {}.",
+                        "{text} has no readable origin remote, so it could not be verified as a checkout of {}.",
                         known.name
                     )),
                 }
+                if *canonical != directory {
+                    warnings.push(format!(
+                        "{text} is saved as the machine spells it: {}.",
+                        canonical.display()
+                    ));
+                    workflow.checkouts.remove(&key);
+                    workflow.checkouts.insert(key, canonical.clone());
+                }
             }
             Some(Inspection::Missing) => {
-                bail!("{shown} does not exist on the machine or is not a directory.")
+                bail!("{text} does not exist on the machine or is not a directory.")
             }
             Some(Inspection::Outside) => bail!(
-                "{shown} is outside the machine's allowed roots (a symbolic link cannot leave them)."
+                "{text} is outside the machine's allowed roots (a symbolic link cannot leave them)."
             ),
             unknown => {
                 let reason = match unknown {
@@ -669,11 +702,14 @@ pub fn check(workflow: &Workflow, facts: &Facts) -> Result<Vec<String>> {
                     _ => "the machine did not inspect it",
                 };
                 ensure!(
-                    inside(directory, &facts.roots),
-                    "{shown} is outside the machine's allowed roots."
+                    facts
+                        .roots
+                        .iter()
+                        .any(|root| under(&text, &root.to_string_lossy(), &facts.os)),
+                    "{text} is outside the machine's allowed roots."
                 );
                 warnings.push(format!(
-                    "{shown} could not be verified as a checkout of {} ({reason}); the machine checks it again before a run.",
+                    "{text} could not be verified as a checkout of {} ({reason}); the machine checks it again before a run.",
                     known.name
                 ));
             }
@@ -713,14 +749,92 @@ pub fn check(workflow: &Workflow, facts: &Facts) -> Result<Vec<String>> {
     Ok(warnings)
 }
 
-/// Whether a directory is inside one of the roots, component by component (no link is
-/// resolved: used only when the machine itself cannot answer).
-pub fn inside(directory: &Path, roots: &[PathBuf]) -> bool {
-    directory.is_absolute()
-        && !directory
-            .components()
-            .any(|c| matches!(c, std::path::Component::ParentDir))
-        && roots.iter().any(|root| directory.starts_with(root))
+/// The components of an absolute directory as a machine of that spelling writes it, or none
+/// when it is not absolute there or holds `.` or `..`. Text-based, so the coordinator reads a
+/// Windows machine's directories the same on any system: `C:\…` or `C:/…`, `\\server\share\…`
+/// and the verbatim `\\?\` forms on Windows; `/…` elsewhere.
+fn components(path: &str, windows: bool) -> Option<Vec<String>> {
+    let parts: Vec<String> = if windows {
+        let path = path.replace('/', "\\");
+        let path = match path.strip_prefix(r"\\?\UNC\") {
+            Some(rest) => format!(r"\\{rest}"),
+            None => path.strip_prefix(r"\\?\").unwrap_or(&path).to_owned(),
+        };
+        let bytes = path.as_bytes();
+        let mut parts = Vec::new();
+        let rest = if bytes.len() >= 3
+            && bytes[0].is_ascii_alphabetic()
+            && bytes[1] == b':'
+            && bytes[2] == b'\\'
+        {
+            parts.push(path[..2].to_owned());
+            &path[3..]
+        } else {
+            let mut segments = path.strip_prefix(r"\\")?.splitn(3, '\\');
+            let (server, share) = (segments.next()?, segments.next()?);
+            if server.is_empty() || share.is_empty() {
+                return None;
+            }
+            parts.push(format!(r"\\{server}\{share}"));
+            segments.next().unwrap_or("")
+        };
+        parts.extend(
+            rest.split('\\')
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned),
+        );
+        parts
+    } else {
+        let rest = path.strip_prefix('/')?;
+        rest.split('/')
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+            .collect()
+    };
+    (!parts.iter().any(|p| p == "." || p == "..") && !path.chars().any(char::is_control))
+        .then_some(parts)
+}
+fn windows(os: &str) -> bool {
+    os.eq_ignore_ascii_case("windows")
+}
+/// Whether the file systems of that system compare names without letter case by default.
+fn case_insensitive(os: &str) -> bool {
+    windows(os) || os.eq_ignore_ascii_case("macos")
+}
+
+/// Whether a directory is absolute in some machine's spelling (Unix or Windows), as the map
+/// checks it without knowing the machine.
+pub fn absolute(path: &str) -> bool {
+    path.len() <= 4096 && (components(path, false).is_some() || components(path, true).is_some())
+}
+/// Whether a directory is absolute on a machine of that operating system.
+pub fn absolute_on(path: &str, os: &str) -> bool {
+    path.len() <= 4096 && components(path, windows(os)).is_some()
+}
+/// Whether a directory is a root or below it on a machine of that operating system, component
+/// by component and without reading the file system (no link is resolved).
+pub fn under(path: &str, root: &str, os: &str) -> bool {
+    let (Some(path), Some(root)) = (components(path, windows(os)), components(root, windows(os)))
+    else {
+        return false;
+    };
+    let same = |a: &String, b: &String| {
+        if case_insensitive(os) {
+            a.to_lowercase() == b.to_lowercase()
+        } else {
+            a == b
+        }
+    };
+    path.len() >= root.len() && root.iter().zip(&path).all(|(r, p)| same(r, p))
+}
+/// The same directory written twice, as a machine of any system could see it.
+fn same_directory(a: &str, b: &str) -> bool {
+    let key = |p: &str| {
+        components(p, false)
+            .or_else(|| components(p, true))
+            .map(|c| c.join("/").to_lowercase())
+    };
+    key(a).is_some() && key(a) == key(b)
 }
 
 #[cfg(test)]
@@ -807,6 +921,7 @@ pub(crate) mod tests {
         Facts {
             project_known: true,
             catalog: catalog(),
+            os: "linux".into(),
             roots: vec![PathBuf::from("/work")],
             agents: Ok(agents()),
             checkouts: BTreeMap::from([(REPO.to_lowercase(), inspection)]),
@@ -815,9 +930,13 @@ pub(crate) mod tests {
     fn answered(origin: Option<&str>) -> Inspection {
         Inspection::Answered {
             directory: PathBuf::from("/work/payments-api"),
+            link: false,
             checkout: true,
             origin: origin.map(str::to_owned),
         }
+    }
+    fn checked(workflow: &Workflow, facts: &Facts) -> Result<Vec<String>> {
+        check(&mut workflow.clone(), facts)
     }
 
     #[test]
@@ -953,6 +1072,78 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn directories_are_read_as_the_machine_spells_them() {
+        // A Windows machine's directories are absolute and under its roots on any coordinator.
+        assert!(absolute(r"C:\Work\payments-api") && absolute("C:/Work/x") && absolute("/srv/x"));
+        assert!(absolute(r"\\server\share\x") && !absolute("relative") && !absolute("C:"));
+        assert!(absolute_on(r"C:\Work\x", "windows") && !absolute_on(r"C:\Work\x", "linux"));
+        assert!(absolute_on("/srv/x", "macos") && !absolute_on("/srv/x", "windows"));
+        assert!(!absolute(r"C:\Work\..\Windows") && !absolute("/work/../etc"));
+        assert!(under(r"C:\Work\payments-api", r"C:\Work", "windows"));
+        assert!(under(r"c:/work/Payments-API", r"C:\Work", "windows"));
+        assert!(under(r"\\?\C:\Work\x", r"C:\Work", "windows"));
+        assert!(!under(r"C:\Workshop\x", r"C:\Work", "windows"));
+        assert!(under("/Users/Ana/Work/x", "/users/ana/work", "macos"));
+        assert!(!under("/Users/Ana/Work/x", "/users/ana/work", "linux"));
+        assert!(!under("/work2/x", "/work", "linux") && under("/work", "/work", "linux"));
+        // The check on a Linux coordinator for a Windows machine that cannot answer.
+        let mut w = workflow("payments");
+        w.checkouts
+            .insert(REPO.into(), PathBuf::from(r"C:\Work\payments-api"));
+        assert!(validate_workflow(&w).is_ok());
+        let mut f = facts(Inspection::Unknown("offline".into()));
+        f.os = "windows".into();
+        f.roots = vec![PathBuf::from(r"C:\Work")];
+        assert_eq!(checked(&w, &f).unwrap().len(), 1);
+        f.roots = vec![PathBuf::from(r"D:\Other")];
+        assert!(checked(&w, &f).is_err());
+        // A Unix directory is not absolute on a Windows machine, nor the reverse.
+        f.roots = vec![PathBuf::from(r"C:\Work")];
+        assert!(
+            checked(&workflow("payments"), &f)
+                .unwrap_err()
+                .to_string()
+                .contains("absolute")
+        );
+        let linux = facts(Inspection::Unknown("offline".into()));
+        assert!(checked(&w, &linux).is_err());
+    }
+
+    #[test]
+    fn checkouts_are_keyed_once_per_repository_whatever_the_letter_case() {
+        let mut w = workflow("payments");
+        w.checkouts
+            .insert(REPO.to_uppercase(), PathBuf::from("/work/other"));
+        let error = validate_workflow(&w).unwrap_err().to_string();
+        assert!(error.contains("two checkouts"), "{error}");
+        // The same directory written twice is refused too, as a case-insensitive machine sees it.
+        let mut w = workflow("payments");
+        w.repositories.push(Repository {
+            id: OTHER.into(),
+            name: "payments-web".into(),
+        });
+        w.checkouts
+            .insert(OTHER.into(), "/WORK/payments-api".into());
+        assert!(validate_workflow(&w).is_err());
+    }
+
+    #[test]
+    fn a_checkout_is_saved_as_the_machine_spells_it() {
+        let origin = "git@ssh.dev.azure.com:v3/example/Payments/payments-api";
+        let mut w = workflow("payments");
+        w.checkouts
+            .insert(REPO.into(), PathBuf::from("/Work/Payments-API"));
+        let mut f = facts(answered(Some(origin)));
+        f.os = "macos".into();
+        let warnings = check(&mut w, &f).unwrap();
+        assert_eq!(w.checkouts[REPO], PathBuf::from("/work/payments-api"));
+        assert!(
+            warnings[0].contains("as the machine spells it"),
+            "{warnings:?}"
+        );
+    }
+
+    #[test]
     fn azure_remotes_are_read_in_every_spelling() {
         let expected = Some(("example".into(), "payments".into(), "payments-api".into()));
         for remote in [
@@ -986,53 +1177,55 @@ pub(crate) mod tests {
         let w = workflow("payments");
         let origin = "git@ssh.dev.azure.com:v3/example/Payments/payments-api";
         assert_eq!(
-            check(&w, &facts(answered(Some(origin)))).unwrap(),
+            checked(&w, &facts(answered(Some(origin)))).unwrap(),
             Vec::<String>::new()
         );
         // The project outside the source's organizations.
         let mut f = facts(answered(Some(origin)));
         f.project_known = false;
-        assert!(check(&w, &f).unwrap_err().to_string().contains("Project"));
+        assert!(checked(&w, &f).unwrap_err().to_string().contains("Project"));
         // An unknown repository.
         let mut f = facts(answered(Some(origin)));
         f.catalog[0].id = OTHER.into();
         assert!(
-            check(&w, &f)
+            checked(&w, &f)
                 .unwrap_err()
                 .to_string()
                 .contains("not in the Git catalog")
         );
         // A checkout outside the roots, or one that resolves outside them.
-        let error = check(&w, &facts(Inspection::Outside))
+        let error = checked(&w, &facts(Inspection::Outside))
             .unwrap_err()
             .to_string();
         assert!(error.contains("outside"), "{error}");
-        let error = check(&w, &facts(Inspection::Missing))
+        let error = checked(&w, &facts(Inspection::Missing))
             .unwrap_err()
             .to_string();
         assert!(error.contains("does not exist"), "{error}");
-        // A symbolic link alias of the canonical directory.
+        // A path through a symbolic link below the root.
         let alias = Inspection::Answered {
             directory: PathBuf::from("/work/real/payments-api"),
+            link: true,
             checkout: true,
             origin: Some(origin.into()),
         };
-        let error = check(&w, &facts(alias)).unwrap_err().to_string();
-        assert!(error.contains("alias"), "{error}");
+        let error = checked(&w, &facts(alias)).unwrap_err().to_string();
+        assert!(error.contains("symbolic link"), "{error}");
         // Not a checkout.
         let plain = Inspection::Answered {
             directory: PathBuf::from("/work/payments-api"),
+            link: false,
             checkout: false,
             origin: None,
         };
         assert!(
-            check(&w, &facts(plain))
+            checked(&w, &facts(plain))
                 .unwrap_err()
                 .to_string()
                 .contains("not a Git checkout")
         );
         // Another repository's origin is refused; no origin is a warning.
-        let error = check(
+        let error = checked(
             &w,
             &facts(answered(Some(
                 "https://dev.azure.com/example/Payments/_git/payments-web",
@@ -1042,41 +1235,41 @@ pub(crate) mod tests {
         .to_string();
         assert!(error.contains("another repository"), "{error}");
         assert!(
-            check(
+            checked(
                 &w,
                 &facts(answered(Some("git@github.com:example/payments-api.git")))
             )
             .is_err()
         );
-        let warnings = check(&w, &facts(answered(None))).unwrap();
+        let warnings = checked(&w, &facts(answered(None))).unwrap();
         assert_eq!(warnings.len(), 1);
         // An older or offline machine: inside its last roots warns, outside refuses.
-        let warnings = check(&w, &facts(Inspection::Unknown("an older version".into()))).unwrap();
+        let warnings = checked(&w, &facts(Inspection::Unknown("an older version".into()))).unwrap();
         assert!(warnings[0].contains("an older version"), "{warnings:?}");
         let mut f = facts(Inspection::Unknown("offline".into()));
         f.roots = vec![PathBuf::from("/elsewhere")];
-        assert!(check(&w, &f).is_err());
+        assert!(checked(&w, &f).is_err());
         let mut outside = workflow("payments");
         outside.checkouts.insert(REPO.into(), "/work/../etc".into());
-        assert!(check(&outside, &facts(Inspection::Unknown("offline".into()))).is_err());
+        assert!(checked(&outside, &facts(Inspection::Unknown("offline".into()))).is_err());
         // An agent the machine does not have, a model or effort it does not offer.
         let mut w = workflow("payments");
         w.agent.provider = "claude".into();
         assert!(
-            check(&w, &facts(answered(Some(origin))))
+            checked(&w, &facts(answered(Some(origin))))
                 .unwrap_err()
                 .to_string()
                 .contains("not installed")
         );
         let mut w = workflow("payments");
         w.agent.effort = "xhigh".into();
-        assert!(check(&w, &facts(answered(Some(origin)))).is_err());
+        assert!(checked(&w, &facts(answered(Some(origin)))).is_err());
         let mut f = facts(answered(Some(origin)));
         f.agents = Err("the machine is offline".into());
-        assert_eq!(check(&workflow("payments"), &f).unwrap().len(), 1);
+        assert_eq!(checked(&workflow("payments"), &f).unwrap().len(), 1);
         // A name that is not the catalog's.
         let mut w = workflow("payments");
         w.repositories[0].name = "renamed".into();
-        assert!(check(&w, &facts(answered(Some(origin)))).is_err());
+        assert!(checked(&w, &facts(answered(Some(origin)))).is_err());
     }
 }

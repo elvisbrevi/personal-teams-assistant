@@ -97,12 +97,50 @@ fn repository_config(directory: &Path, git: &Path, roots: &[PathBuf]) -> Option<
     read_bounded(&confined(&common.join("config"), roots)?)
 }
 
-/// Inspect `path` on this machine, confined to `roots`.
+/// At most this many directories are inspected in one call (a workflow's repositories).
+pub(super) const MAX_PATHS: usize = crate::workflows::MAX_REPOSITORIES;
+
+/// Inspect every path of one `checkout_inspect` call, in order.
+pub(super) fn inspect_all(paths: &Value, roots: &[PathBuf]) -> anyhow::Result<Value> {
+    let paths = paths
+        .as_array()
+        .filter(|p| p.len() <= MAX_PATHS)
+        .ok_or_else(|| anyhow::anyhow!("Give at most {MAX_PATHS} directories to inspect."))?;
+    let answers: Vec<Value> = paths.iter().map(|p| inspect(p.as_str(), roots)).collect();
+    Ok(json!({"checkouts":answers}))
+}
+
+/// Inspect `path` on this machine, confined to `roots`. A path that is not, as written, a root
+/// or below one is `outside` before anything on disk is read, so the answer never says whether
+/// a directory elsewhere exists.
 pub(super) fn inspect(path: Option<&str>, roots: &[PathBuf]) -> Value {
-    let Some(path) = path.map(Path::new).filter(|p| p.is_absolute()) else {
-        return json!({"state":"missing"});
+    let os = std::env::consts::OS;
+    let Some(path) = path.filter(|p| crate::workflows::absolute_on(p, os)) else {
+        return json!({"state":"outside"});
     };
-    let Ok(canonical) = path.canonicalize() else {
+    // The roots as saved and as they resolve: both are spellings of the same directories.
+    let mut spellings: Vec<String> = Vec::new();
+    for root in roots {
+        spellings.push(root.to_string_lossy().into_owned());
+        if let Ok(canonical) = root.canonicalize() {
+            spellings.push(canonical.to_string_lossy().into_owned());
+        }
+    }
+    let Some(root) = spellings
+        .iter()
+        .find(|root| crate::workflows::under(path, root, os))
+    else {
+        return json!({"state":"outside"});
+    };
+    let given = Path::new(path);
+    // A symbolic link between the root and the directory makes the path an alias.
+    let link = given.ancestors().any(|ancestor| {
+        let text = ancestor.to_string_lossy();
+        crate::workflows::under(&text, root, os)
+            && !crate::workflows::under(root, &text, os)
+            && fs::symlink_metadata(ancestor).is_ok_and(|m| m.file_type().is_symlink())
+    });
+    let Ok(canonical) = given.canonicalize() else {
         return json!({"state":"missing"});
     };
     if confined(&canonical, roots).is_none() {
@@ -114,33 +152,36 @@ pub(super) fn inspect(path: Option<&str>, roots: &[PathBuf]) -> Value {
     let directory = paths::plain(&canonical);
     let git = canonical.join(".git");
     if fs::symlink_metadata(&git).is_err() {
-        return json!({"state":"not_checkout","directory":directory});
+        return json!({"state":"not_checkout","directory":directory,"link":link});
     }
     let origin = repository_config(&canonical, &git, roots)
         .as_deref()
         .and_then(origin_url)
         .as_deref()
         .and_then(shown_origin);
-    json!({"state":"checkout","directory":directory,"origin":origin})
+    json!({"state":"checkout","directory":directory,"link":link,"origin":origin})
 }
 
-/// The coordinator's reading of a machine's answer.
+/// The coordinator's reading of a machine's answer. The directory is the machine's own
+/// spelling (a Windows machine's `C:\…` on a Linux coordinator too).
 pub(in crate::app) fn inspection(answer: &Value) -> crate::workflows::Inspection {
     use crate::workflows::Inspection;
     let directory = answer["directory"]
         .as_str()
-        .filter(|d| d.len() <= 4096 && !d.chars().any(char::is_control))
-        .map(PathBuf::from)
-        .filter(|d| d.is_absolute());
+        .filter(|d| crate::workflows::absolute(d))
+        .map(PathBuf::from);
     let origin = answer["origin"].as_str().and_then(shown_origin);
+    let link = answer["link"] == true;
     match (answer["state"].as_str(), directory) {
         (Some("checkout"), Some(directory)) => Inspection::Answered {
             directory,
+            link,
             checkout: true,
             origin,
         },
         (Some("not_checkout"), Some(directory)) => Inspection::Answered {
             directory,
+            link,
             checkout: false,
             origin: None,
         },
@@ -192,7 +233,7 @@ mod tests {
             inspect(root.path().join("missing").to_str(), &roots)["state"],
             "missing"
         );
-        assert_eq!(inspect(Some("relative"), &roots)["state"], "missing");
+        assert_eq!(inspect(Some("relative"), &roots)["state"], "outside");
         // A worktree: its `.git` file points into the main checkout's Git directory.
         let worktree = root.path().join("feature");
         fs::create_dir_all(repo.join(".git/worktrees/feature")).unwrap();
@@ -217,6 +258,13 @@ mod tests {
                 origin: Some(_),
                 ..
             }
+        ));
+        // A Windows machine's answer reads the same on any coordinator.
+        assert!(matches!(
+            inspection(
+                &json!({"state":"checkout","directory":r"C:\Work\payments-api","origin":null})
+            ),
+            crate::workflows::Inspection::Answered { checkout: true, .. }
         ));
         assert_eq!(
             inspection(&json!({"state":"something else"})),
@@ -261,7 +309,46 @@ mod tests {
                 PathBuf::from(answer["directory"].as_str().unwrap()),
                 real.canonicalize().unwrap()
             );
+            assert_eq!(answer["link"], true);
+            assert_eq!(inspect(real.to_str(), &roots)["link"], false);
+            assert!(matches!(
+                inspection(&answer),
+                crate::workflows::Inspection::Answered { link: true, .. }
+            ));
         }
+        // Whether a directory outside the roots exists is never told: both are `outside`.
+        let existing = outside.path().join("exists");
+        fs::create_dir(&existing).unwrap();
+        assert_eq!(inspect(existing.to_str(), &roots)["state"], "outside");
+        assert_eq!(
+            inspect(outside.path().join("missing").to_str(), &roots)["state"],
+            "outside"
+        );
+        assert_eq!(
+            inspect(root.path().join("../escape").to_str(), &roots)["state"],
+            "outside"
+        );
+        // One call inspects every checkout of a workflow, in order, and no more.
+        let answer = inspect_all(
+            &json!([
+                root.path().join("real"),
+                outside.path(),
+                root.path().join("none")
+            ]),
+            &roots,
+        )
+        .unwrap();
+        let states: Vec<&str> = answer["checkouts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|a| a["state"].as_str().unwrap())
+            .collect();
+        assert_eq!(states.len(), 3);
+        assert_eq!(&states[1..], ["outside", "missing"]);
+        let many: Vec<String> = (0..=MAX_PATHS).map(|n| format!("/x/{n}")).collect();
+        assert!(inspect_all(&json!(many), &roots).is_err());
+        assert!(inspect_all(&json!("/x"), &roots).is_err());
         assert_eq!(inspect(root.path().to_str(), &[])["state"], "outside");
     }
 }
