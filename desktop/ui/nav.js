@@ -13,6 +13,8 @@ import { loadCloud } from './settings-cloud.js';
 import { loadRegistration, renderActivityNotice } from './activities.js';
 import { loadActivity, loadMessages } from './messages.js';
 import { loadKnowledge } from './knowledge.js';
+import { loadWorkflows } from './workflows.js';
+import { loadWorkflowSettings } from './settings-workflows.js';
 
 /** Views opened from To-Do: they have no navigation item of their own. */
 const TODO_VIEWS = ['implementation', 'create-request', 'agent-history', 'agent-guides'];
@@ -20,18 +22,23 @@ function showTab(name, anchor) {
   setTab(name);
   clearRevealedVariable();
   setNavOverflow(false);
-  for (const section of ['overview', 'todo', ...TODO_VIEWS, 'settings', 'messages', 'knowledge', 'chat', 'registration']) $('#' + section).hidden = section !== name;
+  for (const section of ['overview', 'todo', ...TODO_VIEWS, 'settings', 'messages', 'knowledge', 'chat', 'registration', 'workflows']) $('#' + section).hidden = section !== name;
   for (const button of document.querySelectorAll('nav button[data-tab]')) {
     button.setAttribute('aria-current', button.dataset.tab === (TODO_VIEWS.includes(name) ? 'todo' : name) ? 'page' : 'false');
   }
-  $('#nav-more').setAttribute('aria-current', ['knowledge', 'chat'].includes(name) ? 'page' : 'false');
+  $('#nav-more').setAttribute('aria-current', ['workflows', 'knowledge', 'chat'].includes(name) ? 'page' : 'false');
   if (name === 'messages') loadMessages().catch(fail);
   if (name === 'overview') loadActivity();
   if (name === 'registration') loadRegistration().catch(fail);
   if (name === 'knowledge') loadKnowledge().catch(fail);
+  if (name === 'workflows') {
+    // The section opens with its first view unless a link leads to another.
+    if (!anchor) selectTab($('#workflows-tabs'), 'list');
+    loadWorkflows();
+  }
   if (name === 'todo') loadTodo();
   if (name === 'agent-history') loadAgentHistory();
-  if (name === 'settings') { loadMachines().catch(fail); loadVariables(); loadAccountConfig(); loadUpdates(); loadService(); loadCloud(); loadAgentEndpoint(); }
+  if (name === 'settings') { loadMachines().catch(fail); loadVariables(); loadAccountConfig(); loadUpdates(); loadService(); loadCloud(); loadAgentEndpoint(); loadWorkflowSettings(); }
   const target = anchor && document.getElementById(anchor);
   // A panel inside a tab (a Settings section, an Activities view) opens that tab first.
   const owner = target && document.querySelector(`[aria-controls="${target.closest('[role=tabpanel]')?.id}"]`);

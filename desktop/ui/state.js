@@ -55,7 +55,7 @@
 /**
  * A section of the GUI: a navigation destination or a view inside one (To-Do's views).
  * @typedef {'overview' | 'todo' | 'create-request' | 'agent-history' | 'agent-guides' | 'implementation'
- *   | 'messages' | 'registration' | 'knowledge' | 'chat' | 'settings'} Section
+ *   | 'messages' | 'registration' | 'workflows' | 'knowledge' | 'chat' | 'settings'} Section
  */
 
 /** Snapshot being edited by the forms (saved with «Save changes»). @type {Snapshot | undefined} */

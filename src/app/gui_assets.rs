@@ -80,6 +80,8 @@ pub(super) const ASSETS: &[Asset] = &[
     asset!("knowledge.js", "text/javascript; charset=utf-8", true),
     asset!("knowledge-map.js", "text/javascript; charset=utf-8", true),
     asset!("chat.js", "text/javascript; charset=utf-8", true),
+    asset!("workflows.js", "text/javascript; charset=utf-8", true),
+    asset!("workflow-blocks.js", "text/javascript; charset=utf-8", true),
     asset!(
         "settings-general.js",
         "text/javascript; charset=utf-8",
@@ -118,6 +120,11 @@ pub(super) const ASSETS: &[Asset] = &[
         true
     ),
     asset!("settings-cloud.js", "text/javascript; charset=utf-8", true),
+    asset!(
+        "settings-workflows.js",
+        "text/javascript; charset=utf-8",
+        true
+    ),
     asset!("i18n.js", "text/javascript; charset=utf-8", false),
     asset!("catalog.js", "text/javascript; charset=utf-8", false),
     asset!("style.css", "text/css; charset=utf-8", false),

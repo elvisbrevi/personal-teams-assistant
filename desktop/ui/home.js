@@ -8,6 +8,7 @@ import { busy, done, fail } from './notices.js';
 import { renderSettingsFlags, showTab } from './nav.js';
 import { copy } from './markdown.js';
 import { startAssistant } from './profile.js';
+import { ensureWorkflowSettings, projectsWithoutReadyState } from './settings-workflows.js';
 
 // ---------------------------------------------------------------- status and overview
 
@@ -182,6 +183,20 @@ async function azureCliLogin() {
   }
 }
 
+/** Workflows on Home: listed once some exist; a project that starts by itself needs a ready state. */
+function workflowTiles(s) {
+  const workflows = s.map.workflows ?? [];
+  if (!workflows.length) return [];
+  ensureWorkflowSettings();
+  const missing = projectsWithoutReadyState();
+  if (missing?.length) {
+    return [tile(t('Workflows'), t('Ready state missing'), 'warn', t('Choose when items of {projects} start by themselves', { projects: missing.join(', ') }), ['settings', 'panel-workflow-ready'], 'flow')];
+  }
+  const enabled = workflows.filter(w => w.enabled).length;
+  return [tile(t('Workflows'), tn(enabled, '1 enabled', '{n} enabled'), enabled ? 'ok' : 'muted',
+    missing ? t('Every project that starts by itself has a ready state') : t('Ready states not read yet'), ['workflows'], 'flow')];
+}
+
 function renderTiles(s) {
   const config = s.config;
   const chain = enabledChain(config);
@@ -205,6 +220,7 @@ function renderTiles(s) {
     tile(t('Sources'), t('{ready} of {total} ready', { ready, total: s.map.resources.length }), ready ? 'ok' : 'warn', t('Enabled, authorized and with an audience'), ['knowledge'], 'book'),
     tile(t('Personal chat'), config.graph.self_chat ? t('Enabled') : t('Disabled'), config.graph.self_chat ? 'ok' : 'muted',
       config.graph.self_chat ? t('Ask it from your Teams notes') : t('Optional'), ['settings', 'panel-self-chat'], 'chat'),
+    ...workflowTiles(s),
   ];
   // What needs attention stays in sight; the parts in order fold into one line that opens them.
   const attention = rows.filter(row => row.classList.contains('warn') || row.classList.contains('error'));
@@ -298,6 +314,7 @@ function renderLive() {
     variables: missingCredentials(s.credentials).length > 0,
     teams: !s.microsoft_connected || !entraReady(s.config) || !urlReady(s.config),
     models: !enabledChain(s.config).length,
+    workflows: Boolean(projectsWithoutReadyState()?.length),
   });
 }
 
