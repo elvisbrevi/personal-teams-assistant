@@ -1,4 +1,5 @@
 //! Account-authoritative machine metadata. Filesystem changes execute on the target.
+use super::paths;
 use super::*;
 use crate::store::settings::SettingsStore;
 
@@ -71,7 +72,8 @@ pub(super) async fn save_roots(host: &Arc<Host>, args: &Value) -> Result<Value> 
     let config = host.state.settings.config()?;
     let mut data = state.registry.lock().await;
     ensure!(
-        config.server.webhook_prefix.is_empty() || roots == data.settings.roots,
+        config.server.webhook_prefix.is_empty()
+            || paths::plain_all(&roots) == paths::plain_all(&data.settings.roots),
         "The portal operator manages this machine's allowed directories."
     );
     let mut canonical = Vec::new();
@@ -87,11 +89,13 @@ pub(super) async fn save_roots(host: &Arc<Host>, args: &Value) -> Result<Value> 
                 "Allowed roots cannot contain symbolic links."
             );
         }
-        let path = path.canonicalize()?;
+        let canonical_path = path.canonicalize()?;
         ensure!(
-            path.is_dir(),
+            canonical_path.is_dir(),
             "Allowed roots must be existing absolute directories."
         );
+        // Stored and shown in the plain spelling; checks canonicalize it again.
+        let path = paths::plain(&canonical_path);
         if !canonical.contains(&path) {
             canonical.push(path);
         }
@@ -204,7 +208,8 @@ pub(super) async fn operate(host: &Arc<Host>, method: &str, args: &Value) -> Res
                     machine.name = name.into();
                 }
                 if let Some(roots) = roots {
-                    machine.roots = serde_json::from_value(roots)?;
+                    machine.roots =
+                        paths::plain_all(&serde_json::from_value::<Vec<PathBuf>>(roots)?);
                 }
             }
             state.save(&data)?;

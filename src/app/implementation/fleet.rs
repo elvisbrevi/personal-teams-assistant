@@ -410,7 +410,7 @@ pub(in crate::app) async fn protocol(host: &Arc<Host>, args: &Value) -> Result<V
                 roots.len() <= 16 && roots.iter().all(|p| p.as_os_str().len() <= 4096),
                 "Invalid machine roots."
             );
-            machine.roots = roots;
+            machine.roots = super::paths::plain_all(&roots);
         }
         if args["action"] == "poll" {
             machine.assistant_phase = args
