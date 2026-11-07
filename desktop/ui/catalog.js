@@ -367,11 +367,11 @@ const UI_CATALOG = { es: {
   "Plan children": "Planificar hijos",
   "Implement": "Implementar",
   "Write a request": "Redactar una solicitud",
-  "Choose a workflow": "Elegir un flujo de trabajo",
+  "Choose a workflow": "Elegir un workflow",
   "Implement on an HU, a bug or a GitHub epic: the agent proposes child tasks for you to review before creating them.": "Implementar en una HU, un bug o una épica de GitHub: el agente propone tareas hijas para que las revises antes de crearlas.",
   "Implement on a task, a development bug or a GitHub issue: the agent works with full permissions on the chosen computer, in the selected directories, until the request is done.": "Implementar en una tarea, un bug de desarrollo o un issue de GitHub: el agente trabaja con permisos completos en el computador elegido, en los directorios seleccionados, hasta terminar la solicitud.",
   "Create request in To-Do: the agent writes the new HU, bug or GitHub epic from your context.": "Crear solicitud en To-Do: el agente redacta la nueva HU, bug o épica de GitHub a partir de tu contexto.",
-  "Workflows: the workflow director reads a work item and the enabled workflows of its project and chooses the one that fits, or none.": "Flujos de trabajo: el director de flujos lee un elemento de trabajo y los flujos habilitados de su proyecto, y elige el que corresponde o ninguno.",
+  "Workflows: the workflow director reads a work item and the enabled workflows of its project and chooses the one that fits, or none.": "Workflows: el director de workflows lee un work item y los workflows habilitados de su proyecto, y elige el que corresponde o ninguno.",
   "Stripe width": "Ancho de la franja",
   "In pixels, from 2 to 16.": "En píxeles, de 2 a 16.",
   "Message text size": "Tamaño del texto del mensaje",
@@ -2407,9 +2407,6 @@ const UI_CATALOG = { es: {
   "The machine's coding agents could not be read ({reason}); the saved choice is checked again when you save.": "No se pudieron leer los agentes de código de la máquina ({reason}); la elección guardada se vuelve a verificar al guardar.",
   "Machine": "Máquina",
   "Where the director's CLI runs.": "Dónde se ejecuta la CLI del director.",
-  "Check every 1 to 60 minutes.": "Revisa cada 1 a 60 minutos.",
-  "Let 1 to 4 runs advance at once.": "Deja avanzar de 1 a 4 ejecuciones a la vez.",
-  "Wait 1 to 60 days for pull requests.": "Espera de 1 a 60 días los pull requests.",
   "Workflow settings saved.": "Ajustes de workflows guardados.",
   "Instruction": "Instrucción",
   "Teams notification": "Notificación de Teams",
@@ -2584,7 +2581,13 @@ const UI_CATALOG = { es: {
   "Blocks": "Bloques",
   "Each workflow names one Azure DevOps project, its repositories and their checkouts on one machine, the coding agent and its instructions. Children are created only after you review and confirm their plan.": "Cada workflow nombra un proyecto de Azure DevOps, sus repositorios y sus checkouts en una máquina, el agente de código y sus instrucciones. Los hijos se crean solo después de que revises y confirmes su plan.",
   "Ready states and director": "Estados listos y director",
-  "Reusable parts of a workflow: an instruction the agents read, a Teams message posted at a stage, or one of your approved launchers run at a stage. A block that acts is confirmed when you save it.": "Partes reutilizables de un workflow: una instrucción que leen los agentes, un mensaje de Teams publicado en una etapa o uno de tus lanzadores aprobados ejecutado en una etapa. Un bloque que actúa se confirma al guardarlo."
+  "Reusable parts of a workflow: an instruction the agents read, a Teams message posted at a stage, or one of your approved launchers run at a stage. A block that acts is confirmed when you save it.": "Partes reutilizables de un workflow: una instrucción que leen los agentes, un mensaje de Teams publicado en una etapa o uno de tus lanzadores aprobados ejecutado en una etapa. Un bloque que actúa se confirma al guardarlo.",
+  "Reading the states of this project's process…": "Leyendo los estados del proceso de este proyecto…",
+  "No director yet": "Aún sin director",
+  "Check every {min} to {max} minutes.": "Revisa cada {min} a {max} minutos.",
+  "Let {min} to {max} runs advance at once.": "Deja avanzar de {min} a {max} ejecuciones a la vez.",
+  "Wait {min} to {max} days for pull requests.": "Espera de {min} a {max} días los pull requests.",
+  "Nothing changed.": "No cambió nada."
 } };
 
 /** Host texts with a variable part (older runs and entries were stored in English). */

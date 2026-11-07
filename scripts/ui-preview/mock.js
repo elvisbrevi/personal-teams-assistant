@@ -74,7 +74,7 @@
     { id: 'plan', name: 'Plan children', summary: 'Implement on an HU, a bug or a GitHub epic: the agent proposes child tasks for you to review before creating them.', instructions: 'Plan small child tasks for the parent.' },
     { id: 'code', name: 'Implement', summary: 'Implement on a task, a development bug or a GitHub issue: the agent changes the code in the selected directories.', instructions: 'Implement the work item.' },
     { id: 'request', name: 'Write a request', summary: 'Create request in To-Do: the agent writes the new HU, bug or GitHub epic from your context.', instructions: 'Write one request of the selected type.' },
-    { id: 'direct', name: 'Choose a workflow', summary: 'The workflow director: it chooses the workflow for each item from your enabled workflows\' descriptions.', instructions: 'Choose the workflow whose description fits the item.' },
+    { id: 'direct', name: 'Choose a workflow', summary: 'Workflows: the workflow director reads a work item and the enabled workflows of its project and chooses the one that fits, or none.', instructions: 'Choose the workflow whose description fits the item.' },
   ];
   // The built-in cases the host sends, with short synthetic default texts.
   snapshot.cases = [
@@ -347,11 +347,27 @@
       if (window.__ptaTeamsChatsError) throw new Error('Connect the Microsoft account first.');
       return { chats: structuredClone(teamsChats), total: teamsChats.length, offset: 0, next_offset: null };
     },
-    workflow_settings: () => ({ settings: structuredClone(workflowSettings), editable: true,
-      projects: [...new Set(workflows.map(w => w.project))].map(project => ({ organization: org, project, states: processStates[project] ?? [] })) }),
+    // As src/app/workflows/director.rs answers: every value, the defaults and bounds; with a
+    // project, its process's states.
+    workflow_settings: args => {
+      const reply = { settings: structuredClone(workflowSettings), editable: true,
+        defaults: { watch_interval_minutes: 5, concurrency: 2, pull_request_wait_days: 7, director: null, ready_states: [] },
+        bounds: { watch_interval_minutes: [1, 60], concurrency: [1, 4], pull_request_wait_days: [1, 60], ready_states_per_project: 20, projects_with_ready_states: 50 } };
+      if (args.project) {
+        if (!processStates[args.project]) throw new Error(`invalid project: ${args.project} is not in the configured organizations of the enabled Azure source.`);
+        reply.process_states = { organization: org, project: args.project, states: processStates[args.project] };
+      }
+      return reply;
+    },
+    // Only the fields given change; each project's ready states replace that project's.
     workflow_settings_update: args => {
       window.__ptaWorkflowCalls.push({ method: 'workflow_settings_update', ...structuredClone(args) });
-      workflowSettings = structuredClone(args.settings);
+      for (const field of ['watch_interval_minutes', 'concurrency', 'pull_request_wait_days']) if (field in args) workflowSettings[field] = args[field];
+      if ('director' in args) workflowSettings.director = args.director;
+      for (const change of args.ready_states ?? []) {
+        workflowSettings.ready_states = workflowSettings.ready_states.filter(r => r.project !== change.project);
+        if (change.states.length) workflowSettings.ready_states.push({ organization: org, project: change.project, states: change.states });
+      }
       return { settings: structuredClone(workflowSettings), saved: true, warnings: [] };
     },
   };

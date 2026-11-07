@@ -2243,6 +2243,8 @@ if (flag !== '--axe-only') for (const [label, viewport] of [['desktop', { width:
   await page.click('#workflows-tab-list');
   await page.click('#workflows-settings');
   await page.waitForSelector('#workflow-ready-states [data-project="Payments"]');
+  // The process's states arrive per project after the settings.
+  await page.waitForFunction(() => document.querySelectorAll('#workflow-ready-states [data-project="Exports"] input').length === 4).catch(() => {});
   check(`workflow settings ${label}: the section's link opens the category`, await page.getAttribute('#settings-tab-workflows', 'aria-selected') === 'true' && await page.isVisible('#panel-workflow-ready'));
   check(`workflow settings ${label}: ready states are the process's discovered states`, await page.locator('#workflow-ready-states [data-project="Payments"] input').count() === 5);
   check(`workflow settings ${label}: the category passes axe`, (await scan(page)).length === 0, JSON.stringify(await scan(page)));
@@ -2256,15 +2258,16 @@ if (flag !== '--axe-only') for (const [label, viewport] of [['desktop', { width:
   await page.click('#workflow-settings-save');
   await page.waitForTimeout(400);
   const update = (await calls()).find(c => c.method === 'workflow_settings_update');
-  check(`workflow settings ${label}: ready states, watcher and director are saved`, update?.settings.watch_interval_minutes === 10 && update.settings.concurrency === 3
-    && update.settings.ready_states.find(r => r.project === 'Exports')?.states.join() === 'Approved' && update.settings.director.model === 'claude-opus-5-5', JSON.stringify(update));
+  check(`workflow settings ${label}: only what changed is saved: ready states, watcher and director`, update?.watch_interval_minutes === 10 && update.concurrency === 3
+    && !('pull_request_wait_days' in update) && JSON.stringify(update.ready_states) === '[{"organization":"https://dev.azure.com/contoso","project":"Exports","states":["Approved"]}]'
+    && update.director.model === 'claude-opus-5-5' && update.director.machine === '11111111-1111-4111-8111-111111111111', JSON.stringify(update));
   await page.click('#workflow-director-prompt');
   check(`workflow settings ${label}: the director's prompt opens in Guides and instructions`, await page.isVisible('#agent-guides') && await page.locator('#agent-prompts [data-prompt="direct"] details').evaluate(d => d.open));
 
   // Home links to the ready states while an enabled workflow that starts by itself has none.
   await page.evaluate(async () => {
     window.__ptaWorkflowCalls.length = 0;
-    await invoke('workflow_settings_update', { settings: { ready_states: [], watch_interval_minutes: 5, concurrency: 2, pull_request_wait_days: 7, director: null } });
+    await invoke('workflow_settings_update', { ready_states: [{ project: 'Payments', states: [] }] });
     await invoke('workflow_save', { id: 'payments-features', enabled: true });
   });
   await page.evaluate(() => showTab('settings', 'panel-workflow-ready'));
