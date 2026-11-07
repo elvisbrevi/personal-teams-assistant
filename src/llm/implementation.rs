@@ -86,8 +86,9 @@ thread_local! {
     /// A fake provider CLI a host-level test runs instead of the installed one.
     static TEST_CLI: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
 }
-/// Run `cli` as every provider's CLI on this test's thread (none restores the lookup).
-#[cfg(test)]
+/// Run `cli` as every provider's CLI on this test's thread (none restores the lookup). Only
+/// Unix tests install a fake CLI (a shell script), so the seam exists only there.
+#[cfg(all(test, unix))]
 pub(crate) fn use_test_cli(cli: Option<PathBuf>) {
     TEST_CLI.with(|current| *current.borrow_mut() = cli);
 }
