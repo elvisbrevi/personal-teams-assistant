@@ -813,13 +813,7 @@ async fn ready_states_must_be_states_of_the_projects_process() {
         json!([{"organization":"https://dev.azure.com/example","project":"Payments","states":["Ready"]}])
     );
     let stored = host.state.settings.map().unwrap().workflow_settings;
-    assert_eq!(
-        stored
-            .ready("https://dev.azure.com/example", "PAYMENTS")
-            .unwrap()
-            .states,
-        ["Ready"]
-    );
+    assert_eq!(stored.ready_states[0].states, ["Ready"]);
     // Giving the project again replaces its states; no states clears them.
     update(json!({"ready_states":[{"project":"Payments","states":["New","Active"]}]}))
         .await
@@ -1098,4 +1092,271 @@ async fn classification_needs_an_azure_item_and_a_director() {
     )
     .await;
     assert_eq!(extra.code, "invalid_input");
+}
+
+/// Run `workflow_settings_update` with the process states from `process`, as the owner here.
+async fn update_with(
+    host: &Arc<Host>,
+    args: Value,
+    process: &director::Process,
+) -> Result<Value, String> {
+    authority::within(
+        authority::Invocation {
+            scope: host.state.authority.clone(),
+            transport: Local,
+        },
+        director::update(host, &args, process),
+    )
+    .await
+}
+fn ready(
+    organization: &str,
+    project: &str,
+    states: &[&str],
+) -> crate::workflows::director::ReadyStates {
+    crate::workflows::director::ReadyStates {
+        organization: format!("https://dev.azure.com/{organization}"),
+        project: project.into(),
+        states: states.iter().map(|s| s.to_string()).collect(),
+    }
+}
+fn process_of(projects: &[(&str, &str)]) -> BTreeMap<String, Value> {
+    projects
+        .iter()
+        .map(|(organization, project)| {
+            (
+                project.to_lowercase(),
+                json!({"organization":format!("https://dev.azure.com/{organization}"),"project":project,"states":["New","Ready"]}),
+            )
+        })
+        .collect()
+}
+fn set_ready(host: &Arc<Host>, entries: Vec<crate::workflows::director::ReadyStates>) {
+    let mut map = host.state.settings.map().unwrap();
+    map.workflow_settings.ready_states = entries;
+    host.state.settings.save_map(&map).unwrap();
+}
+
+#[tokio::test]
+async fn clearing_a_project_in_several_organizations_needs_its_organization() {
+    let root = tempfile::tempdir().unwrap();
+    let host = host(root.path());
+    set_ready(
+        &host,
+        vec![
+            ready("example", "Payments", &["Ready"]),
+            ready("other", "Payments", &["New"]),
+            ready("example", "Billing", &["Ready"]),
+        ],
+    );
+    let process = director::Process::Fixed(BTreeMap::new());
+    let ambiguous = update_with(
+        &host,
+        json!({"ready_states":[{"project":"payments","states":[]}]}),
+        &process,
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        ambiguous.starts_with("[invalid_input]") && ambiguous.contains("several organizations"),
+        "{ambiguous}"
+    );
+    assert_eq!(
+        host.state
+            .settings
+            .map()
+            .unwrap()
+            .workflow_settings
+            .ready_states
+            .len(),
+        3
+    );
+    // With its organization, only that one is cleared; a project in one organization needs none.
+    update_with(
+        &host,
+        json!({"ready_states":[{"organization":"https://dev.azure.com/other","project":"Payments","states":[]},{"project":"BILLING","states":[]}]}),
+        &process,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        host.state
+            .settings
+            .map()
+            .unwrap()
+            .workflow_settings
+            .ready_states,
+        [ready("example", "Payments", &["Ready"])]
+    );
+}
+
+#[tokio::test]
+async fn re_setting_a_project_at_the_limit_replaces_it_and_a_new_one_is_refused() {
+    let root = tempfile::tempdir().unwrap();
+    let host = host(root.path());
+    let limit = crate::workflows::director::MAX_READY_PROJECTS;
+    let names: Vec<String> = (0..limit).map(|n| format!("Project{n}")).collect();
+    set_ready(
+        &host,
+        names
+            .iter()
+            .map(|n| ready("example", n, &["New"]))
+            .collect(),
+    );
+    let mut projects: Vec<(&str, &str)> = names.iter().map(|n| ("example", n.as_str())).collect();
+    projects.push(("example", "Extra"));
+    let process = director::Process::Fixed(process_of(&projects));
+    // Without an organization, the catalog resolves it to the stored project, which it replaces.
+    update_with(
+        &host,
+        json!({"ready_states":[{"project":"project7","states":["Ready"]}]}),
+        &process,
+    )
+    .await
+    .unwrap();
+    let stored = host
+        .state
+        .settings
+        .map()
+        .unwrap()
+        .workflow_settings
+        .ready_states;
+    assert_eq!(stored.len(), limit);
+    assert_eq!(
+        stored
+            .iter()
+            .find(|r| r.project == "Project7")
+            .unwrap()
+            .states,
+        ["Ready"]
+    );
+    let over = update_with(
+        &host,
+        json!({"ready_states":[{"project":"Extra","states":["Ready"]}]}),
+        &process,
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        over.contains(&format!("At most {limit} projects")),
+        "{over}"
+    );
+}
+
+#[tokio::test]
+async fn projects_are_read_at_once_under_one_bound_and_nothing_is_saved_past_it() {
+    let root = tempfile::tempdir().unwrap();
+    let host = host(root.path());
+    let projects = process_of(&[("example", "One"), ("example", "Two"), ("example", "Three")]);
+    let args = json!({"ready_states":[
+        {"project":"One","states":["Ready"]},{"project":"Two","states":["Ready"]},{"project":"Three","states":["Ready"]}]});
+    // Three reads of 300 ms each fit a 700 ms bound only when they run together.
+    let concurrent = director::Process::Delayed {
+        projects: projects.clone(),
+        delay: std::time::Duration::from_millis(300),
+        bound: std::time::Duration::from_millis(700),
+    };
+    update_with(&host, args.clone(), &concurrent).await.unwrap();
+    assert_eq!(
+        host.state
+            .settings
+            .map()
+            .unwrap()
+            .workflow_settings
+            .ready_states
+            .len(),
+        3
+    );
+    set_ready(&host, Vec::new());
+    let slow = director::Process::Delayed {
+        projects,
+        delay: std::time::Duration::from_millis(900),
+        bound: std::time::Duration::from_millis(300),
+    };
+    let refused = update_with(&host, args, &slow).await.unwrap_err();
+    assert!(
+        refused.starts_with("[network]") && refused.contains("nothing was saved"),
+        "{refused}"
+    );
+    assert!(
+        host.state
+            .settings
+            .map()
+            .unwrap()
+            .workflow_settings
+            .is_default()
+    );
+}
+
+#[tokio::test]
+async fn a_new_director_needs_every_field_and_a_change_merges_with_the_stored_one() {
+    let root = tempfile::tempdir().unwrap();
+    let host = host(root.path());
+    let own = implementation::test_machine(&host, None).await;
+    let partial = call(
+        &host,
+        Local,
+        "workflow_settings_update",
+        json!({"director":{"model":"gpt-6.1-sol"}}),
+    )
+    .await;
+    assert_eq!(partial.code, "invalid_input");
+    let message = partial.message.unwrap();
+    assert!(
+        message.contains("machine, provider, model and effort")
+            && message.contains("missing machine, provider, effort"),
+        "{message}"
+    );
+    let mut map = host.state.settings.map().unwrap();
+    map.workflow_settings.director = Some(crate::workflows::director::Director {
+        machine: own.clone(),
+        provider: "codex".into(),
+        model: "synthetic-model-that-is-not-installed".into(),
+        effort: "low".into(),
+    });
+    host.state.settings.save_map(&map).unwrap();
+    // One field changes; the others come from the stored director, which is then checked.
+    let merged = call(
+        &host,
+        Local,
+        "workflow_settings_update",
+        json!({"director":{"effort":"high"}}),
+    )
+    .await;
+    assert_eq!(merged.code, "invalid_input");
+    let message = merged.message.unwrap();
+    assert!(
+        message.contains("synthetic-model-that-is-not-installed")
+            || message.contains("not installed"),
+        "{message}"
+    );
+    let unknown = call(
+        &host,
+        Local,
+        "workflow_settings_update",
+        json!({"director":{"colour":"red"}}),
+    )
+    .await;
+    assert_eq!(unknown.code, "invalid_input");
+}
+
+#[test]
+fn a_classification_answers_within_the_control_deadline_with_margin() {
+    use control::CLIENT_DEADLINE_SECONDS as CONTROL_DEADLINE_SECONDS;
+    use implementation::director::{POLL_SECONDS, PROBE_SECONDS, SESSION_SECONDS, WAIT_SECONDS};
+    const MARGIN: u64 = 5;
+    // The machine probes its CLIs (when the last probe does not offer the agent), runs the
+    // session and answers on its next polls, before the coordinator stops waiting.
+    const { assert!(PROBE_SECONDS + SESSION_SECONDS + POLL_SECONDS + MARGIN <= WAIT_SECONDS) };
+    // The item read and the wait, before the client's deadline.
+    const { assert!(director::ITEM_SECONDS + WAIT_SECONDS + MARGIN <= CONTROL_DEADLINE_SECONDS) };
+    // On the coordinator itself: the item read, the probe and the session.
+    const {
+        assert!(
+            director::ITEM_SECONDS + PROBE_SECONDS + SESSION_SECONDS + MARGIN
+                <= CONTROL_DEADLINE_SECONDS
+        )
+    };
+    // A settings update: every project read at once, then the director's machine (40 s).
+    const { assert!(director::READY_READ_SECONDS + 40 + MARGIN <= CONTROL_DEADLINE_SECONDS) };
 }

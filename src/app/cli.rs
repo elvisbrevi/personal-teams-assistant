@@ -785,11 +785,12 @@ fn settings_changes(args: &[String]) -> Result<Vec<(String, String)>> {
     }
     Ok(sets)
 }
-/// The `workflow_settings_update` arguments for `--set` pairs; `director.*` keys change the
-/// stored director (`current`) field by field.
-fn settings_update(sets: &[(String, String)], current: Value) -> Result<Value> {
+/// The `workflow_settings_update` arguments for `--set` pairs; `director.*` keys are the
+/// director's fields to change, which the host merges with the stored director (a new one
+/// needs all four).
+fn settings_update(sets: &[(String, String)]) -> Result<Value> {
     let mut body = json!({});
-    let mut director = current;
+    let mut director = Value::Null;
     let mut director_changed = false;
     let mut ready = Vec::new();
     for (key, value) in sets {
@@ -905,16 +906,7 @@ async fn workflows_command(args: &[String]) -> Result<Reply> {
                     option(args, "--project").is_none() && option(args, "--organization").is_none(),
                     "--project and --organization read a project's states; give ready states with --set"
                 );
-                let current = if sets.iter().any(|(k, _)| k.starts_with("director.")) {
-                    let reply = call("workflow_settings", json!({}), None, true).await?;
-                    if !reply.ok {
-                        return Ok(reply);
-                    }
-                    reply.data["settings"]["director"].clone()
-                } else {
-                    Value::Null
-                };
-                let mut body = settings_update(&sets, current)?;
+                let mut body = settings_update(&sets)?;
                 if let Some(source) = option(args, "--source") {
                     body["source"] = json!(source);
                 }
@@ -3703,11 +3695,10 @@ mod wiki_tests {
         .iter()
         .map(|(k, v)| (k.to_string(), v.to_string()))
         .collect();
-        let current = json!({"machine":"5a6b7c8d-9e0f-4a1b-8c2d-3e4f5a6b7c8d","provider":"codex","model":"old","effort":"low"});
-        let body = settings_update(&sets, current).unwrap();
+        let body = settings_update(&sets).unwrap();
         assert_eq!(body["concurrency"], 3);
-        assert_eq!(body["director"]["model"], "gpt-6.1-sol");
-        assert_eq!(body["director"]["provider"], "codex");
+        // Only the fields given: the host merges them with the stored director.
+        assert_eq!(body["director"], json!({"model":"gpt-6.1-sol"}));
         assert_eq!(
             body["ready_states"][0],
             json!({"project":"Payments","states":["Ready","Approved"]})
@@ -3717,10 +3708,10 @@ mod wiki_tests {
             json!({"project":"Billing","states":[]})
         );
         assert_eq!(body["ready_states"][2]["project"], "Cards");
-        let cleared = settings_update(&[("director".into(), "none".into())], Value::Null).unwrap();
+        let cleared = settings_update(&[("director".into(), "none".into())]).unwrap();
         assert!(cleared["director"].is_null() && cleared.get("director").is_some());
-        assert!(settings_update(&[("concurrency".into(), "two".into())], Value::Null).is_err());
-        assert!(settings_update(&[("colour".into(), "red".into())], Value::Null).is_err());
+        assert!(settings_update(&[("concurrency".into(), "two".into())]).is_err());
+        assert!(settings_update(&[("colour".into(), "red".into())]).is_err());
         let args: Vec<String> = [
             "workflows",
             "settings",

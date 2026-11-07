@@ -411,9 +411,11 @@ Requires host and CLI `workflow_director_support: true`.
   `workflow_settings_update` with only the fields to change). Keys: `watch_interval_minutes`
   (1-60), `concurrency` (1-4), `pull_request_wait_days` (1-60); `director.machine` (a
   `machine_list` ID; the coordinator's own row for it), `director.provider`
-  (codex|claude|opencode), `director.model`, `director.effort` (each merged with the stored
-  director; MCP takes the whole `director` object, or `null` to clear it, as `--set director
-  none` does); `ready_states.PROJECT "STATE,STATE"` (an empty value clears that project's) or
+  (codex|claude|opencode), `director.model`, `director.effort` (the host merges the fields given
+  with the stored director; a new director needs all four, and the refusal names the missing
+  ones; MCP takes a `director` object with the fields to change, or `null` to clear it, as `--set
+  director none` does); `ready_states.PROJECT "STATE,STATE"` (an empty value clears that
+  project's; a project in several organizations needs its organization) or
   `ready_states '{"organization":…,"project":…,"states":[…]}'` (MCP `ready_states` is a list of
   those). The host refuses values out of bounds, a ready state the project's process does not
   have (the refusal lists the states it has), a machine that is not the account's, and a

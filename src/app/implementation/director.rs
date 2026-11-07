@@ -1,6 +1,7 @@
 //! The workflow director's session. It runs on the director's machine in the same retained,
 //! tool-less, read-only, closed-JSON session as planning (`llm::implementation::direct`), in a
-//! private `implementation/requests/<run-id>` directory, with the restricted child environment;
+//! private temporary directory under `implementation/directors/` removed when the session
+//! ends, with the restricted child environment;
 //! on another machine it is the additive one-shot call `workflow_direct` (`answer`), which a
 //! worker runs beside its poll and advertises with `workflow_direct_support`. The coordinator
 //! records each session as an agent session in `request_runs` (purpose `classification`: the
@@ -10,11 +11,18 @@
 use super::*;
 use crate::llm::implementation::Direction;
 
+/// How long listing the machine's installed CLIs may take before a session, when the last
+/// probe (`llm::implementation::PROBE_REUSE`) does not offer the agent.
+pub(in crate::app) const PROBE_SECONDS: u64 = 15;
 /// How long one director session may take on its machine.
-pub(in crate::app) const SESSION_SECONDS: u64 = 85;
-/// How long the coordinator waits for another machine's answer: with the item read before it,
-/// a classification answers within the control channel's 120-second client deadline.
-pub(super) const WAIT_SECONDS: u64 = 90;
+pub(in crate::app) const SESSION_SECONDS: u64 = 60;
+/// A worker polls every two seconds: one poll to claim the call, one to return its answer,
+/// with room for a slow round-trip.
+pub(in crate::app) const POLL_SECONDS: u64 = 10;
+/// How long the coordinator waits for another machine's answer: the probe, the session and the
+/// polls, with ten seconds of margin (95). With the item read before it, a classification
+/// answers within the control channel's client deadline (`control::CLIENT_DEADLINE_SECONDS`).
+pub(in crate::app) const WAIT_SECONDS: u64 = PROBE_SECONDS + SESSION_SECONDS + POLL_SECONDS + 10;
 const INSTRUCTIONS: usize = 12_000;
 const INPUT: usize = 200_000;
 
@@ -74,19 +82,25 @@ async fn session(
         call.instructions.chars().count() <= INSTRUCTIONS && call.input.len() <= INPUT,
         "The workflow director's input is too long."
     );
-    crate::llm::implementation::validate(&call.provider, &call.model, &call.effort).await?;
-    let directory = host
-        .state
-        .implementation
-        .root
-        .join("requests")
-        .join(&call.id);
-    security::private_dir(&directory)?;
+    crate::llm::implementation::validate_recent(
+        &call.provider,
+        &call.model,
+        &call.effort,
+        Duration::from_secs(PROBE_SECONDS),
+    )
+    .await?;
+    // A private directory for this session only, removed when it ends (`directory` drops).
+    let parent = host.state.implementation.root.join("directors");
+    security::private_dir(&parent)?;
+    let directory = tempfile::Builder::new()
+        .prefix("session-")
+        .tempdir_in(&parent)?;
+    security::private_dir(directory.path())?;
     match tokio::time::timeout(
         Duration::from_secs(SESSION_SECONDS),
         crate::llm::implementation::direct(
             (&call.provider, &call.model, &call.effort),
-            directory,
+            directory.path().to_path_buf(),
             &call.instructions,
             &call.input,
             observer,
@@ -191,10 +205,11 @@ pub(in crate::app) async fn ask(host: &Arc<Host>, ask: Ask<'_>) -> Result<Answer
                 serde_json::to_value(&call)?,
             )
             .await?;
-            let session = reply["session_id"].as_str().map(str::to_owned);
-            if let Some(session) = &session {
-                valid_session(session)?;
-            }
+            // A session ID that is not one is dropped; the answer is still judged.
+            let session = reply["session_id"]
+                .as_str()
+                .filter(|s| valid_session(s).is_ok())
+                .map(str::to_owned);
             let started = reply["started_at"]
                 .as_str()
                 .filter(|t| chrono::DateTime::parse_from_rfc3339(t).is_ok())
