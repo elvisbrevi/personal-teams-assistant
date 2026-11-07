@@ -14,7 +14,7 @@ pub(super) mod fleet;
 pub(super) mod join;
 pub(super) mod login;
 mod management;
-mod paths;
+pub(super) mod paths;
 mod requests;
 mod store;
 pub(super) use fleet::register;
@@ -1971,7 +1971,8 @@ mod tests {
         let detail = operation(&host, "machine_detail", &json!({"machine":worker}))
             .await
             .unwrap();
-        assert_eq!(detail["roots"], json!([work]));
+        // Shown in the plain spelling (no Windows verbatim prefix), whatever the worker reported.
+        assert_eq!(detail["roots"], json!([paths::plain(&work)]));
         assert_eq!(detail["name"], "Remote desk");
         assert!(
             operation(&host, "machine_update", &json!({"machine":own,"roots":[]}))

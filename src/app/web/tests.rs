@@ -2156,7 +2156,7 @@ async fn machine_login_native_installation_finishes_only_after_trust_and_keeps_p
     assert!(stored.is_none());
     assert_eq!(
         control::dispatch(&native, browse.clone()).await.data["directories"],
-        json!([old_root])
+        json!([super::implementation::paths::plain(&old_root)])
     );
     enrollment::decide(&served.root, &entries[0], &transaction, true, false).unwrap();
     assert_eq!(status(&native).await.unwrap()["state"], "approved");

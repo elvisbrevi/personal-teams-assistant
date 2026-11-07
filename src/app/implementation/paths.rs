@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 /// The plain spelling of a path: a Windows verbatim disk or UNC prefix removed, anything else unchanged.
 /// Text-based so a coordinator on any operating system can normalize a Windows machine's roots.
-pub(super) fn plain(path: &Path) -> PathBuf {
+pub(in crate::app) fn plain(path: &Path) -> PathBuf {
     let Some(text) = path.to_str() else {
         return path.to_path_buf();
     };
