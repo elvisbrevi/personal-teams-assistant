@@ -420,7 +420,11 @@ async fn checkouts_are_inspected_by_their_machine_and_an_older_worker_is_unknown
     .unwrap();
     let outside = root.path().join("outside");
     fs::create_dir_all(&outside).unwrap();
-    implementation::test_machine(&host, Some(vec![allowed.canonicalize().unwrap()])).await;
+    // Roots are saved canonical, and paths are asked in that spelling: on macOS the temporary
+    // directory `/var/folders/…` is an alias of `/private/var/…`, and a path written under the
+    // alias is not, as written, under the root.
+    let allowed = allowed.canonicalize().unwrap();
+    implementation::test_machine(&host, Some(vec![allowed.clone()])).await;
     let facts = implementation::machine_facts(&host, &own)
         .await
         .unwrap()
