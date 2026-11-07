@@ -128,4 +128,4 @@ function chooseFromList({ trigger, title, items, selected = [], recent = [], mul
   return dialog;
 }
 
-export { chooseDirectories, chooseFromList };
+export { chooseDirectories, chooseFromList, normalize };

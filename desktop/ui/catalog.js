@@ -2407,7 +2407,6 @@ const UI_CATALOG = { es: {
   "The machine's coding agents could not be read ({reason}); the saved choice is checked again when you save.": "No se pudieron leer los agentes de código de la máquina ({reason}); la elección guardada se vuelve a verificar al guardar.",
   "Machine": "Máquina",
   "Where the director's CLI runs.": "Dónde se ejecuta la CLI del director.",
-  "Workflow settings saved.": "Ajustes de workflows guardados.",
   "Instruction": "Instrucción",
   "Teams notification": "Notificación de Teams",
   "Launcher": "Lanzador",
@@ -2575,7 +2574,6 @@ const UI_CATALOG = { es: {
   "Workflow director": "Director de workflows",
   "The director reads each item and your enabled workflows' descriptions and chooses one, or none; it decides nothing else, and code checks its choice. It runs without tools, read-only.": "El director lee cada ítem y las descripciones de tus workflows habilitados y elige uno, o ninguno; no decide nada más, y el código verifica su elección. Se ejecuta sin herramientas, solo lectura.",
   "Edit the director's instructions": "Editar las instrucciones del director",
-  "Save workflow settings": "Guardar ajustes de workflows",
   "Recipes that take an HU or bug from its plan to its pull requests, on the machine and in the repositories you choose.": "Recetas que llevan una HU o un bug desde su plan hasta sus pull requests, en la máquina y los repositorios que elijas.",
   "Workflow views": "Vistas de workflows",
   "Blocks": "Bloques",
@@ -2587,7 +2585,6 @@ const UI_CATALOG = { es: {
   "Check every {min} to {max} minutes.": "Revisa cada {min} a {max} minutos.",
   "Let {min} to {max} runs advance at once.": "Deja avanzar de {min} a {max} ejecuciones a la vez.",
   "Wait {min} to {max} days for pull requests.": "Espera de {min} a {max} días los pull requests.",
-  "Nothing changed.": "No cambió nada."
 } };
 
 /** Host texts with a variable part (older runs and entries were stored in English). */

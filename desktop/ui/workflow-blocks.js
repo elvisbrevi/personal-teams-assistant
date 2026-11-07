@@ -20,7 +20,9 @@ const STAGE_NAMES = {
 const PLACEHOLDERS = {
   item: t('the work item\'s number and title'), link: t('its link'), pull_requests: t('the links of its pull requests'), summary: t('the director\'s progress summary'),
 };
-const LIMITS = { name: 80, text: 8000, template: 4000, mentions: 20 };
+const LIMITS = { name: 80, text: 8000, template: 4000, mentions: 20, mention: 120, chat: 200 };
+/** A name cut to the host's limit, with an ellipsis when it was longer. */
+const fit = (text, max) => [...text].length > max ? `${[...text].slice(0, max - 1).join('').trimEnd()}…` : text;
 /** The personal chat (Teams notes) is always the user's own. */
 const PERSONAL_CHAT = '48:notes';
 
@@ -209,8 +211,9 @@ function blockEditor(draft, saved) {
           const item = items.find(i => i.value === id);
           if (!item) return;
           if (draft.chat?.id !== id) draft.mentions = [];
-          draft.chat = { id, name: item.label };
-          chat.textContent = item.label;
+          // A chat without a topic is named by its members, which can be longer than a name may be.
+          draft.chat = { id, name: fit(item.label, LIMITS.chat) };
+          chat.textContent = draft.chat.name;
           touched(); renderMentions();
         } });
     });
@@ -311,6 +314,8 @@ function blockEditor(draft, saved) {
     if (draft.kind === 'instruction' && [...draft.text].length > LIMITS.text) list.push(t('Shorten the instruction.'));
     if (draft.kind === 'teams_notification') {
       if (!draft.chat) list.push(t('Choose the chat.'));
+      else if (!draft.chat.name.trim() || [...draft.chat.name].length > LIMITS.chat) list.push(t('Choose the chat again: its name must have 1 to {n} characters.', { n: LIMITS.chat }));
+      if (draft.mentions.some(m => [...m].length > LIMITS.mention)) list.push(t('Mention only members whose names have at most {n} characters.', { n: LIMITS.mention }));
       if (!draft.template.trim()) list.push(t('Write the message.'));
       if ([...draft.template].length > LIMITS.template) list.push(t('Shorten the message.'));
       if (unknownPlaceholders(draft.template).length) list.push(t('Use only the listed placeholders.'));

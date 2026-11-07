@@ -7,10 +7,10 @@ import { $, badge, el } from './dom.js';
 import { live } from './state.js';
 import { busy, done } from './notices.js';
 import { selectTab, showTab } from './nav.js';
-import { chooseDirectories, chooseFromList } from './directory-sheet.js';
+import { chooseDirectories, chooseFromList, normalize } from './directory-sheet.js';
 import { applying } from './profile.js';
 import { providerNames } from './home.js';
-import { effortNames } from './settings-models.js';
+import { fillAgentChoices } from './settings-models.js';
 import { blockSummary, KIND_NAMES, loadLaunchers, renderBlocks, STAGE_NAMES } from './workflow-blocks.js';
 
 /** The host's limits (src/workflows.rs), checked here before anything is sent. */
@@ -34,7 +34,6 @@ const projectCatalogs = new Map();
 const repositoryCatalogs = new Map();
 const agentCatalogs = new Map();
 
-const normalize = text => String(text ?? '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLocaleLowerCase();
 /** A workflow or block ID from its name: lowercase letters, digits, - and _, starting with a letter. */
 function slug(name, taken, prefix = 'w') {
   let base = normalize(name).replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 56);
@@ -310,32 +309,11 @@ function workflowEditor(draft, saved, renderFacts) {
   const model = el('select', {});
   const effort = el('select', {});
   const agentNote = el('p', { class: 'hint', role: 'status' });
-  const fillAgent = providers => {
-    const chosen = draft.agent;
-    // A choice the machine did not list stays as it is saved: the host checks it again.
-    const list = providers.length ? providers
-      : chosen.provider ? [{ id: chosen.provider, models: [{ id: chosen.model, name: chosen.model, efforts: [chosen.effort] }] }] : [];
-    provider.replaceChildren(...list.map(p => el('option', { value: p.id, textContent: providerNames[p.id] || p.id })));
-    if (!list.length) provider.append(el('option', { value: '', textContent: t('No coding CLI installed on this machine') }));
-    provider.value = list.some(p => p.id === chosen.provider) ? chosen.provider : list[0]?.id ?? '';
-    const fillEfforts = () => {
-      const info = list.find(p => p.id === provider.value)?.models?.find(m => m.id === model.value);
-      effort.replaceChildren(...(info?.efforts ?? []).map(value => el('option', { value, textContent: effortNames[value] || value })));
-      effort.value = info?.efforts?.includes(draft.agent.effort) ? draft.agent.effort : info?.default_effort ?? info?.efforts?.[0] ?? '';
-      draft.agent = { provider: provider.value, model: model.value, effort: effort.value };
-      changed();
-    };
-    const fillModels = () => {
-      const info = list.find(p => p.id === provider.value);
-      model.replaceChildren(...(info?.models ?? []).map(m => el('option', { value: m.id, textContent: m.name || m.id })));
-      model.value = info?.models?.some(m => m.id === draft.agent.model) ? draft.agent.model : info?.models?.[0]?.id ?? '';
-      fillEfforts();
-    };
-    provider.onchange = () => { draft.changed = true; draft.agent.provider = provider.value; fillModels(); };
-    model.onchange = () => { draft.changed = true; draft.agent.model = model.value; fillEfforts(); };
-    effort.onchange = () => { draft.changed = true; draft.agent.effort = effort.value; changed(); };
-    fillModels();
-  };
+  const fillAgent = providers => fillAgentChoices({ provider, model, effort }, providers, { ...draft.agent }, (agent, byUser) => {
+    draft.agent = agent;
+    if (byUser) draft.changed = true;
+    changed();
+  });
   const loadAgents = async () => {
     const id = draft.machine;
     if (!id) { agentNote.textContent = ''; fillAgent([]); return; }
