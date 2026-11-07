@@ -97,7 +97,7 @@ function chooseFromList({ trigger, title, items, selected = [], recent = [], mul
           el('span', {}, item.label, item.detail ? el('small', { textContent: ` · ${item.detail}` }) : null)));
       }
       const button = el('button', { type: 'button', class: 'link-button', textContent: item.label, 'aria-pressed': String(chosen.has(item.value)) });
-      button.onclick = () => { dialog.close(); apply([item.value]); };
+      button.onclick = () => { finish(); apply([item.value]); };
       return el('div', { class: 'directory-picker-row' }, button);
     };
     const recentMatches = firstRecent.map(v => matches.find(m => m.value === v)).filter(Boolean);
@@ -112,14 +112,20 @@ function chooseFromList({ trigger, title, items, selected = [], recent = [], mul
     update(matches.length);
   };
   search.oninput = render;
-  dialog.onkeydown = event => { if (event.key === 'Escape') { event.preventDefault(); dialog.close(); } };
-  close.onclick = () => dialog.close();
-  if (use) use.onclick = () => { const values = [...chosen]; dialog.close(); apply(values); };
-  dialog.onclose = () => {
+  // Closing returns focus to the trigger at once, not when the dialog's close event comes later.
+  let finished = false;
+  function finish() {
+    if (finished) return;
+    finished = true;
+    if (dialog.open) dialog.close();
     dialog.remove();
     document.body.classList.toggle('directory-picker-open', Boolean(document.querySelector('dialog[open]')));
     trigger?.focus({ preventScroll: true });
-  };
+  }
+  dialog.onkeydown = event => { if (event.key === 'Escape') { event.preventDefault(); finish(); } };
+  close.onclick = finish;
+  if (use) use.onclick = () => { const values = [...chosen]; finish(); apply(values); };
+  dialog.onclose = finish;
   dialog.append(el('div', { class: 'directory-picker-head' }, el('h2', { textContent: title }), close),
     el('label', { class: 'destination-search' }, t('Filter by name'), search), body,
     el('div', { class: 'directory-picker-footer' }, count, use));

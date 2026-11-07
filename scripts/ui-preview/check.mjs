@@ -2116,7 +2116,9 @@ if (flag !== '--axe-only') for (const [label, viewport] of [['desktop', { width:
   await page.fill(`${sheet} input[type=search]`, 'recei');
   check(`workflows ${label}: the project sheet filters by name`, await page.locator(`${sheet} .directory-picker-row`).count() === 1);
   await page.keyboard.press('Escape');
-  check(`workflows ${label}: Escape keeps the choice and returns focus`, await page.textContent('#workflow-project-new') === unchosen && await page.evaluate(() => document.activeElement?.id === 'workflow-project-new'));
+  const refocused = await page.waitForFunction(() => document.activeElement?.id === 'workflow-project-new' && !document.querySelector('dialog.destination-picker'), null, { timeout: 5000 }).then(() => true, () => false);
+  check(`workflows ${label}: Escape keeps the choice and returns focus`, refocused && await page.textContent('#workflow-project-new') === unchosen,
+    await page.evaluate(() => `${document.activeElement?.tagName}#${document.activeElement?.id} ${document.querySelectorAll('dialog').length} dialog(s)`));
   await page.click('#workflow-project-new');
   await page.fill(`${sheet} input[type=search]`, 'pay');
   await page.locator(`${sheet} .directory-picker-row button`).first().click();
