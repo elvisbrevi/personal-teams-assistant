@@ -154,7 +154,7 @@ function agentRunCard(run) {
   const copySession = el('button', { type: 'button', class: 'secondary small', textContent: t('Copy session ID'), disabled: !run.session_id });
   copySession.onclick = () => busy(copySession, async () => { if (!await copy(run.session_id)) fail(t('Could not copy the session ID.')); });
   const card = el('article', { class: 'implementation-run', 'data-run-id': run.id },
-    el('div', { class: 'todo-context' }, badge(run.purpose === 'request' && run.state === 'created' ? t('Request created') : tx(run.state), ['created', 'done', 'plan_ready'].includes(run.state) ? 'ok' : ['failed', 'uncertain', 'needs_attention'].includes(run.state) ? 'warn' : 'info'),
+    el('div', { class: 'todo-context' }, badge(run.purpose === 'request' && run.state === 'created' ? t('Request created') : tx(run.state), ['created', 'done', 'plan_ready'].includes(run.state) ? 'ok' : ['failed', 'uncertain', 'needs_attention', 'permission_prompt'].includes(run.state) ? 'warn' : 'info'),
       el('strong', { textContent: `${providerNames[run.provider] || run.provider} · ${run.model}` }), run.purpose === 'request' ? badge(t('Request creation'), 'muted') : badge(t('Implementation'), 'muted')),
     run.project ? el('p', { textContent: `${run.project} · ${{ hu: t('HU'), bug: t('Bug'), epic: t('Epic') }[run.kind] || tx(run.kind)}` }) : null,
     run.item?.url ? link(`#${run.item.id} · ${run.item.title}`, run.item.url) : null,

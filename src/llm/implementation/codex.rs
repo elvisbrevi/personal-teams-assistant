@@ -186,7 +186,7 @@ impl Client {
             }
         }
         let mut params = json!({"model":model,"cwd":directories[0],"approvalPolicy":"never",
-            "sandbox":if planning { "read-only" } else { "workspace-write" },"config":config,"ephemeral":false});
+            "sandbox":permission_mode("codex", planning),"config":config,"ephemeral":false});
         if planning {
             params["baseInstructions"] = json!(
                 "Generate only the requested JSON from the supplied context. Do not use tools or write to providers."
@@ -202,7 +202,7 @@ impl Client {
         schema: Option<Value>,
         observer: SessionObserver<'_>,
         remote: mobile::Observer,
-    ) -> Result<(bool, String)> {
+    ) -> Result<Outcome> {
         let (model, effort) = choice;
         let params = self
             .parameters(choice, directories, schema.is_some())
@@ -230,12 +230,18 @@ impl Client {
             .to_owned();
         interrupt.turn = Some(turn_id.clone());
         let mut text = String::new();
+        let mut prompts = Vec::new();
         let ok = tokio::time::timeout(Duration::from_secs(7200), async {
             loop {
                 let event = match self.pending.pop_front() { Some(event) => event, None => self.receive().await? };
                 let method = event["method"].as_str().unwrap_or_default();
                 let p = &event["params"];
                 if event.get("id").is_some() && !method.is_empty() {
+                    // Approvals and questions for this thread are prompts nobody can answer:
+                    // record them and refuse at once, so the turn goes on without waiting.
+                    if p["threadId"] == thread && asks_a_person(method) {
+                        keep_prompt(&mut prompts, &prompt_text(method, &asked(p)));
+                    }
                     self.send(json!({"id":event["id"],"error":{"code":-32601,"message":"This host does not grant tool approvals."}})).await?;
                     continue;
                 }
@@ -249,9 +255,25 @@ impl Client {
                 }
             }
         }).await??;
-        let redactor = crate::security::Redactor::new(&[], Vec::new())?;
-        Ok((ok, redactor.redact(&text)))
+        Outcome::redacted(ok, &text, &prompts)
     }
+}
+/// Server requests of the app-server protocol that wait for a person: approvals, questions and
+/// elicitations ([protocol](https://github.com/openai/codex/blob/main/codex-rs/app-server-protocol/src/protocol/common.rs)).
+fn asks_a_person(method: &str) -> bool {
+    method.ends_with("/requestApproval")
+        || method.ends_with("/requestUserInput")
+        || method.ends_with("/elicitation/request")
+}
+/// What a request asked for, without its protocol identifiers.
+fn asked(params: &Value) -> Value {
+    let mut asked = params.clone();
+    if let Some(fields) = asked.as_object_mut() {
+        for key in ["threadId", "turnId", "itemId", "approvalId", "requestId"] {
+            fields.remove(key);
+        }
+    }
+    asked
 }
 // Protocol config reads include null option fields; TOML overrides must omit them.
 fn config_table(values: &serde_json::Map<String, Value>) -> serde_json::Map<String, Value> {
@@ -589,9 +611,82 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(result.0);
-        assert_eq!(result.1, "{\"title\":\"Synthetic\"}");
+        assert!(result.ok);
+        assert_eq!(result.text, "{\"title\":\"Synthetic\"}");
         assert_eq!(*native.lock().unwrap(), THREAD);
         server.await.unwrap();
+    }
+    #[tokio::test]
+    async fn a_coding_thread_has_full_access_and_records_an_approval_it_refused() {
+        let root = tempfile::tempdir().unwrap();
+        let socket = root.path().join("codex.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let mut refused = false;
+            while let Some(Ok(Message::Text(message))) = ws.next().await {
+                let request: Value = serde_json::from_str(&message).unwrap();
+                if request["id"] == "approval-1" {
+                    // The host answered the approval at once, with a refusal.
+                    assert!(request.get("error").is_some());
+                    refused = true;
+                    for event in [
+                        json!({"method":"item/completed","params":{"threadId":THREAD,"turnId":"turn-1","item":{"type":"agentMessage","text":"Done without pushing."}}}),
+                        json!({"method":"turn/completed","params":{"threadId":THREAD,"turn":{"id":"turn-1","status":"completed"}}}),
+                    ] {
+                        ws.send(Message::Text(event.to_string().into()))
+                            .await
+                            .unwrap();
+                    }
+                    break;
+                }
+                let method = request["method"].as_str().unwrap();
+                let result = match method {
+                    "initialized" => continue,
+                    "initialize" => json!({}),
+                    "thread/start" => {
+                        assert_eq!(request["params"]["sandbox"], "danger-full-access");
+                        assert_eq!(request["params"]["approvalPolicy"], "never");
+                        json!({"thread":{"id":THREAD}})
+                    }
+                    "turn/start" => json!({"turn":{"id":"turn-1"}}),
+                    _ => panic!("Unexpected method {method}"),
+                };
+                ws.send(Message::Text(
+                    json!({"id":request["id"],"result":result})
+                        .to_string()
+                        .into(),
+                ))
+                .await
+                .unwrap();
+                if method == "turn/start" {
+                    ws.send(Message::Text(json!({"id":"approval-1","method":"item/commandExecution/requestApproval","params":{"threadId":THREAD,"turnId":"turn-1","itemId":"i1","command":"git push -u origin feature","reason":"network"}}).to_string().into())).await.unwrap();
+                }
+            }
+            refused
+        });
+        let client = Client::socket(socket.to_str().unwrap(), mobile::Access::default())
+            .await
+            .unwrap();
+        let outcome = client
+            .execute(
+                ("synthetic", "low"),
+                &[root.path().into()],
+                "Synthetic task",
+                None,
+                &|_| Ok(()),
+                std::sync::Arc::new(|_| Ok(())),
+            )
+            .await
+            .unwrap();
+        assert!(outcome.ok);
+        assert_eq!(
+            outcome.prompts,
+            [
+                r#"item/commandExecution/requestApproval: {"command":"git push -u origin feature","reason":"network"}"#
+            ]
+        );
+        assert!(server.await.unwrap());
     }
 }

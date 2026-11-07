@@ -1018,7 +1018,7 @@ pub(super) const TOOLS: &[Tool] = &[
     Tool {
         name: "implementation_start",
         title: "Start work item implementation",
-        description: "HU/bug/Epic: propose children for review. Task/development bug/issue: run the selected coding agent in the selected directories. Never sends Teams messages or automatically publishes changes.",
+        description: "HU/bug/Epic: propose children for review. Task/development bug/issue: run the selected coding agent in the selected directories, fully autonomous with full permissions on that computer: it never asks or waits and finishes the request, including branch, commits, push, pull request and tests when asked. Never changes work items, sends Teams messages, merges, publishes or deploys.",
         effect: Effect::External,
         schema: || {
             object(
@@ -2251,7 +2251,7 @@ pub(super) fn confirmation(name: &str, args: &Value) -> Option<String> {
             args["kind"], args["target"]["project"]
         ),
         "implementation_start" => format!(
-            "Start the selected coding agent for item {} on machine {} in the selected directories?",
+            "Start the selected coding agent for item {} on machine {} in the selected directories, with full permissions on that computer and no further prompts?",
             args["item"]["id"], args["machine"]
         ),
         "implementation_create" => {

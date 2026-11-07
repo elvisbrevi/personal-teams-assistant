@@ -113,7 +113,7 @@ async function loadWorkItemSessions() {
       const open = el('button', { type: 'button', class: 'secondary small', textContent: t('Open agent session') });
       open.onclick = () => openAgentSession(session, open);
       return el('article', { class: 'implementation-run', 'data-run-id': session.id }, el('strong', { textContent: `${providerNames[session.provider] || session.provider} · ${session.model}` }),
-        badge(session.online === false ? t('Machine offline. Last reported state: {state}', { state: tx(session.state) }) : tx(session.state), session.state === 'done' ? 'ok' : 'info'),
+        badge(session.online === false ? t('Machine offline. Last reported state: {state}', { state: tx(session.state) }) : tx(session.state), session.state === 'done' ? 'ok' : session.state === 'permission_prompt' ? 'warn' : 'info'),
         el('code', { textContent: session.session_id || t('The agent has not reported its session ID yet.') }),
         el('dl', { class: 'todo-fields' }, ...[[t('Started at'), session.started_at], [t('Finished at'), session.finished_at]].map(([label, value]) => el('div', {}, el('dt', { textContent: label }), el('dd', { textContent: value ? new Date(value).toLocaleString(uiLocale()) : t('Not recorded') })))), open);
     }));

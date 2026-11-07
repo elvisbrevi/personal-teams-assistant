@@ -134,6 +134,10 @@ struct Session {
     _tree: ProcessTree,
     stderr: tokio::task::JoinHandle<std::io::Result<Vec<u8>>>,
     remote_connected: bool,
+    /// While a delegated coding turn runs nobody answers: a prompt is recorded and refused at
+    /// once, even with a mobile connection, so the run never waits for a person.
+    autonomous: bool,
+    prompts: Vec<String>,
 }
 impl Drop for Session {
     fn drop(&mut self) {
@@ -163,7 +167,22 @@ impl Session {
                 // The provider bridge forwards prompts to the signed-in person's app and
                 // injects their response itself. The host never grants an approval.
                 if value["type"] == "control_request" {
-                    if !self.remote_connected {
+                    let request = &value["request"];
+                    let asks = ["can_use_tool", "elicitation"]
+                        .contains(&request["subtype"].as_str().unwrap_or_default());
+                    if self.autonomous && asks {
+                        let tool = request["tool_name"]
+                            .as_str()
+                            .or(request["subtype"].as_str())
+                            .unwrap_or("prompt");
+                        let input = if request["input"].is_null() {
+                            &request["message"]
+                        } else {
+                            &request["input"]
+                        };
+                        keep_prompt(&mut self.prompts, &prompt_text(tool, input));
+                    }
+                    if !self.remote_connected || (self.autonomous && asks) {
                         self.send(json!({"type":"control_response","response":{"subtype":"error",
                             "request_id":value["request_id"],"error":"This host does not grant tool approvals."}})).await?;
                     }
@@ -295,18 +314,23 @@ async fn spawn(
         stderr: tokio::spawn(tail(child.stderr.take().unwrap())),
         child,
         remote_connected: false,
+        autonomous: false,
+        prompts: Vec::new(),
     })
 }
 
+/// Run one Claude turn; a coding turn (`planning` false) is autonomous until its result.
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn execute(
     binary: &std::path::Path,
     args: &[OsString],
     directory: &std::path::Path,
     prompt: &str,
     id: &str,
+    planning: bool,
     observer: SessionObserver<'_>,
     remote: Observer,
-) -> Result<(bool, String)> {
+) -> Result<Outcome> {
     let mut session = spawn(binary, args, directory).await?;
     observer(None)?;
     let access = session
@@ -314,6 +338,7 @@ pub(super) async fn execute(
         .await
         .unwrap_or_else(|_| Access::unavailable());
     remote(access.clone())?;
+    session.autonomous = !planning;
     session.send(json!({"type":"user","message":{"role":"user","content":prompt},"parent_tool_use_id":null,"session_id":id})).await?;
     let mut events = Events::default();
     let result = tokio::time::timeout(Duration::from_secs(7200), async {
@@ -328,6 +353,11 @@ pub(super) async fn execute(
     .await?;
     result?;
     let ok = !events.failed && !events.text.trim().is_empty();
+    // After the delegated turn the retained connection belongs to the person's mobile app.
+    session.autonomous = false;
+    for prompt in std::mem::take(&mut session.prompts) {
+        keep_prompt(&mut events.prompts, &prompt);
+    }
     if access.status == "connected" {
         if retain(id, session, access, remote.clone()).await.is_err() {
             remote(Access::unavailable())?;
@@ -335,8 +365,7 @@ pub(super) async fn execute(
     } else {
         let _ = session.child.kill().await;
     }
-    let redactor = crate::security::Redactor::new(&[], Vec::new())?;
-    Ok((ok, redactor.redact(&events.text)))
+    Outcome::redacted(ok, &events.text, &events.prompts)
 }
 
 pub(crate) async fn reconnect(
@@ -373,7 +402,8 @@ pub(crate) async fn reconnect(
         return Ok(live.access.clone());
     }
     drop(guard);
-    let mut args = arguments(provider, model, effort, directories)?;
+    // A resumed session keeps the permission mode its run started with.
+    let mut args = arguments(provider, model, effort, directories, planning)?;
     args.extend(["--resume".into(), id.into()]);
     if planning {
         args.extend(["--tools".into(), "".into()]);
@@ -406,10 +436,11 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn claude_publishes_the_real_remote_id_and_keeps_serving_after_the_initial_result() {
-        use std::os::unix::fs::PermissionsExt;
         let root = tempfile::tempdir().unwrap();
         let binary = root.path().join("claude-fixture");
-        std::fs::write(&binary, r##"#!/bin/sh
+        crate::llm::agent::install_fake_cli(
+            &binary,
+            r##"#!/bin/sh
 while [ "$#" -gt 0 ]; do
   if [ "$1" = '--session-id' ]; then shift; session="$1"; fi
   shift
@@ -424,8 +455,8 @@ case "$prompt" in *'Synthetic mobile check'*) ;; *) exit 8;; esac
 printf '{"type":"system","session_id":"%s"}\n' "$session"
 printf '{"type":"result","session_id":"%s","is_error":false,"result":"Completed synthetic check."}\n' "$session"
 while read -r control; do :; done
-"##).unwrap();
-        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
+"##,
+        );
         let native = std::sync::Mutex::new(String::new());
         let observed = Arc::new(std::sync::Mutex::new(Vec::new()));
         let updates = observed.clone();
@@ -452,8 +483,8 @@ while read -r control; do :; done
         .await
         .unwrap()
         .unwrap();
-        assert!(result.0);
-        assert_eq!(result.1, "Completed synthetic check.");
+        assert!(result.ok);
+        assert_eq!(result.text, "Completed synthetic check.");
         let id = native.lock().unwrap().clone();
         assert!(is_live(&id).await);
         {
@@ -469,5 +500,61 @@ while read -r control; do :; done
         }
         close(&id).await;
         assert!(!is_live(&id).await);
+    }
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_claude_coding_turn_never_waits_on_a_prompt_and_records_it() {
+        let root = tempfile::tempdir().unwrap();
+        let binary = root.path().join("claude-fixture");
+        // Remote Control is refused, so nothing else could answer; the run must not wait.
+        crate::llm::agent::install_fake_cli(
+            &binary,
+            r##"#!/bin/sh
+printf '%s ' "$@" > arguments.txt
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = '--session-id' ]; then shift; session="$1"; fi
+  shift
+done
+read -r initialize
+printf '%s\n' '{"type":"control_response","response":{"subtype":"success","request_id":"pta-initialize","response":{}}}'
+read -r remote
+printf '%s\n' '{"type":"control_response","response":{"subtype":"error","request_id":"pta-remote","error":"not eligible"}}'
+read -r prompt
+printf '{"type":"system","session_id":"%s"}\n' "$session"
+printf '%s\n' '{"type":"control_request","request_id":"ask-1","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"gh pr create --fill"}}}'
+read -r answer
+case "$answer" in *'"request_id":"ask-1"'*'error'*|*'error'*'"request_id":"ask-1"'*) ;; *) exit 11;; esac
+printf '{"type":"result","session_id":"%s","is_error":false,"result":"Opened nothing.","permission_denials":[{"tool_name":"Bash","tool_input":{"command":"gh pr create --fill"}}]}\n' "$session"
+"##,
+        );
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(5),
+            super::super::execute_at(
+                &binary,
+                ("claude", "synthetic-model", "low"),
+                &[root.path().into()],
+                "Synthetic coding task",
+                None,
+                &|_| Ok(()),
+                Arc::new(|_| Ok(())),
+            ),
+        )
+        .await
+        .expect("The run waited for an answer")
+        .unwrap();
+        assert!(outcome.ok);
+        assert_eq!(
+            outcome.prompts,
+            [r#"Bash: {"command":"gh pr create --fill"}"#]
+        );
+        let launched = std::fs::read_to_string(root.path().join("arguments.txt")).unwrap();
+        assert!(
+            launched.contains("--permission-mode bypassPermissions "),
+            "{launched}"
+        );
+        assert!(
+            launched.contains("--disallowedTools AskUserQuestion "),
+            "{launched}"
+        );
     }
 }

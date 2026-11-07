@@ -278,7 +278,17 @@ pub(crate) struct Run {
     started_at: Option<String>,
     #[serde(default)]
     remote: Option<crate::llm::implementation::mobile::Access>,
+    /// The permission mode the execution machine launched the CLI with
+    /// (`llm::implementation::permission_mode`); none in a record from an older host.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) permission_mode: Option<String>,
+    /// The permission prompts the CLI still raised and nobody answered (bounded, redacted).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) prompts: Vec<String>,
 }
+/// The final state of a coding run that stopped on a permission prompt, recorded with its text
+/// so its cause can be removed; distinct from `needs_attention`.
+pub(crate) const PERMISSION_PROMPT: &str = "permission_prompt";
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SessionSummary {
@@ -812,7 +822,7 @@ async fn local(host: &Arc<Host>, method: &str, args: &Value) -> Result<Value> {
                 .db
                 .list(args["work_item_url"].as_str(), args["id"].as_str(), false)?
             {
-                let value = json!({"id":run.launch.id,"item":run.launch.detail.item,"planning":run.launch.planning,"state":run.state,"created_at":run.created_at,"started_at":run.started_at,"finished_at":run.finished_at,"session_id":run.session_id,"remote":run.remote,"provider":run.launch.request.provider,"model":run.launch.request.model,"effort":run.launch.request.effort,"machine":run.launch.request.machine,"output":run.output,"plan":run.plan});
+                let value = json!({"id":run.launch.id,"item":run.launch.detail.item,"planning":run.launch.planning,"state":run.state,"created_at":run.created_at,"started_at":run.started_at,"finished_at":run.finished_at,"session_id":run.session_id,"remote":run.remote,"provider":run.launch.request.provider,"model":run.launch.request.model,"effort":run.launch.request.effort,"machine":run.launch.request.machine,"output":run.output,"plan":run.plan,"permission_mode":run.permission_mode,"prompts":run.prompts});
                 size += serde_json::to_vec(&value)?.len();
                 if size > 800_000 && !runs.is_empty() {
                     partial = true;
@@ -894,6 +904,14 @@ async fn local(host: &Arc<Host>, method: &str, args: &Value) -> Result<Value> {
                 session_id: None,
                 started_at: None,
                 remote: None,
+                permission_mode: Some(
+                    crate::llm::implementation::permission_mode(
+                        &launch.request.provider,
+                        launch.planning,
+                    )
+                    .into(),
+                ),
+                prompts: Vec::new(),
             })?;
             let host = host.clone();
             let task = tokio::spawn(async move {
@@ -1072,7 +1090,7 @@ async fn run(host: &Arc<Host>, launch: Launch) {
             for child in children {
                 validate_child(child)?;
             }
-            Ok((true, String::new(), Some(plan)))
+            Ok((true, String::new(), Some(plan), Vec::new()))
         }
         .await
     } else {
@@ -1087,15 +1105,31 @@ async fn run(host: &Arc<Host>, launch: Launch) {
             remote,
         )
         .await
-        .map(|(ok, text)| (ok, text, None))
+        .map(|outcome| (outcome.ok, outcome.text, None, outcome.prompts))
     };
-    let (status,output,plan)=match result {
-        Ok((ok,output,plan))=>(if plan.is_some() { "plan_ready" } else if ok { "done" } else { "needs_attention" },output,plan),
-        Err(_)=>("failed","The selected CLI did not complete. Check its login, permissions and model availability on the execution machine.".into(),None),
+    let (status, output, plan, prompts) = match result {
+        Ok((ok, output, plan, prompts)) => (final_state(ok, plan.is_some(), &prompts), output, plan, prompts),
+        Err(_) => ("failed", "The selected CLI did not complete. Check its login, permissions and model availability on the execution machine.".into(), None, Vec::new()),
     };
     if authority::invocation(&host.state).is_ok_and(|i| i.scope.owner) {
-        let _ = LocalImplementation::new(&host.state.implementation.db)
-            .finish_run(&launch.id, status, &output, plan);
+        let db = &host.state.implementation.db;
+        if !prompts.is_empty() {
+            let _ = db.prompts(&launch.id, &prompts);
+        }
+        let _ = LocalImplementation::new(db).finish_run(&launch.id, status, &output, plan);
+    }
+}
+/// How a finished run ends. A run is fully autonomous, so a permission prompt the CLI still
+/// raised is its own state with the prompt recorded, never `needs_attention`.
+fn final_state(ok: bool, plan: bool, prompts: &[String]) -> &'static str {
+    if plan {
+        "plan_ready"
+    } else if !prompts.is_empty() {
+        PERMISSION_PROMPT
+    } else if ok {
+        "done"
+    } else {
+        "needs_attention"
     }
 }
 
@@ -1292,6 +1326,15 @@ fn validate_child(child: &Value) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn a_permission_prompt_never_ends_a_run_in_needs_attention() {
+        let prompt = vec!["Bash: git push".to_owned()];
+        assert_eq!(final_state(false, false, &prompt), PERMISSION_PROMPT);
+        assert_eq!(final_state(true, false, &prompt), PERMISSION_PROMPT);
+        assert_eq!(final_state(true, false, &[]), "done");
+        assert_eq!(final_state(false, false, &[]), "needs_attention");
+        assert_eq!(final_state(true, true, &[]), "plan_ready");
+    }
     #[test]
     fn paths_are_canonical_and_cannot_escape_allowed_roots() {
         let allowed = tempfile::tempdir().unwrap();
