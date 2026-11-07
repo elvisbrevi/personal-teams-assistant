@@ -748,7 +748,8 @@ pub(in crate::app) fn named_repository(
     description: &str,
 ) -> Option<(crate::workflows::Repository, PathBuf)> {
     let text = format!("{title}\n{description}").to_lowercase();
-    let word = |c: char| c.is_alphanumeric() || "_.-".contains(c);
+    // A name followed by a full stop is still a mention.
+    let word = |c: char| c.is_alphanumeric() || "_-".contains(c);
     let position = |name: &str| {
         let name = name.to_lowercase();
         text.match_indices(&name)
@@ -779,9 +780,7 @@ pub(in crate::app) fn reported_branch(output: &str) -> Option<String> {
             .get(..BRANCH.len())
             .filter(|p| p.eq_ignore_ascii_case(BRANCH))
             .map(|_| &line[BRANCH.len()..])?;
-        let branch = rest
-            .trim()
-            .trim_matches(|c| c == '`' || c == '*' || c == '"');
+        let branch = rest.trim_matches(|c: char| c.is_whitespace() || "`*\"".contains(c));
         let branch = branch.strip_prefix("refs/heads/").unwrap_or(branch);
         crate::ado::workflow::valid_branch(branch).then(|| branch.to_owned())
     })

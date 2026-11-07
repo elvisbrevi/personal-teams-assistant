@@ -334,13 +334,16 @@ async fn cancel(host: &Arc<Host>, args: RunArgs) -> Result<Value, String> {
     let mut cancelled = None;
     let mut warning = None;
     if let Some(active) = &active {
-        // A run recorded but not yet confirmed as launched may still be on the machine.
-        let present = active.started
-            || implementation::observe(host, &active.machine, &active.id)
-                .await
-                .ok()
-                .flatten()
-                .is_some();
+        // Only a run still in flight is cancelled; one recorded but not yet confirmed as
+        // launched may be on the machine already. When the machine cannot be asked, a launched
+        // run is cancelled anyway (the call reports whether it reached it).
+        let present = match implementation::observe(host, &active.machine, &active.id).await {
+            Ok(Some(observed)) => {
+                matches!(observed["state"].as_str(), Some("running" | "planning"))
+            }
+            Ok(None) => false,
+            Err(_) => active.started,
+        };
         if present {
             match implementation::cancel_run(host, &active.machine, &active.id).await {
                 Ok(()) => cancelled = Some(active.id.clone()),
