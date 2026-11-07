@@ -334,8 +334,12 @@
       window.__ptaLastImplementation = structuredClone(args);
       const planning = !args.item.task && (args.item.provider !== 'github' || args.item.id === 42);
       const id = crypto.randomUUID();
+      const prompted = !planning && args.context.includes('[synthetic prompt]');
       implementationRuns.push({ id, machine: args.machine, session_id: crypto.randomUUID(), provider: args.provider, model: args.model, started_at: '2026-10-24T12:00:01Z', finished_at: '2026-10-24T12:02:00Z', item: { id: args.item.id, title: 'Implement receipt downloads', url: args.item.provider === 'github' ? `https://github.com/${args.item.project}/issues/${args.item.id}` : `${org}/${args.item.project}/_workitems/edit/${args.item.id}` },
-        planning, state: planning ? 'plan_ready' : 'done', created_at: '2026-10-24T12:00:00Z', output: planning ? '' : 'Updated receipt downloads and checked the result.',
+        planning, state: planning ? 'plan_ready' : prompted ? 'permission_prompt' : 'done', created_at: '2026-10-24T12:00:00Z', output: planning ? '' : 'Updated receipt downloads and checked the result.',
+        // The execution machine records the mode it launched the CLI with (src/llm/implementation.rs).
+        permission_mode: planning ? 'read-only' : { claude: 'bypassPermissions', codex: 'danger-full-access', opencode: 'allow-all' }[args.provider],
+        prompts: prompted ? ['Bash: {"command":"gh pr create --fill"}'] : [],
         plan: planning ? { children: [{ title: 'Implement receipt download', description: 'Add the receipt download action and verify it on a phone.' }] } : null });
       return { id, started: true };
     },

@@ -2906,6 +2906,59 @@ async fn the_operator_enables_the_account_store_per_portal_account() {
 }
 
 #[tokio::test]
+async fn the_shared_server_never_launches_a_fully_autonomous_coding_run_for_an_account() {
+    use authority::Transport::{Browser, Local, Machine};
+    let (_dir, portal, entries, _issuer) = configured_fixture().await;
+    let mut refused = 0;
+    for account in &entries {
+        let profile = profile_dir(&portal.root, account);
+        let host = Arc::new(Host {
+            state: init_state(&profile, &profile.join("data")).unwrap(),
+            shell: Box::new(NativeShell),
+        });
+        if host.state.authority.owner {
+            continue;
+        }
+        // Refused before the machine is even compared with this one.
+        let own = uuid::Uuid::new_v4().to_string();
+        for transport in [Browser, Local, Machine] {
+            let mut request = control::Request::new("implementation_launch");
+            request.args = json!({"id":uuid::Uuid::new_v4().to_string(),"request":{"machine":own,"item":{"provider":"github","id":1,"project":"example/repo"},"context":"Synthetic","directories":[profile.join("data")],"provider":"claude","model":"synthetic","effort":"low"},"detail":{},"language":"en","planning":false});
+            let reply = authority::within(
+                authority::Invocation {
+                    scope: host.state.authority.clone(),
+                    transport,
+                },
+                control::dispatch(&host, request),
+            )
+            .await;
+            assert!(!reply.ok, "{transport:?}");
+            // Whatever refuses first, the execution gate itself refuses this account.
+            let gate = authority::within(
+                authority::Invocation {
+                    scope: host.state.authority.clone(),
+                    transport,
+                },
+                async { authority::require_execution(&host.state) },
+            )
+            .await;
+            assert!(gate.is_err(), "{transport:?}");
+            assert!(
+                host.state
+                    .implementation
+                    .db
+                    .list(None, None, true)
+                    .unwrap()
+                    .is_empty(),
+                "{transport:?}"
+            );
+            refused += 1;
+        }
+    }
+    assert!(refused > 0);
+}
+
+#[tokio::test]
 async fn consumer_bindings_are_private_per_account_and_shared_accounts_run_no_processes() {
     use crate::security::AccountSecrets;
     use authority::Transport::{Browser, Local, Machine};

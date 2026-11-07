@@ -931,6 +931,7 @@ for (const [label, viewport] of [['desktop', { width: 1440, height: 900 }], ['ph
   await page.waitForSelector('#implementation-provider option', { state: 'attached' });
   check(`${label}: implementation opens before starting and offers both machines`, await page.locator('#implementation-machine option').count() === 2 && await page.locator('.implementation-footer button').last().isDisabled());
   await page.fill('#implementation-context', 'Implement the receipt flow and check the phone layout.');
+  check(`${label}: planning children shows no full-permissions note`, await page.locator('#implementation-permissions').count() === 0);
   const chooseDirectories = async () => {
     await page.getByRole('button', { name: '+ Elegir directorios', exact: true }).click();
     await page.getByRole('button', { name: 'Explorar el directorio /work', exact: true }).click();
@@ -975,10 +976,19 @@ for (const [label, viewport] of [['desktop', { width: 1440, height: 900 }], ['ph
   await page.locator('#todo-detail-content .todo-detail-header button[aria-label="Implementar work item"]').click();
   await page.waitForSelector('#implementation-provider option', { state: 'attached' });
   check(`${label}: task detail opens direct implementation`, (await page.textContent('#implementation-content h2')).includes('Implementar el work item seleccionado'));
+  check(`${label}: the coding form says the agent runs with full permissions on that computer, with no extra confirmation`, await page.locator('#implementation-permissions').innerText().then(text => text.includes('permisos completos en ese computador')) && await page.locator('#implementation-content dialog, #implementation-content input[type=checkbox]').count() === 0);
+  await page.fill('#implementation-context', 'Open the pull request. [synthetic prompt]');
   await chooseDirectories();
   await page.locator('.implementation-footer button').last().click();
   await page.waitForSelector('.implementation-output');
   check(`${label}: direct task execution preserves the verified task classification`, await page.evaluate(() => window.__ptaLastImplementation.item.task === true));
+  const recorded = page.locator('.implementation-run').last();
+  check(`${label}: the run detail shows its permission mode`, (await recorded.locator('.implementation-permission-mode').innerText()).startsWith('Permisos completos en ese computador ('));
+  check(`${label}: a prompt the CLI still raised is shown with its text and its own state`, (await recorded.locator('.implementation-prompts').innerText()).includes('gh pr create --fill') && (await recorded.innerText()).includes('Detenida en un permiso'));
+  const recordedViolations = await scan(page);
+  check(`${label}: a run stopped on a permission prompt passes WCAG 2.2 AA`, recordedViolations.length === 0, JSON.stringify(recordedViolations));
+  check(`${label}: the run detail fits the viewport`, await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth));
+  await page.screenshot({ path: `${out}/${label}-implementation-run.png`, fullPage: true });
   await page.click('nav [data-tab="settings"]');
   await page.click('#settings-tab-teams');
   await page.click('#teams-machine-open');

@@ -231,8 +231,13 @@ children and run installed coding agents.
    editable agent instructions (`pta prompts`) plus fixed rules, and also receive the
    organization's norms, architecture and conventions for the item's project as untrusted input.
    On a process task (any task-category type, such as a development bug a guide lists with the bugs) or ordinary GitHub issue, Start implements that item in
-   the chosen directories. Changes remain local; the coding prompt does not authorize pushing,
-   publishing, changing work items or sending Teams messages.
+   the chosen directories. A started implementation is fully autonomous on that computer: the
+   CLI runs with full permissions (Claude Code `bypassPermissions`, Codex `danger-full-access`
+   with approvals `never`, OpenCode allow-all) and never waits for a person, so it creates the
+   branch, commits, pushes, opens the pull request and runs tests when the request asks for
+   them, deciding and reporting what would otherwise need a person. Starting is the
+   authorization; there is no further prompt or confirmation. It still never changes work items,
+   sends Teams messages, merges, publishes or deploys. The form says so in a short note.
 
 Every tool is available through `pta tools list`, `pta tools call NAME` (JSON on stdin) and MCP.
 Examples use synthetic identifiers; obtain actual machine IDs and verified item details first:
@@ -262,8 +267,11 @@ work item provider/project/ID/link, execution machine, agent/model/effort, real 
 state, request time, actual start time and finish time. Session IDs are captured from CLI events
 while the agent runs; a run ID is never substituted for an unavailable native session ID. Native
 sessions persist in their CLI, including planning sessions. Successful implementations become
-`done`; plans become `plan_ready`. Failures, blocked permissions, cancellations and interruptions
-stay distinct. An interrupted run retains its session ID, with no invented finish time. The
+`done`; plans become `plan_ready`. A run is never left waiting on a permission prompt: if the CLI
+still raised one, its text (bounded, redacted) is in the run's `prompts` and the run ends in
+`permission_prompt`, so the cause can be removed on that computer. Each run records
+`permission_mode` (the mode its machine launched the CLI with; `read-only` for planning, absent
+in records from older hosts). Failures, cancellations and interruptions stay distinct. An interrupted run retains its session ID, with no invented finish time. The
 coordinator receives durable session updates, including last-known records for offline machines.
 
 `implementation_runs` filters by machine and optional run `id` or `work_item_url`, returns the

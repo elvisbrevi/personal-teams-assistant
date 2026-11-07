@@ -67,6 +67,7 @@ async function openImplementation(item, selection, trigger) {
     $('#implementation-content').replaceChildren(el('div', { class: 'panel' },
       el('h2', { textContent: prepared.planning ? t('Plan child work items') : t('Implement selected work item') }),
       el('p', { class: 'hint', textContent: prepared.planning ? t('Review and edit the proposed children before creating them. Existing children are included as context.') : t('The selected coding agent will work in the directories you choose.') }),
+      prepared.planning ? null : el('p', { class: 'callout warn', id: 'implementation-permissions', textContent: t('The agent runs with full permissions on that computer: it runs commands, commits, pushes and opens pull requests there without asking anyone.') }),
       el('label', {}, t('Implementation context'), context),
       el('label', {}, t('Execution machine'), machine),
       el('fieldset', {}, el('legend', { textContent: t('Working directories') }), directoryList, add),
@@ -121,6 +122,12 @@ async function implementationMachine(form) {
   implementationModels(form);
   await implementationRuns(form);
 }
+/** The permission mode a run was launched with, as the execution machine recorded it. */
+function permissionMode(mode) {
+  if (!mode) return t('Not recorded');
+  if (mode === 'read-only') return t('Read-only, no tools');
+  return t('Full permissions on that computer ({mode})', { mode });
+}
 async function implementationRuns(form) {
   const machine = form.machine.value; const generation = form.generation;
   const result = await invoke('implementation_runs', { machine, work_item_url: form.prepared.detail.item.url });
@@ -132,8 +139,12 @@ async function implementationRuns(form) {
   }));
   if (implementationForm !== form || generation !== form.generation) return;
   form.runs.replaceChildren(...runs.map(run => {
-    const panel = el('article', { class: 'implementation-run' }, badge(tx(run.state), ['done', 'completed', 'created'].includes(run.state) ? 'ok' : 'info'), el('strong', { textContent: `${providerNames[run.provider] || run.provider || ''} · ${run.model || ''}` }),
-      el('dl', { class: 'todo-fields' }, ...[[t('Requested at'), run.created_at], [t('Started at'), run.started_at], [t('Finished at'), run.finished_at]].map(([label, value]) => el('div', {}, el('dt', { textContent: label }), el('dd', { textContent: value ? new Date(value).toLocaleString(uiLocale()) : t('Not recorded') })))));
+    const panel = el('article', { class: 'implementation-run' }, badge(tx(run.state), ['done', 'completed', 'created'].includes(run.state) ? 'ok' : ['permission_prompt', 'needs_attention', 'failed'].includes(run.state) ? 'warn' : 'info'), el('strong', { textContent: `${providerNames[run.provider] || run.provider || ''} · ${run.model || ''}` }),
+      el('dl', { class: 'todo-fields' }, ...[[t('Requested at'), run.created_at], [t('Started at'), run.started_at], [t('Finished at'), run.finished_at]].map(([label, value]) => el('div', {}, el('dt', { textContent: label }), el('dd', { textContent: value ? new Date(value).toLocaleString(uiLocale()) : t('Not recorded') }))),
+        el('div', {}, el('dt', { textContent: t('Permission mode') }), el('dd', { class: 'implementation-permission-mode', textContent: permissionMode(run.permission_mode) }))));
+    if (run.prompts?.length) panel.append(el('div', { class: 'callout warn implementation-prompts' }, el('div', {},
+      el('p', { textContent: t('The coding CLI still stopped on a permission prompt, which nobody answered. Remove its cause on that computer:') }),
+      el('pre', { class: 'implementation-output', textContent: run.prompts.join('\n') }))));
     if (run.session_id) {
       const open = el('button', { type: 'button', class: 'secondary small', textContent: t('Open agent session') });
       open.onclick = () => openAgentSession({ ...run, machine }, open);

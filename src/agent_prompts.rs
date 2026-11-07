@@ -41,7 +41,7 @@ pub const BUILT_IN: [BuiltIn; 3] = [
     BuiltIn {
         id: CODE,
         name: "Implement",
-        summary: "Implement on a task, a development bug or a GitHub issue: the agent changes the code in the selected directories.",
+        summary: "Implement on a task, a development bug or a GitHub issue: the agent works with full permissions on the chosen computer, in the selected directories, until the request is done.",
         instructions: prompts::IMPLEMENTATION_CODE,
     },
     BuiltIn {

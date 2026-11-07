@@ -215,6 +215,15 @@ impl Database {
         tx.commit()?;
         Ok(())
     }
+    /// Record the permission prompts a run still raised, before it finishes.
+    pub(super) fn prompts(&self, id: &str, prompts: &[String]) -> Result<()> {
+        let value = serde_json::to_string(prompts)?;
+        self.0.lock().unwrap().execute(
+            "UPDATE agent_runs SET payload=json_set(payload,'$.prompts',json(?2)) WHERE id=?1 AND state IN ('running','planning')",
+            params![id, value],
+        )?;
+        Ok(())
+    }
     pub(super) fn remote(
         &self,
         id: &str,
@@ -389,6 +398,43 @@ mod tests {
         assert_eq!(done.remote.as_ref().unwrap().status, "connected");
         assert_eq!(done.started_at, running.started_at);
         assert!(done.finished_at.is_some());
+    }
+    #[test]
+    fn the_record_keeps_the_permission_mode_and_prompts_and_older_records_read_as_unknown() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("runs.db");
+        let db = Database::open(&path).unwrap();
+        // A record written by an older host has neither field.
+        let older = sample();
+        assert!(older.permission_mode.is_none() && older.prompts.is_empty());
+        assert!(
+            serde_json::to_value(&older)
+                .unwrap()
+                .get("permission_mode")
+                .is_none()
+        );
+        let mut run = sample();
+        run.permission_mode = Some("bypassPermissions".into());
+        let id = run.launch.id.clone();
+        db.insert(&run).unwrap();
+        let prompts = vec![r#"Bash: {"command":"git push"}"#.to_owned()];
+        db.prompts(&id, &prompts).unwrap();
+        LocalImplementation::new(&db)
+            .finish_run(&id, super::super::PERMISSION_PROMPT, "Stopped.", None)
+            .unwrap();
+        // A finished run's prompts are never rewritten.
+        db.prompts(&id, &["Later".to_owned()]).unwrap();
+        drop(db);
+        let finished = Database::open(&path).unwrap().get(&id).unwrap().unwrap();
+        assert_eq!(finished.state, "permission_prompt");
+        assert_eq!(
+            finished.permission_mode.as_deref(),
+            Some("bypassPermissions")
+        );
+        assert_eq!(finished.prompts, prompts);
+        // The replicated summary still matches what older coordinators accept.
+        let summary = serde_json::to_value(SessionSummary::from(finished)).unwrap();
+        assert!(summary.get("permission_mode").is_none() && summary.get("prompts").is_none());
     }
     #[test]
     fn request_intents_sessions_and_uncertainty_survive_restart_without_replay() {
