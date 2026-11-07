@@ -1,7 +1,7 @@
 //! The Git repositories of one project (`_apis/git/repositories`), from which a workflow's
 //! repositories are chosen. Read with the enabled source's read credential, bounded and cached
 //! like the process metadata; nothing here writes or changes a source.
-use super::{Catalog, cached_read, project_url, request};
+use super::{Catalog, Source, cached_read, project_url, request};
 use crate::{state::Store, workflows::CatalogRepository};
 use anyhow::{Context, Result, bail, ensure};
 use reqwest::{Client, Method};
@@ -20,16 +20,16 @@ fn text(value: &Value, max: usize) -> String {
         .to_owned()
 }
 
-/// The project's repositories in one of the source's configured organizations. Without
+/// The source and the project's own spelling of a project in one of the source's configured
+/// organizations (all its accessible projects, as explicit requests list them). Without
 /// `organization`, the project's name must be unique across them.
-pub(crate) async fn list(
+pub(super) async fn resolve(
     client: &Client,
     key: &str,
     catalog: &str,
-    cache: &Store,
     organization: Option<&str>,
     project: &str,
-) -> Result<Value> {
+) -> Result<(Source, String)> {
     let wanted = organization
         .map(|o| {
             crate::workflows::organization_name(o)
@@ -69,6 +69,22 @@ pub(crate) async fn list(
         .iter()
         .find(|s| s.organization == organization)
         .context("Project outside the Azure source catalog.")?;
+    Ok((source.clone(), project.to_owned()))
+}
+
+/// The project's repositories in one of the source's configured organizations. Without
+/// `organization`, the project's name must be unique across them.
+pub(crate) async fn list(
+    client: &Client,
+    key: &str,
+    catalog: &str,
+    cache: &Store,
+    organization: Option<&str>,
+    project: &str,
+) -> Result<Value> {
+    let (source, project) = resolve(client, key, catalog, organization, project).await?;
+    let (source, project) = (&source, project.as_str());
+    let organization = source.organization.as_str();
     let url = project_url(
         source,
         project,

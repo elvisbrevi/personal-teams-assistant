@@ -90,6 +90,9 @@ struct Endpoint {
     /// The workflow operations (`workflows::METHODS`).
     #[serde(default)]
     workflows_support: bool,
+    /// The workflow director's settings and classification (`workflows::director_handles`).
+    #[serde(default)]
+    workflow_director_support: bool,
     #[serde(default)]
     wiki_support: bool,
     #[serde(default)]
@@ -438,7 +441,7 @@ async fn client_with_transport(
         request.method.as_str(),
         "chat" | "test_providers" | "variable_launcher_run"
     ) {
-        client = client.timeout(Duration::from_secs(120));
+        client = client.timeout(Duration::from_secs(CLIENT_DEADLINE_SECONDS));
     }
     let client = client.build()?;
     for attempt in 0..20 {
@@ -511,6 +514,10 @@ async fn client_with_transport(
         ensure!(
             endpoint.workflows_support || !workflows::handles(&request.method),
             "Incompatible workflows host: update the host and CLI together before managing workflows."
+        );
+        ensure!(
+            endpoint.workflow_director_support || !workflows::director_handles(&request.method),
+            "Incompatible workflows host: update the host and CLI together before using the workflow director."
         );
         ensure!(
             endpoint.cloud_store_support || !cloud::handles(&request.method),
@@ -684,6 +691,7 @@ pub(crate) fn launch(
             web_access_support: true,
             implementation_support: true,
             workflows_support: true,
+            workflow_director_support: true,
             machine_pairing_support: true,
             machine_login_support: true,
             machine_management_support: true,
@@ -801,6 +809,9 @@ pub(super) fn failure(message: &str, invalid: bool) -> Reply {
     );
     Reply::error(code, exit, message.strip_prefix(&prefix).unwrap_or(message))
 }
+/// How long a client waits for an operation (other than a model chat, a provider test or a
+/// launcher run); operations that read and then commit stay under it.
+pub(super) const CLIENT_DEADLINE_SECONDS: u64 = 120;
 pub(crate) async fn dispatch(host: &Arc<Host>, request: Request) -> Reply {
     // Reject before diagnostics: a failed account check must not read or write a
     // newly rebound account's paths, even to record the rejection.
@@ -1570,6 +1581,7 @@ mod tests {
                 web_access_support: true,
                 implementation_support: true,
                 workflows_support: true,
+                workflow_director_support: true,
                 machine_pairing_support: true,
                 machine_login_support: true,
                 machine_management_support: true,
@@ -1615,6 +1627,7 @@ mod tests {
                 web_access_support: true,
                 implementation_support: true,
                 workflows_support: true,
+                workflow_director_support: true,
                 machine_pairing_support: true,
                 machine_login_support: true,
                 machine_management_support: true,
@@ -1675,6 +1688,7 @@ mod tests {
                     web_access_support: true,
                     implementation_support: true,
                     workflows_support: true,
+                    workflow_director_support: true,
                     machine_pairing_support: true,
                     machine_login_support: true,
                     machine_management_support: true,

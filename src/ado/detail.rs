@@ -336,6 +336,18 @@ async fn relations(
     Ok(())
 }
 
+/// The process categories a detail read accepts, with the label each gives the item.
+const HU_OR_BUG: &[(&str, &str)] = &[
+    ("Microsoft.RequirementCategory", "requirement"),
+    ("Microsoft.BugCategory", "bug"),
+];
+const TASK: &[(&str, &str)] = &[("Microsoft.TaskCategory", "task")];
+const ANY: &[(&str, &str)] = &[
+    ("Microsoft.RequirementCategory", "requirement"),
+    ("Microsoft.BugCategory", "bug"),
+    ("Microsoft.TaskCategory", "task"),
+];
+
 pub async fn get(
     client: &Client,
     key: &str,
@@ -343,7 +355,19 @@ pub async fn get(
     cache: &Store,
     args: &DetailRequest,
 ) -> Result<Detail> {
-    get_kind(client, key, catalog, cache, args, false).await
+    get_kind(client, key, catalog, cache, args, HU_OR_BUG).await
+}
+
+/// An item of any of the requirement, bug and task categories, in one read, with the category
+/// its type was found in (`Item::category`).
+pub async fn get_any(
+    client: &Client,
+    key: &str,
+    catalog: &str,
+    cache: &Store,
+    args: &DetailRequest,
+) -> Result<Detail> {
+    get_kind(client, key, catalog, cache, args, ANY).await
 }
 
 pub async fn get_task(
@@ -353,7 +377,7 @@ pub async fn get_task(
     cache: &Store,
     args: &DetailRequest,
 ) -> Result<Detail> {
-    get_kind(client, key, catalog, cache, args, true).await
+    get_kind(client, key, catalog, cache, args, TASK).await
 }
 
 async fn get_kind(
@@ -362,7 +386,7 @@ async fn get_kind(
     catalog: &str,
     cache: &Store,
     args: &DetailRequest,
-    task: bool,
+    categories: &[(&str, &str)],
 ) -> Result<Detail> {
     args.validate(false)?;
     let catalog = Catalog::parse(catalog)?.own(client, key).await?;
@@ -393,13 +417,10 @@ async fn get_kind(
             {
                 continue;
             }
-            // Verify the type against this project's process, including closed HUs and bugs.
-            let mut kinds = BTreeSet::new();
-            for category in if task {
-                &["Microsoft.TaskCategory"][..]
-            } else {
-                &["Microsoft.RequirementCategory", "Microsoft.BugCategory"][..]
-            } {
+            // Verify the type against this project's process, including closed HUs and bugs, and
+            // keep the category it was found in.
+            let mut kinds = BTreeMap::new();
+            for (category, label) in categories {
                 match todo::metadata(
                     client,
                     key,
@@ -414,34 +435,36 @@ async fn get_kind(
                 .await
                 {
                     Ok(reply) => {
-                        kinds.extend(
-                            reply["workItemTypes"]
-                                .as_array()
-                                .context("invalid work item category")?
-                                .iter()
-                                .filter_map(|k| k["name"].as_str().map(str::to_owned)),
-                        );
+                        for kind in reply["workItemTypes"]
+                            .as_array()
+                            .context("invalid work item category")?
+                            .iter()
+                            .filter_map(|k| k["name"].as_str())
+                        {
+                            kinds.entry(kind.to_owned()).or_insert(*label);
+                        }
                     }
                     Err(error) if error.to_string().ends_with("HTTP 404") => (),
                     Err(error) => return Err(error),
                 }
             }
-            ensure!(
-                kinds.contains(field(&item, "System.WorkItemType")),
-                if task {
+            let Some(category) = kinds.get(field(&item, "System.WorkItemType")).copied() else {
+                anyhow::bail!(if categories == TASK {
                     "invalid work item type: select a task"
-                } else {
+                } else if categories == HU_OR_BUG {
                     "invalid work item type: select an HU or bug"
-                }
-            );
+                } else {
+                    "invalid work item type: select an HU, bug or task"
+                });
+            };
             ensure!(
                 found.is_none(),
                 "invalid ambiguous work item ID: select a project and an Azure source with one organization"
             );
-            found = Some((source, project, item));
+            found = Some((source, project, item, category));
         }
     }
-    let (source, project, item) =
+    let (source, project, item, category) =
         found.context("invalid work item: not found in the configured Azure projects")?;
     let reference = item_reference(source, project, &item)?;
     let metadata = todo::metadata(
@@ -512,7 +535,7 @@ async fn get_kind(
             project: project.clone(),
             kind: field(&item, "System.WorkItemType").into(),
             state: field(&item, "System.State").into(),
-            category: String::new(),
+            category: category.into(),
             created_at: todo::timestamp(&item["fields"]["System.CreatedDate"]),
             dates,
         },
@@ -606,6 +629,7 @@ mod tests {
             (8, "Private", "User Story"),
             (9, "Payments", "Task"),
             (10, "Payments", "Bug"),
+            (11, "Payments", "Development task"),
         ] {
             Mock::given(method("GET"))
                 .and(path(format!("/example/Payments/_apis/wit/workitems/{id}")))
@@ -745,6 +769,24 @@ mod tests {
             .unwrap();
         assert_eq!(bug.item.kind, "Bug");
         assert!(bug.partial); // Unavailable discussion/history are never presented as complete.
+        assert_eq!(bug.item.category, "bug");
+        assert_eq!(detail.item.category, "requirement");
+        // One read of any category returns the item with the category its type was found in.
+        let client = Client::new();
+        let requests: Vec<DetailRequest> = (0..=11).map(args).collect();
+        let any = |id: usize| get_any(&client, "test-key", catalog, &cache, &requests[id]);
+        assert_eq!(any(7).await.unwrap().item.category, "requirement");
+        assert_eq!(any(10).await.unwrap().item.category, "bug");
+        let task = any(11).await.unwrap();
+        assert_eq!(task.item.category, "task");
+        assert_eq!(task.item.kind, "Development task");
+        // A type in none of the categories is refused; the HU read refuses the task.
+        assert!(any(9).await.is_err());
+        assert!(
+            get(&Client::new(), "test-key", catalog, &cache, &args(11))
+                .await
+                .is_err()
+        );
         TEST_SERVER.with(|s| *s.borrow_mut() = None);
     }
 }
