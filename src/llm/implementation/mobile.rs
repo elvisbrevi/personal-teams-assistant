@@ -436,10 +436,11 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn claude_publishes_the_real_remote_id_and_keeps_serving_after_the_initial_result() {
-        use std::os::unix::fs::PermissionsExt;
         let root = tempfile::tempdir().unwrap();
         let binary = root.path().join("claude-fixture");
-        std::fs::write(&binary, r##"#!/bin/sh
+        crate::llm::agent::install_fake_cli(
+            &binary,
+            r##"#!/bin/sh
 while [ "$#" -gt 0 ]; do
   if [ "$1" = '--session-id' ]; then shift; session="$1"; fi
   shift
@@ -454,8 +455,8 @@ case "$prompt" in *'Synthetic mobile check'*) ;; *) exit 8;; esac
 printf '{"type":"system","session_id":"%s"}\n' "$session"
 printf '{"type":"result","session_id":"%s","is_error":false,"result":"Completed synthetic check."}\n' "$session"
 while read -r control; do :; done
-"##).unwrap();
-        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
+"##,
+        );
         let native = std::sync::Mutex::new(String::new());
         let observed = Arc::new(std::sync::Mutex::new(Vec::new()));
         let updates = observed.clone();
@@ -503,11 +504,12 @@ while read -r control; do :; done
     #[cfg(unix)]
     #[tokio::test]
     async fn a_claude_coding_turn_never_waits_on_a_prompt_and_records_it() {
-        use std::os::unix::fs::PermissionsExt;
         let root = tempfile::tempdir().unwrap();
         let binary = root.path().join("claude-fixture");
         // Remote Control is refused, so nothing else could answer; the run must not wait.
-        std::fs::write(&binary, r##"#!/bin/sh
+        crate::llm::agent::install_fake_cli(
+            &binary,
+            r##"#!/bin/sh
 printf '%s ' "$@" > arguments.txt
 while [ "$#" -gt 0 ]; do
   if [ "$1" = '--session-id' ]; then shift; session="$1"; fi
@@ -523,8 +525,8 @@ printf '%s\n' '{"type":"control_request","request_id":"ask-1","request":{"subtyp
 read -r answer
 case "$answer" in *'"request_id":"ask-1"'*'error'*|*'error'*'"request_id":"ask-1"'*) ;; *) exit 11;; esac
 printf '{"type":"result","session_id":"%s","is_error":false,"result":"Opened nothing.","permission_denials":[{"tool_name":"Bash","tool_input":{"command":"gh pr create --fill"}}]}\n' "$session"
-"##).unwrap();
-        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
+"##,
+        );
         let outcome = tokio::time::timeout(
             Duration::from_secs(5),
             super::super::execute_at(

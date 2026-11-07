@@ -686,13 +686,14 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn coding_runs_in_the_selected_directory_with_no_host_credentials() {
-        use std::os::unix::fs::PermissionsExt;
         let root = tempfile::tempdir().unwrap();
         let script = root.path().join("coding-cli");
         // The synthetic CLI records its arguments; the shared daemon is unavailable, so the
         // run falls back to `codex exec`.
-        std::fs::write(&script,"#!/bin/sh\nprintf '%s ' \"$@\" >> arguments.txt\nprintf '\\n' >> arguments.txt\ncat >/dev/null\ntest -z \"${GRAPH_WEBHOOK_SECRET+x}\" || exit 9\ntest -z \"${AZURE_DEVOPS_EXT_PAT+x}\" || exit 9\ntest -t 0 && exit 10\nprintf implemented > implementation.txt\nprintf '%s\\n' '{\"type\":\"thread.started\",\"thread_id\":\"11111111-1111-4111-8111-111111111111\"}' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"Completed the change.\"}}'\n").unwrap();
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+        crate::llm::agent::install_fake_cli(
+            &script,
+            "#!/bin/sh\nprintf '%s ' \"$@\" >> arguments.txt\nprintf '\\n' >> arguments.txt\ncat >/dev/null\ntest -z \"${GRAPH_WEBHOOK_SECRET+x}\" || exit 9\ntest -z \"${AZURE_DEVOPS_EXT_PAT+x}\" || exit 9\ntest -t 0 && exit 10\nprintf implemented > implementation.txt\nprintf '%s\\n' '{\"type\":\"thread.started\",\"thread_id\":\"11111111-1111-4111-8111-111111111111\"}' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"Completed the change.\"}}'\n",
+        );
         let outcome = execute_at(
             &script,
             ("codex", "test-model", "high"),
@@ -719,11 +720,12 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn an_opencode_prompt_nobody_answered_is_recorded_from_its_output() {
-        use std::os::unix::fs::PermissionsExt;
         let root = tempfile::tempdir().unwrap();
         let script = root.path().join("opencode-cli");
-        std::fs::write(&script,"#!/bin/sh\nprintf '%s' \"$OPENCODE_CONFIG_CONTENT\" > config.json\ncat >/dev/null\nprintf '%s\\n' '! permission requested: shell (git push origin feature); auto-rejecting' >&2\nprintf '%s\\n' '{\"type\":\"text\",\"part\":{\"text\":\"Pushed nothing.\"}}'\n").unwrap();
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+        crate::llm::agent::install_fake_cli(
+            &script,
+            "#!/bin/sh\nprintf '%s' \"$OPENCODE_CONFIG_CONTENT\" > config.json\ncat >/dev/null\nprintf '%s\\n' '! permission requested: shell (git push origin feature); auto-rejecting' >&2\nprintf '%s\\n' '{\"type\":\"text\",\"part\":{\"text\":\"Pushed nothing.\"}}'\n",
+        );
         let outcome = execute_at(
             &script,
             ("opencode", "provider/model", "default"),

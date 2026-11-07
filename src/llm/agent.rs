@@ -928,6 +928,38 @@ pub async fn catalog() -> Catalog {
     }
 }
 
+/// Install a fake CLI script for a test and wait until it can be executed. While it is
+/// written, a process another test forks inherits the write descriptor until it calls exec, and
+/// running the file meanwhile fails with ETXTBSY (as in `app::azure_cli`'s tests). The script
+/// exits at once when `PTA_FAKE_CLI_PROBE` is set, so the probe does nothing else.
+#[cfg(all(test, unix))]
+pub(crate) fn install_fake_cli(path: &Path, script: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    let (shebang, body) = script
+        .split_once('\n')
+        .expect("a script starts with a shebang");
+    std::fs::write(
+        path,
+        format!("{shebang}\n[ -n \"$PTA_FAKE_CLI_PROBE\" ] && exit 0\n{body}"),
+    )
+    .unwrap();
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+    for _ in 0..200 {
+        match std::process::Command::new(path)
+            .env("PTA_FAKE_CLI_PROBE", "1")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+        {
+            Err(error) if error.raw_os_error() == Some(26) => {
+                std::thread::sleep(std::time::Duration::from_millis(10))
+            }
+            _ => return,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1252,21 +1284,18 @@ mod tests {
     /// A fake CLI that records its stdin, arguments and environment, then prints `reply`.
     #[cfg(unix)]
     fn fake_cli(dir: &Path, reply: &str, status: i32) -> PathBuf {
-        use std::os::unix::fs::PermissionsExt;
         let path = dir.join("fake-cli");
         let log = dir.join("log");
         let reply_path = dir.join("reply");
         std::fs::write(&reply_path, reply).unwrap();
-        std::fs::write(
+        install_fake_cli(
             &path,
-            format!(
+            &format!(
                 "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 'opencode v2.0.32'; exit 0; fi\ncat > '{log}.stdin'\nprintf '%s\\n' \"$@\" > '{log}.args'\nenv > '{log}.env'\npwd > '{log}.pwd'\ncat '{reply}'\nexit {status}\n",
                 log = log.display(),
                 reply = reply_path.display(),
             ),
-        )
-        .unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        );
         path
     }
 
