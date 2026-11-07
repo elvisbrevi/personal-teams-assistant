@@ -87,6 +87,9 @@ struct Endpoint {
     account_portable_support: bool,
     #[serde(default)]
     implementation_support: bool,
+    /// The workflow operations (`workflows::METHODS`).
+    #[serde(default)]
+    workflows_support: bool,
     #[serde(default)]
     wiki_support: bool,
     #[serde(default)]
@@ -506,6 +509,10 @@ async fn client_with_transport(
             "Incompatible implementation host: update the host and CLI together."
         );
         ensure!(
+            endpoint.workflows_support || !workflows::handles(&request.method),
+            "Incompatible workflows host: update the host and CLI together before managing workflows."
+        );
+        ensure!(
             endpoint.cloud_store_support || !cloud::handles(&request.method),
             "Incompatible account store host: update the host and CLI together before connecting to the account store."
         );
@@ -676,6 +683,7 @@ pub(crate) fn launch(
             web_support: true,
             web_access_support: true,
             implementation_support: true,
+            workflows_support: true,
             machine_pairing_support: true,
             machine_login_support: true,
             machine_management_support: true,
@@ -766,6 +774,33 @@ fn arg<T: serde::de::DeserializeOwned>(
     serde_json::from_value(value.get(name).cloned().unwrap_or(Value::Null))
         .map_err(|_| format!("invalid argument: {name}"))
 }
+/// The reply of an operation that failed with `message`: its `[invalid_input]`, `[conflict]`,
+/// `[not_ready]` or `[network]` prefix gives the code and exit status and is removed; `invalid`
+/// makes it invalid input whatever it says.
+pub(super) fn failure(message: &str, invalid: bool) -> Reply {
+    let (code, exit) = if invalid || message.starts_with("[invalid_input]") {
+        ("invalid_input", 2)
+    } else if message.starts_with("[conflict]") {
+        ("state_conflict", 6)
+    } else if message.starts_with("[not_ready]") {
+        ("not_ready", 3)
+    } else if message.starts_with("[network]") {
+        ("dependency_or_network", 5)
+    } else {
+        ("operation_failed", 1)
+    };
+    let prefix = format!(
+        "[{}] ",
+        match exit {
+            2 => "invalid_input",
+            3 => "not_ready",
+            5 => "network",
+            6 => "conflict",
+            _ => "error",
+        }
+    );
+    Reply::error(code, exit, message.strip_prefix(&prefix).unwrap_or(message))
+}
 pub(crate) async fn dispatch(host: &Arc<Host>, request: Request) -> Reply {
     // Reject before diagnostics: a failed account check must not read or write a
     // newly rebound account's paths, even to record the rejection.
@@ -850,6 +885,10 @@ async fn dispatch_inner(host: &Arc<Host>, request: Request) -> Reply {
     if service::handles(&request.method) {
         // The operating system's service manager; no profile edit.
         return service::operate(host, &request).await;
+    }
+    if workflows::handles(&request.method) {
+        // Reads the catalog and the machine first; takes the operations lock only to save.
+        return workflows::operate(host, &request).await;
     }
     if maintenance::handles(&request.method) {
         // Independent of profile edits: a build can take many minutes.
@@ -1011,35 +1050,10 @@ async fn dispatch_inner(host: &Arc<Host>, request: Request) -> Reply {
     let result = operate(host, method, &args).await;
     let mut reply = match result {
         Ok(data) => Reply::success(data),
-        Err(message) => {
-            let (code, exit) = if message.starts_with("[invalid_input]")
-                || message.starts_with("invalid argument")
-                || method == "validate"
-            {
-                ("invalid_input", 2)
-            } else if message.starts_with("[conflict]") {
-                ("state_conflict", 6)
-            } else if message.starts_with("[not_ready]") {
-                ("not_ready", 3)
-            } else if message.starts_with("[network]") {
-                ("dependency_or_network", 5)
-            } else {
-                ("operation_failed", 1)
-            };
-            let message = message
-                .strip_prefix(&format!(
-                    "[{}] ",
-                    match exit {
-                        2 => "invalid_input",
-                        3 => "not_ready",
-                        5 => "network",
-                        6 => "conflict",
-                        _ => "error",
-                    }
-                ))
-                .unwrap_or(&message);
-            Reply::error(code, exit, message)
-        }
+        Err(message) => failure(
+            &message,
+            message.starts_with("invalid argument") || method == "validate",
+        ),
     };
     // No provider passed: fail, but keep each provider's failure class in `data`.
     if reply.ok
@@ -1555,6 +1569,7 @@ mod tests {
                 web_support: true,
                 web_access_support: true,
                 implementation_support: true,
+                workflows_support: true,
                 machine_pairing_support: true,
                 machine_login_support: true,
                 machine_management_support: true,
@@ -1599,6 +1614,7 @@ mod tests {
                 web_support: true,
                 web_access_support: true,
                 implementation_support: true,
+                workflows_support: true,
                 machine_pairing_support: true,
                 machine_login_support: true,
                 machine_management_support: true,
@@ -1658,6 +1674,7 @@ mod tests {
                     web_support: true,
                     web_access_support: true,
                     implementation_support: true,
+                    workflows_support: true,
                     machine_pairing_support: true,
                     machine_login_support: true,
                     machine_management_support: true,

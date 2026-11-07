@@ -4,6 +4,7 @@ pub(crate) mod implementation;
 pub mod link;
 mod progress;
 pub mod registration;
+pub(crate) mod repositories;
 pub mod review;
 pub mod tasks;
 pub mod todo;

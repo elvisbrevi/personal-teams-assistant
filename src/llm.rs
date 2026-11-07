@@ -265,7 +265,7 @@ pub fn validate_provider(name: &str) -> Result<()> {
 }
 
 /// Model IDs reach CLI arguments: a closed character set and no leading dash.
-fn valid_model(model: &str) -> bool {
+pub(crate) fn valid_model(model: &str) -> bool {
     !model.is_empty()
         && model.len() <= 100
         && model

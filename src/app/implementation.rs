@@ -10,6 +10,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::time::Duration;
 
+pub(super) mod checkout;
 pub(super) mod fleet;
 pub(super) mod join;
 pub(super) mod login;
@@ -73,6 +74,15 @@ struct Machine {
     /// Its update state as its last poll reported it; none from older hosts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     update: Option<UpdateReport>,
+    /// Whether its last poll said it answers `checkout_inspect`; older hosts do not.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    checkout_inspect: bool,
+}
+impl Machine {
+    /// Trusted and seen in its last polls (a worker polls every two seconds).
+    fn online(&self) -> bool {
+        !self.revoked && now() - self.seen < 35
+    }
 }
 /// A machine's update state as it reports it: shown in the portal, never acted on there.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -536,6 +546,67 @@ fn planning(selection: &Selection, detail: &Detail) -> bool {
 pub(super) fn handles(method: &str) -> bool {
     method.starts_with("implementation_") || method.starts_with("machine_")
 }
+
+/// An execution machine of the account as a workflow names it.
+pub(super) struct MachineFacts {
+    /// The coordinator (this installation) itself.
+    pub own: bool,
+    pub online: bool,
+    /// The operating system it reported: how it spells directories.
+    pub os: String,
+    /// Its allowed roots, as it last reported them (this installation's own, read now).
+    pub roots: Vec<PathBuf>,
+    /// It answers `checkout_inspect`.
+    pub inspect: bool,
+}
+/// The machine `id` of this account, or none when it is unknown, revoked or another account's.
+pub(super) async fn machine_facts(host: &Arc<Host>, id: &str) -> Result<Option<MachineFacts>> {
+    let version = management::version(host)?;
+    let own_roots = paths::plain_all(&roots(host).await?);
+    let data = host.state.implementation.registry.lock().await;
+    if data.id == id {
+        return Ok(Some(MachineFacts {
+            own: true,
+            online: true,
+            os: std::env::consts::OS.into(),
+            roots: own_roots,
+            inspect: true,
+        }));
+    }
+    Ok(data
+        .machines
+        .iter()
+        .find(|m| m.id == id && !m.revoked && m.account_version == version)
+        .map(|m| MachineFacts {
+            own: false,
+            online: m.online(),
+            os: m.os.clone(),
+            roots: m.roots.clone(),
+            inspect: m.checkout_inspect,
+        }))
+}
+/// The one-shot calls a workflow save makes on its machine: its installed CLIs and a checkout.
+pub(super) async fn machine_call(
+    host: &Arc<Host>,
+    machine: &str,
+    method: &str,
+    args: Value,
+) -> Result<Value> {
+    ensure!(
+        matches!(method, "implementation_catalog" | "checkout_inspect"),
+        "Unavailable execution operation."
+    );
+    fleet::call(host, machine, method, args).await
+}
+/// This installation's machine ID, and its allowed roots set as a test needs them.
+#[cfg(test)]
+pub(super) async fn test_machine(host: &Host, roots: Option<Vec<PathBuf>>) -> String {
+    let mut data = host.state.implementation.registry.lock().await;
+    if let Some(roots) = roots {
+        data.settings.roots = roots;
+    }
+    data.id.clone()
+}
 pub(super) async fn operate(
     host: &Arc<Host>,
     method: &str,
@@ -770,7 +841,11 @@ fn browse_directories(path: Option<&str>, allowed: &[PathBuf]) -> Result<Value> 
 async fn local(host: &Arc<Host>, method: &str, args: &Value) -> Result<Value> {
     if !matches!(
         method,
-        "machine_assistant" | "implementation_runs" | "machine_roots" | "machine_browse"
+        "machine_assistant"
+            | "implementation_runs"
+            | "machine_roots"
+            | "machine_browse"
+            | "checkout_inspect"
     ) {
         authority::require_execution(&host.state)?;
     } else {
@@ -783,6 +858,10 @@ async fn local(host: &Arc<Host>, method: &str, args: &Value) -> Result<Value> {
     let state = &host.state.implementation;
     match method {
         "machine_browse" => browse_machine(host, args),
+        "checkout_inspect" => {
+            let allowed = roots(host).await?;
+            checkout::inspect_all(&args["paths"], &allowed)
+        }
         "machine_roots" => management::save_roots(host, args).await,
         "implementation_mobile_session" => mobile_session(host, args).await,
         "machine_assistant" => {
@@ -1561,6 +1640,52 @@ mod tests {
                 "{method}"
             );
         }
+    }
+    #[tokio::test]
+    async fn a_worker_answers_checkout_inspect_only_once_its_poll_says_it_can() {
+        let root = tempfile::tempdir().unwrap();
+        let host = host(root.path());
+        let worker = uuid::Uuid::new_v4().to_string();
+        let registration =
+            fleet::register(&host, &json!({"id":worker,"name":"Worker","os":"linux"}))
+                .await
+                .unwrap();
+        let token = registration["token"].as_str().unwrap();
+        let inspect = |host: Arc<Host>, worker: String| async move {
+            machine_facts(&host, &worker)
+                .await
+                .unwrap()
+                .unwrap()
+                .inspect
+        };
+        // An older worker sends no flag and reads as unable to answer.
+        fleet::protocol(&host, &json!({"id":worker,"token":token,"action":"poll"}))
+            .await
+            .unwrap();
+        assert!(!inspect(host.clone(), worker.clone()).await);
+        fleet::protocol(
+            &host,
+            &json!({"id":worker,"token":token,"action":"poll","checkout_inspect_support":true}),
+        )
+        .await
+        .unwrap();
+        assert!(inspect(host.clone(), worker.clone()).await);
+        // The call is not reachable from the worker protocol's coordinator side.
+        assert!(
+            fleet::protocol(
+                &host,
+                &json!({"id":worker,"token":token,"action":"call","method":"checkout_inspect","args":{"path":"/"}}),
+            )
+            .await
+            .is_err()
+        );
+        // Only the two workflow calls go through `machine_call`.
+        let own = host.state.implementation.registry.lock().await.id.clone();
+        assert!(
+            machine_call(&host, &own, "implementation_launch", json!({}))
+                .await
+                .is_err()
+        );
     }
     #[tokio::test]
     async fn directory_configuration_browse_preserves_execution_and_profile_boundaries() {

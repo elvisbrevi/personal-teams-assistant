@@ -56,6 +56,7 @@ mod standing;
 mod tools;
 mod variables;
 mod web;
+mod workflows;
 
 /// What the process owning the host can do beyond operations: open the system browser and quit.
 /// There is no window; the owner's GUI is the local page (`page.rs`) in the system browser.
@@ -1114,6 +1115,21 @@ async fn start_service(state: &DesktopState) -> Result<()> {
 }
 
 async fn save_settings(
+    host: &Arc<Host>,
+    config: Config,
+    mut map: KnowledgeMap,
+    tunnel_config: String,
+) -> std::result::Result<(), String> {
+    // Workflows and their blocks change only through their own operations, which check them
+    // against the machine, the catalog and the caller's authority: editors keep the stored ones.
+    let stored = host.state.settings.map().map_err(fail)?;
+    map.workflows = stored.workflows;
+    map.workflow_blocks = stored.workflow_blocks;
+    commit_settings(host, config, map, tunnel_config).await
+}
+
+/// The settings commit behind `save_settings`, for the operations that checked their own part.
+async fn commit_settings(
     host: &Arc<Host>,
     mut config: Config,
     mut map: KnowledgeMap,

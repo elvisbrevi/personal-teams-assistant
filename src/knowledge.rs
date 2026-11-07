@@ -39,6 +39,13 @@ pub struct KnowledgeMap {
         skip_serializing_if = "crate::organization::Organization::is_empty"
     )]
     pub organization: crate::organization::Organization,
+    /// Saved recipes for implementing the items of one Azure DevOps project; see
+    /// `crate::workflows`. Changed only through the workflow operations.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub workflows: Vec<crate::workflows::Workflow>,
+    /// The reusable parts of workflows (instructions, Teams notifications, launchers).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub workflow_blocks: Vec<crate::workflows::Block>,
 }
 /// Someone who writes to the user, and how the user addresses them. It reaches the model only
 /// when answering that person.
@@ -198,6 +205,7 @@ impl KnowledgeMap {
         }
         crate::agent_prompts::validate(&map.agent_prompts)?;
         crate::work_items::validate(&map.work_item_guides)?;
+        crate::workflows::validate(&map.workflows, &map.workflow_blocks)?;
         crate::organization::validate(&map.organization, |id| {
             map.resources.iter().find(|r| r.id == id).map(|r| &r.access)
         })?;

@@ -110,6 +110,23 @@ pub(in crate::app) fn launcher_state(state: &DesktopState, id: &str) -> (bool, b
     }
 }
 
+/// The program digest of this installation's launcher `id`, and whether the user approved it.
+pub(in crate::app) fn launcher_approval(state: &DesktopState, id: &str) -> Option<(String, bool)> {
+    state
+        .variables
+        .consumers
+        .launchers
+        .get(id)
+        .ok()
+        .map(|launcher| (launcher.digest, launcher.approved_at.is_some()))
+}
+
+/// A launcher placed in this installation's list as a test needs it, approved or not.
+#[cfg(test)]
+pub(in crate::app) fn add_test_launcher(state: &DesktopState, launcher: rules::Launcher) {
+    state.variables.consumers.launchers.add(launcher).unwrap();
+}
+
 /// What a person reviews before approving a launcher; the digest identifies that definition.
 pub(super) fn launcher_view(launcher: &rules::Launcher, variables: Vec<Value>) -> Value {
     json!({

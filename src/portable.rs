@@ -12,7 +12,9 @@
 //! reinterpreted. The organization (its name, entries and documenting sources) and the work
 //! item guides are account data too, and travel with it. The chats each computer receives stay
 //! its own; the account's separate reading scope (`teams_reading`, chat IDs included) travels,
-//! and only reads on request use it.
+//! and only reads on request use it. Workflows and their blocks travel too, but change only on
+//! the account's coordinator (where their runs live): synchronization carries them to the
+//! account's other computers and never back.
 use crate::{
     config::{Config, Language, LlmChoice, TeamsReading},
     index::Note,
@@ -20,6 +22,7 @@ use crate::{
     organization::{Entry, Organization},
     questions::Question,
     work_items::Guide,
+    workflows::{Block, Workflow},
 };
 use anyhow::{Result, ensure};
 use serde::{Deserialize, Serialize};
@@ -51,13 +54,15 @@ pub const SETTINGS_FIELDS: [&str; 10] = [
     "teams_reading.chats",
 ];
 /// What synchronization carries besides the settings.
-pub const COLLECTIONS: [&str; 6] = [
+pub const COLLECTIONS: [&str; 8] = [
     "sources",
     "contexts",
     "questions",
     "notes",
     "organization",
     "work_item_guides",
+    "workflows",
+    "workflow_blocks",
 ];
 
 /// Preferences that follow the account.
@@ -141,6 +146,11 @@ pub struct Document {
     pub organization: Organization,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub work_item_guides: Vec<Guide>,
+    /// Left out while empty, like the guides; changed only on the coordinator.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub workflows: Vec<Workflow>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub workflow_blocks: Vec<Block>,
 }
 
 impl PartialEq for Resource {
@@ -206,6 +216,10 @@ impl Document {
         organization.sources.sort();
         let mut work_item_guides = map.work_item_guides.clone();
         work_item_guides.sort_by(|a, b| a.id.cmp(&b.id));
+        let mut workflows = map.workflows.clone();
+        workflows.sort_by(|a, b| a.id.cmp(&b.id));
+        let mut workflow_blocks = map.workflow_blocks.clone();
+        workflow_blocks.sort_by(|a, b| a.id.cmp(&b.id));
         Self {
             schema: SCHEMA,
             settings: Settings::of(config),
@@ -214,6 +228,8 @@ impl Document {
             questions,
             organization,
             work_item_guides,
+            workflows,
+            workflow_blocks,
         }
     }
 
@@ -238,6 +254,8 @@ impl Document {
             agent_prompts: Vec::new(),
             work_item_guides: self.work_item_guides.clone(),
             organization: self.organization.clone(),
+            workflows: self.workflows.clone(),
+            workflow_blocks: self.workflow_blocks.clone(),
         };
         KnowledgeMap::parse(&toml::to_string(&scratch)?)?;
         Ok(())
@@ -335,6 +353,8 @@ impl Document {
             agent_prompts: map.agent_prompts.clone(),
             work_item_guides: self.work_item_guides.clone(),
             organization,
+            workflows: self.workflows.clone(),
+            workflow_blocks: self.workflow_blocks.clone(),
         };
         (config, map, unavailable)
     }
@@ -926,6 +946,45 @@ mod tests {
             .apply_to(&mut next, &BTreeSet::from(["hidden".to_owned()]))
             .unwrap();
         assert_eq!(next.organization.sources, ["hidden"]);
+    }
+
+    #[test]
+    fn workflows_travel_to_the_accounts_computers_and_change_only_on_the_coordinator() {
+        use crate::workflows::tests::{instruction, workflow};
+        let (config, mut map) = profile();
+        let empty = Document::project(&config, &map);
+        assert!(!serde_json::to_string(&empty).unwrap().contains("workflow"));
+        let mut payments = workflow("payments");
+        payments.blocks = vec!["base".into()];
+        map.workflows = vec![workflow("zeta"), payments];
+        map.workflow_blocks = vec![instruction("base")];
+        let account = Document::project(&config, &map);
+        account.check().unwrap();
+        assert_eq!(account.workflows[0].id, "payments");
+        assert_ne!(account.digest(&[]), empty.digest(&[]));
+        // Installed as the account holds them, replacing the computer's.
+        let (local_config, mut local) = profile();
+        local.workflows = vec![workflow("local-only")];
+        let (_, installed, _) = account.install(&local_config, &local, |_| true);
+        assert_eq!(installed.workflows, account.workflows);
+        assert_eq!(installed.workflow_blocks, map.workflow_blocks);
+        KnowledgeMap::parse(&toml::to_string(&installed).unwrap()).unwrap();
+        // A block a workflow names must travel with it.
+        let mut broken = account.clone();
+        broken.workflow_blocks.clear();
+        assert!(broken.check().is_err());
+        // A change on another computer never carries them back.
+        let mut changed = installed.clone();
+        changed.workflows.clear();
+        changed.workflow_blocks.clear();
+        let patch = Patch::between(
+            &Document::project(&local_config, &installed),
+            &Document::project(&local_config, &changed),
+        );
+        assert!(patch.is_empty());
+        let mut next = account.clone();
+        patch.apply_to(&mut next, &BTreeSet::new()).unwrap();
+        assert_eq!(next.workflows, account.workflows);
     }
 
     #[test]

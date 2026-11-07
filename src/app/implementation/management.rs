@@ -12,7 +12,7 @@ pub(super) fn version(host: &Host) -> Result<String> {
 }
 
 fn summary(machine: &Machine) -> Value {
-    let online = !machine.revoked && now() - machine.seen < 35;
+    let online = machine.online();
     json!({"id":machine.id,"name":machine.name,"os":machine.os,"local":false,
         "trust":if machine.revoked {"revoked"} else {"trusted"},"online":online,
         "presence":if !online {"offline"} else if machine.assistant_phase.is_none() {"unknown"} else {"online"},
