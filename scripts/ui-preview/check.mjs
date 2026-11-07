@@ -1095,6 +1095,18 @@ for (const [label, viewport] of [['desktop', { width: 1440, height: 900 }], ['ph
   await page.locator('#repositories button[aria-label]').first().click();
   check(`${label}: existing checkout editor reuses the same sheet`, await page.isVisible('.directory-picker'));
   await page.keyboard.press('Escape');
+  await page.evaluate(() => { window.__ptaWindowsDrives = true; });
+  await page.click('#repo-path-choose');
+  await page.getByRole('button', { name: 'Explorar el directorio D:\\', exact: true }).click();
+  await page.getByRole('button', { name: 'Explorar el directorio D:\\code', exact: true }).click();
+  await page.getByLabel('Seleccionar el directorio D:\\code\\sag', { exact: true }).waitFor();
+  const windowsSheet = await page.locator('dialog.directory-picker').innerText();
+  check(`${label}: Windows paths read plainly in the location and rows`, windowsSheet.includes('D:\\code\\sag')
+    && await page.locator('dialog.directory-picker .directory-picker-location').innerText() === 'D:\\code' && !windowsSheet.includes('\\\\?\\'));
+  await page.getByLabel('Seleccionar el directorio D:\\code\\sag', { exact: true }).check();
+  await page.getByRole('button', { name: 'Usar los directorios seleccionados', exact: true }).click();
+  check(`${label}: a directory on another drive can be chosen`, await page.inputValue('#repo-path') === 'D:\\code\\sag');
+  await page.evaluate(() => { window.__ptaWindowsDrives = false; });
   check(`${label}: implementation has no browser errors`, errors.length === 0, errors.join('; '));
   await context.close();
 }
