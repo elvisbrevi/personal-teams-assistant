@@ -47,6 +47,9 @@
   <link rel="modulepreload" href="settings-service.js" fetchpriority="low">
   <link rel="modulepreload" href="nav.js" fetchpriority="low">
   <link rel="modulepreload" href="todo-request.js" fetchpriority="low">
+  <link rel="modulepreload" href="workflows.js" fetchpriority="low">
+  <link rel="modulepreload" href="workflow-blocks.js" fetchpriority="low">
+  <link rel="modulepreload" href="settings-workflows.js" fetchpriority="low">
   <link rel="modulepreload" href="notices.js" fetchpriority="low">
   <link rel="modulepreload" href="dialogs.js" fetchpriority="low">
   <link rel="modulepreload" href="control.js" fetchpriority="low">
@@ -80,6 +83,7 @@
     <symbol id="i-folder" viewBox="0 0 24 24"><path d="M3 7V4h6l3 3h9v13H3z"/></symbol>
     <symbol id="i-copy" viewBox="0 0 24 24"><rect x="8" y="8" width="12" height="13" rx="2"/><path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h3"/></symbol>
     <symbol id="i-monitor" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/></symbol>
+    <symbol id="i-flow" viewBox="0 0 24 24"><rect x="3" y="3.5" width="7" height="5" rx="1.5"/><rect x="14" y="9.5" width="7" height="5" rx="1.5"/><rect x="3" y="15.5" width="7" height="5" rx="1.5"/><path d="M10 6h3.5a2 2 0 0 1 2 2v1.5M15.5 14.5V16a2 2 0 0 1-2 2H10"/></symbol>
     <symbol id="i-more" viewBox="0 0 24 24"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></symbol>
   </svg>
   <a class="skip-link" href="#main">Skip to content</a>
@@ -95,9 +99,11 @@
         <button data-tab="todo" title="To-Do"><span class="tile" aria-hidden="true"><svg class="icon"><use href="#i-todo"/></svg></span><span>To-Do</span></button>
         <button data-tab="messages" title="Messages"><span class="tile" aria-hidden="true"><svg class="icon"><use href="#i-inbox"/></svg></span><span>Messages</span><b id="nav-attention" class="nav-count" hidden></b></button>
         <button data-tab="registration" title="Activities"><span class="tile" aria-hidden="true"><svg class="icon"><use href="#i-check"/></svg></span><span class="long">Activities</span><span class="short">Activity</span><b id="nav-activities" class="nav-count" hidden></b></button>
-        <span class="nav-gap" aria-hidden="true"></span>
         <button id="nav-more" class="nav-more" aria-expanded="false" aria-controls="nav-secondary" title="More sections"><span class="tile" aria-hidden="true"><svg class="icon"><use href="#i-more"/></svg></span><span>More</span></button>
+        <!-- On a desktop these follow Activities in the sidebar; below 860px they open from More. -->
         <div id="nav-secondary" class="nav-secondary">
+          <button data-tab="workflows" title="Workflows"><span class="tile" aria-hidden="true"><svg class="icon"><use href="#i-flow"/></svg></span><span class="long">Workflows</span><span class="short">Workflows</span></button>
+          <span class="nav-gap" aria-hidden="true"></span>
           <button data-tab="knowledge" title="Knowledge"><span class="tile" aria-hidden="true"><svg class="icon"><use href="#i-book"/></svg></span><span class="long">Knowledge</span><span class="short">Sources</span></button>
           <button data-tab="chat" title="Test chat"><span class="tile" aria-hidden="true"><svg class="icon"><use href="#i-chat"/></svg></span><span class="long">Test chat</span><span class="short">Test</span></button>
         </div>
@@ -260,6 +266,7 @@
           <button role="tab" id="settings-tab-models" data-group="models" aria-controls="settings-models" aria-selected="false" tabindex="-1"><svg class="icon" aria-hidden="true"><use href="#i-chip"/></svg>Models<span class="flag warn" hidden><span class="sr-only">Needs attention</span></span><span class="flag edited" hidden><span class="sr-only">Unsaved changes</span></span></button>
           <button role="tab" id="settings-tab-machines" data-group="machines" aria-controls="settings-machines" aria-selected="false" tabindex="-1"><svg class="icon" aria-hidden="true"><use href="#i-monitor"/></svg>Machines</button>
           <button role="tab" id="settings-tab-activity" data-group="activity" aria-controls="settings-activity" aria-selected="false" tabindex="-1"><svg class="icon" aria-hidden="true"><use href="#i-check"/></svg>Daily record<span class="flag edited" hidden><span class="sr-only">Unsaved changes</span></span></button>
+          <button role="tab" id="settings-tab-workflows" data-group="workflows" aria-controls="settings-workflows" aria-selected="false" tabindex="-1"><svg class="icon" aria-hidden="true"><use href="#i-flow"/></svg>Workflows<span class="flag warn" hidden><span class="sr-only">Needs attention</span></span></button>
           <button role="tab" id="settings-tab-variables" data-group="variables" aria-controls="settings-variables" aria-selected="false" tabindex="-1"><svg class="icon" aria-hidden="true"><use href="#i-key"/></svg>Variables<span class="flag warn" hidden><span class="sr-only">Needs attention</span></span></button>
           <button role="tab" id="settings-tab-advanced" data-group="advanced" aria-controls="settings-advanced" aria-selected="false" tabindex="-1"><svg class="icon" aria-hidden="true"><use href="#i-wrench"/></svg>Advanced</button>
         </div>
@@ -480,6 +487,32 @@
           </div>
         </div>
 
+        <div id="settings-workflows" class="settings-group" role="tabpanel" aria-labelledby="settings-tab-workflows" data-settings-group="workflows" hidden>
+          <div class="panel" id="panel-workflow-ready">
+            <div class="panel-head"><h2>Ready states</h2><button id="workflow-settings-refresh" type="button" class="secondary small"><svg class="icon"><use href="#i-refresh"/></svg>Refresh</button></div>
+            <p class="hint">An HU or bug assigned to you that reaches one of these states starts the workflow the director chooses, if that workflow starts by itself. The states are the ones your project's process defines.</p>
+            <p id="workflow-settings-progress" class="hint" role="status" aria-live="polite"></p>
+            <div id="workflow-ready-states" class="list"></div>
+          </div>
+          <div class="panel" id="panel-workflow-watcher">
+            <h2>Watcher and runs</h2>
+            <div class="grid">
+              <label>Check every (minutes) <small>From 1 to 60.</small><input id="workflow-interval" type="number" min="1" max="60" step="1" inputmode="numeric"></label>
+              <label>Runs at once <small>From 1 to 4; the others wait their turn.</small><input id="workflow-concurrency" type="number" min="1" max="4" step="1" inputmode="numeric"></label>
+              <label>Pull-request wait (days) <small>How long a run waits for its pull requests before it goes on.</small><input id="workflow-pr-wait" type="number" min="1" max="60" step="1" inputmode="numeric"></label>
+            </div>
+          </div>
+          <div class="panel" id="panel-workflow-director">
+            <h2>Workflow director</h2>
+            <p class="hint">The director reads each item and your enabled workflows' descriptions and chooses one, or none; it decides nothing else, and code checks its choice. It runs without tools, read-only.</p>
+            <div id="workflow-director" class="grid"></div>
+            <div class="actions"><button id="workflow-director-prompt" type="button" class="link-button">Edit the director's instructions</button></div>
+          </div>
+          <div id="workflow-settings-warnings" class="callout warn" role="status" hidden></div>
+          <div id="workflow-settings-problem" class="callout error" role="alert" hidden></div>
+          <div class="actions"><button id="workflow-settings-save" type="button">Save workflow settings</button></div>
+        </div>
+
         <div id="settings-variables" class="settings-group" role="tabpanel" aria-labelledby="settings-tab-variables" data-settings-group="variables" hidden>
           <div class="panel" id="panel-variables">
             <div class="panel-head"><h2>Variables</h2><span id="variables-count" class="badge muted" hidden></span><button id="variables-refresh" type="button" class="secondary">Refresh</button></div>
@@ -687,6 +720,33 @@
         <div id="activity-detail" hidden>
           <div class="toolbar"><button id="activity-task-back" class="secondary"><svg class="icon"><use href="#i-back"/></svg>Back to tasks</button><button id="activity-detail-refresh" class="secondary"><svg class="icon"><use href="#i-refresh"/></svg>Refresh detail</button></div>
           <p id="activity-detail-progress" class="hint" role="status"></p><div id="activity-detail-content"></div>
+        </div>
+      </section>
+      <section id="workflows" hidden>
+        <header class="page-head"><span class="page-tile" aria-hidden="true"><svg class="icon"><use href="#i-flow"/></svg></span><div class="page-title"><h1>Workflows</h1><p>Recipes that take an HU or bug from its plan to its pull requests, on the machine and in the repositories you choose.</p></div></header>
+        <div id="workflows-tabs" class="subnav" role="tablist" aria-label="Workflow views">
+          <button role="tab" id="workflows-tab-list" data-group="list" aria-controls="workflows-list" aria-selected="true">Workflows</button>
+          <button role="tab" id="workflows-tab-blocks" data-group="blocks" aria-controls="workflows-blocks" aria-selected="false" tabindex="-1">Blocks</button>
+        </div>
+        <div id="workflows-list" role="tabpanel" aria-labelledby="workflows-tab-list">
+          <div class="panel">
+            <div class="panel-head"><h2>Workflows</h2><span id="workflows-summary" class="hint"></span><button id="workflows-refresh" type="button" class="secondary small"><svg class="icon"><use href="#i-refresh"/></svg>Refresh</button></div>
+            <p class="hint">Each workflow names one Azure DevOps project, its repositories and their checkouts on one machine, the coding agent and its instructions. Children are created only after you review and confirm their plan.</p>
+            <p id="workflows-progress" class="hint" role="status" aria-live="polite"></p>
+            <div id="workflows-problem" class="callout error" role="alert" hidden></div>
+            <div id="workflows-notice" class="callout warn" hidden></div>
+            <div id="workflow-rows" class="list"></div>
+            <div class="actions"><button id="workflow-new" type="button" class="secondary">New workflow</button><button id="workflows-settings" type="button" class="link-button">Ready states and director</button></div>
+          </div>
+        </div>
+        <div id="workflows-blocks" role="tabpanel" aria-labelledby="workflows-tab-blocks" hidden>
+          <div class="panel">
+            <div class="panel-head"><h2>Blocks</h2><span id="blocks-summary" class="hint"></span></div>
+            <p class="hint">Reusable parts of a workflow: an instruction the agents read, a Teams message posted at a stage, or one of your approved launchers run at a stage. A block that acts is confirmed when you save it.</p>
+            <div id="blocks-problem" class="callout error" role="alert" hidden></div>
+            <div id="block-rows" class="list"></div>
+            <div class="actions"><button id="block-new" type="button" class="secondary">New block</button></div>
+          </div>
         </div>
       </section>
       <section id="messages" hidden>

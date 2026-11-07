@@ -11,6 +11,7 @@ use sha2::{Digest, Sha256};
 use std::time::Duration;
 
 pub(super) mod checkout;
+pub(super) mod director;
 pub(super) mod fleet;
 pub(super) mod join;
 pub(super) mod login;
@@ -77,6 +78,9 @@ struct Machine {
     /// Whether its last poll said it answers `checkout_inspect`; older hosts do not.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     checkout_inspect: bool,
+    /// Whether its last poll said it runs the workflow director (`workflow_direct`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    workflow_direct: bool,
 }
 impl Machine {
     /// Trusted and seen in its last polls (a worker polls every two seconds).
@@ -558,6 +562,8 @@ pub(super) struct MachineFacts {
     pub roots: Vec<PathBuf>,
     /// It answers `checkout_inspect`.
     pub inspect: bool,
+    /// It runs the workflow director (`workflow_direct`).
+    pub direct: bool,
 }
 /// The machine `id` of this account, or none when it is unknown, revoked or another account's.
 pub(super) async fn machine_facts(host: &Arc<Host>, id: &str) -> Result<Option<MachineFacts>> {
@@ -571,6 +577,7 @@ pub(super) async fn machine_facts(host: &Arc<Host>, id: &str) -> Result<Option<M
             os: std::env::consts::OS.into(),
             roots: own_roots,
             inspect: true,
+            direct: true,
         }));
     }
     Ok(data
@@ -583,6 +590,7 @@ pub(super) async fn machine_facts(host: &Arc<Host>, id: &str) -> Result<Option<M
             os: m.os.clone(),
             roots: m.roots.clone(),
             inspect: m.checkout_inspect,
+            direct: m.workflow_direct,
         }))
 }
 /// The one-shot calls a workflow save makes on its machine: its installed CLIs and a checkout.
@@ -862,6 +870,8 @@ async fn local(host: &Arc<Host>, method: &str, args: &Value) -> Result<Value> {
             let allowed = roots(host).await?;
             checkout::inspect_all(&args["paths"], &allowed)
         }
+        // Boxed: the session is a large future, kept off the stack of every machine call.
+        "workflow_direct" => Box::pin(director::answer(host, args)).await,
         "machine_roots" => management::save_roots(host, args).await,
         "implementation_mobile_session" => mobile_session(host, args).await,
         "machine_assistant" => {
@@ -1685,6 +1695,133 @@ mod tests {
             machine_call(&host, &own, "implementation_launch", json!({}))
                 .await
                 .is_err()
+        );
+    }
+    #[tokio::test]
+    async fn the_director_runs_on_a_worker_only_once_it_says_it_can_and_the_coordinator_records_it()
+    {
+        let root = tempfile::tempdir().unwrap();
+        let host = host(root.path());
+        let worker = uuid::Uuid::new_v4().to_string();
+        let registration =
+            fleet::register(&host, &json!({"id":worker,"name":"Worker","os":"linux"}))
+                .await
+                .unwrap();
+        let token = registration["token"].as_str().unwrap().to_owned();
+        let director = crate::workflows::director::Director {
+            machine: worker.clone(),
+            provider: "claude".into(),
+            model: "claude-sonnet-5-5".into(),
+            effort: "low".into(),
+        };
+        let item: crate::tools::todo::Item = serde_json::from_value(json!({"id":41,"title":"Receipt downloads",
+            "url":"https://dev.azure.com/example/Payments/_workitems/edit/41","project":"Payments","state":"Ready",
+            "kind":"User Story","created_at":null,"dates":[]}))
+        .unwrap();
+        let ask = |host: Arc<Host>,
+                   director: crate::workflows::director::Director,
+                   item: crate::tools::todo::Item| async move {
+            director::ask(
+                &host,
+                director::Ask {
+                    machine: &director.machine,
+                    director: &director,
+                    instructions: "Choose.",
+                    input: "{}".into(),
+                    item: &item,
+                },
+            )
+            .await
+        };
+        // An older worker does not say it runs the director, and is never asked.
+        fleet::protocol(&host, &json!({"id":worker,"token":token,"action":"poll"}))
+            .await
+            .unwrap();
+        assert!(!machine_facts(&host, &worker).await.unwrap().unwrap().direct);
+        let refused = ask(host.clone(), director.clone(), item.clone())
+            .await
+            .err()
+            .unwrap();
+        assert!(
+            refused
+                .to_string()
+                .contains("Update the workflow director's machine")
+        );
+        // Its record says the director did not run; nothing else was recorded.
+        let records = host.state.implementation.db.requests(None).unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0]["state"], "failed");
+        let poll =
+            json!({"id":worker,"token":token,"action":"poll","workflow_direct_support":true});
+        fleet::protocol(&host, &poll).await.unwrap();
+        assert!(machine_facts(&host, &worker).await.unwrap().unwrap().direct);
+        // The call is not reachable from the worker protocol's coordinator side.
+        assert!(
+            fleet::protocol(
+                &host,
+                &json!({"id":worker,"token":token,"action":"call","method":"workflow_direct","args":{}}),
+            )
+            .await
+            .is_err()
+        );
+        let asking = tokio::spawn(ask(host.clone(), director.clone(), item.clone()));
+        let command = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let reply = fleet::protocol(&host, &poll).await.unwrap();
+                if !reply["command"].is_null() {
+                    break reply["command"].clone();
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(command["method"], "workflow_direct");
+        assert_eq!(command["args"]["provider"], "claude");
+        assert_eq!(command["args"]["instructions"], "Choose.");
+        // In flight, the session is in Agent history as generating, on the worker.
+        let generating = host.state.implementation.db.requests(None).unwrap();
+        assert!(
+            generating
+                .iter()
+                .any(|r| r["state"] == "generating" && r["machine"] == worker.as_str())
+        );
+        // The worker answers once; the coordinator keeps the record.
+        let result = json!({"ok":true,"data":{"answer":{"workflow":"payments","reason":"Pagos."},"problem":null,
+            "session_id":"44444444-4444-4444-8444-444444444444","started_at":"2026-11-07T10:00:00+00:00","finished_at":"2026-11-07T10:00:09+00:00"}});
+        let mut answered = poll.clone();
+        answered["results"] = json!([{"id":command["id"],"result":result}]);
+        fleet::protocol(&host, &answered).await.unwrap();
+        let answer = asking.await.unwrap().unwrap();
+        assert_eq!(
+            answer.direction.answer,
+            Some(json!({"workflow":"payments","reason":"Pagos."}))
+        );
+        assert_eq!(
+            answer.session_id.as_deref(),
+            Some("44444444-4444-4444-8444-444444444444")
+        );
+        let history = host.state.implementation.db.history().unwrap();
+        let recorded = history
+            .iter()
+            .find(|r| r["id"] == answer.run.as_str())
+            .unwrap();
+        assert_eq!(recorded["state"], "done");
+        assert_eq!(recorded["purpose"], "classification");
+        assert_eq!(recorded["machine"], worker.as_str());
+        assert_eq!(recorded["started_at"], "2026-11-07T10:00:00+00:00");
+        assert_eq!(
+            recorded["item"]["url"],
+            "https://dev.azure.com/example/Payments/_workitems/edit/41"
+        );
+        // Nothing was launched on any machine.
+        assert!(
+            host.state
+                .implementation
+                .db
+                .list(None, None, true)
+                .unwrap()
+                .is_empty()
         );
     }
     #[tokio::test]

@@ -225,6 +225,33 @@ async fn schema(
     })
 }
 
+/// The workflow states of a project's requirement, bug and listed task types (the types To-Do
+/// lists without a filter), read from its process with the read credential and cached like the
+/// rest of the process metadata: the states a workflow's ready states are chosen from.
+pub(crate) async fn process_states(
+    client: &Client,
+    key: &str,
+    catalog: &str,
+    cache: &Store,
+    organization: Option<&str>,
+    project: &str,
+    guides: &[Guide],
+) -> Result<Value> {
+    let (source, project) =
+        super::repositories::resolve(client, key, catalog, organization, project).await?;
+    let schema = schema(
+        client,
+        key,
+        cache,
+        &source,
+        &project,
+        &Filters::default(),
+        guides,
+    )
+    .await?;
+    Ok(json!({"organization":source.organization,"project":project,"states":schema.states}))
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn in_project(
     client: &Client,
@@ -469,6 +496,110 @@ mod tests {
         Mock, MockServer, ResponseTemplate,
         matchers::{method, path},
     };
+
+    #[tokio::test]
+    async fn ready_states_are_chosen_from_the_requirement_bug_and_listed_task_types() {
+        let server = MockServer::start().await;
+        TEST_SERVER.with(|s| *s.borrow_mut() = Some(Url::parse(&server.uri()).unwrap()));
+        for (endpoint, value) in [
+            (
+                "/example/_apis/projects",
+                json!({"value":[{"name":"Payments"},{"name":"Billing"}]}),
+            ),
+            ("/example/_apis/wit/fields", json!({"value":[]})),
+            (
+                "/example/Payments/_apis/wit/workitemtypecategories/Microsoft.RequirementCategory",
+                json!({"workItemTypes":[{"name":"User Story"}]}),
+            ),
+            (
+                "/example/Payments/_apis/wit/workitemtypecategories/Microsoft.BugCategory",
+                json!({"workItemTypes":[{"name":"Bug"}]}),
+            ),
+            (
+                "/example/Payments/_apis/wit/workitemtypecategories/Microsoft.TaskCategory",
+                json!({"workItemTypes":[{"name":"Task"},{"name":"Development Bug"}]}),
+            ),
+            (
+                "/example/Payments/_apis/wit/workitemtypes/User%20Story",
+                json!({"fields":[],"states":[{"name":"New"},{"name":"Ready"},{"name":"Active"}]}),
+            ),
+            (
+                "/example/Payments/_apis/wit/workitemtypes/Bug",
+                json!({"fields":[],"states":[{"name":"New"},{"name":"Approved"}]}),
+            ),
+            (
+                "/example/Payments/_apis/wit/workitemtypes/Development%20Bug",
+                json!({"fields":[],"states":[{"name":"Ready for development"}]}),
+            ),
+            (
+                "/example/Payments/_apis/wit/workitemtypes/Task",
+                json!({"fields":[],"states":[{"name":"To Do"}]}),
+            ),
+        ] {
+            Mock::given(method("GET"))
+                .and(path(endpoint))
+                .respond_with(ResponseTemplate::new(200).set_body_json(value))
+                .mount(&server)
+                .await;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let cache = Store::open(&dir.path().join("cache.db")).unwrap();
+        let guides = [Guide {
+            id: "development-bug".into(),
+            provider: "azure".into(),
+            kind: "Development Bug".into(),
+            listed_with_bugs: true,
+            ..Default::default()
+        }];
+        let catalog = "[[sources]]\norganization='https://dev.azure.com/example'\nprojects=['Payments']\nauthor_email='me@example.test'";
+        let states = process_states(
+            &Client::new(),
+            "test-key",
+            catalog,
+            &cache,
+            None,
+            "payments",
+            &guides,
+        )
+        .await
+        .unwrap();
+        assert_eq!(states["project"], "Payments");
+        assert_eq!(states["organization"], "https://dev.azure.com/example");
+        // The task type listed with the bugs counts; an ordinary task type does not.
+        assert_eq!(
+            states["states"],
+            json!([
+                "Active",
+                "Approved",
+                "New",
+                "Ready",
+                "Ready for development"
+            ])
+        );
+        assert!(
+            process_states(
+                &Client::new(),
+                "test-key",
+                catalog,
+                &cache,
+                None,
+                "Unknown",
+                &guides
+            )
+            .await
+            .is_err()
+        );
+        // Only reads.
+        assert!(
+            server
+                .received_requests()
+                .await
+                .unwrap()
+                .iter()
+                .all(|r| r.method == wiremock::http::Method::GET)
+        );
+        TEST_SERVER.with(|s| *s.borrow_mut() = None);
+    }
 
     #[tokio::test]
     async fn developer_roles_states_dates_and_order_are_read_from_the_process() {

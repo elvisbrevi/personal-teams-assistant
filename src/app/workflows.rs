@@ -13,7 +13,8 @@
 //! a launcher does) and an approved launcher of the coordinator with that program digest.
 //! Workflows are saved only on the coordinator, where their runs live; they reach the account's
 //! other computers with its portable configuration. Other settings editors keep them as stored
-//! (`save_settings`).
+//! (`save_settings`). The workflow director's settings and its dry-run classification are in
+//! `director`.
 use super::*;
 use crate::workflows::{self as core, Block, Facts, Inspection, Kind, Workflow};
 use serde_json::{Value, json};
@@ -29,8 +30,14 @@ pub(super) const METHODS: [&str; 8] = [
     "workflow_repositories",
 ];
 
+mod director;
+
 pub(super) fn handles(method: &str) -> bool {
-    METHODS.contains(&method)
+    METHODS.contains(&method) || director::METHODS.contains(&method)
+}
+/// The workflow director's operations (`workflow_director_support`).
+pub(super) fn director_handles(method: &str) -> bool {
+    director::METHODS.contains(&method)
 }
 
 fn invalid(text: impl std::fmt::Display) -> String {
@@ -140,6 +147,9 @@ pub(super) fn describe(block: &Block) -> String {
 
 async fn operation(host: &Arc<Host>, method: &str, args: &Value) -> Result<Value, String> {
     let state = &host.state;
+    if director::METHODS.contains(&method) {
+        return director::operation(host, method, args).await;
+    }
     match method {
         "workflows_list" => {
             ensure_no_arguments(args)?;

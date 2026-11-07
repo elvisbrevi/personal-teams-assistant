@@ -95,6 +95,45 @@ pub(in crate::app) async fn repositories(
     })
 }
 
+/// The workflow states of a project's requirement, bug and listed task types
+/// (`workflow_settings` and its update): the ready states are chosen from them. Read with the
+/// enabled Azure source's read credential and cached like the process metadata.
+pub(in crate::app) async fn process_states(
+    state: &DesktopState,
+    source: Option<&str>,
+    organization: Option<&str>,
+    project: &str,
+) -> Result<Value, String> {
+    let azure = azure(state, source).map_err(|_| {
+        "[not_ready] Enable one Azure DevOps source with its read credential before choosing a project's ready states."
+            .to_owned()
+    })?;
+    let config = state.settings.config().map_err(fail)?;
+    let cache = Store::open(&config.server.data_dir.join("todo-cache.db")).map_err(fail)?;
+    tokio::time::timeout(
+        std::time::Duration::from_secs(60),
+        crate::ado::todo::process_states(
+            &azure.client,
+            &azure.read_key,
+            &azure.catalog,
+            &cache,
+            organization,
+            project,
+            &azure.guides,
+        ),
+    )
+    .await
+    .map_err(|_| "[network] The project's process states could not be read in time.".to_owned())?
+    .map_err(|error| {
+        let text = error.to_string();
+        if text.starts_with("invalid") {
+            format!("[invalid_input] {text}")
+        } else {
+            "[network] The project's process states could not be read; check the catalog and the Azure read credential.".into()
+        }
+    })
+}
+
 /// Check a reviewed child against the provider's live types before anything is written.
 pub(in crate::app) async fn check_child(
     state: &DesktopState,
