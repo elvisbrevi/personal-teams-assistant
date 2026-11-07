@@ -76,14 +76,28 @@ printf '{"installs":{"personal-teams-assistant 0.11.2 (registry+https://github.c
 check "a second copy next to a Cargo installation is refused" sh -c '! sh "$0" --root "$1" --test-source "$2" >"$3" 2>&1' "$script" "$root" "$work/source" "$work/out"
 check "  and says how to switch" said "cargo uninstall personal-teams-assistant"
 rm -f "$CARGO_HOME/.crates2.json"
+# A live Cargo installation (its own record beside binstall's) is refused and binstall's record is left alone.
+mkdir -p "$CARGO_HOME/binstall"
+other='{"name":"other-crate","version_req":"*","current_version":"1.0.0","bins":["other"]}'
+ours='{"name":"personal-teams-assistant","version_req":"*","current_version":"0.11.2","bins":["personal-teams-assistant","pta"]}'
+printf '%s\n%s\n' "$other" "$ours" >"$CARGO_HOME/binstall/crates-v1.json"
+printf '[v1]\n"personal-teams-assistant 0.11.2 (registry+https://github.com/rust-lang/crates.io-index)" = ["pta"]\n' >"$CARGO_HOME/.crates.toml"
+binstall_before=$(sha "$CARGO_HOME/binstall/crates-v1.json")
+check "a live binstall installation is refused" sh -c '! sh "$0" --root "$1" --test-source "$2" >"$3" 2>&1' "$script" "$root" "$work/source" "$work/out"
+check "  and its binstall record is untouched" test "$(sha "$CARGO_HOME/binstall/crates-v1.json")" = "$binstall_before"
+rm -f "$CARGO_HOME/.crates.toml"
 check "the test source needs the test mode" sh -c '! PTA_INSTALL_TEST= sh "$0" --root "$1" --test-source "$2" >"$3" 2>&1' "$script" "$root" "$work/source" "$work/out"
 check "a coordinator origin must be HTTPS" sh -c '! sh "$0" --root "$1" --test-source "$2" --origin http://portal.example >"$3" 2>&1' "$script" "$root" "$work/source" "$work/out"
 check "nothing was installed by any refusal" test ! -e "$root/bin"
 
-echo "# Install"
+echo "# Install (with a stale binstall entry left by cargo uninstall)"
 if run --test-source "$work/source"; then pass "install.sh installs"; else bad "install.sh installs"; cat "$work/out"; fi
 check "it checked the digest" said "matches its published SHA-256"
 check "it says the existing profile is used" said "Using the existing profile"
+check "it removed the stale binstall entry" said "Removed the stale cargo binstall entry"
+check "  keeping the other entry byte for byte" test "$(cat "$CARGO_HOME/binstall/crates-v1.json")" = "$other"
+check "  and leaving no temporary file" test -z "$(ls "$CARGO_HOME/binstall" | grep -v '^crates-v1.json$' || true)"
+stale_after=$(sha "$CARGO_HOME/binstall/crates-v1.json")
 check "pta --version from the installed path" sh -c '"$0/bin/pta" --version | grep -q "$1"' "$root" "$version"
 check "both binaries are installed" test -x "$root/bin/personal-teams-assistant"
 record="$root/install.json"
@@ -125,6 +139,8 @@ check "  and its record unchanged" test "$(sha "$record")" = "$before"
 rm -f "$root/bin/pta"
 if run --test-source "$work/source" --unattended-updates; then pass "running it again succeeds"; else bad "running it again succeeds"; cat "$work/out"; fi
 check "it repaired a missing binary" cmp -s "$root/bin/pta" "$work/pta.before"
+check "a second run leaves the binstall record unchanged" test "$(sha "$CARGO_HOME/binstall/crates-v1.json")" = "$stale_after"
+check "  and does not mention it" sh -c '! grep -q "stale cargo binstall" "$0"' "$work/out"
 update=$(pta --json update status 2>&1 || true)
 check "--unattended-updates turned unattended updates on" sh -c 'printf "%s" "$0" | grep -q "\"unattended\":{[^}]*\"enabled\":true"' "$update"
 for file in "$HOME/.profile" "$HOME/.bash_profile" "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.zprofile"; do
