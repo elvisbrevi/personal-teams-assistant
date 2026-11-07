@@ -9,13 +9,23 @@ The repository GitHub connection and existing tunnels/DNS are never changed.
 nothing installed signs in through the browser and reaches the portal's remote MCP endpoint
 (`/mcp`). Access then resolves its opaque token and sends the origin the same signed
 assertion as a browser login; the portal stores no client secret and runs no OAuth server.
+
+--managed-oauth-only and --managed-oauth-off change only that setting on an existing portal:
+they need nothing but CLOUDFLARE_API_TOKEN[_FILE] (Access: Apps and Policies Write), the
+account and the hostname, find the panel application by its managed name and exact hostname,
+and send it back as read with only `oauth_configuration` changed. Its policies, identity
+provider and every other field are preserved and compared after the write; the identity
+providers, the callbacks and the settings file are never read or written. --report FILE
+writes a private JSON record without secrets of what was read, what changed and the endpoint.
 """
 import argparse
 import fnmatch
 import json
 import os
 import re
+import hashlib
 import tempfile
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -35,6 +45,16 @@ MACHINE_POLICY = "Authenticated machine protocol only"
 # only for loopback redirects or the exact HTTPS callbacks the operator lists.
 OAUTH_TOKEN_LIFETIME = "5m"
 OAUTH_SESSION = "12h"
+# Fields of an Access application that the API generates and returns but that are not part of the
+# update request body in Cloudflare's public schema (`PUT /accounts/{account}/access/apps/{id}`):
+# `id` is the path parameter, `aud` is the audience Cloudflare derives for the application (the
+# portal's settings pin it, so it must never change), and `created_at`/`updated_at` are server
+# timestamps. These are the only fields removed from the application as read before the narrow
+# mode's PUT; everything else, policies included, is resent exactly as read, as Cloudflare's
+# managed OAuth guide says (the PUT replaces the application). `updated_at` is also the only field
+# allowed to differ in the readback.
+READ_ONLY_APP_FIELDS = ("id", "aud", "created_at", "updated_at")
+VOLATILE_APP_FIELDS = ("updated_at",)
 
 
 class SetupError(Exception):
@@ -271,24 +291,165 @@ def configure(args):
         print(f"Managed OAuth is on: agents add https://{args.hostname}/mcp as a remote MCP server and sign in through the browser.")
 
 
+def canonical(value):
+    return json.dumps(value, sort_keys=True, separators=(",", ":"))
+
+
+def digest(value):
+    return "sha256:" + hashlib.sha256(canonical(value).encode()).hexdigest()
+
+
+def panel_application(token, base, hostname):
+    """The one managed panel application for `hostname`, after the same ownership checks as a full run."""
+    panel = []
+    for app in listing(token, base + "/apps"):
+        for domain in domains(app):
+            host, _, path = domain.partition("/")
+            if not fnmatch.fnmatchcase(hostname, host):
+                continue
+            managed = app.get("type") == "self_hosted" and host == hostname
+            if not path and managed and app.get("name") == APP_NAME and set(domains(app)) == {hostname}:
+                if not any(item is app for item in panel):
+                    panel.append(app)
+            elif not (path and managed and (app.get("name") or "").startswith(APP_NAME + " ")):
+                raise SetupError("An overlapping or unmanaged Access application exists; it was not changed.")
+    if not panel:
+        raise SetupError("No managed portal application exists for this hostname; run the full configuration first.")
+    if len(panel) > 1:
+        raise SetupError("More than one managed portal application exists for this hostname; inspect Access before changing it.")
+    return panel[0]
+
+
+def wanted_oauth(current, enable, redirects):
+    """`oauth_configuration` as read with only what the narrow mode sets: the rest, `grant` included, is kept."""
+    value = json.loads(canonical(current or {}))
+    value["enabled"] = enable
+    if enable:
+        registration = value.get("dynamic_client_registration") or {}
+        registration.update({"enabled":True,"allow_any_on_localhost":True,"allow_any_on_loopback":True,
+            "allowed_uris":redirects})
+        value["dynamic_client_registration"] = registration
+    return value
+
+
+def contains(actual, wanted):
+    if isinstance(wanted, dict):
+        return isinstance(actual, dict) and all(contains(actual.get(key), item) for key, item in wanted.items())
+    return actual == wanted
+
+
+def policy_summary(policies):
+    # Names, IDs and a digest only: the include rules name people, and the report needs only to prove them unchanged.
+    return {"count":len(policies),"names":[p.get("name") for p in policies],"ids":[p.get("id") for p in policies],
+        "digest":digest(policies)}
+
+
+def managed_oauth_only(args, report):
+    enable = bool(args.managed_oauth_only)
+    redirects = redirect_uris(args.oauth_redirect_uri)
+    if redirects and not enable:
+        raise SetupError("--oauth-redirect-uri needs --managed-oauth-only.")
+    account = args.account_id or os.environ.get("CLOUDFLARE_ACCOUNT_ID", "")
+    if not re.fullmatch(r"[0-9a-f]{32}", account) or not re.fullmatch(r"[a-z0-9-]+(?:\.[a-z0-9-]+)+", args.hostname):
+        raise SetupError("Invalid account ID or hostname.")
+    report.update({"mode":"managed-oauth-only" if enable else "managed-oauth-off","account_id":account,
+        "hostname":args.hostname,"dry_run":bool(args.dry_run),"writes":False,"required_permissions":[APP_WRITE]})
+    token = secret("CLOUDFLARE_API_TOKEN")
+    base = f"/accounts/{account}/access"
+    listed = panel_application(token, base, args.hostname)
+    path = f"{base}/apps/{listed['id']}"
+    before = result(token, "GET", path)
+    policies_before = result(token, "GET", path + "/policies")
+    if before.get("id") != listed["id"] or before.get("name") != APP_NAME or before.get("type") != "self_hosted" or set(domains(before)) != {args.hostname}:
+        raise SetupError("The portal application changed while it was read; inspect Access before changing it.")
+    if any(policy.get("name") != PANEL_POLICY for policy in policies_before) or any(
+            policy.get("name") != PANEL_POLICY for policy in before.get("policies") or []):
+        raise SetupError("Existing portal application has unmanaged policies; inspect it before changing Access.")
+    if not policies_before:
+        raise SetupError("The portal application has no Allow policy; run the full configuration first.")
+    oauth = wanted_oauth(before.get("oauth_configuration"), enable, redirects)
+    changed = canonical(oauth) != canonical(before.get("oauth_configuration") or {}) and not (
+        not enable and not (before.get("oauth_configuration") or {}).get("enabled"))
+    report["read"] = {"application":{"id":before["id"],"name":before.get("name"),"domain":before.get("domain"),
+            "aud":before.get("aud"),"allowed_idps":before.get("allowed_idps") or [],
+            "session_duration":before.get("session_duration")},
+        "oauth_configuration":before.get("oauth_configuration"),"policies":policy_summary(policies_before)}
+    report["changes"] = {"oauth_configuration":{"before":before.get("oauth_configuration"),"after":oauth}} if changed else {}
+    report["mcp_endpoint"] = "https://" + args.hostname + "/mcp"
+    if args.dry_run or not changed:
+        report["managed_oauth_enabled"] = bool((before.get("oauth_configuration") or {}).get("enabled"))
+        return
+    body = {key: value for key, value in before.items() if key not in READ_ONLY_APP_FIELDS}
+    body["oauth_configuration"] = oauth
+    report["writes"] = True
+    result(token, "PUT", path, body)
+    after = result(token, "GET", path)
+    policies_after = result(token, "GET", path + "/policies")
+    if canonical(policies_after) != canonical(policies_before):
+        raise SetupError("Access policy readback differs from the policies read before the change; inspect Access now.")
+    kept = lambda app: {key: value for key, value in app.items() if key not in VOLATILE_APP_FIELDS and key != "oauth_configuration"}
+    if canonical(kept(after)) != canonical(kept(before)):
+        raise SetupError("Access application readback differs outside managed OAuth; inspect Access now.")
+    if not contains(after.get("oauth_configuration"), oauth):
+        raise SetupError("Access managed OAuth readback did not match the requested setting; inspect Access now.")
+    report["managed_oauth_enabled"] = enable
+    report["readback"] = {"oauth_configuration":after.get("oauth_configuration"),"policies":policy_summary(policies_after),
+        "policies_preserved":True,"application_preserved":True}
+
+
+def run_narrow(args):
+    report = {"started_at": int(time.time())}
+    try:
+        managed_oauth_only(args, report)
+        report["ok"] = True
+    except (SetupError, OSError, ValueError, KeyError, TypeError) as error:
+        report["ok"] = False
+        report["error"] = str(error) if isinstance(error, SetupError) else "Access setup could not complete; inspect inputs and private file paths."
+    report["finished_at"] = int(time.time())
+    if args.report:
+        private_json(args.report, report)
+    print(json.dumps(report, indent=2))
+    if not report["ok"]:
+        raise SetupError(report["error"])
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--account-id")
     parser.add_argument("--hostname", required=True)
-    parser.add_argument("--owner-github-id", type=int, required=True)
-    parser.add_argument("--allow-email", action="append", required=True)
-    parser.add_argument("--callbacks-file", type=Path, required=True)
+    parser.add_argument("--owner-github-id", type=int)
+    parser.add_argument("--allow-email", action="append")
+    parser.add_argument("--callbacks-file", type=Path)
     parser.add_argument("--settings-file", type=Path)
+    narrow = parser.add_mutually_exclusive_group()
+    narrow.add_argument("--managed-oauth-only", action="store_true",
+        help="turn on managed OAuth on the existing panel application and change nothing else")
+    narrow.add_argument("--managed-oauth-off", action="store_true",
+        help="turn managed OAuth off on the existing panel application and change nothing else")
+    parser.add_argument("--report", type=Path,
+        help="with --managed-oauth-only/--managed-oauth-off: a private JSON report without secrets")
     parser.add_argument("--managed-oauth", action="store_true",
         help="turn on Access managed OAuth so agents reach the remote MCP endpoint (/mcp) after a browser sign-in")
     parser.add_argument("--oauth-redirect-uri", action="append",
         help="an exact HTTPS OAuth callback of an agent client (loopback callbacks are always allowed); repeatable")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
-    if not args.dry_run and not args.settings_file:
-        parser.error("--settings-file is required for configuration")
+    if args.managed_oauth_only or args.managed_oauth_off:
+        full = [name for name in ["owner_github_id", "allow_email", "callbacks_file", "settings_file", "managed_oauth"] if getattr(args, name)]
+        if full:
+            parser.error("--managed-oauth-only/--managed-oauth-off take only --account-id, --hostname, --oauth-redirect-uri, --report and --dry-run")
+    else:
+        if args.report:
+            parser.error("--report needs --managed-oauth-only or --managed-oauth-off")
+        if args.owner_github_id is None or not args.allow_email or not args.callbacks_file:
+            parser.error("the full configuration needs --owner-github-id, --allow-email and --callbacks-file")
+        if not args.dry_run and not args.settings_file:
+            parser.error("--settings-file is required for configuration")
     try:
-        configure(args)
+        if args.managed_oauth_only or args.managed_oauth_off:
+            run_narrow(args)
+        else:
+            configure(args)
     except (SetupError, OSError, ValueError, KeyError, TypeError) as error:
         message = str(error) if isinstance(error, SetupError) else "Access setup could not complete; inspect inputs and private file paths."
         parser.exit(1, message + "\n")
