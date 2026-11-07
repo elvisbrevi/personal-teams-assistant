@@ -12,9 +12,10 @@
 //! reinterpreted. The organization (its name, entries and documenting sources) and the work
 //! item guides are account data too, and travel with it. The chats each computer receives stay
 //! its own; the account's separate reading scope (`teams_reading`, chat IDs included) travels,
-//! and only reads on request use it. Workflows and their blocks travel too, but change only on
-//! the account's coordinator (where their runs live): synchronization carries them to the
-//! account's other computers and never back.
+//! and only reads on request use it. Workflows, their blocks and their settings (ready states,
+//! the watcher, the workflow director) travel too, but change only on the account's
+//! coordinator (where their runs live): synchronization carries them to the account's other
+//! computers and never back.
 use crate::{
     config::{Config, Language, LlmChoice, TeamsReading},
     index::Note,
@@ -22,7 +23,7 @@ use crate::{
     organization::{Entry, Organization},
     questions::Question,
     work_items::Guide,
-    workflows::{Block, Workflow},
+    workflows::{Block, Workflow, director::Settings as WorkflowSettings},
 };
 use anyhow::{Result, ensure};
 use serde::{Deserialize, Serialize};
@@ -54,7 +55,7 @@ pub const SETTINGS_FIELDS: [&str; 10] = [
     "teams_reading.chats",
 ];
 /// What synchronization carries besides the settings.
-pub const COLLECTIONS: [&str; 8] = [
+pub const COLLECTIONS: [&str; 9] = [
     "sources",
     "contexts",
     "questions",
@@ -63,6 +64,7 @@ pub const COLLECTIONS: [&str; 8] = [
     "work_item_guides",
     "workflows",
     "workflow_blocks",
+    "workflow_settings",
 ];
 
 /// Preferences that follow the account.
@@ -151,6 +153,9 @@ pub struct Document {
     pub workflows: Vec<Workflow>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub workflow_blocks: Vec<Block>,
+    /// Left out while every value is its default; changed only on the coordinator.
+    #[serde(default, skip_serializing_if = "WorkflowSettings::is_default")]
+    pub workflow_settings: WorkflowSettings,
 }
 
 impl PartialEq for Resource {
@@ -230,6 +235,7 @@ impl Document {
             work_item_guides,
             workflows,
             workflow_blocks,
+            workflow_settings: map.workflow_settings.clone(),
         }
     }
 
@@ -256,6 +262,7 @@ impl Document {
             organization: self.organization.clone(),
             workflows: self.workflows.clone(),
             workflow_blocks: self.workflow_blocks.clone(),
+            workflow_settings: self.workflow_settings.clone(),
         };
         KnowledgeMap::parse(&toml::to_string(&scratch)?)?;
         Ok(())
@@ -355,6 +362,7 @@ impl Document {
             organization,
             workflows: self.workflows.clone(),
             workflow_blocks: self.workflow_blocks.clone(),
+            workflow_settings: self.workflow_settings.clone(),
         };
         (config, map, unavailable)
     }
@@ -985,6 +993,42 @@ mod tests {
         let mut next = account.clone();
         patch.apply_to(&mut next, &BTreeSet::new()).unwrap();
         assert_eq!(next.workflows, account.workflows);
+    }
+
+    #[test]
+    fn workflow_settings_travel_like_the_workflows_and_are_left_out_while_default() {
+        let (config, mut map) = profile();
+        let plain = Document::project(&config, &map);
+        assert!(
+            !serde_json::to_string(&plain)
+                .unwrap()
+                .contains("workflow_settings")
+        );
+        map.workflow_settings.concurrency = 3;
+        map.workflow_settings.director = Some(crate::workflows::director::Director {
+            machine: "5a6b7c8d-9e0f-4a1b-8c2d-3e4f5a6b7c8d".into(),
+            provider: "codex".into(),
+            model: "gpt-6.1-sol".into(),
+            effort: "low".into(),
+        });
+        let account = Document::project(&config, &map);
+        account.check().unwrap();
+        assert_ne!(account.digest(&[]), plain.digest(&[]));
+        let (local_config, local) = profile();
+        let (_, installed, _) = account.install(&local_config, &local, |_| true);
+        assert_eq!(installed.workflow_settings, map.workflow_settings);
+        // A change on another computer never carries them back.
+        let mut changed = installed.clone();
+        changed.workflow_settings = Default::default();
+        let patch = Patch::between(
+            &Document::project(&local_config, &installed),
+            &Document::project(&local_config, &changed),
+        );
+        assert!(patch.is_empty());
+        // Out of bounds, the account's document is refused like a hand edit.
+        let mut broken = account.clone();
+        broken.workflow_settings.concurrency = 9;
+        assert!(broken.check().is_err());
     }
 
     #[test]

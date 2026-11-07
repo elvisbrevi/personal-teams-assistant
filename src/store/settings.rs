@@ -73,6 +73,7 @@ impl LocalSettings {
                     organization: Default::default(),
                     workflows: Vec::new(),
                     workflow_blocks: Vec::new(),
+                    workflow_settings: Default::default(),
                 })?,
             )?;
         }

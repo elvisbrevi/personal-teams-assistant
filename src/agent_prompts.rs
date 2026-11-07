@@ -1,5 +1,6 @@
 //! The instructions the implementation agents start from: planning children, implementing a
-//! work item and writing a new request. The map keeps only what the user changed
+//! work item, writing a new request, and choosing a workflow for a work item (the workflow
+//! director). The map keeps only what the user changed
 //! (`[[agent_prompts]]`); a prompt not listed uses its default. What the agents may not do
 //! (untrusted evidence, no provider writes, the JSON contract) is added by code to every prompt
 //! and cannot be replaced.
@@ -30,8 +31,9 @@ pub struct BuiltIn {
 pub const PLAN: &str = "plan";
 pub const CODE: &str = "code";
 pub const REQUEST: &str = "request";
+pub const DIRECT: &str = "direct";
 
-pub const BUILT_IN: [BuiltIn; 3] = [
+pub const BUILT_IN: [BuiltIn; 4] = [
     BuiltIn {
         id: PLAN,
         name: "Plan children",
@@ -49,6 +51,12 @@ pub const BUILT_IN: [BuiltIn; 3] = [
         name: "Write a request",
         summary: "Create request in To-Do: the agent writes the new HU, bug or GitHub epic from your context.",
         instructions: prompts::IMPLEMENTATION_REQUEST,
+    },
+    BuiltIn {
+        id: DIRECT,
+        name: "Choose a workflow",
+        summary: "Workflows: the workflow director reads a work item and the enabled workflows of its project and chooses the one that fits, or none.",
+        instructions: prompts::WORKFLOW_DIRECT,
     },
 ];
 
@@ -118,5 +126,30 @@ mod tests {
         assert!(validate(&[change(PLAN, " ")]).is_err());
         assert!(validate(&[change(PLAN, "a"), change(PLAN, "b")]).is_err());
         assert!(validate(&[change(REQUEST, &"x".repeat(8001))]).is_err());
+    }
+
+    #[test]
+    fn the_director_has_its_own_editable_prompt() {
+        assert_eq!(resolve(&[], DIRECT), prompts::WORKFLOW_DIRECT);
+        let edited = [Prompt {
+            id: DIRECT.into(),
+            instructions: "Prefer the workflow that names the item's repository.".into(),
+        }];
+        assert!(validate(&edited).is_ok());
+        assert_eq!(
+            resolve(&edited, DIRECT),
+            "Prefer the workflow that names the item's repository."
+        );
+        assert_eq!(resolve(&edited, PLAN), prompts::IMPLEMENTATION_PLAN);
+        let limit = [Prompt {
+            id: DIRECT.into(),
+            instructions: "x".repeat(8000),
+        }];
+        assert!(validate(&limit).is_ok());
+        let over = [Prompt {
+            id: DIRECT.into(),
+            instructions: "x".repeat(8001),
+        }];
+        assert!(validate(&over).is_err());
     }
 }

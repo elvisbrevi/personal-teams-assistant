@@ -334,6 +334,7 @@ pub(in crate::app) async fn register(host: &Arc<Host>, args: &Value) -> Result<V
         host_version: None,
         update: None,
         checkout_inspect: false,
+        workflow_direct: false,
     });
     state.save(&data)?;
     drop(data);
@@ -427,6 +428,7 @@ pub(in crate::app) async fn protocol(host: &Arc<Host>, args: &Value) -> Result<V
                 .map(str::to_owned);
             machine.update = super::UpdateReport::parse(&args["update"]);
             machine.checkout_inspect = args["checkout_inspect_support"] == true;
+            machine.workflow_direct = args["workflow_direct_support"] == true;
         }
         state.save(&data)?;
     }
@@ -652,7 +654,8 @@ pub(super) async fn call(
             "implementation_runs",
             "implementation_cancel",
             "implementation_mobile_session",
-            "checkout_inspect"
+            "checkout_inspect",
+            "workflow_direct"
         ]
         .contains(&method),
         "Unavailable execution operation."
@@ -691,6 +694,18 @@ pub(super) async fn call(
             "Update this execution machine before browsing or running implementations."
         );
     }
+    if method == "workflow_direct" {
+        ensure!(
+            state
+                .registry
+                .lock()
+                .await
+                .machines
+                .iter()
+                .any(|m| m.id == machine && m.workflow_direct),
+            "Update the workflow director's machine: its version cannot run the workflow director."
+        );
+    }
     if method == "machine_assistant" {
         let data = state.registry.lock().await;
         let target = data
@@ -724,10 +739,11 @@ pub(super) async fn call(
             result: None,
         });
     }
-    for _ in 0..if method == "machine_assistant" {
-        360
-    } else {
-        160
+    // The director's session answers within its own bound (`director::SESSION_SECONDS`).
+    for _ in 0..match method {
+        "machine_assistant" => 360,
+        "workflow_direct" => 4 * super::director::WAIT_SECONDS,
+        _ => 160,
     } {
         tokio::time::sleep(Duration::from_millis(250)).await;
         authority::require_account(&host.state)?;
@@ -752,6 +768,8 @@ pub(super) async fn call(
                     "The machine could not change the assistant state. Check its Teams selection, connection and settings."
                 } else if matches!(method, "machine_roots" | "machine_browse") {
                     "The machine rejected these directories. Refresh the machine and choose existing allowed directories."
+                } else if method == "workflow_direct" {
+                    "The workflow director's machine could not run the director. Check its installed CLI, model and login."
                 } else {
                     "The execution machine rejected the operation. Check its directories, installed CLI and running jobs."
                 }
@@ -768,6 +786,11 @@ pub(super) async fn call(
     if matches!(method, "machine_roots" | "machine_browse") {
         anyhow::bail!(
             "The machine did not confirm the directory operation. Refresh its details before trying again."
+        );
+    }
+    if method == "workflow_direct" {
+        anyhow::bail!(
+            "The workflow director's machine did not answer in time. Its session, if it started, is read-only and wrote nothing."
         );
     }
     anyhow::bail!("The machine did not reply. Inspect its runs before starting anything again.")
@@ -802,7 +825,7 @@ async fn poll(host: Arc<Host>) {
             let polled = remote(
                 &connection,
                 json!({"action":"poll","id":own,"results":results,"sessions":sessions,"session_cursor":next,"assistant_phase":assistant_phase,"management_support":true,"roots":roots,
-                    "host_version":env!("CARGO_PKG_VERSION"),"update":crate::app::maintenance::report(&host),"checkout_inspect_support":true}),
+                    "host_version":env!("CARGO_PKG_VERSION"),"update":crate::app::maintenance::report(&host),"checkout_inspect_support":true,"workflow_direct_support":true}),
             )
             .await;
             standing::note(&host.state, &polled);
@@ -815,11 +838,15 @@ async fn poll(host: Arc<Host>) {
                     crate::app::cloud::announced(&host);
                 }
                 if let Some(command) = reply["command"].as_object() {
-                    if command["method"] == "machine_assistant" {
+                    // Long calls run beside the poll, so presence keeps flowing meanwhile.
+                    if command["method"] == "machine_assistant"
+                        || command["method"] == "workflow_direct"
+                    {
                         let host = host.clone();
                         let command = command.clone();
                         assistant_commands.spawn(async move {
-                            let result = local(&host, "machine_assistant", &command["args"]).await;
+                            let method = command["method"].as_str().unwrap_or_default();
+                            let result = local(&host, method, &command["args"]).await;
                             let result = match result {
                                 Ok(data) => json!({"ok":true,"data":data}),
                                 Err(_) => json!({"ok":false}),
@@ -973,6 +1000,7 @@ mod tests {
             host_version: None,
             update: None,
             checkout_inspect: false,
+            workflow_direct: false,
         });
         data.teams_machine = worker.clone();
         assert!(leased(&mut data, &worker));

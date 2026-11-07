@@ -1425,18 +1425,18 @@ pub(super) const TOOLS: &[Tool] = &[
     Tool {
         name: "agent_prompts_list",
         title: "Implementation agent prompts",
-        description: "The implementation agents' instructions: plan (children of an HU, bug or GitHub epic), code (implementing a task, development bug or issue) and request (writing a new HU, bug or epic), with their defaults and the user's changes. The rules on untrusted evidence, provider writes and the JSON contract are added by code and cannot be changed.",
+        description: "The implementation agents' instructions: plan (children of an HU, bug or GitHub epic), code (implementing a task, development bug or issue), request (writing a new HU, bug or epic) and direct (the workflow director choosing a workflow for a work item), with their defaults and the user's changes. The rules on untrusted evidence, provider writes, the list the director chooses from and the JSON contract are added by code and cannot be changed.",
         effect: Effect::Read,
         schema: none,
     },
     Tool {
         name: "agent_prompt_update",
         title: "Change an implementation agent prompt",
-        description: "Replaces the instructions of one implementation agent prompt (plan, code or request); at most 8000 characters.",
+        description: "Replaces the instructions of one implementation agent prompt (plan, code, request or direct); at most 8000 characters.",
         effect: Effect::Local,
         schema: || {
             object(
-                json!({"id": {"type": "string", "enum": ["plan", "code", "request"]}, "instructions": string("The new instructions.")}),
+                json!({"id": {"type": "string", "enum": ["plan", "code", "request", "direct"]}, "instructions": string("The new instructions.")}),
                 &["id", "instructions"],
             )
         },
@@ -1448,7 +1448,7 @@ pub(super) const TOOLS: &[Tool] = &[
         effect: Effect::Local,
         schema: || {
             object(
-                json!({"id": {"type": "string", "enum": ["plan", "code", "request"]}}),
+                json!({"id": {"type": "string", "enum": ["plan", "code", "request", "direct"]}}),
                 &["id"],
             )
         },
@@ -1526,6 +1526,42 @@ pub(super) const TOOLS: &[Tool] = &[
             object(
                 json!({"project": string("The Azure DevOps project's name."), "organization": string("https://dev.azure.com/NAME, when the project's name is in several organizations."), "source": string("Enabled Azure source ID; optional when exactly one is enabled.")}),
                 &["project"],
+            )
+        },
+    },
+    Tool {
+        name: "workflow_settings",
+        title: "Workflow settings",
+        description: "The workflow settings: ready_states per organization and project (the workflow states that mean ready to develop), watch_interval_minutes (default 5), concurrency (default 2), pull_request_wait_days (default 7) and the workflow director {machine, provider, model, effort}, with the defaults, the bounds and whether this computer is the coordinator where they change (editable). With project (and organization or source when needed), also process_states: the states that project's process has for its requirement, bug and listed task types, which ready states are chosen from.",
+        effect: Effect::Read,
+        schema: || {
+            object(
+                json!({"project": string("An Azure DevOps project whose process states to list."), "organization": string("https://dev.azure.com/NAME, when the project's name is in several organizations."), "source": string("Enabled Azure source ID; optional when exactly one is enabled.")}),
+                &[],
+            )
+        },
+    },
+    Tool {
+        name: "workflow_settings_update",
+        title: "Change the workflow settings",
+        description: "Changes the workflow settings on the account's coordinator; only the fields given change. watch_interval_minutes 1-60, concurrency 1-4, pull_request_wait_days 1-60; director {machine (machine_list ID; the coordinator's own ID for it), provider codex|claude|opencode, model, effort} installed on that machine, or null to clear it; ready_states [{organization?, project, states}] replaces each project's ready states (states empty clears them), and every state must be one of that project's process states (workflow_settings with project lists them). Refusals say why; what the machine cannot answer now comes back in warnings.",
+        effect: Effect::Local,
+        schema: || {
+            object(
+                json!({"watch_interval_minutes": {"type": "integer", "minimum": 1, "maximum": 60}, "concurrency": {"type": "integer", "minimum": 1, "maximum": 4}, "pull_request_wait_days": {"type": "integer", "minimum": 1, "maximum": 60}, "director": {"type": ["object", "null"], "description": "{machine, provider, model, effort}, or null to clear the director."}, "ready_states": {"type": "array", "items": {"type": "object"}, "description": "[{organization?, project, states}]; states empty clears that project's."}, "source": string("Enabled Azure source ID the states are read from; optional when exactly one is enabled.")}),
+                &[],
+            )
+        },
+    },
+    Tool {
+        name: "workflow_classify",
+        title: "Classify a work item into a workflow",
+        description: "Dry run: reads the Azure DevOps work item fresh, asks the workflow director (its machine, CLI, model and effort in workflow_settings, the direct prompt) which enabled workflow of the item's project fits it, and checks the answer in code: the reply's workflow is an ID the director was sent, enabled and of the item's project, or null with reason unrecognized, disabled or other_project (also for an answer that is not the JSON asked for, or none), or with the director's reason when it chose none. Also returns the outcome, what the director said, the candidates, the item's verified link and the run and native session IDs; the session is read-only and tool-less and appears in Agent history (implementation_history). Nothing starts and nothing is written to Azure DevOps.",
+        effect: Effect::Local,
+        schema: || {
+            object(
+                json!({"provider": {"type": "string", "enum": ["azure"]}, "id": {"type": "integer", "minimum": 1}, "project": string("The item's Azure DevOps project, when the ID is in several."), "source": string("Enabled Azure source ID; optional when exactly one is enabled.")}),
+                &["provider", "id"],
             )
         },
     },
@@ -2214,7 +2250,8 @@ pub(super) async fn run(name: &str, args: &Value) -> Result<Value, String> {
         // The same host operations as `pta workflows`; the host checks and confirms.
         "workflows_list" | "workflow_show" | "workflow_save" | "workflow_remove"
         | "workflow_blocks_list" | "workflow_block_save" | "workflow_block_remove"
-        | "workflow_repositories" => ipc(name, args.clone()).await,
+        | "workflow_repositories" | "workflow_settings" | "workflow_settings_update"
+        | "workflow_classify" => ipc(name, args.clone()).await,
         "answer_rate" => ipc("answer_feedback", json!({"resource": text(args, "resource")?, "rating": args.get("rating"),
             "comment": args.get("comment"), "example": args.get("example"), "context": args.get("context")})).await,
         "answer_draft" => ipc("answer_refine", json!({"resource": text(args, "resource")?, "context": args.get("context").and_then(Value::as_str).unwrap_or(""),
@@ -2631,6 +2668,9 @@ mod tests {
             ("workflow_block_remove", "local"),
             ("workflow_remove", "needs confirmation"),
             ("workflow_block_save", "needs confirmation"),
+            ("workflow_settings", "read"),
+            ("workflow_settings_update", "local"),
+            ("workflow_classify", "local"),
         ] {
             assert_eq!(effect(name), (json!(expected), json!("offered")), "{name}");
             assert!(super::super::workflows::handles(name), "{name}");

@@ -405,7 +405,7 @@ Knowledge
                            projects, purpose, instructions and fields (reference, name, required,
                            values, default, guidance, fill) and listed_with_bugs (To-Do lists that
                            Azure task type with the bugs). The implementation agents follow them.
-  prompts list | prompts show ID         The implementation agents' instructions (plan, code, request).
+  prompts list | prompts show ID         The implementation agents' instructions (plan, code, request, direct).
   prompts edit ID | prompts reset ID     JSON on stdin: {\"instructions\": TEXT}; reset restores the default.
   workflows list | workflows show ID     Workflows: recipes for implementing the items of one Azure DevOps project.
   workflows save           JSON on stdin: id, name, description, enabled, auto_start, organization
@@ -424,6 +424,19 @@ Knowledge
   workflows blocks remove ID             Refused while a workflow uses it.
   workflows repositories --project NAME [--organization URL] [--source ID]
                            The project's Git repositories (read credential, cached five minutes).
+  workflows settings [--project NAME [--organization URL] [--source ID]]
+                           Ready states, watcher interval, concurrency, pull-request wait and the
+                           workflow director; with --project, the states that project's process has.
+  workflows settings --set KEY VALUE [--set KEY VALUE…] [--source ID]
+                           KEY: watch_interval_minutes (1-60), concurrency (1-4),
+                           pull_request_wait_days (1-60), director.machine|provider|model|effort,
+                           director none, ready_states.PROJECT \"STATE,STATE\" (empty clears), or
+                           ready_states with JSON {organization?, project, states}. Ready states must
+                           be the process's; the director's agent must be installed on its machine.
+  workflows classify ID [--project NAME] [--source ID]
+                           Dry run: the workflow the director chooses for an Azure work item, checked
+                           by code (an enabled workflow of its project, or none with the reason).
+                           Starts nothing; the session appears in Agent history.
   notes list [--context ID] [--limit N]  Verified notes, newest first.
   notes search TEXT [--context ID]       Notes by relevance.
   notes add | notes edit ID              JSON on stdin: title, text, contexts, keywords, origin, reference.
@@ -500,10 +513,12 @@ fn protected_value() -> Result<String> {
 /// The words of a command without its flags and their values.
 fn words(args: &[String]) -> Vec<&str> {
     let mut words = Vec::new();
-    let mut skip = false;
+    let mut skip = 0;
     for arg in args {
-        if skip {
-            skip = false;
+        if skip > 0 {
+            skip -= 1;
+        } else if arg == "--set" {
+            skip = 2;
         } else if matches!(
             arg.as_str(),
             "--description"
@@ -544,7 +559,7 @@ fn words(args: &[String]) -> Vec<&str> {
                 | "--project"
                 | "--organization"
         ) {
-            skip = true;
+            skip = 1;
         } else if !arg.starts_with("--") {
             words.push(arg.as_str());
         }
@@ -754,6 +769,81 @@ async fn account_command(args: &[String]) -> Result<Reply> {
     }
 }
 
+/// Every `--set KEY VALUE` pair, in order.
+fn settings_changes(args: &[String]) -> Result<Vec<(String, String)>> {
+    let mut sets = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == "--set" {
+            let key = args.get(i + 1).context("--set needs KEY VALUE")?;
+            let value = args.get(i + 2).context("--set needs KEY VALUE")?;
+            sets.push((key.clone(), value.clone()));
+            i += 3;
+        } else {
+            i += 1;
+        }
+    }
+    Ok(sets)
+}
+/// The `workflow_settings_update` arguments for `--set` pairs; `director.*` keys change the
+/// stored director (`current`) field by field.
+fn settings_update(sets: &[(String, String)], current: Value) -> Result<Value> {
+    let mut body = json!({});
+    let mut director = current;
+    let mut director_changed = false;
+    let mut ready = Vec::new();
+    for (key, value) in sets {
+        match key.as_str() {
+            "watch_interval_minutes" | "concurrency" | "pull_request_wait_days" => {
+                let number: u32 = value
+                    .parse()
+                    .with_context(|| format!("{key} takes a whole number"))?;
+                body[key.as_str()] = json!(number);
+            }
+            "director" => {
+                ensure!(
+                    value == "none",
+                    "director takes none; set its fields with director.machine, director.provider, director.model and director.effort"
+                );
+                director = Value::Null;
+                director_changed = true;
+            }
+            field @ ("director.machine" | "director.provider" | "director.model"
+            | "director.effort") => {
+                if !director.is_object() {
+                    director = json!({});
+                }
+                director[&field["director.".len()..]] = json!(value);
+                director_changed = true;
+            }
+            "ready_states" => {
+                let entry: Value = serde_json::from_str(value)
+                    .context("ready_states takes JSON {organization?, project, states}")?;
+                ready.push(entry);
+            }
+            _ => {
+                let project = key
+                    .strip_prefix("ready_states.")
+                    .filter(|p| !p.trim().is_empty())
+                    .with_context(|| format!("unknown setting {key}; consult --help"))?;
+                let states: Vec<&str> = value
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                ready.push(json!({"project":project,"states":states}));
+            }
+        }
+    }
+    if director_changed {
+        body["director"] = director;
+    }
+    if !ready.is_empty() {
+        body["ready_states"] = json!(ready);
+    }
+    Ok(body)
+}
+
 /// Workflows and their blocks: the same host operations as the MCP workflow tools.
 async fn workflows_command(args: &[String]) -> Result<Reply> {
     let words = words(args);
@@ -796,6 +886,52 @@ async fn workflows_command(args: &[String]) -> Result<Reply> {
             ("workflow_block_save", body)
         }
         (Some("blocks"), Some("remove")) => ("workflow_block_remove", json!({"id":id(3)?})),
+        (Some("settings"), _) => {
+            let sets = settings_changes(args)?;
+            if sets.is_empty() {
+                let mut body = json!({});
+                for (flag, key) in [
+                    ("--project", "project"),
+                    ("--organization", "organization"),
+                    ("--source", "source"),
+                ] {
+                    if let Some(value) = option(args, flag) {
+                        body[key] = json!(value);
+                    }
+                }
+                ("workflow_settings", body)
+            } else {
+                ensure!(
+                    option(args, "--project").is_none() && option(args, "--organization").is_none(),
+                    "--project and --organization read a project's states; give ready states with --set"
+                );
+                let current = if sets.iter().any(|(k, _)| k.starts_with("director.")) {
+                    let reply = call("workflow_settings", json!({}), None, true).await?;
+                    if !reply.ok {
+                        return Ok(reply);
+                    }
+                    reply.data["settings"]["director"].clone()
+                } else {
+                    Value::Null
+                };
+                let mut body = settings_update(&sets, current)?;
+                if let Some(source) = option(args, "--source") {
+                    body["source"] = json!(source);
+                }
+                ("workflow_settings_update", body)
+            }
+        }
+        (Some("classify"), _) => {
+            let id: u64 = id(2)?.parse().context("the work item ID is a number")?;
+            let mut body = json!({"provider":"azure","id":id});
+            if let Some(project) = option(args, "--project") {
+                body["project"] = json!(project);
+            }
+            if let Some(source) = option(args, "--source") {
+                body["source"] = json!(source);
+            }
+            ("workflow_classify", body)
+        }
         (Some("repositories"), _) => {
             let mut body =
                 json!({"project":option(args, "--project").context("--project is required")?});
@@ -1525,6 +1661,16 @@ fn validate_args(args: &[String]) -> Result<()> {
                     "invalid value for this flag"
                 );
             }
+            "--set" => {
+                // A key and its value; the value may be empty (clearing ready states).
+                i += 2;
+                ensure!(
+                    args.get(i - 1)
+                        .is_some_and(|k| !k.is_empty() && !k.starts_with("--"))
+                        && args.get(i).is_some_and(|v| !v.starts_with("--")),
+                    "invalid --set KEY VALUE"
+                );
+            }
             "--program" | "--directory" => {
                 i += 1;
                 ensure!(
@@ -1801,7 +1947,8 @@ fn validate_args(args: &[String]) -> Result<()> {
             | ["cases", "show" | "edit" | "reset", _]
             | ["contexts", "list" | "add"]
             | ["contexts", "show" | "edit" | "remove", _]
-            | ["workflows", "list" | "save" | "repositories"]
+            | ["workflows", "list" | "save" | "repositories" | "settings"]
+            | ["workflows", "classify", _]
             | ["workflows", "show" | "remove" | "enable" | "disable", _]
             | ["workflows", "blocks", "list" | "save"]
             | ["workflows", "blocks", "remove", _]
@@ -2041,14 +2188,24 @@ fn validate_args(args: &[String]) -> Result<()> {
             "--source",
             p.as_slice().starts_with(&["answer", "refine"])
                 || p.as_slice().starts_with(&["knowledge", "search"])
-                || p.as_slice() == ["workflows", "repositories"],
+                || matches!(
+                    p.as_slice(),
+                    ["workflows", "repositories" | "settings" | "classify", ..]
+                ),
         ),
+        ("--set", p.as_slice() == ["workflows", "settings"]),
         ("--context", ["notes", "knowledge"].contains(&p[0])),
         ("--expect", p.as_slice() == ["setup", "status"]),
-        ("--project", p.as_slice() == ["workflows", "repositories"]),
+        (
+            "--project",
+            matches!(
+                p.as_slice(),
+                ["workflows", "repositories" | "settings" | "classify", ..]
+            ),
+        ),
         (
             "--organization",
-            p.as_slice() == ["workflows", "repositories"],
+            matches!(p.as_slice(), ["workflows", "repositories" | "settings"]),
         ),
     ] {
         ensure!(
@@ -2174,7 +2331,7 @@ async fn execute(mut args: Vec<String>) -> Result<Reply> {
         }
         "capabilities" => {
             return Ok(Reply::success(
-                json!({"contract":control::CONTRACT,"commands":HELP,"skill_version":env!("CARGO_PKG_VERSION"),"activity_registration_support":true,"web_support":true,"web_access_support":true,"knowledge_index_support":true,"mcp_support":true,"tools_support":true,"todo_support":true,"implementation_support":true,"workflows_support":true,"machine_pairing_support":true,"machine_login_support":true,"machine_management_support":true,"account_variables_support":true,"account_portable_support":true,"account_authority_support":true,"shared_accounts_support":true,"cloud_store_support":true,"cloud_mirror_support":true,"cloud_disconnect_support":true,"cloud_primary_support":true,"cloud_migration_support":true,"cloud_installations_support":true,"cloud_handoff_support":true,"cloud_delivery_support":true,"cloud_restore_support":true,"cloud_conflicts_support":true,"cloud_lost_support":true,"cloud_repair_support":true,"teams_read_support":true,"audit_pages_support":true,"service_support":true}),
+                json!({"contract":control::CONTRACT,"commands":HELP,"skill_version":env!("CARGO_PKG_VERSION"),"activity_registration_support":true,"web_support":true,"web_access_support":true,"knowledge_index_support":true,"mcp_support":true,"tools_support":true,"todo_support":true,"implementation_support":true,"workflows_support":true,"workflow_director_support":true,"machine_pairing_support":true,"machine_login_support":true,"machine_management_support":true,"account_variables_support":true,"account_portable_support":true,"account_authority_support":true,"shared_accounts_support":true,"cloud_store_support":true,"cloud_mirror_support":true,"cloud_disconnect_support":true,"cloud_primary_support":true,"cloud_migration_support":true,"cloud_installations_support":true,"cloud_handoff_support":true,"cloud_delivery_support":true,"cloud_restore_support":true,"cloud_conflicts_support":true,"cloud_lost_support":true,"cloud_repair_support":true,"teams_read_support":true,"audit_pages_support":true,"service_support":true}),
             ));
         }
         "skill" => return crate::app::skill::command(action, args.get(2).map(String::as_str)),
@@ -3519,9 +3676,66 @@ mod wiki_tests {
             &["workflows", "show"],
             &["workflows", "blocks"],
             &["workflows", "run", "payments"],
+            &["workflows", "settings", "--set", "concurrency"],
+            &["workflows", "settings", "--set", "--confirmed", "2"],
+            &["workflows", "list", "--set", "concurrency", "2"],
+            &["workflows", "classify"],
+            &[
+                "workflows",
+                "classify",
+                "41",
+                "--organization",
+                "https://dev.azure.com/x",
+            ],
         ] {
             assert!(check(args).is_err(), "{args:?}");
         }
+    }
+    #[test]
+    fn workflow_settings_changes_become_one_update() {
+        let sets: Vec<(String, String)> = [
+            ("concurrency", "3"),
+            ("director.model", "gpt-6.1-sol"),
+            ("ready_states.Payments", "Ready, Approved"),
+            ("ready_states.Billing", ""),
+            ("ready_states", r#"{"organization":"https://dev.azure.com/example","project":"Cards","states":["New"]}"#),
+        ]
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+        let current = json!({"machine":"5a6b7c8d-9e0f-4a1b-8c2d-3e4f5a6b7c8d","provider":"codex","model":"old","effort":"low"});
+        let body = settings_update(&sets, current).unwrap();
+        assert_eq!(body["concurrency"], 3);
+        assert_eq!(body["director"]["model"], "gpt-6.1-sol");
+        assert_eq!(body["director"]["provider"], "codex");
+        assert_eq!(
+            body["ready_states"][0],
+            json!({"project":"Payments","states":["Ready","Approved"]})
+        );
+        assert_eq!(
+            body["ready_states"][1],
+            json!({"project":"Billing","states":[]})
+        );
+        assert_eq!(body["ready_states"][2]["project"], "Cards");
+        let cleared = settings_update(&[("director".into(), "none".into())], Value::Null).unwrap();
+        assert!(cleared["director"].is_null() && cleared.get("director").is_some());
+        assert!(settings_update(&[("concurrency".into(), "two".into())], Value::Null).is_err());
+        assert!(settings_update(&[("colour".into(), "red".into())], Value::Null).is_err());
+        let args: Vec<String> = [
+            "workflows",
+            "settings",
+            "--set",
+            "concurrency",
+            "3",
+            "--set",
+            "ready_states.Billing",
+            "",
+        ]
+        .iter()
+        .map(|a| a.to_string())
+        .collect();
+        assert_eq!(settings_changes(&args).unwrap().len(), 2);
+        assert_eq!(words(&args), ["workflows", "settings"]);
     }
 }
 #[cfg(test)]
@@ -3670,6 +3884,35 @@ mod help_tests {
             &["workflows", "blocks", "save", "--confirmed"],
             &["workflows", "blocks", "remove", "base"],
             &["workflows", "repositories", "--project", "My Project"],
+            &["workflows", "settings"],
+            &[
+                "workflows",
+                "settings",
+                "--project",
+                "Payments",
+                "--source",
+                "azure",
+            ],
+            &[
+                "workflows",
+                "settings",
+                "--set",
+                "concurrency",
+                "3",
+                "--set",
+                "ready_states.Payments",
+                "",
+            ],
+            &["workflows", "classify", "41"],
+            &[
+                "workflows",
+                "classify",
+                "41",
+                "--project",
+                "Payments",
+                "--source",
+                "azure",
+            ],
             &[
                 "workflows",
                 "repositories",
