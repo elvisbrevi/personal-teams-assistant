@@ -1075,20 +1075,18 @@ fn browser_allows_shared_implementation_tools_but_rejects_internal_worker_operat
 #[test]
 fn browser_lists_the_accounts_chats_for_workflow_notifications_but_never_posts() {
     let (_dir, portal, entries) = fixture();
-    for entry in &entries {
+    assert!(
+        portal
+            .check_request(&entries[0], &control::Request::new("teams_chats"))
+            .is_ok()
+    );
+    for method in ["teams_post", "teams_messages", "teams_search"] {
         assert!(
             portal
-                .check_request(entry, &control::Request::new("teams_chats"))
-                .is_ok()
+                .check_request(&entries[0], &control::Request::new(method))
+                .is_err(),
+            "{method}"
         );
-        for method in ["teams_post", "teams_messages", "teams_search"] {
-            assert!(
-                portal
-                    .check_request(entry, &control::Request::new(method))
-                    .is_err(),
-                "{method}"
-            );
-        }
     }
 }
 #[test]

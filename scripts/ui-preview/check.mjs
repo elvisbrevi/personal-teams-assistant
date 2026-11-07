@@ -172,7 +172,7 @@ check('axe: no WCAG 2.2 AA violations in any scan', !Object.keys(totals).length,
   const { context, page, errors } = await open();
   // Navigation order and Settings in the footer
   const order = await page.$$eval('nav [data-tab]', b => b.map(x => x.dataset.tab));
-  check('nav order: daily work first, Settings last', JSON.stringify(order) === JSON.stringify(['overview', 'todo', 'messages', 'registration', 'knowledge', 'chat', 'settings']), order.join(','));
+  check('nav order: daily work first, Settings last', JSON.stringify(order) === JSON.stringify(['overview', 'todo', 'messages', 'registration', 'workflows', 'knowledge', 'chat', 'settings']), order.join(','));
   await page.click('nav [data-tab="todo"]');
   await page.waitForTimeout(200);
   check('To-Do initially requests ten Azure HUs', await page.evaluate(() => window.__ptaLastTodo?.provider === 'azure' && window.__ptaLastTodo?.limit === 10) && await page.locator('.todo-item').count() === 10);
@@ -578,7 +578,7 @@ check('axe: no WCAG 2.2 AA violations in any scan', !Object.keys(totals).length,
   await page.click('#save'); await page.waitForTimeout(300);
   check('a new guide is saved with its field', await page.evaluate(() => window.__ptaLastSave.map.work_item_guides.some(g => g.id === 'support' && g.type === 'Support' && g.provider === 'azure' && g.fields[0]?.reference === 'Custom.Kind')));
   const plan = page.locator('#agent-prompts > .resource').first();
-  check('agent instructions show the built-in prompts', await page.$$eval('#agent-prompts > .resource', rows => rows.length) === 3);
+  check('agent instructions show the built-in prompts, the director\'s included', await page.$$eval('#agent-prompts > .resource', rows => rows.length) === 4 && await page.locator('#agent-prompts [data-prompt="direct"]').count() === 1);
   await plan.locator('summary').click();
   await plan.locator('textarea').fill('Plan at most three children.');
   await page.click('#save'); await page.waitForTimeout(300);
@@ -2108,6 +2108,7 @@ if (flag !== '--axe-only') for (const [label, viewport] of [['desktop', { width:
   await editor.locator('input').first().fill('Receipts worker');
   check(`workflows ${label}: the ID follows the name`, await editor.locator('input').nth(1).inputValue() === 'receipts-worker');
   await editor.locator('textarea').first().fill('Bugs of the receipts worker.');
+  const unchosen = await page.textContent('#workflow-project-new');
   await page.click('#workflow-project-new');
   await page.waitForSelector(sheet);
   check(`workflows ${label}: the project sheet lists recent projects, then all`, await page.locator(`${sheet} h3`).count() === 2);
@@ -2115,7 +2116,7 @@ if (flag !== '--axe-only') for (const [label, viewport] of [['desktop', { width:
   await page.fill(`${sheet} input[type=search]`, 'recei');
   check(`workflows ${label}: the project sheet filters by name`, await page.locator(`${sheet} .directory-picker-row`).count() === 1);
   await page.keyboard.press('Escape');
-  check(`workflows ${label}: Escape keeps the choice and returns focus`, await page.textContent('#workflow-project-new') === 'Elige un proyecto' && await page.evaluate(() => document.activeElement?.id === 'workflow-project-new'));
+  check(`workflows ${label}: Escape keeps the choice and returns focus`, await page.textContent('#workflow-project-new') === unchosen && await page.evaluate(() => document.activeElement?.id === 'workflow-project-new'));
   await page.click('#workflow-project-new');
   await page.fill(`${sheet} input[type=search]`, 'pay');
   await page.locator(`${sheet} .directory-picker-row button`).first().click();
@@ -2174,9 +2175,9 @@ if (flag !== '--axe-only') for (const [label, viewport] of [['desktop', { width:
   await payments.locator('input.switch').click();
   await page.waitForTimeout(300);
   check(`workflows ${label}: the switch disables a workflow and nothing else`, (await calls()).some(c => c.method === 'workflow_save' && c.id === 'payments-features' && c.enabled === false && !c.workflow));
-  await saved.locator('button', { hasText: 'Quitar workflow' }).click();
-  check(`workflows ${label}: removing asks for a second tap`, !(await calls()).some(c => c.method === 'workflow_remove') && await saved.locator('button', { hasText: 'Toca de nuevo para quitar' }).isVisible());
-  await saved.locator('button', { hasText: 'Toca de nuevo para quitar' }).click();
+  await saved.locator('button', { hasText: 'Eliminar workflow' }).click();
+  check(`workflows ${label}: removing asks for a second tap`, !(await calls()).some(c => c.method === 'workflow_remove') && await saved.locator('button', { hasText: 'Toca de nuevo para eliminar' }).isVisible());
+  await saved.locator('button', { hasText: 'Toca de nuevo para eliminar' }).click();
   await page.waitForTimeout(300);
   check(`workflows ${label}: the workflow is removed with confirmation`, (await calls()).some(c => c.method === 'workflow_remove' && c.id === 'receipts-worker' && c.confirmed === true)
     && await page.locator('[data-workflow="receipts-worker"]').count() === 0);
@@ -2188,7 +2189,7 @@ if (flag !== '--axe-only') for (const [label, viewport] of [['desktop', { width:
   check(`blocks ${label}: rows say where each block is used`, /Payments features/.test(await page.textContent('[data-block="base-branch"] .resource-facts')));
   check(`blocks ${label}: the library with its editors passes axe`, (await scan(page)).length === 0, JSON.stringify(await scan(page)));
   const before = (await calls()).length;
-  await page.locator('[data-block="base-branch"] button', { hasText: 'Quitar bloque' }).click();
+  await page.locator('[data-block="base-branch"] button', { hasText: 'Eliminar bloque' }).click();
   check(`blocks ${label}: removing a block in use is refused with its workflows`, (await calls()).length === before
     && /Payments features/.test(await page.locator('[data-block="base-branch"] .block-editor > .callout.error').textContent()));
   await page.click('#block-new');
