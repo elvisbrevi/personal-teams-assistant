@@ -63,6 +63,19 @@ try {
     Check 'a second copy next to a Cargo installation is refused' ((Run-Installer -TestSource (Join-Path $work 'source')) -ne 0)
     Check '  and says how to switch' (Said 'cargo uninstall personal-teams-assistant')
     Remove-Item (Join-Path $env:CARGO_HOME '.crates2.json')
+    # A live Cargo installation (its own record beside binstall's) is refused and binstall's record is left alone.
+    $binstallDir = Join-Path $env:CARGO_HOME 'binstall'
+    New-Item -ItemType Directory -Force -Path $binstallDir | Out-Null
+    $binstallFile = Join-Path $binstallDir 'crates-v1.json'
+    $other = '{"name":"other-crate","version_req":"*","current_version":"1.0.0","bins":["other"]}'
+    $ours = '{"name":"personal-teams-assistant","version_req":"*","current_version":"0.11.2","bins":["personal-teams-assistant","pta"]}'
+    [System.IO.File]::WriteAllText($binstallFile, "$other`n$ours`n", (New-Object System.Text.UTF8Encoding $false))
+    $cratesToml = Join-Path $env:CARGO_HOME '.crates.toml'
+    Set-Content -LiteralPath $cratesToml -Value "[v1]`n`"personal-teams-assistant 0.11.2 (registry+https://github.com/rust-lang/crates.io-index)`" = [`"pta.exe`"]"
+    $binstallBefore = (Get-FileHash $binstallFile).Hash
+    Check 'a live binstall installation is refused' ((Run-Installer -TestSource (Join-Path $work 'source')) -ne 0)
+    Check '  and its binstall record is untouched' ((Get-FileHash $binstallFile).Hash -eq $binstallBefore)
+    Remove-Item $cratesToml
     $env:PTA_INSTALL_TEST = ''
     Check 'the test source needs the test mode' ((Run-Installer -TestSource (Join-Path $work 'source')) -ne 0)
     $env:PTA_INSTALL_TEST = '1'
@@ -76,6 +89,10 @@ try {
     if ($code -ne 0) { Get-Content $out | Write-Host }
     Check 'it checked the digest' (Said 'matches its published SHA-256')
     Check 'it says the existing profile is used' (Said 'Using the existing profile')
+    Check 'it removed the stale binstall entry' (Said 'Removed the stale cargo binstall entry')
+    Check '  keeping the other entry byte for byte' (([System.IO.File]::ReadAllText($binstallFile)) -eq "$other`n")
+    Check '  and leaving no temporary file' (@(Get-ChildItem $binstallDir).Count -eq 1)
+    $staleAfter = (Get-FileHash $binstallFile).Hash
     Check 'pta --version from the installed path' ((Pta --version) -match [regex]::Escape($Version))
     Check 'both binaries are installed' (Test-Path (Join-Path $root 'bin\personal-teams-assistant.exe'))
     $record = Get-Content -LiteralPath (Join-Path $root 'install.json') -Raw | ConvertFrom-Json
@@ -106,6 +123,8 @@ try {
     $code = Run-Installer -TestSource (Join-Path $work 'source') -UnattendedUpdates
     Check 'running it again succeeds' ($code -eq 0)
     if ($code -ne 0) { Get-Content $out | Write-Host }
+    Check 'a second run leaves the binstall record unchanged' ((Get-FileHash $binstallFile).Hash -eq $staleAfter)
+    Check '  and does not mention it' (-not (Said 'stale cargo binstall'))
     Check '-UnattendedUpdates turned unattended updates on' ((Pta --json update status) -match '"unattended":\{[^}]*"enabled":true')
     Check 'the bin directory is on the user PATH once' (@((UserPath).Split(';') | Where-Object { $_ -eq (Join-Path $root 'bin') }).Count -eq 1)
     Check 'the same machine identity is kept' ((Pta --json tools call machine_settings | ConvertFrom-Json).data.id -eq $machine)

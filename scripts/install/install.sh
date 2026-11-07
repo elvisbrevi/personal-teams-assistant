@@ -212,6 +212,36 @@ EOF
     exit 1
 }
 
+# `cargo uninstall` leaves binstall's own record (crates-v1.json, one JSON object per line) naming
+# the package. After a successful install, with no Cargo installation left, drop only this
+# package's lines when the file is exactly that format, writing it atomically; otherwise say so.
+clean_stale_binstall_record() {
+    cargo_home=${CARGO_HOME:-$HOME/.cargo}
+    file="$cargo_home/binstall/crates-v1.json"
+    [ -f "$file" ] || return 0
+    grep -q "\"name\":\"$PACKAGE\"" "$file" || return 0
+    cargo_record "$cargo_home" && return 0
+    # JSON lines: every non-empty line is one object starting with its name.
+    if grep -v '^[[:space:]]*$' "$file" | grep -qv '^{"name":".*}$'; then
+        warn "binstall's record $file still names $PACKAGE, which is no longer installed with Cargo; delete that entry by hand, or it will make cargo binstall believe the package is installed."
+        return 0
+    fi
+    temp="$file.pta-tmp.$$"
+    status=0
+    grep -v "^{\"name\":\"$PACKAGE\"" "$file" >"$temp" || status=$?
+    # grep exits 1 when no line is left (an empty record is valid); more is a real error.
+    if [ "$status" -gt 1 ]; then
+        rm -f "$temp"
+        return 0
+    fi
+    if mv "$temp" "$file"; then
+        say "Removed the stale cargo binstall entry for $PACKAGE from $file."
+    else
+        rm -f "$temp"
+        warn "The stale cargo binstall entry for $PACKAGE in $file could not be removed; delete that line by hand."
+    fi
+}
+
 resolve() {
     if [ -L "$1" ]; then
         target=$(readlink "$1")
@@ -601,6 +631,7 @@ do_install() {
     write_record "$STAGE/$RECORD"
     mv "$STAGE/$RECORD" "$ROOT/$RECORD"
     say "Installed $("$BIN/$CLI" --version </dev/null) in $BIN."
+    clean_stale_binstall_record
 
     setup_path
     if [ "$NO_SERVICE" = yes ]; then

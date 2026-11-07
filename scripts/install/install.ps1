@@ -205,6 +205,38 @@ To stay with Cargo instead, update with: cargo install $Package --locked
 "@
 }
 
+# `cargo uninstall` leaves binstall's own record (crates-v1.json, one JSON object per line) naming
+# the package. After a successful install, with no Cargo installation left, drop only this
+# package's lines when the file is exactly that format, writing it atomically; otherwise say so.
+function Clear-StaleBinstallRecord {
+    $cargoHome = if ($env:CARGO_HOME) { $env:CARGO_HOME } else { Join-Path $env:USERPROFILE '.cargo' }
+    $file = Join-Path $cargoHome 'binstall\crates-v1.json'
+    if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { return }
+    $utf8 = New-Object System.Text.UTF8Encoding $false
+    $text = [System.IO.File]::ReadAllText($file, $utf8)
+    $prefix = "{`"name`":`"$Package`""
+    if (-not $text.Contains($prefix)) { return }
+    if (Test-CargoRecord $cargoHome) { return }
+    $lines = $text -split "`n"
+    foreach ($line in $lines) {
+        $bare = $line.TrimEnd("`r")
+        if ($bare.Trim() -and -not ($bare.StartsWith('{"name":"') -and $bare.EndsWith('}'))) {
+            Warn "binstall's record $file still names $Package, which is no longer installed with Cargo; delete its line by hand."
+            return
+        }
+    }
+    $kept = @($lines | Where-Object { -not $_.StartsWith($prefix) })
+    $temp = "$file.pta-tmp"
+    try {
+        [System.IO.File]::WriteAllText($temp, ($kept -join "`n"), $utf8)
+        Move-Item -LiteralPath $temp -Destination $file -Force
+        Say "Removed the stale cargo binstall entry for $Package from $file."
+    } catch {
+        Remove-Item -LiteralPath $temp -Force -ErrorAction SilentlyContinue
+        Warn "The stale cargo binstall entry for $Package in $file could not be removed; delete that line by hand."
+    }
+}
+
 function Get-ProfileDir {
     if ($env:PTA_PROFILE_DIR) { return $env:PTA_PROFILE_DIR }
     return Join-Path $env:APPDATA 'dev.personalteams.assistant'
@@ -526,6 +558,7 @@ function Install-Archive {
         Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue
     }
     Say "Installed $((Invoke-Pta '--version').Text) in $Bin."
+    Clear-StaleBinstallRecord
 
     Add-UserPath
     if ($SkipService) { Say 'Not registered to start at login (-NoService).' } else { Install-PtaService }
