@@ -266,6 +266,13 @@
       window.__ptaLastMachineBrowse = args.path;
       await delay(window.__ptaBrowseDelay || 0);
       if (window.__ptaBrowseError) throw new Error('Directory read failed.');
+      // A Windows host: every fixed drive at the top, plain paths without the \\?\ prefix.
+      if (window.__ptaWindowsDrives) {
+        const tree = { 'D:\\': ['D:\\code'], 'D:\\code': ['D:\\code\\sag'], 'D:\\code\\sag': [] };
+        const parent = { 'D:\\code': 'D:\\', 'D:\\code\\sag': 'D:\\code' };
+        return { path: args.path || null, parent: parent[args.path] || null, roots: !args.path,
+          directories: !args.path ? ['C:\\', 'D:\\'] : tree[args.path] || [] };
+      }
       return { path: args.path || null, parent: args.path === '/work' ? null : '/work', roots: !args.path,
         directories: !args.path ? ['/work'] : args.path === '/work' ? ['/work/application', '/work/documentation'] : [] };
     },

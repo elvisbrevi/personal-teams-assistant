@@ -158,7 +158,9 @@ children and run installed coding agents.
    The GUI uses a shared directory sheet for allowed roots and local checkout add/edit paths,
    with single or multiple selection, a leading `../` row, parent navigation and Apply/Cancel. `machine_browse`
    takes an optional absolute `path` and reads this host's directories for these choices;
-   an empty path lists its filesystem root (the home drive on Windows). Isolated web
+   an empty path lists its filesystem roots: `/` on Unix, every fixed local drive on Windows
+   (`C:\`, `D:\`, …; removable, network and CD drives are not offered). Paths come back
+   without the Windows `\\?\` prefix, and either spelling is accepted as input. Isolated web
    profiles can browse only their own repositories. Browsing grants no execution access.
    The coordinator never signs in; another computer you want to connect enters its HTTPS
    origin in the app's sign-in screen.
@@ -170,7 +172,9 @@ children and run installed coding agents.
    An offline report is last-known, never proof that Teams
    stopped. Missing/unknown capabilities require a compatible target and a fresh poll.
    `machine_update` takes `machine`, optional `name` and/or `roots`: names can change offline,
-   roots require an online compatible machine and explicit canonical directories. Empty roots
+   roots require an online compatible machine and explicit canonical directories on any fixed
+   drive; links and junctions are refused, also across drives. `machine_detail` shows the saved
+   roots canonicalized in plain form (`D:\code\sag`). Empty roots
    grant no native execution access. `machine_directories` (`machine`, optional `path`) is
    the remote directory-sheet read; it grants no roots. Both GUIs expose Manage machine
    beside every row and use the shared sheet. Portal roots remain operator-controlled.

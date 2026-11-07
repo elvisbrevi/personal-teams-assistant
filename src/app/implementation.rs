@@ -14,6 +14,7 @@ pub(super) mod fleet;
 pub(super) mod join;
 pub(super) mod login;
 mod management;
+pub(super) mod paths;
 mod requests;
 mod store;
 pub(super) use fleet::register;
@@ -389,6 +390,11 @@ impl State {
                 creations: BTreeMap::new(),
             }
         };
+        // Roots saved with the Windows verbatim prefix read back in their plain spelling.
+        registry.settings.roots = paths::plain_all(&registry.settings.roots);
+        for machine in &mut registry.machines {
+            machine.roots = paths::plain_all(&machine.roots);
+        }
         for record in registry.creations.values_mut() {
             if record["state"] == "sending" {
                 record["state"] = json!("uncertain");
@@ -728,19 +734,18 @@ fn browse_machine(host: &Host, args: &Value) -> Result<Value> {
             .or_else(|| std::env::var_os("USERPROFILE"))
             .map(PathBuf::from)
             .context("Home directory unavailable.")?;
-        vec![
-            home.ancestors()
-                .last()
-                .context("Directory root unavailable.")?
-                .to_path_buf(),
-        ]
+        let roots = paths::filesystem_roots(&home);
+        ensure!(!roots.is_empty(), "Directory root unavailable.");
+        roots
     };
     browse_directories(args["path"].as_str(), &allowed)
 }
 
 fn browse_directories(path: Option<&str>, allowed: &[PathBuf]) -> Result<Value> {
     if path.is_none_or(str::is_empty) {
-        return Ok(json!({"path":null,"parent":null,"directories":allowed,"roots":true}));
+        return Ok(
+            json!({"path":null,"parent":null,"directories":paths::plain_all(allowed),"roots":true}),
+        );
     }
     let path = confined(Path::new(path.unwrap()), allowed)?;
     let mut entries: Vec<PathBuf> = fs::read_dir(&path)?
@@ -752,10 +757,14 @@ fn browse_directories(path: Option<&str>, allowed: &[PathBuf]) -> Result<Value> 
                 && confined(p, allowed).is_ok()
         })
         .take(1000)
+        .map(|p| paths::plain(&p))
         .collect();
     entries.sort();
-    let parent = path.parent().and_then(|p| confined(p, allowed).ok());
-    Ok(json!({"path":path,"parent":parent,"directories":entries,"roots":false}))
+    let parent = path
+        .parent()
+        .and_then(|p| confined(p, allowed).ok())
+        .map(|p| paths::plain(&p));
+    Ok(json!({"path":paths::plain(&path),"parent":parent,"directories":entries,"roots":false}))
 }
 
 async fn local(host: &Arc<Host>, method: &str, args: &Value) -> Result<Value> {
@@ -1359,7 +1368,7 @@ mod tests {
         }
         fn exit(&self) {}
     }
-    fn host(root: &Path) -> Arc<Host> {
+    pub(super) fn host(root: &Path) -> Arc<Host> {
         Arc::new(Host {
             state: init_state(&root.join("profile"), &root.join("data")).unwrap(),
             shell: Box::new(TestShell),
@@ -2005,7 +2014,8 @@ mod tests {
         let detail = operation(&host, "machine_detail", &json!({"machine":worker}))
             .await
             .unwrap();
-        assert_eq!(detail["roots"], json!([work]));
+        // Shown in the plain spelling (no Windows verbatim prefix), whatever the worker reported.
+        assert_eq!(detail["roots"], json!([paths::plain(&work)]));
         assert_eq!(detail["name"], "Remote desk");
         assert!(
             operation(&host, "machine_update", &json!({"machine":own,"roots":[]}))
