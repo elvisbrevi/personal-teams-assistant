@@ -133,7 +133,8 @@ pub(crate) async fn pull_requests(
             repository: id.to_lowercase(),
             title: text(&pull["title"], 400),
             status,
-            url: crate::tools::todo::validate_link(link.as_str())?.to_string(),
+            url: crate::tools::todo::https_link(link.as_str())
+                .context("invalid pull request link")?,
             created_at: pull["creationDate"]
                 .is_string()
                 .then(|| text(&pull["creationDate"], 40)),
