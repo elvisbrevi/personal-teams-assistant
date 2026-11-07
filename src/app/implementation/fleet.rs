@@ -333,6 +333,7 @@ pub(in crate::app) async fn register(host: &Arc<Host>, args: &Value) -> Result<V
         store_held: None,
         host_version: None,
         update: None,
+        checkout_inspect: false,
     });
     state.save(&data)?;
     drop(data);
@@ -425,6 +426,7 @@ pub(in crate::app) async fn protocol(host: &Arc<Host>, args: &Value) -> Result<V
                 .filter(|v| crate::maintenance::Version::parse(v).is_some())
                 .map(str::to_owned);
             machine.update = super::UpdateReport::parse(&args["update"]);
+            machine.checkout_inspect = args["checkout_inspect_support"] == true;
         }
         state.save(&data)?;
     }
@@ -649,7 +651,8 @@ pub(super) async fn call(
             "implementation_launch",
             "implementation_runs",
             "implementation_cancel",
-            "implementation_mobile_session"
+            "implementation_mobile_session",
+            "checkout_inspect"
         ]
         .contains(&method),
         "Unavailable execution operation."
@@ -802,7 +805,7 @@ async fn poll(host: Arc<Host>) {
             let polled = remote(
                 &connection,
                 json!({"action":"poll","id":own,"results":results,"sessions":sessions,"session_cursor":next,"assistant_phase":assistant_phase,"management_support":true,"roots":roots,
-                    "host_version":env!("CARGO_PKG_VERSION"),"update":crate::app::maintenance::report(&host)}),
+                    "host_version":env!("CARGO_PKG_VERSION"),"update":crate::app::maintenance::report(&host),"checkout_inspect_support":true}),
             )
             .await;
             standing::note(&host.state, &polled);
@@ -972,6 +975,7 @@ mod tests {
             store_held: None,
             host_version: None,
             update: None,
+            checkout_inspect: false,
         });
         data.teams_machine = worker.clone();
         assert!(leased(&mut data, &worker));

@@ -1,6 +1,6 @@
 # Account configuration
 
-The account's **portable configuration** follows the signed-in account to every installation: the preferences below, the model choices, the sources and their audiences, the contexts, the questions, the verified notes, and the organization with its work item guides (0.10.16+). Requires `account_portable_support: true` in `pta --json capabilities` and a host of the same release (`status.host_version`); update the host and CLI together, with no fallback.
+The account's **portable configuration** follows the signed-in account to every installation: the preferences below, the model choices, the sources and their audiences, the contexts, the questions, the verified notes, the organization with its work item guides (0.10.16+), and the workflows with their blocks (0.12.0+, changed only on the coordinator). Requires `account_portable_support: true` in `pta --json capabilities` and a host of the same release (`status.host_version`); update the host and CLI together, with no fallback.
 
 ## What is portable, and what never is
 
@@ -10,7 +10,7 @@ A positive allowlist defines it; anything not listed stays on the computer that 
 | --- | --- |
 | `llm.language`, `llm.style`, `llm.chain` (provider, model, effort, on/off, order), `policy.greeting`, `policy.max_context_chars`, `policy.max_message_age_seconds`, `policy.sensitive_patterns`, the Teams chats read on request `teams_reading` (`all_chats`, `personal_chat`, `chats`; 0.10.60+) | data directory, bind, public URL, tunnel, webhook prefix, `knowledge_map` path, `[secrets]` mapping |
 | sources: ID, description, topics, enabled, external processing, audiences (`allowed_conversations`, `allowed_senders`), the repository **alias** and relative path or the URL/tool definition | repository **folders** (`repositories` bindings), allowed roots, execution machines, the selected Teams machine |
-| contexts, questions (with their associated requests), verified notes, the organization (name, entries, documenting sources) and the work item guides | the chats this computer receives and answers (`graph.discover_all_chats`, `graph.allowed_chats`, the personal chat), Microsoft/GitHub/Azure sessions, provider logins and CLIs, credentials, machine credentials, internal keys, people profiles, agent instructions, launchers, activity records |
+| contexts, questions (with their associated requests), verified notes, the organization (name, entries, documenting sources), the work item guides, and the workflows and workflow blocks (0.12.0+; they come from the coordinator and are changed only there, so a change made on another computer never travels back) | the chats this computer receives and answers (`graph.discover_all_chats`, `graph.allowed_chats`, the personal chat), Microsoft/GitHub/Azure sessions, provider logins and CLIs, credentials, machine credentials, internal keys, people profiles, agent instructions, launchers, activity records |
 
 Microsoft setup identifiers follow the account separately through Variables (`ENTRA_TENANT_ID`, `ENTRA_CLIENT_ID`, `TEAMS_USER_ID`, 0.10.2+), and restore into local Microsoft Teams settings. They are public setup metadata, not a Microsoft session; the existing database identity is still protected. See [Microsoft setup identifiers](variables.md#microsoft-setup-identifiers-0102).
 

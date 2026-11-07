@@ -180,3 +180,19 @@ _Avoid_: system prompt (in user-facing text)
 **Agent session**:
 The coding agent's own conversation associated with an implementation run and its work item. Its native session ID identifies it in that agent's tools and supported app links.
 _Avoid_: run ID
+
+**Workflow**:
+A saved recipe for implementing the items of one Azure DevOps project: the repositories it works on, the execution machine and the checkout of each repository there, the coding agent, its instructions and an ordered list of workflow blocks. It travels with the account and changes only on the coordinator. It grants nothing: every directory, repository, agent, chat and launcher is checked when it is saved and again when it is used.
+_Avoid_: pipeline (Azure DevOps' own), automation, recipe (in user-facing text)
+
+**Workflow block**:
+A reusable part of a workflow: an instruction the agents read, a Teams notification posted to one chat at one stage, or an approved launcher of the coordinator run at one stage. A block that acts is authorized when it is saved (a notification with the user's confirmation of its chat and text, a launcher by the owner at the GUI), not when it runs.
+_Avoid_: step, plugin
+
+**Workflow director**:
+The model-backed selector and summarizer configured in Settings › Workflows: it chooses which enabled workflow fits an item, or none, and writes progress summaries; code checks its choice and it decides nothing else. Distinct from the coordinator, which stays the user's main installation.
+_Avoid_: coordinator, orchestrator, dispatcher
+
+**Workflow run**:
+One execution of a workflow for one work item, kept on the coordinator, advancing through stages (planning, the plan-review gate, child creation, coding, pull requests, blocks, done) by the existing implementation operations, never past the user's review of the plan.
+_Avoid_: implementation run (one of its parts), job

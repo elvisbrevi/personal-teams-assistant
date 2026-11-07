@@ -55,6 +55,46 @@ fn azure(state: &DesktopState, source: Option<&str>) -> anyhow::Result<Azure> {
     })
 }
 
+/// The Git repositories of a project of the enabled Azure source (`workflow_repositories`),
+/// read with its read credential and cached like the process metadata. A project outside the
+/// source's configured organizations is `[invalid_input] invalid project: …`.
+pub(in crate::app) async fn repositories(
+    state: &DesktopState,
+    source: Option<&str>,
+    organization: Option<&str>,
+    project: &str,
+) -> Result<Value, String> {
+    let azure = azure(state, source).map_err(|_| {
+        "[not_ready] Enable one Azure DevOps source with its read credential before listing a project's repositories."
+            .to_owned()
+    })?;
+    let config = state.settings.config().map_err(fail)?;
+    let cache = Store::open(&config.server.data_dir.join("todo-cache.db")).map_err(fail)?;
+    tokio::time::timeout(
+        std::time::Duration::from_secs(110),
+        crate::ado::repositories::list(
+            &azure.client,
+            &azure.read_key,
+            &azure.catalog,
+            &cache,
+            organization,
+            project,
+        ),
+    )
+    .await
+    .map_err(|_| "[network] The project's Git repositories could not be read in time.".to_owned())?
+    .map_err(|error| {
+        let text = error.to_string();
+        if text.starts_with("invalid") {
+            format!("[invalid_input] {text}")
+        } else if text.contains("Git repositories; the repository catalog would be incomplete") {
+            text
+        } else {
+            "[network] The project's Git repositories could not be read; check the catalog and the Azure read credential.".into()
+        }
+    })
+}
+
 /// Check a reviewed child against the provider's live types before anything is written.
 pub(in crate::app) async fn check_child(
     state: &DesktopState,

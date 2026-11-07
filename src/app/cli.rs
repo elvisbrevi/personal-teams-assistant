@@ -407,6 +407,23 @@ Knowledge
                            Azure task type with the bugs). The implementation agents follow them.
   prompts list | prompts show ID         The implementation agents' instructions (plan, code, request).
   prompts edit ID | prompts reset ID     JSON on stdin: {\"instructions\": TEXT}; reset restores the default.
+  workflows list | workflows show ID     Workflows: recipes for implementing the items of one Azure DevOps project.
+  workflows save           JSON on stdin: id, name, description, enabled, auto_start, organization
+                           (https://dev.azure.com/NAME), project, repositories [{id, name}], machine (ID),
+                           checkouts {REPOSITORY_ID: DIRECTORY}, agent {provider, model, effort},
+                           instructions (at most 8000 characters) and blocks (IDs). Checked against the
+                           project's catalog, the machine's roots and checkouts and its installed CLIs;
+                           what cannot be verified comes back as warnings. Saved on the coordinator only.
+  workflows enable ID | workflows disable ID   Changes only whether the workflow is enabled.
+  workflows remove ID --confirmed        Removes a workflow (its definition cannot be recovered).
+  workflows blocks list                  Blocks and the workflows that use them.
+  workflows blocks save [--confirmed]    JSON on stdin: id, name, kind (instruction: text; teams_notification:
+                           stage, chat {id, name}, mentions, template with {item} {link} {pull_requests}
+                           {summary}, needs --confirmed; launcher: stage, launcher {id, digest}, only from
+                           the local page or the owner's portal, never here).
+  workflows blocks remove ID             Refused while a workflow uses it.
+  workflows repositories --project NAME [--organization URL] [--source ID]
+                           The project's Git repositories (read credential, cached five minutes).
   notes list [--context ID] [--limit N]  Verified notes, newest first.
   notes search TEXT [--context ID]       Notes by relevance.
   notes add | notes edit ID              JSON on stdin: title, text, contexts, keywords, origin, reference.
@@ -524,6 +541,8 @@ fn words(args: &[String]) -> Vec<&str> {
                 | "--wiki"
                 | "--author"
                 | "--path"
+                | "--project"
+                | "--organization"
         ) {
             skip = true;
         } else if !arg.starts_with("--") {
@@ -733,6 +752,66 @@ async fn account_command(args: &[String]) -> Result<Reply> {
         }
         _ => anyhow::bail!("missing argument; consult --help"),
     }
+}
+
+/// Workflows and their blocks: the same host operations as the MCP workflow tools.
+async fn workflows_command(args: &[String]) -> Result<Reply> {
+    let words = words(args);
+    let id =
+        |n: usize| -> Result<&str> { words.get(n).copied().context("missing ID; consult --help") };
+    let confirmed = args.iter().any(|a| a == "--confirmed");
+    let (method, body) = match (words.get(1).copied(), words.get(2).copied()) {
+        (Some("list"), _) => ("workflows_list", json!({})),
+        (Some("show"), _) => ("workflow_show", json!({"id":id(2)?})),
+        (Some("save"), _) => ("workflow_save", json!({"workflow":input()?})),
+        (Some(action @ ("enable" | "disable")), _) => (
+            "workflow_save",
+            json!({"id":id(2)?,"enabled":action == "enable"}),
+        ),
+        (Some("remove"), _) => {
+            let id = id(2)?;
+            if let Some(reply) = unconfirmed(
+                args,
+                format!("Remove workflow {id}? Its definition cannot be recovered."),
+            ) {
+                return Ok(reply);
+            }
+            ("workflow_remove", json!({"id":id,"confirmed":true}))
+        }
+        (Some("blocks"), Some("list")) => ("workflow_blocks_list", json!({})),
+        (Some("blocks"), Some("save")) => {
+            let block = input()?;
+            // A block that acts is confirmed with the chat and the text it posts.
+            if block["kind"] == "teams_notification"
+                && let Some(reply) = unconfirmed(
+                    args,
+                    super::tools::confirmation("workflow_block_save", &json!({"block":block}))
+                        .unwrap_or_default(),
+                )
+            {
+                return Ok(reply);
+            }
+            let mut body = json!({"block":block});
+            if confirmed {
+                body["confirmed"] = json!(true);
+            }
+            ("workflow_block_save", body)
+        }
+        (Some("blocks"), Some("remove")) => ("workflow_block_remove", json!({"id":id(3)?})),
+        (Some("repositories"), _) => {
+            let mut body =
+                json!({"project":option(args, "--project").context("--project is required")?});
+            if let Some(organization) = option(args, "--organization") {
+                body["organization"] = json!(organization);
+            }
+            if let Some(source) = option(args, "--source") {
+                body["source"] = json!(source);
+            }
+            ("workflow_repositories", body)
+        }
+        _ => anyhow::bail!("unknown command or invalid argument count"),
+    };
+    call(method, body, None, true).await
 }
 
 /// The installation's link to the account store Worker.
@@ -1439,7 +1518,8 @@ fn validate_args(args: &[String]) -> Result<()> {
             | "--forget-service-token" => {}
             "--destination" | "--name" | "--existing" | "--to" | "--target" | "--label"
             | "--token-expires" | "--keep" | "--machine" | "--since" | "--until" | "--before"
-            | "--from" | "--chat" | "--query" | "--wiki" | "--author" => {
+            | "--from" | "--chat" | "--query" | "--wiki" | "--author" | "--project"
+            | "--organization" => {
                 i += 1;
                 ensure!(
                     args.get(i)
@@ -1723,6 +1803,10 @@ fn validate_args(args: &[String]) -> Result<()> {
             | ["cases", "show" | "edit" | "reset", _]
             | ["contexts", "list" | "add"]
             | ["contexts", "show" | "edit" | "remove", _]
+            | ["workflows", "list" | "save" | "repositories"]
+            | ["workflows", "show" | "remove" | "enable" | "disable", _]
+            | ["workflows", "blocks", "list" | "save"]
+            | ["workflows", "blocks", "remove", _]
             | ["notes", "list" | "add"]
             | ["notes", "search" | "edit" | "remove", _]
             | ["knowledge", "search", _]
@@ -1801,6 +1885,8 @@ fn validate_args(args: &[String]) -> Result<()> {
         (
             "--confirmed",
             p.as_slice() == ["cloud", "connect"]
+                || p.as_slice().starts_with(&["workflows", "remove"])
+                || p.as_slice() == ["workflows", "blocks", "save"]
                 || p.as_slice() == ["cloud", "migrate"]
                 || p.as_slice() == ["cloud", "rollback"]
                 || p.as_slice() == ["cloud", "erase"]
@@ -1956,10 +2042,16 @@ fn validate_args(args: &[String]) -> Result<()> {
         (
             "--source",
             p.as_slice().starts_with(&["answer", "refine"])
-                || p.as_slice().starts_with(&["knowledge", "search"]),
+                || p.as_slice().starts_with(&["knowledge", "search"])
+                || p.as_slice() == ["workflows", "repositories"],
         ),
         ("--context", ["notes", "knowledge"].contains(&p[0])),
         ("--expect", p.as_slice() == ["setup", "status"]),
+        ("--project", p.as_slice() == ["workflows", "repositories"]),
+        (
+            "--organization",
+            p.as_slice() == ["workflows", "repositories"],
+        ),
     ] {
         ensure!(
             !args.iter().any(|a| a == flag) || allowed,
@@ -2033,6 +2125,9 @@ async fn execute(mut args: Vec<String>) -> Result<Reply> {
     if command == "cloud" {
         return cloud_command(&args).await;
     }
+    if command == "workflows" {
+        return workflows_command(&args).await;
+    }
     if command == "setup" {
         return call(
             "setup_readiness",
@@ -2081,7 +2176,7 @@ async fn execute(mut args: Vec<String>) -> Result<Reply> {
         }
         "capabilities" => {
             return Ok(Reply::success(
-                json!({"contract":control::CONTRACT,"commands":HELP,"skill_version":env!("CARGO_PKG_VERSION"),"activity_registration_support":true,"web_support":true,"web_access_support":true,"knowledge_index_support":true,"mcp_support":true,"tools_support":true,"todo_support":true,"implementation_support":true,"machine_pairing_support":true,"machine_login_support":true,"machine_management_support":true,"account_variables_support":true,"account_portable_support":true,"account_authority_support":true,"shared_accounts_support":true,"cloud_store_support":true,"cloud_mirror_support":true,"cloud_disconnect_support":true,"cloud_primary_support":true,"cloud_migration_support":true,"cloud_installations_support":true,"cloud_handoff_support":true,"cloud_delivery_support":true,"cloud_restore_support":true,"cloud_conflicts_support":true,"cloud_lost_support":true,"cloud_repair_support":true,"teams_read_support":true,"audit_pages_support":true,"service_support":true}),
+                json!({"contract":control::CONTRACT,"commands":HELP,"skill_version":env!("CARGO_PKG_VERSION"),"activity_registration_support":true,"web_support":true,"web_access_support":true,"knowledge_index_support":true,"mcp_support":true,"tools_support":true,"todo_support":true,"implementation_support":true,"workflows_support":true,"machine_pairing_support":true,"machine_login_support":true,"machine_management_support":true,"account_variables_support":true,"account_portable_support":true,"account_authority_support":true,"shared_accounts_support":true,"cloud_store_support":true,"cloud_mirror_support":true,"cloud_disconnect_support":true,"cloud_primary_support":true,"cloud_migration_support":true,"cloud_installations_support":true,"cloud_handoff_support":true,"cloud_delivery_support":true,"cloud_restore_support":true,"cloud_conflicts_support":true,"cloud_lost_support":true,"cloud_repair_support":true,"teams_read_support":true,"audit_pages_support":true,"service_support":true}),
             ));
         }
         "skill" => return crate::app::skill::command(action, args.get(2).map(String::as_str)),
@@ -3413,6 +3508,23 @@ mod wiki_tests {
         assert!(check(&["update", "unattended", "maybe"]).is_err());
         assert!(check(&["update", "unattended"]).is_err());
     }
+    #[test]
+    fn workflow_commands_take_only_their_own_flags() {
+        let check =
+            |args: &[&str]| validate_args(&args.iter().map(|a| a.to_string()).collect::<Vec<_>>());
+        for args in [
+            &["workflows", "save", "--confirmed"][..],
+            &["workflows", "enable", "payments", "--confirmed"],
+            &["workflows", "blocks", "remove", "base", "--confirmed"],
+            &["workflows", "list", "--project", "Payments"],
+            &["workflows", "repositories", "--project"],
+            &["workflows", "show"],
+            &["workflows", "blocks"],
+            &["workflows", "run", "payments"],
+        ] {
+            assert!(check(args).is_err(), "{args:?}");
+        }
+    }
 }
 #[cfg(test)]
 mod help_tests {
@@ -3550,6 +3662,26 @@ mod help_tests {
             &["organization", "sources", "remove", "handbook"],
             &["prompts", "list"],
             &["prompts", "reset", "code"],
+            &["workflows", "list"],
+            &["workflows", "show", "payments"],
+            &["workflows", "save"],
+            &["workflows", "enable", "payments"],
+            &["workflows", "disable", "payments"],
+            &["workflows", "remove", "payments", "--confirmed"],
+            &["workflows", "blocks", "list"],
+            &["workflows", "blocks", "save", "--confirmed"],
+            &["workflows", "blocks", "remove", "base"],
+            &["workflows", "repositories", "--project", "My Project"],
+            &[
+                "workflows",
+                "repositories",
+                "--project",
+                "Payments",
+                "--organization",
+                "https://dev.azure.com/example",
+                "--source",
+                "azure",
+            ],
             &["questions", "list"],
             &["questions", "add"],
             &["questions", "associate", "resource"],

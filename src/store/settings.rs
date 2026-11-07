@@ -71,6 +71,8 @@ impl LocalSettings {
                     agent_prompts: Vec::new(),
                     work_item_guides: Vec::new(),
                     organization: Default::default(),
+                    workflows: Vec::new(),
+                    workflow_blocks: Vec::new(),
                 })?,
             )?;
         }

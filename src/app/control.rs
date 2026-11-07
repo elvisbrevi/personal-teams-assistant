@@ -87,6 +87,9 @@ struct Endpoint {
     account_portable_support: bool,
     #[serde(default)]
     implementation_support: bool,
+    /// The workflow operations (`workflows::METHODS`).
+    #[serde(default)]
+    workflows_support: bool,
     #[serde(default)]
     wiki_support: bool,
     #[serde(default)]
@@ -506,6 +509,10 @@ async fn client_with_transport(
             "Incompatible implementation host: update the host and CLI together."
         );
         ensure!(
+            endpoint.workflows_support || !workflows::handles(&request.method),
+            "Incompatible workflows host: update the host and CLI together before managing workflows."
+        );
+        ensure!(
             endpoint.cloud_store_support || !cloud::handles(&request.method),
             "Incompatible account store host: update the host and CLI together before connecting to the account store."
         );
@@ -676,6 +683,7 @@ pub(crate) fn launch(
             web_support: true,
             web_access_support: true,
             implementation_support: true,
+            workflows_support: true,
             machine_pairing_support: true,
             machine_login_support: true,
             machine_management_support: true,
@@ -850,6 +858,10 @@ async fn dispatch_inner(host: &Arc<Host>, request: Request) -> Reply {
     if service::handles(&request.method) {
         // The operating system's service manager; no profile edit.
         return service::operate(host, &request).await;
+    }
+    if workflows::handles(&request.method) {
+        // Reads the catalog and the machine first; takes the operations lock only to save.
+        return workflows::operate(host, &request).await;
     }
     if maintenance::handles(&request.method) {
         // Independent of profile edits: a build can take many minutes.
@@ -1555,6 +1567,7 @@ mod tests {
                 web_support: true,
                 web_access_support: true,
                 implementation_support: true,
+                workflows_support: true,
                 machine_pairing_support: true,
                 machine_login_support: true,
                 machine_management_support: true,
@@ -1599,6 +1612,7 @@ mod tests {
                 web_support: true,
                 web_access_support: true,
                 implementation_support: true,
+                workflows_support: true,
                 machine_pairing_support: true,
                 machine_login_support: true,
                 machine_management_support: true,
@@ -1658,6 +1672,7 @@ mod tests {
                     web_support: true,
                     web_access_support: true,
                     implementation_support: true,
+                    workflows_support: true,
                     machine_pairing_support: true,
                     machine_login_support: true,
                     machine_management_support: true,

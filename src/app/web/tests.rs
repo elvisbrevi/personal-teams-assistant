@@ -3416,3 +3416,74 @@ async fn the_join_command_is_built_by_the_portal_from_its_own_origin_for_a_signe
     // The account's host is not asked: the origin is the portal's, never a host's setting.
     assert!(alice.received_requests().await.unwrap().is_empty());
 }
+
+#[tokio::test]
+async fn only_the_owners_portal_session_saves_a_launcher_block() {
+    let (_dir, portal, entries, _issuer) = configured_fixture().await;
+    let hosts: Vec<_> = entries
+        .iter()
+        .map(|account| {
+            let profile = profile_dir(&portal.root, account);
+            Arc::new(Host {
+                state: init_state(&profile, &profile.join("data")).unwrap(),
+                shell: Box::new(NativeShell),
+            })
+        })
+        .collect();
+    let digest = "4be0a713".repeat(8);
+    for host in &hosts {
+        crate::app::consumers::add_test_launcher(
+            &host.state,
+            crate::consumers::Launcher {
+                id: "release-desa".into(),
+                description: "Synthetic release".into(),
+                program: PathBuf::from("/usr/bin/true"),
+                digest: digest.clone(),
+                args: Vec::new(),
+                directory: PathBuf::from("/tmp"),
+                env: BTreeMap::new(),
+                timeout_seconds: 60,
+                created_at: 0,
+                approved_at: Some(1),
+            },
+        );
+    }
+    let block = json!({"block":{"id":"desa","name":"Release in desa","kind":"launcher",
+        "stage":"pull_requests_completed","launcher":{"id":"release-desa","digest":digest}}});
+    async fn save(
+        host: &Arc<Host>,
+        transport: authority::Transport,
+        args: &Value,
+    ) -> control::Reply {
+        let mut request = control::Request::new("workflow_block_save");
+        request.args = args.clone();
+        authority::within(
+            authority::Invocation {
+                scope: host.state.authority.clone(),
+                transport,
+            },
+            control::dispatch(host, request),
+        )
+        .await
+    }
+    let (alice, bob) = (&hosts[0], &hosts[1]);
+    assert!(alice.state.authority.owner && bob.state.authority.shared);
+    assert!(!bob.state.authority.owner);
+    // A shared portal account is refused even in its own portal session.
+    let refused = save(bob, authority::Transport::Browser, &block).await;
+    assert_eq!(refused.code, "state_conflict", "{:?}", refused.message);
+    // The owner's remote agent and the owner's local channel are refused too.
+    for transport in [authority::Transport::Agent, authority::Transport::Local] {
+        let refused = save(alice, transport, &block).await;
+        assert!(!refused.ok, "{transport:?}");
+    }
+    let saved = save(alice, authority::Transport::Browser, &block).await;
+    assert!(saved.ok, "{:?}", saved.message);
+    assert!(
+        LocalSettings::at(&profile_dir(&portal.root, &entries[1]))
+            .map()
+            .unwrap()
+            .workflow_blocks
+            .is_empty()
+    );
+}
