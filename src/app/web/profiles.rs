@@ -495,6 +495,8 @@ pub(super) const PORTAL_METHODS: &[&str] = &[
     "workflow_settings",
     "workflow_settings_update",
     "workflow_classify",
+    // Read-only: the account's own chats, for choosing a workflow notification's chat.
+    "teams_chats",
     "list_azure_hus",
     "list_azure_tasks",
     "list_github_epics",

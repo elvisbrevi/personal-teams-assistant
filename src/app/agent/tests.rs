@@ -128,3 +128,23 @@ fn the_endpoint_offers_reading_and_the_accounts_own_work() {
         assert_eq!(tool(name), Remote::Offered, "{name}");
     }
 }
+
+#[test]
+fn the_chat_directory_is_offered_but_never_the_messages_or_a_post() {
+    assert_eq!(tool("teams_chats"), Remote::Offered);
+    assert!(check_method("teams_chats").is_ok());
+    for name in [
+        "teams_messages",
+        "teams_search",
+        "teams_post",
+        "account_records",
+    ] {
+        assert!(
+            matches!(tool(name), Remote::Denied(_)),
+            "{name} must be denied"
+        );
+    }
+    for method in ["teams_messages", "teams_search", "teams_post"] {
+        assert!(check_method(method).is_err(), "{method} must be refused");
+    }
+}

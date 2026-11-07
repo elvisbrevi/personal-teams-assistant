@@ -153,7 +153,38 @@ function renderEmbeddings() {
 /** @param {any} value */
 function setLlmCatalog(value) { llmCatalog = value; }
 
+/**
+ * Fills the CLI, model and effort selects of a coding agent from a machine's catalog
+ * (`implementation_catalog` providers), keeping `chosen` where the catalog lists it. A choice the
+ * catalog does not list (an offline machine) stays as the only option: the host checks it again.
+ * `changed(agent, byUser)` hears every value the selects settle on.
+ */
+function fillAgentChoices({ provider, model, effort }, providers, chosen, changed) {
+  const list = providers.length ? providers
+    : chosen.provider ? [{ id: chosen.provider, models: [{ id: chosen.model, name: chosen.model, efforts: [chosen.effort] }] }] : [];
+  provider.replaceChildren(...list.map(p => el('option', { value: p.id, textContent: providerNames[p.id] || p.id })));
+  if (!list.length) provider.append(el('option', { value: '', textContent: t('No coding CLI installed on this machine') }));
+  provider.value = list.some(p => p.id === chosen.provider) ? chosen.provider : list[0]?.id ?? '';
+  const agent = () => ({ provider: provider.value, model: model.value, effort: effort.value });
+  const efforts = () => {
+    const info = list.find(p => p.id === provider.value)?.models?.find(m => m.id === model.value);
+    effort.replaceChildren(...(info?.efforts ?? []).map(value => el('option', { value, textContent: effortNames[value] || value })));
+    effort.value = info?.efforts?.includes(chosen.effort) ? chosen.effort : info?.default_effort ?? info?.efforts?.[0] ?? '';
+  };
+  const models = () => {
+    const info = list.find(p => p.id === provider.value);
+    model.replaceChildren(...(info?.models ?? []).map(m => el('option', { value: m.id, textContent: m.name || m.id })));
+    model.value = info?.models?.some(m => m.id === chosen.model) ? chosen.model : info?.models?.[0]?.id ?? '';
+    efforts();
+  };
+  provider.onchange = () => { models(); changed(agent(), true); };
+  model.onchange = () => { efforts(); changed(agent(), true); };
+  effort.onchange = () => changed(agent(), true);
+  models();
+  changed(agent(), false);
+}
+
 export {
   effortNames, llmCatalog, llmRows, renderChain, loadChain, loadSelfChat, collectEmbeddings, renderEmbeddings,
-  setLlmCatalog,
+  setLlmCatalog, fillAgentChoices,
 };

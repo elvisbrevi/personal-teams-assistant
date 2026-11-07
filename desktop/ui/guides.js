@@ -2,7 +2,7 @@
 import { t, tn } from './i18n.js';
 import { $, badge, el, lines, names } from './dom.js';
 import { current } from './state.js';
-import { markDirty } from './nav.js';
+import { markDirty, showTab } from './nav.js';
 import { renderOrganization } from './knowledge-map.js';
 
 // ---------------------------------------------------------------- work item guides and agent instructions
@@ -136,10 +136,20 @@ function renderAgentPrompts() {
     const edit = el('details', { class: 'fold resource-edit', open: openPrompts.has(built.id) }, el('summary', { textContent: t('Edit the instructions') }),
       el('label', {}, t('Instructions'), text), el('div', { class: 'actions' }, reset));
     edit.ontoggle = () => { if (edit.open) openPrompts.add(built.id); else openPrompts.delete(built.id); };
-    container.append(el('div', { class: 'resource' },
+    container.append(el('div', { class: 'resource', 'data-prompt': built.id },
       el('div', { class: 'resource-head' }, el('strong', { class: 'title', textContent: t(built.name) }), el('span', { class: 'grow' }), state),
       el('p', { class: 'resource-facts' }, el('span', { textContent: t(built.summary) })), edit));
   }
 }
 
-export { openGuides, renderGuides, renderAgentPrompts };
+/** Opens Guides and instructions at one agent prompt, its editor open (Settings › Workflows' director). */
+function showAgentPrompt(id) {
+  openPrompts.add(id);
+  renderAgentPrompts();
+  showTab('agent-guides');
+  const prompt = document.querySelector(`#agent-prompts [data-prompt="${id}"]`);
+  prompt?.scrollIntoView({ block: 'start' });
+  prompt?.querySelector('textarea')?.focus({ preventScroll: true });
+}
+
+export { openGuides, renderGuides, renderAgentPrompts, showAgentPrompt };

@@ -74,6 +74,7 @@
     { id: 'plan', name: 'Plan children', summary: 'Implement on an HU, a bug or a GitHub epic: the agent proposes child tasks for you to review before creating them.', instructions: 'Plan small child tasks for the parent.' },
     { id: 'code', name: 'Implement', summary: 'Implement on a task, a development bug or a GitHub issue: the agent changes the code in the selected directories.', instructions: 'Implement the work item.' },
     { id: 'request', name: 'Write a request', summary: 'Create request in To-Do: the agent writes the new HU, bug or GitHub epic from your context.', instructions: 'Write one request of the selected type.' },
+    { id: 'direct', name: 'Choose a workflow', summary: 'Workflows: the workflow director reads a work item and the enabled workflows of its project and chooses the one that fits, or none.', instructions: 'Choose the workflow whose description fits the item.' },
   ];
   // The built-in cases the host sends, with short synthetic default texts.
   snapshot.cases = [
@@ -250,6 +251,130 @@
   };
   const staleVariable = (variable, expected, verb) => {
     if (variable.version !== expected) throw new Error(`${variable.name} changed since it was loaded (it is now version ${variable.version}). Inspect it before ${verb}.`);
+  };
+  // Workflows (src/app/workflows.rs): synthetic definitions, blocks, repositories, chats and
+  // settings. A checkout under /work/documentation is refused as another repository's; a
+  // checkout on the offline remote machine is saved with a warning.
+  const repo = n => `a1a1a1a1-0000-4000-8000-00000000000${n}`;
+  const workflowRepositories = {
+    Payments: [{ id: repo(1), name: 'payments-api', default_branch: 'refs/heads/main' }, { id: repo(2), name: 'payments-web', default_branch: 'refs/heads/develop' }, { id: repo(3), name: 'receipts-worker', default_branch: 'refs/heads/main' }],
+    Exports: [{ id: repo(4), name: 'exports-batch', default_branch: 'refs/heads/main' }],
+  };
+  let workflows = scenario === 'full' ? [
+    { id: 'payments-features', name: 'Payments features', description: 'HUs and bugs of the payments API and its web checkout.', enabled: true, auto_start: true, organization: org, project: 'Payments',
+      repositories: [{ id: repo(1), name: 'payments-api' }, { id: repo(2), name: 'payments-web' }], machine: '11111111-1111-4111-8111-111111111111',
+      checkouts: { [repo(1)]: '/work/application', [repo(2)]: '/work/application/web' }, agent: { provider: 'claude', model: 'claude-opus-5-5', effort: 'high' },
+      instructions: 'Run the unit tests before every commit.', blocks: ['base-branch', 'notify-release'], updated_at: secs(NOW - 3_600_000) },
+    { id: 'exports-nightly', name: 'Exports batch', description: 'Bugs of the nightly export batch.', enabled: false, auto_start: true, organization: org, project: 'Exports',
+      repositories: [{ id: repo(4), name: 'exports-batch' }], machine: '22222222-2222-4222-8222-222222222222',
+      checkouts: { [repo(4)]: '/Users/ana/src/exports-batch' }, agent: { provider: 'codex', model: 'gpt-6.1-sol', effort: 'medium' }, instructions: '', blocks: [], updated_at: secs(NOW - 86_400_000) },
+  ] : [];
+  let workflowBlocks = scenario === 'full' ? [
+    { id: 'base-branch', name: 'Base branch feature/222', kind: 'instruction', text: 'Start every branch from feature/222 and open the pull request against it.', updated_at: secs(NOW - 7_200_000) },
+    { id: 'notify-release', name: 'Notify Victoria when the release is ready', kind: 'teams_notification', stage: 'done', chat: { id: '19:abc@thread.v2', name: 'Payments team' },
+      mentions: ['Victoria Gómez'], template: 'The release of {item} is ready: {pull_requests}', updated_at: secs(NOW - 7_200_000) },
+    { id: 'release-desa', name: 'Release in desa', kind: 'launcher', stage: 'pull_requests_completed', launcher: { id: 'release-tool', digest: 'd'.repeat(64) }, updated_at: secs(NOW - 7_200_000) },
+  ] : [];
+  const teamsChats = [
+    { id: '19:abc@thread.v2', type: 'group', topic: 'Payments team', members: ['Victoria Gómez', 'Luis Soto', 'Ana Pérez'], last_updated: '2026-10-14T15:00:00Z', readable: true },
+    { id: '19:def@thread.v2', type: 'oneOnOne', topic: 'Ana Pérez', members: ['Ana Pérez'], last_updated: '2026-10-14T14:00:00Z', readable: true },
+    { id: '19:rel@thread.v2', type: 'group', topic: 'Releases', members: ['Victoria Gómez', 'Marta Ruiz'], last_updated: '2026-10-13T10:00:00Z', readable: false },
+  ];
+  // A chat without a topic is named by its members (Graph::chat_directory): longer than a block's chat name may be.
+  const crowd = Array.from({ length: 24 }, (_, i) => `Synthetic member ${String(i + 1).padStart(2, '0')}`);
+  teamsChats.push({ id: '19:crowd@thread.v2', type: 'group', topic: crowd.join(', '), members: crowd, last_updated: '2026-10-12T10:00:00Z', readable: false });
+  let workflowSettings = { ready_states: scenario === 'full' ? [{ organization: org, project: 'Payments', states: ['Ready for development'] }] : [],
+    watch_interval_minutes: 5, concurrency: 2, pull_request_wait_days: 7, director: { machine: '11111111-1111-4111-8111-111111111111', provider: 'claude', model: 'claude-sonnet-5-5', effort: 'medium' } };
+  const processStates = { Payments: ['New', 'Ready for development', 'Developing', 'Awaiting validation', 'Finished'], Exports: ['New', 'Approved', 'Committed', 'Done'] };
+  const usedBy = () => Object.fromEntries(workflowBlocks.map(b => [b.id, workflows.filter(w => w.blocks.includes(b.id)).map(w => w.id)]));
+  const syncWorkflows = () => { snapshot.map.workflows = structuredClone(workflows); snapshot.map.workflow_blocks = structuredClone(workflowBlocks); };
+  syncWorkflows();
+  window.__ptaWorkflowCalls = [];
+  const workflowHandlers = {
+    workflows_list: () => ({ workflows: structuredClone(workflows), editable: !window.__ptaWorkflowsElsewhere }),
+    workflow_show: args => ({ workflow: structuredClone(workflows.find(w => w.id === args.id)), blocks: [], editable: true }),
+    workflow_blocks_list: () => ({ blocks: structuredClone(workflowBlocks), used_by: usedBy(), editable: !window.__ptaWorkflowsElsewhere }),
+    workflow_repositories: args => {
+      if (!workflowRepositories[args.project]) throw new Error(`invalid project: ${args.project} is not in the configured organizations of the enabled Azure source.`);
+      return { organization: org, project: args.project, repositories: workflowRepositories[args.project].map(r => ({ ...r, remote_url: `${org}/${args.project}/_git/${r.name}`, ssh_url: '', web_url: '' })) };
+    },
+    workflow_save: args => {
+      window.__ptaWorkflowCalls.push({ method: 'workflow_save', ...structuredClone(args) });
+      if (args.id) {
+        const workflow = workflows.find(w => w.id === args.id);
+        workflow.enabled = args.enabled; syncWorkflows();
+        return { workflow: structuredClone(workflow), saved: true, warnings: [] };
+      }
+      const workflow = structuredClone(args.workflow);
+      for (const [id, dir] of Object.entries(workflow.checkouts)) {
+        const name = workflow.repositories.find(r => r.id.toLowerCase() === id)?.name;
+        if (dir.includes('documentation')) throw new Error(`The origin of ${dir} (${org}/${workflow.project}/_git/handbook) names another repository than ${name}.`);
+      }
+      const warnings = workflow.machine === '22222222-2222-4222-8222-222222222222'
+        ? Object.entries(workflow.checkouts).map(([id, dir]) => `${dir} could not be verified as a checkout of ${workflow.repositories.find(r => r.id.toLowerCase() === id)?.name} (the machine is offline); the machine checks it again before a run.`)
+        : [];
+      workflow.updated_at = secs(Date.now());
+      const at = workflows.findIndex(w => w.id === workflow.id);
+      if (at >= 0) workflows[at] = workflow; else workflows.push(workflow);
+      syncWorkflows();
+      return { workflow, saved: true, warnings };
+    },
+    workflow_remove: args => {
+      window.__ptaWorkflowCalls.push({ method: 'workflow_remove', ...args });
+      if (!args.confirmed) throw new Error(`Confirm removing workflow ${args.id}: its definition cannot be recovered.`);
+      workflows = workflows.filter(w => w.id !== args.id); syncWorkflows();
+      return { removed: args.id };
+    },
+    workflow_block_save: args => {
+      window.__ptaWorkflowCalls.push({ method: 'workflow_block_save', ...structuredClone(args) });
+      const block = structuredClone(args.block);
+      if (block.kind !== 'instruction' && !args.confirmed) throw new Error('Confirm this block with the user, then save it with confirmed: true.');
+      if (block.chat && [...block.chat.name].length > 200) throw new Error(`Teams notification block ${block.id} needs a chat ID as pta teams chats lists it and the chat's name (at most 200 characters).`);
+      if (block.kind === 'launcher') {
+        const launcher = launchers.find(l => l.id === block.launcher.id);
+        if (!launcher?.approved) throw new Error(`Launcher ${block.launcher.id} is not approved yet; approve it first.`);
+      }
+      block.updated_at = secs(Date.now());
+      const at = workflowBlocks.findIndex(b => b.id === block.id);
+      if (at >= 0) workflowBlocks[at] = block; else workflowBlocks.push(block);
+      syncWorkflows();
+      return { block, saved: true, warnings: [], ...(block.kind === 'teams_notification' ? { chat: block.chat, mentions: block.mentions, template: block.template } : {}) };
+    },
+    workflow_block_remove: args => {
+      window.__ptaWorkflowCalls.push({ method: 'workflow_block_remove', ...args });
+      const users = usedBy()[args.id] ?? [];
+      if (users.length) throw new Error(`Block ${args.id} is used by workflow ${users.join(', ')}; take it out of them first.`);
+      workflowBlocks = workflowBlocks.filter(b => b.id !== args.id); syncWorkflows();
+      return { removed: args.id };
+    },
+    teams_chats: () => {
+      if (window.__ptaTeamsChatsError) throw new Error('Connect the Microsoft account first.');
+      return { chats: structuredClone(teamsChats), total: teamsChats.length, offset: 0, next_offset: null };
+    },
+    // As src/app/workflows/director.rs answers: every value, the defaults and bounds; with a
+    // project, its process's states.
+    workflow_settings: args => {
+      window.__ptaWorkflowCalls.push({ method: 'workflow_settings', ...structuredClone(args) });
+      const reply = { settings: structuredClone(workflowSettings), editable: true,
+        defaults: { watch_interval_minutes: 5, concurrency: 2, pull_request_wait_days: 7, director: null, ready_states: [] },
+        bounds: { watch_interval_minutes: [1, 60], concurrency: [1, 4], pull_request_wait_days: [1, 60], ready_states_per_project: 20, projects_with_ready_states: 50 } };
+      if (args.project) {
+        if (!processStates[args.project]) throw new Error(`invalid project: ${args.project} is not in the configured organizations of the enabled Azure source.`);
+        reply.process_states = { organization: org, project: args.project, states: processStates[args.project] };
+      }
+      return reply;
+    },
+    // Only the fields given change; each project's ready states replace that project's.
+    workflow_settings_update: args => {
+      window.__ptaWorkflowCalls.push({ method: 'workflow_settings_update', ...structuredClone(args) });
+      for (const field of ['watch_interval_minutes', 'concurrency', 'pull_request_wait_days']) if (field in args) workflowSettings[field] = args[field];
+      if ('director' in args) workflowSettings.director = args.director;
+      for (const change of args.ready_states ?? []) {
+        workflowSettings.ready_states = workflowSettings.ready_states.filter(r => r.project !== change.project);
+        if (change.states.length) workflowSettings.ready_states.push({ organization: org, project: change.project, states: change.states });
+      }
+      return { settings: structuredClone(workflowSettings), saved: true, warnings: [] };
+    },
   };
   const handlers = {
     github_cli_status: () => githubCli(),
@@ -715,7 +840,7 @@
       if (index >= 0) pendingVariables.splice(index, 1);
       return { request: args.request, state: 'cancelled' };
     },
-    variable_consumer_list: () => ({ standing: window.__ptaStanding ? structuredClone(window.__ptaStanding) : undefined, launchers_available: window.__ptaLaunchersHere !== false, launchers: structuredClone(launchers), consumers: [{ id: 'deepseek', title: 'DeepSeek API',
+    variable_consumer_list: () => ({ standing: window.__ptaStanding ? structuredClone(window.__ptaStanding) : undefined, launchers_available: window.__ptaLaunchersHere !== false, launchers: window.__ptaLaunchersHidden ? undefined : structuredClone(launchers), consumers: [{ id: 'deepseek', title: 'DeepSeek API',
       summary: 'The key the assistant uses to call the DeepSeek language-model API when DeepSeek is in the model chain.', destination: 'https://api.deepseek.com', slot: 'api_key', operations: ['check'], binding: bindingView() }] }),
     variable_consumer_bind: args => {
       window.__ptaConsumerCalls.push({ method: 'bind', ...args });
@@ -773,6 +898,7 @@
     set_credential: args => { snapshot.credentials[args.name] = 'system'; return {}; },
     delete_credential: args => { snapshot.credentials[args.name] = 'missing'; return {}; },
   };
+  Object.assign(handlers, workflowHandlers);
   window.__ptaSetMicrosoftSetup = (graph, error = null) => { Object.assign(snapshot.config.graph, graph); snapshot.teams_identity_error = error; };
   window.__ptaChangeProfile = change => change(snapshot);
   window.__ptaCalls = [];

@@ -101,7 +101,7 @@ function contrast(a, b) {
 const palettes = [...css.matchAll(/\[data-palette="([\w-]+)"\] \{/g)].map(m => m[1]);
 const styles = [...new Set([...css.matchAll(/\[data-style="([\w-]+)"\]/g)].map(m => m[1]))];
 const states = ['ok', 'warn', 'error', 'info', 'active'];
-const sections = ['overview', 'messages', 'registration', 'knowledge', 'chat', 'settings', 'todo'];
+const sections = ['overview', 'messages', 'registration', 'knowledge', 'chat', 'settings', 'todo', 'workflows'];
 /** [foreground, background, minimum]: what the components put on what. */
 const pairs = [
   ...['--bg', '--surface', '--surface-2', '--sunken'].map(surface => ['--text', surface, 4.5]),

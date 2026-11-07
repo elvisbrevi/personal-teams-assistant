@@ -331,11 +331,15 @@ host never relaunches an interrupted run or resubmits an uncertain child creatio
 Requires host and CLI `workflows_support: true`. A workflow is a saved recipe for implementing
 the items of one Azure DevOps project; a workflow block is a reusable part of it. This version
 holds the definitions, their settings and the workflow director's dry-run classification:
-nothing runs a workflow yet (the run engine, the watcher and the GUI's Workflows section come
-later), and the GUI has no workflow screens. Definitions and settings travel with the account
-but are saved only on its coordinator: on a computer signed in to one, every change answers
-`not_ready` and names the coordinator. Other settings editors (`config apply`, the GUI's
-settings) keep the stored workflows, blocks and workflow settings.
+nothing runs a workflow yet (the run engine and the watcher come later). People edit them in the
+GUI's **Workflows** section (sidebar, after Activities; under More on a phone): the Workflows
+view for definitions and the Blocks view for the library, with Settings › Workflows for the
+ready states, the watcher and the workflow director. A launcher block can only be saved there,
+at the coordinator's local page or the owner's portal session, so send the user there for one.
+Definitions and settings travel with the account but are saved only on its coordinator: on a
+computer signed in to one, every change answers `not_ready` and names the coordinator. Other
+settings editors (`config apply`, the GUI's settings) keep the stored workflows, blocks and
+workflow settings.
 
 1. Choose the repositories: `pta workflows repositories --project NAME [--organization URL]
    [--source ID]` (MCP `workflow_repositories`) lists the project's Git repositories (`id`,

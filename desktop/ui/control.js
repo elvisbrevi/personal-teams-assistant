@@ -38,13 +38,16 @@ import { browserMicrosoftLogin } from './dialogs.js';
  *   'notes_save' | 'open_azure_cli_login' | 'open_github_login' | 'open_work_item' |
  *   'portable_status' | 'question_associate' | 'restart' | 'save_settings' | 'self_chat_disable' |
  *   'self_chat_enable' | 'self_chat_status' | 'service_install' | 'service_status' | 'service_uninstall' | 'setup_readiness' | 'snapshot' | 'start_assistant' |
- *   'stop_assistant' | 'test_self_chat' | 'update_github_repository' | 'variable_consumer_bind' |
+ *   'stop_assistant' | 'teams_chats' | 'test_self_chat' | 'update_github_repository' | 'variable_consumer_bind' |
  *   'variable_consumer_check' | 'variable_consumer_list' | 'variable_consumer_unbind' |
  *   'variable_create' | 'variable_delete' | 'variable_deliver' | 'variable_delivery_approve' |
  *   'variable_delivery_list' | 'variable_delivery_remove' | 'variable_entry_cancel' |
  *   'variable_entry_complete' | 'variable_launcher_approve' | 'variable_launcher_remove' |
  *   'variable_launcher_run' | 'variable_list' | 'variable_migration_inspect' |
- *   'variable_migration_run' | 'variable_rename' | 'variable_reveal' | 'variable_update'
+ *   'variable_migration_run' | 'variable_rename' | 'variable_reveal' | 'variable_update' |
+ *   'workflow_block_remove' | 'workflow_block_save' | 'workflow_blocks_list' | 'workflow_remove' |
+ *   'workflow_repositories' | 'workflow_save' | 'workflow_settings' | 'workflow_settings_update' |
+ *   'workflow_show' | 'workflows_list'
  * )} Method
  */
 /**
@@ -82,7 +85,7 @@ const rawInvoke = transport.invoke;
 // Also the answer operations: they do not depend on the profile files, so they neither check
 // nor advance the form's revision.
 /** @type {Method[]} */
-const READS = ['snapshot', 'chat', 'github_repositories', 'self_chat_status', 'llm_providers', 'azure_cli_status', 'begin_azure_cli_login', 'open_azure_cli_login', 'finish_azure_cli_login', 'cancel_azure_cli_login', 'github_cli_status', 'audit', 'activity_status', 'activity_history', 'activity_pending', 'answer_refine', 'answer_send', 'list_azure_hus', 'list_github_epics', 'list_github_issues', 'get_azure_hu', 'get_azure_task', 'list_azure_tasks', 'get_github_epic', 'get_github_issue', 'open_work_item'];
+const READS = ['snapshot', 'chat', 'github_repositories', 'self_chat_status', 'llm_providers', 'azure_cli_status', 'begin_azure_cli_login', 'open_azure_cli_login', 'finish_azure_cli_login', 'cancel_azure_cli_login', 'github_cli_status', 'audit', 'activity_status', 'activity_history', 'activity_pending', 'answer_refine', 'answer_send', 'list_azure_hus', 'list_github_epics', 'list_github_issues', 'get_azure_hu', 'get_azure_task', 'list_azure_tasks', 'get_github_epic', 'get_github_issue', 'open_work_item', 'teams_chats'];
 // Revision of the profile files the last reply saw. The form's own revision (`current.revision`)
 // changes only when it reloads or writes, so saving a stale form fails instead of overwriting
 // changes made elsewhere (e.g. with `pta`).
@@ -103,7 +106,7 @@ async function invoke(method, args = {}) {
   }
   /** @type {Reply} */
   let result = await rawInvoke('command', { request: {
-    method, args, revision: READS.includes(method) || /^(implementation_|machine_|variable_|crate_update_|cloud_)/.test(method) ? null : current?.revision ?? null, contract: 1
+    method, args, revision: READS.includes(method) || /^(implementation_|machine_|variable_|crate_update_|cloud_|workflows?_)/.test(method) ? null : current?.revision ?? null, contract: 1
   }});
   if (transport.browser && result.code === 'authorization_pending' && method === 'connect_microsoft') {
     result = await browserMicrosoftLogin(result.data.authorization_url);
@@ -119,7 +122,7 @@ async function invoke(method, args = {}) {
     }
   }
   if (result.revision) lastRevision = result.revision;
-  if (result.revision && current && !READS.includes(method) && !/^(implementation_|machine_|variable_|crate_update_|cloud_)/.test(method)) current.revision = result.revision;
+  if (result.revision && current && !READS.includes(method) && !/^(implementation_|machine_|variable_|crate_update_|cloud_|workflows?_)/.test(method)) current.revision = result.revision;
   if (!result.ok) throw result.message || result.code;
   return result.data;
 }
