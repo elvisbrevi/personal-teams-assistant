@@ -564,6 +564,8 @@ button.ref small { font-weight: 400; color: var(--muted); text-decoration: none;
 .offer.compact .actions { margin: 0; }
 .savebar { position: fixed; z-index: 5; left: calc(248px + 2.2rem); right: 2.2rem; bottom: 1.2rem; max-width: 1136px; display: flex; align-items: center; justify-content: space-between; gap: .6rem 1rem; flex-wrap: wrap; padding: .6rem .65rem .6rem 1.3rem; border: var(--bw) solid var(--line); border-radius: var(--radius-button); background: var(--inverse); color: var(--inverse-text); box-shadow: var(--shadow-float); font-family: var(--display); font-weight: var(--w-strong); animation: pop .16s ease-out; }
 .savebar .actions { margin: 0; }
+/* While the save bar floats, the page's end and anything scrolled into view stay above it. */
+:root:has(#savebar:not([hidden])) { scroll-padding-bottom: 6rem; }
 .savebar button { --lift: 0px; --rest: none; --raised: none; }
 .savebar button.secondary { background: transparent; color: var(--inverse-text); border-color: var(--inverse-text); }
 .savebar button:not(.secondary) { background: var(--primary); color: var(--on-primary); border-color: var(--primary); }
@@ -848,6 +850,8 @@ dialog p { overflow-wrap: anywhere; }
   .bubble { max-width: 95%; }
   .toast { top: calc(env(safe-area-inset-top) + .6rem); bottom: auto; left: .75rem; right: .75rem; max-width: none; }
   .savebar { left: .75rem; right: .75rem; bottom: calc(var(--tabbar) + .55rem); border-radius: min(var(--radius), 20px); padding: .6rem .6rem .6rem 1rem; }
+  :root:has(#savebar:not([hidden])) { scroll-padding-bottom: calc(var(--tabbar) + 5.5rem); }
+  body:has(#savebar:not([hidden])) main { padding-bottom: calc(var(--tabbar) + 6.5rem); }
   /* Activities read as a list, then one activity at a time. */
   #registration.editing .subnav, #registration.editing #activity-view-review > :not(#activity-editor) { display: none; }
   .step-title { gap: .65rem; }
