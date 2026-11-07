@@ -40,6 +40,19 @@ struct ReadyChange {
     #[serde(default)]
     states: Vec<String>,
 }
+/// The director's fields to change; a new director needs all four.
+#[derive(Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DirectorChange {
+    #[serde(default)]
+    machine: Option<String>,
+    #[serde(default)]
+    provider: Option<String>,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    effort: Option<String>,
+}
 #[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct UpdateArgs {
@@ -49,9 +62,9 @@ struct UpdateArgs {
     concurrency: Option<u32>,
     #[serde(default)]
     pull_request_wait_days: Option<u32>,
-    /// A director to set; `null` clears it (see `clear_director`).
+    /// The director's fields to change, merged with the stored director; `null` clears it.
     #[serde(default)]
-    director: Option<Director>,
+    director: Option<DirectorChange>,
     #[serde(default)]
     ready_states: Vec<ReadyChange>,
     /// The Azure source the ready states are read from, when several are enabled.
@@ -129,15 +142,23 @@ async fn show(host: &Arc<Host>, args: ShowArgs) -> Result<Value, String> {
     Ok(reply)
 }
 
-/// The update applied to settings, with each ready-state change as given (the organization is
-/// the catalog's once it has been read).
-fn apply(
-    settings: &mut Settings,
-    args: &UpdateArgs,
-    clear_director: bool,
-    ready: &[ReadyStates],
-    cleared: &[ReadyChange],
-) {
+/// What an update changes once it has been checked: the director (set or cleared), each
+/// project's new ready states as the catalog spells them, and the ready states it clears
+/// (organization name and project, lowercased).
+#[derive(Default)]
+struct Resolved {
+    director: Option<Option<Director>>,
+    ready: Vec<ReadyStates>,
+    cleared: Vec<(String, String)>,
+}
+
+fn same_ready(stored: &ReadyStates, organization: &str, project: &str) -> bool {
+    crate::workflows::organization_name(&stored.organization).as_deref() == Some(organization)
+        && stored.project.eq_ignore_ascii_case(project)
+}
+
+/// The update applied to settings.
+fn apply(settings: &mut Settings, args: &UpdateArgs, resolved: &Resolved) {
     if let Some(value) = args.watch_interval_minutes {
         settings.watch_interval_minutes = value;
     }
@@ -147,39 +168,125 @@ fn apply(
     if let Some(value) = args.pull_request_wait_days {
         settings.pull_request_wait_days = value;
     }
-    if clear_director {
-        settings.director = None;
-    } else if let Some(director) = &args.director {
-        settings.director = Some(director.clone());
+    if let Some(director) = &resolved.director {
+        settings.director = director.clone();
     }
-    let same = |stored: &ReadyStates, organization: Option<&str>, project: &str| {
-        stored.project.eq_ignore_ascii_case(project)
-            && organization.is_none_or(|o| {
-                crate::workflows::organization_name(o)
-                    == crate::workflows::organization_name(&stored.organization)
-            })
-    };
-    for change in cleared {
+    for (organization, project) in &resolved.cleared {
         settings
             .ready_states
-            .retain(|r| !same(r, change.organization.as_deref(), &change.project));
+            .retain(|r| !same_ready(r, organization, project));
     }
-    for entry in ready {
+    for entry in &resolved.ready {
+        let organization =
+            crate::workflows::organization_name(&entry.organization).unwrap_or_default();
         settings
             .ready_states
-            .retain(|r| !same(r, Some(&entry.organization), &entry.project));
+            .retain(|r| !same_ready(r, &organization, &entry.project));
         settings.ready_states.push(entry.clone());
     }
 }
 
+/// The director after a change: the fields given over the stored director; without one, every
+/// field is needed.
+fn merge_director(stored: Option<&Director>, change: &DirectorChange) -> Result<Director, String> {
+    let fields = [
+        ("machine", &change.machine),
+        ("provider", &change.provider),
+        ("model", &change.model),
+        ("effort", &change.effort),
+    ];
+    let Some(stored) = stored else {
+        let missing: Vec<&str> = fields
+            .iter()
+            .filter(|(_, value)| value.is_none())
+            .map(|(name, _)| *name)
+            .collect();
+        if !missing.is_empty() {
+            return Err(invalid(format!(
+                "There is no workflow director yet: give its machine, provider, model and effort (missing {}).",
+                missing.join(", ")
+            )));
+        }
+        return Ok(Director {
+            machine: change.machine.clone().unwrap_or_default(),
+            provider: change.provider.clone().unwrap_or_default(),
+            model: change.model.clone().unwrap_or_default(),
+            effort: change.effort.clone().unwrap_or_default(),
+        });
+    };
+    let pick = |value: &Option<String>, stored: &String| value.clone().unwrap_or(stored.clone());
+    Ok(Director {
+        machine: pick(&change.machine, &stored.machine),
+        provider: pick(&change.provider, &stored.provider),
+        model: pick(&change.model, &stored.model),
+        effort: pick(&change.effort, &stored.effort),
+    })
+}
+
+/// The stored ready states a clearing change names: by organization and project, or by project
+/// alone when only one organization has it. A project in several organizations needs its
+/// organization, as setting its states does.
+fn resolve_clear(
+    stored: &Settings,
+    change: &ReadyChange,
+) -> Result<Option<(String, String)>, String> {
+    let organization = change
+        .organization
+        .as_deref()
+        .map(|o| {
+            crate::workflows::organization_name(o)
+                .ok_or_else(|| invalid("Give the organization as https://dev.azure.com/NAME."))
+        })
+        .transpose()?;
+    let matching: Vec<&ReadyStates> = stored
+        .ready_states
+        .iter()
+        .filter(|r| {
+            r.project.eq_ignore_ascii_case(&change.project)
+                && organization.as_ref().is_none_or(|o| {
+                    crate::workflows::organization_name(&r.organization).as_ref() == Some(o)
+                })
+        })
+        .collect();
+    match matching.as_slice() {
+        [] => Ok(None),
+        [one] => Ok(Some((
+            crate::workflows::organization_name(&one.organization).unwrap_or_default(),
+            one.project.to_lowercase(),
+        ))),
+        _ => Err(invalid(format!(
+            "Project {} has ready states in several organizations; give its organization to clear them.",
+            change.project
+        ))),
+    }
+}
+
 /// Where the process states of a project come from: the enabled Azure source, or a test's
-/// fixed answers by lowercased project name.
+/// fixed answers by lowercased project name, each after a delay, under a bound.
 pub(super) enum Process {
     Azure,
     #[cfg(test)]
     Fixed(BTreeMap<String, Value>),
+    #[cfg(test)]
+    Delayed {
+        projects: BTreeMap<String, Value>,
+        delay: std::time::Duration,
+        bound: std::time::Duration,
+    },
 }
+/// How long reading the process states of every project in one update may take, all of them
+/// read at once. With the director's check after it (at most 40 seconds), an update answers
+/// within the control channel's 120-second client deadline and never commits after the client
+/// gave up.
+pub(super) const READY_READ_SECONDS: u64 = 60;
 impl Process {
+    fn bound(&self) -> std::time::Duration {
+        match self {
+            #[cfg(test)]
+            Self::Delayed { bound, .. } => *bound,
+            _ => std::time::Duration::from_secs(READY_READ_SECONDS),
+        }
+    }
     async fn states(
         &self,
         state: &DesktopState,
@@ -187,23 +294,31 @@ impl Process {
         organization: Option<&str>,
         project: &str,
     ) -> Result<Value, String> {
+        #[cfg(test)]
+        let fixed = |projects: &BTreeMap<String, Value>| {
+            projects.get(&project.to_lowercase()).cloned().ok_or_else(|| {
+                invalid(format!(
+                    "invalid project: {project} is not in the configured organizations of the Azure source"
+                ))
+            })
+        };
         match self {
             Self::Azure => tools::todo::process_states(state, source, organization, project).await,
             #[cfg(test)]
-            Self::Fixed(projects) => {
-                let _ = (state, source, organization);
-                projects.get(&project.to_lowercase()).cloned().ok_or_else(|| {
-                    invalid(format!(
-                        "invalid project: {project} is not in the configured organizations of the Azure source"
-                    ))
-                })
+            Self::Fixed(projects) => fixed(projects),
+            #[cfg(test)]
+            Self::Delayed {
+                projects, delay, ..
+            } => {
+                tokio::time::sleep(*delay).await;
+                fixed(projects)
             }
         }
     }
 }
 
-/// A stand-in organization for ready states whose organization is still to be read, so the
-/// update's shape is checked before anything is read.
+/// A stand-in organization for a ready-state change that names none, so its own shape is
+/// checked before anything is read; the count of projects is checked on the final list.
 const UNREAD: &str = "https://dev.azure.com/unread";
 
 /// `workflow_settings_update`, with the process states read from `process`.
@@ -227,40 +342,61 @@ pub(super) async fn update(
             "Give at least one setting to change: watch_interval_minutes, concurrency, pull_request_wait_days, director or ready_states.",
         ));
     }
-    let (cleared, wanted): (Vec<ReadyChange>, Vec<ReadyChange>) = args
+    let stored = state.settings.map().map_err(fail)?.workflow_settings;
+    let (clearing, wanted): (Vec<ReadyChange>, Vec<ReadyChange>) = args
         .ready_states
         .iter()
         .cloned()
         .partition(|c| c.states.is_empty());
-    // Everything the settings alone can refuse, before the process or a machine is read.
-    let provisional: Vec<ReadyStates> = wanted
-        .iter()
-        .map(|c| ReadyStates {
-            organization: c.organization.clone().unwrap_or_else(|| UNREAD.into()),
-            project: c.project.clone(),
-            states: c.states.clone(),
-        })
-        .collect();
-    let mut candidate = state.settings.map().map_err(fail)?.workflow_settings;
-    apply(
-        &mut candidate,
-        &args,
-        clear_director,
-        &provisional,
-        &cleared,
-    );
+    let mut resolved = Resolved {
+        director: if clear_director {
+            Some(None)
+        } else {
+            args.director
+                .as_ref()
+                .map(|change| merge_director(stored.director.as_ref(), change))
+                .transpose()?
+                .map(Some)
+        },
+        ..Default::default()
+    };
+    for change in &clearing {
+        resolved.cleared.extend(resolve_clear(&stored, change)?);
+    }
+    // Everything the settings alone can refuse, before the process or a machine is read: the
+    // scalars, the director and the clearings on the stored list, and each new entry's shape.
+    let mut candidate = stored.clone();
+    apply(&mut candidate, &args, &resolved);
     core::validate(&candidate).map_err(invalid)?;
-    // Every ready state must be one of the project's process states.
-    let mut ready = Vec::new();
     for change in &wanted {
-        let process = process
-            .states(
-                state,
-                args.source.as_deref(),
-                change.organization.as_deref(),
-                &change.project,
-            )
-            .await?;
+        core::validate(&Settings {
+            ready_states: vec![ReadyStates {
+                organization: change.organization.clone().unwrap_or_else(|| UNREAD.into()),
+                project: change.project.clone(),
+                states: change.states.clone(),
+            }],
+            ..Default::default()
+        })
+        .map_err(invalid)?;
+    }
+    // Every ready state must be one of its project's process states; the projects are read at
+    // once, under one bound, and nothing is saved when it passes.
+    let reads = futures_util::future::join_all(wanted.iter().map(|change| {
+        process.states(
+            state,
+            args.source.as_deref(),
+            change.organization.as_deref(),
+            &change.project,
+        )
+    }));
+    let read = tokio::time::timeout(process.bound(), reads)
+        .await
+        .map_err(|_| {
+            "[network] The projects' process states could not be read in time; nothing was saved."
+                .to_owned()
+        })?;
+    for (change, process) in wanted.iter().zip(read) {
+        let process = process?;
         let states: std::collections::BTreeSet<String> =
             serde_json::from_value(process["states"].clone()).map_err(fail)?;
         let unknown = core::unknown_states(&change.states, &states);
@@ -280,7 +416,7 @@ pub(super) async fn update(
                     .join(", ")
             )));
         }
-        ready.push(ReadyStates {
+        resolved.ready.push(ReadyStates {
             organization: process["organization"]
                 .as_str()
                 .unwrap_or_default()
@@ -293,18 +429,16 @@ pub(super) async fn update(
             states: change.states.clone(),
         });
     }
+    // The final list, with the projects the catalog resolved: re-setting a project replaces it.
+    let mut candidate = stored;
+    apply(&mut candidate, &args, &resolved);
+    core::validate(&candidate).map_err(invalid)?;
     let mut warnings = Vec::new();
-    if let Some(director) = &args.director {
+    if let Some(Some(director)) = &resolved.director {
         warnings.extend(verify_director(host, director).await?);
     }
     let saved = change(host, |map| {
-        apply(
-            &mut map.workflow_settings,
-            &args,
-            clear_director,
-            &ready,
-            &cleared,
-        );
+        apply(&mut map.workflow_settings, &args, &resolved);
         core::validate(&map.workflow_settings).map_err(invalid)?;
         Ok(map.workflow_settings.clone())
     })
@@ -356,24 +490,20 @@ async fn verify_director(host: &Arc<Host>, director: &Director) -> Result<Vec<St
     Ok(warnings)
 }
 
-/// How long the fresh item read may take before the director is asked.
-const ITEM_SECONDS: u64 = 25;
+/// How long the fresh item read may take before the director is asked: with the wait for the
+/// director (`implementation::director::WAIT_SECONDS`), a classification answers within the
+/// control channel's client deadline.
+pub(super) const ITEM_SECONDS: u64 = 20;
 const DESCRIPTION: usize = 8000;
 
-/// The item fresh, with the existing detail reads: an HU or bug, or else a task.
+/// The item fresh, in one detail read of any category (an HU, a bug or a task), with the
+/// category its type was found in.
 async fn read_item(
     state: &DesktopState,
     args: &ClassifyArgs,
 ) -> Result<crate::tools::todo::Detail, String> {
     let body = json!({"id":args.id,"project":args.project,"source":args.source});
-    let read = async {
-        match tools::todo::read(state, "get_azure_hu", &body).await {
-            Err(error) if error.contains("invalid work item type") => {
-                tools::todo::read(state, "get_azure_task", &body).await
-            }
-            other => other,
-        }
-    };
+    let read = tools::todo::read(state, "get_azure_item", &body);
     let value = tokio::time::timeout(std::time::Duration::from_secs(ITEM_SECONDS), read)
         .await
         .map_err(|_| "[network] The work item could not be read in time.".to_owned())??;

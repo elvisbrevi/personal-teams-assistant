@@ -441,7 +441,7 @@ async fn client_with_transport(
         request.method.as_str(),
         "chat" | "test_providers" | "variable_launcher_run"
     ) {
-        client = client.timeout(Duration::from_secs(120));
+        client = client.timeout(Duration::from_secs(CLIENT_DEADLINE_SECONDS));
     }
     let client = client.build()?;
     for attempt in 0..20 {
@@ -809,6 +809,9 @@ pub(super) fn failure(message: &str, invalid: bool) -> Reply {
     );
     Reply::error(code, exit, message.strip_prefix(&prefix).unwrap_or(message))
 }
+/// How long a client waits for an operation (other than a model chat, a provider test or a
+/// launcher run); operations that read and then commit stay under it.
+pub(super) const CLIENT_DEADLINE_SECONDS: u64 = 120;
 pub(crate) async fn dispatch(host: &Arc<Host>, request: Request) -> Reply {
     // Reject before diagnostics: a failed account check must not read or write a
     // newly rebound account's paths, even to record the rejection.

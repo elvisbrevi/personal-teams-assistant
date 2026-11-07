@@ -61,14 +61,6 @@ impl Settings {
     pub fn is_default(&self) -> bool {
         *self == Self::default()
     }
-    /// The ready states of a project, if it has any.
-    pub fn ready(&self, organization: &str, project: &str) -> Option<&ReadyStates> {
-        let organization = organization_name(organization)?;
-        self.ready_states.iter().find(|r| {
-            organization_name(&r.organization).as_deref() == Some(organization.as_str())
-                && r.project.eq_ignore_ascii_case(project)
-        })
-    }
 }
 
 /// The workflow states of one project that mean «ready to develop», chosen from the states its
@@ -231,14 +223,12 @@ pub enum Verdict {
     OtherProject,
 }
 impl Verdict {
-    pub fn word(self) -> &'static str {
-        match self {
-            Self::Chosen => "chosen",
-            Self::None => "none",
-            Self::Unrecognized => "unrecognized",
-            Self::Disabled => "disabled",
-            Self::OtherProject => "other_project",
-        }
+    /// Its word, as it is serialized (`other_project`, …).
+    pub fn word(self) -> String {
+        serde_json::to_value(self)
+            .ok()
+            .and_then(|v| v.as_str().map(str::to_owned))
+            .unwrap_or_default()
     }
 }
 
@@ -278,7 +268,7 @@ pub fn judge(
     let refused = |verdict: Verdict, said: Option<String>, said_reason: String| Judgment {
         workflow: None,
         verdict,
-        reason: verdict.word().into(),
+        reason: verdict.word(),
         said,
         said_reason,
     };
@@ -297,7 +287,7 @@ pub fn judge(
             workflow: None,
             verdict: Verdict::None,
             reason: if reason.is_empty() {
-                Verdict::None.word().into()
+                Verdict::None.word()
             } else {
                 reason.clone()
             },
@@ -322,7 +312,7 @@ pub fn judge(
         workflow: Some(found.id.clone()),
         verdict: Verdict::Chosen,
         reason: if reason.is_empty() {
-            Verdict::Chosen.word().into()
+            Verdict::Chosen.word()
         } else {
             reason.clone()
         },

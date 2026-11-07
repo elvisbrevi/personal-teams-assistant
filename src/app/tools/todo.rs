@@ -55,44 +55,74 @@ fn azure(state: &DesktopState, source: Option<&str>) -> anyhow::Result<Azure> {
     })
 }
 
+/// One read of a project of the enabled Azure source, with its read credential and the To-Do
+/// cache, bounded to `seconds`: `what` names it in the errors, `purpose` in the refusal when no
+/// single source is enabled. A project outside the source's configured organizations is
+/// `[invalid_input] invalid project: …`.
+async fn project_read<T, F, Fut>(
+    state: &DesktopState,
+    source: Option<&str>,
+    purpose: &str,
+    what: &str,
+    seconds: u64,
+    read: F,
+) -> Result<T, String>
+where
+    F: FnOnce(Azure, Store) -> Fut,
+    Fut: std::future::Future<Output = anyhow::Result<T>>,
+{
+    let azure = azure(state, source).map_err(|_| {
+        format!(
+            "[not_ready] Enable one Azure DevOps source with its read credential before {purpose}."
+        )
+    })?;
+    let config = state.settings.config().map_err(fail)?;
+    let cache = Store::open(&config.server.data_dir.join("todo-cache.db")).map_err(fail)?;
+    tokio::time::timeout(
+        std::time::Duration::from_secs(seconds),
+        read(azure, cache),
+    )
+    .await
+    .map_err(|_| format!("[network] The project's {what} could not be read in time."))?
+    .map_err(|error| {
+        let text = error.to_string();
+        if text.starts_with("invalid") {
+            format!("[invalid_input] {text}")
+        } else if text.contains("the repository catalog would be incomplete") {
+            text
+        } else {
+            format!("[network] The project's {what} could not be read; check the catalog and the Azure read credential.")
+        }
+    })
+}
+
 /// The Git repositories of a project of the enabled Azure source (`workflow_repositories`),
-/// read with its read credential and cached like the process metadata. A project outside the
-/// source's configured organizations is `[invalid_input] invalid project: …`.
+/// read with its read credential and cached like the process metadata.
 pub(in crate::app) async fn repositories(
     state: &DesktopState,
     source: Option<&str>,
     organization: Option<&str>,
     project: &str,
 ) -> Result<Value, String> {
-    let azure = azure(state, source).map_err(|_| {
-        "[not_ready] Enable one Azure DevOps source with its read credential before listing a project's repositories."
-            .to_owned()
-    })?;
-    let config = state.settings.config().map_err(fail)?;
-    let cache = Store::open(&config.server.data_dir.join("todo-cache.db")).map_err(fail)?;
-    tokio::time::timeout(
-        std::time::Duration::from_secs(110),
-        crate::ado::repositories::list(
-            &azure.client,
-            &azure.read_key,
-            &azure.catalog,
-            &cache,
-            organization,
-            project,
-        ),
+    project_read(
+        state,
+        source,
+        "listing a project's repositories",
+        "Git repositories",
+        110,
+        |azure, cache| async move {
+            crate::ado::repositories::list(
+                &azure.client,
+                &azure.read_key,
+                &azure.catalog,
+                &cache,
+                organization,
+                project,
+            )
+            .await
+        },
     )
     .await
-    .map_err(|_| "[network] The project's Git repositories could not be read in time.".to_owned())?
-    .map_err(|error| {
-        let text = error.to_string();
-        if text.starts_with("invalid") {
-            format!("[invalid_input] {text}")
-        } else if text.contains("Git repositories; the repository catalog would be incomplete") {
-            text
-        } else {
-            "[network] The project's Git repositories could not be read; check the catalog and the Azure read credential.".into()
-        }
-    })
 }
 
 /// The workflow states of a project's requirement, bug and listed task types
@@ -104,34 +134,26 @@ pub(in crate::app) async fn process_states(
     organization: Option<&str>,
     project: &str,
 ) -> Result<Value, String> {
-    let azure = azure(state, source).map_err(|_| {
-        "[not_ready] Enable one Azure DevOps source with its read credential before choosing a project's ready states."
-            .to_owned()
-    })?;
-    let config = state.settings.config().map_err(fail)?;
-    let cache = Store::open(&config.server.data_dir.join("todo-cache.db")).map_err(fail)?;
-    tokio::time::timeout(
-        std::time::Duration::from_secs(60),
-        crate::ado::todo::process_states(
-            &azure.client,
-            &azure.read_key,
-            &azure.catalog,
-            &cache,
-            organization,
-            project,
-            &azure.guides,
-        ),
+    project_read(
+        state,
+        source,
+        "choosing a project's ready states",
+        "process states",
+        60,
+        |azure, cache| async move {
+            crate::ado::todo::process_states(
+                &azure.client,
+                &azure.read_key,
+                &azure.catalog,
+                &cache,
+                organization,
+                project,
+                &azure.guides,
+            )
+            .await
+        },
     )
     .await
-    .map_err(|_| "[network] The project's process states could not be read in time.".to_owned())?
-    .map_err(|error| {
-        let text = error.to_string();
-        if text.starts_with("invalid") {
-            format!("[invalid_input] {text}")
-        } else {
-            "[network] The project's process states could not be read; check the catalog and the Azure read credential.".into()
-        }
-    })
 }
 
 /// Check a reviewed child against the provider's live types before anything is written.
@@ -299,6 +321,9 @@ pub(in crate::app) async fn read(
                 serde_json::to_value(crate::ado::tasks::list(&client, &key, &catalog, &cache, &query, &config.activity_registration).await?).map_err(anyhow::Error::from)
             } else if method == "get_azure_task" {
                 serde_json::to_value(crate::ado::detail::get_task(&client, &key, &catalog, &cache, detail.as_ref().unwrap()).await?).map_err(anyhow::Error::from)
+            } else if method == "get_azure_item" {
+                // Internal (the workflow director): an HU, bug or task in one read.
+                serde_json::to_value(crate::ado::detail::get_any(&client, &key, &catalog, &cache, detail.as_ref().unwrap()).await?).map_err(anyhow::Error::from)
             } else {
             match &detail {
                 Some(args) => serde_json::to_value(crate::ado::detail::get(&client, &key, &catalog, &cache, args).await?),

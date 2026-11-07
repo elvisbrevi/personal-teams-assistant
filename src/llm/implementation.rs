@@ -12,21 +12,73 @@ pub(crate) async fn validate(provider: &str, model: &str, effort: &str) -> Resul
     if TEST_CLI.with(|cli| cli.borrow().is_some()) {
         return Ok(());
     }
-    let catalog = super::catalog().await;
-    let info = catalog
-        .providers
-        .iter()
-        .find(|p| p.id == provider && p.transport == "cli" && p.available)
+    let catalog = serde_json::to_value(super::catalog().await)?;
+    remember(&catalog);
+    check_offered(&catalog, provider, model, effort)
+}
+
+/// Whether a catalog (`llm::catalog`, as JSON) offers that installed CLI, model and effort.
+fn check_offered(catalog: &Value, provider: &str, model: &str, effort: &str) -> Result<()> {
+    let info = catalog["providers"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|p| p["id"] == provider && p["transport"] == "cli" && p["available"] == true)
         .ok_or_else(|| {
             anyhow::anyhow!("Install and sign in to the selected CLI on this machine.")
         })?;
     ensure!(
-        info.models
-            .iter()
-            .any(|m| m.id == model && m.efforts.iter().any(|e| e == effort)),
+        info["models"].as_array().into_iter().flatten().any(|m| {
+            m["id"] == model
+                && m["efforts"]
+                    .as_array()
+                    .is_some_and(|e| e.iter().any(|e| e == effort))
+        }),
         "Select an available model and effort on this machine."
     );
     Ok(())
+}
+/// The installed CLIs as this machine last probed them, and when.
+fn probed() -> &'static std::sync::Mutex<Option<(std::time::Instant, Value)>> {
+    static PROBED: std::sync::OnceLock<std::sync::Mutex<Option<(std::time::Instant, Value)>>> =
+        std::sync::OnceLock::new();
+    PROBED.get_or_init(|| std::sync::Mutex::new(None))
+}
+fn remember(catalog: &Value) {
+    *probed().lock().unwrap() = Some((std::time::Instant::now(), catalog.clone()));
+}
+/// How long a probe of the installed CLIs is reused before a director session.
+pub(crate) const PROBE_REUSE: Duration = Duration::from_secs(600);
+/// `validate` for the workflow director, whose session has a fixed time budget: a probe of the
+/// last ten minutes that offers the agent is reused; otherwise the CLIs are probed again within
+/// `bound`, and a probe that does not finish in time refuses the session.
+pub(crate) async fn validate_recent(
+    provider: &str,
+    model: &str,
+    effort: &str,
+    bound: Duration,
+) -> Result<()> {
+    #[cfg(test)]
+    if TEST_CLI.with(|cli| cli.borrow().is_some()) {
+        return Ok(());
+    }
+    let recent = probed()
+        .lock()
+        .unwrap()
+        .as_ref()
+        .filter(|(at, _)| at.elapsed() < PROBE_REUSE)
+        .map(|(_, catalog)| catalog.clone());
+    if let Some(catalog) = recent
+        && check_offered(&catalog, provider, model, effort).is_ok()
+    {
+        return Ok(());
+    }
+    let catalog = tokio::time::timeout(bound, super::catalog())
+        .await
+        .map_err(|_| anyhow::anyhow!("The installed CLIs could not be listed in time."))?;
+    let catalog = serde_json::to_value(catalog)?;
+    remember(&catalog);
+    check_offered(&catalog, provider, model, effort)
 }
 
 #[cfg(test)]

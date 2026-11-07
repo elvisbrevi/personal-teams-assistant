@@ -1814,6 +1814,42 @@ mod tests {
             recorded["item"]["url"],
             "https://dev.azure.com/example/Payments/_workitems/edit/41"
         );
+        // A session ID that is not one is dropped, and the answer is kept.
+        let asking = tokio::spawn(ask(host.clone(), director.clone(), item.clone()));
+        let command = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let reply = fleet::protocol(&host, &poll).await.unwrap();
+                if !reply["command"].is_null() {
+                    break reply["command"].clone();
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let result = json!({"ok":true,"data":{"answer":{"workflow":"payments","reason":"Pagos."},"problem":"Free text the worker made up",
+            "session_id":"../../etc/passwd","started_at":"yesterday","finished_at":null}});
+        let mut answered = poll.clone();
+        answered["results"] = json!([{"id":command["id"],"result":result}]);
+        fleet::protocol(&host, &answered).await.unwrap();
+        let kept = asking.await.unwrap().unwrap();
+        assert_eq!(kept.session_id, None);
+        assert_eq!(
+            kept.direction.answer,
+            Some(json!({"workflow":"payments","reason":"Pagos."}))
+        );
+        assert_eq!(kept.direction.problem, None);
+        let record = host
+            .state
+            .implementation
+            .db
+            .requests(Some(&kept.run))
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert_eq!(record["state"], "done");
+        assert!(record["session_id"].is_null() && record["started_at"].is_null());
+        assert_eq!(record["output"], "");
         // Nothing was launched on any machine.
         assert!(
             host.state
