@@ -158,6 +158,8 @@ struct Snapshot {
     cases: &'static [crate::cases::BuiltIn],
     /// The implementation agents' built-in prompts with their default instructions (additive).
     agent_prompts: &'static [crate::agent_prompts::BuiltIn],
+    /// The workflow runs waiting on the user, Home's attention items (additive).
+    workflow_attention: Vec<serde_json::Value>,
 }
 
 #[derive(Debug)]
@@ -936,6 +938,7 @@ async fn snapshot(host: &Host) -> std::result::Result<Snapshot, String> {
         tunnel_config: state.settings.tunnel().unwrap_or_default(),
         cases: &crate::cases::BUILT_IN,
         agent_prompts: &crate::agent_prompts::BUILT_IN,
+        workflow_attention: workflows::runs::attention(state).unwrap_or_default(),
     })
 }
 

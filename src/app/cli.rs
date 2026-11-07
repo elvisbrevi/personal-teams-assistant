@@ -437,6 +437,22 @@ Knowledge
                            Dry run: the workflow the director chooses for an Azure work item, checked
                            by code (an enabled workflow of its project, or none with the reason).
                            Starts nothing; the session appears in Agent history.
+  workflows run ID (--workflow WORKFLOW | --director) [--project NAME] [--source ID] --confirmed
+                           Starts a workflow run for an Azure item assigned to you, on the coordinator:
+                           an HU or bug is planned and waits at plan_review until you confirm its
+                           children (Implement, or tools call implementation_create); each child is
+                           then coded in turn with full permissions on the workflow's machine, and the
+                           run waits for the pull requests of the branches the sessions report. A task
+                           is coded directly.
+                           --director lets the workflow director choose (none leaves it unassigned).
+  workflows runs [--state STATE] [--workflow WORKFLOW] [--limit N]
+                           Runs, newest first, and those waiting on you (attention).
+  workflows status RUN                   One run: stages, implementation runs, children, pull requests.
+  workflows resume RUN --confirmed       Continues a failed, interrupted or needs_attention run from its
+                           stage, accepting what stopped it; never submits a plan or starts a started
+                           coding run again.
+  workflows cancel RUN --confirmed       Cancels the run and its active implementation run.
+  workflows assign RUN WORKFLOW --confirmed   Gives an unassigned run an enabled workflow of its project.
   notes list [--context ID] [--limit N]  Verified notes, newest first.
   notes search TEXT [--context ID]       Notes by relevance.
   notes add | notes edit ID              JSON on stdin: title, text, contexts, keywords, origin, reference.
@@ -558,6 +574,8 @@ fn words(args: &[String]) -> Vec<&str> {
                 | "--path"
                 | "--project"
                 | "--organization"
+                | "--workflow"
+                | "--state"
         ) {
             skip = 1;
         } else if !arg.starts_with("--") {
@@ -923,6 +941,76 @@ async fn workflows_command(args: &[String]) -> Result<Reply> {
                 body["source"] = json!(source);
             }
             ("workflow_classify", body)
+        }
+        (Some("run"), _) => {
+            let id: u64 = id(2)?.parse().context("the work item ID is a number")?;
+            let workflow = option(args, "--workflow");
+            let director = args.iter().any(|a| a == "--director");
+            ensure!(
+                workflow.is_some() != director,
+                "give --workflow WORKFLOW or --director"
+            );
+            let question = super::tools::confirmation(
+                "workflow_run_start",
+                &json!({"id":id,"workflow":workflow}),
+            )
+            .unwrap_or_default();
+            if let Some(reply) = unconfirmed(args, question) {
+                return Ok(reply);
+            }
+            let mut body = json!({"provider":"azure","id":id,"confirmed":true});
+            match workflow {
+                Some(workflow) => body["workflow"] = json!(workflow),
+                None => body["director"] = json!(true),
+            }
+            for (flag, key) in [("--project", "project"), ("--source", "source")] {
+                if let Some(value) = option(args, flag) {
+                    body[key] = json!(value);
+                }
+            }
+            ("workflow_run_start", body)
+        }
+        (Some("runs"), _) => {
+            let mut body = json!({});
+            for (flag, key) in [("--state", "state"), ("--workflow", "workflow")] {
+                if let Some(value) = option(args, flag) {
+                    body[key] = json!(value);
+                }
+            }
+            if let Some(limit) = option(args, "--limit") {
+                body["limit"] = json!(limit.parse::<u64>().context("invalid limit")?);
+            }
+            ("workflow_runs", body)
+        }
+        (Some("status"), _) => ("workflow_run_status", json!({"run":id(2)?})),
+        (Some(action @ ("resume" | "cancel")), _) => {
+            let run = id(2)?;
+            let method = if action == "resume" {
+                "workflow_run_resume"
+            } else {
+                "workflow_run_cancel"
+            };
+            let question =
+                super::tools::confirmation(method, &json!({"run":run})).unwrap_or_default();
+            if let Some(reply) = unconfirmed(args, question) {
+                return Ok(reply);
+            }
+            (method, json!({"run":run,"confirmed":true}))
+        }
+        (Some("assign"), _) => {
+            let (run, workflow) = (id(2)?, id(3)?);
+            let question = super::tools::confirmation(
+                "workflow_run_assign",
+                &json!({"run":run,"workflow":workflow}),
+            )
+            .unwrap_or_default();
+            if let Some(reply) = unconfirmed(args, question) {
+                return Ok(reply);
+            }
+            (
+                "workflow_run_assign",
+                json!({"run":run,"workflow":workflow,"confirmed":true}),
+            )
         }
         (Some("repositories"), _) => {
             let mut body =
@@ -1641,11 +1729,12 @@ fn validate_args(args: &[String]) -> Result<()> {
             | "--keep-local"
             | "--adopt"
             | "--mine"
-            | "--forget-service-token" => {}
+            | "--forget-service-token"
+            | "--director" => {}
             "--destination" | "--name" | "--existing" | "--to" | "--target" | "--label"
             | "--token-expires" | "--keep" | "--machine" | "--since" | "--until" | "--before"
             | "--from" | "--chat" | "--query" | "--wiki" | "--author" | "--project"
-            | "--organization" => {
+            | "--organization" | "--workflow" | "--state" => {
                 i += 1;
                 ensure!(
                     args.get(i)
@@ -1941,6 +2030,9 @@ fn validate_args(args: &[String]) -> Result<()> {
             | ["contexts", "show" | "edit" | "remove", _]
             | ["workflows", "list" | "save" | "repositories" | "settings"]
             | ["workflows", "classify", _]
+            | ["workflows", "runs"]
+            | ["workflows", "run" | "status" | "resume" | "cancel", _]
+            | ["workflows", "assign", _, _]
             | ["workflows", "show" | "remove" | "enable" | "disable", _]
             | ["workflows", "blocks", "list" | "save"]
             | ["workflows", "blocks", "remove", _]
@@ -2023,6 +2115,10 @@ fn validate_args(args: &[String]) -> Result<()> {
             "--confirmed",
             p.as_slice() == ["cloud", "connect"]
                 || p.as_slice().starts_with(&["workflows", "remove"])
+                || matches!(
+                    p.as_slice(),
+                    ["workflows", "run" | "resume" | "cancel" | "assign", ..]
+                )
                 || p.as_slice() == ["workflows", "blocks", "save"]
                 || p.as_slice() == ["cloud", "migrate"]
                 || p.as_slice() == ["cloud", "rollback"]
@@ -2131,7 +2227,8 @@ fn validate_args(args: &[String]) -> Result<()> {
             "--limit",
             ["audit", "logs", "notes", "variables"].contains(&p[0])
                 || (p[0] == "teams" && p.get(1) != Some(&"send"))
-                || p.as_slice().starts_with(&["azure", "wiki", "search"]),
+                || p.as_slice().starts_with(&["azure", "wiki", "search"])
+                || p.as_slice() == ["workflows", "runs"],
         ),
         (
             "--offset",
@@ -2182,17 +2279,37 @@ fn validate_args(args: &[String]) -> Result<()> {
                 || p.as_slice().starts_with(&["knowledge", "search"])
                 || matches!(
                     p.as_slice(),
-                    ["workflows", "repositories" | "settings" | "classify", ..]
+                    [
+                        "workflows",
+                        "repositories" | "settings" | "classify" | "run",
+                        ..
+                    ]
                 ),
         ),
         ("--set", p.as_slice() == ["workflows", "settings"]),
+        (
+            "--workflow",
+            matches!(
+                p.as_slice(),
+                ["workflows", "run", _] | ["workflows", "runs"]
+            ),
+        ),
+        ("--state", p.as_slice() == ["workflows", "runs"]),
+        (
+            "--director",
+            matches!(p.as_slice(), ["workflows", "run", _]),
+        ),
         ("--context", ["notes", "knowledge"].contains(&p[0])),
         ("--expect", p.as_slice() == ["setup", "status"]),
         (
             "--project",
             matches!(
                 p.as_slice(),
-                ["workflows", "repositories" | "settings" | "classify", ..]
+                [
+                    "workflows",
+                    "repositories" | "settings" | "classify" | "run",
+                    ..
+                ]
             ),
         ),
         (
@@ -3667,7 +3784,12 @@ mod wiki_tests {
             &["workflows", "repositories", "--project"],
             &["workflows", "show"],
             &["workflows", "blocks"],
-            &["workflows", "run", "payments"],
+            &["workflows", "run"],
+            &["workflows", "runs", "--director"],
+            &["workflows", "status", "run", "--confirmed"],
+            &["workflows", "assign", "run"],
+            &["workflows", "run", "41", "--state", "done"],
+            &["workflows", "runs", "--project", "Payments"],
             &["workflows", "settings", "--set", "concurrency"],
             &["workflows", "settings", "--set", "--confirmed", "2"],
             &["workflows", "list", "--set", "concurrency", "2"],
@@ -3681,6 +3803,42 @@ mod wiki_tests {
             ],
         ] {
             assert!(check(args).is_err(), "{args:?}");
+        }
+        for args in [
+            &[
+                "workflows",
+                "run",
+                "41",
+                "--workflow",
+                "payments",
+                "--confirmed",
+            ][..],
+            &[
+                "workflows",
+                "run",
+                "41",
+                "--director",
+                "--project",
+                "P",
+                "--source",
+                "s",
+            ],
+            &[
+                "workflows",
+                "runs",
+                "--state",
+                "plan_review",
+                "--workflow",
+                "w",
+                "--limit",
+                "5",
+            ],
+            &["workflows", "status", "r"],
+            &["workflows", "resume", "r", "--confirmed"],
+            &["workflows", "cancel", "r", "--confirmed"],
+            &["workflows", "assign", "r", "payments", "--confirmed"],
+        ] {
+            assert!(check(args).is_ok(), "{args:?}");
         }
     }
     #[test]

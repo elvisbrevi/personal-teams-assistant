@@ -64,12 +64,14 @@ fn now() -> i64 {
     chrono::Utc::now().timestamp()
 }
 
+/// What a started run does, as the user confirms it.
+pub(in crate::app) const START_EFFECT: &str = "plan its children (read-only), wait for your review and confirmation of the plan (implementation_create), then code each created child, one after another, with full permissions on that computer and no further prompts, and wait for their pull requests to be completed (a task is coded directly, without a plan)";
 /// What starting a run does, as the user confirms it.
 pub(in crate::app) fn describe_start(
     workflow: Option<&crate::workflows::Workflow>,
     item: u64,
 ) -> String {
-    let what = "plan its children (read-only), wait for your review and confirmation of the plan (implementation_create), then code each created child, one after another, with full permissions on that computer and no further prompts, and wait for their pull requests to be completed (a task is coded directly, without a plan)";
+    let what = START_EFFECT;
     match workflow {
         Some(w) => format!(
             "Start workflow {} for Azure work item {item}: on machine {} with {} {} {}, {what}",

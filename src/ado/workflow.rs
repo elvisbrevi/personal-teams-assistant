@@ -143,7 +143,7 @@ pub(crate) async fn pull_requests(
             accepted: false,
         });
     }
-    found.sort_by(|a, b| b.id.cmp(&a.id));
+    found.sort_by_key(|a| std::cmp::Reverse(a.id));
     Ok(found)
 }
 
