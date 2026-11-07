@@ -119,6 +119,9 @@ async fn in_memory(host: &Host) -> Vec<String> {
     if super::super::activity::active(&host.state).await {
         reasons.push("An activity review is running.".to_owned());
     }
+    if host.state.workflows.advancing() {
+        reasons.push("A workflow run is advancing a stage.".to_owned());
+    }
     reasons
 }
 

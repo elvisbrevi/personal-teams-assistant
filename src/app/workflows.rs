@@ -31,9 +31,20 @@ pub(super) const METHODS: [&str; 8] = [
 ];
 
 mod director;
+pub(super) mod engine;
+pub(super) mod record;
+pub(super) mod runs;
+#[cfg(test)]
+pub(super) mod synthetic;
 
 pub(super) fn handles(method: &str) -> bool {
-    METHODS.contains(&method) || director::METHODS.contains(&method)
+    METHODS.contains(&method)
+        || director::METHODS.contains(&method)
+        || runs::METHODS.contains(&method)
+}
+/// The workflow run operations (`workflow_runs_support`).
+pub(super) fn runs_handles(method: &str) -> bool {
+    runs::METHODS.contains(&method)
 }
 /// The workflow director's operations (`workflow_director_support`).
 pub(super) fn director_handles(method: &str) -> bool {
@@ -150,6 +161,9 @@ async fn operation(host: &Arc<Host>, method: &str, args: &Value) -> Result<Value
     if director::METHODS.contains(&method) {
         return director::operation(host, method, args).await;
     }
+    if runs::METHODS.contains(&method) {
+        return runs::operation(host, method, args, &engine::Azure::Live).await;
+    }
     match method {
         "workflows_list" => {
             ensure_no_arguments(args)?;
@@ -204,7 +218,12 @@ async fn operation(host: &Arc<Host>, method: &str, args: &Value) -> Result<Value
                     a.id
                 )));
             }
-            // Workflow runs do not exist yet; once they do, an active run refuses this.
+            if runs::has_active(state, &a.id).map_err(fail)? {
+                return Err(conflict(format!(
+                    "Workflow {} has a run that is not done or cancelled; let it finish or cancel it first.",
+                    a.id
+                )));
+            }
             change(host, |map| {
                 let before = map.workflows.len();
                 map.workflows.retain(|w| w.id != a.id);

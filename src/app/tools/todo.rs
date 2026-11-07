@@ -335,3 +335,49 @@ pub(in crate::app) async fn read(
     };
     Ok(result)
 }
+
+/// The pull requests of one repository whose source branch a coding session reported, read
+/// with the enabled Azure source's read credential (the workflow engine; never cached, nothing
+/// written).
+pub(in crate::app) async fn pull_requests(
+    state: &DesktopState,
+    source: Option<&str>,
+    organization: &str,
+    project: &str,
+    repository: (&str, &str),
+    branch: &str,
+) -> Result<Vec<crate::ado::workflow::PullRequest>, String> {
+    project_read(
+        state,
+        source,
+        "reading a workflow's pull requests",
+        "pull requests",
+        60,
+        |azure, _cache| async move {
+            crate::ado::workflow::pull_requests(
+                &azure.client,
+                &azure.read_key,
+                &azure.catalog,
+                organization,
+                project,
+                repository,
+                branch,
+            )
+            .await
+        },
+    )
+    .await
+}
+
+/// Whether an item read fresh is assigned to the enabled Azure source's user.
+pub(in crate::app) fn assigned(
+    state: &DesktopState,
+    source: Option<&str>,
+    detail: &crate::tools::todo::Detail,
+) -> Result<bool, String> {
+    let azure = azure(state, source).map_err(|_| {
+        "[not_ready] Enable one Azure DevOps source with its read credential before starting a workflow.".to_owned()
+    })?;
+    crate::ado::workflow::assigned(&azure.catalog, detail)
+        .map_err(|e| format!("[invalid_input] {e}"))
+}

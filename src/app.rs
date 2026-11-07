@@ -119,6 +119,8 @@ pub(crate) struct DesktopState {
     activity_graph: Mutex<Option<Arc<crate::adapters::graph::Graph>>>,
     activity_recovered: Mutex<Option<PathBuf>>,
     implementation: implementation::State,
+    /// The workflow runs and their engine (`workflows::engine`).
+    workflows: workflows::engine::State,
     variables: variables::State,
     portable: portable::State,
     standing: standing::State,
@@ -807,6 +809,7 @@ pub(crate) fn init_state(config_dir: &Path, data_dir: &Path) -> Result<DesktopSt
     Ok(DesktopState {
         authority: web::account_scope(&config_dir)?,
         implementation: implementation::State::new(&config_dir)?,
+        workflows: workflows::engine::State::new(&config_dir)?,
         variables: variables::State::new(&config_dir),
         portable: portable::State::new(&config_dir),
         standing: standing::State::default(),
