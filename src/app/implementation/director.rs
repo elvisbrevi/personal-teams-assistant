@@ -52,7 +52,10 @@ pub(in crate::app) struct Answer {
 struct Call {
     /// Left out for choosing a workflow, so an older worker, which does not know the field,
     /// still answers it.
-    #[serde(default, skip_serializing_if = "crate::llm::implementation::DirectTask::is_classify")]
+    #[serde(
+        default,
+        skip_serializing_if = "crate::llm::implementation::DirectTask::is_classify"
+    )]
     task: crate::llm::implementation::DirectTask,
     id: String,
     provider: String,

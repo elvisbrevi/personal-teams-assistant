@@ -1041,7 +1041,10 @@ async fn workflows_command(args: &[String]) -> Result<Reply> {
             if !status.ok {
                 return Ok(status);
             }
-            let stored = status.data["run"]["summaries"].as_array().cloned().unwrap_or_default();
+            let stored = status.data["run"]["summaries"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default();
             let chosen = match option(args, "--summary") {
                 Some(wanted) => stored.iter().find(|s| s["id"] == wanted),
                 None => stored.last(),
@@ -1057,10 +1060,13 @@ async fn workflows_command(args: &[String]) -> Result<Reply> {
             if let Some(text) = &edited {
                 body["text"] = json!(text);
             }
-            let mut question = super::tools::confirmation("workflow_summary_send", &body)
-                .unwrap_or_default();
+            let mut question =
+                super::tools::confirmation("workflow_summary_send", &body).unwrap_or_default();
             if edited.is_none() {
-                question.push_str(&format!("\n\n{}", chosen["text"].as_str().unwrap_or_default()));
+                question.push_str(&format!(
+                    "\n\n{}",
+                    chosen["text"].as_str().unwrap_or_default()
+                ));
             }
             if let Some(reply) = unconfirmed(args, question) {
                 return Ok(reply);
@@ -2174,7 +2180,11 @@ fn validate_args(args: &[String]) -> Result<()> {
                 || p.as_slice().starts_with(&["workflows", "remove"])
                 || matches!(
                     p.as_slice(),
-                    ["workflows", "run" | "resume" | "cancel" | "assign" | "summary", ..]
+                    [
+                        "workflows",
+                        "run" | "resume" | "cancel" | "assign" | "summary",
+                        ..
+                    ]
                 )
                 || p.as_slice() == ["workflows", "blocks", "save"]
                 || p.as_slice() == ["cloud", "migrate"]

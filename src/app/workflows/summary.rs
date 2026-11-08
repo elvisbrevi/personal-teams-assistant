@@ -198,15 +198,18 @@ fn links(run: &Run) -> Vec<Link> {
 }
 
 fn boundary(text: &str, at: usize) -> bool {
-    !text[..at].chars().next_back().is_some_and(char::is_alphanumeric)
+    !text[..at]
+        .chars()
+        .next_back()
+        .is_some_and(char::is_alphanumeric)
         && !text[at..].chars().next().is_some_and(char::is_alphanumeric)
 }
 /// Whether `lower` has `needle` as whole words.
 fn names(lower: &str, needle: &str) -> bool {
     !needle.is_empty()
-        && lower.match_indices(needle).any(|(at, hit)| {
-            boundary(lower, at) && boundary(lower, at + hit.len())
-        })
+        && lower
+            .match_indices(needle)
+            .any(|(at, hit)| boundary(lower, at) && boundary(lower, at + hit.len()))
 }
 
 /// Whether the summary names the item or pull request: by its number the way people write it
@@ -215,7 +218,9 @@ fn mentioned(text: &str, link: &Link) -> bool {
     let lower = text.to_lowercase();
     let id = link.id;
     let number = if link.pull_request {
-        format!(r"(?:!|\bpr\s*[#!]?|\bpull request\s*[#!]?|\bsolicitud de extracci[oó]n\s*[#!]?)\s*{id}\b")
+        format!(
+            r"(?:!|\bpr\s*[#!]?|\bpull request\s*[#!]?|\bsolicitud de extracci[oó]n\s*[#!]?)\s*{id}\b"
+        )
     } else {
         format!(r"(?:#|\b(?:hu|work item|task|tarea|bug|item)\s*#?)\s*{id}\b")
     };
@@ -231,8 +236,14 @@ fn mentioned(text: &str, link: &Link) -> bool {
 fn clean(text: &str, limit: usize) -> String {
     let patterns: [(&str, &str); 7] = [
         // Images and links keep their words.
-        (r"!\[([^\]\n]*)\]\((?:[^()\s]|\([^()\s]*\))*(?:\s+[^)\n]*)?\)", "$1"),
-        (r"\[([^\]\n]+)\]\((?:[^()\s]|\([^()\s]*\))*(?:\s+[^)\n]*)?\)", "$1"),
+        (
+            r"!\[([^\]\n]*)\]\((?:[^()\s]|\([^()\s]*\))*(?:\s+[^)\n]*)?\)",
+            "$1",
+        ),
+        (
+            r"\[([^\]\n]+)\]\((?:[^()\s]|\([^()\s]*\))*(?:\s+[^)\n]*)?\)",
+            "$1",
+        ),
         // Reference-style link definitions, autolinks, bare URLs of any scheme and www hosts.
         (r"(?m)^[ \t]*\[[^\]\n]+\]:[ \t]*\S+.*$", ""),
         (r"(?i)<?\b[a-z][a-z0-9+.\-]{1,20}://[^\s<>)\]]*>?", ""),
@@ -301,7 +312,10 @@ pub(super) fn compose(summary: &str, run: &Run, language: crate::config::Languag
         return cleaned;
     }
     let section = format!("**{header}**\n{}", list.trim_end());
-    let body = clean(summary, MAX_CHARS.saturating_sub(section.chars().count() + 2));
+    let body = clean(
+        summary,
+        MAX_CHARS.saturating_sub(section.chars().count() + 2),
+    );
     if body.is_empty() {
         return section;
     }
@@ -373,7 +387,10 @@ async fn summarize(host: &Arc<Host>, args: SummaryArgs) -> Result<Value, String>
     .map_err(|error| failed(&error.to_string()))?;
     let session = &answer.run;
     let _ = implementation::director::annotate(host, session, "workflow_run", json!(run.id));
-    let problem = match (written(answer.direction.answer.as_ref()), answer.direction.problem) {
+    let problem = match (
+        written(answer.direction.answer.as_ref()),
+        answer.direction.problem,
+    ) {
         (Some(text), None) if !clean(text, MAX_CHARS).is_empty() => None,
         (Some(_), None) => Some("The workflow director's summary was empty."),
         (_, Some(problem)) => Some(problem),
@@ -397,7 +414,12 @@ async fn summarize(host: &Arc<Host>, args: SummaryArgs) -> Result<Value, String>
         "model": director.model,
         "session_id": answer.session_id,
     });
-    let _ = implementation::director::annotate(host, session, "summary", json!({"chars": text.chars().count()}));
+    let _ = implementation::director::annotate(
+        host,
+        session,
+        "summary",
+        json!({"chars": text.chars().count()}),
+    );
     {
         let lock = state.workflows.lock(&run.id);
         let _guard = lock.lock().await;
@@ -437,7 +459,11 @@ fn resolve_mention(members: &[String], name: &str) -> Result<String, String> {
         ([one], _) | ([], [one]) => Ok((*one).clone()),
         ([], []) => Err(invalid(format!(
             "The mention «{name}» names nobody in this chat; its members are {}.",
-            if members.is_empty() { "not listed".to_owned() } else { members.join(", ") }
+            if members.is_empty() {
+                "not listed".to_owned()
+            } else {
+                members.join(", ")
+            }
         ))),
         _ => Err(invalid(format!(
             "The mention «{name}» matches several members of this chat; write the full display name."
@@ -446,11 +472,25 @@ fn resolve_mention(members: &[String], name: &str) -> Result<String, String> {
 }
 
 /// What a person confirms before a summary is sent.
-fn describe_send(run: &str, summary: &str, chat: &str, mentions: &[String], edited: bool) -> String {
+fn describe_send(
+    run: &str,
+    summary: &str,
+    chat: &str,
+    mentions: &[String],
+    edited: bool,
+) -> String {
     format!(
         "Post the {} of workflow run {run} (summary {summary}) in the Teams chat {chat}, as you, mentioning {}: one message, never retried",
-        if edited { "edited text" } else { "stored summary" },
-        if mentions.is_empty() { "no one".to_owned() } else { mentions.join(", ") }
+        if edited {
+            "edited text"
+        } else {
+            "stored summary"
+        },
+        if mentions.is_empty() {
+            "no one".to_owned()
+        } else {
+            mentions.join(", ")
+        }
     )
 }
 
@@ -479,7 +519,11 @@ async fn send(host: &Arc<Host>, args: SendArgs) -> Result<Value, String> {
         ));
     }
     let marker = regex::Regex::new(r"@\[([^\]\n]{1,100})\]").map_err(fail)?;
-    let edited = args.text.as_deref().map(str::trim).filter(|t| !t.is_empty());
+    let edited = args
+        .text
+        .as_deref()
+        .map(str::trim)
+        .filter(|t| !t.is_empty());
     if args.text.is_some() && edited.is_none() {
         return Err(invalid("The edited text is empty."));
     }
@@ -543,7 +587,9 @@ async fn send(host: &Arc<Host>, args: SendArgs) -> Result<Value, String> {
         graph.chat_directory(None),
     )
     .await
-    .map_err(|_| "[network] The chat directory could not be read in time; nothing was sent.".to_owned())?
+    .map_err(|_| {
+        "[network] The chat directory could not be read in time; nothing was sent.".to_owned()
+    })?
     .map_err(fail)?;
     let entry = directory.iter().find(|c| c["id"] == chat).ok_or_else(|| {
         invalid(format!(
@@ -607,7 +653,9 @@ async fn send(host: &Arc<Host>, args: SendArgs) -> Result<Value, String> {
     let (outcome, detail, message_id) = match &result {
         Ok(sent) => ("sent", None, sent["message_id"].as_str().map(str::to_owned)),
         Err(error) => match error.downcast_ref::<PostRefusal>() {
-            Some(PostRefusal::Uncertain) | None => ("uncertain", Some(PostRefusal::Uncertain.to_string()), None),
+            Some(PostRefusal::Uncertain) | None => {
+                ("uncertain", Some(PostRefusal::Uncertain.to_string()), None)
+            }
             Some(refusal) => ("refused", Some(refusal.to_string()), None),
         },
     };
@@ -624,7 +672,11 @@ async fn send(host: &Arc<Host>, args: SendArgs) -> Result<Value, String> {
         let lock = state.workflows.lock(&run.id);
         let _guard = lock.lock().await;
         let mut run = found(state, &run.id)?;
-        if let Some(entry) = run.summary_sends.iter_mut().find(|s| s["id"] == id.as_str()) {
+        if let Some(entry) = run
+            .summary_sends
+            .iter_mut()
+            .find(|s| s["id"] == id.as_str())
+        {
             *entry = finished.clone();
         }
         state.workflows.db.save(&run).map_err(fail)?;
