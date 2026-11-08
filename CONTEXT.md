@@ -186,7 +186,7 @@ A saved recipe for implementing the items of one Azure DevOps project: the repos
 _Avoid_: pipeline (Azure DevOps' own), automation, recipe (in user-facing text)
 
 **Workflow block**:
-A reusable part of a workflow: an instruction the agents read, a Teams notification posted to one chat at one stage, or an approved launcher of the coordinator run at one stage. A block that acts is authorized when it is saved (a notification with the user's confirmation of its chat and text, a launcher by the owner at the GUI), not when it runs.
+A reusable part of a workflow: an instruction the agents read, a Teams notification posted to one chat at one stage, or an approved launcher of the coordinator run at one stage. A block that acts is authorized when it is saved (a notification with the user's confirmation of its chat and text, a launcher by the owner at the GUI), not when it runs; the engine then runs it once at each occurrence of its stage and records its outcome, and it never reaches a Teams channel.
 _Avoid_: step, plugin
 
 **Workflow director**:

@@ -18,7 +18,7 @@ const STAGE_NAMES = {
 };
 /** The placeholders a notification's template may hold; code fills them in when it posts. */
 const PLACEHOLDERS = {
-  item: t('the work item\'s number and title'), link: t('its link'), pull_requests: t('the links of its pull requests'), summary: t('the director\'s progress summary'),
+  item: t('the work item\'s number and title'), link: t('its link'), pull_requests: t('the links of its pull requests'), summary: t('the director\'s progress summary'), state: t('the run\'s state'),
 };
 const LIMITS = { name: 80, text: 8000, template: 4000, mentions: 20, mention: 120, chat: 200 };
 /** A name cut to the host's limit, with an ellipsis when it was longer. */
@@ -246,7 +246,7 @@ function blockEditor(draft, saved) {
       el('small', { class: 'hint', textContent: t('Only chats you belong to; channels are not offered. It posts once per run, as you.') })),
     mentions,
     el('label', {}, t('Message'), el('small', { textContent: t('The members you mention are matched to the chat\'s members again when it posts.') }), template, counted(template, LIMITS.template)),
-    el('p', { class: 'hint', textContent: t('Placeholders: {item} the work item, {link} its link, {pull_requests} its pull requests, {summary} the director\'s summary. Select one to insert it.') }),
+    el('p', { class: 'hint', textContent: t('Placeholders: {item} the work item, {link} its link, {pull_requests} its pull requests, {summary} the director\'s summary, {state} the run\'s state. Select one to insert it.') }),
     placeholders, placeholderProblem];
   };
 

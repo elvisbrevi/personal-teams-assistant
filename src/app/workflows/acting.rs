@@ -81,10 +81,7 @@ pub(in crate::app) fn occurrences(run: &Run) -> Vec<Occurrence> {
         return found;
     }
     let planned = !run.task();
-    if planned
-        && run.state == Phase::Planning
-        && run.planning.as_ref().is_none_or(|p| !p.started)
-    {
+    if planned && run.state == Phase::Planning && run.planning.as_ref().is_none_or(|p| !p.started) {
         found.push(at(Stage::BeforePlanning, "before_planning".into()));
     }
     if planned
@@ -93,13 +90,19 @@ pub(in crate::app) fn occurrences(run: &Run) -> Vec<Occurrence> {
     {
         found.push(at(Stage::PlanReady, format!("plan_ready:{}", plan.id)));
     }
-    let coding = matches!(run.state, Phase::Coding | Phase::PullRequests | Phase::Blocks);
+    let coding = matches!(
+        run.state,
+        Phase::Coding | Phase::PullRequests | Phase::Blocks
+    );
     if planned
         && coding
         && let Some(ledger) = &run.ledger
         && !run.children.is_empty()
     {
-        found.push(at(Stage::ChildrenCreated, format!("children_created:{ledger}")));
+        found.push(at(
+            Stage::ChildrenCreated,
+            format!("children_created:{ledger}"),
+        ));
     }
     if coding {
         for child in run
@@ -421,7 +424,11 @@ pub(in crate::app) fn render(run: &Run, block: &Block, occurrence: &Occurrence) 
 }
 
 /// The message a notification posts: the members the block mentions, then its rendered text.
-fn compose(run: &Run, block: &Block, occurrence: &Occurrence) -> std::result::Result<String, String> {
+fn compose(
+    run: &Run,
+    block: &Block,
+    occurrence: &Occurrence,
+) -> std::result::Result<String, String> {
     let mut text = String::new();
     for name in &block.mentions {
         if name.contains(']') || name.chars().count() > 100 {
@@ -444,12 +451,7 @@ fn redacted(text: &str) -> String {
     redactor.redact(text).chars().take(400).collect()
 }
 
-async fn notify(
-    host: &Arc<Host>,
-    run: &Run,
-    block: &Block,
-    occurrence: &Occurrence,
-) -> Attempt {
+async fn notify(host: &Arc<Host>, run: &Run, block: &Block, occurrence: &Occurrence) -> Attempt {
     let Some(chat) = &block.chat else {
         return Attempt::of("refused", "The block names no chat.");
     };

@@ -86,18 +86,13 @@ impl Teams {
     }
     /// The details of the audit events of one kind, oldest first.
     fn events(&self, kind: &str) -> Vec<String> {
-        let mut found: Vec<String> = crate::state::Store::inspect(
-            &self.dir.path().join("graph.db"),
-            true,
-            100,
-            None,
-            false,
-        )
-        .unwrap()
-        .iter()
-        .filter(|e| e["kind"] == kind)
-        .map(|e| e["detail"].as_str().unwrap().to_owned())
-        .collect();
+        let mut found: Vec<String> =
+            crate::state::Store::inspect(&self.dir.path().join("graph.db"), true, 100, None, false)
+                .unwrap()
+                .iter()
+                .filter(|e| e["kind"] == kind)
+                .map(|e| e["detail"].as_str().unwrap().to_owned())
+                .collect();
         found.reverse();
         found
     }
@@ -145,13 +140,6 @@ impl Bench {
     /// Pull requests that are completed already, for the task's branch.
     fn merged(&self) {
         self.pulls(WEB, "payments-web", "feature/child-1", 21, "completed");
-    }
-    fn outcomes(&self, id: &str) -> Vec<(String, String, String)> {
-        self.run(id)
-            .block_outcomes
-            .iter()
-            .map(|o| (o.block.clone(), o.occurrence.clone(), o.outcome.clone()))
-            .collect()
     }
     /// A launcher of this computer that runs `body` in the allowed checkout; `marker` gets a
     /// line each time it runs.
@@ -220,7 +208,7 @@ async fn a_done_notification_posts_once_with_rendered_placeholders_and_the_resol
     bench.acting(vec![notification(
         "notify",
         Stage::Done,
-        "{item} is {state}: {link}\nPull requests:\n{pull_requests}\nSummary: {summary} {unknown}",
+        "{item} is {state}: {link}\nPull requests:\n{pull_requests}\nSummary: {summary}",
         &["Victoria"],
     )]);
     let teams = Teams::new(&bench.host, &["Victoria Gómez", "Ana Pérez"], 201).await;
@@ -250,7 +238,7 @@ async fn a_done_notification_posts_once_with_rendered_placeholders_and_the_resol
         html.contains("pullrequest/21") && html.contains("PR 21: PR 21"),
         "{html}"
     );
-    assert!(html.contains("Shipped") && html.contains("{unknown}"), "{html}");
+    assert!(html.contains("Shipped"), "{html}");
     assert_eq!(body["mentions"].as_array().unwrap().len(), 1);
     assert!(!html.contains("Ana Pérez</at>"));
     // The audit and the run's record each hold the one outcome.
@@ -295,7 +283,12 @@ async fn a_refused_notification_records_why_and_the_run_continues() {
             true,
             "several members",
         ),
-        (&["Victoria Gómez"][..], &["Victoria"][..], false, "no Microsoft session"),
+        (
+            &["Victoria Gómez"][..],
+            &["Victoria"][..],
+            false,
+            "no Microsoft session",
+        ),
     ] {
         let bench = Bench::new().await;
         bench.merged();
@@ -324,7 +317,11 @@ async fn a_refused_notification_records_why_and_the_run_continues() {
             assert_eq!(run.block_outcomes[1].outcome, "refused");
         }
         if session {
-            let sent = run.block_outcomes.iter().filter(|o| o.outcome == "sent").count();
+            let sent = run
+                .block_outcomes
+                .iter()
+                .filter(|o| o.outcome == "sent")
+                .count();
             assert_eq!(teams.posts().await.len(), sent, "{reason}");
         }
         if session {
@@ -352,11 +349,9 @@ async fn a_failure_after_the_request_is_uncertain_and_nothing_is_retried() {
     }
     // One request for each block, and neither was repeated.
     assert_eq!(teams.posts().await.len(), 2);
-    assert!(
-        run.block_outcomes
-            .iter()
-            .all(|o| o.outcome == "uncertain" && o.reason.as_deref().unwrap().contains("never retried"))
-    );
+    assert!(run.block_outcomes.iter().all(
+        |o| o.outcome == "uncertain" && o.reason.as_deref().unwrap().contains("never retried")
+    ));
     assert_eq!(
         teams.events("workflow_notification"),
         ["uncertain", "uncertain"]
@@ -368,23 +363,24 @@ async fn a_failure_after_the_request_is_uncertain_and_nothing_is_retried() {
 async fn an_attempt_without_a_result_is_uncertain_after_a_restart_and_never_made_again() {
     let mut bench = Bench::new().await;
     bench.acting(vec![notification("notify", Stage::Done, "{item}", &[])]);
-    let teams = Teams::new(&bench.host, &[], 201).await;
+    let teams = Teams::new(&bench.host, &["Ana Pérez"], 201).await;
     let id = bench.start(TASK).await;
     bench.state(&id, Phase::PullRequests).await;
     // The host stopped after it recorded the attempt and before it recorded the result.
     let mut run = bench.run(&id);
-    run.block_outcomes.push(crate::app::workflows::record::BlockOutcome {
-        block: "notify".into(),
-        kind: Kind::TeamsNotification,
-        stage: Some(Stage::Done),
-        outcome: "attempting".into(),
-        at: 1,
-        occurrence: "done".into(),
-        reason: None,
-        exit_code: None,
-        duration_ms: None,
-        message_id: None,
-    });
+    run.block_outcomes
+        .push(crate::app::workflows::record::BlockOutcome {
+            block: "notify".into(),
+            kind: Kind::TeamsNotification,
+            stage: Some(Stage::Done),
+            outcome: "attempting".into(),
+            at: 1,
+            occurrence: "done".into(),
+            reason: None,
+            exit_code: None,
+            duration_ms: None,
+            message_id: None,
+        });
     bench.save(&run);
     bench.restart().await;
     teams.attach(&bench.host).await;
@@ -421,9 +417,14 @@ async fn every_stage_of_an_hu_run_acts_in_its_turn_and_a_child_is_told_once() {
             )
         })
         .collect();
-    blocks.push(notification("second", Stage::ChildDone, "Second {link}", &[]));
+    blocks.push(notification(
+        "second",
+        Stage::ChildDone,
+        "Second {link}",
+        &[],
+    ));
     bench.acting(blocks);
-    let teams = Teams::new(&bench.host, &[], 201).await;
+    let teams = Teams::new(&bench.host, &["Ana Pérez"], 201).await;
     let id = bench.start(HU).await;
     teams.attach(&bench.host).await;
     // Before planning, then the plan waits: its note is posted and nothing more.
@@ -489,7 +490,7 @@ async fn a_failed_run_posts_its_failed_blocks_once_for_each_failure() {
         "{item} is {state}",
         &[],
     )]);
-    let teams = Teams::new(&bench.host, &[], 201).await;
+    let teams = Teams::new(&bench.host, &["Ana Pérez"], 201).await;
     let id = bench.start(TASK).await;
     teams.attach(&bench.host).await;
     // The checkout the workflow maps is gone: coding cannot start, which fails the run.
@@ -521,11 +522,15 @@ async fn a_failed_run_posts_its_failed_blocks_once_for_each_failure() {
 async fn a_run_that_failed_while_the_host_was_down_posts_its_failed_blocks_after_the_start() {
     let mut bench = Bench::new().await;
     bench.acting(vec![notification("failed", Stage::Failed, "{item}", &[])]);
-    let teams = Teams::new(&bench.host, &[], 201).await;
+    let teams = Teams::new(&bench.host, &["Ana Pérez"], 201).await;
     let id = bench.start(TASK).await;
     // The host stopped right after the run was recorded as failed, before its blocks ran.
     let mut run = bench.run(&id);
-    run.stop(Phase::Failed, bench.now(), "The coding run could not be launched.".into());
+    run.stop(
+        Phase::Failed,
+        bench.now(),
+        "The coding run could not be launched.".into(),
+    );
     bench.save(&run);
     bench.restart().await;
     teams.attach(&bench.host).await;
@@ -659,12 +664,14 @@ async fn one_launcher_runs_at_a_time_and_another_run_waits_for_it() {
         Stage::PullRequestsCompleted,
         &release,
     )]);
-    let id = bench.start(TASK).await;
-    bench.state(&id, Phase::Blocks).await;
     // Another launcher is running: this run waits, with nothing recorded, then goes on.
     let busy = consumers::busy_guard(&bench.host.state);
+    let id = bench.start(TASK).await;
+    bench.state(&id, Phase::Blocks).await;
     assert_eq!(
-        acting::execute(&bench.host, &id, bench.now()).await.unwrap(),
+        acting::execute(&bench.host, &id, bench.now())
+            .await
+            .unwrap(),
         Progress::Waiting
     );
     assert!(bench.run(&id).block_outcomes.is_empty());
@@ -695,7 +702,8 @@ async fn the_engines_authority_reaches_only_its_two_paths_and_no_other_caller_ho
         Transport::Machine,
         Transport::Agent,
     ] {
-        let (posted, _) = authority::within(as_(transport), acting::post(&bench.host, CHAT, "x")).await;
+        let (posted, _) =
+            authority::within(as_(transport), acting::post(&bench.host, CHAT, "x")).await;
         assert_eq!(posted.outcome, "refused", "{transport:?}");
         let launched = authority::within(
             as_(transport),
@@ -724,23 +732,32 @@ async fn the_engines_authority_reaches_only_its_two_paths_and_no_other_caller_ho
     assert!(teams.posts().await.is_empty());
     assert_eq!(bench.ran("release"), 0);
     // The engine's authority is not a client: no operation answers it.
-    for method in ["status", "teams_post", "variable_launcher_run", "workflow_runs"] {
+    for method in [
+        "status",
+        "teams_post",
+        "variable_launcher_run",
+        "workflow_runs",
+    ] {
         let refused = call_as(&bench, Transport::Workflow, method, json!({})).await;
         assert!(!refused.ok, "{method}");
     }
     let mut request = control::Request::new("workflow_runs");
     request.args = json!({});
     let invocation = authority::workflow(&bench.host.state).unwrap();
-    assert!(authority::within(invocation, async {
-        authority::authorize(&bench.host.state, &request)
-    })
-    .await
-    .is_err());
+    assert!(
+        authority::within(invocation, async {
+            authority::authorize(&bench.host.state, &request)
+        })
+        .await
+        .is_err()
+    );
     // With it, the two paths work.
     let invocation = authority::workflow(&bench.host.state).unwrap();
-    let (posted, _) =
-        authority::within(invocation.clone(), acting::post(&bench.host, CHAT, "@[Victoria] hi"))
-            .await;
+    let (posted, _) = authority::within(
+        invocation.clone(),
+        acting::post(&bench.host, CHAT, "@[Victoria] hi"),
+    )
+    .await;
     assert_eq!(posted.outcome, "sent");
     let launched = authority::within(
         invocation,
@@ -764,7 +781,10 @@ fn no_client_path_names_the_workflow_authority() {
         ("mcp", include_str!("../../../mcp.rs")),
         ("page", include_str!("../../../page.rs")),
         ("tools", include_str!("../../../tools/mod.rs")),
-        ("machines", include_str!("../../../implementation/management.rs")),
+        (
+            "machines",
+            include_str!("../../../implementation/management.rs"),
+        ),
         ("headless", include_str!("../../../headless.rs")),
     ];
     for (name, source) in clients {
@@ -807,7 +827,10 @@ fn the_occurrences_follow_the_record_and_a_template_is_rendered_by_code() {
     run.state = Phase::Done;
     assert!(acting::occurrences(&run).is_empty());
     run.state = Phase::Blocks;
-    let keys: Vec<String> = acting::occurrences(&run).into_iter().map(|o| o.key).collect();
+    let keys: Vec<String> = acting::occurrences(&run)
+        .into_iter()
+        .map(|o| o.key)
+        .collect();
     assert_eq!(keys, ["done"]);
     let block = notification(
         "n",

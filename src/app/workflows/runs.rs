@@ -65,7 +65,7 @@ fn now() -> i64 {
 }
 
 /// What a started run does, as the user confirms it.
-pub(in crate::app) const START_EFFECT: &str = "plan its children (read-only), wait for your review and confirmation of the plan (implementation_create), then code each created child, one after another, with full permissions on that computer and no further prompts, and wait for their pull requests to be completed (a task is coded directly, without a plan)";
+pub(in crate::app) const START_EFFECT: &str = "plan its children (read-only), wait for your review and confirmation of the plan (implementation_create), then code each created child, one after another, with full permissions on that computer and no further prompts, and wait for their pull requests to be completed (a task is coded directly, without a plan); along the way the workflow's Teams notification blocks post once at their stage, as you, and its launcher blocks run the approved launchers of this computer";
 /// What starting a run does, as the user confirms it: the workflow by its ID (with its machine
 /// and agent when the host knows them), or the director's choice.
 pub(in crate::app) fn describe_start(

@@ -223,15 +223,16 @@ pub(in crate::app) async fn tick(
     };
     // A run that failed while the host stopped, before its `failed` blocks ran: they run now
     // (once: a recorded attempt is never made again). Failed runs are not advanced otherwise.
+    let mut tasks = Vec::new();
     if !state.settled.swap(true, Ordering::SeqCst) {
         for run in state.db.list(&[Phase::Failed], None, -1)? {
             if acting::has_due(&run) && state.inflight.lock().unwrap().insert(run.id.clone()) {
                 let guard = Inflight(host.clone(), run.id.clone());
                 let (host, id) = (host.clone(), run.id.clone());
-                tokio::spawn(async move {
+                tasks.push(tokio::spawn(async move {
                     let _guard = guard;
                     let _ = acting::execute(&host, &id, now).await;
-                });
+                }));
             }
         }
     }
@@ -239,7 +240,6 @@ pub(in crate::app) async fn tick(
     let mut runs = state.db.list(&driven, None, -1)?;
     // The oldest first: they take the free slots first.
     runs.reverse();
-    let mut tasks = Vec::new();
     for run in runs {
         if unrecovered.contains(&run.id) || !state.inflight.lock().unwrap().insert(run.id.clone()) {
             continue;

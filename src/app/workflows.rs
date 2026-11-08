@@ -30,8 +30,8 @@ pub(super) const METHODS: [&str; 8] = [
     "workflow_repositories",
 ];
 
-mod director;
 pub(super) mod acting;
+mod director;
 pub(super) mod engine;
 pub(super) mod record;
 pub(super) mod runs;
