@@ -18,6 +18,8 @@
   --c-overview: light-dark(#c5f25a, #bde85a); --c-messages: light-dark(#8ec5ff, #8cc0fb); --c-registration: light-dark(#ffae6b, #fba86a);
   --c-knowledge: light-dark(#bba4ff, #b39cff); --c-chat: light-dark(#ffa6d5, #fb9fcf); --c-settings: light-dark(#ffd95c, #f8d058);
   --c-todo: var(--ok-fill);
+  /* Workflows carry To-Do's items further: a mix of To-Do's and Messages' colors, in every palette. */
+  --c-workflows: color-mix(in srgb, var(--c-messages) 50%, var(--c-todo));
   /* States: a text color, a sticker fill and a soft fill for badges, tiles and callouts. Ink text sits on every fill. */
   --ok: light-dark(#136b42, #8fd9a8); --ok-fill: light-dark(#86e0aa, #7fd9a1); --ok-soft: light-dark(#d9f5e2, #1e3a2c);
   --warn: light-dark(#7a5200, #f3c969); --warn-fill: light-dark(#ffd95c, #f5cf55); --warn-soft: light-dark(#fff0b8, #3b3216);
@@ -103,6 +105,7 @@ nav button[aria-current="page"] { background: var(--inverse); color: var(--inver
 [data-tab="registration"], #registration { --tile: var(--c-registration); }
 [data-tab="knowledge"], #knowledge { --tile: var(--c-knowledge); }
 [data-tab="chat"], #chat { --tile: var(--c-chat); }
+[data-tab="workflows"], #workflows { --tile: var(--c-workflows); }
 [data-tab="settings"], #settings { --tile: var(--c-settings); }
 .nav-gap { display: block; height: 0; margin: .5rem .7rem; border-top: var(--bw) solid var(--rule); }
 .nav-settings { margin-top: auto; }
@@ -561,6 +564,8 @@ button.ref small { font-weight: 400; color: var(--muted); text-decoration: none;
 .offer.compact .actions { margin: 0; }
 .savebar { position: fixed; z-index: 5; left: calc(248px + 2.2rem); right: 2.2rem; bottom: 1.2rem; max-width: 1136px; display: flex; align-items: center; justify-content: space-between; gap: .6rem 1rem; flex-wrap: wrap; padding: .6rem .65rem .6rem 1.3rem; border: var(--bw) solid var(--line); border-radius: var(--radius-button); background: var(--inverse); color: var(--inverse-text); box-shadow: var(--shadow-float); font-family: var(--display); font-weight: var(--w-strong); animation: pop .16s ease-out; }
 .savebar .actions { margin: 0; }
+/* While the save bar floats, the page's end and anything scrolled into view stay above it. */
+:root:has(#savebar:not([hidden])) { scroll-padding-bottom: 6rem; }
 .savebar button { --lift: 0px; --rest: none; --raised: none; }
 .savebar button.secondary { background: transparent; color: var(--inverse-text); border-color: var(--inverse-text); }
 .savebar button:not(.secondary) { background: var(--primary); color: var(--on-primary); border-color: var(--primary); }
@@ -729,6 +734,8 @@ dialog p { overflow-wrap: anywhere; }
   nav button { width: auto; min-height: 2.75rem; padding: .25rem .7rem .25rem .25rem; gap: .45rem; white-space: nowrap; font-size: var(--fs-sm); }
   nav .tile { width: 1.95rem; height: 1.95rem; border-radius: min(var(--radius-tile), 10px); }
   .nav-gap { width: 0; height: 1.6rem; margin: auto .25rem; border-top: 0; border-left: var(--bw) solid var(--rule); }
+  /* Inside More, the gap between daily work and what feeds the answers is a line across. */
+  .nav-secondary .nav-gap { width: auto; height: 0; margin: .1rem .35rem; border-left: 0; border-top: var(--bw) solid var(--rule); }
   .nav-settings { margin-top: 0; padding-right: .25rem; }
   .nav-count { margin-left: 0; }
   /* Short labels and an icon-only Settings (named for assistive tech) keep the bar from scrolling. */
@@ -843,6 +850,8 @@ dialog p { overflow-wrap: anywhere; }
   .bubble { max-width: 95%; }
   .toast { top: calc(env(safe-area-inset-top) + .6rem); bottom: auto; left: .75rem; right: .75rem; max-width: none; }
   .savebar { left: .75rem; right: .75rem; bottom: calc(var(--tabbar) + .55rem); border-radius: min(var(--radius), 20px); padding: .6rem .6rem .6rem 1rem; }
+  :root:has(#savebar:not([hidden])) { scroll-padding-bottom: calc(var(--tabbar) + 5.5rem); }
+  body:has(#savebar:not([hidden])) main { padding-bottom: calc(var(--tabbar) + 6.5rem); }
   /* Activities read as a list, then one activity at a time. */
   #registration.editing .subnav, #registration.editing #activity-view-review > :not(#activity-editor) { display: none; }
   .step-title { gap: .65rem; }
@@ -1124,3 +1133,30 @@ body.directory-picker-open { overflow: hidden; }
 .agent-endpoint code { min-width: 0; font-size: var(--fs-md); }
 .agent-steps { margin: .5rem 0 0; padding-left: 1.2rem; font-size: var(--fs-md); }
 .agent-steps li { margin: .35rem 0; overflow-wrap: anywhere; }
+
+/* Workflows: rows with an enabled switch, the repositories with their checkouts, ordered blocks. */
+.workflow-switch { display: flex; align-items: center; gap: .5rem; margin: 0; font-size: var(--fs-sm); }
+.workflow-repos, .workflow-blocks { display: grid; gap: .5rem; margin: .25rem 0 .75rem; }
+.workflow-repo, .workflow-block { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: .35rem .75rem; padding: .6rem .75rem; border: 1.5px solid var(--rule); border-radius: var(--radius-card); background: var(--surface-2); }
+.workflow-repo > div:first-child, .workflow-block > div:first-child { display: grid; gap: .15rem; min-width: 0; }
+.workflow-repo code, .workflow-repo small, .workflow-block small { overflow-wrap: anywhere; min-width: 0; }
+.workflow-repo small, .workflow-block small { color: var(--muted); font-size: var(--fs-sm); }
+.workflow-repo .actions, .workflow-block .actions { margin: 0; flex-wrap: wrap; justify-content: flex-end; }
+.workflow-editor .field-block, .block-editor .field-block { margin-bottom: .75rem; }
+.workflow-editor .request-target, .block-editor .request-target { justify-content: flex-start; }
+.workflow-editor .check small, .block-editor .check small { display: block; color: var(--muted); font-size: var(--fs-sm); }
+@media (min-width: 681px) { .workflow-repo .actions, .workflow-block .actions { flex-wrap: nowrap; } }
+.workflow-add { display: flex; flex-wrap: wrap; align-items: flex-end; gap: .5rem; }
+.workflow-add label { flex: 1 1 14rem; margin: 0; }
+.counter { display: block; text-align: right; color: var(--muted); font-size: var(--fs-xs); font-variant-numeric: tabular-nums; }
+.counter.over { color: var(--error); }
+.placeholder-list { display: flex; flex-wrap: wrap; gap: .4rem; margin: 0 0 .75rem; }
+.block-confirm { display: grid; gap: .5rem; }
+.block-confirm pre { margin: 0; padding: .6rem .75rem; border: 1.5px solid var(--rule); border-radius: 12px; background: var(--surface); white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; }
+.workflow-ready { display: grid; grid-template-columns: minmax(0, 1fr); gap: .35rem; padding: .75rem 0; border-top: 1.5px solid var(--rule); }
+.list > .workflow-ready:first-child { border-top: 0; }
+.workflow-ready .choice-list { display: flex; flex-wrap: wrap; gap: 0 1.2rem; }
+@media (max-width: 680px) {
+  .workflow-repo, .workflow-block { grid-template-columns: minmax(0, 1fr); }
+  .workflow-repo .actions, .workflow-block .actions { justify-content: flex-start; }
+}

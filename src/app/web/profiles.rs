@@ -501,6 +501,8 @@ pub(super) const PORTAL_METHODS: &[&str] = &[
     "workflow_run_resume",
     "workflow_run_cancel",
     "workflow_run_assign",
+    // Read-only: the account's own chats, for choosing a workflow notification's chat.
+    "teams_chats",
     "list_azure_hus",
     "list_azure_tasks",
     "list_github_epics",

@@ -113,19 +113,19 @@ for (const [label, ctx] of [['desktop', {}], ['phone', { viewport: { width: 393,
 for (const [label, ctx] of [['desktop-light', {}], ['desktop-dark', { colorScheme: 'dark' }], ['phone', { viewport: { width: 393, height: 852 }, isMobile: true, hasTouch: true }]]) {
   const { context, page } = await open({ axe: true, context: ctx });
   await page.evaluate(axeSource);
-  for (const tab of ['overview', 'todo', 'agent-history', 'agent-guides', 'messages', 'registration', 'knowledge', 'chat', 'settings']) {
+  for (const tab of ['overview', 'todo', 'agent-history', 'agent-guides', 'messages', 'registration', 'workflows', 'knowledge', 'chat', 'settings']) {
     await page.evaluate(t => showTab(t), tab);
     await page.waitForTimeout(300);
     // Home's parts in order and the guides' editors are scanned open.
     if (tab === 'overview') await page.evaluate(() => { document.querySelector('#status-more').open = true; });
     if (tab === 'agent-guides') await page.evaluate(() => { for (const d of document.querySelectorAll('#agent-guides details')) d.open = true; });
     // Every tab of the section's tab list (Settings sections, Activities and Knowledge views) is scanned.
-    const list = { settings: '#settings-tabs', knowledge: '#knowledge-tabs' }[tab];
+    const list = { settings: '#settings-tabs', knowledge: '#knowledge-tabs', workflows: '#workflows-tabs' }[tab];
     const groups = list ? await page.$$eval(`${list} [role=tab]`, tabs => tabs.map(t => t.dataset.group)).catch(() => []) : [];
     for (const group of groups.length ? groups : [null]) {
       if (group) { await page.evaluate(([l, g]) => selectTab($(l), g), [list, group]); await page.waitForTimeout(250); }
       // Knowledge editors are scanned open.
-      if (tab === 'knowledge') await page.evaluate(() => { for (const d of document.querySelectorAll('#knowledge details')) d.open = true; });
+      if (tab === 'knowledge' || tab === 'workflows') await page.evaluate(t => { for (const d of document.querySelectorAll(`#${t} details`)) d.open = true; }, tab);
       const key = `${label}/${tab}${group ? ':' + group : ''}`;
       axeSummary[key] = await scan(page);
     }
@@ -172,7 +172,7 @@ check('axe: no WCAG 2.2 AA violations in any scan', !Object.keys(totals).length,
   const { context, page, errors } = await open();
   // Navigation order and Settings in the footer
   const order = await page.$$eval('nav [data-tab]', b => b.map(x => x.dataset.tab));
-  check('nav order: daily work first, Settings last', JSON.stringify(order) === JSON.stringify(['overview', 'todo', 'messages', 'registration', 'knowledge', 'chat', 'settings']), order.join(','));
+  check('nav order: daily work first, Settings last', JSON.stringify(order) === JSON.stringify(['overview', 'todo', 'messages', 'registration', 'workflows', 'knowledge', 'chat', 'settings']), order.join(','));
   await page.click('nav [data-tab="todo"]');
   await page.waitForTimeout(200);
   check('To-Do initially requests ten Azure HUs', await page.evaluate(() => window.__ptaLastTodo?.provider === 'azure' && window.__ptaLastTodo?.limit === 10) && await page.locator('.todo-item').count() === 10);
@@ -320,7 +320,7 @@ check('axe: no WCAG 2.2 AA violations in any scan', !Object.keys(totals).length,
   // Status row deep link to Settings › Microsoft Teams
   await page.click('nav [data-tab="overview"]');
   check('Home folds the parts in order into one line', !(await page.isVisible('#tiles')) && !(await page.isVisible('#tiles-fine .status-row'))
-    && (await page.textContent('#status-more-summary')).includes('Todo en orden: 9 partes'), await page.textContent('#status-more-summary'));
+    && (await page.textContent('#status-more-summary')).includes('Todo en orden: 10 partes'), await page.textContent('#status-more-summary'));
   await page.click('#status-more-summary');
   await page.click('#tiles-fine .status-row:nth-child(1)');
   await page.waitForTimeout(300);
@@ -578,7 +578,7 @@ check('axe: no WCAG 2.2 AA violations in any scan', !Object.keys(totals).length,
   await page.click('#save'); await page.waitForTimeout(300);
   check('a new guide is saved with its field', await page.evaluate(() => window.__ptaLastSave.map.work_item_guides.some(g => g.id === 'support' && g.type === 'Support' && g.provider === 'azure' && g.fields[0]?.reference === 'Custom.Kind')));
   const plan = page.locator('#agent-prompts > .resource').first();
-  check('agent instructions show the built-in prompts', await page.$$eval('#agent-prompts > .resource', rows => rows.length) === 3);
+  check('agent instructions show the built-in prompts, the director\'s included', await page.$$eval('#agent-prompts > .resource', rows => rows.length) === 4 && await page.locator('#agent-prompts [data-prompt="direct"]').count() === 1);
   await plan.locator('summary').click();
   await plan.locator('textarea').fill('Plan at most three children.');
   await page.click('#save'); await page.waitForTimeout(300);
@@ -849,9 +849,9 @@ check('axe: no WCAG 2.2 AA violations in any scan', !Object.keys(totals).length,
   await page.screenshot({ path: `${out}/phone-todo-detail.png`, fullPage: true });
   await page.click('#todo-back');
   await page.click('#nav-more');
-  check('phone: More reveals Knowledge and Test chat', await page.isVisible('nav [data-tab="knowledge"]') && await page.isVisible('nav [data-tab="chat"]'));
+  check('phone: More reveals Workflows, Knowledge and Test chat', await page.isVisible('nav [data-tab="workflows"]') && await page.isVisible('nav [data-tab="knowledge"]') && await page.isVisible('nav [data-tab="chat"]'));
   await page.keyboard.press('Tab');
-  check('phone: Tab enters the More disclosure in reading order', await page.evaluate(() => document.activeElement?.dataset.tab === 'knowledge'));
+  check('phone: Tab enters the More disclosure in reading order', await page.evaluate(() => document.activeElement?.dataset.tab === 'workflows'));
   await page.keyboard.press('Escape');
   check('phone: Escape closes More and restores focus', await page.getAttribute('#nav-more', 'aria-expanded') === 'false' && await page.evaluate(() => document.activeElement.id === 'nav-more'));
   await page.click('#nav-more');
@@ -2070,6 +2070,261 @@ for (const [label, viewport] of [['desktop', { width: 1440, height: 900 }], ['ph
   await page.waitForTimeout(300);
   check('portal account: no start-at-login control', await page.locator('#panel-service').isHidden());
   check('portal account: start at login has no browser errors', errors.length === 0, errors.join('; '));
+  await context.close();
+}
+// Workflows: navigation, the workflow and block editors with their sheets, Settings › Workflows,
+// Home's status row and axe scans, at desktop and phone widths (synthetic data).
+if (flag !== '--axe-only') for (const [label, viewport] of [['desktop', { width: 1280, height: 900 }], ['phone', { width: 393, height: 852 }]]) {
+  const phone = label === 'phone';
+  const { context, page, errors } = await open({ axe: true, context: { viewport, ...(phone ? { isMobile: true, hasTouch: true } : {}) } });
+  await page.evaluate(axeSource);
+  const calls = () => page.evaluate(() => window.__ptaWorkflowCalls);
+  const sheet = 'dialog.destination-picker';
+  if (phone) {
+    check('workflows phone: the floating bar keeps five destinations', await page.locator('nav > button:not(.nav-settings):visible').count() === 5, String(await page.locator('nav > button:not(.nav-settings):visible').count()));
+    check('workflows phone: Workflows waits under More', await page.locator('nav [data-tab="workflows"]').isHidden());
+    await page.click('#nav-more');
+    await page.click('nav [data-tab="workflows"]');
+    check('workflows phone: More opens the section and closes', await page.isVisible('#workflows') && await page.getAttribute('#nav-more', 'aria-expanded') === 'false'
+      && await page.getAttribute('#nav-more', 'aria-current') === 'page');
+  } else {
+    const order = await page.$$eval('nav button[data-tab]', buttons => buttons.map(b => b.dataset.tab));
+    check('workflows desktop: the sidebar lists Workflows after Activities, eight items', order.indexOf('workflows') === order.indexOf('registration') + 1 && order.length === 8, order.join(' '));
+    await page.click('nav [data-tab="workflows"]');
+  }
+  await page.waitForSelector('[data-workflow="payments-features"]');
+  check(`workflows ${label}: the section opens with the first view`, await page.getAttribute('#workflows-tab-list', 'aria-selected') === 'true' && await page.isVisible('#workflow-rows'));
+  check(`workflows ${label}: a row summarizes project, repositories, machine, agent and blocks`,
+    /Payments.*payments-api, payments-web.*Preview server.*Claude Code.*2 bloques/.test(await page.textContent('[data-workflow="payments-features"] .resource-facts small')));
+  // Every row's editor, open, passes axe.
+  await page.evaluate(() => { for (const d of document.querySelectorAll('#workflow-rows details')) d.open = true; });
+  await page.waitForTimeout(400);
+  check(`workflows ${label}: the list with its editors passes axe`, (await scan(page)).length === 0, JSON.stringify(await scan(page)));
+  check(`workflows ${label}: no free-text directory field`, await page.locator('#workflows input:not([type=checkbox]):not([type=search])').evaluateAll(inputs => inputs.every(i => !/dir|path|checkout/i.test(i.name + i.id + i.placeholder))));
+
+  // A new workflow: project, repositories, checkout on the machine, agent; saved and verified.
+  await page.click('#workflow-new');
+  const editor = page.locator('[data-workflow="new"] .workflow-editor');
+  await editor.locator('input').first().fill('Receipts worker');
+  check(`workflows ${label}: the ID follows the name`, await editor.locator('input').nth(1).inputValue() === 'receipts-worker');
+  await editor.locator('textarea').first().fill('Bugs of the receipts worker.');
+  const unchosen = await page.textContent('#workflow-project-new');
+  await page.click('#workflow-project-new');
+  await page.waitForSelector(sheet);
+  check(`workflows ${label}: the project sheet lists recent projects, then all`, await page.locator(`${sheet} h3`).count() === 2);
+  check(`workflows ${label}: the project sheet passes axe`, (await scan(page)).length === 0, JSON.stringify(await scan(page)));
+  await page.fill(`${sheet} input[type=search]`, 'recei');
+  check(`workflows ${label}: the project sheet filters by name`, await page.locator(`${sheet} .directory-picker-row`).count() === 1);
+  await page.keyboard.press('Escape');
+  const refocused = await page.waitForFunction(() => document.activeElement?.id === 'workflow-project-new' && !document.querySelector('dialog.destination-picker'), null, { timeout: 5000 }).then(() => true, () => false);
+  check(`workflows ${label}: Escape keeps the choice and returns focus`, refocused && await page.textContent('#workflow-project-new') === unchosen,
+    await page.evaluate(() => `${document.activeElement?.tagName}#${document.activeElement?.id} ${document.querySelectorAll('dialog').length} dialog(s)`));
+  await page.click('#workflow-project-new');
+  await page.fill(`${sheet} input[type=search]`, 'pay');
+  await page.locator(`${sheet} .directory-picker-row button`).first().click();
+  check(`workflows ${label}: choosing a project fills the field`, await page.textContent('#workflow-project-new') === 'Payments');
+  await editor.locator('button', { hasText: 'Elegir repositorios' }).click();
+  await page.waitForSelector(sheet);
+  check(`workflows ${label}: the repository sheet is a searchable multi-select`, await page.locator(`${sheet} input[type=checkbox]`).count() === 3 && await page.isVisible(`${sheet} input[type=search]`));
+  check(`workflows ${label}: the repository sheet passes axe`, (await scan(page)).length === 0, JSON.stringify(await scan(page)));
+  await page.locator(`${sheet} .directory-picker-row`, { hasText: 'receipts-worker' }).locator('input').check();
+  await page.locator(`${sheet} .directory-picker-footer button`).click();
+  check(`workflows ${label}: the chosen repository waits for its checkout`, await editor.locator('[data-repository] small', { hasText: 'Sin checkout elegido' }).count() === 1);
+  await editor.locator('[data-repository] button', { hasText: 'Elegir checkout' }).click();
+  await page.waitForSelector('dialog.directory-picker:not(.destination-picker) .directory-picker-row');
+  check(`workflows ${label}: the checkout opens the shared directory sheet on the machine`, await page.evaluate(() => window.__ptaCalls.includes('implementation_browse')));
+  await page.locator('dialog.directory-picker .directory-picker-row button', { hasText: '/work' }).first().click();
+  await page.locator('dialog.directory-picker .directory-picker-row', { hasText: '/work/application' }).locator('input').check();
+  await page.locator('dialog.directory-picker .directory-picker-footer button').click();
+  await editor.locator('button', { hasText: 'Crear workflow' }).click();
+  await page.waitForSelector('[data-workflow="receipts-worker"]');
+  const created = (await calls()).find(c => c.method === 'workflow_save' && c.workflow?.id === 'receipts-worker');
+  check(`workflows ${label}: creating saves project, repository, checkout and agent`, created && created.workflow.project === 'Payments' && created.workflow.organization === 'https://dev.azure.com/contoso'
+    && created.workflow.checkouts['a1a1a1a1-0000-4000-8000-000000000003'] === '/work/application' && created.workflow.agent.provider === 'codex' && created.workflow.agent.model && created.workflow.agent.effort,
+    JSON.stringify(created));
+  const saved = page.locator('[data-workflow="receipts-worker"]');
+  check(`workflows ${label}: the checkout reads as verified`, await saved.locator('[data-repository] .badge.ok').count() === 1);
+
+  // A checkout whose origin names another repository is refused next to it.
+  await saved.locator('[data-repository] button', { hasText: 'Cambiar checkout' }).click();
+  await page.waitForSelector('dialog.directory-picker:not(.destination-picker) .directory-picker-row');
+  await page.locator('dialog.directory-picker .directory-picker-row button', { hasText: '/work' }).first().click();
+  await page.locator('dialog.directory-picker .directory-picker-row', { hasText: '/work/documentation' }).locator('input').check();
+  await page.locator('dialog.directory-picker .directory-picker-footer button').click();
+  await saved.locator('button', { hasText: 'Guardar workflow' }).click();
+  await page.waitForTimeout(300);
+  check(`workflows ${label}: a mismatched checkout shows the host's reason next to it`, await saved.locator('[data-repository] .badge.error').count() === 1
+    && /names another repository/.test(await saved.locator('.workflow-editor > .callout.error').textContent()));
+  // Another machine that cannot answer: saved with a warning, the checkout not verified.
+  await saved.locator('.workflow-editor select').first().selectOption('22222222-2222-4222-8222-222222222222');
+  await saved.locator('[data-repository] button', { hasText: 'Elegir checkout' }).click();
+  await page.waitForSelector('dialog.directory-picker:not(.destination-picker) .directory-picker-row');
+  await page.locator('dialog.directory-picker .directory-picker-row button', { hasText: '/work' }).first().click();
+  await page.locator('dialog.directory-picker .directory-picker-row', { hasText: '/work/application' }).locator('input').check();
+  await page.locator('dialog.directory-picker .directory-picker-footer button').click();
+  await saved.locator('button', { hasText: 'Guardar workflow' }).click();
+  await page.waitForTimeout(400);
+  check(`workflows ${label}: an unverifiable checkout is saved with the host's warning`, await saved.locator('[data-repository] .badge.warn').count() === 1
+    && await saved.locator('.workflow-editor > .callout.warn').isVisible());
+
+  // Reorder blocks, disable with the switch, remove with a second tap.
+  const payments = page.locator('[data-workflow="payments-features"]');
+  await payments.locator('[data-block="base-branch"] button[data-move="1"]').click();
+  await payments.locator('button', { hasText: 'Guardar workflow' }).click();
+  await page.waitForTimeout(300);
+  const reordered = (await calls()).filter(c => c.method === 'workflow_save' && c.workflow?.id === 'payments-features').pop();
+  check(`workflows ${label}: blocks are reordered and saved in order`, reordered?.workflow.blocks.join() === 'notify-release,base-branch', JSON.stringify(reordered?.workflow?.blocks));
+  await payments.locator('input.switch').click();
+  await page.waitForTimeout(300);
+  check(`workflows ${label}: the switch disables a workflow and nothing else`, (await calls()).some(c => c.method === 'workflow_save' && c.id === 'payments-features' && c.enabled === false && !c.workflow));
+  await saved.locator('button', { hasText: 'Eliminar workflow' }).click();
+  check(`workflows ${label}: removing asks for a second tap`, !(await calls()).some(c => c.method === 'workflow_remove') && await saved.locator('button', { hasText: 'Toca de nuevo para eliminar' }).isVisible());
+  await saved.locator('button', { hasText: 'Toca de nuevo para eliminar' }).click();
+  await page.waitForTimeout(300);
+  check(`workflows ${label}: the workflow is removed with confirmation`, (await calls()).some(c => c.method === 'workflow_remove' && c.id === 'receipts-worker' && c.confirmed === true)
+    && await page.locator('[data-workflow="receipts-worker"]').count() === 0);
+
+  // Blocks: the library, a block in use cannot be removed, a notification confirms chat and text.
+  await page.click('#workflows-tab-blocks');
+  await page.evaluate(() => { for (const d of document.querySelectorAll('#block-rows details')) d.open = true; });
+  await page.waitForTimeout(400);
+  check(`blocks ${label}: rows say where each block is used`, /Payments features/.test(await page.textContent('[data-block="base-branch"] .resource-facts')));
+  check(`blocks ${label}: the library with its editors passes axe`, (await scan(page)).length === 0, JSON.stringify(await scan(page)));
+  const before = (await calls()).length;
+  await page.locator('[data-block="base-branch"] button', { hasText: 'Eliminar bloque' }).click();
+  check(`blocks ${label}: removing a block in use is refused with its workflows`, (await calls()).length === before
+    && /Payments features/.test(await page.locator('[data-block="base-branch"] .block-editor > .callout.error').textContent()));
+  await page.click('#block-new');
+  const block = page.locator('[data-block="new"] .block-editor');
+  await block.locator('select').first().selectOption('teams_notification');
+  await block.locator('input').first().fill('Tell the releases chat');
+  await page.click('#block-chat-new');
+  await page.waitForSelector(sheet);
+  check(`blocks ${label}: the chat sheet lists the personal chat and the user's chats`, await page.locator(`${sheet} .directory-picker-row`).count() === 5);
+  check(`blocks ${label}: the chat sheet passes axe`, (await scan(page)).length === 0, JSON.stringify(await scan(page)));
+  await page.fill(`${sheet} input[type=search]`, 'releases');
+  await page.locator(`${sheet} .directory-picker-row button`).first().click();
+  await block.locator('fieldset label', { hasText: 'Marta Ruiz' }).locator('input').check();
+  await block.locator('textarea').fill('Released: ');
+  await block.locator('.placeholder-list button', { hasText: '{link}' }).click();
+  await block.locator('button', { hasText: 'Revisar y guardar' }).click();
+  check(`blocks ${label}: a notification shows its chat and text before saving`, !(await calls()).some(c => c.method === 'workflow_block_save' && c.block.id === 'tell-the-releases-chat')
+    && /Releases.*Marta Ruiz/.test(await block.locator('.block-confirm').textContent()) && (await block.locator('.block-confirm pre').textContent()) === 'Released: {link}');
+  check(`blocks ${label}: the confirmation passes axe`, (await scan(page)).length === 0, JSON.stringify(await scan(page)));
+  await block.locator('button', { hasText: 'Confirmar y guardar' }).click();
+  await page.waitForSelector('[data-block="tell-the-releases-chat"]');
+  const notification = (await calls()).find(c => c.method === 'workflow_block_save' && c.block.id === 'tell-the-releases-chat');
+  check(`blocks ${label}: the notification is saved confirmed with its chat, mentions and template`, notification?.confirmed === true && notification.block.chat.id === '19:rel@thread.v2'
+    && notification.block.mentions.join() === 'Marta Ruiz' && notification.block.template === 'Released: {link}' && notification.block.stage === 'done' && !('text' in notification.block), JSON.stringify(notification));
+  // A chat named by its many members is cut to the host's limit, and the block is accepted.
+  await page.click('#block-new');
+  await block.locator('select').first().selectOption('teams_notification');
+  await block.locator('input').first().fill('Tell the crowd');
+  await page.click('#block-chat-new');
+  await page.waitForSelector(sheet);
+  await page.fill(`${sheet} input[type=search]`, 'Synthetic member 01');
+  await page.locator(`${sheet} .directory-picker-row button`).first().click();
+  const crowdName = await page.textContent('#block-chat-new');
+  check(`blocks ${label}: a long chat name is cut to at most 200 characters with an ellipsis`, [...crowdName].length <= 200 && [...crowdName].length > 190 && crowdName.endsWith('…'), String([...crowdName].length));
+  await block.locator('textarea').fill('Done: {item}');
+  await block.locator('button', { hasText: 'Revisar y guardar' }).click();
+  await block.locator('button', { hasText: 'Confirmar y guardar' }).click();
+  await page.waitForSelector('[data-block="tell-the-crowd"]');
+  check(`blocks ${label}: the block with the cut name is accepted`, (await calls()).some(c => c.method === 'workflow_block_save' && c.block.id === 'tell-the-crowd' && [...c.block.chat.name].length <= 200 && c.block.chat.name.endsWith('…')));
+  // A launcher block lists the coordinator's approved launchers, with program and digest.
+  await page.evaluate(() => invoke('variable_launcher_approve', { id: 'release-tool', digest: 'd'.repeat(64) }));
+  // Reading the section again (showTab reloads it) lists what changed.
+  await page.evaluate(() => showTab('workflows', 'workflows-blocks'));
+  await page.waitForTimeout(400);
+  await page.click('#block-new');
+  await block.locator('select').first().selectOption('launcher');
+  await block.locator('input').first().fill('Release in test');
+  await block.locator('select').nth(2).selectOption('release-tool');
+  check(`blocks ${label}: a launcher shows its program and digest`, /\/usr\/local\/bin\/release --fixed/.test(await block.locator('.facts').textContent()) && /d{64}/.test(await block.locator('.facts').textContent()));
+  await block.locator('button', { hasText: 'Revisar y guardar' }).click();
+  await block.locator('button', { hasText: 'Confirmar y guardar' }).click();
+  await page.waitForSelector('[data-block="release-in-test"]');
+  check(`blocks ${label}: the launcher block is saved confirmed`, (await calls()).some(c => c.method === 'workflow_block_save' && c.block.id === 'release-in-test' && c.confirmed && c.block.launcher.digest === 'd'.repeat(64)));
+  // Where launchers are not listed (another account's portal), the launcher editor says why.
+  await page.evaluate(() => { window.__ptaLaunchersHidden = true; });
+  // Reading the section again (showTab reloads it) lists what changed.
+  await page.evaluate(() => showTab('workflows', 'workflows-blocks'));
+  await page.waitForTimeout(400);
+  await page.click('#block-new');
+  check(`blocks ${label}: launcher blocks are offered only on an owner transport`, await block.locator('select').first().locator('option[value="launcher"]').evaluate(option => option.disabled)
+    && /página local/.test(await block.textContent()));
+  await page.evaluate(() => { window.__ptaLaunchersHidden = false; });
+  await block.locator('button', { hasText: 'Descartar' }).click();
+
+  // Settings › Workflows from the section's link: ready states, watcher, director.
+  await page.click('#workflows-tab-list');
+  await page.click('#workflows-settings');
+  await page.waitForSelector('#workflow-ready-states [data-project="Payments"]');
+  // The process's states arrive per project after the settings.
+  await page.waitForFunction(() => document.querySelectorAll('#workflow-ready-states [data-project="Exports"] input').length === 4).catch(() => {});
+  check(`workflow settings ${label}: the section's link opens the category`, await page.getAttribute('#settings-tab-workflows', 'aria-selected') === 'true' && await page.isVisible('#panel-workflow-ready'));
+  check(`workflow settings ${label}: ready states are the process's discovered states`, await page.locator('#workflow-ready-states [data-project="Payments"] input').count() === 5);
+  check(`workflow settings ${label}: the category passes axe`, (await scan(page)).length === 0, JSON.stringify(await scan(page)));
+  await page.locator('#workflow-ready-states [data-project="Exports"] label', { hasText: 'Approved' }).locator('input').check();
+  await page.fill('#workflow-interval', '10');
+  await page.selectOption('#workflow-director-model', 'claude-opus-5-5');
+  check(`workflow settings ${label}: edits show the save bar and flag the category`, await page.isVisible('#savebar') && await page.isVisible('#settings-tab-workflows .flag.edited'));
+  await page.click('#workflow-director-prompt');
+  check(`workflow settings ${label}: the director's prompt opens in Guides and instructions`, await page.isVisible('#agent-guides') && await page.locator('#agent-prompts [data-prompt="direct"] details').evaluate(d => d.open));
+  await page.evaluate(() => showTab('settings', 'panel-workflow-ready'));
+  await page.waitForTimeout(500);
+  check(`workflow settings ${label}: unsaved edits survive leaving the category and coming back`, await page.inputValue('#workflow-interval') === '10'
+    && await page.locator('#workflow-ready-states [data-project="Exports"] label', { hasText: 'Approved' }).locator('input').isChecked()
+    && await page.inputValue('#workflow-director-model') === 'claude-opus-5-5' && !(await calls()).some(c => c.method === 'workflow_settings_update'));
+  await page.fill('#workflow-concurrency', '9');
+  await page.click('#save');
+  await page.waitForTimeout(300);
+  check(`workflow settings ${label}: values out of range are refused before sending`, await page.isVisible('#workflow-settings-problem') && !(await calls()).some(c => c.method === 'workflow_settings_update'));
+  await page.fill('#workflow-concurrency', '3');
+  await page.click('#save');
+  await page.waitForTimeout(600);
+  const update = (await calls()).find(c => c.method === 'workflow_settings_update');
+  check(`workflow settings ${label}: the save bar saves only what changed: ready states, watcher and director`, update?.watch_interval_minutes === 10 && update.concurrency === 3
+    && !('pull_request_wait_days' in update) && JSON.stringify(update.ready_states) === '[{"organization":"https://dev.azure.com/contoso","project":"Exports","states":["Approved"]}]'
+    && update.director.model === 'claude-opus-5-5' && update.director.machine === '11111111-1111-4111-8111-111111111111', JSON.stringify(update));
+  check(`workflow settings ${label}: saving clears the save bar`, await page.isHidden('#savebar') && await page.isHidden('#settings-tab-workflows .flag.edited'));
+
+  // Home links to the ready states while an enabled workflow that starts by itself has none.
+  await page.evaluate(async () => {
+    window.__ptaWorkflowCalls.length = 0;
+    await invoke('workflow_settings_update', { ready_states: [{ project: 'Payments', states: [] }] });
+    await invoke('workflow_save', { id: 'payments-features', enabled: true });
+  });
+  await page.evaluate(() => showTab('settings', 'panel-workflow-ready'));
+  await page.waitForTimeout(400);
+  await page.evaluate(async () => { await refreshLive(); showTab('overview'); });
+  await page.waitForTimeout(300);
+  const tile = page.locator('#tiles .status-row', { hasText: 'Workflows' });
+  check(`workflows ${label}: Home warns about a missing ready state`, await tile.count() === 1 && /Payments/.test(await tile.textContent()));
+  await tile.click();
+  check(`workflows ${label}: Home's row opens Settings › Workflows`, await page.getAttribute('#settings-tab-workflows', 'aria-selected') === 'true');
+  check(`workflows ${label}: no page scrolls sideways`, await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+  check(`workflows ${label}: no client errors`, errors.length === 0, errors.join('; '));
+  await context.close();
+}
+// Home reads only the saved workflow settings: no machine catalog or process states.
+if (flag !== '--axe-only') {
+  const { context, page, errors } = await open();
+  await page.waitForTimeout(1200);
+  const homeCalls = await page.evaluate(() => ({ methods: window.__ptaCalls, workflow: window.__ptaWorkflowCalls }));
+  check('workflows Home: reads the saved workflow settings once and nothing heavier', homeCalls.methods.filter(m => m === 'workflow_settings').length === 1
+    && !homeCalls.workflow.some(c => c.method === 'workflow_settings' && c.project) && !homeCalls.methods.includes('implementation_catalog'), JSON.stringify(homeCalls.methods));
+  check('workflows Home: no client errors', errors.length === 0, errors.join('; '));
+  await context.close();
+}
+// A computer signed in to a coordinator reads workflows but changes them there.
+if (flag !== '--axe-only') {
+  const { context, page, errors } = await open();
+  await page.evaluate(() => { window.__ptaWorkflowsElsewhere = true; showTab('workflows'); });
+  await page.waitForSelector('[data-workflow="payments-features"]');
+  check('workflows elsewhere: rows without editors and a notice naming the coordinator', await page.isVisible('#workflows-notice') && await page.locator('#workflow-rows details').count() === 0
+    && await page.isHidden('#workflow-new') && await page.locator('#workflow-rows input.switch').count() === 0);
+  check('workflows elsewhere: no client errors', errors.length === 0, errors.join('; '));
   await context.close();
 }
 await browser.close();

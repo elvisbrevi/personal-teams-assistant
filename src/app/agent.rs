@@ -201,7 +201,8 @@ pub(super) const TOOLS: &[(&str, Remote)] = &[
     ("answer_draft", Offered),
     ("index_refresh", Offered),
     ("answer_send", Offered),
-    ("teams_chats", Denied(PORTAL)),
+    // The chat directory only: names and members, never a message.
+    ("teams_chats", Offered),
     ("teams_messages", Denied(PORTAL)),
     ("teams_search", Denied(PORTAL)),
     ("teams_post", Denied(PORTAL)),
@@ -227,6 +228,7 @@ pub(super) fn tool(name: &str) -> Remote {
 pub(super) const METHODS: &[&str] = &[
     "snapshot",
     "save_settings",
+    "teams_chats",
     "azure_cli_status",
     "github_cli_status",
     "implementation_request_catalog",

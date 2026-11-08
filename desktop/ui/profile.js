@@ -14,6 +14,7 @@ import { renderNoteContexts, renderRepositories, renderResources } from './knowl
 import { renderContexts, renderEntries, renderOrganization, renderPeople, renderQuestions } from './knowledge-map.js';
 import { renderAgentPrompts, renderGuides } from './guides.js';
 import { renderChatSources } from './chat.js';
+import { checkWorkflowSettings, discardWorkflowSettings, saveWorkflowSettings } from './settings-workflows.js';
 
 function profileKey(snapshot) { return JSON.stringify([snapshot.config, snapshot.map]); }
 
@@ -82,6 +83,7 @@ async function reload() {
   renderSavebar();
   renderLive();
   renderRepositories(); renderResources(); renderContexts(); renderQuestions(); renderPeople(); renderOrganization(); renderEntries(); renderGuides(); renderAgentPrompts(); renderNoteContexts(); renderChatSources();
+  discardWorkflowSettings();
   loadAzureCliStatus(); loadGithubCliStatus();
   await Promise.all([loadChain(), loadSelfChat()]);
 }
@@ -110,12 +112,15 @@ function collectSettings() {
   collectRegistrationSettings();
   collectEmbeddings();
   collectMessageStyle();
+  checkWorkflowSettings();
 }
 
 async function save() {
   if (!llmRows.some(row => row.enabled)) throw t('Turn on at least one language model.');
   collectSettings();
   await invoke('save_settings', { config: current.config, map: current.map, tunnelConfig: $('#tunnel-config').value.trim() });
+  // Settings › Workflows is saved by its own operation, after the profile it does not change.
+  await saveWorkflowSettings();
   await reload();
 }
 
