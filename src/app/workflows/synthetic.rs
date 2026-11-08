@@ -13,6 +13,10 @@ pub(in crate::app) struct Catalog {
     pulls: Mutex<BTreeMap<(String, String), Vec<PullRequest>>>,
     /// Every request, as `GET what`.
     pub requests: Mutex<Vec<String>>,
+    /// The items whose reads fail, as during an outage.
+    pub failing_items: Mutex<BTreeSet<u64>>,
+    /// Pull request reads fail.
+    pub failing_pulls: std::sync::atomic::AtomicBool,
 }
 
 pub(in crate::app) const ORGANIZATION: &str = "https://dev.azure.com/example";
@@ -76,6 +80,9 @@ impl Catalog {
             .lock()
             .unwrap()
             .push(format!("GET workitems/{id}"));
+        if self.failing_items.lock().unwrap().contains(&id) {
+            return Err("[network] Azure work items could not be read.".into());
+        }
         self.items
             .lock()
             .unwrap()
@@ -86,17 +93,25 @@ impl Catalog {
     pub(in crate::app) fn assigned(&self, id: u64) -> bool {
         self.assigned.lock().unwrap().contains(&id)
     }
-    pub(in crate::app) fn pull_requests(&self, repository: &str, branch: &str) -> Vec<PullRequest> {
+    pub(in crate::app) fn pull_requests(
+        &self,
+        repository: &str,
+        branch: &str,
+    ) -> Result<Vec<PullRequest>, String> {
         self.requests
             .lock()
             .unwrap()
             .push(format!("GET pullrequests {repository} refs/heads/{branch}"));
-        self.pulls
+        if self.failing_pulls.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err("[network] The project's pull requests could not be read.".into());
+        }
+        Ok(self
+            .pulls
             .lock()
             .unwrap()
             .get(&(repository.to_lowercase(), branch.to_owned()))
             .cloned()
-            .unwrap_or_default()
+            .unwrap_or_default())
     }
     /// Every request was a read.
     pub(in crate::app) fn only_reads(&self) -> bool {

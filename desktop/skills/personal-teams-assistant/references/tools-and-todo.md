@@ -472,19 +472,21 @@ run (any state but `done` and `cancelled`).
   `coding`, `pull_requests`, `blocks` (acting blocks are recorded as `not_run` in this version),
   `done`, `failed`, `cancelled`, `interrupted`, `needs_attention`. A coding run that ends
   `permission_prompt`, `failed`, `needs_attention` or `interrupted`, an abandoned pull request, a
-  session that reported no branch, an uncertain creation and a wait longer than
-  `pull_request_wait_days` stop the run in `needs_attention`, naming the cause and the linked run
+  session that reported no branch, an uncertain creation, a run that delivered no child and a
+  wait longer than `pull_request_wait_days` stop the run in `needs_attention`, naming the cause and the linked run
   or pull request. A restart while a planning or coding run was active leaves it `interrupted`.
 - **Resume:** `pta workflows resume RUN --confirmed` (MCP `workflow_run_resume`) continues a
   `failed`, `interrupted` or `needs_attention` run from the stage it stopped in, accepting what
   stopped it: a new planning run replaces one that did not end ready, the children that were
   created are coded, a child whose coding run did not end done is left as it ended and the next
   one is coded, an abandoned pull request no longer stops the run, and the pull-request wait starts
-  again. It never submits a plan again, never starts a coding run that was started, and writes
+  again; a run that delivered nothing ends done without pull requests. It never submits a plan again, never starts a coding run that was started, and writes
   nothing to Azure DevOps. Resume only after the user looked at the cause.
 - **Cancel:** `pta workflows cancel RUN --confirmed` (MCP `workflow_run_cancel`) cancels the active
   planning or coding run (its file changes stay) and the run advances no more; a creation already
-  being sent is not stopped.
+  being sent is not stopped. When the run's machine cannot be reached, the reply's `warning` names
+  the run and the machine: relay it, and cancel that run there with `implementation_cancel` once
+  the machine is reachable.
 
 The engine never merges, completes or changes a pull request or a work item; the coding agent
 opens the pull request as its instructions ask. A run uses the workflow as it was when the run got

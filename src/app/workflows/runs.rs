@@ -66,17 +66,24 @@ fn now() -> i64 {
 
 /// What a started run does, as the user confirms it.
 pub(in crate::app) const START_EFFECT: &str = "plan its children (read-only), wait for your review and confirmation of the plan (implementation_create), then code each created child, one after another, with full permissions on that computer and no further prompts, and wait for their pull requests to be completed (a task is coded directly, without a plan)";
-/// What starting a run does, as the user confirms it.
+/// What starting a run does, as the user confirms it: the workflow by its ID (with its machine
+/// and agent when the host knows them), or the director's choice.
 pub(in crate::app) fn describe_start(
-    workflow: Option<&crate::workflows::Workflow>,
+    workflow: Option<&str>,
+    place: Option<&crate::workflows::Workflow>,
     item: u64,
 ) -> String {
     let what = START_EFFECT;
+    let place = place
+        .map(|w| {
+            format!(
+                " on machine {} with {} {} {},",
+                w.machine, w.agent.provider, w.agent.model, w.agent.effort
+            )
+        })
+        .unwrap_or_default();
     match workflow {
-        Some(w) => format!(
-            "Start workflow {} for Azure work item {item}: on machine {} with {} {} {}, {what}",
-            w.id, w.machine, w.agent.provider, w.agent.model, w.agent.effort
-        ),
+        Some(id) => format!("Start workflow {id} for Azure work item {item}:{place} {what}"),
         None => format!(
             "Start a workflow run for Azure work item {item}: the workflow director chooses the workflow (or none, and the run waits for you to assign one); then, on that workflow's machine and agent, {what}"
         ),
@@ -178,7 +185,7 @@ async fn start(host: &Arc<Host>, args: StartArgs, azure: &Azure) -> Result<Value
     if !args.confirmed {
         return Err(invalid(format!(
             "Confirm with the user, then start with confirmed: true. {}.",
-            describe_start(named, args.id)
+            describe_start(named.map(|w| w.id.as_str()), named, args.id)
         )));
     }
     let detail = azure
@@ -336,23 +343,23 @@ async fn cancel(host: &Arc<Host>, args: RunArgs) -> Result<Value, String> {
     let mut cancelled = None;
     let mut warning = None;
     if let Some(active) = &active {
-        // Only a run still in flight is cancelled; one recorded but not yet confirmed as
-        // launched may be on the machine already. When the machine cannot be asked, a launched
-        // run is cancelled anyway (the call reports whether it reached it).
+        // Only a run still in flight is cancelled. When its machine cannot be asked, the run
+        // may be running there (even one whose launch was not confirmed yet): the cancellation
+        // is tried, and when it does not reach the machine the reply says where to cancel it.
         let present = match implementation::observe(host, &active.machine, &active.id).await {
             Ok(Some(observed)) => {
                 matches!(observed["state"].as_str(), Some("running" | "planning"))
             }
             Ok(None) => false,
-            Err(_) => active.started,
+            Err(_) => true,
         };
         if present {
             match implementation::cancel_run(host, &active.machine, &active.id).await {
                 Ok(()) => cancelled = Some(active.id.clone()),
                 Err(_) => {
                     warning = Some(format!(
-                        "Implementation run {} could not be cancelled on its machine (it may be offline); cancel it there with implementation_cancel.",
-                        active.id
+                        "Implementation run {} may still be running on machine {}, which could not be reached; once it is reachable, cancel it there with implementation_cancel (machine {}, id {}).",
+                        active.id, active.machine, active.machine, active.id
                     ))
                 }
             }
@@ -385,7 +392,7 @@ async fn assign(host: &Arc<Host>, args: AssignArgs) -> Result<Value, String> {
             "Confirm with the user, then assign with confirmed: true. Assign workflow {} to run {}: {}.",
             workflow.id,
             run.id,
-            describe_start(Some(workflow), run.item.id)
+            describe_start(Some(&workflow.id), Some(workflow), run.item.id)
         )));
     }
     engine::assign(

@@ -1599,7 +1599,7 @@ pub(super) const TOOLS: &[Tool] = &[
     Tool {
         name: "workflow_run_resume",
         title: "Resume a workflow run",
-        description: "Resumes a failed, interrupted or needs_attention workflow run from the stage it stopped in, accepting what stopped it: an interrupted or failed planning run is replaced by a new one (planning is read-only); an uncertain or incomplete creation continues with the children that were created; a coding run that did not end done is accepted as it ended and the next child is coded (a coding run recorded as started is never started again); an abandoned pull request, or a child without a branch, no longer stops the run, and the wait for pull requests starts again. No plan is ever submitted again and nothing is written to Azure DevOps.",
+        description: "Resumes a failed, interrupted or needs_attention workflow run from the stage it stopped in, accepting what stopped it: an interrupted or failed planning run, or one its machine no longer has, is replaced by a new one (planning is read-only); an uncertain or incomplete creation continues with the children that were created; a coding run that did not end done, or that its machine no longer has, is accepted as it ended and the next child is coded (a coding run recorded as started is never started again); an abandoned pull request, or a child without a branch, no longer stops the run, and the wait for pull requests starts again; a run that delivered no child ends done without pull requests. No plan is ever submitted again and nothing is written to Azure DevOps.",
         effect: Effect::External,
         schema: || {
             object(
@@ -2472,18 +2472,14 @@ pub(super) fn confirmation(name: &str, args: &Value) -> Option<String> {
                 _ => return None,
             }
         }
-        "workflow_run_start" => match args["workflow"].as_str() {
-            Some(workflow) => format!(
-                "Start workflow {workflow} for Azure work item {}: {}?",
-                args["id"],
-                super::workflows::runs::START_EFFECT
-            ),
-            None => format!(
-                "Start a workflow run for Azure work item {}, with the workflow the director chooses: {}?",
-                args["id"],
-                super::workflows::runs::START_EFFECT
-            ),
-        },
+        "workflow_run_start" => format!(
+            "{}?",
+            super::workflows::runs::describe_start(
+                args["workflow"].as_str(),
+                None,
+                args["id"].as_u64().unwrap_or_default()
+            )
+        ),
         "workflow_run_resume" => format!(
             "Resume workflow run {} from the stage it stopped in, accepting what stopped it (a started coding run is not started again and no plan is submitted again)?",
             args["run"].as_str().unwrap_or("this")

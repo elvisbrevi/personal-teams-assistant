@@ -268,6 +268,20 @@ pub(in crate::app) struct Run {
     /// the ones coded.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub creation_accepted: bool,
+    /// The person resumed a run that delivered no child: it ends done without pull requests.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub undelivered_accepted: bool,
+    /// Why it stopped, when a resume treats that cause on its own (`nothing_delivered`,
+    /// `ledger_parent`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cause: Option<String>,
+    /// While classifying: the director could not be reached; it is asked again from then on,
+    /// without a slot meanwhile.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_at: Option<i64>,
+    /// How many times in a row the director could not be reached (the wait doubles).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub retries: u32,
     /// It holds one of the `concurrency` slots.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub admitted: bool,
@@ -308,6 +322,10 @@ impl Run {
             attention: None,
             error: None,
             creation_accepted: false,
+            undelivered_accepted: false,
+            cause: None,
+            retry_at: None,
+            retries: 0,
             admitted: false,
             waiting_since: None,
             checked_at: None,
@@ -335,6 +353,9 @@ impl Run {
         self.state = next;
         self.stopped_in = None;
         self.attention = None;
+        self.cause = None;
+        self.retry_at = None;
+        self.retries = 0;
         if next.driven() || next == State::Unassigned {
             self.timeline.push(Stage {
                 stage: next,
@@ -366,6 +387,7 @@ impl Run {
         self.state = state;
         self.attention = Some(reason.clone());
         self.error = Some(reason);
+        self.cause = None;
         self.admitted = false;
         self.updated_at = now;
     }
@@ -417,6 +439,10 @@ impl Run {
             "finished_at": self.finished_at,
         })
     }
+}
+
+fn is_zero(value: &u32) -> bool {
+    *value == 0
 }
 
 pub(in crate::app) struct Store(std::sync::Mutex<Connection>);

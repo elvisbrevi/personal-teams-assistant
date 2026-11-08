@@ -34,6 +34,8 @@ pub(in crate::app) struct State {
     admission: Mutex<()>,
     advancing: AtomicUsize,
     recovered: AtomicBool,
+    /// The runs whose advance is running now, each in its own task.
+    inflight: std::sync::Mutex<std::collections::HashSet<String>>,
 }
 impl State {
     pub(in crate::app) fn new(profile: &Path) -> Result<Self> {
@@ -45,6 +47,7 @@ impl State {
             admission: Mutex::new(()),
             advancing: AtomicUsize::new(0),
             recovered: AtomicBool::new(false),
+            inflight: std::sync::Mutex::new(std::collections::HashSet::new()),
         })
     }
     /// The lock every change of one run holds: a step of the engine, a cancel, a resume.
@@ -59,6 +62,23 @@ impl State {
     /// Whether a run is advancing a stage now (the updater waits).
     pub(in crate::app) fn advancing(&self) -> bool {
         self.advancing.load(Ordering::SeqCst) > 0
+    }
+    /// Whether the look after a start found every active implementation run.
+    pub(in crate::app) fn recovered(&self) -> bool {
+        self.recovered.load(Ordering::SeqCst)
+    }
+}
+/// A run's advance in flight; dropped when its task ends.
+struct Inflight(Arc<Host>, String);
+impl Drop for Inflight {
+    fn drop(&mut self) {
+        self.0
+            .state
+            .workflows
+            .inflight
+            .lock()
+            .unwrap()
+            .remove(&self.1);
     }
 }
 struct Advancing<'a>(&'a AtomicUsize);
@@ -76,6 +96,7 @@ impl Drop for Advancing<'_> {
 
 /// Where the engine reads Azure DevOps: the enabled source with its read credential, or a
 /// test's synthetic catalog. Neither has a way to write.
+#[derive(Clone)]
 pub(in crate::app) enum Azure {
     Live,
     #[cfg(test)]
@@ -132,7 +153,7 @@ impl Azure {
                 .await
             }
             #[cfg(test)]
-            Self::Synthetic(catalog) => Ok(catalog.pull_requests(&repository.id, branch)),
+            Self::Synthetic(catalog) => catalog.pull_requests(&repository.id, branch),
         }
     }
 }
@@ -185,26 +206,51 @@ pub(in crate::app) async fn tick(
     if !may_run(&host.state) {
         return Ok(());
     }
-    if !state.recovered.swap(true, Ordering::SeqCst) {
-        recover(host).await?;
-    }
+    // Until every active implementation run has been looked at once, the runs whose run could
+    // not be asked wait: the normal step would read an interruption as an ending.
+    let unrecovered = if state.recovered() {
+        std::collections::HashSet::new()
+    } else {
+        let unrecovered = recover(host).await?;
+        if unrecovered.is_empty() {
+            state.recovered.store(true, Ordering::SeqCst);
+        }
+        unrecovered
+    };
     let driven: Vec<Phase> = Phase::ALL.into_iter().filter(|s| s.driven()).collect();
     let mut runs = state.db.list(&driven, None, -1)?;
     // The oldest first: they take the free slots first.
     runs.reverse();
-    let ids: Vec<String> = runs.into_iter().map(|r| r.id).collect();
-    let advances = ids.iter().map(|id| advance(host, azure, id, now, poll));
-    for result in futures_util::future::join_all(advances).await {
-        if result.is_err() {
-            tracing::warn!(event = "workflow_run_not_advanced");
+    let mut tasks = Vec::new();
+    for run in runs {
+        if unrecovered.contains(&run.id) || !state.inflight.lock().unwrap().insert(run.id.clone()) {
+            continue;
         }
+        // Each run in its own task: a slow step (a director session) never holds the others.
+        let guard = Inflight(host.clone(), run.id.clone());
+        let (host, azure, id) = (host.clone(), azure.clone(), run.id.clone());
+        tasks.push(tokio::spawn(async move {
+            let _guard = guard;
+            if advance(&host, &azure, &id, now, poll).await.is_err() {
+                tracing::warn!(event = "workflow_run_not_advanced");
+            }
+        }));
     }
+    // A tick waits for its steps at most until the next one; a run still advancing then is
+    // skipped by the next tick and keeps going on its own.
+    let _ = tokio::time::timeout(
+        std::time::Duration::from_secs(TICK_SECONDS),
+        futures_util::future::join_all(tasks),
+    )
+    .await;
     Ok(())
 }
 
 /// After a restart: a run whose active implementation run was interrupted is `interrupted`.
-async fn recover(host: &Arc<Host>) -> Result<()> {
+/// Returns the runs whose implementation run could not be asked (its machine is unreachable).
+async fn recover(host: &Arc<Host>) -> Result<std::collections::HashSet<String>> {
     let state = &host.state.workflows;
+    let mut unrecovered = std::collections::HashSet::new();
     for run in state.db.list(&[Phase::Planning, Phase::Coding], None, -1)? {
         let lock = state.lock(&run.id);
         let _guard = lock.lock().await;
@@ -214,9 +260,13 @@ async fn recover(host: &Arc<Host>) -> Result<()> {
         let Some(active) = run.active_implementation().cloned() else {
             continue;
         };
-        let Ok(Some(observed)) = implementation::observe(host, &active.machine, &active.id).await
-        else {
-            continue;
+        let observed = match implementation::observe(host, &active.machine, &active.id).await {
+            Ok(Some(observed)) => observed,
+            Ok(None) => continue,
+            Err(_) => {
+                unrecovered.insert(run.id.clone());
+                continue;
+            }
         };
         if observed["state"] == "interrupted" {
             set_observed(&mut run, "interrupted");
@@ -232,7 +282,7 @@ async fn recover(host: &Arc<Host>) -> Result<()> {
             state.db.save(&run)?;
         }
     }
-    Ok(())
+    Ok(unrecovered)
 }
 
 /// Record the observed state of the run's active implementation run.
@@ -282,6 +332,9 @@ async fn advance(host: &Arc<Host>, azure: &Azure, id: &str, now: i64, poll: i64)
             return Ok(());
         };
         if !run.state.driven() {
+            return Ok(());
+        }
+        if run.retry_at.is_some_and(|at| now < at) {
             return Ok(());
         }
         if run.state.takes_slot() && !run.admitted && !admit(host, &mut run).await? {
@@ -370,10 +423,14 @@ async fn classify(host: &Arc<Host>, azure: &Azure, run: Run, now: i64) -> Result
         // The director's machine is offline or the item could not be read: try again later.
         Err(error) if error.starts_with("[not_ready]") || error.starts_with("[network]") => {
             let note = error.split_once("] ").map_or(error.as_str(), |(_, t)| t);
-            if wait(&mut run, note.to_owned()).unwrap_or(false) {
-                run.updated_at = now;
-                state.db.save(&run)?;
-            }
+            run.error = Some(note.to_owned());
+            // Asked again later, one minute doubling up to half an hour, without a slot
+            // meanwhile, so an unreachable director never blocks other runs.
+            run.retries = run.retries.saturating_add(1);
+            run.retry_at = Some(now + (60i64 << run.retries.min(5).saturating_sub(1)).min(1800));
+            run.admitted = false;
+            run.updated_at = now;
+            state.db.save(&run)?;
             return Ok(false);
         }
         Err(error) => {
@@ -393,20 +450,32 @@ async fn classify(host: &Arc<Host>, azure: &Azure, run: Run, now: i64) -> Result
         "director": verdict["director"],
         "session": verdict["run"],
     }));
+    // Checked against the workflows as they are now: one removed or disabled during the
+    // session is not assigned.
+    let map = host.state.settings.map()?;
     let chosen = verdict["workflow"].as_str().and_then(|id| {
         let workflow = map.workflows.iter().find(|w| w.id == id && w.enabled)?;
         same_project(workflow, &run.item).then_some(workflow)
     });
     match chosen {
-        Some(workflow) => assign(
-            &mut run,
-            workflow,
-            &map.workflow_blocks,
-            now,
-            &format!("chosen: {}", workflow.id),
-        ),
+        Some(workflow) => {
+            run.error = None;
+            assign(
+                &mut run,
+                workflow,
+                &map.workflow_blocks,
+                now,
+                &format!("chosen: {}", workflow.id),
+            )
+        }
         None => {
-            let reason = verdict["reason"].as_str().unwrap_or("none").to_owned();
+            let reason = match verdict["workflow"].as_str() {
+                Some(id) => {
+                    format!("workflow {id} is no longer an enabled workflow of this project")
+                }
+                None => verdict["reason"].as_str().unwrap_or("none").to_owned(),
+            };
+            run.error = None;
             run.advance(Phase::Unassigned, now, "no workflow");
             run.attention = Some(format!(
                 "The workflow director chose no workflow ({reason}); assign one to this run."
@@ -448,7 +517,16 @@ async fn step(
                 return Ok(false);
             };
             if record["parent"] != run.item.url.as_str() {
-                return Err("The creation ledger names another parent.".into());
+                run.stop(
+                    Phase::NeedsAttention,
+                    now,
+                    format!(
+                        "The creation ledger entry of planning run {plan} names another parent than {}; cancel this run, or resume it to plan again with a new planning run.",
+                        run.item.url
+                    ),
+                );
+                run.cause = Some("ledger_parent".into());
+                return Ok(true);
             }
             run.ledger = Some(plan);
             run.advance(Phase::CreatingChildren, now, "confirmed");
@@ -617,7 +695,8 @@ async fn planning(
         Err(error) => return wait(run, error.to_string()),
     };
     let observed_state = observed["state"].as_str().unwrap_or_default().to_owned();
-    let changed = planned.state.as_deref() != Some(observed_state.as_str());
+    let changed = planned.state.as_deref() != Some(observed_state.as_str()) || run.error.is_some();
+    run.error = None;
     set_observed(run, &observed_state);
     match observed_state.as_str() {
         "planning" => Ok(changed),
@@ -772,15 +851,21 @@ pub(in crate::app) fn named_repository(
 /// `Branch:`, as a plain branch name.
 pub(in crate::app) fn reported_branch(output: &str) -> Option<String> {
     output.lines().rev().find_map(|line| {
-        let line = line
-            .trim()
-            .trim_matches(|c| c == '*' || c == '`' || c == '-')
-            .trim();
+        // A list marker or emphasis may open the line.
+        let line = line.trim_start_matches(|c: char| c.is_whitespace() || "-*>`".contains(c));
         let rest = line
             .get(..BRANCH.len())
             .filter(|p| p.eq_ignore_ascii_case(BRANCH))
             .map(|_| &line[BRANCH.len()..])?;
-        let branch = rest.trim_matches(|c: char| c.is_whitespace() || "`*\"".contains(c));
+        let rest = rest.trim_start_matches(|c: char| c.is_whitespace() || "*`\"'".contains(c));
+        let token = rest.split_whitespace().next()?;
+        // Only a remark may follow the name («(pushed)», «— with tests»), never more words.
+        let after = rest[token.len()..].trim_start();
+        if !(after.is_empty() || after.starts_with(['(', '-', '\u{2013}', '\u{2014}'])) {
+            return None;
+        }
+        // Sentence punctuation and quoting after the name; a trailing hyphen is the name's.
+        let branch = token.trim_end_matches(|c: char| ".,;:)`\"'*".contains(c));
         let branch = branch.strip_prefix("refs/heads/").unwrap_or(branch);
         crate::ado::workflow::valid_branch(branch).then(|| branch.to_owned())
     })
@@ -897,7 +982,8 @@ async fn coding(
         Err(error) => return wait(run, error.to_string()),
     };
     let observed_state = observed["state"].as_str().unwrap_or_default().to_owned();
-    let changed = coding.state.as_deref() != Some(observed_state.as_str());
+    let changed = coding.state.as_deref() != Some(observed_state.as_str()) || run.error.is_some();
+    run.error = None;
     set_observed(run, &observed_state);
     match observed_state.as_str() {
         "running" => Ok(changed),
@@ -985,11 +1071,15 @@ async fn pull_requests(
                 continue;
             }
             if let Err(error) = detect(host, azure, run, index).await {
-                return wait(run, error);
+                // A failed read waits for the poll interval too.
+                run.checked_at = Some(now);
+                run.error = Some(error);
+                return Ok(true);
             }
         }
         // Recorded on every read, so the next read waits for the poll interval.
         run.checked_at = Some(now);
+        run.error = None;
         changed = true;
     }
     let coded: Vec<&Child> = run
@@ -997,6 +1087,15 @@ async fn pull_requests(
         .iter()
         .filter(|c| c.outcome.as_deref() == Some("done"))
         .collect();
+    if coded.is_empty() && !run.undelivered_accepted {
+        let reason = format!(
+            "No child was delivered ({} children, none coded to done), so there is no pull request to wait for; cancel the run, or resume it to finish it as done without delivering anything.",
+            run.children.len()
+        );
+        run.stop(Phase::NeedsAttention, now, reason);
+        run.cause = Some("nothing_delivered".into());
+        return Ok(true);
+    }
     if let Some(pull) = coded
         .iter()
         .flat_map(|c| c.pull_requests.iter())
@@ -1018,11 +1117,12 @@ async fn pull_requests(
     });
     if settled {
         let count = coded.iter().map(|c| c.pull_requests.len()).sum::<usize>();
-        run.advance(
-            Phase::Blocks,
-            now,
-            &format!("completed: {count} pull requests"),
-        );
+        let outcome = if coded.is_empty() {
+            "accepted: nothing delivered".to_owned()
+        } else {
+            format!("completed: {count} pull requests")
+        };
+        run.advance(Phase::Blocks, now, &outcome);
         return Ok(true);
     }
     let days = host
@@ -1064,68 +1164,82 @@ async fn pull_requests(
 /// started again; a planning run that did not end ready is replaced by a new one (planning is
 /// read-only).
 pub(in crate::app) async fn resume(host: &Arc<Host>, run: &mut Run, now: i64) -> Result<Value> {
-    let stage = run
+    let mut stage = run
         .stopped_in
         .context("This run did not stop in a stage it can resume.")?;
     let mut accepted = Vec::new();
-    match stage {
-        Phase::Planning => {
-            if let Some(planned) = run.planning.clone() {
-                let observed = if planned.started {
-                    implementation::observe(host, &planned.machine, &planned.id)
-                        .await
-                        .ok()
-                        .flatten()
-                } else {
-                    None
-                };
-                let observed = observed
-                    .as_ref()
-                    .and_then(|o| o["state"].as_str())
-                    .map(str::to_owned)
-                    .or(planned.state.clone());
-                if planned.started
-                    && !matches!(observed.as_deref(), Some("planning" | "plan_ready"))
-                {
+    match (stage, run.cause.as_deref()) {
+        // The ledger entry names another parent: plan again, with a new planning run.
+        (_, Some("ledger_parent")) => {
+            if let Some(planned) = run.planning.take() {
+                accepted.push(json!({"planning_run": planned.id, "replaced": true}));
+            }
+            run.ledger = None;
+            stage = Phase::Planning;
+        }
+        // Nothing was delivered: the person accepts the run as done without pull requests.
+        (_, Some("nothing_delivered")) => {
+            run.undelivered_accepted = true;
+            accepted.push(json!({"nothing_delivered": true}));
+        }
+        (Phase::Planning, _) => {
+            if let Some(planned) = run.planning.clone()
+                && planned.started
+            {
+                // A planning run the machine no longer has, or one that did not end ready, is
+                // replaced (planning is read-only); one the machine cannot be asked about now
+                // is looked at again by the stage.
+                let replace =
+                    match implementation::observe(host, &planned.machine, &planned.id).await {
+                        Ok(Some(observed)) => {
+                            !matches!(observed["state"].as_str(), Some("planning" | "plan_ready"))
+                        }
+                        Ok(None) => true,
+                        Err(_) => !matches!(
+                            planned.state.as_deref(),
+                            None | Some("planning" | "plan_ready")
+                        ),
+                    };
+                if replace {
                     accepted.push(json!({"planning_run": planned.id, "replaced": true}));
                     run.planning = None;
                 }
             }
         }
-        Phase::CreatingChildren => {
+        (Phase::CreatingChildren, _) => {
             run.creation_accepted = true;
             accepted.push(json!({"creation": run.ledger}));
         }
-        Phase::Coding => {
+        (Phase::Coding, _) => {
             if let Some(index) = run.children.iter().position(|c| c.outcome.is_none())
                 && let Some(coding) = run.children[index].coding.clone()
                 && coding.started
             {
-                let observed = implementation::observe(host, &coding.machine, &coding.id)
-                    .await
-                    .ok()
-                    .flatten();
-                let state = observed
-                    .as_ref()
-                    .and_then(|o| o["state"].as_str())
-                    .map(str::to_owned)
-                    .or(coding.state.clone());
-                if state.as_deref() != Some("running") {
+                // A coding run is never started again: one that ended (or that its machine no
+                // longer has) is accepted as it ended, and the next child is coded.
+                let (ended, output) =
+                    match implementation::observe(host, &coding.machine, &coding.id).await {
+                        Ok(Some(observed)) => (
+                            observed["state"].as_str().map(str::to_owned),
+                            observed["output"].as_str().map(str::to_owned),
+                        ),
+                        Ok(None) => (Some("missing".to_owned()), None),
+                        Err(_) => (coding.state.clone(), None),
+                    };
+                if ended.as_deref() != Some("running") {
                     let child = &mut run.children[index];
                     child.outcome = Some("accepted".into());
                     child.finished_at = Some(now);
-                    child.branch = observed
-                        .as_ref()
-                        .and_then(|o| reported_branch(o["output"].as_str().unwrap_or_default()));
-                    if let (Some(c), Some(s)) = (child.coding.as_mut(), state.clone()) {
-                        c.state = Some(s);
+                    child.branch = output.as_deref().and_then(reported_branch);
+                    if let (Some(c), Some(ended)) = (child.coding.as_mut(), ended.clone()) {
+                        c.state = Some(ended);
                     }
                     accepted
-                        .push(json!({"child": child.url, "coding_run": coding.id, "ended": state}));
+                        .push(json!({"child": child.url, "coding_run": coding.id, "ended": ended}));
                 }
             }
         }
-        Phase::PullRequests => {
+        (Phase::PullRequests, _) => {
             for child in &mut run.children {
                 if child.outcome.as_deref() == Some("done") && child.branch.is_none() {
                     child.outcome = Some("accepted".into());
