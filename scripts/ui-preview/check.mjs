@@ -2327,6 +2327,123 @@ if (flag !== '--axe-only') {
   check('workflows elsewhere: no client errors', errors.length === 0, errors.join('; '));
   await context.close();
 }
+// Workflows, automatic starts and the Implement entry: Home lists the runs waiting on the user
+// once (with the item's link), Settings › Workflows shows the watcher and its last poll, and the
+// Implement form's Workflow select fills and locks what a workflow supplies (a named workflow, or
+// the director's choice shown before anything starts), at desktop and phone widths.
+for (const [label, viewport] of [['desktop', { width: 1280, height: 900 }], ['phone', { width: 393, height: 852 }]]) {
+  const { context, page, errors } = await open({ axe: true, context: { viewport } });
+  await page.evaluate(axeSource);
+  await page.waitForSelector('#workflow-attention .status-row');
+  check(`automatic starts ${label}: Home lists the runs waiting for you once, each with its item's link`, await page.locator('#workflow-attention .status-row').count() === 2
+    && await page.locator('#workflow-attention .ref', { hasText: '#5003' }).count() === 1 && await page.locator('#tiles .status-row', { hasText: '5003' }).count() === 0
+    && /Plan por revisar/.test(await page.locator('#workflow-attention').innerText()) && /Necesita un workflow/.test(await page.locator('#workflow-attention').innerText()));
+  check(`automatic starts ${label}: Home does not scroll sideways`, await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+  const home = await scan(page);
+  check(`automatic starts ${label}: Home passes WCAG 2.2 AA`, home.length === 0, JSON.stringify(home));
+  await page.screenshot({ path: `${out}/${label}-home-workflow-attention.png`, fullPage: true });
+  await page.click('#workflow-attention-open');
+  check(`automatic starts ${label}: the attention panel opens the Workflows section`, await page.isVisible('#workflows'));
+
+  // The watcher in Settings › Workflows.
+  await page.evaluate(() => { showTab('settings'); selectTab($('#settings-tabs'), 'workflows'); });
+  await page.waitForSelector('#workflow-watcher-state p');
+  const watching = await page.locator('#workflow-watcher-state').innerText();
+  check(`automatic starts ${label}: Settings shows the interval and the last poll`, /revisa cada 5 minutos/.test(watching) && /Última revisión a las .*: 1 ejecución iniciada/.test(watching), watching);
+  await page.evaluate(() => { window.__ptaWatcher = { state: 'idle', reason: '', interval_minutes: 5, last_poll: null, next_poll_at: null }; });
+  await page.click('#workflow-settings-refresh');
+  await page.waitForFunction(() => /inactiva/.test(document.querySelector('#workflow-watcher-state')?.textContent || ''));
+  await page.evaluate(() => { window.__ptaWatcher = { state: 'unavailable', reason: '', interval_minutes: 5, last_poll: null, next_poll_at: null }; });
+  await page.click('#workflow-settings-refresh');
+  await page.waitForFunction(() => /solo en tu coordinador/.test(document.querySelector('#workflow-watcher-state')?.textContent || ''));
+  await page.evaluate(() => { delete window.__ptaWatcher; });
+  const settings = await scan(page);
+  check(`automatic starts ${label}: Settings › Workflows passes WCAG 2.2 AA`, settings.length === 0, JSON.stringify(settings));
+  check(`automatic starts ${label}: Settings does not scroll sideways`, await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+  check(`automatic starts ${label}: no client errors`, errors.length === 0, errors.join('; '));
+  await context.close();
+}
+for (const [label, viewport] of [['desktop', { width: 1280, height: 900 }], ['phone', { width: 393, height: 852 }]]) {
+  const { context, page, errors } = await open({ axe: true, context: { viewport } });
+  await page.evaluate(axeSource);
+  const openForm = async () => {
+    await page.click('nav [data-tab="todo"]');
+    await page.locator('#todo-list button[aria-label="Implementar work item"]').first().click();
+    await page.waitForSelector('#implementation-provider option', { state: 'attached' });
+    await page.waitForFunction(() => !document.querySelector('#implementation-machine').disabled);
+  };
+  await openForm();
+  const values = await page.locator('#implementation-workflow option').evaluateAll(options => options.map(o => o.value));
+  check(`implement workflow ${label}: the select offers none, the director and the enabled workflows of the item's project`, JSON.stringify(values) === JSON.stringify(['none', 'director', 'payments-features']), JSON.stringify(values));
+  check(`implement workflow ${label}: none leaves the form as it was`, await page.locator('#implementation-machine').isEnabled() && await page.locator('#implementation-context').isEnabled());
+
+  // A named workflow fills and locks the machine, directories, agent, model and effort.
+  await page.selectOption('#implementation-workflow', 'payments-features');
+  await page.waitForFunction(() => !document.querySelector('#implementation-workflow-note').hidden);
+  const locked = await page.evaluate(() => ({
+    machine: [document.querySelector('#implementation-machine').value, document.querySelector('#implementation-machine').disabled],
+    provider: [document.querySelector('#implementation-provider').value, document.querySelector('#implementation-provider').disabled],
+    model: [document.querySelector('#implementation-model').value, document.querySelector('#implementation-model').disabled],
+    effort: [document.querySelector('#implementation-effort').value, document.querySelector('#implementation-effort').disabled],
+    context: document.querySelector('#implementation-context').disabled,
+    directories: [...document.querySelectorAll('.implementation-paths code')].map(c => c.textContent),
+    removable: document.querySelectorAll('.implementation-path button').length,
+    note: document.querySelector('#implementation-workflow-note').textContent,
+    start: document.querySelector('.implementation-footer button:last-child').disabled,
+  }));
+  check(`implement workflow ${label}: a workflow fills and locks machine, directories, agent, model and effort`, locked.machine[0] === '11111111-1111-4111-8111-111111111111' && locked.machine[1]
+    && locked.provider[0] === 'claude' && locked.provider[1] && locked.model[0] === 'claude-opus-5-5' && locked.model[1] && locked.effort[0] === 'high' && locked.effort[1] && locked.context
+    && JSON.stringify(locked.directories) === JSON.stringify(['/work/application', '/work/application/web']) && locked.removable === 0 && /Payments features/.test(locked.note) && !locked.start, JSON.stringify(locked));
+  check(`implement workflow ${label}: the directory chooser stays closed while locked`, await page.locator('#implementation-content fieldset button.secondary', { hasText: 'Elegir directorios' }).isDisabled());
+  const named = await scan(page);
+  check(`implement workflow ${label}: the locked form passes WCAG 2.2 AA`, named.length === 0, JSON.stringify(named));
+  await page.screenshot({ path: `${out}/${label}-implementation-workflow.png`, fullPage: true });
+  await page.locator('.implementation-footer button').last().click();
+  await page.waitForSelector('#implementation-workflow-started');
+  const sent = await page.evaluate(() => window.__ptaLastImplementation);
+  check(`implement workflow ${label}: Start sends the workflow and nothing the workflow supplies`, sent.workflow === 'payments-features' && !('machine' in sent) && !('directories' in sent) && !('provider' in sent) && !('context' in sent), JSON.stringify(sent));
+  check(`implement workflow ${label}: the started run's state is shown inline with a link to Workflows`, /Planificando/.test(await page.locator('#implementation-workflow-started').innerText())
+    && await page.locator('#implementation-workflow-started button', { hasText: 'Abrir Workflows' }).count() === 1);
+  await page.locator('#implementation-workflow-started button', { hasText: 'Refresh' }).or(page.locator('#implementation-workflow-started button', { hasText: 'Actualizar' })).first().click();
+  await page.waitForFunction(() => /Plan esperando tu revisión/.test(document.querySelector('#implementation-workflow-started')?.textContent || ''));
+  const started = await scan(page);
+  check(`implement workflow ${label}: the started run passes WCAG 2.2 AA`, started.length === 0, JSON.stringify(started));
+  await page.screenshot({ path: `${out}/${label}-implementation-workflow-started.png`, fullPage: true });
+  check(`implement workflow ${label}: no sideways scroll`, await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+  await page.locator('#implementation-workflow-started button', { hasText: 'Abrir Workflows' }).click();
+  check(`implement workflow ${label}: the link opens the Workflows section`, await page.isVisible('#workflows'));
+
+  // The director chooses: its choice and reason are shown before anything starts.
+  await openForm();
+  await page.selectOption('#implementation-workflow', 'director');
+  await page.waitForSelector('#implementation-workflow-choice');
+  const choice = await page.locator('#implementation-workflow-choice').innerText();
+  const asked = await page.evaluate(() => window.__ptaLastImplementation);
+  check(`implement workflow ${label}: the director's choice and reason are shown before any start`, asked.workflow === 'director' && /Payments features/.test(choice) && /checkout/.test(choice)
+    && await page.locator('#implementation-workflow-started').count() === 0, choice);
+  check(`implement workflow ${label}: the chosen workflow locks the form and Start waits for the person`, await page.locator('#implementation-machine').isDisabled()
+    && await page.locator('.implementation-paths code').count() === 2 && await page.locator('.implementation-footer button').last().isEnabled());
+  const chosen = await scan(page);
+  check(`implement workflow ${label}: the director's choice passes WCAG 2.2 AA`, chosen.length === 0, JSON.stringify(chosen));
+  await page.screenshot({ path: `${out}/${label}-implementation-workflow-director.png`, fullPage: true });
+  await page.locator('.implementation-footer button').last().click();
+  await page.waitForSelector('#implementation-workflow-started');
+  check(`implement workflow ${label}: confirming starts the chosen workflow`, (await page.evaluate(() => window.__ptaLastImplementation)).workflow === 'payments-features');
+
+  // A director that chooses none starts nothing and leaves the choice to the person.
+  await page.evaluate(() => { window.__ptaDirectorNone = true; });
+  await openForm();
+  await page.selectOption('#implementation-workflow', 'director');
+  await page.waitForSelector('#implementation-workflow-choice.warn');
+  check(`implement workflow ${label}: no workflow chosen leaves Start disabled and the reason shown`, await page.locator('.implementation-footer button').last().isDisabled()
+    && /Ningún workflow/.test(await page.locator('#implementation-workflow-choice').innerText()));
+  await page.selectOption('#implementation-workflow', 'none');
+  await page.waitForFunction(() => !document.querySelector('#implementation-machine').disabled);
+  check(`implement workflow ${label}: none unlocks the form again`, await page.locator('#implementation-context').isEnabled() && await page.locator('#implementation-workflow-choice').count() === 0);
+  await page.evaluate(() => { delete window.__ptaDirectorNone; });
+  check(`implement workflow ${label}: no client errors`, errors.length === 0, errors.join('; '));
+  await context.close();
+}
 await browser.close();
 fs.writeFileSync(`${out}/flows.json`, JSON.stringify(results, null, 1));
 const failed = results.filter(r => !r.ok).length;

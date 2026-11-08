@@ -85,10 +85,10 @@ pub(in crate::app) async fn start(
     if a.workflow == "director" {
         let mut choice = super::director::classify_for(
             host,
-            "azure",
+            azure,
             a.item.id,
-            Some(a.item.project.clone()),
-            a.item.source.clone(),
+            Some(&a.item.project),
+            a.item.source.as_deref(),
         )
         .await?;
         choice["started"] = json!(false);
@@ -107,3 +107,6 @@ pub(in crate::app) async fn start(
     .await?;
     Ok(json!({"workflow": a.workflow, "started": true, "run": started["run"]}))
 }
+
+#[cfg(all(test, unix))]
+mod tests;

@@ -104,7 +104,9 @@ impl Watcher {
         self.ledger
             .lock()
             .unwrap()
-            .query_row("SELECT COUNT(*) FROM workflow_seen", [], |r| r.get::<_, i64>(0))
+            .query_row("SELECT COUNT(*) FROM workflow_seen", [], |r| {
+                r.get::<_, i64>(0)
+            })
             .unwrap_or(0) as usize
     }
     /// The ledger rows of an item: `(state, changed_at)`.
@@ -140,7 +142,9 @@ pub(in crate::app) fn view(state: &DesktopState) -> Value {
     let (word, reason) = if !engine::may_run(state) {
         (
             "unavailable",
-            Some("Only the account owner's coordinator watches for ready items; a computer signed in to it and a shared portal account never do."),
+            Some(
+                "Only the account owner's coordinator watches for ready items; a computer signed in to it and a shared portal account never do.",
+            ),
         )
     } else if !settings.ready_states.iter().any(|r| !r.states.is_empty()) {
         (
@@ -208,7 +212,11 @@ pub(in crate::app) async fn poll(host: &Arc<Host>, azure: &Azure, now: i64) -> V
         .unwrap_or_default();
     let mut projects = Vec::new();
     let mut budget = MAX_STARTS;
-    for ready in settings.ready_states.iter().filter(|r| !r.states.is_empty()) {
+    for ready in settings
+        .ready_states
+        .iter()
+        .filter(|r| !r.states.is_empty())
+    {
         projects.push(project(host, azure, ready, &mut budget, now).await);
     }
     let partial = projects.iter().any(|p| p["complete"] != true);
@@ -311,7 +319,9 @@ async fn project(
                     continue;
                 }
                 Err(_) => {
-                    found.errors.push(format!("{}: the seen ledger could not be written", item.id));
+                    found
+                        .errors
+                        .push(format!("{}: the seen ledger could not be written", item.id));
                     found.complete = false;
                     continue;
                 }
@@ -330,7 +340,9 @@ async fn project(
                     found.started += 1;
                 }
                 // Azure could not be reached or the engine is not ready: not seen yet.
-                Err(error) if error.starts_with("[network]") || error.starts_with("[not_ready]") => {
+                Err(error)
+                    if error.starts_with("[network]") || error.starts_with("[not_ready]") =>
+                {
                     let _ = watcher.forget(&item.url, ready_state);
                     let note = error.split_once("] ").map_or(error.as_str(), |(_, t)| t);
                     found.errors.push(format!("{}: {note}", item.id));
@@ -385,3 +397,6 @@ pub(in crate::app) async fn schedule(host: Arc<Host>) {
         tokio::time::sleep(std::time::Duration::from_secs(TICK_SECONDS)).await;
     }
 }
+
+#[cfg(all(test, unix))]
+mod tests;

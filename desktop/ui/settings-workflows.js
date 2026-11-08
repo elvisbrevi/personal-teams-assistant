@@ -2,7 +2,7 @@
 // advance at once, the pull-request wait and the workflow director (`workflow_settings`,
 // `workflow_settings_update`). Its edits are unsaved Settings edits like any other category's:
 // the save bar saves them (`saveWorkflowSettings`) after the profile, and Discard drops them.
-import { t, tx } from './i18n.js';
+import { t, tn, tx, uiLocale } from './i18n.js';
 import { invoke } from './control.js';
 import { $, el } from './dom.js';
 import { live } from './state.js';
@@ -138,7 +138,35 @@ function renderWorkflowSettings({ director = true } = {}) {
     input.disabled = !editable;
     input.oninput = () => { form[field] = Number(input.value); edited(); };
   }
+  renderWatcher(workflowSettings.watcher);
   if (director) renderDirector(editable);
+}
+
+/** What the watcher on this computer is doing and its last poll since the host started. */
+function renderWatcher(watcher) {
+  const box = $('#workflow-watcher-state');
+  if (!watcher) { box.hidden = true; return; }
+  const when = seconds => new Date(seconds * 1000).toLocaleTimeString(uiLocale(), { timeStyle: 'short' });
+  const lines = [];
+  if (watcher.state === 'unavailable') lines.push(t('The watcher runs only on your coordinator: this computer, a computer signed in to it and a shared account never start runs by themselves.'));
+  else if (watcher.state === 'idle') lines.push(t('The watcher is idle: choose a ready state for a project to start it.'));
+  else lines.push(t('The watcher checks every {n} minutes.', { n: watcher.interval_minutes }));
+  const poll = watcher.last_poll;
+  if (watcher.state === 'watching') {
+    if (!poll) lines.push(t('No check yet since the host started.'));
+    else {
+      lines.push(poll.started
+        ? tn(poll.started, 'Last check at {time}: 1 run started.', 'Last check at {time}: {n} runs started.', { time: when(poll.at) })
+        : t('Last check at {time}: nothing new.', { time: when(poll.at) }));
+      if (poll.partial) lines.push(t('Part of what it reads was not covered in that check; it continues at the next one.'));
+      for (const project of poll.projects ?? []) {
+        if (project.skipped) lines.push(`${project.project}: ${tx(project.skipped)}`);
+        for (const error of project.errors ?? []) lines.push(`${project.project}: ${tx(error)}`);
+      }
+    }
+  }
+  box.hidden = false;
+  box.replaceChildren(...lines.map(text => el('p', { class: 'hint', textContent: text })));
 }
 
 function renderDirector(editable) {

@@ -161,6 +161,7 @@ $('#restart').onclick = () => busy($('#restart'), async () => {
 });
 $('#stop').onclick = () => busy($('#stop'), async () => { await invoke('stop_assistant'); await refreshLive(); done(t('Assistant stopped.')); });
 $('#activity-all').onclick = () => showTab('messages');
+$('#workflow-attention-open').onclick = () => showTab('workflows');
 $('#activity-notice-open').onclick = () => busy($('#activity-notice-open'), () => invoke('activity_open'));
 $('#activity-settings').onclick = () => showTab('settings', 'panel-registration');
 $('#activity-refresh').onclick = () => busy($('#activity-refresh'), loadRegistration);

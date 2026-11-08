@@ -1018,20 +1018,12 @@ pub(super) const TOOLS: &[Tool] = &[
     Tool {
         name: "implementation_start",
         title: "Start work item implementation",
-        description: "HU/bug/Epic: propose children for review. Task/development bug/issue: run the selected coding agent in the selected directories, fully autonomous with full permissions on that computer: it never asks or waits and finishes the request, including branch, commits, push, pull request and tests when asked. Never changes work items, sends Teams messages, merges, publishes or deploys.",
+        description: "HU/bug/Epic: propose children for review. Task/development bug/issue: run the selected coding agent in the selected directories, fully autonomous with full permissions on that computer: it never asks or waits and finishes the request, including branch, commits, push, pull request and tests when asked. Never changes work items, sends Teams messages, merges, publishes or deploys. With workflow (an Azure item only; omit the machine, directories, provider, model, effort and context, which the workflow supplies): a workflow ID starts a workflow run on the coordinator (it plans an HU or bug read-only, waits for the user's review of the plan, then codes each created child one after another with full permissions on the workflow's machine; see workflow_runs); director asks the workflow director and returns its choice and reason (workflow, outcome, reason, candidates) WITHOUT starting anything, so show it to the user and call again with the chosen workflow ID; none (the default) is the plain run described above.",
         effect: Effect::External,
         schema: || {
             object(
-                json!({"machine":string("Machine ID."),"item":implementation_item(),"context":string("The user's implementation context."),"directories":strings("Selected absolute working directories."),"provider":{"type":"string","enum":["codex","claude","opencode"]},"model":string("Available model ID."),"effort":string("Supported model effort."),"confirmed":confirmed()}),
-                &[
-                    "machine",
-                    "item",
-                    "context",
-                    "directories",
-                    "provider",
-                    "model",
-                    "effort",
-                ],
+                json!({"machine":string("Machine ID."),"item":implementation_item(),"context":string("The user's implementation context."),"directories":strings("Selected absolute working directories."),"provider":{"type":"string","enum":["codex","claude","opencode"]},"model":string("Available model ID."),"effort":string("Supported model effort."),"workflow":string("none (default), director, or a workflow ID of the item's project (Azure items). With a workflow or director, omit machine, directories, provider, model, effort and context."),"confirmed":confirmed()}),
+                &["item"],
             )
         },
     },
@@ -1532,7 +1524,7 @@ pub(super) const TOOLS: &[Tool] = &[
     Tool {
         name: "workflow_settings",
         title: "Workflow settings",
-        description: "The workflow settings: ready_states per organization and project (the workflow states that mean ready to develop), watch_interval_minutes (default 5), concurrency (default 2), pull_request_wait_days (default 7) and the workflow director {machine, provider, model, effort}, with the defaults, the bounds and whether this computer is the coordinator where they change (editable). With project (and organization or source when needed), also process_states: the states that project's process has for its requirement, bug and listed task types, which ready states are chosen from.",
+        description: "The workflow settings: ready_states per organization and project (the workflow states that mean ready to develop), watch_interval_minutes (default 5), concurrency (default 2), pull_request_wait_days (default 7) and the workflow director {machine, provider, model, effort}, with the defaults, the bounds and whether this computer is the coordinator where they change (editable). watcher: the ready-state watcher on this computer (state watching, idle while no ready state is configured, or unavailable on a computer signed in to a coordinator and for a shared portal account; the interval; the last poll since the host started: items read, runs started, projects covered fully or partially, errors; and the next poll). The watcher lists the HUs, bugs and listed tasks assigned to the user in the ready states (read credential only, at most 100 items per project and 25 new runs per poll) and starts a run with the workflow director choosing among the enabled workflows of the project that start by themselves (auto_start); a run stops at plan_review, and nothing is created before the user confirms the plan. With project (and organization or source when needed), also process_states: the states that project's process has for its requirement, bug and listed task types, which ready states are chosen from.",
         effect: Effect::Read,
         schema: || {
             object(
@@ -2438,10 +2430,20 @@ pub(super) fn confirmation(name: &str, args: &Value) -> Option<String> {
             "Generate and create one {} in {} using the supplied context and selected agent?",
             args["kind"], args["target"]["project"]
         ),
-        "implementation_start" => format!(
-            "Start the selected coding agent for item {} on machine {} in the selected directories, with full permissions on that computer and no further prompts?",
-            args["item"]["id"], args["machine"]
-        ),
+        "implementation_start" => match args["workflow"].as_str() {
+            Some("director") => format!(
+                "Ask the workflow director which workflow fits item {}? Nothing starts: you review its choice first.",
+                args["item"]["id"]
+            ),
+            Some(workflow) if workflow != "none" => format!(
+                "Start workflow {workflow} for item {}: it plans on the workflow's computer (read-only), waits for your review of the plan, then codes each created child with full permissions on that computer and no further prompts?",
+                args["item"]["id"]
+            ),
+            _ => format!(
+                "Start the selected coding agent for item {} on machine {} in the selected directories, with full permissions on that computer and no further prompts?",
+                args["item"]["id"], args["machine"]
+            ),
+        },
         "implementation_create" => {
             "Create the reviewed children of this implementation plan in Azure DevOps or GitHub?"
                 .into()

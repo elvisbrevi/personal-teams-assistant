@@ -153,8 +153,12 @@ impl Catalog {
             })
             .map(|d| d.item.clone())
             .collect();
-        items.sort_by(|a, b| b.id.cmp(&a.id));
-        let limit = self.list_cap.lock().unwrap().map_or(limit, |c| c.min(limit));
+        items.sort_by_key(|a| std::cmp::Reverse(a.id));
+        let limit = self
+            .list_cap
+            .lock()
+            .unwrap()
+            .map_or(limit, |c| c.min(limit));
         let has_more = items.len() > limit;
         items.truncate(limit);
         Ok(crate::tools::todo::List {

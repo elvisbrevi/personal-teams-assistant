@@ -159,6 +159,10 @@
             <p id="account-setup-next" class="callout info" role="status" hidden></p>
             <ol id="account-setup-steps" class="steps" aria-live="polite"></ol>
           </div>
+          <div class="panel" id="workflow-attention-panel" hidden>
+            <div class="panel-head"><h2>Workflow runs waiting for you</h2><button id="workflow-attention-open" type="button" class="link-button">Open Workflows<svg class="icon"><use href="#i-arrow"/></svg></button></div>
+            <div id="workflow-attention" class="status-list" aria-live="polite"></div>
+          </div>
           <div class="panel" id="setup-panel">
             <div class="panel-head"><h2>Setup</h2><span id="setup-progress" class="hint"></span></div>
             <div class="progress" aria-hidden="true"><span id="setup-bar"></span></div>
@@ -501,6 +505,7 @@
               <label>Runs at once <small>From 1 to 4; the others wait their turn.</small><input id="workflow-concurrency" type="number" min="1" max="4" step="1" inputmode="numeric"></label>
               <label>Pull-request wait (days) <small>How long a run waits for its pull requests before it goes on.</small><input id="workflow-pr-wait" type="number" min="1" max="60" step="1" inputmode="numeric"></label>
             </div>
+            <div id="workflow-watcher-state" role="status" aria-live="polite" hidden></div>
           </div>
           <div class="panel" id="panel-workflow-director">
             <h2>Workflow director</h2>

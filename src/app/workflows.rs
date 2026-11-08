@@ -35,9 +35,9 @@ pub(super) mod engine;
 pub(super) mod implement;
 pub(super) mod record;
 pub(super) mod runs;
-pub(super) mod watcher;
 #[cfg(test)]
 pub(super) mod synthetic;
+pub(super) mod watcher;
 
 pub(super) fn handles(method: &str) -> bool {
     METHODS.contains(&method)

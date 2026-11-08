@@ -571,25 +571,31 @@ async fn classify(host: &Arc<Host>, args: ClassifyArgs) -> Result<Value, String>
     classify_item(host, &director, &detail, false).await
 }
 
-/// The dry-run classification of an item (the Implement entry): the director's choice among the
-/// enabled workflows of its project, and nothing else.
+/// The dry-run classification of an item (the Implement entry): the director's choice among
+/// the enabled workflows of its project, and nothing else.
 pub(super) async fn classify_for(
     host: &Arc<Host>,
-    provider: &str,
+    azure: &super::engine::Azure,
     id: u64,
-    project: Option<String>,
-    source: Option<String>,
+    project: Option<&str>,
+    source: Option<&str>,
 ) -> Result<Value, String> {
-    classify(
-        host,
-        ClassifyArgs {
-            provider: provider.to_owned(),
-            id,
-            project,
-            source,
-        },
-    )
-    .await
+    let state = &host.state;
+    require_coordinator(state)?;
+    let director = state
+        .settings
+        .map()
+        .map_err(fail)?
+        .workflow_settings
+        .director
+        .ok_or_else(|| {
+            "[not_ready] Choose the workflow director first (pta workflows settings --set director.machine ID --set director.provider P --set director.model M --set director.effort E).".to_owned()
+        })?;
+    let read = azure.item(state, source, project, id);
+    let detail = tokio::time::timeout(std::time::Duration::from_secs(ITEM_SECONDS), read)
+        .await
+        .map_err(|_| "[network] The work item could not be read in time.".to_owned())??;
+    classify_item(host, &director, &detail, false).await
 }
 
 /// Classify an item already read: ask the director on its machine and check its answer. With

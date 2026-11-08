@@ -6,7 +6,7 @@ import { $, el, icon, sleep } from './dom.js';
 import { current, live, tab } from './state.js';
 import { busy, done, fail } from './notices.js';
 import { renderSettingsFlags, showTab } from './nav.js';
-import { copy } from './markdown.js';
+import { copy, link } from './markdown.js';
 import { startAssistant } from './profile.js';
 import { ensureWorkflowSettings, projectsWithoutReadyState } from './settings-workflows.js';
 
@@ -197,6 +197,25 @@ function workflowTiles(s) {
     missing ? t('Every project that starts by itself has a ready state') : t('Ready states not read yet'), ['workflows'], 'flow')];
 }
 
+/** The runs that wait on the user, one row each with the item's verified link; Workflows opens them. */
+const RUN_WAITS = {
+  plan_review: () => t('Plan to review'),
+  unassigned: () => t('Needs a workflow'),
+  needs_attention: () => t('Needs attention'),
+  interrupted: () => t('Interrupted'),
+  failed: () => t('Failed'),
+};
+function renderWorkflowAttention(s) {
+  const runs = s.workflow_attention ?? [];
+  $('#workflow-attention-panel').hidden = !runs.length;
+  $('#workflow-attention').replaceChildren(...runs.map(run => el('div', { class: 'status-row warn', 'data-run': run.id },
+    el('span', { class: 'status-icon', 'aria-hidden': 'true' }, icon('flow')),
+    el('span', { class: 'status-value' }, el('span', { class: 'status-label', textContent: (RUN_WAITS[run.state] ?? (() => tx(run.state)))() }),
+      el('strong', { textContent: run.item.title }),
+      ...(run.attention ? [el('small', { textContent: tx(run.attention).slice(0, 240) })] : [])),
+    link(`#${run.item.id}`, run.item.url))));
+}
+
 function renderTiles(s) {
   const config = s.config;
   const chain = enabledChain(config);
@@ -227,6 +246,7 @@ function renderTiles(s) {
   const fine = rows.filter(row => !attention.includes(row));
   $('#tiles').replaceChildren(...attention);
   $('#tiles').hidden = !attention.length;
+  renderWorkflowAttention(s);
   $('#tiles-fine').replaceChildren(...fine);
   $('#status-more').hidden = !fine.length;
   $('#status-more-summary').textContent = attention.length

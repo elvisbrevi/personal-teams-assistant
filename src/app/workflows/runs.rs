@@ -451,4 +451,4 @@ pub(in crate::app) fn has_active(state: &DesktopState, workflow: &str) -> Result
 }
 
 #[cfg(all(test, unix))]
-mod tests;
+pub(super) mod tests;
