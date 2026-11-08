@@ -1844,6 +1844,7 @@ mod tests {
                 director::Ask {
                     machine: &director.machine,
                     director: &director,
+                    task: crate::llm::implementation::DirectTask::Classify,
                     instructions: "Choose.",
                     input: "{}".into(),
                     item: &item,
