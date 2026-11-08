@@ -620,6 +620,20 @@ pub(super) async fn operate(
     method: &str,
     args: &Value,
 ) -> std::result::Result<Value, String> {
+    // The Implement form's workflow choice: a workflow ID or the director starts or classifies
+    // through the workflow engine; `none` is the plain run below.
+    if method == "implementation_start" && workflows::implement::choice(args).is_some() {
+        let mut request = control::Request::new(method);
+        request.args = args.clone();
+        authority::authorize(&host.state, &request).map_err(|e| format!("[invalid_input] {e}"))?;
+        return workflows::implement::start(host, args, &workflows::engine::Azure::Live).await;
+    }
+    let plain = if method == "implementation_start" {
+        workflows::implement::plain(args)
+    } else {
+        args.clone()
+    };
+    let args = &plain;
     operation(host, method, args).await.map_err(|error| {
         if error.downcast_ref::<reqwest::Error>().is_some() { return "[network] The execution machine or provider could not be reached. Inspect its runs before trying again.".into(); }
         let redactor=security::Redactor::new(&[],Vec::new()).expect("built-in redaction patterns");

@@ -125,6 +125,7 @@ async fn show(host: &Arc<Host>, args: ShowArgs) -> Result<Value, String> {
         "defaults": view(&Settings::default()),
         "bounds": bounds(),
         "editable": editable(state)?,
+        "watcher": super::watcher::view(state),
     });
     if let Some(project) = &args.project {
         reply["process_states"] = tools::todo::process_states(
@@ -567,21 +568,46 @@ async fn classify(host: &Arc<Host>, args: ClassifyArgs) -> Result<Value, String>
             "[not_ready] Choose the workflow director first (pta workflows settings --set director.machine ID --set director.provider P --set director.model M --set director.effort E).".to_owned()
         })?;
     let detail = read_item(state, &args).await?;
-    classify_item(host, &director, &detail).await
+    classify_item(host, &director, &detail, false).await
 }
 
-/// Classify an item already read: ask the director on its machine and check its answer.
+/// The dry-run classification of an item (the Implement entry): the director's choice among the
+/// enabled workflows of its project, and nothing else.
+pub(super) async fn classify_for(
+    host: &Arc<Host>,
+    provider: &str,
+    id: u64,
+    project: Option<String>,
+    source: Option<String>,
+) -> Result<Value, String> {
+    classify(
+        host,
+        ClassifyArgs {
+            provider: provider.to_owned(),
+            id,
+            project,
+            source,
+        },
+    )
+    .await
+}
+
+/// Classify an item already read: ask the director on its machine and check its answer. With
+/// `auto_only` (a run the watcher started) it chooses among the workflows that start by
+/// themselves only.
 pub(super) async fn classify_item(
     host: &Arc<Host>,
     director: &Director,
     detail: &crate::tools::todo::Detail,
+    auto_only: bool,
 ) -> Result<Value, String> {
     let state = &host.state;
     let item = &detail.item;
     let organization = core::item_organization(&item.url)
         .ok_or_else(|| invalid("The work item has no Azure DevOps link."))?;
     let map = state.settings.map().map_err(fail)?;
-    let candidates = core::candidates(&map.workflows, &organization, &item.project);
+    let mut candidates = core::candidates(&map.workflows, &organization, &item.project);
+    candidates.retain(|w| !auto_only || w.auto_start);
     let listed: Vec<Value> = candidates
         .iter()
         .map(|w| json!({"id":w.id,"name":w.name}))
@@ -593,7 +619,11 @@ pub(super) async fn classify_item(
         return Ok(json!({
             "workflow": null,
             "outcome": core::Verdict::None.word(),
-            "reason": format!("No enabled workflow covers project {}.", item.project),
+            "reason": if auto_only {
+                format!("No enabled workflow of project {} starts by itself.", item.project)
+            } else {
+                format!("No enabled workflow covers project {}.", item.project)
+            },
             "candidates": listed,
             "item": verified,
             "run": null,

@@ -17,6 +17,11 @@ pub(in crate::app) struct Catalog {
     pub failing_items: Mutex<BTreeSet<u64>>,
     /// Pull request reads fail.
     pub failing_pulls: std::sync::atomic::AtomicBool,
+    /// The ready-state listings fail, as during an outage.
+    pub failing_lists: std::sync::atomic::AtomicBool,
+    /// The most items a listing may return, whatever the limit asked (a catalog larger than
+    /// the read's bound).
+    pub list_cap: Mutex<Option<usize>>,
 }
 
 pub(in crate::app) const ORGANIZATION: &str = "https://dev.azure.com/example";
@@ -39,6 +44,7 @@ pub(in crate::app) fn detail(
             kind: kind.into(),
             category: category.into(),
             created_at: None,
+            changed_at: None,
             dates: Vec::new(),
         },
         fields: vec![DetailField {
@@ -112,6 +118,50 @@ impl Catalog {
             .get(&(repository.to_lowercase(), branch.to_owned()))
             .cloned()
             .unwrap_or_default())
+    }
+    /// Change the state an item is in.
+    pub(in crate::app) fn set_state(&self, id: u64, state: &str) {
+        if let Some(detail) = self.items.lock().unwrap().get_mut(&id) {
+            detail.item.state = state.into();
+        }
+    }
+    /// The items assigned to the user in a state of a project, newest ID first, at most
+    /// `limit` (with `has_more` when there are others): the To-Do read the watcher makes.
+    pub(in crate::app) fn ready_items(
+        &self,
+        project: &str,
+        state: &str,
+        limit: usize,
+    ) -> Result<crate::tools::todo::List, String> {
+        self.requests
+            .lock()
+            .unwrap()
+            .push(format!("GET list {project} {state} limit {limit}"));
+        if self.failing_lists.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err("[network] Azure work items could not be read.".into());
+        }
+        let assigned = self.assigned.lock().unwrap().clone();
+        let mut items: Vec<Item> = self
+            .items
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|d| {
+                assigned.contains(&d.item.id)
+                    && d.item.state == state
+                    && d.item.project.eq_ignore_ascii_case(project)
+            })
+            .map(|d| d.item.clone())
+            .collect();
+        items.sort_by(|a, b| b.id.cmp(&a.id));
+        let limit = self.list_cap.lock().unwrap().map_or(limit, |c| c.min(limit));
+        let has_more = items.len() > limit;
+        items.truncate(limit);
+        Ok(crate::tools::todo::List {
+            items,
+            has_more,
+            ..Default::default()
+        })
     }
     /// Every request was a read.
     pub(in crate::app) fn only_reads(&self) -> bool {

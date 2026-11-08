@@ -32,8 +32,10 @@ pub(super) const METHODS: [&str; 8] = [
 
 mod director;
 pub(super) mod engine;
+pub(super) mod implement;
 pub(super) mod record;
 pub(super) mod runs;
+pub(super) mod watcher;
 #[cfg(test)]
 pub(super) mod synthetic;
 

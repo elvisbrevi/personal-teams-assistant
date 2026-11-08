@@ -282,6 +282,10 @@ pub(in crate::app) struct Run {
     /// How many times in a row the director could not be reached (the wait doubles).
     #[serde(default, skip_serializing_if = "is_zero")]
     pub retries: u32,
+    /// The watcher started it: the director chooses among the enabled workflows that start by
+    /// themselves (`auto_start`) only.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub auto_start: bool,
     /// It holds one of the `concurrency` slots.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub admitted: bool,
@@ -326,6 +330,7 @@ impl Run {
             cause: None,
             retry_at: None,
             retries: 0,
+            auto_start: false,
             admitted: false,
             waiting_since: None,
             checked_at: None,

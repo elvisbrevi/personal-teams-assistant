@@ -537,6 +537,7 @@ async fn get_kind(
             state: field(&item, "System.State").into(),
             category: category.into(),
             created_at: todo::timestamp(&item["fields"]["System.CreatedDate"]),
+            changed_at: None,
             dates,
         },
         fields,

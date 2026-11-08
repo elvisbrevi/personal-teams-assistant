@@ -23,6 +23,7 @@ pub(super) fn item(source: &Source, project: &str, value: &Value) -> Result<Item
         kind: field(value, "System.WorkItemType").into(),
         category: "task".into(),
         created_at: todo::timestamp(&value["fields"]["System.CreatedDate"]),
+        changed_at: None,
         dates: [
             "Microsoft.VSTS.Scheduling.StartDate",
             "Microsoft.VSTS.Scheduling.FinishDate",

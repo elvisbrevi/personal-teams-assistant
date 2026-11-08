@@ -484,6 +484,7 @@ async fn issues_with(
             kind: issue["type"]["name"].as_str().unwrap_or("Issue").into(),
             category: String::new(),
             created_at: issue["created_at"].as_str().map(str::to_owned),
+            changed_at: None,
             dates: vec![
                 Date {
                     field: "start_date".into(),

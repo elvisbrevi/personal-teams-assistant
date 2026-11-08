@@ -335,6 +335,7 @@ async fn in_project(
         "System.WorkItemType",
         "System.State",
         "System.CreatedDate",
+        "System.ChangedDate",
     ];
     fields.extend(
         schema
@@ -407,6 +408,7 @@ async fn in_project(
                 .map(|k| k.category.to_owned())
                 .unwrap_or_default(),
             created_at: timestamp(&item["fields"]["System.CreatedDate"]),
+            changed_at: timestamp(&item["fields"]["System.ChangedDate"]),
             dates: schema
                 .dates
                 .iter()

@@ -30,6 +30,8 @@ const CONTEXT: usize = 32_000;
 /// The engine's state on the profile: the runs' store and what advances now.
 pub(in crate::app) struct State {
     pub(in crate::app) db: Store,
+    /// The ready-state watcher: its seen ledger and last poll (`watcher`).
+    pub(in crate::app) watcher: super::watcher::Watcher,
     locks: std::sync::Mutex<HashMap<String, Arc<Mutex<()>>>>,
     admission: Mutex<()>,
     advancing: AtomicUsize,
@@ -43,6 +45,7 @@ impl State {
         security::private_dir(&root)?;
         Ok(Self {
             db: Store::open(&root.join("workflows.db"))?,
+            watcher: super::watcher::Watcher::open(&root.join("workflows.db"))?,
             locks: std::sync::Mutex::new(HashMap::new()),
             admission: Mutex::new(()),
             advancing: AtomicUsize::new(0),
@@ -405,7 +408,13 @@ async fn classify(host: &Arc<Host>, azure: &Azure, run: Run, now: i64) -> Result
                 .await
             {
                 Ok(detail) => {
-                    Box::pin(super::director::classify_item(host, director, &detail)).await
+                    Box::pin(super::director::classify_item(
+                        host,
+                        director,
+                        &detail,
+                        run.auto_start,
+                    ))
+                    .await
                 }
                 Err(error) => Err(error),
             }
@@ -455,7 +464,9 @@ async fn classify(host: &Arc<Host>, azure: &Azure, run: Run, now: i64) -> Result
     let map = host.state.settings.map()?;
     let chosen = verdict["workflow"].as_str().and_then(|id| {
         let workflow = map.workflows.iter().find(|w| w.id == id && w.enabled)?;
-        same_project(workflow, &run.item).then_some(workflow)
+        // A run the watcher started chooses only among the workflows that start by themselves.
+        (same_project(workflow, &run.item) && (!run.auto_start || workflow.auto_start))
+            .then_some(workflow)
     });
     match chosen {
         Some(workflow) => {
