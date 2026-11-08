@@ -1633,6 +1633,25 @@ pub(super) const TOOLS: &[Tool] = &[
         },
     },
     Tool {
+        name: "workflow_summary",
+        title: "Summarize a workflow run",
+        description: "Asks the workflow director (its machine, CLI, model and effort in workflow_settings, the direct prompt plus a summarize task that code appends) for a progress summary of one workflow run, written in the configured language (Markdown, at most 4000 characters), and stores it on the run (summaries, the last 20: id, text, created_at, provider, model and native session_id). It runs a model on the director's machine, so it takes time and uses that agent's quota, but it only reads: the input is the run record (the item's title and verified link, the workflow, every stage with timestamps and outcome, the children with links, coding run states and pull requests, block outcomes and the attention text), never a session transcript or launcher output; the session is read-only and tool-less and appears in Agent history (implementation_history, purpose summary). The director writes no links: any URL it wrote is dropped and code appends the verified links of the item and of the children and pull requests the summary names. An empty or malformed answer is an error and stores nothing. Runs only on the owner's coordinator. Show the user the summary before offering workflow_summary_send.",
+        effect: Effect::Read,
+        schema: || object(json!({"run": string("The workflow run's ID.")}), &["run"]),
+    },
+    Tool {
+        name: "workflow_summary_send",
+        title: "Send a run summary to Teams",
+        description: "Posts one stored summary of a workflow run (summary: its id from workflow_summary or workflow_run_status), or the edited text the user wrote (text replaces it for this send and is kept with the record), to one Teams chat as the user: Markdown, one message, never retried. chat must be an ID that teams_chats lists (a person's one-to-one chat or a group chat; not your personal chat, a channel or any other ID). mentions are members' display names in that chat (each becomes an @mention; an unknown or ambiguous name refuses the whole send); an edited text may also write @[Name]. Nothing is posted without the user's confirmation of this exact text and chat. Several recipients are several confirmed sends, each with its own record in the run's summary_sends (chat, mentions, text, outcome sent, refused or uncertain, time); an uncertain outcome is never retried: check Teams before sending again. Runs only on the owner's coordinator.",
+        effect: Effect::External,
+        schema: || {
+            object(
+                json!({"run": string("The workflow run's ID."), "summary": string("The stored summary's ID."), "chat": string("A chat ID from teams_chats."), "mentions": strings("Display names of members of that chat to mention."), "text": string("The edited text to send instead of the stored summary's (at most 8000 characters)."), "confirmed": confirmed()}),
+                &["run", "summary", "chat"],
+            )
+        },
+    },
+    Tool {
         name: "answer_rate",
         title: "Rate an answer",
         description: "Rates an answer good or bad with a comment; ratings automatically guide answers to the matched question: good suggests its approach, bad rejects its mistakes. Facts always come from fresh evidence. null clears the rating.",
@@ -2320,9 +2339,8 @@ pub(super) async fn run(name: &str, args: &Value) -> Result<Value, String> {
         | "workflow_blocks_list" | "workflow_block_save" | "workflow_block_remove"
         | "workflow_repositories" | "workflow_settings" | "workflow_settings_update"
         | "workflow_classify" | "workflow_run_start" | "workflow_runs" | "workflow_run_status"
-        | "workflow_run_resume" | "workflow_run_cancel" | "workflow_run_assign" => {
-            ipc(name, args.clone()).await
-        }
+        | "workflow_run_resume" | "workflow_run_cancel" | "workflow_run_assign"
+        | "workflow_summary" | "workflow_summary_send" => ipc(name, args.clone()).await,
         "answer_rate" => ipc("answer_feedback", json!({"resource": text(args, "resource")?, "rating": args.get("rating"),
             "comment": args.get("comment"), "example": args.get("example"), "context": args.get("context")})).await,
         "answer_draft" => ipc("answer_refine", json!({"resource": text(args, "resource")?, "context": args.get("context").and_then(Value::as_str).unwrap_or(""),
@@ -2493,6 +2511,7 @@ pub(super) fn confirmation(name: &str, args: &Value) -> Option<String> {
             args["workflow"].as_str().unwrap_or("this"),
             args["run"].as_str().unwrap_or("this")
         ),
+        "workflow_summary_send" => format!("{}?", super::workflows::summary::describe_args(args)),
         "cloud_disconnect" => if args["forget_service_token"] == true {
             "Disconnect this installation from the account store and remove the account's service token from it?".into()
         } else {
@@ -2769,6 +2788,8 @@ mod tests {
             ("workflow_run_resume", "needs confirmation"),
             ("workflow_run_cancel", "needs confirmation"),
             ("workflow_run_assign", "needs confirmation"),
+            ("workflow_summary", "read"),
+            ("workflow_summary_send", "needs confirmation"),
         ] {
             assert_eq!(effect(name), (json!(expected), json!("offered")), "{name}");
             assert!(super::super::workflows::handles(name), "{name}");

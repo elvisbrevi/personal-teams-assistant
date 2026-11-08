@@ -453,6 +453,14 @@ Knowledge
                            coding run again.
   workflows cancel RUN --confirmed       Cancels the run and its active implementation run.
   workflows assign RUN WORKFLOW --confirmed   Gives an unassigned run an enabled workflow of its project.
+  workflows summary RUN    The workflow director writes a progress summary of the run from its record
+                           (stages, children, pull requests, block outcomes; Markdown, at most 4000
+                           characters, the verified links appended by code) and it is stored on the run.
+                           Runs a model on the director's machine; the session appears in Agent history.
+  workflows summary RUN --send CHAT_ID [--mention NAME…] [--text-file PATH] [--summary ID] --confirmed
+                           Posts the run's latest stored summary (or --summary ID, or the edited text in
+                           PATH) once, as you, to a chat of `teams chats`; each --mention names a member
+                           of that chat. Never retried; each send is recorded on the run.
   notes list [--context ID] [--limit N]  Verified notes, newest first.
   notes search TEXT [--context ID]       Notes by relevance.
   notes add | notes edit ID              JSON on stdin: title, text, contexts, keywords, origin, reference.
@@ -575,6 +583,10 @@ fn words(args: &[String]) -> Vec<&str> {
                 | "--project"
                 | "--organization"
                 | "--workflow"
+                | "--send"
+                | "--mention"
+                | "--text-file"
+                | "--summary"
                 | "--state"
         ) {
             skip = 1;
@@ -1011,6 +1023,50 @@ async fn workflows_command(args: &[String]) -> Result<Reply> {
                 "workflow_run_assign",
                 json!({"run":run,"workflow":workflow,"confirmed":true}),
             )
+        }
+        (Some("summary"), _) => {
+            let run = id(2)?;
+            let Some(chat) = option(args, "--send") else {
+                ensure!(
+                    !confirmed
+                        && ["--mention", "--text-file", "--summary"]
+                            .iter()
+                            .all(|flag| option(args, flag).is_none()),
+                    "--mention, --text-file, --summary and --confirmed go with --send CHAT_ID"
+                );
+                return call("workflow_summary", json!({"run":run}), None, true).await;
+            };
+            // The stored summary to send: the one named, or the run's latest.
+            let status = call("workflow_run_status", json!({"run":run}), None, true).await?;
+            if !status.ok {
+                return Ok(status);
+            }
+            let stored = status.data["run"]["summaries"].as_array().cloned().unwrap_or_default();
+            let chosen = match option(args, "--summary") {
+                Some(wanted) => stored.iter().find(|s| s["id"] == wanted),
+                None => stored.last(),
+            }
+            .context("the run has no such stored summary: pta workflows summary RUN writes one")?;
+            let edited = option(args, "--text-file")
+                .map(|path| {
+                    std::fs::read_to_string(path).with_context(|| format!("cannot read {path}"))
+                })
+                .transpose()?;
+            let mut body = json!({"run":run,"summary":chosen["id"],"chat":chat,
+                "mentions":options(args, "--mention")});
+            if let Some(text) = &edited {
+                body["text"] = json!(text);
+            }
+            let mut question = super::tools::confirmation("workflow_summary_send", &body)
+                .unwrap_or_default();
+            if edited.is_none() {
+                question.push_str(&format!("\n\n{}", chosen["text"].as_str().unwrap_or_default()));
+            }
+            if let Some(reply) = unconfirmed(args, question) {
+                return Ok(reply);
+            }
+            body["confirmed"] = json!(true);
+            ("workflow_summary_send", body)
         }
         (Some("repositories"), _) => {
             let mut body =
@@ -2033,6 +2089,7 @@ fn validate_args(args: &[String]) -> Result<()> {
             | ["workflows", "runs"]
             | ["workflows", "run" | "status" | "resume" | "cancel", _]
             | ["workflows", "assign", _, _]
+            | ["workflows", "summary", _]
             | ["workflows", "show" | "remove" | "enable" | "disable", _]
             | ["workflows", "blocks", "list" | "save"]
             | ["workflows", "blocks", "remove", _]
@@ -2117,7 +2174,7 @@ fn validate_args(args: &[String]) -> Result<()> {
                 || p.as_slice().starts_with(&["workflows", "remove"])
                 || matches!(
                     p.as_slice(),
-                    ["workflows", "run" | "resume" | "cancel" | "assign", ..]
+                    ["workflows", "run" | "resume" | "cancel" | "assign" | "summary", ..]
                 )
                 || p.as_slice() == ["workflows", "blocks", "save"]
                 || p.as_slice() == ["cloud", "migrate"]
@@ -2295,6 +2352,22 @@ fn validate_args(args: &[String]) -> Result<()> {
             ),
         ),
         ("--state", p.as_slice() == ["workflows", "runs"]),
+        (
+            "--send",
+            matches!(p.as_slice(), ["workflows", "summary", _]),
+        ),
+        (
+            "--mention",
+            matches!(p.as_slice(), ["workflows", "summary", _]),
+        ),
+        (
+            "--text-file",
+            matches!(p.as_slice(), ["workflows", "summary", _]),
+        ),
+        (
+            "--summary",
+            matches!(p.as_slice(), ["workflows", "summary", _]),
+        ),
         (
             "--director",
             matches!(p.as_slice(), ["workflows", "run", _]),

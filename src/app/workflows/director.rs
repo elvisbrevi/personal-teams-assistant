@@ -629,6 +629,7 @@ pub(super) async fn classify_item(
         host,
         implementation::director::Ask {
             machine: &director.machine,
+            task: crate::llm::implementation::DirectTask::Classify,
             director,
             instructions: &instructions,
             input,

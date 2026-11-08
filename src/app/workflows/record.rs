@@ -255,9 +255,14 @@ pub(in crate::app) struct Run {
     pub children: Vec<Child>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub block_outcomes: Vec<BlockOutcome>,
-    /// Progress summaries (written by the director in a later version).
+    /// Progress summaries the director wrote (`summary::Summary`: `id`, `text`, `created_at`,
+    /// `model`, `session_id`), oldest first, at most `summary::MAX_SUMMARIES`; the acting
+    /// blocks render `{summary}` from the last one.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub summaries: Vec<Value>,
+    /// One record per send of a summary to a chat (`summary::Send`), oldest first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub summary_sends: Vec<Value>,
     /// What the user must look at, while the run waits on them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attention: Option<String>,
@@ -319,6 +324,7 @@ impl Run {
             children: Vec::new(),
             block_outcomes: Vec::new(),
             summaries: Vec::new(),
+            summary_sends: Vec::new(),
             attention: None,
             error: None,
             creation_accepted: false,
