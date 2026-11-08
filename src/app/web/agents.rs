@@ -454,10 +454,21 @@ async fn call(
         record(operation, "-32602", started);
         return rpc(rpc_error(id, -32602, &message));
     }
-    let question = (tool.effect == Effect::External)
-        .then(|| tools::confirmation(tool.name, &args))
-        .flatten();
     let dispatch = dispatch(&portal, &account);
+    // What the person approves includes what only the host knows (the text a summary send posts).
+    let question = if tool.effect == Effect::External {
+        match tools::question_with(dispatch.clone(), tool.name, &args).await {
+            Ok(question) => question,
+            Err(message) => {
+                record(operation, "tool_error", started);
+                return rpc(
+                    json!({"jsonrpc": "2.0", "id": id, "result": protocol::outcome(Err(message))}),
+                );
+            }
+        }
+    } else {
+        None
+    };
     let Some(question) = question else {
         let Ok(_permit) = portal.requests.try_acquire() else {
             return status(StatusCode::TOO_MANY_REQUESTS, operation, started);

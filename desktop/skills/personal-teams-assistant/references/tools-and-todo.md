@@ -493,7 +493,7 @@ run (any state but `done` and `cancelled`).
   the run and the machine: relay it, and cancel that run there with `implementation_cancel` once
   the machine is reachable.
 
-- **Summarize:** `pta workflows summary RUN` (MCP `workflow_summary`, a read that **runs a model**:
+- **Summarize:** `pta workflows summary RUN` (MCP `workflow_summary`, which **runs a model** and needs no confirmation, like `workflow_classify`:
   it takes up to about a minute and uses the director's agent quota) has the workflow director
   write a progress summary of the run (Markdown in `llm.language`, at most 4000 characters) from
   the run record only: the item, stages with times and outcomes, children, coding run states, pull
@@ -507,17 +507,23 @@ run (any state but `done` and `cancelled`).
   machine running 0.12.6 or later. Show the user the summary before offering to send it.
 - **Send a summary to Teams:** `pta workflows summary RUN --send CHAT_ID [--mention NAME…]
   [--text-file PATH] [--summary ID] --confirmed` (MCP `workflow_summary_send` with `run`,
-  `summary`, `chat`, `mentions`, optional `text`; needs confirmation) posts the stored summary (the
-  latest, or `--summary ID`), or the edited text (`text`, at most 8000 characters; the edit is kept
-  with the send record), once, as the user, in one chat. `CHAT_ID` must be a chat that
-  `pta teams chats` lists (a person's one-to-one chat or a group chat; not the personal chat, a
-  channel or an invented ID), and each mention a display name of a member of that chat (an unknown
-  or ambiguous name refuses the whole send). Confirm the exact text, chat and mentions with the
-  user first; several recipients are several confirmed sends. Nothing is posted otherwise. The run
-  records each send in `summary_sends` (chat, mentions, text, `outcome` `sent`, `refused` or
-  `uncertain`, time, `message_id`); an `uncertain` outcome is never retried: ask the user to check
-  Teams before sending that summary to that chat again. Available on the remote endpoint too (the
-  only Teams post it offers), only for the owner's coordinator.
+  `summary`, `chat`, `mentions`, optional `text`; needs confirmation) posts a stored summary, or
+  the edited text (`text`, at most 8000 characters; the edit is kept with the send record), once,
+  as the user, in one chat. Without `--confirmed` the CLI shows the latest summary, its ID and the
+  exact text; the confirmed command must repeat `--summary ID` (a summary written meanwhile is
+  never posted unseen). `CHAT_ID` must be a chat that `pta teams chats` lists (a person's
+  one-to-one chat or a group chat; not the personal chat, a channel or an invented ID), and each
+  mention a display name of a member of that chat (an unknown or ambiguous name refuses the whole
+  send). The confirmation always shows the exact text, chat and mentions: confirm them with the
+  user; several recipients are several confirmed sends. Nothing is posted otherwise. The run
+  records each send in `summary_sends` (chat, mentions, `outcome` `sent`, `refused` (nothing was
+  sent) or `uncertain` (the request may have reached Teams), time, `message_id`; the text only
+  when it is an edit, otherwise the summary's ID says what was sent); an `uncertain` outcome is
+  never retried: ask the user to check Teams before sending that summary to that chat again. If
+  the reply says the record could not be saved, the outcome it states (sent or uncertain) still
+  holds. Available on the remote endpoint too, only for the owner's coordinator; an agent there
+  sends a stored summary as written and `text` is refused (editing is for the person, in the
+  portal or at the local page), and `teams_post` stays unavailable.
 
 The engine never merges, completes or changes a pull request or a work item; the coding agent
 opens the pull request as its instructions ask. A run uses the workflow as it was when the run got

@@ -256,8 +256,8 @@ pub(in crate::app) struct Run {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub block_outcomes: Vec<BlockOutcome>,
     /// Progress summaries the director wrote (`summary::Summary`: `id`, `text`, `created_at`,
-    /// `model`, `session_id`), oldest first, at most `summary::MAX_SUMMARIES`; the acting
-    /// blocks render `{summary}` from the last one.
+    /// `provider`, `model`, `session_id`), oldest first, at most `summary::MAX_SUMMARIES`.
+    /// A notification block's `{summary}` is rendered from the latest entry (the last).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub summaries: Vec<Value>,
     /// One record per send of a summary to a chat (`summary::Send`), oldest first.
@@ -505,6 +505,13 @@ impl Store {
         )?;
         ensure!(changed == 1, "Workflow run {} is not recorded.", run.id);
         Ok(())
+    }
+    /// Lose a run, as a failing disk would: a test of what is reported when saving fails.
+    #[cfg(test)]
+    pub(in crate::app) fn forget(&self, id: &str) {
+        let db = self.0.lock().unwrap();
+        db.execute("DELETE FROM workflow_runs WHERE id=?1", [id])
+            .unwrap();
     }
     pub(in crate::app) fn get(&self, id: &str) -> Result<Option<Run>> {
         let db = self.0.lock().unwrap();

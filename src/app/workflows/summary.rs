@@ -23,8 +23,8 @@
 //! chat's members, one POST, never retried, recorded as `teams_post`). Each send leaves a
 //! record on the run (`Run::summary_sends`) that is `uncertain` from before the request until
 //! its result is known, so an interruption never reads as a send that did not happen.
-use super::engine;
 use super::record::Run;
+use super::runs::{found, require_engine};
 use super::*;
 use crate::adapters::graph::PostRefusal;
 use crate::llm::implementation::DirectTask;
@@ -87,27 +87,6 @@ fn time(at: i64) -> Option<String> {
 }
 fn bounded(text: &str, max: usize) -> String {
     text.chars().take(max).collect()
-}
-
-/// Summaries and sends run only on the owner's coordinator, where the runs are.
-fn require_engine(state: &DesktopState) -> Result<(), String> {
-    require_coordinator(state)?;
-    if !engine::may_run(state) {
-        return Err("[not_ready] Workflow summaries are written and sent only on the account owner's coordinator, where the runs are.".into());
-    }
-    Ok(())
-}
-
-fn found(state: &DesktopState, id: &str) -> Result<Run, String> {
-    if uuid::Uuid::parse_str(id).is_err() {
-        return Err(invalid("Give the workflow run's ID."));
-    }
-    state
-        .workflows
-        .db
-        .get(id)
-        .map_err(fail)?
-        .ok_or_else(|| invalid(format!("There is no workflow run {id}.")))
 }
 
 /// What the director reads: the run record, bounded, and nothing else (untrusted input to it:
@@ -271,13 +250,19 @@ fn clean(text: &str, limit: usize) -> String {
     if text.chars().count() <= limit {
         return text.to_owned();
     }
-    // Cut at the last line or word break that fits, and say so.
-    let cut: String = text.chars().take(limit.saturating_sub(1)).collect();
-    let at = cut
-        .rfind('\n')
-        .or_else(|| cut.rfind(' '))
-        .filter(|at| *at > cut.len() / 2)
-        .unwrap_or(cut.len());
+    // Cut where a word ends (the last break that fits, unless the cut already falls between
+    // words), and say so.
+    let room = limit.saturating_sub(1);
+    let cut: String = text.chars().take(room).collect();
+    let whole_word = text
+        .chars()
+        .nth(room)
+        .is_none_or(|next| !next.is_alphanumeric());
+    let at = if whole_word {
+        cut.len()
+    } else {
+        cut.rfind(char::is_whitespace).unwrap_or(cut.len())
+    };
     format!("{}…", cut[..at].trim_end())
 }
 
@@ -289,37 +274,48 @@ fn label(text: &str) -> String {
 }
 
 /// The stored text: the model's summary cleaned and bounded, then the list of verified links of
-/// the run record (the item always; the children and pull requests the text names).
+/// the run record (the item always; the children and pull requests the final text names).
 pub(super) fn compose(summary: &str, run: &Run, language: crate::config::Language) -> String {
-    let mut list = String::new();
     let header = language.say("Links", "Enlaces");
-    let cleaned = clean(summary, MAX_CHARS);
-    for link in links(run)
-        .iter()
-        .enumerate()
-        .filter(|(n, l)| *n == 0 || mentioned(&cleaned, l))
-        .map(|(_, l)| l)
-    {
-        let entry = format!("- [{}]({})\n", label(&link.label), link.url);
-        // The header and its separator are counted once, with the first entry.
-        let used = if list.is_empty() { header.len() + 4 } else { 0 };
-        if list.len() + used + entry.len() > LINKS_CHARS {
-            break;
+    let all = links(run);
+    // The links of a text: the item, then what the text names, within their share.
+    let section_for = |text: &str| -> String {
+        let mut list = String::new();
+        for link in all
+            .iter()
+            .enumerate()
+            .filter(|(n, l)| *n == 0 || mentioned(text, l))
+            .map(|(_, l)| l)
+        {
+            let entry = format!("- [{}]({})\n", label(&link.label), link.url);
+            // The header and its separator are counted once, with the first entry.
+            let used = if list.is_empty() { header.len() + 4 } else { 0 };
+            if list.len() + used + entry.len() > LINKS_CHARS {
+                break;
+            }
+            list.push_str(&entry);
         }
-        list.push_str(&entry);
+        if list.is_empty() {
+            String::new()
+        } else {
+            format!("**{header}**\n{}", list.trim_end())
+        }
+    };
+    let join = |body: &str, section: &str| match (body.is_empty(), section.is_empty()) {
+        (_, true) => body.to_owned(),
+        (true, false) => section.to_owned(),
+        (false, false) => format!("{body}\n\n{section}"),
+    };
+    // The list for the whole text fixes the room the text leaves; the links kept are then those
+    // of the text as it is stored, which can only name less than the whole.
+    let whole = section_for(&clean(summary, MAX_CHARS));
+    let body = clean(summary, MAX_CHARS.saturating_sub(whole.chars().count() + 2));
+    let stored = join(&body, &section_for(&body));
+    if stored.chars().count() <= MAX_CHARS {
+        stored
+    } else {
+        join(&body, &whole)
     }
-    if list.is_empty() {
-        return cleaned;
-    }
-    let section = format!("**{header}**\n{}", list.trim_end());
-    let body = clean(
-        summary,
-        MAX_CHARS.saturating_sub(section.chars().count() + 2),
-    );
-    if body.is_empty() {
-        return section;
-    }
-    format!("{body}\n\n{section}")
 }
 
 /// The summary in the director's answer: exactly `{"summary": text}`.
@@ -433,54 +429,18 @@ async fn summarize(host: &Arc<Host>, args: SummaryArgs) -> Result<Value, String>
     Ok(json!({"workflow_run": run.id, "summary": stored, "run": session}))
 }
 
-/// The members of a chat directory entry, as `chat_directory` lists them (not the user).
-fn members(chat: &Value) -> Vec<String> {
-    chat["members"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|m| m.as_str().map(str::to_owned))
-        .collect()
-}
-
-/// The member a mention names, as `post_chat` resolves it: an exact display name, else the only
-/// one containing the words.
-fn resolve_mention(members: &[String], name: &str) -> Result<String, String> {
-    let wanted = name.to_lowercase();
-    let exact: Vec<&String> = members
-        .iter()
-        .filter(|m| m.to_lowercase() == wanted)
-        .collect();
-    let partial: Vec<&String> = members
-        .iter()
-        .filter(|m| m.to_lowercase().contains(&wanted))
-        .collect();
-    match (exact.as_slice(), partial.as_slice()) {
-        ([one], _) | ([], [one]) => Ok((*one).clone()),
-        ([], []) => Err(invalid(format!(
-            "The mention «{name}» names nobody in this chat; its members are {}.",
-            if members.is_empty() {
-                "not listed".to_owned()
-            } else {
-                members.join(", ")
-            }
-        ))),
-        _ => Err(invalid(format!(
-            "The mention «{name}» matches several members of this chat; write the full display name."
-        ))),
-    }
-}
-
-/// What a person confirms before a summary is sent.
+/// What a person confirms before a summary is sent: the run, summary, chat and mentions and the
+/// exact text that will be posted (`text`).
 fn describe_send(
     run: &str,
     summary: &str,
     chat: &str,
     mentions: &[String],
+    text: &str,
     edited: bool,
 ) -> String {
     format!(
-        "Post the {} of workflow run {run} (summary {summary}) in the Teams chat {chat}, as you, mentioning {}: one message, never retried",
+        "Post the {} of workflow run {run} (summary {summary}) in the Teams chat {chat}, as you, mentioning {}: one message, never retried. The text posted is:\n\n{text}",
         if edited {
             "edited text"
         } else {
@@ -494,10 +454,56 @@ fn describe_send(
     )
 }
 
+/// What the person confirms, from the arguments of the operation and the stored summary's text
+/// (the text posted is the edited one when `text` is given).
+pub(in crate::app) fn describe_args(args: &Value, stored: Option<&str>) -> String {
+    let mentions: Vec<String> = args["mentions"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|m| m.as_str().map(str::to_owned))
+        .collect();
+    let edited = args["text"].as_str().filter(|t| !t.trim().is_empty());
+    describe_send(
+        args["run"].as_str().unwrap_or("?"),
+        args["summary"].as_str().unwrap_or("?"),
+        args["chat"].as_str().unwrap_or("?"),
+        &mentions,
+        edited.or(stored).unwrap_or("(the stored summary's text)"),
+        edited.is_some(),
+    )
+}
+
+/// The stored text of a summary in the record `workflow_run_status` returns.
+pub(in crate::app) fn stored_text<'a>(status: &'a Value, summary: &str) -> Option<&'a str> {
+    status["run"]["summaries"]
+        .as_array()?
+        .iter()
+        .find(|s| s["id"] == summary)?["text"]
+        .as_str()
+}
+
+/// What a failed record of the send, after the request, must not hide.
+fn unrecorded(run: &str, send: &str, outcome: &str, why: &str) -> String {
+    format!(
+        "The send's record could not be saved on workflow run {run} (send {send}, {outcome}): {why} Its first record there, written before the request, still says uncertain."
+    )
+}
+
 /// `workflow_summary_send`: post one stored summary (or an edited text) to one chat.
 async fn send(host: &Arc<Host>, args: SendArgs) -> Result<Value, String> {
     let state = &host.state;
     require_engine(state)?;
+    // An agent sends a stored summary as written; editing it is for the person, in the portal or
+    // at this computer's page, like writing any message of their own.
+    if args.text.is_some()
+        && authority::invocation(state)
+            .is_ok_and(|i| matches!(i.transport, authority::Transport::Agent))
+    {
+        return Err(invalid(
+            "A remote agent sends a stored summary as it is written; editing the text is for the person, in the portal or at this computer's page.",
+        ));
+    }
     let run = found(state, &args.run)?;
     let summary = run
         .summaries
@@ -556,7 +562,10 @@ async fn send(host: &Arc<Host>, args: SendArgs) -> Result<Value, String> {
                 "A mention is a member's display name (at most 100 characters, without brackets).",
             ));
         }
-        if !wanted.iter().any(|w| w.eq_ignore_ascii_case(name)) {
+        if !wanted
+            .iter()
+            .any(|w| w.to_lowercase() == name.to_lowercase())
+        {
             wanted.push(name.to_owned());
         }
     }
@@ -570,17 +579,24 @@ async fn send(host: &Arc<Host>, args: SendArgs) -> Result<Value, String> {
     });
     if !args.confirmed {
         return Err(invalid(format!(
-            "Confirm with the user, then send with confirmed: true. {}.{}",
-            describe_send(&run.id, &args.summary, chat, &wanted, edited.is_some()),
+            "Confirm with the user, then send with confirmed: true. {}{}",
+            describe_send(
+                &run.id,
+                &args.summary,
+                chat,
+                &wanted,
+                &body,
+                edited.is_some()
+            ),
             if earlier_uncertain {
-                " An earlier send of this summary to this chat is uncertain: check Teams first, since this posts again."
+                "\n\nAn earlier send of this summary to this chat is uncertain: check Teams first, since this posts again."
             } else {
                 ""
             }
         )));
     }
-    // The destination must be one of the user's chats in the directory; its members resolve
-    // the mentions before anything is posted.
+    // The destination must be one of the user's chats in the directory; its members, read as
+    // the post reads them, resolve the mentions before anything is posted.
     let graph = teams_graph(state).await.map_err(fail)?;
     let directory = tokio::time::timeout(
         std::time::Duration::from_secs(CHATS_SECONDS),
@@ -596,12 +612,15 @@ async fn send(host: &Arc<Host>, args: SendArgs) -> Result<Value, String> {
             "The chat {chat} is not in your chat directory; choose one that teams_chats lists. Nothing was sent."
         ))
     })?;
-    let listed = members(entry);
-    let mut resolved: Vec<String> = Vec::new();
-    for name in &wanted {
-        let member = resolve_mention(&listed, name)?;
-        if !resolved.contains(&member) {
-            resolved.push(member);
+    let mut resolved: Vec<(String, String)> = Vec::new();
+    if !wanted.is_empty() {
+        let members = graph.chat_members(chat).await.map_err(fail)?;
+        for name in &wanted {
+            let (user, shown) = crate::adapters::graph::mention_target(&members, name)
+                .map_err(|refusal| invalid(format!("The mention «{name}»: {refusal}")))?;
+            if !resolved.iter().any(|(u, _)| *u == user) {
+                resolved.push((user, shown));
+            }
         }
     }
     // Mentions not written in the text open the message, one line.
@@ -610,13 +629,18 @@ async fn send(host: &Arc<Host>, args: SendArgs) -> Result<Value, String> {
         .flat_map(|t| marker.captures_iter(t))
         .filter_map(|c| c.get(1).map(|m| m.as_str().trim().to_lowercase()))
         .collect();
-    let opening: Vec<String> = args
-        .mentions
-        .iter()
-        .map(|m| m.trim())
-        .filter(|m| !m.is_empty() && !inline.contains(&m.to_lowercase()))
-        .map(|m| format!("@[{m}]"))
-        .collect();
+    let mut opening: Vec<String> = Vec::new();
+    for mention in args.mentions.iter().map(|m| m.trim()) {
+        let lower = mention.to_lowercase();
+        if !mention.is_empty()
+            && !inline.contains(&lower)
+            && !opening
+                .iter()
+                .any(|o| o.to_lowercase() == format!("@[{lower}]"))
+        {
+            opening.push(format!("@[{mention}]"));
+        }
+    }
     let message = if opening.is_empty() {
         body.clone()
     } else {
@@ -625,19 +649,22 @@ async fn send(host: &Arc<Host>, args: SendArgs) -> Result<Value, String> {
     if message.chars().count() > 20_000 {
         return Err(invalid("The message is too long."));
     }
-    // The record is `uncertain` from before the request until its result is known.
+    // The record is `uncertain` from before the request until its result is known. The text is
+    // kept when it is an edit; otherwise the summary's ID says what was sent.
     let id = uuid::Uuid::new_v4().to_string();
-    let at = now();
-    let record = json!({
+    let mut record = json!({
         "id": id,
         "summary": args.summary,
         "chat": {"id": chat, "topic": entry["topic"], "type": entry["type"]},
-        "mentions": resolved,
-        "text": body,
+        "mentions": resolved.iter().map(|(_, shown)| shown.clone()).collect::<Vec<_>>(),
+        "chars": body.chars().count(),
         "edited": edited.is_some(),
         "outcome": "uncertain",
-        "at": at,
+        "at": now(),
     });
+    if edited.is_some() {
+        record["text"] = json!(body);
+    }
     {
         let lock = state.workflows.lock(&run.id);
         let _guard = lock.lock().await;
@@ -648,15 +675,21 @@ async fn send(host: &Arc<Host>, args: SendArgs) -> Result<Value, String> {
         }
         state.workflows.db.save(&run).map_err(fail)?;
     }
-    // One request, never retried: a result that may have reached Teams stays uncertain.
+    // One request, never retried. `post_chat` reports every failure after the request as
+    // uncertain; whatever else fails happened before it, and nothing was sent.
     let result = graph.post_chat(chat, &message).await;
     let (outcome, detail, message_id) = match &result {
         Ok(sent) => ("sent", None, sent["message_id"].as_str().map(str::to_owned)),
         Err(error) => match error.downcast_ref::<PostRefusal>() {
-            Some(PostRefusal::Uncertain) | None => {
+            Some(PostRefusal::Uncertain) => {
                 ("uncertain", Some(PostRefusal::Uncertain.to_string()), None)
             }
             Some(refusal) => ("refused", Some(refusal.to_string()), None),
+            None => (
+                "refused",
+                Some("Teams could not be reached before the request; nothing was sent.".to_owned()),
+                None,
+            ),
         },
     };
     let mut finished = record.clone();
@@ -668,7 +701,8 @@ async fn send(host: &Arc<Host>, args: SendArgs) -> Result<Value, String> {
     if let Some(message_id) = &message_id {
         finished["message_id"] = json!(message_id);
     }
-    {
+    // The post's own outcome is the answer, whether or not it could be written down.
+    let saved: Result<(), String> = async {
         let lock = state.workflows.lock(&run.id);
         let _guard = lock.lock().await;
         let mut run = found(state, &run.id)?;
@@ -679,38 +713,33 @@ async fn send(host: &Arc<Host>, args: SendArgs) -> Result<Value, String> {
         {
             *entry = finished.clone();
         }
-        state.workflows.db.save(&run).map_err(fail)?;
+        state.workflows.db.save(&run).map_err(fail)
     }
+    .await;
+    let unsaved = saved
+        .err()
+        .map(|why| unrecorded(&run.id, &id, outcome, &why));
     match outcome {
-        "sent" => Ok(json!({"workflow_run": run.id, "sent": true, "send": finished})),
+        "sent" => {
+            let mut reply = json!({"workflow_run": run.id, "sent": true, "send": finished});
+            if let Some(warning) = unsaved {
+                reply["record_saved"] = json!(false);
+                reply["warning"] = json!(format!(
+                    "The message was sent to Teams (message {}). {warning}",
+                    message_id.unwrap_or_default()
+                ));
+            }
+            Ok(reply)
+        }
         _ => Err(format!(
-            "[error] {} The attempt is recorded on workflow run {} (send {id}, {outcome}).",
+            "[error] {} {}",
             detail.unwrap_or_default(),
-            run.id
+            unsaved.unwrap_or_else(|| format!(
+                "The attempt is recorded on workflow run {} (send {id}, {outcome}).",
+                run.id
+            ))
         )),
     }
-}
-
-/// What a person confirms before a summary is sent, from the arguments of the operation.
-pub(in crate::app) fn describe_args(args: &Value) -> String {
-    let mentions: Vec<String> = args["mentions"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|m| m.as_str().map(str::to_owned))
-        .collect();
-    let text = args["text"].as_str().filter(|t| !t.trim().is_empty());
-    let mut question = describe_send(
-        args["run"].as_str().unwrap_or("?"),
-        args["summary"].as_str().unwrap_or("?"),
-        args["chat"].as_str().unwrap_or("?"),
-        &mentions,
-        text.is_some(),
-    );
-    if let Some(text) = text {
-        question.push_str(&format!(":\n\n{text}"));
-    }
-    question
 }
 
 #[cfg(all(test, unix))]

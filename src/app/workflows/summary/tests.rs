@@ -32,12 +32,20 @@ fn host(root: &Path) -> Arc<Host> {
     })
 }
 async fn call(host: &Arc<Host>, method: &str, args: Value) -> control::Reply {
+    call_as(host, Local, method, args).await
+}
+async fn call_as(
+    host: &Arc<Host>,
+    transport: authority::Transport,
+    method: &str,
+    args: Value,
+) -> control::Reply {
     let mut request = control::Request::new(method);
     request.args = args;
     authority::within(
         authority::Invocation {
             scope: host.state.authority.clone(),
-            transport: Local,
+            transport,
         },
         control::dispatch(host, request),
     )
@@ -564,6 +572,10 @@ struct Sending {
 }
 impl Sending {
     async fn new(post: ResponseTemplate) -> Self {
+        Self::with(|_| post).await
+    }
+    /// The POST is answered by `post`, given the host (a test may change it meanwhile).
+    async fn with<R: wiremock::Respond + 'static>(post: impl FnOnce(Arc<Host>) -> R) -> Self {
         let root = tempfile::tempdir().unwrap();
         let host = host(root.path());
         let own = implementation::test_machine(&host, None).await;
@@ -620,7 +632,7 @@ impl Sending {
                 .await;
         }
         Mock::given(method("POST"))
-            .respond_with(post)
+            .respond_with(post(host.clone()))
             .mount(&server)
             .await;
         let graph = Arc::new(crate::adapters::graph::Graph {
@@ -641,11 +653,14 @@ impl Sending {
         }
     }
     async fn send(&self, args: Value) -> control::Reply {
+        self.send_as(Local, args).await
+    }
+    async fn send_as(&self, transport: authority::Transport, args: Value) -> control::Reply {
         let mut body = json!({"run":self.run});
         for (key, value) in args.as_object().unwrap() {
             body[key] = value.clone();
         }
-        call(&self.host, "workflow_summary_send", body).await
+        call_as(&self.host, transport, "workflow_summary_send", body).await
     }
     async fn posts(&self) -> Vec<MockRequest> {
         self.server
@@ -711,7 +726,12 @@ async fn a_send_posts_once_with_resolved_mentions_and_records_it() {
     assert_eq!(record["mentions"], json!(["Ana Pérez", "Victoria Gómez"]));
     assert_eq!(record["message_id"], "message-1");
     assert_eq!(record["edited"], false);
-    assert_eq!(record["text"], "Primer resumen: **va bien**.");
+    // The text is kept only when it is an edit; the summary ID says what was sent otherwise.
+    assert!(record.get("text").is_none());
+    assert_eq!(
+        record["chars"],
+        "Primer resumen: **va bien**.".chars().count()
+    );
     assert!(record["at"].as_i64().unwrap() > 0 && record["finished_at"].as_i64().unwrap() > 0);
     assert_eq!(reply.data["send"], *record);
     assert_eq!(t.events(), ["sent"]);
@@ -735,7 +755,8 @@ async fn the_same_summary_to_a_second_chat_is_a_second_confirmed_send_with_its_o
     assert!(
         question.contains(OTHER_CHAT)
             && question.contains("summary-2")
-            && question.contains("Luis"),
+            && question.contains("Luis")
+            && question.contains("Segundo resumen."),
         "{question}"
     );
     assert_eq!(t.posts().await.len(), 1);
@@ -966,4 +987,388 @@ async fn summaries_are_written_and_sent_only_where_the_runs_are() {
         assert!(!reply.ok, "{method}");
     }
     assert!(stored(&host, &run.id).summaries.is_empty());
+}
+
+#[tokio::test]
+async fn an_agent_sends_a_stored_summary_as_written_and_the_person_may_edit_it() {
+    use authority::Transport::{Agent, Browser};
+    let t = Sending::new(created()).await;
+    // The operation as each transport reaches it (the portal's allowlist check is the layer
+    // before, covered by the portal and agent tests).
+    let run = |transport: authority::Transport, args: Value| {
+        let host = t.host.clone();
+        let mut body = json!({"run":t.run});
+        for (key, value) in args.as_object().unwrap() {
+            body[key] = value.clone();
+        }
+        async move {
+            authority::within(
+                authority::Invocation {
+                    scope: host.state.authority.clone(),
+                    transport,
+                },
+                operation(&host, "workflow_summary_send", &body),
+            )
+            .await
+        }
+    };
+    // The remote endpoint's agent: a free text is the capability `teams_post` is denied there for.
+    let edited = json!({"summary":"summary-1","chat":CHAT,"text":"Otro texto","confirmed":true});
+    let refused = run(Agent, edited.clone()).await.unwrap_err();
+    assert!(refused.starts_with("[invalid_input]"));
+    assert!(
+        refused.contains("stored summary as it is written"),
+        "{refused}"
+    );
+    assert!(t.posts().await.is_empty() && t.sends().is_empty());
+    // The same agent sends the stored summary, unedited.
+    let stored = run(
+        Agent,
+        json!({"summary":"summary-1","chat":CHAT,"confirmed":true}),
+    )
+    .await;
+    assert!(stored.is_ok(), "{stored:?}");
+    // The person in the portal's browser edits it, as at the local page.
+    let person = run(Browser, edited).await;
+    assert!(person.is_ok(), "{person:?}");
+    let posts = t.posts().await;
+    assert_eq!(posts.len(), 2);
+    let html = |n: usize| {
+        posts[n].body_json::<Value>().unwrap()["body"]["content"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    assert!(html(0).contains("Primer resumen") && html(1).contains("Otro texto"));
+    // The remote endpoint offers the summary send and still denies `teams_post`.
+    assert!(crate::app::agent::check_method("workflow_summary_send").is_ok());
+    assert!(crate::app::agent::check_method("workflow_summary").is_ok());
+    assert!(crate::app::agent::check_method("teams_post").is_err());
+    assert!(matches!(
+        crate::app::agent::tool("teams_post"),
+        crate::app::agent::Remote::Denied(_)
+    ));
+}
+
+#[tokio::test]
+async fn the_confirmation_always_shows_the_exact_text_even_through_the_tool_layer() {
+    let t = Sending::new(created()).await;
+    // The tool layer reads the stored text from the run so the person sees what is posted.
+    let host = t.host.clone();
+    let dispatch: crate::app::tools::Dispatch = Arc::new(move |request| {
+        let host = host.clone();
+        Box::pin(async move {
+            Ok(authority::within(
+                authority::Invocation {
+                    scope: host.state.authority.clone(),
+                    transport: Local,
+                },
+                control::dispatch(&host, request),
+            )
+            .await)
+        })
+    });
+    let args = json!({"run":t.run,"summary":"summary-1","chat":CHAT,"mentions":["Ana"]});
+    let question =
+        crate::app::tools::question_with(dispatch.clone(), "workflow_summary_send", &args)
+            .await
+            .unwrap()
+            .unwrap();
+    for shown in ["Primer resumen: **va bien**.", CHAT, "Ana", "summary-1"] {
+        assert!(question.contains(shown), "{shown}: {question}");
+    }
+    // An edit is the text shown, not the stored one.
+    let mut edited = args.clone();
+    edited["text"] = json!("Texto editado");
+    let question =
+        crate::app::tools::question_with(dispatch.clone(), "workflow_summary_send", &edited)
+            .await
+            .unwrap()
+            .unwrap();
+    assert!(
+        question.contains("Texto editado") && !question.contains("Primer resumen"),
+        "{question}"
+    );
+    // A summary the run does not have cannot be confirmed: nothing is asked.
+    let mut missing = args.clone();
+    missing["summary"] = json!("summary-9");
+    assert!(
+        crate::app::tools::question_with(dispatch, "workflow_summary_send", &missing)
+            .await
+            .is_err()
+    );
+    // The host's own refusal shows the text too.
+    let refusal = t
+        .send(json!({"summary":"summary-1","chat":CHAT}))
+        .await
+        .message
+        .unwrap();
+    assert!(
+        refusal.contains("Primer resumen: **va bien**."),
+        "{refusal}"
+    );
+}
+
+#[tokio::test]
+async fn a_send_whose_record_cannot_be_saved_still_reports_its_real_outcome() {
+    // Sent, then the run is lost before its record is updated: the caller still learns it was sent.
+    let lost = Sending::with(|host| {
+        move |_: &MockRequest| {
+            for run in host.state.workflows.db.list(&[], None, -1).unwrap() {
+                host.state.workflows.db.forget(&run.id);
+            }
+            created()
+        }
+    })
+    .await;
+    let reply = lost
+        .send(json!({"summary":"summary-1","chat":CHAT,"confirmed":true}))
+        .await;
+    assert!(reply.ok, "{:?}", reply.message);
+    assert_eq!(reply.data["sent"], true);
+    assert_eq!(reply.data["record_saved"], false);
+    let warning = reply.data["warning"].as_str().unwrap();
+    assert!(
+        warning.contains("was sent to Teams")
+            && warning.contains("message-1")
+            && warning.contains("could not be saved"),
+        "{warning}"
+    );
+    assert_eq!(lost.posts().await.len(), 1);
+    // Uncertain, then the record cannot be saved: still an error that says the result is unknown.
+    let unknown = Sending::with(|host| {
+        move |_: &MockRequest| {
+            for run in host.state.workflows.db.list(&[], None, -1).unwrap() {
+                host.state.workflows.db.forget(&run.id);
+            }
+            ResponseTemplate::new(500)
+        }
+    })
+    .await;
+    let reply = unknown
+        .send(json!({"summary":"summary-1","chat":CHAT,"confirmed":true}))
+        .await;
+    assert!(!reply.ok);
+    let message = reply.message.unwrap();
+    assert!(
+        message.contains("never retried") && message.contains("could not be saved"),
+        "{message}"
+    );
+    assert_eq!(unknown.posts().await.len(), 1);
+}
+
+#[tokio::test]
+async fn a_failure_before_the_request_is_a_refusal_not_an_uncertain_send() {
+    let t = Sending::new(created()).await;
+    // Graph cannot be reached for `me`, which `post_chat` reads before it posts.
+    Mock::given(method("GET"))
+        .and(path("/me"))
+        .respond_with(ResponseTemplate::new(500))
+        .with_priority(1)
+        .mount(&t.server)
+        .await;
+    let reply = t
+        .send(json!({"summary":"summary-1","chat":CHAT,"confirmed":true}))
+        .await;
+    assert!(!reply.ok);
+    assert!(reply.message.unwrap().contains("nothing was sent"));
+    assert!(t.posts().await.is_empty());
+    let sends = t.sends();
+    assert_eq!(sends.len(), 1);
+    assert_eq!(sends[0]["outcome"], "refused", "{sends:?}");
+    assert!(t.events().is_empty());
+}
+
+#[tokio::test]
+async fn mentions_resolve_over_the_member_list_the_post_uses_so_a_confirmed_send_is_not_refused_later()
+ {
+    let t = Sending::new(created()).await;
+    // «yo» names only the user in the post's own list (the directory leaves them out): the
+    // preflight and the post agree, so it neither fails after confirmation nor passes unseen.
+    let reply = t
+        .send(json!({"summary":"summary-1","chat":CHAT,"mentions":["Yo"],"confirmed":true}))
+        .await;
+    assert!(reply.ok, "{:?}", reply.message);
+    assert_eq!(t.posts().await.len(), 1);
+    // Names matching several members of that list are refused before the post.
+    let several = t
+        .send(json!({"summary":"summary-1","chat":CHAT,"mentions":["o"],"confirmed":true}))
+        .await;
+    assert!(several.message.unwrap().contains("several members"));
+    // The same person named three ways is mentioned once.
+    let twice = t
+        .send(json!({"summary":"summary-1","chat":CHAT,"mentions":["ana pérez","ANA PÉREZ","Ana"],"confirmed":true}))
+        .await;
+    assert!(twice.ok, "{:?}", twice.message);
+    assert_eq!(t.sends().last().unwrap()["mentions"], json!(["Ana Pérez"]));
+    let body: Value = t.posts().await[1].body_json().unwrap();
+    assert_eq!(body["mentions"].as_array().unwrap().len(), 1);
+}
+
+#[test]
+fn a_cut_falls_between_words_and_the_links_follow_the_text_that_is_kept() {
+    use crate::config::Language;
+    let words = "palabra ".repeat(900);
+    let cut = clean(&words, 100);
+    assert!(
+        cut.ends_with("palabra…") && cut.chars().count() <= 100,
+        "{cut}"
+    );
+    let root = tempfile::tempdir().unwrap();
+    let host = host(root.path());
+    let run = record(&host, "machine");
+    // A child named only in the part that is cut off is not linked.
+    let long = format!(
+        "{}\n\nAl final, la tarea #101.",
+        "Relleno del resumen que ocupa sitio. ".repeat(130)
+    );
+    let composed = compose(&long, &run, Language::En);
+    assert!(composed.chars().count() <= MAX_CHARS);
+    assert!(
+        composed.contains('…') && !composed.contains("#101."),
+        "{composed}"
+    );
+    assert!(!composed.contains(WEB_URL), "{composed}");
+    assert!(composed.contains(ITEM_URL));
+}
+
+/// The words after `pta workflows`, as the shell passes them.
+fn words(args: &[&str]) -> Vec<String> {
+    ["workflows", "summary"]
+        .iter()
+        .chain(args)
+        .map(|a| a.to_string())
+        .collect()
+}
+
+#[tokio::test]
+async fn the_cli_send_path_runs_end_to_end_against_the_host() {
+    use crate::app::cli::{summary_send, validate_args};
+    let t = Sending::new(created()).await;
+    let file = t.root.path().join("edited.md");
+    std::fs::write(&file, "Texto corregido a mano.").unwrap();
+    let file = file.display().to_string();
+    // Every flag of the command is accepted by the argument check, and only for this command.
+    let full = words(&[
+        &t.run,
+        "--send",
+        CHAT,
+        "--mention",
+        "Ana",
+        "--mention",
+        "Luis",
+        "--summary",
+        "summary-1",
+        "--text-file",
+        &file,
+        "--confirmed",
+    ]);
+    validate_args(&full).unwrap();
+    validate_args(&words(&[&t.run])).unwrap();
+    for flag in ["--send", "--mention", "--text-file", "--summary"] {
+        assert!(
+            validate_args(&words(&[&t.run, flag])).is_err(),
+            "{flag} needs a value"
+        );
+        let elsewhere: Vec<String> = ["workflows", "status", &t.run, flag, "x"]
+            .iter()
+            .map(|a| a.to_string())
+            .collect();
+        assert!(
+            validate_args(&elsewhere).is_err(),
+            "{flag} is only for the summary"
+        );
+    }
+    let status = call(&t.host, "workflow_run_status", json!({"run":t.run})).await;
+    assert!(status.ok);
+    let run = t.run.as_str();
+
+    // Unconfirmed: nothing is sent; the reply names the latest summary, its ID and its exact
+    // text, and says the confirmed run must repeat that ID.
+    let shown = summary_send(
+        &words(&[run, "--send", CHAT, "--mention", "Ana"]),
+        run,
+        &status.data,
+    )
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(shown.code, "invalid_input");
+    let question = shown.message.unwrap();
+    assert!(
+        question.contains("summary-2")
+            && question.contains("Segundo resumen.")
+            && question.contains("--summary summary-2 --confirmed"),
+        "{question}"
+    );
+    // A confirmed send without the summary's ID is refused, so one written meanwhile is never
+    // posted unseen.
+    let unnamed = summary_send(
+        &words(&[run, "--send", CHAT, "--confirmed"]),
+        run,
+        &status.data,
+    )
+    .unwrap()
+    .unwrap_err();
+    assert!(unnamed.message.unwrap().contains("--summary ID"));
+    assert!(t.posts().await.is_empty());
+    // The summary named is the one the host posts, not the latest.
+    let body = summary_send(
+        &words(&[
+            run,
+            "--send",
+            CHAT,
+            "--mention",
+            "Ana",
+            "--summary",
+            "summary-1",
+            "--confirmed",
+        ]),
+        run,
+        &status.data,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(body["summary"], "summary-1");
+    let sent = call(&t.host, "workflow_summary_send", body).await;
+    assert!(sent.ok, "{:?}", sent.message);
+    let posted: Value = t.posts().await[0].body_json().unwrap();
+    let html = posted["body"]["content"].as_str().unwrap();
+    assert!(
+        html.contains("Primer resumen") && !html.contains("Segundo"),
+        "{html}"
+    );
+    assert_eq!(posted["mentions"][0]["mentionText"], "Ana Pérez");
+    // An edited file replaces the text for that send and is kept with its record.
+    let body = summary_send(
+        &words(&[
+            run,
+            "--send",
+            OTHER_CHAT,
+            "--text-file",
+            &file,
+            "--summary",
+            "summary-2",
+            "--confirmed",
+        ]),
+        run,
+        &status.data,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(body["text"], "Texto corregido a mano.");
+    let edited = call(&t.host, "workflow_summary_send", body).await;
+    assert!(edited.ok, "{:?}", edited.message);
+    let sends = t.sends();
+    assert_eq!(sends.len(), 2);
+    assert_eq!(sends[1]["text"], "Texto corregido a mano.");
+    assert_eq!(sends[1]["chat"]["id"], OTHER_CHAT);
+    // A summary the run does not have is an error before anything is asked.
+    assert!(
+        summary_send(
+            &words(&[run, "--send", CHAT, "--summary", "summary-9", "--confirmed"]),
+            run,
+            &status.data
+        )
+        .is_err()
+    );
 }
