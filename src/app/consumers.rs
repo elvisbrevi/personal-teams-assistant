@@ -121,6 +121,75 @@ pub(in crate::app) fn launcher_approval(state: &DesktopState, id: &str) -> Optio
         .map(|launcher| (launcher.digest, launcher.approved_at.is_some()))
 }
 
+/// How a launcher block of a workflow run ended, as the engine records it.
+pub(in crate::app) enum BlockLaunch {
+    /// Another launcher is running now: nothing was started, the engine asks again later.
+    Busy,
+    /// Nothing was started, and why.
+    NotStarted(String),
+    /// The program ran: `succeeded`, `failed`, `timed_out` or `not_started`, its exit code and
+    /// its duration. Its output is never captured.
+    Ran(rules::RunResult),
+}
+
+/// Whether no launcher is running now.
+pub(in crate::app) fn launcher_idle(state: &DesktopState) -> bool {
+    state.variables.consumers.busy.try_lock().is_ok()
+}
+
+/// Run a launcher block of a workflow run: the coordinator's launcher `id`, only while it is
+/// still approved with the program digest the block stored. It takes the same path as
+/// `variable_launcher_run` (the program and its digest checked again, the directory inside the
+/// allowed roots, every variable resolved at the moment of use, the vetted minimal environment,
+/// one launcher at a time, the launcher's timeout) and refuses any caller but the engine's own
+/// authority; the program's output is never captured.
+pub(in crate::app) async fn run_for_block(
+    host: &Host,
+    id: &str,
+    digest: &str,
+) -> std::result::Result<BlockLaunch, String> {
+    authority::require_workflow(&host.state).map_err(|e| e.to_string())?;
+    let state = &host.state.variables;
+    let not_started = |why: &str| Ok(BlockLaunch::NotStarted(why.to_owned()));
+    let launcher = match state.consumers.launchers.get(id) {
+        Ok(launcher) => launcher,
+        Err(_) => return not_started("The launcher is no longer defined on this computer."),
+    };
+    if launcher.approved_at.is_none() {
+        return not_started("The launcher is not approved.");
+    }
+    if launcher.digest != digest {
+        return not_started(
+            "The launcher was approved with another program digest than the block's.",
+        );
+    }
+    let store = match state.store(host) {
+        Ok(store) => store,
+        Err(error) => return not_started(&error.to_string()),
+    };
+    let result = start(
+        host,
+        &store,
+        LauncherArgs {
+            id: id.to_owned(),
+            versions: BTreeMap::new(),
+        },
+    )
+    .await;
+    audit_result(&store, "workflow_launcher", None, &result);
+    match result {
+        Ok((_, _, ran)) => Ok(BlockLaunch::Ran(ran)),
+        Err(vault::Error::Conflict(message)) if message == BUSY => Ok(BlockLaunch::Busy),
+        Err(error) => not_started(&error.to_string()),
+    }
+}
+
+/// A launcher running now, as a test needs it.
+#[cfg(test)]
+pub(in crate::app) fn busy_guard(state: &DesktopState) -> tokio::sync::MutexGuard<'_, ()> {
+    state.variables.consumers.busy.try_lock().unwrap()
+}
+
 /// A launcher placed in this installation's list as a test needs it, approved or not.
 #[cfg(test)]
 pub(in crate::app) fn add_test_launcher(state: &DesktopState, launcher: rules::Launcher) {
@@ -496,16 +565,35 @@ async fn define(
     }}))
 }
 
+const BUSY: &str = "A launcher is already running.";
+
 async fn launch(
     host: &Host,
     store: &Store,
     a: LauncherArgs,
 ) -> std::result::Result<Value, vault::Error> {
+    let (launcher, used, result) = start(host, store, a).await?;
+    Ok(json!({
+        "launcher":launcher.id,
+        "operation":"run",
+        "variables":used,
+        "result":result,
+        "output":"not captured",
+    }))
+}
+
+/// Every check of a launcher run, then the run: the launcher, the variables it used (by
+/// reference) and how it ended.
+async fn start(
+    host: &Host,
+    store: &Store,
+    a: LauncherArgs,
+) -> std::result::Result<(rules::Launcher, Vec<Value>, rules::RunResult), vault::Error> {
     let consumers = &host.state.variables.consumers;
     let _busy = consumers
         .busy
         .try_lock()
-        .map_err(|_| vault::Error::Conflict("A launcher is already running.".into()))?;
+        .map_err(|_| vault::Error::Conflict(BUSY.into()))?;
     let launcher = consumers.launchers.get(&a.id)?;
     rules::ensure_approved(&launcher)?;
     if let Some(unknown) = a
@@ -537,13 +625,7 @@ async fn launch(
         values.push((env.clone(), value));
     }
     let result = rules::run(&launcher, values).await?;
-    Ok(json!({
-        "launcher":launcher.id,
-        "operation":"run",
-        "variables":used,
-        "result":result,
-        "output":"not captured",
-    }))
+    Ok((launcher, used, result))
 }
 
 /// Supplies application credentials from account variables while a consumer binding exists.

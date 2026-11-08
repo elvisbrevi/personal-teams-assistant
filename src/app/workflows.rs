@@ -31,6 +31,7 @@ pub(super) const METHODS: [&str; 8] = [
 ];
 
 mod director;
+pub(super) mod acting;
 pub(super) mod engine;
 pub(super) mod record;
 pub(super) mod runs;

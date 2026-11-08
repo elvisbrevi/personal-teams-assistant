@@ -33,7 +33,7 @@ pub const MAX_INSTRUCTIONS: usize = 8000;
 pub const MAX_MENTIONS: usize = 20;
 pub const MAX_TEMPLATE: usize = 4000;
 /// The placeholders a notification template may hold; code renders them.
-pub const PLACEHOLDERS: [&str; 4] = ["item", "link", "pull_requests", "summary"];
+pub const PLACEHOLDERS: [&str; 5] = ["item", "link", "pull_requests", "summary", "state"];
 /// The coding agents a workflow can run (the installed CLIs of the implementation flow).
 pub const PROVIDERS: [&str; 3] = ["codex", "claude", "opencode"];
 
@@ -132,7 +132,7 @@ pub struct Block {
     /// The display names of the chat members a notification mentions.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mentions: Vec<String>,
-    /// A notification's text, with `{item}`, `{link}`, `{pull_requests}` and `{summary}`.
+    /// A notification's text, with `{item}`, `{link}`, `{pull_requests}`, `{summary}` and `{state}`.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub template: String,
     /// A launcher block's approved launcher of the coordinator.
@@ -273,7 +273,7 @@ pub fn validate_block(block: &Block) -> Result<()> {
             let unknown = unknown_placeholders(&block.template);
             ensure!(
                 unknown.is_empty(),
-                "Teams notification block {id} uses unknown placeholders ({}); the template may use {{item}}, {{link}}, {{pull_requests}} and {{summary}}.",
+                "Teams notification block {id} uses unknown placeholders ({}); the template may use {{item}}, {{link}}, {{pull_requests}}, {{summary}} and {{state}}.",
                 unknown.join(", ")
             );
             ensure!(

@@ -1172,13 +1172,16 @@ impl Graph {
                 .into());
             }
         };
-        let sent = message["id"]
-            .as_str()
-            .context("Graph send has no message ID")?;
+        // The message reached Teams: whatever fails from here on, the outcome is not a refusal.
+        let sent = message["id"].as_str().ok_or(PostRefusal::Uncertain)?;
         if let Some(nonce) = nonce {
-            self.store.finish_output(&nonce, sent)?;
+            self.store
+                .finish_output(&nonce, sent)
+                .map_err(|_| PostRefusal::Uncertain)?;
         }
-        self.store.event("teams_post", "sent")?;
+        self.store
+            .event("teams_post", "sent")
+            .map_err(|_| PostRefusal::Uncertain)?;
         Ok(json!({"status":"sent","chat":id,"message_id":sent,
             "mentions":mentioned.iter().map(|(_, n)| n).collect::<Vec<_>>()}))
     }
