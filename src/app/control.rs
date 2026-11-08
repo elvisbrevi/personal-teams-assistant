@@ -93,6 +93,9 @@ struct Endpoint {
     /// The workflow director's settings and classification (`workflows::director_handles`).
     #[serde(default)]
     workflow_director_support: bool,
+    /// The workflow run operations (`workflows::runs_handles`).
+    #[serde(default)]
+    workflow_runs_support: bool,
     #[serde(default)]
     wiki_support: bool,
     #[serde(default)]
@@ -520,6 +523,10 @@ async fn client_with_transport(
             "Incompatible workflows host: update the host and CLI together before using the workflow director."
         );
         ensure!(
+            endpoint.workflow_runs_support || !workflows::runs_handles(&request.method),
+            "Incompatible workflows host: update the host and CLI together before starting or following workflow runs."
+        );
+        ensure!(
             endpoint.cloud_store_support || !cloud::handles(&request.method),
             "Incompatible account store host: update the host and CLI together before connecting to the account store."
         );
@@ -692,6 +699,7 @@ pub(crate) fn launch(
             implementation_support: true,
             workflows_support: true,
             workflow_director_support: true,
+            workflow_runs_support: true,
             machine_pairing_support: true,
             machine_login_support: true,
             machine_management_support: true,
@@ -731,11 +739,13 @@ pub(crate) fn launch(
     Ok(async move {
         let machines = tokio::spawn(implementation::fleet::schedule(host.clone()));
         let updates = tokio::spawn(maintenance::schedule(host.clone()));
+        let engine = tokio::spawn(workflows::engine::schedule(host.clone()));
         let scheduler = tokio::spawn(activity::schedule(host));
         if let Ok(listener) = tokio::net::TcpListener::from_std(listener) {
             let _ = axum::serve(listener, router).await;
         }
         scheduler.abort();
+        engine.abort();
         updates.abort();
         machines.abort();
     })
@@ -1582,6 +1592,7 @@ mod tests {
                 implementation_support: true,
                 workflows_support: true,
                 workflow_director_support: true,
+                workflow_runs_support: true,
                 machine_pairing_support: true,
                 machine_login_support: true,
                 machine_management_support: true,
@@ -1628,6 +1639,7 @@ mod tests {
                 implementation_support: true,
                 workflows_support: true,
                 workflow_director_support: true,
+                workflow_runs_support: true,
                 machine_pairing_support: true,
                 machine_login_support: true,
                 machine_management_support: true,
@@ -1689,6 +1701,7 @@ mod tests {
                     implementation_support: true,
                     workflows_support: true,
                     workflow_director_support: true,
+                    workflow_runs_support: true,
                     machine_pairing_support: true,
                     machine_login_support: true,
                     machine_management_support: true,

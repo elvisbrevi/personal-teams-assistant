@@ -1133,7 +1133,7 @@ pub(super) const TOOLS: &[Tool] = &[
     Tool {
         name: "status",
         title: "Assistant status",
-        description: "Whether the host and the assistant run, the mode (observe or active), the Microsoft account, Teams subscriptions and the version.",
+        description: "Whether the host and the assistant run, the mode (observe or active), the Microsoft account, Teams subscriptions and the version, and the workflow runs waiting on the user (workflow_attention: a plan to review, a workflow to assign, a run that needs attention or a resume).",
         effect: Effect::Read,
         schema: none,
     },
@@ -1562,6 +1562,73 @@ pub(super) const TOOLS: &[Tool] = &[
             object(
                 json!({"provider": {"type": "string", "enum": ["azure"]}, "id": {"type": "integer", "minimum": 1}, "project": string("The item's Azure DevOps project, when the ID is in several."), "source": string("Enabled Azure source ID; optional when exactly one is enabled.")}),
                 &["provider", "id"],
+            )
+        },
+    },
+    Tool {
+        name: "workflow_run_start",
+        title: "Start a workflow run",
+        description: "Starts a workflow run on the account's coordinator for an Azure DevOps work item assigned to the user (an HU, bug or task): with workflow (an enabled workflow of the item's project) or director: true (the workflow director chooses; when it chooses none, or there is no director, the run waits unassigned for workflow_run_assign). The engine then advances it by itself every 30 seconds: an HU or bug is planned on the workflow's machine with its agent, checkouts, instructions and instruction blocks (untrusted input under the fixed rules) and stops at plan_review until the user reviews and confirms the children with implementation_create (nothing is created without it); then each created child is coded in turn, with full permissions on that machine, in the checkout of the repository it names (or the workflow's first), and the engine reads (never writes) the pull request of the branch each session reports and waits until every one is completed. A task is coded directly. Refused for a disabled workflow, a workflow of another project, an item not assigned to the user and an item with an active run. Returns the run record (workflow_run_status).",
+        effect: Effect::External,
+        schema: || {
+            object(
+                json!({"provider": {"type": "string", "enum": ["azure"]}, "id": {"type": "integer", "minimum": 1}, "workflow": string("The workflow's ID; or director: true."), "director": {"type": "boolean", "description": "The workflow director chooses the workflow."}, "project": string("The item's Azure DevOps project, when the ID is in several."), "source": string("Enabled Azure source ID; optional when exactly one is enabled."), "confirmed": confirmed()}),
+                &["provider", "id"],
+            )
+        },
+    },
+    Tool {
+        name: "workflow_runs",
+        title: "Workflow runs",
+        description: "The workflow runs, newest first (id, workflow, item with its verified link, state, stage, attention, children, pull requests with their links and status, dates), filtered by state (classifying, unassigned, planning, plan_review, creating_children, coding, pull_requests, blocks, done, failed, cancelled, interrupted, needs_attention) or workflow; limit 1-100 (default 20). attention lists the runs waiting on the user (plan_review, unassigned, needs_attention, interrupted, failed).",
+        effect: Effect::Read,
+        schema: || {
+            object(
+                json!({"state": string("Only runs in this state."), "workflow": string("Only runs of this workflow."), "limit": {"type": "integer", "minimum": 1, "maximum": 100}}),
+                &[],
+            )
+        },
+    },
+    Tool {
+        name: "workflow_run_status",
+        title: "A workflow run",
+        description: "The whole record of one workflow run: the workflow's definition and blocks as they were when the run got it, the item and its verified link, the state and the stage, the stage timeline (stage, started_at, finished_at, outcome), the planning run and each child's coding run (IDs and machine; implementation_runs shows them), the creation ledger entry (implementation_creation), the children with their links, repository, branch and pull requests (links and status), the block outcomes, the director's classification and what the user must look at (attention) or what went wrong (error).",
+        effect: Effect::Read,
+        schema: || object(json!({"run": string("The workflow run's ID.")}), &["run"]),
+    },
+    Tool {
+        name: "workflow_run_resume",
+        title: "Resume a workflow run",
+        description: "Resumes a failed, interrupted or needs_attention workflow run from the stage it stopped in, accepting what stopped it: an interrupted or failed planning run, or one its machine no longer has, is replaced by a new one (planning is read-only); an uncertain or incomplete creation continues with the children that were created; a coding run that did not end done, or that its machine no longer has, is accepted as it ended and the next child is coded (a coding run recorded as started is never started again); an abandoned pull request, or a child without a branch, no longer stops the run, and the wait for pull requests starts again; a run that delivered no child ends done without pull requests. No plan is ever submitted again and nothing is written to Azure DevOps.",
+        effect: Effect::External,
+        schema: || {
+            object(
+                json!({"run": string("The workflow run's ID."), "confirmed": confirmed()}),
+                &["run"],
+            )
+        },
+    },
+    Tool {
+        name: "workflow_run_cancel",
+        title: "Cancel a workflow run",
+        description: "Cancels a workflow run in any stage: its active implementation run (planning or coding) is cancelled on its machine with the existing cancellation, keeping its file changes, and the run stops advancing for good. A creation already being sent is not stopped (see implementation_creation).",
+        effect: Effect::External,
+        schema: || {
+            object(
+                json!({"run": string("The workflow run's ID."), "confirmed": confirmed()}),
+                &["run"],
+            )
+        },
+    },
+    Tool {
+        name: "workflow_run_assign",
+        title: "Assign a workflow to a run",
+        description: "Gives an unassigned workflow run (the director chose none, or there is no director) an enabled workflow of its item's project; the run then plans (or, for a task, codes) as workflow_run_start describes.",
+        effect: Effect::External,
+        schema: || {
+            object(
+                json!({"run": string("The workflow run's ID."), "workflow": string("The workflow's ID."), "confirmed": confirmed()}),
+                &["run", "workflow"],
             )
         },
     },
@@ -2078,6 +2145,7 @@ pub(super) async fn run(name: &str, args: &Value) -> Result<Value, String> {
                 "assistant_running": s["running"], "mode": if s["config"]["policy"]["dry_run"] == true { "observe" } else { "active" },
                 "microsoft_connected": s["microsoft_connected"], "active_subscriptions": s["active_subscriptions"],
                 "subscription_issue": s["subscription_issue"], "tunnel_running": s["tunnel_running"],
+                "workflow_attention": s["workflow_attention"],
             }))
         }
         "messages_list" => {
@@ -2251,7 +2319,10 @@ pub(super) async fn run(name: &str, args: &Value) -> Result<Value, String> {
         "workflows_list" | "workflow_show" | "workflow_save" | "workflow_remove"
         | "workflow_blocks_list" | "workflow_block_save" | "workflow_block_remove"
         | "workflow_repositories" | "workflow_settings" | "workflow_settings_update"
-        | "workflow_classify" => ipc(name, args.clone()).await,
+        | "workflow_classify" | "workflow_run_start" | "workflow_runs" | "workflow_run_status"
+        | "workflow_run_resume" | "workflow_run_cancel" | "workflow_run_assign" => {
+            ipc(name, args.clone()).await
+        }
         "answer_rate" => ipc("answer_feedback", json!({"resource": text(args, "resource")?, "rating": args.get("rating"),
             "comment": args.get("comment"), "example": args.get("example"), "context": args.get("context")})).await,
         "answer_draft" => ipc("answer_refine", json!({"resource": text(args, "resource")?, "context": args.get("context").and_then(Value::as_str).unwrap_or(""),
@@ -2401,6 +2472,27 @@ pub(super) fn confirmation(name: &str, args: &Value) -> Option<String> {
                 _ => return None,
             }
         }
+        "workflow_run_start" => format!(
+            "{}?",
+            super::workflows::runs::describe_start(
+                args["workflow"].as_str(),
+                None,
+                args["id"].as_u64().unwrap_or_default()
+            )
+        ),
+        "workflow_run_resume" => format!(
+            "Resume workflow run {} from the stage it stopped in, accepting what stopped it (a started coding run is not started again and no plan is submitted again)?",
+            args["run"].as_str().unwrap_or("this")
+        ),
+        "workflow_run_cancel" => format!(
+            "Cancel workflow run {} and its active implementation run, keeping its file changes? It stops advancing for good.",
+            args["run"].as_str().unwrap_or("this")
+        ),
+        "workflow_run_assign" => format!(
+            "Assign workflow {} to workflow run {}? It then plans with that workflow's agent and, once you confirm the children, codes each one with full permissions on its machine.",
+            args["workflow"].as_str().unwrap_or("this"),
+            args["run"].as_str().unwrap_or("this")
+        ),
         "cloud_disconnect" => if args["forget_service_token"] == true {
             "Disconnect this installation from the account store and remove the account's service token from it?".into()
         } else {
@@ -2671,6 +2763,12 @@ mod tests {
             ("workflow_settings", "read"),
             ("workflow_settings_update", "local"),
             ("workflow_classify", "local"),
+            ("workflow_run_start", "needs confirmation"),
+            ("workflow_runs", "read"),
+            ("workflow_run_status", "read"),
+            ("workflow_run_resume", "needs confirmation"),
+            ("workflow_run_cancel", "needs confirmation"),
+            ("workflow_run_assign", "needs confirmation"),
         ] {
             assert_eq!(effect(name), (json!(expected), json!("offered")), "{name}");
             assert!(super::super::workflows::handles(name), "{name}");

@@ -736,41 +736,13 @@ async fn operation(host: &Arc<Host>, method: &str, args: &Value) -> Result<Value
             );
             let detail = detail(host, &request.item).await?;
             let planning = planning(&request.item, &detail);
-            let map = host.state.settings.map()?;
-            let organization = LocalOrganization::new(&host.state.settings).organization()?;
-            let (provider, project) = (&request.item.provider, &detail.item.project);
-            let guides = if planning {
-                crate::work_items::for_project(&organization.guides, provider, project)
-            } else {
-                crate::work_items::for_item(
-                    &organization.guides,
-                    provider,
-                    &detail.item.kind,
-                    project,
-                )
-                .into_iter()
-                .collect()
-            };
-            let launch = Launch {
-                id: uuid::Uuid::new_v4().to_string(),
-                planning,
-                instructions: Some(crate::agent_prompts::resolve(
-                    &map.agent_prompts,
-                    if planning {
-                        crate::agent_prompts::PLAN
-                    } else {
-                        crate::agent_prompts::CODE
-                    },
-                )),
-                guides: guides.into_iter().cloned().collect(),
-                organization: crate::organization::for_agents(&organization.organization, project)
-                    .into_iter()
-                    .cloned()
-                    .collect(),
+            let launch = build_launch(
+                host,
+                uuid::Uuid::new_v4().to_string(),
                 request,
                 detail,
-                language: host.state.settings.config()?.llm.language,
-            };
+                planning,
+            )?;
             fleet::call(
                 host,
                 &launch.request.machine,
@@ -802,6 +774,152 @@ async fn operation(host: &Arc<Host>, method: &str, args: &Value) -> Result<Value
         }
         _ => anyhow::bail!("Unknown implementation operation."),
     }
+}
+
+/// The launch of an implementation run: the user's instructions for its kind, the work item
+/// guides that apply (the item's own type, or every type of its project when planning) and the
+/// organization's entries for its project.
+fn build_launch(
+    host: &Arc<Host>,
+    id: String,
+    request: Start,
+    detail: Detail,
+    planning: bool,
+) -> Result<Launch> {
+    let map = host.state.settings.map()?;
+    let organization = LocalOrganization::new(&host.state.settings).organization()?;
+    let (provider, project) = (&request.item.provider, &detail.item.project);
+    let guides = if planning {
+        crate::work_items::for_project(&organization.guides, provider, project)
+    } else {
+        crate::work_items::for_item(&organization.guides, provider, &detail.item.kind, project)
+            .into_iter()
+            .collect()
+    };
+    Ok(Launch {
+        id,
+        planning,
+        instructions: Some(crate::agent_prompts::resolve(
+            &map.agent_prompts,
+            if planning {
+                crate::agent_prompts::PLAN
+            } else {
+                crate::agent_prompts::CODE
+            },
+        )),
+        guides: guides.into_iter().cloned().collect(),
+        organization: crate::organization::for_agents(&organization.organization, project)
+            .into_iter()
+            .cloned()
+            .collect(),
+        request,
+        detail,
+        language: host.state.settings.config()?.llm.language,
+    })
+}
+
+/// An implementation run the workflow engine asks for: an ID it chose and recorded before
+/// asking, an Azure item it read, its machine, agent and directories, and its context.
+pub(super) struct Planned {
+    pub id: String,
+    pub machine: String,
+    pub provider: String,
+    pub model: String,
+    pub effort: String,
+    pub directories: Vec<PathBuf>,
+    pub context: String,
+    pub source: Option<String>,
+    pub detail: Detail,
+    pub planning: bool,
+}
+/// Launch a run the engine planned, through the same `implementation_launch` call as
+/// `implementation_start`. The call is idempotent by run ID: asking again for a run the machine
+/// already holds returns it (`existing`) and starts nothing.
+pub(super) async fn launch_planned(host: &Arc<Host>, planned: Planned) -> Result<Value> {
+    uuid(&planned.id)?;
+    uuid(&planned.machine)?;
+    ensure!(
+        planned.context.len() <= 32_000,
+        "Implementation context is too long."
+    );
+    let request = Start {
+        machine: planned.machine,
+        item: Selection {
+            provider: "azure".into(),
+            id: planned.detail.item.id,
+            project: planned.detail.item.project.clone(),
+            source: planned.source,
+            task: !planned.planning,
+        },
+        context: planned.context,
+        directories: planned.directories,
+        provider: planned.provider,
+        model: planned.model,
+        effort: planned.effort,
+    };
+    let launch = build_launch(host, planned.id, request, planned.detail, planned.planning)?;
+    fleet::call(
+        host,
+        &launch.request.machine,
+        "implementation_launch",
+        serde_json::to_value(&launch)?,
+    )
+    .await
+}
+/// One implementation run as its machine records it (`implementation_runs`), or none when the
+/// machine holds no run with that ID.
+pub(super) async fn observe(host: &Arc<Host>, machine: &str, id: &str) -> Result<Option<Value>> {
+    uuid(id)?;
+    let runs = fleet::call(
+        host,
+        machine,
+        "implementation_runs",
+        json!({"machine":machine,"id":id}),
+    )
+    .await?;
+    Ok(runs["runs"]
+        .as_array()
+        .and_then(|runs| runs.iter().find(|run| run["id"] == id))
+        .cloned())
+}
+/// Cancel an implementation run on its machine (`implementation_cancel`).
+pub(super) async fn cancel_run(host: &Arc<Host>, machine: &str, id: &str) -> Result<()> {
+    uuid(id)?;
+    fleet::call(
+        host,
+        machine,
+        "implementation_cancel",
+        json!({"machine":machine,"id":id}),
+    )
+    .await
+    .map(|_| ())
+}
+/// The creation ledger's record of a plan (`implementation_create`), as it is now: its state,
+/// parent, reviewed children and the items created.
+pub(super) async fn creation_record(host: &Arc<Host>, plan: &str) -> Option<Value> {
+    host.state
+        .implementation
+        .registry
+        .lock()
+        .await
+        .creations
+        .get(plan)
+        .cloned()
+}
+/// A creation recorded as `implementation_create` records it (tests of what observes it).
+#[cfg(test)]
+pub(super) async fn test_creation(host: &Host, plan: &str, record: Value) {
+    let state = &host.state.implementation;
+    let mut data = state.registry.lock().await;
+    data.creations.insert(plan.into(), record);
+    state.save(&data).unwrap();
+}
+/// End an in-flight run in `state` as its machine would record it (tests).
+#[cfg(test)]
+pub(super) fn test_finish(host: &Host, id: &str, state: &str, output: &str) {
+    LocalImplementation::new(&host.state.implementation.db)
+        .finish_run(id, state, output, None)
+        .unwrap();
 }
 
 fn browse_machine(host: &Host, args: &Value) -> Result<Value> {

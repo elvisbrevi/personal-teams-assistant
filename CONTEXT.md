@@ -194,7 +194,7 @@ The model-backed selector and summarizer configured in Settings › Workflows: i
 _Avoid_: coordinator, orchestrator, dispatcher
 
 **Workflow run**:
-One execution of a workflow for one work item, kept on the coordinator, advancing through stages (planning, the plan-review gate, child creation, coding, pull requests, blocks, done) by the existing implementation operations, never past the user's review of the plan.
+One execution of a workflow for one work item, kept on the coordinator, advancing through stages (planning, the plan-review gate, child creation, coding, pull requests, blocks, done) by the existing implementation operations, never past the user's review of the plan. An item has at most one active run; a run that stops (needs attention, interrupted, failed) waits for the user to resume it, and a resume never repeats a write or a started coding run.
 _Avoid_: implementation run (one of its parts), job
 
 **Ready state**:

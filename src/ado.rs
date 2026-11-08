@@ -9,6 +9,7 @@ pub mod review;
 pub mod tasks;
 pub mod todo;
 pub mod wiki;
+pub(crate) mod workflow;
 use crate::evidence::{Block, Evidence, Reference};
 use crate::state::Store;
 use anyhow::{Context, Result, ensure};
