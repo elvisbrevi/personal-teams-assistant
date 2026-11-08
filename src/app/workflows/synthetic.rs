@@ -19,6 +19,8 @@ pub(in crate::app) struct Catalog {
     pub failing_pulls: std::sync::atomic::AtomicBool,
     /// The ready-state listings fail, as during an outage.
     pub failing_lists: std::sync::atomic::AtomicBool,
+    /// The listing of this one state fails.
+    pub failing_state: Mutex<Option<String>>,
     /// The most items a listing may return, whatever the limit asked (a catalog larger than
     /// the read's bound).
     pub list_cap: Mutex<Option<usize>>,
@@ -129,14 +131,18 @@ impl Catalog {
     /// `limit` (with `has_more` when there are others): the To-Do read the watcher makes.
     pub(in crate::app) fn ready_items(
         &self,
+        source: Option<&str>,
         project: &str,
         state: &str,
         limit: usize,
     ) -> Result<crate::tools::todo::List, String> {
-        self.requests
-            .lock()
-            .unwrap()
-            .push(format!("GET list {project} {state} limit {limit}"));
+        self.requests.lock().unwrap().push(format!(
+            "GET list {project} {state} limit {limit} source {}",
+            source.unwrap_or("-")
+        ));
+        if self.failing_state.lock().unwrap().as_deref() == Some(state) {
+            return Err("[network] Azure work items could not be read.".into());
+        }
         if self.failing_lists.load(std::sync::atomic::Ordering::SeqCst) {
             return Err("[network] Azure work items could not be read.".into());
         }

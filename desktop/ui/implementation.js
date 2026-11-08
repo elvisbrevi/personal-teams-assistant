@@ -10,6 +10,7 @@ import { loadWorkItemSessions, openAgentSession } from './sessions.js';
 import { chooseDirectories } from './directory-sheet.js';
 import { providerNames } from './home.js';
 import { effortNames } from './settings-models.js';
+import { runStateLabel as runState } from './run-states.js';
 
 let implementationForm = null;
 let implementationRequest = 0;
@@ -28,14 +29,6 @@ function projectWorkflows(prepared, selected) {
   const item = prepared.detail.item;
   return (current?.map?.workflows ?? []).filter(w => w.enabled && organizationOf(w.organization) === organizationOf(item.url) && w.project.toLowerCase() === item.project.toLowerCase());
 }
-/** A workflow run's stages, as the person reads them. */
-const RUN_STATES = {
-  classifying: () => t('Choosing a workflow'), unassigned: () => t('Waiting for you to choose a workflow'), planning: () => t('Planning'),
-  plan_review: () => t('Plan waiting for your review'), creating_children: () => t('Creating the children'), coding: () => t('Coding'),
-  pull_requests: () => t('Waiting for pull requests'), blocks: () => t('Running the workflow\'s blocks'), done: () => t('Done'), failed: () => t('Failed'),
-  cancelled: () => t('Cancelled'), interrupted: () => t('Interrupted'), needs_attention: () => t('Needs attention'),
-};
-const runState = state => (RUN_STATES[state] ?? (() => tx(state)))();
 function implementationSelection(item, selection) {
   const provider = item.url.startsWith('https://github.com/') ? 'github' : 'azure';
   return { provider, id: item.id, project: item.project, source: provider === 'azure' ? selection?.source || $('#todo-source').value || undefined : undefined,
@@ -125,7 +118,8 @@ function implementationReady(form) {
   }
   // With a workflow the machine, directories and agent are the workflow's own.
   if (form.workflowMode && form.workflowMode !== 'none') {
-    form.start.disabled = form.start.classList.contains('busy') || !form.workflowId;
+    // A started run is not started twice: Start waits for another choice.
+    form.start.disabled = form.start.classList.contains('busy') || !form.workflowId || form.workflowStarted;
     return;
   }
   form.start.disabled = form.start.classList.contains('busy') || !(form.machine.value && form.directories.length && form.provider.value && form.model.value && form.effort.value);
@@ -137,6 +131,8 @@ function lockFields(form, locked) {
 }
 /** Fills the locked fields with the workflow's own machine, checkouts and agent. */
 function fillFromWorkflow(form, workflow) {
+  // A machine's catalog still on its way must not replace what the workflow supplies.
+  ++form.generation;
   const known = [...form.machine.options].some(o => o.value === workflow.machine);
   if (!known) form.machine.append(el('option', { value: workflow.machine, textContent: t('Unknown machine') }));
   form.machine.value = workflow.machine;
@@ -150,20 +146,45 @@ function fillFromWorkflow(form, workflow) {
   form.workflowNote.hidden = false;
   form.workflowNote.textContent = t('This run takes its machine, directories, agent, model, effort and instructions from the workflow {name}. To choose them yourself, start without a workflow.', { name: workflow.name });
 }
+/** What the person chose before a workflow took over, to give back with «No workflow». */
+function rememberChoices(form) {
+  form.remembered = { machine: form.machine.value, context: form.context.value, directories: [...form.directories],
+    provider: form.provider.value, model: form.model.value, effort: form.effort.value };
+}
+async function restoreChoices(form) {
+  const saved = form.remembered; form.remembered = null;
+  if (saved && [...form.machine.options].some(o => o.value === saved.machine)) form.machine.value = saved.machine;
+  await busy(form.machine, () => implementationMachine(form));
+  if (!saved || implementationForm !== form || form.workflowMode !== 'none') return;
+  form.context.value = saved.context;
+  // The directories belong to the machine they were chosen on.
+  if (form.machine.value === saved.machine) { form.directories = saved.directories; implementationDirectories(form); }
+  if ([...form.provider.options].some(o => o.value === saved.provider)) {
+    form.provider.value = saved.provider; implementationModels(form);
+    if ([...form.model.options].some(o => o.value === saved.model)) {
+      form.model.value = saved.model; implementationEfforts(form);
+      if ([...form.effort.options].some(o => o.value === saved.effort)) form.effort.value = saved.effort;
+    }
+  }
+  implementationReady(form);
+}
 /** The Workflow select changed: none, the director's classification, or a named workflow. */
 async function chooseWorkflow(form) {
   const generation = ++form.workflowGeneration;
   const mode = form.workflow.value === 'none' || form.workflow.value === 'director' ? form.workflow.value : 'id';
   const was = form.workflowMode;
-  form.workflowMode = mode; form.workflowId = null;
+  form.workflowMode = mode; form.workflowId = null; form.workflowStarted = false;
   form.workflowRun.replaceChildren();
   form.workflowNote.hidden = true;
   if (mode === 'none') {
     lockFields(form, false);
-    if (was !== 'none') await busy(form.machine, () => implementationMachine(form));
+    if (was !== 'none') await restoreChoices(form);
     implementationReady(form);
     return;
   }
+  if (was === 'none') rememberChoices(form);
+  // A machine's catalog still on its way must not replace the locked values.
+  ++form.generation;
   lockFields(form, true);
   if (mode === 'id') {
     const workflow = form.eligible.find(w => w.id === form.workflow.value);
@@ -227,7 +248,8 @@ async function startWorkflowRun(form) {
     el('p', {}, badgeBox, ' ', el('strong', { textContent: workflow?.name ?? id })),
     el('p', { class: 'hint', textContent: t('The run goes on by itself: it plans the item, stops for your review of the plan and then codes each child. Follow it in Workflows.') }),
     el('div', { class: 'actions' }, refresh, open)));
-  form.start.disabled = true;
+  form.workflowStarted = true;
+  implementationReady(form);
   await implementationRuns(form);
 }
 function implementationModels(form) {

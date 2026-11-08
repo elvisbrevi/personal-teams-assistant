@@ -2356,7 +2356,16 @@ for (const [label, viewport] of [['desktop', { width: 1280, height: 900 }], ['ph
   await page.evaluate(() => { window.__ptaWatcher = { state: 'unavailable', reason: '', interval_minutes: 5, last_poll: null, next_poll_at: null }; });
   await page.click('#workflow-settings-refresh');
   await page.waitForFunction(() => /solo en tu coordinador/.test(document.querySelector('#workflow-watcher-state')?.textContent || ''));
-  await page.evaluate(() => { delete window.__ptaWatcher; });
+  await page.evaluate(() => { window.__ptaWatcher = { state: 'waiting_for_director', reason: '', waiting_projects: ['Payments'], interval_minutes: 5, last_poll: null, next_poll_at: null }; });
+  await page.click('#workflow-settings-refresh');
+  await page.waitForFunction(() => /espera un director/.test(document.querySelector('#workflow-watcher-state')?.textContent || ''));
+  const waitingText = await page.locator('#workflow-watcher-state').innerText();
+  check(`automatic starts ${label}: Settings says the watcher waits for a director and for which projects`, /Payments/.test(waitingText), waitingText);
+  await page.evaluate(async () => { await refreshLive(); showTab('overview'); });
+  await page.waitForSelector('#tiles .status-row:has-text("Falta un director")');
+  check(`automatic starts ${label}: Home warns once that a director is missing`, await page.locator('#tiles .status-row', { hasText: 'Falta un director' }).count() === 1);
+  await page.evaluate(() => { delete window.__ptaWatcher; showTab('settings'); selectTab($('#settings-tabs'), 'workflows'); });
+  await page.click('#workflow-settings-refresh');
   const settings = await scan(page);
   check(`automatic starts ${label}: Settings › Workflows passes WCAG 2.2 AA`, settings.length === 0, JSON.stringify(settings));
   check(`automatic starts ${label}: Settings does not scroll sideways`, await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
@@ -2378,6 +2387,9 @@ for (const [label, viewport] of [['desktop', { width: 1280, height: 900 }], ['ph
   check(`implement workflow ${label}: none leaves the form as it was`, await page.locator('#implementation-machine').isEnabled() && await page.locator('#implementation-context').isEnabled());
 
   // A named workflow fills and locks the machine, directories, agent, model and effort.
+  await page.fill('#implementation-context', 'Keep this note.');
+  await page.selectOption('#implementation-machine', '22222222-2222-4222-8222-222222222222');
+  await page.waitForFunction(() => !document.querySelector('#implementation-machine').disabled);
   await page.selectOption('#implementation-workflow', 'payments-features');
   await page.waitForFunction(() => !document.querySelector('#implementation-workflow-note').hidden);
   const locked = await page.evaluate(() => ({
@@ -2398,14 +2410,22 @@ for (const [label, viewport] of [['desktop', { width: 1280, height: 900 }], ['ph
   const named = await scan(page);
   check(`implement workflow ${label}: the locked form passes WCAG 2.2 AA`, named.length === 0, JSON.stringify(named));
   await page.screenshot({ path: `${out}/${label}-implementation-workflow.png`, fullPage: true });
+  // «No workflow» gives back what the person had chosen before the workflow took over.
+  await page.selectOption('#implementation-workflow', 'none');
+  await page.waitForFunction(() => !document.querySelector('#implementation-machine').disabled && document.querySelector('#implementation-context').value === 'Keep this note.');
+  check(`implement workflow ${label}: no workflow restores the machine and the typed context`, await page.locator('#implementation-machine').inputValue() === '22222222-2222-4222-8222-222222222222'
+    && await page.locator('#implementation-context').inputValue() === 'Keep this note.' && await page.locator('#implementation-context').isEnabled());
+  await page.selectOption('#implementation-workflow', 'payments-features');
+  await page.waitForFunction(() => document.querySelector('#implementation-machine').disabled);
   await page.locator('.implementation-footer button').last().click();
   await page.waitForSelector('#implementation-workflow-started');
+  check(`implement workflow ${label}: Start stays disabled once the run started`, await page.locator('.implementation-footer button').last().isDisabled());
   const sent = await page.evaluate(() => window.__ptaLastImplementation);
   check(`implement workflow ${label}: Start sends the workflow and nothing the workflow supplies`, sent.workflow === 'payments-features' && !('machine' in sent) && !('directories' in sent) && !('provider' in sent) && !('context' in sent), JSON.stringify(sent));
   check(`implement workflow ${label}: the started run's state is shown inline with a link to Workflows`, /Planificando/.test(await page.locator('#implementation-workflow-started').innerText())
     && await page.locator('#implementation-workflow-started button', { hasText: 'Abrir Workflows' }).count() === 1);
   await page.locator('#implementation-workflow-started button', { hasText: 'Refresh' }).or(page.locator('#implementation-workflow-started button', { hasText: 'Actualizar' })).first().click();
-  await page.waitForFunction(() => /Plan esperando tu revisión/.test(document.querySelector('#implementation-workflow-started')?.textContent || ''));
+  await page.waitForFunction(() => /Plan por revisar/.test(document.querySelector('#implementation-workflow-started')?.textContent || ''));
   const started = await scan(page);
   check(`implement workflow ${label}: the started run passes WCAG 2.2 AA`, started.length === 0, JSON.stringify(started));
   await page.screenshot({ path: `${out}/${label}-implementation-workflow-started.png`, fullPage: true });

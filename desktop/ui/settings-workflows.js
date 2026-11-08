@@ -150,9 +150,10 @@ function renderWatcher(watcher) {
   const lines = [];
   if (watcher.state === 'unavailable') lines.push(t('The watcher runs only on your coordinator: this computer, a computer signed in to it and a shared account never start runs by themselves.'));
   else if (watcher.state === 'idle') lines.push(t('The watcher is idle: choose a ready state for a project to start it.'));
+  else if (watcher.state === 'waiting_for_director') lines.push(t('The watcher waits for a director: several workflows of {projects} start by themselves and it needs one to choose among them.', { projects: (watcher.waiting_projects ?? []).join(', ') }));
   else lines.push(t('The watcher checks every {n} minutes.', { n: watcher.interval_minutes }));
   const poll = watcher.last_poll;
-  if (watcher.state === 'watching') {
+  if (watcher.state === 'watching' || watcher.state === 'waiting_for_director') {
     if (!poll) lines.push(t('No check yet since the host started.'));
     else {
       lines.push(poll.started
@@ -160,7 +161,7 @@ function renderWatcher(watcher) {
         : t('Last check at {time}: nothing new.', { time: when(poll.at) }));
       if (poll.partial) lines.push(t('Part of what it reads was not covered in that check; it continues at the next one.'));
       for (const project of poll.projects ?? []) {
-        if (project.skipped) lines.push(`${project.project}: ${tx(project.skipped)}`);
+        if (project.skipped && !project.waiting_for_director) lines.push(`${project.project}: ${tx(project.skipped)}`);
         for (const error of project.errors ?? []) lines.push(`${project.project}: ${tx(error)}`);
       }
     }
@@ -289,10 +290,15 @@ function projectsWithoutReadyState() {
   return [...missing];
 }
 
+/** Projects whose several workflows that start by themselves have no director to choose, or null while unknown. */
+function projectsWaitingForDirector() {
+  return workflowSettings ? (workflowSettings.watcher?.waiting_projects ?? []) : null;
+}
+
 $('#workflow-settings-refresh').onclick = () => busy($('#workflow-settings-refresh'), loadWorkflowSettings);
 $('#workflow-director-prompt').onclick = () => showAgentPrompt('direct');
 
 export {
-  workflowSettings, loadWorkflowSettings, ensureWorkflowSettings, projectsWithoutReadyState, checkWorkflowSettings,
+  workflowSettings, loadWorkflowSettings, ensureWorkflowSettings, projectsWithoutReadyState, projectsWaitingForDirector, checkWorkflowSettings,
   saveWorkflowSettings, discardWorkflowSettings,
 };

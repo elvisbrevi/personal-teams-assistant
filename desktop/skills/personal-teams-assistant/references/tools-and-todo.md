@@ -407,8 +407,8 @@ Requires host and CLI `workflow_director_support: true`.
   default 2), `pull_request_wait_days` (default 7), the `director` (`machine`, `provider`,
   `model`, `effort`; none until chosen) and `ready_states` per organization and project, with
   the defaults, the bounds, `editable` and `watcher` (the ready-state watcher on this computer:
-  `state` `watching`, `idle` while no ready state is configured or `unavailable` where it never
-  runs, the interval and `last_poll`; see [automatic starts](#automatic-starts-and-the-implement-choice)).
+  `state` `watching`, `idle` while no ready state is configured, `waiting_for_director` or
+  `unavailable` where it never runs, the interval and `last_poll`; see [automatic starts](#automatic-starts-and-the-implement-choice)).
   With `--project NAME` (and `--organization URL` or
   `--source ID` when needed) it adds `process_states`: the states that project's process has
   for its requirement, bug and listed task types. Choose ready states only from that list.
@@ -507,12 +507,15 @@ it.
   the HUs, bugs and listed tasks assigned to the user in the **ready states** of each project
   (`pta workflows settings --set ready_states.PROJECT "STATE,STATE"`; read-only, the To-Do read
   with the read credential, at most 100 items per project per poll, and at most 25 new runs per
-  poll). It is idle until a ready state is configured and needs no running Teams service. For an
-  item it has not seen in that state, it starts a run (as `workflow_run_start` with `director: true`)
-  and the workflow director chooses among the enabled workflows of the project that have
-  `auto_start`. A project with no such workflow, a disabled workflow and an item the director
-  finds no workflow for start no coding: the last waits `unassigned` for
-  `pta workflows assign RUN WORKFLOW --confirmed`. An item starts at most one run per ready state
+  poll). It is idle until a ready state is configured and needs no running Teams service. With
+  several enabled Azure sources, each ready-state entry is read through the source whose catalog
+  names its organization. For an item it has not seen in that state, it starts a run: when
+  exactly one enabled workflow of the project has `auto_start`, with that workflow directly (no
+  director needed); when several do, as `workflow_run_start` with `director: true`, and the
+  workflow director chooses among them. With several and no director configured nothing starts
+  and `watcher.state` is `waiting_for_director` (Home warns once). A project with no `auto_start`
+  workflow, a disabled workflow and an item the director finds no workflow for start no coding:
+  the last waits `unassigned` for `pta workflows assign RUN WORKFLOW --confirmed`. An item starts at most one run per ready state
   (a seen ledger); one that leaves the state and comes back is seen again. Whether it ran and what
   the last check found: `pta workflows settings` (`watcher`; kept in memory, so a restart empties
   it). **The gate stands:** an automatic run only plans; it stops at `plan_review` (shown on Home

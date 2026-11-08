@@ -497,20 +497,6 @@ async fn verify_director(host: &Arc<Host>, director: &Director) -> Result<Vec<St
 pub(super) const ITEM_SECONDS: u64 = 20;
 const DESCRIPTION: usize = 8000;
 
-/// The item fresh, in one detail read of any category (an HU, a bug or a task), with the
-/// category its type was found in.
-async fn read_item(
-    state: &DesktopState,
-    args: &ClassifyArgs,
-) -> Result<crate::tools::todo::Detail, String> {
-    let body = json!({"id":args.id,"project":args.project,"source":args.source});
-    let read = tools::todo::read(state, "get_azure_item", &body);
-    let value = tokio::time::timeout(std::time::Duration::from_secs(ITEM_SECONDS), read)
-        .await
-        .map_err(|_| "[network] The work item could not be read in time.".to_owned())??;
-    serde_json::from_value(value).map_err(fail)
-}
-
 /// The item as the director reads it: type, category, project, title, description, tags, area
 /// and iteration, bounded (untrusted input).
 pub(super) fn item_input(detail: &crate::tools::todo::Detail) -> Value {
@@ -551,24 +537,20 @@ pub(super) fn item_input(detail: &crate::tools::todo::Detail) -> Value {
 }
 
 async fn classify(host: &Arc<Host>, args: ClassifyArgs) -> Result<Value, String> {
-    let state = &host.state;
-    require_coordinator(state)?;
+    require_coordinator(&host.state)?;
     if args.provider != "azure" {
         return Err(invalid(
             "Workflows cover Azure DevOps work items: give provider azure.",
         ));
     }
-    let director = state
-        .settings
-        .map()
-        .map_err(fail)?
-        .workflow_settings
-        .director
-        .ok_or_else(|| {
-            "[not_ready] Choose the workflow director first (pta workflows settings --set director.machine ID --set director.provider P --set director.model M --set director.effort E).".to_owned()
-        })?;
-    let detail = read_item(state, &args).await?;
-    classify_item(host, &director, &detail, false).await
+    classify_for(
+        host,
+        &super::engine::Azure::Live,
+        args.id,
+        args.project.as_deref(),
+        args.source.as_deref(),
+    )
+    .await
 }
 
 /// The dry-run classification of an item (the Implement entry): the director's choice among

@@ -3,16 +3,20 @@
 //! listed tasks assigned to the user in the ready states of each configured project (the To-Do
 //! read `list_azure_hus`, with the same assignment rules, the read credential and the process
 //! cache), and starts a workflow run for each item it has not seen in that state yet, through
-//! the engine's own start path (`runs::start_confirmed`) with the director choosing among the
-//! enabled workflows of the project that start by themselves (`auto_start`). It reads and
-//! starts runs, nothing else: the plan-review gate still stands between a run and any child,
-//! and it never changes a source's audiences.
+//! the engine's own start path (`runs::start_confirmed`): the one enabled workflow of the
+//! project that starts by itself (`auto_start`) when there is exactly one, or the director's
+//! choice among them when there are several (without a director the project waits for one and
+//! nothing starts). It reads and starts runs, nothing else: the plan-review gate still stands
+//! between a run and any child, and it never changes a source's audiences.
 //!
 //! The seen ledger (`workflow_seen` in `workflows.db`) makes an item in a given ready state
-//! start at most one run: an item is recorded before its run is asked for, and forgotten again
-//! only when the start could not reach Azure (the next poll tries it again). An item that is
-//! no longer in a ready state is forgotten, so one that comes back is seen again; nothing is
-//! forgotten from a read that was partial or failed.
+//! start at most one run. Each row holds the ID of the run it asked for, written **before** the
+//! run is requested (the engine creates the run under that ID), so the row and the run agree: a
+//! row whose run exists is seen; a row without its run (an abort or a restart between the two,
+//! or a start that could not read Azure) is not seen once one interval has passed, and is asked
+//! for again under the same run ID, which the engine's one-active-run-per-item index also
+//! guards. An item that is no longer in a ready state is forgotten, so one that comes back is
+//! seen again; nothing is forgotten from a read that was partial or failed.
 //!
 //! Bounds: at most [`MAX_ITEMS`] items per project per poll (the To-Do list's own limit), at
 //! most [`MAX_STARTS`] new runs per poll (the rest are seen at the next one), and the poll
@@ -22,7 +26,7 @@
 use super::engine::{self, Azure};
 use super::*;
 use crate::workflows::director::{ReadyStates, Settings};
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 
 /// Items read per project in one poll, over all its ready states (the To-Do list's maximum).
 pub(in crate::app) const MAX_ITEMS: usize = 100;
@@ -31,6 +35,8 @@ pub(in crate::app) const MAX_ITEMS: usize = 100;
 pub(in crate::app) const MAX_STARTS: usize = 25;
 /// How often the task looks at whether a poll is due.
 const TICK_SECONDS: u64 = 30;
+/// What a project with several workflows that start by themselves and no director reports.
+const WAITING: &str = "Waiting for a director: several workflows of this project start by themselves and no workflow director is configured to choose among them.";
 
 /// The watcher's state on the profile: its seen ledger and its last poll.
 pub(in crate::app) struct Watcher {
@@ -38,6 +44,12 @@ pub(in crate::app) struct Watcher {
     last: std::sync::Mutex<Option<Value>>,
     /// One poll at a time (the task's and a test's).
     polling: Mutex<()>,
+}
+
+/// What the ledger holds for an item in a state: the run it asked for and when it did.
+struct Entry {
+    run: String,
+    marked_at: i64,
 }
 
 impl Watcher {
@@ -50,7 +62,8 @@ impl Watcher {
             CREATE TABLE IF NOT EXISTS workflow_seen (
                 item_url TEXT NOT NULL, item_id INTEGER NOT NULL, organization TEXT NOT NULL,
                 project TEXT NOT NULL, state TEXT NOT NULL, changed_at TEXT,
-                first_seen INTEGER NOT NULL, PRIMARY KEY (item_url, state));
+                run_id TEXT NOT NULL, marked_at INTEGER NOT NULL, first_seen INTEGER NOT NULL,
+                PRIMARY KEY (item_url, state));
             CREATE INDEX IF NOT EXISTS workflow_seen_project ON workflow_seen(organization, project, state);",
         )?;
         Ok(Self {
@@ -59,11 +72,33 @@ impl Watcher {
             polling: Mutex::new(()),
         })
     }
-    /// Record the item in the state; true when it was not recorded yet.
-    fn mark(&self, item: &crate::tools::todo::Item, organization: &str, now: i64) -> Result<bool> {
-        let db = self.ledger.lock().unwrap();
-        let inserted = db.execute(
-            "INSERT OR IGNORE INTO workflow_seen (item_url,item_id,organization,project,state,changed_at,first_seen) VALUES (?1,?2,?3,?4,?5,?6,?7)",
+    fn entry(&self, url: &str, state: &str) -> Result<Option<Entry>> {
+        Ok(self
+            .ledger
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT run_id, marked_at FROM workflow_seen WHERE item_url=?1 AND state=?2",
+                params![url, state],
+                |r| {
+                    Ok(Entry {
+                        run: r.get(0)?,
+                        marked_at: r.get(1)?,
+                    })
+                },
+            )
+            .optional()?)
+    }
+    /// Record the item in the state with the run about to be requested for it.
+    fn mark(
+        &self,
+        item: &crate::tools::todo::Item,
+        organization: &str,
+        run: &str,
+        now: i64,
+    ) -> Result<()> {
+        self.ledger.lock().unwrap().execute(
+            "INSERT OR IGNORE INTO workflow_seen (item_url,item_id,organization,project,state,changed_at,run_id,marked_at,first_seen) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?8)",
             params![
                 item.url,
                 item.id,
@@ -71,10 +106,27 @@ impl Watcher {
                 item.project.to_lowercase(),
                 item.state,
                 item.changed_at,
+                run,
                 now
             ],
         )?;
-        Ok(inserted == 1)
+        Ok(())
+    }
+    /// The run is being asked for again: its mark is as new as this attempt.
+    fn retry(&self, url: &str, state: &str, now: i64) -> Result<()> {
+        self.ledger.lock().unwrap().execute(
+            "UPDATE workflow_seen SET marked_at=?3 WHERE item_url=?1 AND state=?2",
+            params![url, state, now],
+        )?;
+        Ok(())
+    }
+    /// The item's run is another one (a run already active for it).
+    fn settle(&self, url: &str, state: &str, run: &str) -> Result<()> {
+        self.ledger.lock().unwrap().execute(
+            "UPDATE workflow_seen SET run_id=?3 WHERE item_url=?1 AND state=?2",
+            params![url, state, run],
+        )?;
+        Ok(())
     }
     fn forget(&self, url: &str, state: &str) -> Result<()> {
         self.ledger.lock().unwrap().execute(
@@ -109,18 +161,30 @@ impl Watcher {
             })
             .unwrap_or(0) as usize
     }
-    /// The ledger rows of an item: `(state, changed_at)`.
+    /// The ledger rows of an item: `(state, changed_at, run_id)`.
     #[cfg(test)]
-    pub(in crate::app) fn rows(&self, url: &str) -> Vec<(String, Option<String>)> {
+    pub(in crate::app) fn rows(&self, url: &str) -> Vec<(String, Option<String>, String)> {
         let db = self.ledger.lock().unwrap();
         let mut query = db
-            .prepare("SELECT state, changed_at FROM workflow_seen WHERE item_url=?1 ORDER BY state")
+            .prepare("SELECT state, changed_at, run_id FROM workflow_seen WHERE item_url=?1 ORDER BY state")
             .unwrap();
         query
-            .query_map([url], |r| Ok((r.get(0)?, r.get(1)?)))
+            .query_map([url], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
             .unwrap()
             .map(Result::unwrap)
             .collect()
+    }
+    /// Make a row look as old as an abort left it (a test of the stale mark).
+    #[cfg(test)]
+    pub(in crate::app) fn age(&self, url: &str, seconds: i64) {
+        self.ledger
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE workflow_seen SET marked_at = marked_at - ?2 WHERE item_url=?1",
+                params![url, seconds],
+            )
+            .unwrap();
     }
     fn record(&self, poll: Value) {
         *self.last.lock().unwrap() = Some(poll);
@@ -130,13 +194,51 @@ impl Watcher {
     }
 }
 
+/// The enabled workflows of a project that start by themselves (IDs, in the map's order).
+fn auto_workflows(
+    workflows: &[crate::workflows::Workflow],
+    organization: &str,
+    project: &str,
+) -> Vec<String> {
+    crate::workflows::director::candidates(workflows, organization, project)
+        .into_iter()
+        .filter(|w| w.auto_start)
+        .map(|w| w.id.clone())
+        .collect()
+}
+
+/// The projects with ready states whose several workflows that start by themselves have no
+/// director to choose among them: nothing starts for them.
+fn waiting_for_director(
+    settings: &Settings,
+    workflows: &[crate::workflows::Workflow],
+) -> Vec<String> {
+    if settings.director.is_some() {
+        return Vec::new();
+    }
+    settings
+        .ready_states
+        .iter()
+        .filter(|r| !r.states.is_empty())
+        .filter(|r| {
+            crate::workflows::organization_name(&r.organization)
+                .is_some_and(|o| auto_workflows(workflows, &o, &r.project).len() > 1)
+        })
+        .map(|r| r.project.clone())
+        .collect()
+}
+
 /// The watcher as `workflow_settings` shows it: whether it watches on this computer, the
 /// interval, and the last poll since the host started.
 pub(in crate::app) fn view(state: &DesktopState) -> Value {
-    let settings = state
-        .settings
-        .map()
-        .map(|m| m.workflow_settings)
+    let map = state.settings.map().ok();
+    let settings = map
+        .as_ref()
+        .map(|m| m.workflow_settings.clone())
+        .unwrap_or_default();
+    let waiting = map
+        .as_ref()
+        .map(|m| waiting_for_director(&settings, &m.workflows))
         .unwrap_or_default();
     let last = state.workflows.watcher.last();
     let (word, reason) = if !engine::may_run(state) {
@@ -151,40 +253,45 @@ pub(in crate::app) fn view(state: &DesktopState) -> Value {
             "idle",
             Some("No ready state is configured; choose one for a project in Settings › Workflows."),
         )
+    } else if !waiting.is_empty() {
+        ("waiting_for_director", Some(WAITING))
     } else {
         ("watching", None)
     };
     json!({
         "state": word,
         "reason": reason,
+        "waiting_projects": waiting,
         "interval_minutes": settings.watch_interval_minutes,
         "last_poll": last,
         "next_poll_at": last
             .as_ref()
             .and_then(|l| l["at"].as_i64())
-            .filter(|_| word == "watching")
+            .filter(|_| word == "watching" || word == "waiting_for_director")
             .map(|at| at + i64::from(settings.watch_interval_minutes) * 60),
     })
 }
 
 impl Azure {
     /// The HUs, bugs and listed tasks assigned to the user in one state of a project, at most
-    /// `limit`: the To-Do read, with the read credential and the process cache.
+    /// `limit`: the To-Do read of that Azure source, with the read credential and the process
+    /// cache.
     async fn ready_items(
         &self,
         state: &DesktopState,
+        source: Option<&str>,
         project: &str,
         ready: &str,
         limit: usize,
     ) -> Result<crate::tools::todo::List, String> {
         match self {
             Self::Live => {
-                let body = json!({"project":project,"state":ready,"limit":limit});
+                let body = json!({"source":source,"project":project,"state":ready,"limit":limit});
                 let value = tools::todo::read(state, "list_azure_hus", &body).await?;
                 serde_json::from_value(value).map_err(fail)
             }
             #[cfg(test)]
-            Self::Synthetic(catalog) => catalog.ready_items(project, ready, limit),
+            Self::Synthetic(catalog) => catalog.ready_items(source, project, ready, limit),
         }
     }
 }
@@ -205,11 +312,12 @@ pub(in crate::app) async fn poll(host: &Arc<Host>, azure: &Azure, now: i64) -> V
     let state = &host.state;
     let watcher = &state.workflows.watcher;
     let _polling = watcher.polling.lock().await;
-    let settings: Settings = state
-        .settings
-        .map()
-        .map(|m| m.workflow_settings)
-        .unwrap_or_default();
+    let Ok(map) = state.settings.map() else {
+        let unread = json!({"at": now, "started": 0, "partial": true, "projects": []});
+        watcher.record(unread.clone());
+        return unread;
+    };
+    let settings = map.workflow_settings.clone();
     let mut projects = Vec::new();
     let mut budget = MAX_STARTS;
     for ready in settings
@@ -217,7 +325,7 @@ pub(in crate::app) async fn poll(host: &Arc<Host>, azure: &Azure, now: i64) -> V
         .iter()
         .filter(|r| !r.states.is_empty())
     {
-        projects.push(project(host, azure, ready, &mut budget, now).await);
+        projects.push(project(host, azure, &map, ready, &mut budget, now).await);
     }
     let partial = projects.iter().any(|p| p["complete"] != true);
     let poll = json!({
@@ -233,12 +341,14 @@ pub(in crate::app) async fn poll(host: &Arc<Host>, azure: &Azure, now: i64) -> V
 async fn project(
     host: &Arc<Host>,
     azure: &Azure,
+    map: &KnowledgeMap,
     ready: &ReadyStates,
     budget: &mut usize,
     now: i64,
 ) -> Value {
     let state = &host.state;
     let watcher = &state.workflows.watcher;
+    let interval = i64::from(map.workflow_settings.watch_interval_minutes) * 60;
     let named = |extra: Value| {
         let mut base = json!({"organization": ready.organization, "project": ready.project, "states": ready.states});
         for (key, value) in extra.as_object().cloned().unwrap_or_default() {
@@ -252,16 +362,30 @@ async fn project(
         );
     };
     // Only the workflows that start by themselves are asked about; with none, nothing is read.
-    let covered = state.settings.map().is_ok_and(|map| {
-        crate::workflows::director::candidates(&map.workflows, &organization, &ready.project)
-            .iter()
-            .any(|w| w.auto_start)
-    });
-    if !covered {
-        return named(
-            json!({"complete": true, "skipped": "No enabled workflow of this project starts by itself (auto_start)."}),
-        );
-    }
+    let candidates = auto_workflows(&map.workflows, &organization, &ready.project);
+    let direct = match candidates.as_slice() {
+        [] => {
+            return named(
+                json!({"complete": true, "skipped": "No enabled workflow of this project starts by itself (auto_start)."}),
+            );
+        }
+        // Exactly one: it needs no director.
+        [only] => Some(only.clone()),
+        _ if map.workflow_settings.director.is_none() => {
+            return named(
+                json!({"complete": true, "skipped": WAITING, "waiting_for_director": true}),
+            );
+        }
+        _ => None,
+    };
+    // The enabled source that holds the organization, when several are enabled.
+    let source = match tools::todo::source_for(state, &ready.organization) {
+        Ok(source) => source,
+        Err(error) => {
+            let note = error.split_once("] ").map_or(error.as_str(), |(_, t)| t);
+            return named(json!({"complete": false, "errors": [note]}));
+        }
+    };
     let mut found = Coverage {
         complete: true,
         ..Default::default()
@@ -274,15 +398,22 @@ async fn project(
             break;
         }
         let list = match azure
-            .ready_items(state, &ready.project, ready_state, items_left)
+            .ready_items(
+                state,
+                source.as_deref(),
+                &ready.project,
+                ready_state,
+                items_left,
+            )
             .await
         {
             Ok(list) => list,
             Err(error) => {
+                // This state is reported and kept as it is; the others are still read.
                 let note = error.split_once("] ").map_or(error.as_str(), |(_, t)| t);
                 found.errors.push(format!("{ready_state}: {note}"));
                 found.complete = false;
-                break;
+                continue;
             }
         };
         // Items of this organization only (a project name can exist in several).
@@ -303,35 +434,61 @@ async fn project(
             found.complete = false;
             found.errors.extend(list.warnings.iter().cloned());
         }
-        let mut present = Vec::new();
+        // Every listed item is present, whether or not this poll may start it.
+        let present: Vec<String> = items.iter().map(|i| i.url.clone()).collect();
         for item in items {
-            if *budget == 0 {
-                // Not recorded: the next poll sees it as new.
-                found.deferred += 1;
-                found.complete = false;
-                continue;
-            }
-            present.push(item.url.clone());
-            match watcher.mark(item, &organization, now) {
-                Ok(true) => {}
-                Ok(false) => {
-                    found.already += 1;
-                    continue;
+            let run = match watcher.entry(&item.url, ready_state) {
+                // Its run exists: seen. A mark without its run is waited for one interval (it
+                // may be the start in flight), then asked for again under the same run ID.
+                Ok(Some(entry)) => {
+                    let exists = state.workflows.db.get(&entry.run).ok().flatten().is_some();
+                    if exists || now - entry.marked_at < interval {
+                        found.already += 1;
+                        continue;
+                    }
+                    if *budget == 0 {
+                        found.deferred += 1;
+                        found.complete = false;
+                        continue;
+                    }
+                    if watcher.retry(&item.url, ready_state, now).is_err() {
+                        found.complete = false;
+                        continue;
+                    }
+                    entry.run
+                }
+                Ok(None) => {
+                    if *budget == 0 {
+                        // Not recorded: the next poll sees it as new.
+                        found.deferred += 1;
+                        found.complete = false;
+                        continue;
+                    }
+                    let run = uuid::Uuid::new_v4().to_string();
+                    if watcher.mark(item, &organization, &run, now).is_err() {
+                        found
+                            .errors
+                            .push(format!("{}: the seen ledger could not be written", item.id));
+                        found.complete = false;
+                        continue;
+                    }
+                    run
                 }
                 Err(_) => {
                     found
                         .errors
-                        .push(format!("{}: the seen ledger could not be written", item.id));
+                        .push(format!("{}: the seen ledger could not be read", item.id));
                     found.complete = false;
                     continue;
                 }
-            }
+            };
             match super::runs::start_confirmed(
                 host,
                 azure,
-                (item.id, Some(item.project.clone()), None),
-                None,
+                (item.id, Some(item.project.clone()), source.clone()),
+                direct.clone(),
                 true,
+                Some(run),
             )
             .await
             {
@@ -348,8 +505,13 @@ async fn project(
                     found.errors.push(format!("{}: {note}", item.id));
                     found.complete = false;
                 }
-                // The item already has an active run, or is not one a workflow runs: seen.
-                Err(_) => {}
+                // The item already has an active run (started by hand, say): that is its run.
+                // Any other refusal leaves the mark, asked again after one interval.
+                Err(_) => {
+                    if let Ok(Some(active)) = state.workflows.db.active_for(&item.url) {
+                        let _ = watcher.settle(&item.url, ready_state, &active.id);
+                    }
+                }
             }
         }
         if sure {

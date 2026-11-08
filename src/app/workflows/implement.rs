@@ -103,6 +103,7 @@ pub(in crate::app) async fn start(
         (a.item.id, Some(a.item.project), a.item.source),
         Some(a.workflow.clone()),
         false,
+        None,
     )
     .await?;
     Ok(json!({"workflow": a.workflow, "started": true, "run": started["run"]}))

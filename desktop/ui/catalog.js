@@ -2590,9 +2590,7 @@ const UI_CATALOG = { es: {
   "Plan to review": "Plan por revisar",
   "Needs a workflow": "Necesita un workflow",
   "Choosing a workflow": "Eligiendo un workflow",
-  "Waiting for you to choose a workflow": "Esperando que elijas un workflow",
   "Planning": "Planificando",
-  "Plan waiting for your review": "Plan esperando tu revisión",
   "Creating the children": "Creando los hijos",
   "Coding": "Programando",
   "Waiting for pull requests": "Esperando los pull requests",
@@ -2618,7 +2616,10 @@ const UI_CATALOG = { es: {
   "Part of what it reads was not covered in that check; it continues at the next one.": "Parte de lo que lee no se cubrió en esa revisión; continúa en la siguiente.",
   "Last check at {time}: 1 run started.": "Última revisión a las {time}: 1 ejecución iniciada.",
   "Last check at {time}: {n} runs started.": "Última revisión a las {time}: {n} ejecuciones iniciadas.",
-  "Workflow runs waiting for you": "Ejecuciones de workflow que te esperan"
+  "Workflow runs waiting for you": "Ejecuciones de workflow que te esperan",
+  "Director missing": "Falta un director",
+  "Several workflows of {projects} start by themselves: choose a workflow director so it can pick one": "Varios workflows de {projects} se inician solos: elige un director de workflows para que escoja uno",
+  "The watcher waits for a director: several workflows of {projects} start by themselves and it needs one to choose among them.": "La vigilancia espera un director: varios workflows de {projects} se inician solos y necesita uno que elija entre ellos."
 } };
 
 /** Host texts with a variable part (older runs and entries were stored in English). */
