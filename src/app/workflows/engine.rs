@@ -11,6 +11,7 @@
 //! anywhere resumes from the last recorded stage without a second start. Only the coordinator
 //! advances runs (never a computer signed in to one, never a shared portal account that is not
 //! the owner's), at most `concurrency` of them in the stages that take a slot.
+use super::acting;
 use super::record::{Child, Implementation, Item, Run, State as Phase, Store};
 use super::*;
 use crate::ado::workflow::PullRequest;
@@ -36,6 +37,8 @@ pub(in crate::app) struct State {
     admission: Mutex<()>,
     advancing: AtomicUsize,
     recovered: AtomicBool,
+    /// The attempts left without a result were settled once after a start.
+    settled: AtomicBool,
     /// The runs whose advance is running now, each in its own task.
     inflight: std::sync::Mutex<std::collections::HashSet<String>>,
 }
@@ -50,6 +53,7 @@ impl State {
             admission: Mutex::new(()),
             advancing: AtomicUsize::new(0),
             recovered: AtomicBool::new(false),
+            settled: AtomicBool::new(false),
             inflight: std::sync::Mutex::new(std::collections::HashSet::new()),
         })
     }
@@ -220,11 +224,28 @@ pub(in crate::app) async fn tick(
         }
         unrecovered
     };
+    // After a start, every acting attempt left without a result is settled, in every run.
+    if !state.settled.load(Ordering::SeqCst) {
+        acting::settle_all(host, now).await?;
+        state.settled.store(true, Ordering::SeqCst);
+    }
+    // A failed run is not advanced, but its `failed` blocks may be due (the host stopped before
+    // they ran, or a launcher was busy): they stay in the sweep until each has an outcome.
+    let mut tasks = Vec::new();
+    for run in state.db.list(&[Phase::Failed], None, -1)? {
+        if acting::has_due(&run) && state.inflight.lock().unwrap().insert(run.id.clone()) {
+            let guard = Inflight(host.clone(), run.id.clone());
+            let (host, id) = (host.clone(), run.id.clone());
+            tasks.push(tokio::spawn(async move {
+                let _guard = guard;
+                let _ = acting::execute(&host, &id, now).await;
+            }));
+        }
+    }
     let driven: Vec<Phase> = Phase::ALL.into_iter().filter(|s| s.driven()).collect();
     let mut runs = state.db.list(&driven, None, -1)?;
     // The oldest first: they take the free slots first.
     runs.reverse();
-    let mut tasks = Vec::new();
     for run in runs {
         if unrecovered.contains(&run.id) || !state.inflight.lock().unwrap().insert(run.id.clone()) {
             continue;
@@ -354,6 +375,15 @@ async fn advance(host: &Arc<Host>, azure: &Azure, id: &str, now: i64, poll: i64)
             }
             continue;
         }
+        // The acting blocks due at this stage run before the stage's own step; the run's lock
+        // is not held while they act.
+        if acting::has_due(&run) {
+            drop(guard);
+            match acting::execute(host, id, now).await? {
+                acting::Progress::Waiting => return Ok(()),
+                acting::Progress::Idle | acting::Progress::Changed => continue,
+            }
+        }
         match step(host, azure, &mut run, now, poll).await {
             Ok(true) => {
                 run.updated_at = now;
@@ -365,6 +395,9 @@ async fn advance(host: &Arc<Host>, azure: &Azure, id: &str, now: i64, poll: i64)
                     security::Redactor::new(&[], Vec::new()).expect("built-in redaction patterns");
                 run.stop(Phase::Failed, now, redactor.redact(&error));
                 state.db.save(&run)?;
+                // The blocks of the `failed` stage.
+                drop(guard);
+                acting::execute(host, id, now).await?;
                 return Ok(());
             }
         }
@@ -547,28 +580,32 @@ async fn step(
         Phase::Coding => coding(host, azure, run, &workflow, now).await,
         Phase::PullRequests => pull_requests(host, azure, run, now, poll).await,
         Phase::Blocks => {
-            let acting: Vec<&crate::workflows::Block> = run
+            // The blocks of this stage ran before this step (`acting`): nothing is due now.
+            // Only the blocks of this stage's own occurrences count here.
+            let own = |stage: Option<crate::workflows::Stage>| {
+                matches!(
+                    stage,
+                    Some(
+                        crate::workflows::Stage::PullRequestsCompleted
+                            | crate::workflows::Stage::Done
+                    )
+                )
+            };
+            let due = run
                 .blocks
                 .iter()
-                .filter(|b| b.kind != crate::workflows::Kind::Instruction)
-                .collect();
-            if acting.is_empty() {
-                run.advance(Phase::Done, now, "skipped: no acting block");
-                return Ok(true);
-            }
-            let outcomes: Vec<super::record::BlockOutcome> = acting
-                .iter()
-                .map(|b| super::record::BlockOutcome {
-                    block: b.id.clone(),
-                    kind: b.kind,
-                    stage: b.stage,
-                    outcome: "not_run: this version records acting blocks without running them"
-                        .into(),
-                    at: now,
-                })
-                .collect();
-            run.block_outcomes.extend(outcomes);
-            run.advance(Phase::Done, now, "acting blocks recorded, not run");
+                .any(|b| b.kind != crate::workflows::Kind::Instruction && own(b.stage));
+            let outcome = if due {
+                let count = run
+                    .block_outcomes
+                    .iter()
+                    .filter(|o| o.occurrence == "pull_requests_completed" || o.occurrence == "done")
+                    .count();
+                format!("{count} acting block outcomes")
+            } else {
+                "skipped: no acting block".to_owned()
+            };
+            run.advance(Phase::Done, now, &outcome);
             Ok(true)
         }
         _ => Ok(false),

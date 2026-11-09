@@ -1169,8 +1169,14 @@ impl Graph {
             Ok(message) => message,
             Err(error) => {
                 let refused = refused_by_graph(&error);
-                self.store
-                    .event("teams_post", if refused { "refused" } else { "uncertain" })?;
+                // The request went out: a log that cannot be written never changes the outcome.
+                if self
+                    .store
+                    .event("teams_post", if refused { "refused" } else { "uncertain" })
+                    .is_err()
+                {
+                    tracing::warn!(event = "teams_post_event_not_recorded");
+                }
                 return Err(if refused {
                     PostRefusal::Refused
                 } else {

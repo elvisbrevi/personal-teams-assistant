@@ -464,7 +464,7 @@ async fn client_with_transport(
                 authority::Transport::Browser => &endpoint.browser_token,
                 authority::Transport::Machine => &endpoint.machine_token,
                 authority::Transport::Agent => &endpoint.agent_token,
-                authority::Transport::Local | authority::Transport::Window => {
+                _ => {
                     anyhow::bail!("Invalid scoped transport.")
                 }
             }

@@ -151,7 +151,7 @@ impl Watcher {
         )?)
     }
     /// How many items the ledger holds.
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(in crate::app) fn seen(&self) -> usize {
         self.ledger
             .lock()
@@ -162,7 +162,7 @@ impl Watcher {
             .unwrap_or(0) as usize
     }
     /// The ledger rows of an item: `(state, changed_at, run_id)`.
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(in crate::app) fn rows(&self, url: &str) -> Vec<(String, Option<String>, String)> {
         let db = self.ledger.lock().unwrap();
         let mut query = db
@@ -175,7 +175,7 @@ impl Watcher {
             .collect()
     }
     /// Make a row look as old as an abort left it (a test of the stale mark).
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(in crate::app) fn age(&self, url: &str, seconds: i64) {
         self.ledger
             .lock()

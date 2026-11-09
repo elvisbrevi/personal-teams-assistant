@@ -34,6 +34,11 @@ pub(super) enum Transport {
     /// The portal's remote MCP endpoint: an agent signed in through the edge identity, with the
     /// account's portal allowlist intersected with the tool catalog (`agent.rs`).
     Agent,
+    /// The workflow engine's own authority (`workflows/acting.rs`), held by code running in
+    /// this process and by nothing else: no token, session or credential maps to it, a request
+    /// carrying it is refused (`authorize`), and it reaches only the two acting paths of a
+    /// workflow run, a Teams notification and a coordinator launcher.
+    Workflow,
 }
 
 #[derive(Clone)]
@@ -51,6 +56,32 @@ pub(super) async fn within<T>(
     operation: impl std::future::Future<Output = T>,
 ) -> T {
     CURRENT.scope(invocation, operation).await
+}
+
+/// The engine's authority for the acting paths of a workflow run. Only the engine calls this,
+/// on the coordinator, with the owner's authority; the paths it reaches re-check it
+/// (`require_workflow`).
+pub(super) fn workflow(state: &DesktopState) -> Result<Invocation> {
+    let scope = web::account_scope(state.settings.profile())?;
+    ensure!(
+        scope == state.authority && scope.owner && scope.admitted,
+        "The workflow engine runs with the account owner's authority only."
+    );
+    Ok(Invocation {
+        scope,
+        transport: Transport::Workflow,
+    })
+}
+
+/// The acting paths of a workflow run accept this authority and no other: never the control
+/// token, a browser session, a machine credential, MCP or `pta tools call`.
+pub(super) fn require_workflow(state: &DesktopState) -> Result<()> {
+    let invocation = invocation(state)?;
+    ensure!(
+        invocation.transport == Transport::Workflow && invocation.scope.owner,
+        "Only the workflow engine runs a workflow's acting blocks."
+    );
+    Ok(())
 }
 
 /// Marks a call from the owner's local page (`page.rs`), the only caller treated as a person at
@@ -115,6 +146,11 @@ pub(super) fn reject_authority_arguments(args: &Value) -> Result<()> {
 pub(super) fn authorize(state: &DesktopState, request: &control::Request) -> Result<Invocation> {
     let invocation = invocation(state)?;
     reject_authority_arguments(&request.args)?;
+    // The engine's own authority reaches no operation: it is not a client.
+    ensure!(
+        invocation.transport != Transport::Workflow,
+        "The workflow engine's authority reaches only the acting blocks of a workflow run."
+    );
     // Ordinary native/agent calls have the same account/path limits as the browser.
     if !invocation.scope.owner
         && !(matches!(invocation.transport, Transport::Local | Transport::Window)
@@ -138,6 +174,7 @@ pub(super) fn authorize(state: &DesktopState, request: &control::Request) -> Res
             agent::check_method(&request.method)?;
             web::check_bound_request(&invocation.scope, request)?;
         }
+        Transport::Workflow => anyhow::bail!("The workflow engine is not a client."),
         Transport::Machine => ensure!(
             matches!(
                 request.method.as_str(),

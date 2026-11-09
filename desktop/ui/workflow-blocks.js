@@ -18,9 +18,9 @@ const STAGE_NAMES = {
 };
 /** The placeholders a notification's template may hold; code fills them in when it posts. */
 const PLACEHOLDERS = {
-  item: t('the work item\'s number and title'), link: t('its link'), pull_requests: t('the links of its pull requests'), summary: t('the director\'s progress summary'),
+  item: t('the work item\'s number and title'), link: t('its link'), pull_requests: t('the links of its pull requests'), summary: t('the director\'s progress summary'), state: t('the run\'s state'),
 };
-const LIMITS = { name: 80, text: 8000, template: 4000, mentions: 20, mention: 120, chat: 200 };
+const LIMITS = { name: 80, text: 8000, template: 4000, mentions: 20, mention: 100, chat: 200 };
 /** A name cut to the host's limit, with an ellipsis when it was longer. */
 const fit = (text, max) => [...text].length > max ? `${[...text].slice(0, max - 1).join('').trimEnd()}…` : text;
 /** The personal chat (Teams notes) is always the user's own. */
@@ -172,7 +172,7 @@ function blockEditor(draft, saved) {
   };
   const stage = el('select', {}, ...STAGES.map(value => el('option', { value, textContent: STAGE_NAMES[value] })));
   stage.onchange = () => { draft.stage = stage.value; touched(); };
-  const stageField = el('label', {}, t('Stage'), el('small', { textContent: t('When in a run the block acts; each block acts at most once per run and stage.') }), stage);
+  const stageField = el('label', {}, t('Stage'), el('small', { textContent: t('When in a run the block acts; each block acts at most once each time that stage occurs.') }), stage);
   const body = el('div', {});
 
   const instructionFields = () => {
@@ -243,10 +243,10 @@ function blockEditor(draft, saved) {
     }));
     checkPlaceholders();
     return [el('div', { class: 'field-block' }, el('label', { id: `block-chat-label-${key}`, textContent: t('Teams chat') }), chat, chatProblem,
-      el('small', { class: 'hint', textContent: t('Only chats you belong to; channels are not offered. It posts once per run, as you.') })),
+      el('small', { class: 'hint', textContent: t('Only chats you belong to; channels are not offered. It posts once each time its stage occurs, as you.') })),
     mentions,
     el('label', {}, t('Message'), el('small', { textContent: t('The members you mention are matched to the chat\'s members again when it posts.') }), template, counted(template, LIMITS.template)),
-    el('p', { class: 'hint', textContent: t('Placeholders: {item} the work item, {link} its link, {pull_requests} its pull requests, {summary} the director\'s summary. Select one to insert it.') }),
+    el('p', { class: 'hint', textContent: t('Placeholders: {item} the work item, {link} its link, {pull_requests} its pull requests, {summary} the director\'s summary, {state} the run\'s state. Select one to insert it.') }),
     placeholders, placeholderProblem];
   };
 
@@ -298,8 +298,8 @@ function blockEditor(draft, saved) {
     const at = STAGE_NAMES[draft.stage];
     if (draft.kind === 'teams_notification') {
       return [el('p', { textContent: draft.mentions.length
-        ? t('At «{stage}», this block posts the message below to the Teams chat «{chat}», mentioning {names}, once per run:', { stage: at, chat: draft.chat.name, names: draft.mentions.join(', ') })
-        : t('At «{stage}», this block posts the message below to the Teams chat «{chat}», once per run:', { stage: at, chat: draft.chat.name }) }),
+        ? t('At «{stage}», this block posts the message below to the Teams chat «{chat}», mentioning {names}, once each time that stage occurs:', { stage: at, chat: draft.chat.name, names: draft.mentions.join(', ') })
+        : t('At «{stage}», this block posts the message below to the Teams chat «{chat}», once each time that stage occurs:', { stage: at, chat: draft.chat.name }) }),
       el('pre', { textContent: draft.template })];
     }
     const launcher = launcherState.launchers.find(l => l.id === draft.launcher.id);
@@ -315,7 +315,7 @@ function blockEditor(draft, saved) {
     if (draft.kind === 'teams_notification') {
       if (!draft.chat) list.push(t('Choose the chat.'));
       else if (!draft.chat.name.trim() || [...draft.chat.name].length > LIMITS.chat) list.push(t('Choose the chat again: its name must have 1 to {n} characters.', { n: LIMITS.chat }));
-      if (draft.mentions.some(m => [...m].length > LIMITS.mention)) list.push(t('Mention only members whose names have at most {n} characters.', { n: LIMITS.mention }));
+      if (draft.mentions.some(m => [...m].length > LIMITS.mention || m.includes(']'))) list.push(t('Mention only members whose names have at most {n} characters and no closing bracket.', { n: LIMITS.mention }));
       if (!draft.template.trim()) list.push(t('Write the message.'));
       if ([...draft.template].length > LIMITS.template) list.push(t('Shorten the message.'));
       if (unknownPlaceholders(draft.template).length) list.push(t('Use only the listed placeholders.'));

@@ -30,6 +30,7 @@ pub(super) const METHODS: [&str; 8] = [
     "workflow_repositories",
 ];
 
+pub(super) mod acting;
 mod director;
 pub(super) mod engine;
 pub(super) mod implement;
@@ -145,7 +146,7 @@ pub(super) fn describe(block: &Block) -> String {
                 block.mentions.join(", ")
             };
             format!(
-                "At stage {stage}, post «{}» to the Teams chat {} ({}), mentioning {mentions}, once per run",
+                "At stage {stage}, post «{}» to the Teams chat {} ({}), mentioning {mentions}, once each time that stage occurs in a run",
                 block.template, chat.name, chat.id
             )
         }

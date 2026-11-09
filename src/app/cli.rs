@@ -419,7 +419,7 @@ Knowledge
   workflows blocks list                  Blocks and the workflows that use them.
   workflows blocks save [--confirmed]    JSON on stdin: id, name, kind (instruction: text; teams_notification:
                            stage, chat {id, name}, mentions, template with {item} {link} {pull_requests}
-                           {summary}, needs --confirmed and a chat you belong to; launcher: stage, launcher
+                           {summary} {state}, needs --confirmed and a chat you belong to; launcher: stage, launcher
                            {id, digest}, only from the local page or the owner's portal, never here).
   workflows blocks remove ID             Refused while a workflow uses it.
   workflows repositories --project NAME [--organization URL] [--source ID]

@@ -210,7 +210,9 @@ impl Child {
     }
 }
 
-/// What a block did, or why it did not run.
+/// What an acting block did at one occurrence of its stage, or why it did not run. The engine
+/// records the attempt (`attempting`) before it acts and the result after: an attempt found
+/// without a result after a restart is `uncertain` and is never made again.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub(in crate::app) struct BlockOutcome {
@@ -218,8 +220,27 @@ pub(in crate::app) struct BlockOutcome {
     pub kind: crate::workflows::Kind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stage: Option<crate::workflows::Stage>,
+    /// A notification: `sent`, `refused` or `uncertain`. A launcher: `succeeded`, `failed`,
+    /// `timed_out`, `not_started` or `uncertain`. `attempting` until the result is recorded.
     pub outcome: String,
+    /// When the result was recorded (the attempt's time while `attempting`).
     pub at: i64,
+    /// Which occurrence of its stage this was (`done`, `child_done:ID`, ...): a block runs at
+    /// most once for each.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub occurrence: String,
+    /// Why a notification was refused or a launcher did not start (never a launcher's output).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// A launcher's exit code, when the program ran to its end.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    /// A launcher's duration in milliseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+    /// A notification's Teams message ID, once it was sent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_id: Option<String>,
 }
 
 /// One workflow run.
@@ -294,6 +315,11 @@ pub(in crate::app) struct Run {
     /// It holds one of the `concurrency` slots.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub admitted: bool,
+    /// When the engine began to act on this run's acting blocks (0.12.8 or later). A run with
+    /// none was recorded by an older version: the occurrences of its stages that had already
+    /// happened are marked `skipped` when the engine first sees it, and never acted on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acting_since: Option<i64>,
     /// When the wait for its pull requests began (or began again on a resume).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub waiting_since: Option<i64>,
@@ -338,6 +364,7 @@ impl Run {
             retries: 0,
             auto_start: false,
             admitted: false,
+            acting_since: Some(now),
             waiting_since: None,
             checked_at: None,
             created_at: now,

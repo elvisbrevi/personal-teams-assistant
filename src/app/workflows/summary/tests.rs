@@ -126,6 +126,11 @@ fn record(host: &Arc<Host>, machine: &str) -> Run {
         stage: Some(Stage::ChildDone),
         outcome: "sent".into(),
         at: 1_700_000_500,
+        occurrence: "child_done:101".into(),
+        reason: None,
+        exit_code: None,
+        duration_ms: None,
+        message_id: Some("1700000500000".into()),
     }];
     run.attention = Some("Waiting for the pull requests of the children.".into());
     assert!(host.state.workflows.db.insert(&run).unwrap());

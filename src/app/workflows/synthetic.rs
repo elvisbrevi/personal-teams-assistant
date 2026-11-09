@@ -67,6 +67,7 @@ pub(in crate::app) fn detail(
 }
 
 impl Catalog {
+    #[cfg(unix)]
     pub(in crate::app) fn add(&self, detail: Detail, assigned: bool) {
         if assigned {
             self.assigned.lock().unwrap().insert(detail.item.id);
@@ -74,6 +75,7 @@ impl Catalog {
         self.items.lock().unwrap().insert(detail.item.id, detail);
     }
     /// The pull requests of a repository's branch, as the next read returns them.
+    #[cfg(unix)]
     pub(in crate::app) fn set_pulls(
         &self,
         repository: &str,
@@ -124,6 +126,7 @@ impl Catalog {
             .unwrap_or_default())
     }
     /// Change the state an item is in.
+    #[cfg(unix)]
     pub(in crate::app) fn set_state(&self, id: u64, state: &str) {
         if let Some(detail) = self.items.lock().unwrap().get_mut(&id) {
             detail.item.state = state.into();
@@ -176,6 +179,7 @@ impl Catalog {
         })
     }
     /// Every request was a read.
+    #[cfg(unix)]
     pub(in crate::app) fn only_reads(&self) -> bool {
         self.requests
             .lock()

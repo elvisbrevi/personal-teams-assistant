@@ -360,8 +360,8 @@ workflow settings.
    - `instruction`: `text` (at most 8000 characters), no stage; saved without confirmation.
    - `teams_notification`: `stage` (`before_planning`, `plan_ready`, `children_created`,
      `child_done`, `pull_requests_completed`, `done`, `failed`), `chat` `{id, name}` from
-     `teams_chats`, `mentions` (member display names, at most 20) and `template` (at most 4000
-     characters; only `{item}`, `{link}`, `{pull_requests}` and `{summary}`). Show the user the
+     `teams_chats`, `mentions` (member display names of at most 100 characters without `]`, at most 20) and `template` (at most 4000
+     characters; only `{item}`, `{link}`, `{pull_requests}`, `{summary}` and `{state}`). Show the user the
      chat and the text and save it with `--confirmed` (MCP: the confirmation names them); the
      reply echoes `chat`, `mentions` and `template`. The chat must be one the user belongs to:
      a chat `teams_chats` does not list is refused, and when no Microsoft session can read the
@@ -478,7 +478,7 @@ run (any state but `done` and `cancelled`).
   (`implementation_creation`), every child's verified link, branch and pull requests with their
   links and status, and `attention` (what to look at) or `error`. Report links as they are.
 - **States:** `classifying`, `unassigned`, `planning`, `plan_review`, `creating_children`,
-  `coding`, `pull_requests`, `blocks` (acting blocks are recorded as `not_run` in this version),
+  `coding`, `pull_requests`, `blocks` (the `pull_requests_completed` and `done` blocks run here),
   `done`, `failed`, `cancelled`, `interrupted`, `needs_attention`. A coding run that ends
   `permission_prompt`, `failed`, `needs_attention` or `interrupted`, an abandoned pull request, a
   session that reported no branch, an uncertain creation, a run that delivered no child and a
@@ -491,6 +491,26 @@ run (any state but `done` and `cancelled`).
   one is coded, an abandoned pull request no longer stops the run, and the pull-request wait starts
   again; a run that delivered nothing ends done without pull requests. It never submits a plan again, never starts a coding run that was started, and writes
   nothing to Azure DevOps. Resume only after the user looked at the cause.
+- **Blocks that act:** the engine runs a run's notification and launcher blocks by itself at
+  their stage (`before_planning`, `plan_ready` while the run waits for the plan review,
+  `children_created`, `child_done` once per child, `pull_requests_completed`, `done`, `failed`),
+  in the workflow's order and at most once per occurrence of the stage. A notification posts once
+  to the chat the user confirmed when saving the block, as the user, through the same path as
+  `teams_post`: the placeholders are filled by code (`{summary}` is the run's latest stored
+  summary, empty when there is none), `@[Name]` mentions are matched to that chat's members only,
+  and an unknown or ambiguous mention (a mention is a member's display name of at most 100 characters without `]`), a chat the user left, a missing Microsoft session or a
+  refusal from Teams records `refused` with the reason and the run goes on; a failure after the
+  request left is `uncertain` and nothing is ever retried. A launcher block runs the approved
+  launcher of the coordinator only while it is still approved with the digest the block stored
+  (otherwise `not_started`, with the reason), never shows or keeps its output, and when it
+  `failed`, `timed_out` or ended `uncertain` stops the run in `needs_attention`. `status` shows every outcome in
+  `block_outcomes` (`block`, `stage`, `occurrence`, `outcome`, `reason`, `exit_code`,
+  `duration_ms`, `message_id`; `skipped` marks a stage that had already happened when a run of an
+  older version was first seen); an `attempting` outcome that a restart interrupted reads
+  `uncertain` and is never attempted again, so check Teams or the launcher's effects by hand
+  before telling the user it did or did not happen. Resuming a run stopped by a launcher goes on
+  with the blocks that have not run and never runs that launcher again. Blocks never post to a
+  Teams channel, only to chats, and a block cannot do anything but these two things.
 - **Cancel:** `pta workflows cancel RUN --confirmed` (MCP `workflow_run_cancel`) cancels the active
   planning or coding run (its file changes stay) and the run advances no more; a creation already
   being sent is not stopped. When the run's machine cannot be reached, the reply's `warning` names
