@@ -35,7 +35,7 @@ pub(in crate::app) struct State {
     admission: Mutex<()>,
     advancing: AtomicUsize,
     recovered: AtomicBool,
-    /// The failed runs whose `failed` blocks were looked at once after a start.
+    /// The attempts left without a result were settled once after a start.
     settled: AtomicBool,
     /// The runs whose advance is running now, each in its own task.
     inflight: std::sync::Mutex<std::collections::HashSet<String>>,
@@ -221,19 +221,22 @@ pub(in crate::app) async fn tick(
         }
         unrecovered
     };
-    // A run that failed while the host stopped, before its `failed` blocks ran: they run now
-    // (once: a recorded attempt is never made again). Failed runs are not advanced otherwise.
+    // After a start, every acting attempt left without a result is settled, in every run.
+    if !state.settled.load(Ordering::SeqCst) {
+        acting::settle_all(host, now).await?;
+        state.settled.store(true, Ordering::SeqCst);
+    }
+    // A failed run is not advanced, but its `failed` blocks may be due (the host stopped before
+    // they ran, or a launcher was busy): they stay in the sweep until each has an outcome.
     let mut tasks = Vec::new();
-    if !state.settled.swap(true, Ordering::SeqCst) {
-        for run in state.db.list(&[Phase::Failed], None, -1)? {
-            if acting::has_due(&run) && state.inflight.lock().unwrap().insert(run.id.clone()) {
-                let guard = Inflight(host.clone(), run.id.clone());
-                let (host, id) = (host.clone(), run.id.clone());
-                tasks.push(tokio::spawn(async move {
-                    let _guard = guard;
-                    let _ = acting::execute(&host, &id, now).await;
-                }));
-            }
+    for run in state.db.list(&[Phase::Failed], None, -1)? {
+        if acting::has_due(&run) && state.inflight.lock().unwrap().insert(run.id.clone()) {
+            let guard = Inflight(host.clone(), run.id.clone());
+            let (host, id) = (host.clone(), run.id.clone());
+            tasks.push(tokio::spawn(async move {
+                let _guard = guard;
+                let _ = acting::execute(&host, &id, now).await;
+            }));
         }
     }
     let driven: Vec<Phase> = Phase::ALL.into_iter().filter(|s| s.driven()).collect();
@@ -567,12 +570,27 @@ async fn step(
         Phase::PullRequests => pull_requests(host, azure, run, now, poll).await,
         Phase::Blocks => {
             // The blocks of this stage ran before this step (`acting`): nothing is due now.
-            let acted = run
+            // Only the blocks of this stage's own occurrences count here.
+            let own = |stage: Option<crate::workflows::Stage>| {
+                matches!(
+                    stage,
+                    Some(
+                        crate::workflows::Stage::PullRequestsCompleted
+                            | crate::workflows::Stage::Done
+                    )
+                )
+            };
+            let due = run
                 .blocks
                 .iter()
-                .any(|b| b.kind != crate::workflows::Kind::Instruction);
-            let outcome = if acted {
-                format!("{} acting block outcomes", run.block_outcomes.len())
+                .any(|b| b.kind != crate::workflows::Kind::Instruction && own(b.stage));
+            let outcome = if due {
+                let count = run
+                    .block_outcomes
+                    .iter()
+                    .filter(|o| o.occurrence == "pull_requests_completed" || o.occurrence == "done")
+                    .count();
+                format!("{count} acting block outcomes")
             } else {
                 "skipped: no acting block".to_owned()
             };

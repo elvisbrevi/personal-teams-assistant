@@ -147,16 +147,59 @@ fn next_due(run: &Run) -> Option<(Block, Occurrence)> {
     None
 }
 
-/// Whether the engine has acting work for the run: a block due in its current stage, or an
-/// attempt left without a result that must be settled.
+/// Whether the engine has acting work for the run: a block due in its current stage, an
+/// attempt left without a result that must be settled, or a run of an older version whose
+/// passed occurrences must be marked.
 pub(in crate::app) fn has_due(run: &Run) -> bool {
-    run.block_outcomes.iter().any(|o| o.outcome == ATTEMPTING) || next_due(run).is_some()
+    run.acting_since.is_none()
+        || run.block_outcomes.iter().any(|o| o.outcome == ATTEMPTING)
+        || next_due(run).is_some()
+}
+
+const ATTEMPTING: &str = "attempting";
+const SKIPPED: &str = "skipped";
+
+/// A run recorded before acting blocks existed has no `acting_since`: the occurrences of its
+/// stages that already happened (a failure long past, a plan that waited, children coded) are
+/// marked `skipped` without acting, and only occurrences that happen from now on act.
+fn mark_passed(run: &mut Run, now: i64) -> bool {
+    if run.acting_since.is_some() {
+        return false;
+    }
+    let mut skipped = Vec::new();
+    for occurrence in occurrences(run) {
+        for block in run.blocks.iter().filter(|b| {
+            b.kind != Kind::Instruction
+                && b.stage == Some(occurrence.stage)
+                && !recorded(run, b, &occurrence)
+        }) {
+            skipped.push(BlockOutcome {
+                block: block.id.clone(),
+                kind: block.kind,
+                stage: block.stage,
+                outcome: SKIPPED.into(),
+                at: now,
+                occurrence: occurrence.key.clone(),
+                reason: Some("before acting blocks existed".into()),
+                exit_code: None,
+                duration_ms: None,
+                message_id: None,
+            });
+        }
+    }
+    run.block_outcomes.extend(skipped);
+    run.acting_since = Some(now);
+    run.updated_at = now;
+    true
 }
 
 /// An attempt without a result belongs to an engine that stopped before it recorded one: what
-/// it did is unknown, so it is `uncertain` and never made again.
+/// it did is unknown, so it is `uncertain` and never made again. A launcher whose outcome is
+/// unknown stops a run that is advancing, for a person to check its side effect; a notification
+/// does not.
 fn settle(run: &mut Run, now: i64) -> bool {
     let mut changed = false;
+    let mut launcher = None;
     for outcome in run
         .block_outcomes
         .iter_mut()
@@ -167,42 +210,91 @@ fn settle(run: &mut Run, now: i64) -> bool {
             "The host stopped after this block's attempt was recorded and before its result; whether it acted is unknown, and it is never attempted again.".into(),
         );
         outcome.at = now;
+        if outcome.kind == Kind::Launcher {
+            launcher.get_or_insert(outcome.block.clone());
+        }
         changed = true;
     }
     if changed {
         run.updated_at = now;
+        if let Some(block) = launcher
+            && run.state.driven()
+        {
+            run.stop(
+                Phase::NeedsAttention,
+                now,
+                format!(
+                    "The host stopped while launcher block {block} was running, so whether it ran is unknown (its output is not kept); check what it was meant to do, then resume to continue without running it again, or cancel the run."
+                ),
+            );
+        }
     }
     changed
 }
-const ATTEMPTING: &str = "attempting";
+
+/// After a start: every attempt of every run that was left without a result is settled, so a
+/// stopped run never shows `attempting` for good.
+pub(in crate::app) async fn settle_all(host: &Arc<Host>, now: i64) -> Result<()> {
+    let state = &host.state.workflows;
+    for run in state.db.list(&[], None, -1)? {
+        if !run.block_outcomes.iter().any(|o| o.outcome == ATTEMPTING) {
+            continue;
+        }
+        let lock = state.lock(&run.id);
+        let _guard = lock.lock().await;
+        let Some(mut run) = state.db.get(&run.id)? else {
+            continue;
+        };
+        if settle(&mut run, now) {
+            state.db.save(&run)?;
+        }
+    }
+    Ok(())
+}
 
 /// Run every acting block that is due in the run, one after another, each recorded before and
-/// after it acts, until none is due, a launcher stops the run or one cannot start yet. The run's
-/// lock is held only while recording, never while a block acts, so a cancel is not kept waiting.
+/// after it acts, until none is due, a launcher stops the run, the run changed stage meanwhile
+/// or a launcher cannot start yet. The run's lock is held only while recording, never while a
+/// block acts, so a cancel is not kept waiting.
 pub(in crate::app) async fn execute(host: &Arc<Host>, id: &str, now: i64) -> Result<Progress> {
     let state = &host.state.workflows;
     let lock = state.lock(id);
     let mut progress = Progress::Idle;
     loop {
-        let (block, occurrence, run) = {
+        let (block, occurrence, run, slot) = {
             let _guard = lock.lock().await;
             let Some(mut run) = state.db.get(id)? else {
                 return Ok(progress);
             };
-            let settled = settle(&mut run, now);
-            let Some((block, occurrence)) = next_due(&run) else {
-                if settled {
+            let mut dirty = settle(&mut run, now);
+            dirty |= mark_passed(&mut run, now);
+            let due = if run.state.driven() || run.state == Phase::Failed {
+                next_due(&run)
+            } else {
+                None
+            };
+            let Some((block, occurrence)) = due else {
+                if dirty {
                     state.db.save(&run)?;
                 }
                 return Ok(progress);
             };
-            // One launcher runs at a time: another run's launcher is waited for, not refused.
-            if block.kind == Kind::Launcher && !consumers::launcher_idle(&host.state) {
-                if settled {
-                    state.db.save(&run)?;
+            // One launcher runs at a time. The slot is taken before the attempt is recorded, so
+            // a launcher that is busy is waited for with nothing recorded, never lost as an
+            // outcome.
+            let slot = if block.kind == Kind::Launcher {
+                match consumers::try_launcher_slot(&host.state) {
+                    Some(slot) => Some(slot),
+                    None => {
+                        if dirty {
+                            state.db.save(&run)?;
+                        }
+                        return Ok(Progress::Waiting);
+                    }
                 }
-                return Ok(Progress::Waiting);
-            }
+            } else {
+                None
+            };
             run.block_outcomes.push(BlockOutcome {
                 block: block.id.clone(),
                 kind: block.kind,
@@ -217,16 +309,19 @@ pub(in crate::app) async fn execute(host: &Arc<Host>, id: &str, now: i64) -> Res
             });
             run.updated_at = now;
             state.db.save(&run)?;
-            (block, occurrence, run)
+            (block, occurrence, run, slot)
         };
+        // Where the run was when the block began: a result that comes back after the run moved
+        // on (a resume, a cancel) belongs to a stage that is over and decides nothing now.
+        let (began_in, began_at) = (run.state, run.timeline.len());
         // The engine's own authority, for the two paths and nothing else.
         let result = match authority::workflow(&host.state) {
             Ok(invocation) => {
-                authority::within(invocation, act(host, &run, &block, &occurrence)).await
+                authority::within(invocation, act(host, &run, &block, &occurrence, slot)).await
             }
             Err(error) => Attempt::of("refused", error.to_string()),
         };
-        let stop = {
+        let (stop, moved) = {
             let _guard = lock.lock().await;
             let Some(mut run) = state.db.get(id)? else {
                 return Ok(progress);
@@ -244,13 +339,16 @@ pub(in crate::app) async fn execute(host: &Arc<Host>, id: &str, now: i64) -> Res
                 entry.message_id = result.message_id.clone();
                 entry.at = now;
             }
-            // A launcher that failed (or whose outcome is unknown) stops the run, unless the
-            // run is already stopped or over: the failure itself, or a cancel.
+            let moved = run.state != began_in || run.timeline.len() != began_at;
+            // A launcher that failed, timed out or whose outcome is unknown stops the run that
+            // is still in the stage the block belongs to; one that already failed, was resumed
+            // or was cancelled is not stopped again.
             let stops = block.kind == Kind::Launcher
-                && matches!(result.outcome, "failed" | "timed_out")
+                && matches!(result.outcome, "failed" | "timed_out" | "uncertain")
+                && !moved
                 && run.state.driven();
             if stops {
-                let name = block.stage.map_or("a", |s| stage_word(s));
+                let name = block.stage.map_or("a", stage_word);
                 run.stop(
                     Phase::NeedsAttention,
                     now,
@@ -258,7 +356,7 @@ pub(in crate::app) async fn execute(host: &Arc<Host>, id: &str, now: i64) -> Res
                         "Launcher block {} ({}) {} at the {name} stage (exit code {}); its output is not kept. Resume to continue without running it again, or cancel the run.",
                         block.name,
                         block.launcher.as_ref().map_or("", |l| l.id.as_str()),
-                        if result.outcome == "timed_out" { "timed out" } else { "failed" },
+                        if result.outcome == "timed_out" { "timed out" } else { "ended unknown" },
                         result.exit_code.map_or("none".into(), |c| c.to_string()),
                     ),
                 );
@@ -266,10 +364,10 @@ pub(in crate::app) async fn execute(host: &Arc<Host>, id: &str, now: i64) -> Res
                 run.updated_at = now;
             }
             state.db.save(&run)?;
-            stops
+            (stops, moved)
         };
         progress = Progress::Changed;
-        if stop {
+        if stop || moved {
             return Ok(progress);
         }
     }
@@ -287,21 +385,30 @@ fn stage_word(stage: Stage) -> &'static str {
     }
 }
 
-async fn act(host: &Arc<Host>, run: &Run, block: &Block, occurrence: &Occurrence) -> Attempt {
+async fn act(
+    host: &Arc<Host>,
+    run: &Run,
+    block: &Block,
+    occurrence: &Occurrence,
+    slot: Option<consumers::LauncherSlot>,
+) -> Attempt {
     match block.kind {
         Kind::TeamsNotification => notify(host, run, block, occurrence).await,
-        Kind::Launcher => launch(host, block).await,
+        Kind::Launcher => match slot {
+            Some(slot) => launch(host, block, slot).await,
+            None => Attempt::of("not_started", "No launcher slot was taken."),
+        },
         Kind::Instruction => Attempt::of("refused", "An instruction block does not act."),
     }
 }
 
 // ---- Launchers ----
 
-async fn launch(host: &Arc<Host>, block: &Block) -> Attempt {
+async fn launch(host: &Arc<Host>, block: &Block, slot: consumers::LauncherSlot) -> Attempt {
     let Some(launcher) = &block.launcher else {
         return Attempt::of("not_started", "The block names no launcher.");
     };
-    match consumers::run_for_block(host, &launcher.id, &launcher.digest).await {
+    match consumers::run_for_block(host, &launcher.id, &launcher.digest, slot).await {
         Ok(consumers::BlockLaunch::Ran(ran)) => Attempt {
             outcome: ran.status,
             reason: None,
@@ -309,9 +416,6 @@ async fn launch(host: &Arc<Host>, block: &Block) -> Attempt {
             duration_ms: Some(ran.duration_ms),
             message_id: None,
         },
-        Ok(consumers::BlockLaunch::Busy) => {
-            Attempt::of("not_started", "Another launcher was running.")
-        }
         Ok(consumers::BlockLaunch::NotStarted(why)) => Attempt::of("not_started", why),
         Err(error) => Attempt::of("not_started", error),
     }
@@ -420,18 +524,21 @@ pub(in crate::app) fn render(run: &Run, block: &Block, occurrence: &Occurrence) 
         }
     }
     text.push_str(rest);
-    text
+    // Mention syntax anywhere in the rendered text is made inert, wherever it came from (a
+    // value that starts with `[` after the template's `@` included): only the block's own
+    // mentions, which `compose` writes after this, mention anybody.
+    text.replace("@[", "@\u{200b}[")
 }
 
 /// The message a notification posts: the members the block mentions, then its rendered text.
-fn compose(
+pub(in crate::app) fn compose(
     run: &Run,
     block: &Block,
     occurrence: &Occurrence,
 ) -> std::result::Result<String, String> {
     let mut text = String::new();
     for name in &block.mentions {
-        if name.contains(']') || name.chars().count() > 100 {
+        if name.contains(']') || name.chars().count() > crate::workflows::MAX_MENTION {
             return Err(format!(
                 "The mention {name} cannot be written as a Teams mention."
             ));

@@ -306,6 +306,11 @@ pub(in crate::app) struct Run {
     /// It holds one of the `concurrency` slots.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub admitted: bool,
+    /// When the engine began to act on this run's acting blocks (0.12.5 or later). A run with
+    /// none was recorded by an older version: the occurrences of its stages that had already
+    /// happened are marked `skipped` when the engine first sees it, and never acted on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acting_since: Option<i64>,
     /// When the wait for its pull requests began (or began again on a resume).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub waiting_since: Option<i64>,
@@ -348,6 +353,7 @@ impl Run {
             retry_at: None,
             retries: 0,
             admitted: false,
+            acting_since: Some(now),
             waiting_since: None,
             checked_at: None,
             created_at: now,

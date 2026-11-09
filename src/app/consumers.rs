@@ -25,7 +25,7 @@ pub(super) struct State {
     /// Values resolved online for the operation about to run (memory only, short-lived).
     staged: std::sync::Mutex<BTreeMap<String, connected::Staged>>,
     /// One launcher runs at a time.
-    busy: tokio::sync::Mutex<()>,
+    busy: Arc<tokio::sync::Mutex<()>>,
     /// Serializes read-modify-write of the launcher list.
     edit: std::sync::Mutex<()>,
     /// Where a built-in consumer's check is sent; tests point it at a local double.
@@ -39,7 +39,7 @@ impl State {
             launchers: rules::Launchers::new(profile),
             bindings: connected::Bindings::new(profile),
             staged: std::sync::Mutex::new(BTreeMap::new()),
-            busy: tokio::sync::Mutex::new(()),
+            busy: Arc::new(tokio::sync::Mutex::new(())),
             edit: std::sync::Mutex::new(()),
             #[cfg(test)]
             origin: std::sync::Mutex::new(None),
@@ -123,8 +123,6 @@ pub(in crate::app) fn launcher_approval(state: &DesktopState, id: &str) -> Optio
 
 /// How a launcher block of a workflow run ended, as the engine records it.
 pub(in crate::app) enum BlockLaunch {
-    /// Another launcher is running now: nothing was started, the engine asks again later.
-    Busy,
     /// Nothing was started, and why.
     NotStarted(String),
     /// The program ran: `succeeded`, `failed`, `timed_out` or `not_started`, its exit code and
@@ -132,9 +130,12 @@ pub(in crate::app) enum BlockLaunch {
     Ran(rules::RunResult),
 }
 
-/// Whether no launcher is running now.
-pub(in crate::app) fn launcher_idle(state: &DesktopState) -> bool {
-    state.variables.consumers.busy.try_lock().is_ok()
+/// The right to run a launcher now: one launcher runs at a time on this computer.
+pub(in crate::app) type LauncherSlot = tokio::sync::OwnedMutexGuard<()>;
+
+/// Take the right to run a launcher when no other launcher is running, without waiting.
+pub(in crate::app) fn try_launcher_slot(state: &DesktopState) -> Option<LauncherSlot> {
+    state.variables.consumers.busy.clone().try_lock_owned().ok()
 }
 
 /// Run a launcher block of a workflow run: the coordinator's launcher `id`, only while it is
@@ -142,11 +143,13 @@ pub(in crate::app) fn launcher_idle(state: &DesktopState) -> bool {
 /// `variable_launcher_run` (the program and its digest checked again, the directory inside the
 /// allowed roots, every variable resolved at the moment of use, the vetted minimal environment,
 /// one launcher at a time, the launcher's timeout) and refuses any caller but the engine's own
-/// authority; the program's output is never captured.
+/// authority; the program's output is never captured. The caller holds the launcher slot
+/// (`try_launcher_slot`) before it records an attempt, so a lost race is a wait, never an outcome.
 pub(in crate::app) async fn run_for_block(
     host: &Host,
     id: &str,
     digest: &str,
+    slot: LauncherSlot,
 ) -> std::result::Result<BlockLaunch, String> {
     authority::require_workflow(&host.state).map_err(|e| e.to_string())?;
     let state = &host.state.variables;
@@ -174,20 +177,20 @@ pub(in crate::app) async fn run_for_block(
             id: id.to_owned(),
             versions: BTreeMap::new(),
         },
+        slot,
     )
     .await;
     audit_result(&store, "workflow_launcher", None, &result);
     match result {
         Ok((_, _, ran)) => Ok(BlockLaunch::Ran(ran)),
-        Err(vault::Error::Conflict(message)) if message == BUSY => Ok(BlockLaunch::Busy),
         Err(error) => not_started(&error.to_string()),
     }
 }
 
 /// A launcher running now, as a test needs it.
 #[cfg(test)]
-pub(in crate::app) fn busy_guard(state: &DesktopState) -> tokio::sync::MutexGuard<'_, ()> {
-    state.variables.consumers.busy.try_lock().unwrap()
+pub(in crate::app) fn busy_guard(state: &DesktopState) -> LauncherSlot {
+    try_launcher_slot(state).unwrap()
 }
 
 /// A launcher placed in this installation's list as a test needs it, approved or not.
@@ -565,14 +568,20 @@ async fn define(
     }}))
 }
 
-const BUSY: &str = "A launcher is already running.";
-
 async fn launch(
     host: &Host,
     store: &Store,
     a: LauncherArgs,
 ) -> std::result::Result<Value, vault::Error> {
-    let (launcher, used, result) = start(host, store, a).await?;
+    let slot = host
+        .state
+        .variables
+        .consumers
+        .busy
+        .clone()
+        .try_lock_owned()
+        .map_err(|_| vault::Error::Conflict("A launcher is already running.".into()))?;
+    let (launcher, used, result) = start(host, store, a, slot).await?;
     Ok(json!({
         "launcher":launcher.id,
         "operation":"run",
@@ -588,12 +597,9 @@ async fn start(
     host: &Host,
     store: &Store,
     a: LauncherArgs,
+    _slot: LauncherSlot,
 ) -> std::result::Result<(rules::Launcher, Vec<Value>, rules::RunResult), vault::Error> {
     let consumers = &host.state.variables.consumers;
-    let _busy = consumers
-        .busy
-        .try_lock()
-        .map_err(|_| vault::Error::Conflict(BUSY.into()))?;
     let launcher = consumers.launchers.get(&a.id)?;
     rules::ensure_approved(&launcher)?;
     if let Some(unknown) = a

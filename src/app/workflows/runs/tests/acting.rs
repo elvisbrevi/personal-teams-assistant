@@ -478,6 +478,12 @@ async fn every_stage_of_an_hu_run_acts_in_its_turn_and_a_child_is_told_once() {
     assert!(posts[8].contains("Pay by card (#100) done"));
     assert_eq!(run.block_outcomes.len(), 9);
     assert!(run.block_outcomes.iter().all(|o| o.outcome == "sent"));
+    let blocks = run
+        .timeline
+        .iter()
+        .find(|s| s.stage == Phase::Blocks)
+        .unwrap();
+    assert_eq!(blocks.outcome.as_deref(), Some("2 acting block outcomes"));
     assert_eq!(teams.events("workflow_notification").len(), 9);
 }
 
@@ -707,7 +713,12 @@ async fn the_engines_authority_reaches_only_its_two_paths_and_no_other_caller_ho
         assert_eq!(posted.outcome, "refused", "{transport:?}");
         let launched = authority::within(
             as_(transport),
-            consumers::run_for_block(&bench.host, "release", &release.digest),
+            consumers::run_for_block(
+                &bench.host,
+                "release",
+                &release.digest,
+                consumers::busy_guard(&bench.host.state),
+            ),
         )
         .await;
         assert!(launched.is_err(), "{transport:?}");
@@ -725,9 +736,14 @@ async fn the_engines_authority_reaches_only_its_two_paths_and_no_other_caller_ho
     let (posted, _) = acting::post(&bench.host, CHAT, "x").await;
     assert_eq!(posted.outcome, "refused");
     assert!(
-        consumers::run_for_block(&bench.host, "release", &release.digest)
-            .await
-            .is_err()
+        consumers::run_for_block(
+            &bench.host,
+            "release",
+            &release.digest,
+            consumers::busy_guard(&bench.host.state)
+        )
+        .await
+        .is_err()
     );
     assert!(teams.posts().await.is_empty());
     assert_eq!(bench.ran("release"), 0);
@@ -761,7 +777,12 @@ async fn the_engines_authority_reaches_only_its_two_paths_and_no_other_caller_ho
     assert_eq!(posted.outcome, "sent");
     let launched = authority::within(
         invocation,
-        consumers::run_for_block(&bench.host, "release", &release.digest),
+        consumers::run_for_block(
+            &bench.host,
+            "release",
+            &release.digest,
+            consumers::busy_guard(&bench.host.state),
+        ),
     )
     .await;
     assert!(matches!(launched, Ok(consumers::BlockLaunch::Ran(_))));
@@ -851,4 +872,321 @@ fn the_occurrences_follow_the_record_and_a_template_is_rendered_by_code() {
     run.summaries.push(json!({"text":"first"}));
     run.summaries.push(json!({"text":"latest"}));
     assert!(acting::render(&run, &block, &occurrence).contains("|latest|"));
+}
+
+/// The record as 0.12.3 wrote it: its acting blocks were noted as not run, and nothing marks
+/// when the engine began to act.
+fn legacy(bench: &Bench, id: &str) {
+    let mut run = bench.run(id);
+    run.acting_since = None;
+    run.block_outcomes = run
+        .blocks
+        .iter()
+        .filter(|b| b.kind != Kind::Instruction)
+        .map(|b| crate::app::workflows::record::BlockOutcome {
+            block: b.id.clone(),
+            kind: b.kind,
+            stage: b.stage,
+            outcome: "not_run: this version records acting blocks without running them".into(),
+            at: 1,
+            occurrence: String::new(),
+            reason: None,
+            exit_code: None,
+            duration_ms: None,
+            message_id: None,
+        })
+        .collect();
+    let mut value = serde_json::to_value(&run).unwrap();
+    assert!(value.get("acting_since").is_none());
+    for outcome in value["block_outcomes"].as_array_mut().unwrap() {
+        assert!(outcome.get("occurrence").is_none());
+    }
+    // Read back as the older record is read.
+    let run: Run = serde_json::from_value(value).unwrap();
+    bench.save(&run);
+}
+
+fn skipped(run: &Run) -> Vec<String> {
+    run.block_outcomes
+        .iter()
+        .filter(|o| o.outcome == "skipped")
+        .map(|o| format!("{}:{}", o.block, o.occurrence))
+        .collect()
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_run_recorded_by_an_older_version_never_acts_on_what_already_happened() {
+    // Failed long ago: its failed blocks, a notification and a launcher, never run.
+    let bench = Bench::new().await;
+    let release = bench.launcher("release", "exit 0", 30);
+    bench.define(&release);
+    bench.acting(vec![
+        notification("failed", Stage::Failed, "{item} {state}", &[]),
+        launcher_block("again", Stage::Failed, &release),
+    ]);
+    let teams = Teams::new(&bench.host, &["Ana Pérez"], 201).await;
+    let id = bench.start(TASK).await;
+    let mut run = bench.run(&id);
+    run.stop(Phase::Failed, bench.now(), "Failed under 0.12.3.".into());
+    bench.save(&run);
+    legacy(&bench, &id);
+    teams.attach(&bench.host).await;
+    for _ in 0..3 {
+        bench.tick().await;
+    }
+    assert!(teams.posts().await.is_empty());
+    assert_eq!(bench.ran("release"), 0);
+    let run = bench.run(&id);
+    assert!(run.acting_since.is_some());
+    assert_eq!(
+        skipped(&run),
+        ["failed:failed:2", "again:failed:2"].map(String::from)
+    );
+    assert_eq!(run.state, Phase::Failed);
+
+    // Coding, after the plan and the children: those stages passed, what comes later acts.
+    let bench = Bench::new().await;
+    bench.acting(vec![
+        notification("plan", Stage::PlanReady, "plan {item}", &[]),
+        notification("created", Stage::ChildrenCreated, "created {item}", &[]),
+        notification("child", Stage::ChildDone, "child {item}", &[]),
+        notification("finished", Stage::Done, "finished {item}", &[]),
+    ]);
+    bench.pulls(WEB, "payments-web", "feature/child-1", 11, "completed");
+    bench.pulls(API, "payments-api", "feature/child-2", 12, "completed");
+    let teams = Teams::new(&bench.host, &["Ana Pérez"], 201).await;
+    teams.attach(&bench.host).await;
+    bench.mode("mode", "block");
+    let id = bench.start(HU).await;
+    let run = bench.state(&id, Phase::PlanReview).await;
+    bench.confirm(&run, "created", &[101, 102]).await;
+    bench
+        .until(&id, |r| {
+            r.children
+                .first()
+                .and_then(|c| c.coding.as_ref())
+                .is_some_and(|c| c.started)
+        })
+        .await;
+    let before = teams.posts().await.len();
+    assert_eq!(before, 2);
+    legacy(&bench, &id);
+    bench.release();
+    bench.state(&id, Phase::Done).await;
+    let posts = teams.posts().await;
+    assert_eq!(posts.len(), before + 3, "{posts:?}");
+    assert!(posts[before].contains("child ") && posts[before + 1].contains("child "));
+    assert!(posts[before + 2].contains("finished "));
+    let run = bench.run(&id);
+    assert_eq!(
+        skipped(&run).len(),
+        2,
+        "{:?}",
+        run.block_outcomes
+            .iter()
+            .map(|o| (&o.block, &o.occurrence, &o.outcome))
+            .collect::<Vec<_>>()
+    );
+
+    // Waiting for pull requests: the children done are past; the completion acts.
+    let bench = Bench::new().await;
+    bench.acting(vec![
+        notification("child", Stage::ChildDone, "child {item}", &[]),
+        notification("finished", Stage::Done, "finished {item}", &[]),
+    ]);
+    let teams = Teams::new(&bench.host, &["Ana Pérez"], 201).await;
+    let id = bench.start(TASK).await;
+    teams.attach(&bench.host).await;
+    bench.state(&id, Phase::PullRequests).await;
+    assert_eq!(teams.posts().await.len(), 1);
+    legacy(&bench, &id);
+    bench.merged();
+    bench.state(&id, Phase::Done).await;
+    let posts = teams.posts().await;
+    assert_eq!(posts.len(), 2, "{posts:?}");
+    assert!(posts[1].contains("finished "));
+    assert_eq!(
+        skipped(&bench.run(&id)),
+        ["child:child_done:200".to_owned()]
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_failed_runs_launcher_waits_while_another_launcher_runs_and_then_runs() {
+    let bench = Bench::new().await;
+    let release = bench.launcher("release", "exit 0", 30);
+    bench.define(&release);
+    bench.acting(vec![launcher_block("again", Stage::Failed, &release)]);
+    let id = bench.start(TASK).await;
+    let mut run = bench.run(&id);
+    run.definition.as_mut().unwrap().checkouts.clear();
+    bench.save(&run);
+    let busy = consumers::busy_guard(&bench.host.state);
+    bench.state(&id, Phase::Failed).await;
+    for _ in 0..3 {
+        bench.tick().await;
+    }
+    // Nothing recorded, nothing run: it is still due, and the sweep keeps asking.
+    assert!(bench.run(&id).block_outcomes.is_empty());
+    assert_eq!(bench.ran("release"), 0);
+    drop(busy);
+    bench.tick().await;
+    assert_eq!(bench.run(&id).block_outcomes[0].outcome, "succeeded");
+    assert_eq!(bench.ran("release"), 1);
+    for _ in 0..3 {
+        bench.tick().await;
+    }
+    assert_eq!(bench.ran("release"), 1);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_launcher_whose_outcome_is_unknown_stops_a_running_run_and_every_attempt_is_settled_at_start()
+ {
+    let mut bench = Bench::new().await;
+    let release = bench.launcher("release", "exit 0", 30);
+    bench.define(&release);
+    bench.acting(vec![
+        launcher_block("desa", Stage::PullRequestsCompleted, &release),
+        notification("note", Stage::Done, "{item}", &[]),
+    ]);
+    let waiting = bench.start(TASK).await;
+    bench.state(&waiting, Phase::PullRequests).await;
+    let attempt =
+        |block: &str, kind, stage, occurrence: &str| crate::app::workflows::record::BlockOutcome {
+            block: block.into(),
+            kind,
+            stage: Some(stage),
+            outcome: "attempting".into(),
+            at: 1,
+            occurrence: occurrence.into(),
+            reason: None,
+            exit_code: None,
+            duration_ms: None,
+            message_id: None,
+        };
+    // A run the host stopped in while its launcher ran.
+    let mut run = bench.run(&waiting);
+    run.block_outcomes.push(attempt(
+        "desa",
+        Kind::Launcher,
+        Stage::PullRequestsCompleted,
+        "pull_requests_completed",
+    ));
+    bench.save(&run);
+    // And a run that was already stopped, with a notification left in flight.
+    let stopped = bench.start(HU).await;
+    let mut run = bench.run(&stopped);
+    run.block_outcomes.push(attempt(
+        "note",
+        Kind::TeamsNotification,
+        Stage::Done,
+        "done",
+    ));
+    run.stop(Phase::NeedsAttention, bench.now(), "Look at it.".into());
+    bench.save(&run);
+    bench.restart().await;
+    bench.tick().await;
+    let run = bench.run(&waiting);
+    assert_eq!(run.state, Phase::NeedsAttention);
+    assert_eq!(run.stopped_in, Some(Phase::PullRequests));
+    assert_eq!(run.block_outcomes[0].outcome, "uncertain");
+    assert!(run.attention.as_deref().unwrap().contains("desa"));
+    let run = bench.run(&stopped);
+    assert_eq!(run.state, Phase::NeedsAttention);
+    assert_eq!(run.block_outcomes[0].outcome, "uncertain");
+    assert_eq!(bench.ran("release"), 0);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_launcher_result_that_returns_after_the_run_was_resumed_does_not_stop_it() {
+    let bench = Bench::new().await;
+    let release = bench.launcher("release", "sleep 1\nexit 1", 30);
+    bench.define(&release);
+    bench.acting(vec![launcher_block("again", Stage::Failed, &release)]);
+    let id = bench.start(TASK).await;
+    let mut run = bench.run(&id);
+    let checkouts = run.definition.as_ref().unwrap().checkouts.clone();
+    run.definition.as_mut().unwrap().checkouts.clear();
+    bench.save(&run);
+    let driver = async {
+        while bench.ran("release") == 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        // The user fixed the checkout and resumed while the launcher was still running.
+        let mut run = bench.run(&id);
+        run.definition.as_mut().unwrap().checkouts = checkouts.clone();
+        bench.save(&run);
+        bench
+            .op("workflow_run_resume", json!({"run":id,"confirmed":true}))
+            .await
+            .unwrap();
+    };
+    tokio::join!(bench.tick(), driver);
+    let run = bench.run(&id);
+    assert_eq!(run.block_outcomes[0].outcome, "failed");
+    assert_ne!(run.state, Phase::NeedsAttention, "{:?}", run.attention);
+    assert_eq!(bench.ran("release"), 1);
+}
+
+#[tokio::test]
+async fn a_failure_to_log_after_the_request_went_out_stays_uncertain() {
+    let bench = Bench::new().await;
+    bench.merged();
+    bench.acting(vec![notification("notify", Stage::Done, "{item}", &[])]);
+    let teams = Teams::new(&bench.host, &["Ana Pérez"], 500).await;
+    // The event log cannot be written.
+    rusqlite::Connection::open(teams.dir.path().join("graph.db"))
+        .unwrap()
+        .execute("DROP TABLE events", [])
+        .unwrap();
+    let id = bench.start(TASK).await;
+    teams.attach(&bench.host).await;
+    let run = bench.state(&id, Phase::Done).await;
+    assert_eq!(teams.posts().await.len(), 1);
+    assert_eq!(run.block_outcomes[0].outcome, "uncertain");
+}
+
+#[test]
+fn mention_syntax_in_any_rendered_text_is_inert_except_the_blocks_own_mentions() {
+    let item = crate::app::workflows::record::Item {
+        provider: "azure".into(),
+        id: 7,
+        project: "Payments".into(),
+        organization: synthetic::ORGANIZATION.into(),
+        url: "https://dev.azure.com/example/Payments/_workitems/edit/7".into(),
+        title: "[Boss] fixes".into(),
+        kind: "Task".into(),
+        category: "task".into(),
+        state: "Ready".into(),
+        source: None,
+    };
+    let mut run = Run::new(item, 1);
+    run.state = Phase::Blocks;
+    // A template's own @ before a title that starts with [ must not become a mention.
+    let block = notification("n", Stage::Done, "@{item} and @[Template] ", &["Victoria"]);
+    let occurrence = Occurrence {
+        stage: Stage::Done,
+        key: "done".into(),
+    };
+    let rendered = acting::render(&run, &block, &occurrence);
+    assert!(!rendered.contains("@["), "{rendered}");
+    // Only the block's own mention is a mention in what is posted.
+    let message = acting::compose(&run, &block, &occurrence).unwrap();
+    assert_eq!(message.matches("@[").count(), 1, "{message}");
+    assert!(message.starts_with("@[Victoria] "));
+    // A mention that a Teams post could not read is refused, as saving refuses it.
+    for name in ["a]b".to_owned(), "x".repeat(101)] {
+        let mut bad = block.clone();
+        bad.mentions = vec![name];
+        assert!(acting::compose(&run, &bad, &occurrence).is_err());
+        assert!(crate::workflows::validate_block(&bad).is_err());
+    }
+    let mut longest = block.clone();
+    longest.mentions = vec!["x".repeat(100)];
+    assert!(acting::compose(&run, &longest, &occurrence).is_ok());
+    assert!(crate::workflows::validate_block(&longest).is_ok());
 }

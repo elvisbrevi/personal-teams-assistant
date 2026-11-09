@@ -31,6 +31,9 @@ pub const MAX_REPOSITORIES: usize = 20;
 pub const MAX_WORKFLOW_BLOCKS: usize = 10;
 pub const MAX_INSTRUCTIONS: usize = 8000;
 pub const MAX_MENTIONS: usize = 20;
+/// The longest display name a mention can carry: a mention is written `@[Name]` and read back
+/// by the Teams post, which takes up to 100 characters and no closing bracket.
+pub const MAX_MENTION: usize = 100;
 pub const MAX_TEMPLATE: usize = 4000;
 /// The placeholders a notification template may hold; code renders them.
 pub const PLACEHOLDERS: [&str; 5] = ["item", "link", "pull_requests", "summary", "state"];
@@ -166,6 +169,10 @@ fn plain(text: &str, max: usize) -> bool {
             .chars()
             .any(|c| c.is_control() && c != '\n' && c != '\t')
 }
+/// A member's display name as a mention can name it.
+fn mention_name(name: &str) -> bool {
+    line(name, MAX_MENTION) && !name.contains(']')
+}
 fn line(text: &str, max: usize) -> bool {
     !text.trim().is_empty() && text.chars().count() <= max && !text.chars().any(char::is_control)
 }
@@ -262,9 +269,9 @@ pub fn validate_block(block: &Block) -> Result<()> {
             );
             ensure!(
                 block.mentions.len() <= MAX_MENTIONS
-                    && block.mentions.iter().all(|m| line(m, 120))
+                    && block.mentions.iter().all(|m| mention_name(m))
                     && block.mentions.iter().collect::<BTreeSet<_>>().len() == block.mentions.len(),
-                "Teams notification block {id} mentions at most {MAX_MENTIONS} different members by display name (at most 120 characters each)."
+                "Teams notification block {id} mentions at most {MAX_MENTIONS} different members by display name (at most {MAX_MENTION} characters each, without a closing bracket, as a Teams mention can be written)."
             );
             ensure!(
                 !block.template.trim().is_empty() && plain(&block.template, MAX_TEMPLATE),

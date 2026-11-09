@@ -142,7 +142,7 @@ pub(super) fn describe(block: &Block) -> String {
                 block.mentions.join(", ")
             };
             format!(
-                "At stage {stage}, post «{}» to the Teams chat {} ({}), mentioning {mentions}, once per run",
+                "At stage {stage}, post «{}» to the Teams chat {} ({}), mentioning {mentions}, once each time that stage occurs in a run",
                 block.template, chat.name, chat.id
             )
         }

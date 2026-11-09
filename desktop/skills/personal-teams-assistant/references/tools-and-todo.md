@@ -358,7 +358,7 @@ workflow settings.
    - `instruction`: `text` (at most 8000 characters), no stage; saved without confirmation.
    - `teams_notification`: `stage` (`before_planning`, `plan_ready`, `children_created`,
      `child_done`, `pull_requests_completed`, `done`, `failed`), `chat` `{id, name}` from
-     `teams_chats`, `mentions` (member display names, at most 20) and `template` (at most 4000
+     `teams_chats`, `mentions` (member display names of at most 100 characters without `]`, at most 20) and `template` (at most 4000
      characters; only `{item}`, `{link}`, `{pull_requests}`, `{summary}` and `{state}`). Show the user the
      chat and the text and save it with `--confirmed` (MCP: the confirmation names them); the
      reply echoes `chat`, `mentions` and `template`. The chat must be one the user belongs to:
@@ -493,14 +493,15 @@ run (any state but `done` and `cancelled`).
   to the chat the user confirmed when saving the block, as the user, through the same path as
   `teams_post`: the placeholders are filled by code (`{summary}` is the run's latest stored
   summary, empty when there is none), `@[Name]` mentions are matched to that chat's members only,
-  and an unknown or ambiguous mention, a chat the user left, a missing Microsoft session or a
+  and an unknown or ambiguous mention (a mention is a member's display name of at most 100 characters without `]`), a chat the user left, a missing Microsoft session or a
   refusal from Teams records `refused` with the reason and the run goes on; a failure after the
   request left is `uncertain` and nothing is ever retried. A launcher block runs the approved
   launcher of the coordinator only while it is still approved with the digest the block stored
   (otherwise `not_started`, with the reason), never shows or keeps its output, and when it
-  `failed` or `timed_out` stops the run in `needs_attention`. `status` shows every outcome in
+  `failed`, `timed_out` or ended `uncertain` stops the run in `needs_attention`. `status` shows every outcome in
   `block_outcomes` (`block`, `stage`, `occurrence`, `outcome`, `reason`, `exit_code`,
-  `duration_ms`, `message_id`); an `attempting` outcome that a restart interrupted reads
+  `duration_ms`, `message_id`; `skipped` marks a stage that had already happened when a run of an
+  older version was first seen); an `attempting` outcome that a restart interrupted reads
   `uncertain` and is never attempted again, so check Teams or the launcher's effects by hand
   before telling the user it did or did not happen. Resuming a run stopped by a launcher goes on
   with the blocks that have not run and never runs that launcher again. Blocks never post to a
