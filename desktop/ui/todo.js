@@ -50,7 +50,7 @@ function todoOriginal(item, selection = null) {
     else fail(t('Could not copy the work item link.'));
   });
   const session = el('button', { type: 'button', class: 'icon-button secondary', hidden: true, 'data-session-for': item.url, title: t('Open agent session'), 'aria-label': t('Open agent session') }, icon('chat'));
-  return el('div', { class: 'todo-actions' }, runLinkFor(item), implement, open, copyButton, session);
+  return el('div', { class: 'todo-actions' }, implement, open, copyButton, session, runLinkFor(item));
 }
 let todoDetailRequest = 0;
 let todoSelection = null;

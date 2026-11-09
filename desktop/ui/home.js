@@ -207,12 +207,12 @@ function workflowTiles(s) {
 function renderWorkflowAttention(s) {
   const runs = s.workflow_attention ?? [];
   $('#workflow-attention-panel').hidden = !runs.length;
-  $('#workflow-attention').replaceChildren(...runs.map(run => el('div', { class: 'status-row warn', 'data-run': run.id, tabIndex: 0, role: 'button', onclick: () => openWorkflowRun(run.id), onkeydown: event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); openWorkflowRun(run.id); } } },
+  $('#workflow-attention').replaceChildren(...runs.map(run => el('div', { class: 'status-row warn', 'data-run': run.id },
     el('span', { class: 'status-icon', 'aria-hidden': 'true' }, icon('flow')),
     el('span', { class: 'status-value' }, el('span', { class: 'status-label', textContent: runStateLabel(run.state) }),
       el('strong', { textContent: run.item.title }),
       ...(run.attention ? [el('small', { textContent: tx(run.attention).slice(0, 240) })] : [])),
-    link(`#${run.item.id}`, run.item.url))));
+    link(`#${run.item.id}`, run.item.url), el('button', { type: 'button', class: 'secondary small run-open', textContent: t('Open run'), onclick: () => openWorkflowRun(run.id) }))));
 }
 
 function renderTiles(s) {

@@ -124,7 +124,6 @@ pub(super) const ASSETS: &[Asset] = &[
     asset!("settings-cloud.js", "text/javascript; charset=utf-8", true),
     asset!(
         "settings-workflows.js",
-        "workflow-runs.js",
         "text/javascript; charset=utf-8",
         true
     ),

@@ -332,9 +332,8 @@ Requires host and CLI `workflows_support: true`. A workflow is a saved recipe fo
 the items of one Azure DevOps project; a workflow block is a reusable part of it. This version
 holds the definitions, their settings, the workflow director's classification and workflow runs
 ([below](#workflow-runs)); runs start when asked, from Implement or by themselves
-([automatic starts](#automatic-starts-and-the-implement-choice); the acting blocks and the GUI's Runs
-views come later; progress summaries and their sending to Teams are in [workflow runs](#workflow-runs),
-without GUI controls yet). People edit the
+([automatic starts](#automatic-starts-and-the-implement-choice)); the acting blocks run at their stage, and
+progress summaries and their sending to Teams are in [workflow runs](#workflow-runs). People edit the
 definitions in the GUI's **Workflows** section (sidebar, after Activities; under More on a phone):
 the Workflows view for definitions and the Blocks view for the library, with Settings › Workflows
 for the ready states, the watcher and the workflow director. A launcher block can only be saved

@@ -291,9 +291,9 @@ async function showPlanReview(run, area, refresh) {
       area.replaceChildren();
       await refresh();
     }));
-  const close = el('button', { type: 'button', class: 'link-button', textContent: t('Close') });
+  const close = el('button', { type: 'button', class: 'secondary', textContent: t('Close') });
   close.onclick = () => { runsData.holding = false; area.replaceChildren(); refresh(); };
-  panel.append(close);
+  panel.append(el('div', { class: 'actions' }, close));
   area.replaceChildren(panel);
 }
 

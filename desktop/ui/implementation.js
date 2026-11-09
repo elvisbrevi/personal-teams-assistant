@@ -11,6 +11,7 @@ import { chooseDirectories } from './directory-sheet.js';
 import { providerNames } from './home.js';
 import { effortNames } from './settings-models.js';
 import { runStateLabel as runState } from './run-states.js';
+import { openWorkflowRun } from './workflow-runs.js';
 
 let implementationForm = null;
 let implementationRequest = 0;
@@ -236,14 +237,14 @@ async function startWorkflowRun(form) {
   const state = el('strong', { textContent: runState(run.state) });
   const badgeBox = el('span', {}, badge(runState(run.state), 'info'));
   const refresh = el('button', { type: 'button', class: 'secondary small', textContent: t('Refresh') });
-  const open = el('button', { type: 'button', class: 'secondary small', textContent: t('Open Workflows') });
+  const open = el('button', { type: 'button', class: 'secondary small', textContent: t('Open the run') });
   refresh.onclick = () => busy(refresh, async () => {
     const reply = await invoke('workflow_run_status', { run: run.id });
     const label = runState(reply.run.state);
     badgeBox.replaceChildren(badge(label, ['done'].includes(reply.run.state) ? 'ok' : ['failed', 'needs_attention', 'interrupted', 'unassigned'].includes(reply.run.state) ? 'warn' : 'info'));
     state.textContent = label;
   });
-  open.onclick = () => showTab('workflows');
+  open.onclick = () => openWorkflowRun(run.id, open);
   form.workflowRun.replaceChildren(el('div', { class: 'callout ok', id: 'implementation-workflow-started' },
     el('p', {}, badgeBox, ' ', el('strong', { textContent: workflow?.name ?? id })),
     el('p', { class: 'hint', textContent: t('The run goes on by itself: it plans the item, stops for your review of the plan and then codes each child. Follow it in Workflows.') }),
