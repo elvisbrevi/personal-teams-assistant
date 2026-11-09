@@ -276,9 +276,14 @@ pub(in crate::app) struct Run {
     pub children: Vec<Child>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub block_outcomes: Vec<BlockOutcome>,
-    /// Progress summaries (written by the director in a later version).
+    /// Progress summaries the director wrote (`summary::Summary`: `id`, `text`, `created_at`,
+    /// `provider`, `model`, `session_id`), oldest first, at most `summary::MAX_SUMMARIES`.
+    /// A notification block's `{summary}` is rendered from the latest entry (the last).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub summaries: Vec<Value>,
+    /// One record per send of a summary to a chat (`summary::Send`), oldest first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub summary_sends: Vec<Value>,
     /// What the user must look at, while the run waits on them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attention: Option<String>,
@@ -306,7 +311,7 @@ pub(in crate::app) struct Run {
     /// It holds one of the `concurrency` slots.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub admitted: bool,
-    /// When the engine began to act on this run's acting blocks (0.12.5 or later). A run with
+    /// When the engine began to act on this run's acting blocks (0.12.7 or later). A run with
     /// none was recorded by an older version: the occurrences of its stages that had already
     /// happened are marked `skipped` when the engine first sees it, and never acted on.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -345,6 +350,7 @@ impl Run {
             children: Vec::new(),
             block_outcomes: Vec::new(),
             summaries: Vec::new(),
+            summary_sends: Vec::new(),
             attention: None,
             error: None,
             creation_accepted: false,
@@ -526,6 +532,13 @@ impl Store {
         )?;
         ensure!(changed == 1, "Workflow run {} is not recorded.", run.id);
         Ok(())
+    }
+    /// Lose a run, as a failing disk would: a test of what is reported when saving fails.
+    #[cfg(test)]
+    pub(in crate::app) fn forget(&self, id: &str) {
+        let db = self.0.lock().unwrap();
+        db.execute("DELETE FROM workflow_runs WHERE id=?1", [id])
+            .unwrap();
     }
     pub(in crate::app) fn get(&self, id: &str) -> Result<Option<Run>> {
         let db = self.0.lock().unwrap();

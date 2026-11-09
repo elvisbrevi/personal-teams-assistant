@@ -1032,6 +1032,13 @@ impl Graph {
         }
         Ok(found)
     }
+    /// The members of a chat as `post_chat` resolves mentions against them (the user included),
+    /// so a caller can check mentions over the very list the post will use.
+    pub async fn chat_members(&self, chat: &str) -> Result<Vec<Value>> {
+        teams::canonical_resource(&format!("chats/{chat}/messages/0"))
+            .map_err(|_| PostRefusal::InvalidChat)?;
+        self.list_collection(&format!("chats/{chat}/members")).await
+    }
     /// Post a new message, as the user, in a chat they belong to (`self` is their personal chat).
     /// `markdown` is rendered like the assistant's answers; `@[Name]` mentions a chat member.
     /// Like every send it happens at most once: a result that may have reached Teams is
@@ -1627,7 +1634,10 @@ impl std::fmt::Display for PostRefusal {
 impl std::error::Error for PostRefusal {}
 
 /// The chat member a `@[name]` mention names: an exact display name, else the only one containing it.
-fn mention_target(members: &[Value], name: &str) -> Result<(String, String), PostRefusal> {
+pub(crate) fn mention_target(
+    members: &[Value],
+    name: &str,
+) -> Result<(String, String), PostRefusal> {
     let named = |m: &Value| {
         Some((
             m["userId"].as_str()?.to_owned(),
