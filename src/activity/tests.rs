@@ -86,6 +86,7 @@ fn daily_snapshots_replace_atomically_keep_legacy_data_and_supply_verified_recap
             kind: "Task".into(),
             category: "task".into(),
             created_at: None,
+            changed_at: None,
             dates: vec![],
         },
         source: "ado".into(),

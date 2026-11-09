@@ -46,7 +46,7 @@ import { browserMicrosoftLogin } from './dialogs.js';
  *   'variable_launcher_run' | 'variable_list' | 'variable_migration_inspect' |
  *   'variable_migration_run' | 'variable_rename' | 'variable_reveal' | 'variable_update' |
  *   'workflow_block_remove' | 'workflow_block_save' | 'workflow_blocks_list' | 'workflow_remove' |
- *   'workflow_repositories' | 'workflow_save' | 'workflow_settings' | 'workflow_settings_update' |
+ *   'workflow_repositories' | 'workflow_run_status' | 'workflow_save' | 'workflow_settings' | 'workflow_settings_update' |
  *   'workflow_show' | 'workflows_list'
  * )} Method
  */

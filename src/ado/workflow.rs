@@ -294,6 +294,7 @@ mod tests {
                 kind: "User Story".into(),
                 category: "requirement".into(),
                 created_at: None,
+                changed_at: None,
                 dates: Vec::new(),
             },
             fields: vec![crate::tools::todo::DetailField {

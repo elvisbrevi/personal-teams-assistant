@@ -55,6 +55,63 @@ fn azure(state: &DesktopState, source: Option<&str>) -> anyhow::Result<Azure> {
     })
 }
 
+/// The enabled Azure source whose catalog names an organization (`https://dev.azure.com/NAME`):
+/// the source a read of that organization needs when several are enabled. `None` when at most
+/// one is enabled (a read then picks it, or says there is none); a refusal when several are and
+/// none, or more than one, names the organization.
+pub(in crate::app) fn source_for(
+    state: &DesktopState,
+    organization: &str,
+) -> Result<Option<String>, String> {
+    #[derive(serde::Deserialize)]
+    struct Named {
+        organization: String,
+    }
+    #[derive(serde::Deserialize)]
+    struct Catalog {
+        sources: Vec<Named>,
+    }
+    let map = state.settings.map().map_err(super::super::fail)?;
+    let enabled: Vec<_> = map
+        .resources
+        .iter()
+        .filter(|r| r.enabled)
+        .filter_map(|r| match &r.access {
+            Access::Tool {
+                tool: tool @ ToolSpec::AzureDevopsStatus { .. },
+            } => Some((r.id.as_str(), tool)),
+            _ => None,
+        })
+        .collect();
+    if enabled.len() <= 1 {
+        return Ok(None);
+    }
+    let wanted = crate::workflows::organization_name(organization);
+    let holders: Vec<&str> = enabled
+        .iter()
+        .filter(|(_, tool)| {
+            tool.catalog(&map.repositories)
+                .ok()
+                .and_then(|text| toml::from_str::<Catalog>(&text).ok())
+                .is_some_and(|c| {
+                    c.sources
+                        .iter()
+                        .any(|s| crate::workflows::organization_name(&s.organization) == wanted)
+                })
+        })
+        .map(|(id, _)| *id)
+        .collect();
+    match holders.as_slice() {
+        [one] => Ok(Some((*one).to_owned())),
+        [] => Err(format!(
+            "[invalid_input] No enabled Azure DevOps source names the organization {organization}."
+        )),
+        _ => Err(format!(
+            "[invalid_input] Several enabled Azure DevOps sources name the organization {organization}; keep one enabled."
+        )),
+    }
+}
+
 /// One read of a project of the enabled Azure source, with its read credential and the To-Do
 /// cache, bounded to `seconds`: `what` names it in the errors, `purpose` in the refusal when no
 /// single source is enabled. A project outside the source's configured organizations is

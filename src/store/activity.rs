@@ -148,6 +148,7 @@ impl ActivityStore for LocalActivity<'_> {
                 category: String::new(),
                 project: parent.project.clone(),
                 created_at: None,
+                changed_at: None,
                 dates: vec![],
             };
             day.hours += e.draft.hours.unwrap_or_default();
@@ -298,6 +299,7 @@ pub(crate) mod contract {
                 kind: "Task".into(),
                 category: "task".into(),
                 created_at: None,
+                changed_at: None,
                 dates: vec![],
             },
             source: "ado".into(),

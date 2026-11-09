@@ -81,6 +81,10 @@ pub struct Item {
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub category: String,
     pub created_at: Option<String>,
+    /// When the item last changed (Azure `System.ChangedDate`); the watcher's seen ledger
+    /// records it. Absent from lists that do not read it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub changed_at: Option<String>,
     pub dates: Vec<Date>,
 }
 

@@ -93,6 +93,7 @@ async fn detail_with(
             kind: issue["type"]["name"].as_str().unwrap_or("Issue").into(),
             category: String::new(),
             created_at: issue["created_at"].as_str().map(str::to_owned),
+            changed_at: None,
             dates: vec![Date {
                 field: "closed_at".into(),
                 name: "Completion date".into(),
@@ -246,6 +247,7 @@ async fn detail_with(
                                     kind: value["type"]["name"].as_str().unwrap_or("Issue").into(),
                                     category: String::new(),
                                     created_at: value["created_at"].as_str().map(str::to_owned),
+                                    changed_at: None,
                                     dates: Vec::new(),
                                 }),
                                 task: false,

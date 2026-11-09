@@ -289,6 +289,13 @@
   const usedBy = () => Object.fromEntries(workflowBlocks.map(b => [b.id, workflows.filter(w => w.blocks.includes(b.id)).map(w => w.id)]));
   const syncWorkflows = () => { snapshot.map.workflows = structuredClone(workflows); snapshot.map.workflow_blocks = structuredClone(workflowBlocks); };
   syncWorkflows();
+  // The runs waiting on the user (src/app/workflows/runs.rs `attention`): Home lists them once.
+  snapshot.workflow_attention = scenario === 'full' ? [
+    { id: '3c5f1c9a-0d2e-4b7a-8f10-5a6b7c8d9e01', workflow: 'payments-features', item: { id: 5003, title: 'Improve settlement reporting', url: `${org}/Payments/_workitems/edit/5003`, kind: 'User Story', category: 'requirement', project: 'Payments' },
+      state: 'plan_review', stage: 'plan_review', attention: 'Review the proposed children and confirm them with implementation_create.', waits_on_user: true, children: 0, pull_requests: [], created_at: secs(NOW - 3_600_000), updated_at: secs(NOW - 1_800_000), finished_at: null },
+    { id: '3c5f1c9a-0d2e-4b7a-8f10-5a6b7c8d9e02', workflow: null, item: { id: 5007, title: 'Review payment validation', url: `${org}/Payments/_workitems/edit/5007`, kind: 'Bug', category: 'bug', project: 'Payments' },
+      state: 'unassigned', stage: 'unassigned', attention: 'The workflow director chose no workflow (No encaja ninguno); assign one to this run.', waits_on_user: true, children: 0, pull_requests: [], created_at: secs(NOW - 900_000), updated_at: secs(NOW - 600_000), finished_at: null },
+  ] : [];
   window.__ptaWorkflowCalls = [];
   const workflowHandlers = {
     workflows_list: () => ({ workflows: structuredClone(workflows), editable: !window.__ptaWorkflowsElsewhere }),
@@ -357,7 +364,13 @@
       window.__ptaWorkflowCalls.push({ method: 'workflow_settings', ...structuredClone(args) });
       const reply = { settings: structuredClone(workflowSettings), editable: true,
         defaults: { watch_interval_minutes: 5, concurrency: 2, pull_request_wait_days: 7, director: null, ready_states: [] },
-        bounds: { watch_interval_minutes: [1, 60], concurrency: [1, 4], pull_request_wait_days: [1, 60], ready_states_per_project: 20, projects_with_ready_states: 50 } };
+        bounds: { watch_interval_minutes: [1, 60], concurrency: [1, 4], pull_request_wait_days: [1, 60], ready_states_per_project: 20, projects_with_ready_states: 50 },
+        // The ready-state watcher on this computer (src/app/workflows/watcher.rs `view`).
+        watcher: window.__ptaWatcher ?? (workflowSettings.ready_states.some(r => r.states.length)
+          ? { state: 'watching', reason: null, interval_minutes: workflowSettings.watch_interval_minutes,
+            last_poll: { at: secs(NOW - 120_000), started: 1, partial: false, projects: [{ organization: org, project: 'Payments', states: ['Ready for development'], complete: true, seen: 2, started: 1, already_seen: 1, deferred: 0, errors: [] }] },
+            next_poll_at: secs(NOW + 180_000) }
+          : { state: 'idle', reason: 'No ready state is configured; choose one for a project in Settings › Workflows.', interval_minutes: workflowSettings.watch_interval_minutes, last_poll: null, next_poll_at: null }) };
       if (args.project) {
         if (!processStates[args.project]) throw new Error(`invalid project: ${args.project} is not in the configured organizations of the enabled Azure source.`);
         reply.process_states = { organization: org, project: args.project, states: processStates[args.project] };
@@ -464,6 +477,17 @@
       directories: !args.path ? ['/work'] : args.path === '/work' ? ['/work/application', '/work/documentation'] : ['/work/application/src'] }),
     implementation_start: args => {
       window.__ptaLastImplementation = structuredClone(args);
+      // The workflow choice (src/app/workflows/implement.rs): the director only classifies; a
+      // workflow ID starts a workflow run with the workflow's own machine and agent.
+      if (args.workflow === 'director') {
+        const none = window.__ptaDirectorNone;
+        return { workflow: none ? null : 'payments-features', outcome: none ? 'none' : 'chosen', reason: none ? 'Ningún workflow encaja con este ítem.' : 'Habla del checkout y de la API de pagos.',
+          candidates: [{ id: 'payments-features', name: 'Payments features' }], item: { id: args.item.id, project: args.item.project }, dry_run: true, started: false, next: 'Nothing was started.' };
+      }
+      if (args.workflow && args.workflow !== 'none') {
+        if ('machine' in args || 'directories' in args) throw new Error('A workflow run takes its machine, directories, agent, model, effort and instructions from the workflow.');
+        return { workflow: args.workflow, started: true, run: { id: '3c5f1c9a-0d2e-4b7a-8f10-5a6b7c8d9e10', workflow: args.workflow, state: 'planning', stage: 'planning', item: { id: args.item.id, project: args.item.project } } };
+      }
       const planning = !args.item.task && (args.item.provider !== 'github' || args.item.id === 42);
       const id = crypto.randomUUID();
       const prompted = !planning && args.context.includes('[synthetic prompt]');
@@ -475,6 +499,7 @@
         plan: planning ? { children: [{ title: 'Implement receipt download', description: 'Add the receipt download action and verify it on a phone.' }] } : null });
       return { id, started: true };
     },
+    workflow_run_status: args => ({ run: { id: args.run, workflow: 'payments-features', state: 'plan_review', stage: 'plan_review', waits_on_user: true } }),
     implementation_runs: args => ({ runs: implementationRuns.filter(run => run.machine === args.machine) }),
     implementation_creation: () => null,
     implementation_sessions: args => ({ sessions: implementationRuns.filter(run => args.urls.includes(run.item.url)).map(run => ({ ...run, online: true })) }),

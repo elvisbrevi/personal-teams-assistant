@@ -3416,6 +3416,7 @@ async fn what_the_user_did_on_a_day_comes_from_the_recorded_activities() {
         category: "task".into(),
         state: "Done".into(),
         created_at: None,
+        changed_at: None,
         dates: vec![],
     };
     use personal_teams_assistant::store::activity::{ActivityStore, LocalActivity};

@@ -978,7 +978,7 @@ async fn the_director_chooses_only_an_enabled_workflow_of_the_items_project_and_
                 scope: host.state.authority.clone(),
                 transport: Local,
             },
-            director::classify_item(&host, &director, &detail("Payments")),
+            director::classify_item(&host, &director, &detail("Payments"), false),
         )
         .await;
         crate::llm::implementation::use_test_cli(None);
@@ -1055,7 +1055,7 @@ async fn the_director_chooses_only_an_enabled_workflow_of_the_items_project_and_
             scope: host.state.authority.clone(),
             transport: Local,
         },
-        director::classify_item(&host, &director, &detail("Cards")),
+        director::classify_item(&host, &director, &detail("Cards"), false),
     )
     .await
     .unwrap();

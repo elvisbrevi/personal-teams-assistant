@@ -527,6 +527,12 @@ async fn client_with_transport(
             "Incompatible workflows host: update the host and CLI together before starting or following workflow runs."
         );
         ensure!(
+            endpoint.workflow_runs_support
+                || request.method != "implementation_start"
+                || workflows::implement::choice(&request.args).is_none(),
+            "Incompatible workflows host: update the host and CLI together before starting a workflow from Implement."
+        );
+        ensure!(
             endpoint.cloud_store_support || !cloud::handles(&request.method),
             "Incompatible account store host: update the host and CLI together before connecting to the account store."
         );
@@ -740,11 +746,13 @@ pub(crate) fn launch(
         let machines = tokio::spawn(implementation::fleet::schedule(host.clone()));
         let updates = tokio::spawn(maintenance::schedule(host.clone()));
         let engine = tokio::spawn(workflows::engine::schedule(host.clone()));
+        let watcher = tokio::spawn(workflows::watcher::schedule(host.clone()));
         let scheduler = tokio::spawn(activity::schedule(host));
         if let Ok(listener) = tokio::net::TcpListener::from_std(listener) {
             let _ = axum::serve(listener, router).await;
         }
         scheduler.abort();
+        watcher.abort();
         engine.abort();
         updates.abort();
         machines.abort();
