@@ -366,6 +366,7 @@ async fn summarize(host: &Arc<Host>, args: SummaryArgs) -> Result<Value, String>
         kind: run.item.kind.clone(),
         category: run.item.category.clone(),
         created_at: None,
+        changed_at: None,
         dates: Vec::new(),
     };
     let answer = Box::pin(implementation::director::ask(
