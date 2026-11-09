@@ -26,9 +26,11 @@ pub(in crate::app) struct Catalog {
     pub list_cap: Mutex<Option<usize>>,
 }
 
+#[cfg(unix)]
 pub(in crate::app) const ORGANIZATION: &str = "https://dev.azure.com/example";
 
 /// A work item of project Payments.
+#[cfg(unix)]
 pub(in crate::app) fn detail(
     id: u64,
     kind: &str,

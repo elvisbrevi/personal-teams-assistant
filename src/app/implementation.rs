@@ -921,7 +921,7 @@ pub(super) async fn creation_record(host: &Arc<Host>, plan: &str) -> Option<Valu
         .cloned()
 }
 /// A creation recorded as `implementation_create` records it (tests of what observes it).
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(super) async fn test_creation(host: &Host, plan: &str, record: Value) {
     let state = &host.state.implementation;
     let mut data = state.registry.lock().await;
@@ -929,7 +929,7 @@ pub(super) async fn test_creation(host: &Host, plan: &str, record: Value) {
     state.save(&data).unwrap();
 }
 /// End an in-flight run in `state` as its machine would record it (tests).
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(super) fn test_finish(host: &Host, id: &str, state: &str, output: &str) {
     LocalImplementation::new(&host.state.implementation.db)
         .finish_run(id, state, output, None)
@@ -1858,6 +1858,7 @@ mod tests {
                 director::Ask {
                     machine: &director.machine,
                     director: &director,
+                    task: crate::llm::implementation::DirectTask::Classify,
                     instructions: "Choose.",
                     input: "{}".into(),
                     item: &item,

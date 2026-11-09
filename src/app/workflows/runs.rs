@@ -98,7 +98,7 @@ pub(in crate::app) fn describe_start(
     }
 }
 
-fn found(state: &DesktopState, id: &str) -> Result<Run, String> {
+pub(super) fn found(state: &DesktopState, id: &str) -> Result<Run, String> {
     if uuid::Uuid::parse_str(id).is_err() {
         return Err(invalid("Give the workflow run's ID."));
     }
@@ -111,7 +111,7 @@ fn found(state: &DesktopState, id: &str) -> Result<Run, String> {
 }
 
 /// Runs advance only on the owner's coordinator.
-fn require_engine(state: &DesktopState) -> Result<(), String> {
+pub(super) fn require_engine(state: &DesktopState) -> Result<(), String> {
     require_coordinator(state)?;
     if !engine::may_run(state) {
         return Err("[not_ready] Workflow runs advance only on the account owner's coordinator; start them there.".into());

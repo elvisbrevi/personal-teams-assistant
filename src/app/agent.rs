@@ -197,6 +197,10 @@ pub(super) const TOOLS: &[(&str, Remote)] = &[
     ("workflow_run_resume", Offered),
     ("workflow_run_cancel", Offered),
     ("workflow_run_assign", Offered),
+    // Written and sent only on the owner's coordinator; the host refuses elsewhere. Sending needs
+    // the user's confirmation of the exact text and chat, as every Teams post does.
+    ("workflow_summary", Offered),
+    ("workflow_summary_send", Offered),
     ("answer_rate", Offered),
     ("answer_draft", Offered),
     ("index_refresh", Offered),
@@ -313,6 +317,8 @@ pub(super) const METHODS: &[&str] = &[
     "workflow_run_resume",
     "workflow_run_cancel",
     "workflow_run_assign",
+    "workflow_summary",
+    "workflow_summary_send",
     "audit_list",
     "audit",
     "notes_list",

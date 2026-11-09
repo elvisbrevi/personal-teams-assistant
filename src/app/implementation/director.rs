@@ -29,6 +29,8 @@ const INPUT: usize = 200_000;
 /// What the coordinator asks the director.
 pub(in crate::app) struct Ask<'a> {
     pub machine: &'a str,
+    /// Choosing a workflow for an item, or summarizing a run (the record's `purpose`).
+    pub task: crate::llm::implementation::DirectTask,
     pub director: &'a crate::workflows::director::Director,
     /// The resolved `direct` prompt.
     pub instructions: &'a str,
@@ -48,6 +50,13 @@ pub(in crate::app) struct Answer {
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct Call {
+    /// Left out for choosing a workflow, so an older worker, which does not know the field,
+    /// still answers it.
+    #[serde(
+        default,
+        skip_serializing_if = "crate::llm::implementation::DirectTask::is_classify"
+    )]
+    task: crate::llm::implementation::DirectTask,
     id: String,
     provider: String,
     model: String,
@@ -99,6 +108,7 @@ async fn session(
     match tokio::time::timeout(
         Duration::from_secs(SESSION_SECONDS),
         crate::llm::implementation::direct(
+            call.task,
             (&call.provider, &call.model, &call.effort),
             directory.path().to_path_buf(),
             &call.instructions,
@@ -164,9 +174,14 @@ pub(in crate::app) async fn ask(host: &Arc<Host>, ask: Ask<'_>) -> Result<Answer
     let mut item = ask.item.clone();
     item.dates.clear();
     let director = ask.director;
-    let record = json!({"id":id,"machine":ask.machine,"purpose":"classification","project":item.project,"kind":item.kind,"provider":director.provider,"model":director.model,"effort":director.effort,"state":"generating","created_at":now_text(),"started_at":null,"finished_at":null,"session_id":null,"item":item,"output":"","permission_mode":crate::llm::implementation::permission_mode(&director.provider, true)});
+    let purpose = match ask.task {
+        crate::llm::implementation::DirectTask::Classify => "classification",
+        crate::llm::implementation::DirectTask::Summarize => "summary",
+    };
+    let record = json!({"id":id,"machine":ask.machine,"purpose":purpose,"project":item.project,"kind":item.kind,"provider":director.provider,"model":director.model,"effort":director.effort,"state":"generating","created_at":now_text(),"started_at":null,"finished_at":null,"session_id":null,"item":item,"output":"","permission_mode":crate::llm::implementation::permission_mode(&director.provider, true)});
     state.db.request_insert(&record)?;
     let call = Call {
+        task: ask.task,
         id: id.clone(),
         provider: director.provider.clone(),
         model: director.model.clone(),
@@ -286,6 +301,15 @@ pub(in crate::app) async fn ask(host: &Arc<Host>, ask: Ask<'_>) -> Result<Answer
 pub(in crate::app) fn record(host: &Arc<Host>, run: &str, verdict: Value) -> Result<()> {
     LocalImplementation::new(&host.state.implementation.db).finish_request(run, &mut |record| {
         record["classification"] = verdict.clone();
+        Ok(())
+    })
+}
+
+/// Keep a field about the session (the workflow run a summary is of, the verdict on its
+/// output) in its record.
+pub(in crate::app) fn annotate(host: &Arc<Host>, run: &str, key: &str, value: Value) -> Result<()> {
+    LocalImplementation::new(&host.state.implementation.db).finish_request(run, &mut |record| {
+        record[key] = value.clone();
         Ok(())
     })
 }
