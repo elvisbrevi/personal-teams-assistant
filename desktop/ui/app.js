@@ -38,6 +38,7 @@ import {
 import { openGuides, renderGuides } from './guides.js';
 import { answerBubble, bubble, chosen, resizeComposer } from './chat.js';
 import { machineTrust } from './dialogs.js';
+import { closeWorkflowRun, loadWorkflowRuns } from './workflow-runs.js';
 
 // ---------------------------------------------------------------- wiring
 
@@ -161,7 +162,12 @@ $('#restart').onclick = () => busy($('#restart'), async () => {
 });
 $('#stop').onclick = () => busy($('#stop'), async () => { await invoke('stop_assistant'); await refreshLive(); done(t('Assistant stopped.')); });
 $('#activity-all').onclick = () => showTab('messages');
-$('#workflow-attention-open').onclick = () => showTab('workflows');
+$('#workflow-attention-open').onclick = () => { showTab('workflows', 'workflows-runs'); loadWorkflowRuns(); };
+$('#runs-refresh').onclick = () => loadWorkflowRuns();
+$('#runs-state').onchange = () => loadWorkflowRuns();
+$('#runs-workflow').onchange = () => loadWorkflowRuns();
+$('#run-detail-back').onclick = () => closeWorkflowRun();
+$('#workflows-tab-runs').addEventListener('click', () => loadWorkflowRuns());
 $('#activity-notice-open').onclick = () => busy($('#activity-notice-open'), () => invoke('activity_open'));
 $('#activity-settings').onclick = () => showTab('settings', 'panel-registration');
 $('#activity-refresh').onclick = () => busy($('#activity-refresh'), loadRegistration);

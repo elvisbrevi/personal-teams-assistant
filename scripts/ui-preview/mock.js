@@ -296,8 +296,109 @@
     { id: '3c5f1c9a-0d2e-4b7a-8f10-5a6b7c8d9e02', workflow: null, item: { id: 5007, title: 'Review payment validation', url: `${org}/Payments/_workitems/edit/5007`, kind: 'Bug', category: 'bug', project: 'Payments' },
       state: 'unassigned', stage: 'unassigned', attention: 'The workflow director chose no workflow (No encaja ninguno); assign one to this run.', waits_on_user: true, children: 0, pull_requests: [], created_at: secs(NOW - 900_000), updated_at: secs(NOW - 600_000), finished_at: null },
   ] : [];
+  // Workflow runs as src/app/workflows/record.rs keeps them (`Run::view`, `Run::summary`): one in each state a
+  // person acts on, and finished ones. The plan-review run's planning run is on the first machine with its plan.
+  const runId = n => `3c5f1c9a-0d2e-4b7a-8f10-5a6b7c8d9e${String(n).padStart(2, '0')}`;
+  const item = (id, title, kind, category, state = 'Ready for development') => ({ provider: 'azure', id, project: 'Payments', organization: org, url: `${org}/Payments/_workitems/edit/${id}`, title, kind, category, state, source: null });
+  const stage = (name, started, finished, outcome) => ({ stage: name, started_at: secs(NOW - started), finished_at: finished == null ? null : secs(NOW - finished), outcome });
+  const planningRunId = 'a7d0c2f4-5e6b-4c8d-9f01-2a3b4c5d6e7f';
+  let workflowRuns = scenario === 'full' ? [
+    { id: runId(1), workflow: 'payments-features', definition: { id: 'payments-features', name: 'Payments features' }, blocks: structuredClone(workflowBlocks), item: item(5003, 'Improve settlement reporting', 'User Story', 'requirement'),
+      state: 'plan_review', stopped_in: null, timeline: [stage('classifying', 3_600_000, 3_590_000, 'named'), stage('planning', 3_590_000, 1_800_000, 'plan_ready'), stage('plan_review', 1_800_000, null, null)],
+      classification: { workflow: 'payments-features', outcome: 'named' }, planning: { id: planningRunId, machine: '11111111-1111-4111-8111-111111111111', started: true, state: 'plan_ready' }, ledger: null, children: [], block_outcomes: [],
+      summaries: [], summary_sends: [], attention: 'Review the proposed children and confirm them with implementation_create.', error: null, auto_start: true, created_at: secs(NOW - 3_600_000), updated_at: secs(NOW - 1_800_000), finished_at: null },
+    { id: runId(2), workflow: null, definition: null, blocks: [], item: item(5007, 'Review payment validation', 'Bug', 'bug'),
+      state: 'unassigned', stopped_in: null, timeline: [stage('classifying', 900_000, 600_000, 'no workflow'), stage('unassigned', 600_000, null, null)],
+      classification: { workflow: null, outcome: 'none', reason: 'No encaja ninguno: el bug toca validación, no reportes.', director: 'claude:claude-sonnet-5-5' }, planning: null, ledger: null, children: [], block_outcomes: [],
+      summaries: [], summary_sends: [], attention: 'The workflow director chose no workflow (No encaja ninguno); assign one to this run.', error: null, auto_start: true, created_at: secs(NOW - 900_000), updated_at: secs(NOW - 600_000), finished_at: null },
+    { id: runId(3), workflow: 'payments-features', definition: { id: 'payments-features', name: 'Payments features' }, blocks: structuredClone(workflowBlocks), item: item(5001, 'Receipt downloads', 'User Story', 'requirement', 'Developing'),
+      state: 'coding', stopped_in: null, timeline: [stage('classifying', 86_400_000, 86_390_000, 'named'), stage('planning', 86_390_000, 82_800_000, 'plan_ready'), stage('plan_review', 82_800_000, 79_200_000, 'confirmed'), stage('creating_children', 79_200_000, 79_000_000, 'created 2'), stage('coding', 79_000_000, null, null)],
+      classification: { workflow: 'payments-features', outcome: 'chosen', reason: 'Toca el API de pagos.' }, planning: { id: 'b8e1d3a5-6f7c-4d9e-a012-3b4c5d6e7f80', machine: '11111111-1111-4111-8111-111111111111', started: true, state: 'plan_ready' }, ledger: 'b8e1d3a5-6f7c-4d9e-a012-3b4c5d6e7f80',
+      children: [
+        { id: 6001, title: 'Add the receipt download action', url: `${org}/Payments/_workitems/edit/6001`, kind: 'Task', repository: { id: '0f3c2a1b-0000-4000-8000-000000000001', name: 'payments-api' }, directory: '/work/payments-api', coding: { id: 'c9f2e4b6-7a8d-4e0f-b123-4c5d6e7f8091', machine: '11111111-1111-4111-8111-111111111111', started: true, state: 'done' }, started_at: secs(NOW - 79_000_000), finished_at: secs(NOW - 72_000_000), branch: 'feature/6001-receipt-download', pull_requests: [{ id: 41, repository: 'payments-api', title: 'Add the receipt download action', status: 'active', url: `${org}/Payments/_git/payments-api/pullrequest/41`, created_at: '2026-10-13T20:00:00Z', closed_at: null }], outcome: 'done' },
+        { id: 6002, title: 'Show the download on the phone', url: `${org}/Payments/_workitems/edit/6002`, kind: 'Task', repository: { id: '0f3c2a1b-0000-4000-8000-000000000002', name: 'payments-web' }, directory: '/work/payments-web', coding: { id: 'd0a3f5c7-8b9e-4f10-c234-5d6e7f809102', machine: '11111111-1111-4111-8111-111111111111', started: true, state: 'running' }, started_at: secs(NOW - 7_200_000), finished_at: null, branch: null, pull_requests: [], outcome: null },
+      ], block_outcomes: [{ block: 'notify-release', kind: 'teams_notification', stage: 'done', outcome: 'skipped', at: secs(NOW - 79_000_000), occurrence: 'plan_ready', reason: 'before acting blocks existed' }],
+      summaries: [{ id: 'e1b4c6d8-9c0f-4a21-d345-6e7f80910213', text: 'La HU **Receipt downloads** avanza: el primer hijo ya tiene su pull request y el segundo está en desarrollo.\n\nEnlaces\n- #5001 Receipt downloads\n- !41 Add the receipt download action', created_at: secs(NOW - 3_600_000), provider: 'claude', model: 'claude-sonnet-5-5', session_id: 'sess-synthetic-summary-1' }],
+      summary_sends: [{ id: 'f2c5d7e9-0d1a-4b32-e456-7f8091021324', summary: 'e1b4c6d8-9c0f-4a21-d345-6e7f80910213', chat: { id: '19:def@thread.v2', topic: 'Ana Pérez', type: 'oneOnOne' }, mentions: [], chars: 120, edited: false, outcome: 'sent', at: secs(NOW - 3_000_000), message_id: '1760450000000' }],
+      attention: null, error: null, auto_start: false, created_at: secs(NOW - 86_400_000), updated_at: secs(NOW - 7_200_000), finished_at: null },
+    { id: runId(4), workflow: 'payments-features', definition: { id: 'payments-features', name: 'Payments features' }, blocks: structuredClone(workflowBlocks), item: item(4998, 'Fix rounding in refunds', 'Task', 'task', 'Developing'),
+      state: 'needs_attention', stopped_in: 'coding', timeline: [stage('classifying', 172_800_000, 172_790_000, 'named'), stage('coding', 172_790_000, 170_000_000, 'permission_prompt'), stage('needs_attention', 170_000_000, null, null)],
+      classification: { workflow: 'payments-features', outcome: 'named' }, planning: null, ledger: null,
+      children: [{ id: 4998, title: 'Fix rounding in refunds', url: `${org}/Payments/_workitems/edit/4998`, kind: 'Task', repository: { id: '0f3c2a1b-0000-4000-8000-000000000001', name: 'payments-api' }, directory: '/work/payments-api', coding: { id: 'e3b6d8f0-1e2b-4c43-f567-809102132435', machine: '11111111-1111-4111-8111-111111111111', started: true, state: 'permission_prompt' }, started_at: secs(NOW - 172_790_000), finished_at: secs(NOW - 170_000_000), branch: null, pull_requests: [], outcome: 'permission_prompt' }],
+      block_outcomes: [], summaries: [], summary_sends: [], attention: 'Coding run e3b6d8f0 stopped on a permission prompt; remove its cause on that computer, then resume to continue with the next child.', error: null, auto_start: false, created_at: secs(NOW - 172_800_000), updated_at: secs(NOW - 170_000_000), finished_at: null },
+    { id: runId(5), workflow: 'payments-features', definition: { id: 'payments-features', name: 'Payments features' }, blocks: structuredClone(workflowBlocks), item: item(4990, 'Export refunds to the ledger', 'User Story', 'requirement', 'Finished'),
+      state: 'done', stopped_in: null, timeline: [stage('classifying', 604_800_000, 604_790_000, 'named'), stage('planning', 604_790_000, 600_000_000, 'plan_ready'), stage('plan_review', 600_000_000, 590_000_000, 'confirmed'), stage('creating_children', 590_000_000, 589_000_000, 'created 1'), stage('coding', 589_000_000, 580_000_000, '1 coded'), stage('pull_requests', 580_000_000, 500_000_000, 'completed: 1 pull request'), stage('blocks', 500_000_000, 499_000_000, '2 acting block outcomes'), stage('done', 499_000_000, 499_000_000, 'done')],
+      classification: { workflow: 'payments-features', outcome: 'named' }, planning: { id: 'f4c7e9a1-2f3c-4d54-a678-9102132435a6', machine: '11111111-1111-4111-8111-111111111111', started: true, state: 'plan_ready' }, ledger: 'f4c7e9a1-2f3c-4d54-a678-9102132435a6',
+      children: [{ id: 5990, title: 'Write the ledger export', url: `${org}/Payments/_workitems/edit/5990`, kind: 'Task', repository: { id: '0f3c2a1b-0000-4000-8000-000000000001', name: 'payments-api' }, directory: '/work/payments-api', coding: { id: 'a5d8f0b2-3a4d-4e65-b789-0213243546b7', machine: '11111111-1111-4111-8111-111111111111', started: true, state: 'done' }, started_at: secs(NOW - 589_000_000), finished_at: secs(NOW - 580_000_000), branch: 'feature/5990-ledger-export', pull_requests: [{ id: 37, repository: 'payments-api', title: 'Write the ledger export', status: 'completed', url: `${org}/Payments/_git/payments-api/pullrequest/37`, created_at: '2026-10-07T12:00:00Z', closed_at: '2026-10-08T15:00:00Z' }], outcome: 'done' }],
+      block_outcomes: [{ block: 'release-desa', kind: 'launcher', stage: 'pull_requests_completed', outcome: 'succeeded', at: secs(NOW - 499_500_000), occurrence: 'pull_requests_completed', exit_code: 0, duration_ms: 42_000 }, { block: 'notify-release', kind: 'teams_notification', stage: 'done', outcome: 'sent', at: secs(NOW - 499_000_000), occurrence: 'done', message_id: '1759900000000' }],
+      summaries: [], summary_sends: [], attention: null, error: null, auto_start: true, created_at: secs(NOW - 604_800_000), updated_at: secs(NOW - 499_000_000), finished_at: secs(NOW - 499_000_000) },
+  ] : [];
+  const runSummary = run => ({ id: run.id, workflow: run.workflow, item: { id: run.item.id, title: run.item.title, url: run.item.url, kind: run.item.kind, category: run.item.category, project: run.item.project }, state: run.state, stage: run.stopped_in ?? run.state, attention: run.attention,
+    waits_on_user: ['plan_review', 'unassigned', 'needs_attention', 'interrupted', 'failed'].includes(run.state), children: run.children.length, pull_requests: run.children.flatMap(c => c.pull_requests.map(p => ({ url: p.url, status: p.status }))), created_at: run.created_at, updated_at: run.updated_at, finished_at: run.finished_at });
+  const runView = run => ({ ...structuredClone(run), stage: run.stopped_in ?? run.state, waits_on_user: runSummary(run).waits_on_user });
+  const findRun = id => { const run = workflowRuns.find(r => r.id === id); if (!run) throw new Error(`[invalid_input] Workflow run ${id} is not recorded.`); return run; };
+  // The plan-review run's planning run, as implementation_runs lists it on its machine, with the plan the person reviews;
+  // the coding runs of the other runs, so their agent sessions can be opened.
+  if (scenario === 'full') {
+    implementationRuns.push({ id: planningRunId, machine: '11111111-1111-4111-8111-111111111111', session_id: 'sess-synthetic-planning-5003', provider: 'claude', model: 'claude-sonnet-5-5', started_at: '2026-10-14T15:20:00Z', finished_at: '2026-10-14T15:50:00Z', item: { id: 5003, title: 'Improve settlement reporting', url: `${org}/Payments/_workitems/edit/5003` },
+      planning: true, state: 'plan_ready', created_at: '2026-10-14T15:20:00Z', output: '', permission_mode: 'read-only', prompts: [],
+      plan: { children: [{ title: 'Add the settlement report query', description: 'A query that sums settlements per day in payments-api.', type: 'Task', fields: [] }, { title: 'Show the settlement report', description: 'A page in payments-web that lists the daily sums.', type: 'Task', fields: [] }] } });
+    for (const run of workflowRuns) for (const child of run.children) if (child.coding) implementationRuns.push({ id: child.coding.id, machine: child.coding.machine, session_id: `sess-synthetic-${child.id}`, provider: 'codex', model: 'gpt-6.1-sol', started_at: '2026-10-13T12:00:00Z', finished_at: child.finished_at ? '2026-10-13T14:00:00Z' : null, item: { id: child.id, title: child.title, url: child.url }, planning: false, state: child.coding.state, created_at: '2026-10-13T12:00:00Z', output: '', permission_mode: 'danger-full-access', prompts: [], plan: null });
+  }
+  let statusReads = 0;
   window.__ptaWorkflowCalls = [];
   const workflowHandlers = {
+    workflow_runs: args => {
+      window.__ptaWorkflowCalls.push({ method: 'workflow_runs', ...structuredClone(args) });
+      const runs = workflowRuns.filter(r => (!args.state || r.state === args.state) && (!args.workflow || r.workflow === args.workflow));
+      return { runs: runs.slice(0, args.limit ?? 20).map(runSummary), partial: runs.length > (args.limit ?? 20) };
+    },
+    workflow_run_status: args => {
+      const run = findRun(args.run);
+      // After the children were confirmed the engine creates them and then codes: the next reads show it.
+      if (run.state === 'creating_children' && ++statusReads >= 2) { run.state = 'coding'; run.timeline[run.timeline.length - 1].finished_at = secs(Date.now()); run.timeline[run.timeline.length - 1].outcome = 'created 2'; run.timeline.push({ stage: 'coding', started_at: secs(Date.now()), finished_at: null, outcome: null }); run.updated_at = secs(Date.now()); }
+      return { run: runView(run) };
+    },
+    workflow_run_resume: args => {
+      window.__ptaWorkflowCalls.push({ method: 'workflow_run_resume', ...structuredClone(args) });
+      if (!args.confirmed) throw new Error('[invalid_input] Confirm the resume with the user, then call again with confirmed: true.');
+      const run = findRun(args.run); run.state = run.stopped_in ?? 'coding'; run.stopped_in = null; run.attention = null; run.updated_at = secs(Date.now());
+      run.timeline.push({ stage: run.state, started_at: secs(Date.now()), finished_at: null, outcome: null });
+      return { run: runView(run), resumed: true, accepted: true };
+    },
+    workflow_run_cancel: args => {
+      window.__ptaWorkflowCalls.push({ method: 'workflow_run_cancel', ...structuredClone(args) });
+      if (!args.confirmed) throw new Error('[invalid_input] Confirm the cancel with the user, then call again with confirmed: true.');
+      const run = findRun(args.run); run.state = 'cancelled'; run.attention = null; run.finished_at = secs(Date.now()); run.updated_at = secs(Date.now());
+      return { run: runView(run), cancelled: true, implementation_cancelled: false, warning: window.__ptaCancelWarning ?? null };
+    },
+    workflow_run_assign: args => {
+      window.__ptaWorkflowCalls.push({ method: 'workflow_run_assign', ...structuredClone(args) });
+      if (!args.confirmed) throw new Error('[invalid_input] Confirm the assignment with the user, then call again with confirmed: true.');
+      const run = findRun(args.run); const workflow = workflows.find(w => w.id === args.workflow);
+      run.workflow = workflow.id; run.definition = { id: workflow.id, name: workflow.name }; run.state = 'planning'; run.attention = null; run.updated_at = secs(Date.now());
+      run.timeline.push({ stage: 'planning', started_at: secs(Date.now()), finished_at: null, outcome: null });
+      return { run: runView(run), assigned: true };
+    },
+    workflow_summary: args => {
+      window.__ptaWorkflowCalls.push({ method: 'workflow_summary', ...structuredClone(args) });
+      const run = findRun(args.run);
+      const summary = { id: crypto.randomUUID(), text: `**${run.item.title}** va en «${run.state}»: ${run.children.length} hijos, ${run.children.flatMap(c => c.pull_requests).length} pull requests.\n\nEnlaces\n- #${run.item.id} ${run.item.title}`, created_at: secs(Date.now()), provider: 'claude', model: 'claude-sonnet-5-5', session_id: `sess-synthetic-summary-${run.summaries.length + 2}` };
+      run.summaries.push(summary); if (run.summaries.length > 20) run.summaries.shift();
+      return { workflow_run: run.id, summary: structuredClone(summary), run: summary.id };
+    },
+    workflow_summary_send: args => {
+      window.__ptaWorkflowCalls.push({ method: 'workflow_summary_send', ...structuredClone(args) });
+      if (!args.confirmed) throw new Error('[invalid_input] Confirm the send with the user, then call again with confirmed: true.');
+      const run = findRun(args.run); const chat = teamsChats.find(c => c.id === args.chat);
+      if (!chat) throw new Error('[invalid_input] The chat is not in your chat directory.');
+      const unknown = (args.mentions ?? []).find(m => !chat.members.includes(m));
+      if (unknown) throw new Error(`[invalid_input] Nobody in the chat is named ${unknown}.`);
+      const send = { id: crypto.randomUUID(), summary: args.summary, chat: { id: chat.id, topic: chat.topic, type: chat.type }, mentions: args.mentions ?? [], chars: (args.text ?? run.summaries.find(s => s.id === args.summary)?.text ?? '').length, edited: Boolean(args.text), outcome: chat.id === '19:rel@thread.v2' ? 'refused' : 'sent', at: secs(Date.now()), message_id: '1760460000000' };
+      if (send.outcome === 'refused') { send.reason = 'You are no longer a member of this chat.'; run.summary_sends.push(send); throw new Error('[invalid_input] Nothing was sent: you are no longer a member of this chat.'); }
+      run.summary_sends.push(send);
+      return { workflow_run: run.id, sent: true, send: structuredClone(send) };
+    },
     workflows_list: () => ({ workflows: structuredClone(workflows), editable: !window.__ptaWorkflowsElsewhere }),
     workflow_show: args => ({ workflow: structuredClone(workflows.find(w => w.id === args.id)), blocks: [], editable: true }),
     workflow_blocks_list: () => ({ blocks: structuredClone(workflowBlocks), used_by: usedBy(), editable: !window.__ptaWorkflowsElsewhere }),
@@ -499,7 +600,6 @@
         plan: planning ? { children: [{ title: 'Implement receipt download', description: 'Add the receipt download action and verify it on a phone.' }] } : null });
       return { id, started: true };
     },
-    workflow_run_status: args => ({ run: { id: args.run, workflow: 'payments-features', state: 'plan_review', stage: 'plan_review', waits_on_user: true } }),
     implementation_runs: args => ({ runs: implementationRuns.filter(run => run.machine === args.machine) }),
     implementation_creation: () => null,
     implementation_sessions: args => ({ sessions: implementationRuns.filter(run => args.urls.includes(run.item.url)).map(run => ({ ...run, online: true })) }),
@@ -512,7 +612,7 @@
         pairing: args.action === 'pair' ? { manual_code: 'TEST-CODE', expires_at: Math.floor(Date.now() / 1000) + 600 } : null };
     },
     implementation_cancel: args => { const run = implementationRuns.find(run => run.id === args.id); if (run) run.state = 'cancelled'; return { cancelled: true }; },
-    implementation_create: args => { window.__ptaLastChildCreation = structuredClone(args); return { state: 'created', created: args.children.map((child, index) => ({ id: 6000 + index, title: child.title, url: `${org}/Payments/_workitems/edit/${6000 + index}` })) }; },
+    implementation_create: args => { window.__ptaLastChildCreation = structuredClone(args); const run = workflowRuns.find(r => r.planning?.id === args.id && r.state === 'plan_review'); if (run) { run.state = 'creating_children'; run.attention = null; run.ledger = args.id; run.updated_at = secs(Date.now()); run.timeline[run.timeline.length - 1].finished_at = secs(Date.now()); run.timeline[run.timeline.length - 1].outcome = 'confirmed'; run.timeline.push({ stage: 'creating_children', started_at: secs(Date.now()), finished_at: null, outcome: null }); statusReads = 0; } return { state: 'created', created: args.children.map((child, index) => ({ id: 6000 + index, title: child.title, url: `${org}/Payments/_workitems/edit/${6000 + index}` })) }; },
     get_azure_task: async args => { const detail = await todoDetail(args, false); window.__ptaLastDetail.method = 'get_azure_task'; detail.item.kind = 'Task'; return detail; },
     activity_run: args => { window.__ptaLastActivityRun = args; return { running: true }; },
     get_azure_hu: args => todoDetail(args, false),

@@ -289,6 +289,43 @@ function permissionMode(mode) {
   if (mode === 'read-only') return t('Read-only, no tools');
   return t('Full permissions on that computer ({mode})', { mode });
 }
+/**
+ * The review of a planning run's proposed children, shared by Implement and a workflow run's plan-review gate:
+ * each child editable and selectable (an Azure child also its type and the guide's proposed field values),
+ * and one button that creates the selected ones only on a second press, through `create(chosen)`.
+ */
+function planChildrenReview(run, azure, create) {
+  const children = run.plan.children.map(child => {
+    const selected = el('input', { type: 'checkbox', checked: true });
+    const title = el('input', { value: child.title, maxLength: 200 });
+    const description = el('textarea', { value: child.description, rows: 3, maxLength: 16000 });
+    const kind = el('input', { value: child.type ?? '', maxLength: 120, placeholder: t('Default task type'), translate: 'no', spellcheck: false });
+    // Values the agent proposed from the work item guide; an emptied value is not written.
+    const guide = () => (current?.map?.work_item_guides ?? []).find(g => g.provider === 'azure' && g.type.toLowerCase() === kind.value.trim().toLowerCase());
+    const values = (child.fields ?? []).map(proposed => {
+      const known = guide()?.fields?.find(f => f.reference === proposed.reference);
+      const value = known?.values?.length
+        ? el('select', {}, el('option', { value: '', textContent: t('Do not fill') }), ...[...new Set([...known.values, proposed.value])].map(v => el('option', { value: v, textContent: v, selected: v === proposed.value })))
+        : el('input', { value: proposed.value, spellcheck: false });
+      return { reference: proposed.reference, value, row: el('label', {}, el('span', {}, known?.name || proposed.reference, ' ', el('code', { textContent: proposed.reference })), value) };
+    });
+    const fieldset = el('fieldset', {}, el('legend', {}, el('label', { class: 'check' }, selected, t('Create this child'))), el('label', {}, t('Title'), title), el('label', {}, t('Description'), description),
+      ...(azure ? [el('label', {}, t('Work item type'), kind), ...values.map(v => v.row)] : []));
+    return { selected, title, description, kind, values, fieldset };
+  });
+  const button = el('button', { type: 'button', class: 'secondary', textContent: t('Create selected children') });
+  const review = el('div', { class: 'plan-review' }, ...children.map(c => c.fieldset), button);
+  let reviewed = false;
+  review.addEventListener('input', () => { reviewed = false; button.textContent = t('Create selected children'); });
+  button.onclick = () => busy(button, async () => {
+    if (!reviewed) { reviewed = true; button.textContent = t('Confirm child creation'); return; }
+    const chosen = children.filter(c => c.selected.checked).map(c => ({ title: c.title.value, description: c.description.value,
+      ...(azure ? { type: c.kind.value.trim(), fields: c.values.map(v => ({ reference: v.reference, value: v.value.value.trim() })).filter(v => v.value) } : {}) }));
+    if (!chosen.length) throw t('Select at least one child.');
+    await create(chosen);
+  });
+  return review;
+}
 async function implementationRuns(form) {
   const machine = form.machine.value; const generation = form.generation;
   const result = await invoke('implementation_runs', { machine, work_item_url: form.prepared.detail.item.url });
@@ -322,37 +359,10 @@ async function implementationRuns(form) {
         const record = form.creations[run.id];
         panel.append(badge(tx(record.state), record.state === 'created' ? 'ok' : 'warn'), ...(record.created || []).map(item => link(`#${item.id} ${item.title}`, item.url)));
       } else {
-        const azure = form.selected.provider === 'azure';
-        const children = run.plan.children.map(child => {
-          const selected = el('input', { type: 'checkbox', checked: true });
-          const title = el('input', { value: child.title, maxLength: 200 });
-          const description = el('textarea', { value: child.description, rows: 3, maxLength: 16000 });
-          const kind = el('input', { value: child.type ?? '', maxLength: 120, placeholder: t('Default task type'), translate: 'no', spellcheck: false });
-          // Values the agent proposed from the work item guide; an emptied value is not written.
-          const guide = () => (current?.map?.work_item_guides ?? []).find(g => g.provider === 'azure' && g.type.toLowerCase() === kind.value.trim().toLowerCase());
-          const values = (child.fields ?? []).map(proposed => {
-            const known = guide()?.fields?.find(f => f.reference === proposed.reference);
-            const value = known?.values?.length
-              ? el('select', {}, el('option', { value: '', textContent: t('Do not fill') }), ...[...new Set([...known.values, proposed.value])].map(v => el('option', { value: v, textContent: v, selected: v === proposed.value })))
-              : el('input', { value: proposed.value, spellcheck: false });
-            return { reference: proposed.reference, value, row: el('label', {}, el('span', {}, known?.name || proposed.reference, ' ', el('code', { textContent: proposed.reference })), value) };
-          });
-          panel.append(el('fieldset', {}, el('legend', {}, el('label', { class: 'check' }, selected, t('Create this child'))), el('label', {}, t('Title'), title), el('label', {}, t('Description'), description),
-            ...(azure ? [el('label', {}, t('Work item type'), kind), ...values.map(v => v.row)] : [])));
-          return { selected, title, description, kind, values };
-        });
-        const create = el('button', { type: 'button', class: 'secondary', textContent: t('Create selected children') });
-        let reviewed = false;
-        panel.addEventListener('input', () => { reviewed = false; create.textContent = t('Create selected children'); });
-        create.onclick = () => busy(create, async () => {
-          if (!reviewed) { reviewed = true; create.textContent = t('Confirm child creation'); return; }
-          const chosen = children.filter(c => c.selected.checked).map(c => ({ title: c.title.value, description: c.description.value,
-            ...(azure ? { type: c.kind.value.trim(), fields: c.values.map(v => ({ reference: v.reference, value: v.value.value.trim() })).filter(v => v.value) } : {}) }));
-          if (!chosen.length) throw t('Select at least one child.');
+        panel.append(planChildrenReview(run, form.selected.provider === 'azure', async chosen => {
           form.creations[run.id] = await invoke('implementation_create', { machine, id: run.id, item: form.selected, children: chosen, confirmed: true });
           await implementationRuns(form);
-        });
-        panel.append(create);
+        }));
       }
     }
     return panel;
@@ -363,5 +373,5 @@ async function implementationRuns(form) {
 
 export {
   implementationForm, openImplementation, implementationReady, implementationModels, implementationEfforts,
-  implementationRuns,
+  implementationRuns, planChildrenReview,
 };

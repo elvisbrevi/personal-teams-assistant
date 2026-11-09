@@ -8,6 +8,7 @@ import { busy, done, fail } from './notices.js';
 import { copy, link, todoRich, todoSafeUrl } from './markdown.js';
 import { loadWorkItemSessions } from './sessions.js';
 import { openImplementation } from './implementation.js';
+import { refreshActiveRuns, runLinkFor } from './workflow-runs.js';
 import {
   activityDetailRequest, activityTask, loadActivityTask, setActivityDetailRequest, setActivityTask,
 } from './activities.js';
@@ -49,7 +50,7 @@ function todoOriginal(item, selection = null) {
     else fail(t('Could not copy the work item link.'));
   });
   const session = el('button', { type: 'button', class: 'icon-button secondary', hidden: true, 'data-session-for': item.url, title: t('Open agent session'), 'aria-label': t('Open agent session') }, icon('chat'));
-  return el('div', { class: 'todo-actions' }, implement, open, copyButton, session);
+  return el('div', { class: 'todo-actions' }, runLinkFor(item), implement, open, copyButton, session);
 }
 let todoDetailRequest = 0;
 let todoSelection = null;
@@ -282,7 +283,7 @@ async function loadTodo({ more = false, keep = more } = {}) {
       else if (kind) args.kind = kind;
     }
     if ($('#todo-state').value) args.state = $('#todo-state').value;
-    const result = await invoke(azure ? 'list_azure_hus' : $('#todo-github-kind').value === 'all' ? 'list_github_issues' : 'list_github_epics', args);
+    const [result] = await Promise.all([invoke(azure ? 'list_azure_hus' : $('#todo-github-kind').value === 'all' ? 'list_github_issues' : 'list_github_epics', args), azure ? refreshActiveRuns() : Promise.resolve()]);
     if (request !== todoRequest) return;
     const selected = $('#todo-state').value;
     $('#todo-state').replaceChildren(el('option', { value: '', textContent: t('All states') }), ...result.states.map(state => el('option', { value: state, textContent: tx(state) })));
