@@ -10,8 +10,8 @@ use std::sync::atomic::{AtomicI64, Ordering};
 
 const API: &str = "0f3c6a2e-5b1d-4f7a-9c8e-1a2b3c4d5e6f";
 const WEB: &str = "1a2b3c4d-5b1d-4f7a-9c8e-0f3c6a2e5e6f";
-const HU: u64 = 100;
-const TASK: u64 = 200;
+pub(in crate::app::workflows) const HU: u64 = 100;
+pub(in crate::app::workflows) const TASK: u64 = 200;
 
 struct TestShell;
 impl Shell for TestShell {
@@ -59,17 +59,17 @@ esac
 printf '%s\n' "{\"type\":\"text\",\"part\":{\"text\":\"Implemented change $n.\\nBranch: feature/child-$n\"}}"
 "#;
 
-struct Bench {
-    root: tempfile::TempDir,
-    host: Arc<Host>,
-    catalog: Arc<Catalog>,
-    azure: Azure,
-    log: PathBuf,
-    api: PathBuf,
-    web: PathBuf,
-    machine: String,
+pub(in crate::app::workflows) struct Bench {
+    pub(in crate::app::workflows) root: tempfile::TempDir,
+    pub(in crate::app::workflows) host: Arc<Host>,
+    pub(in crate::app::workflows) catalog: Arc<Catalog>,
+    pub(in crate::app::workflows) azure: Azure,
+    pub(in crate::app::workflows) log: PathBuf,
+    pub(in crate::app::workflows) api: PathBuf,
+    pub(in crate::app::workflows) web: PathBuf,
+    pub(in crate::app::workflows) machine: String,
     /// Seconds added to the clock (an expired wait).
-    offset: AtomicI64,
+    pub(in crate::app::workflows) offset: AtomicI64,
 }
 
 fn host(root: &Path) -> Arc<Host> {
@@ -113,7 +113,7 @@ fn workflow(machine: &str, api: &Path, web: &Path) -> Workflow {
 }
 
 impl Bench {
-    async fn new() -> Self {
+    pub(in crate::app::workflows) async fn new() -> Self {
         let root = tempfile::tempdir().unwrap();
         let host = host(root.path());
         let allowed = root.path().join("allowed");
@@ -190,33 +190,37 @@ impl Bench {
     }
     /// The host again on the same profile, as after a restart: in-flight implementation runs
     /// read back interrupted and an unfinished creation uncertain.
-    async fn restart(&mut self) {
+    pub(in crate::app::workflows) async fn restart(&mut self) {
         self.host = host(self.root.path());
         // The allowed roots a test sets are not saved.
         let allowed = self.api.parent().unwrap().to_path_buf();
         implementation::test_machine(&self.host, Some(vec![allowed])).await;
     }
-    fn now(&self) -> i64 {
+    pub(in crate::app::workflows) fn now(&self) -> i64 {
         chrono::Utc::now().timestamp() + self.offset.load(Ordering::SeqCst)
     }
-    fn count(&self, name: &str) -> usize {
+    pub(in crate::app::workflows) fn count(&self, name: &str) -> usize {
         fs::read_to_string(self.log.join(name))
             .map(|t| t.lines().count())
             .unwrap_or(0)
     }
-    fn mode(&self, name: &str, mode: &str) {
+    pub(in crate::app::workflows) fn mode(&self, name: &str, mode: &str) {
         fs::write(self.log.join(name), mode).unwrap();
     }
-    fn release(&self) {
+    pub(in crate::app::workflows) fn release(&self) {
         fs::write(self.log.join("release"), "").unwrap();
     }
-    fn run(&self, id: &str) -> Run {
+    pub(in crate::app::workflows) fn run(&self, id: &str) -> Run {
         self.host.state.workflows.db.get(id).unwrap().unwrap()
     }
-    async fn op(&self, method: &str, args: Value) -> Result<Value, String> {
+    pub(in crate::app::workflows) async fn op(
+        &self,
+        method: &str,
+        args: Value,
+    ) -> Result<Value, String> {
         operation(&self.host, method, &args, &self.azure).await
     }
-    async fn start(&self, item: u64) -> String {
+    pub(in crate::app::workflows) async fn start(&self, item: u64) -> String {
         let reply = self
             .op(
                 "workflow_run_start",
@@ -226,19 +230,19 @@ impl Bench {
             .unwrap();
         reply["run"]["id"].as_str().unwrap().to_owned()
     }
-    async fn tick(&self) {
+    pub(in crate::app::workflows) async fn tick(&self) {
         self.tick_with(0).await;
     }
     /// A tick that reads pull requests at most every `poll` seconds.
-    async fn tick_with(&self, poll: i64) {
+    pub(in crate::app::workflows) async fn tick_with(&self, poll: i64) {
         engine::tick(&self.host, &self.azure, self.now(), poll)
             .await
             .unwrap();
     }
-    fn save(&self, run: &Run) {
+    pub(in crate::app::workflows) fn save(&self, run: &Run) {
         self.host.state.workflows.db.save(run).unwrap();
     }
-    fn reads(&self, what: &str) -> usize {
+    pub(in crate::app::workflows) fn reads(&self, what: &str) -> usize {
         self.catalog
             .requests
             .lock()
@@ -247,7 +251,7 @@ impl Bench {
             .filter(|r| r.contains(what))
             .count()
     }
-    fn director(&self) {
+    pub(in crate::app::workflows) fn director(&self) {
         let mut map = self.host.state.settings.map().unwrap();
         map.workflow_settings.director = Some(crate::workflows::director::Director {
             machine: self.machine.clone(),
@@ -260,7 +264,7 @@ impl Bench {
         let line = json!({"type":"text","part":{"text":answer.to_string()}});
         fs::write(self.log.join("director.jsonl"), format!("{line}\n")).unwrap();
     }
-    async fn start_director(&self, item: u64) -> String {
+    pub(in crate::app::workflows) async fn start_director(&self, item: u64) -> String {
         let reply = self
             .op(
                 "workflow_run_start",
@@ -271,7 +275,11 @@ impl Bench {
         reply["run"]["id"].as_str().unwrap().to_owned()
     }
     /// Tick until the run satisfies `what`.
-    async fn until(&self, id: &str, what: impl Fn(&Run) -> bool) -> Run {
+    pub(in crate::app::workflows) async fn until(
+        &self,
+        id: &str,
+        what: impl Fn(&Run) -> bool,
+    ) -> Run {
         for _ in 0..400 {
             self.tick().await;
             let run = self.run(id);
@@ -282,12 +290,12 @@ impl Bench {
         }
         panic!("{:#?}", self.run(id));
     }
-    async fn state(&self, id: &str, state: Phase) -> Run {
+    pub(in crate::app::workflows) async fn state(&self, id: &str, state: Phase) -> Run {
         self.until(id, |r| r.state == state).await
     }
     /// The user confirms the plan's children with `implementation_create`: its ledger entry,
     /// in `state`, with the children created so far.
-    async fn confirm(&self, run: &Run, state: &str, created: &[u64]) {
+    pub(in crate::app::workflows) async fn confirm(&self, run: &Run, state: &str, created: &[u64]) {
         let plan = run.planning.as_ref().unwrap().id.clone();
         let created: Vec<Value> = created
             .iter()
@@ -303,7 +311,14 @@ impl Bench {
         )
         .await;
     }
-    fn pulls(&self, repository: &str, name: &str, branch: &str, id: u64, status: &str) {
+    pub(in crate::app::workflows) fn pulls(
+        &self,
+        repository: &str,
+        name: &str,
+        branch: &str,
+        id: u64,
+        status: &str,
+    ) {
         self.catalog.set_pulls(
             repository,
             branch,
@@ -318,7 +333,7 @@ impl Bench {
         );
     }
     /// The implementation run's state as its machine records it.
-    async fn implementation(&self, id: &str) -> String {
+    pub(in crate::app::workflows) async fn implementation(&self, id: &str) -> String {
         implementation::observe(&self.host, &self.machine, id)
             .await
             .unwrap()
@@ -327,7 +342,7 @@ impl Bench {
             .unwrap()
             .to_owned()
     }
-    fn ledger_entries(&self) -> usize {
+    pub(in crate::app::workflows) fn ledger_entries(&self) -> usize {
         let registry: Value = serde_json::from_slice(
             &fs::read(
                 self.root

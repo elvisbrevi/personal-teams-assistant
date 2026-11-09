@@ -33,6 +33,14 @@ struct StartArgs {
     director: bool,
     #[serde(default)]
     confirmed: bool,
+    /// The watcher started it (never from a request): the director chooses among the
+    /// workflows that start by themselves.
+    #[serde(skip)]
+    auto: bool,
+    /// The ID the run gets (never from a request): the watcher records it in its ledger before
+    /// asking, so the row and the run agree.
+    #[serde(skip)]
+    run_id: Option<String>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -236,6 +244,10 @@ async fn start(host: &Arc<Host>, args: StartArgs, azure: &Azure) -> Result<Value
     }
     let now = now();
     let mut run = Run::new(item, now);
+    run.auto_start = args.auto;
+    if let Some(id) = args.run_id {
+        run.id = id;
+    }
     if let Some(workflow) = named {
         run.classification = Some(json!({"workflow":workflow.id,"outcome":"named"}));
         engine::assign(&mut run, workflow, &map.workflow_blocks, now, "named");
@@ -247,6 +259,37 @@ async fn start(host: &Arc<Host>, args: StartArgs, azure: &Azure) -> Result<Value
         )));
     }
     Ok(json!({"run": run.view(), "started": true}))
+}
+
+/// Start a run for an item on behalf of a caller that already holds the user's confirmation
+/// (the watcher, which a configured ready state and an `auto_start` workflow authorize, and the
+/// Implement entry): a named workflow, or the director's choice (`auto`: among the workflows that
+/// start by themselves), under `run_id` when the caller recorded one.
+pub(in crate::app) async fn start_confirmed(
+    host: &Arc<Host>,
+    azure: &Azure,
+    item: (u64, Option<String>, Option<String>),
+    workflow: Option<String>,
+    auto: bool,
+    run_id: Option<String>,
+) -> Result<Value, String> {
+    let (id, project, source) = item;
+    start(
+        host,
+        StartArgs {
+            provider: "azure".into(),
+            id,
+            project,
+            source,
+            director: workflow.is_none(),
+            workflow,
+            confirmed: true,
+            auto,
+            run_id,
+        },
+        azure,
+    )
+    .await
 }
 
 fn list(state: &DesktopState, args: ListArgs) -> Result<Value, String> {
@@ -417,4 +460,4 @@ pub(in crate::app) fn has_active(state: &DesktopState, workflow: &str) -> Result
 }
 
 #[cfg(all(test, unix))]
-mod tests;
+pub(super) mod tests;

@@ -10,9 +10,25 @@ import { loadWorkItemSessions, openAgentSession } from './sessions.js';
 import { chooseDirectories } from './directory-sheet.js';
 import { providerNames } from './home.js';
 import { effortNames } from './settings-models.js';
+import { runStateLabel as runState } from './run-states.js';
 
 let implementationForm = null;
 let implementationRequest = 0;
+
+/** The organization name of an Azure DevOps address (work item link or `https://dev.azure.com/NAME`). */
+function organizationOf(address) {
+  try {
+    const url = new URL(address);
+    if (url.hostname === 'dev.azure.com') return url.pathname.split('/').filter(Boolean)[0]?.toLowerCase();
+    return url.hostname.endsWith('.visualstudio.com') ? url.hostname.split('.')[0].toLowerCase() : undefined;
+  } catch { return undefined; }
+}
+/** The enabled workflows of the item's project (Azure items only): what the Workflow select offers. */
+function projectWorkflows(prepared, selected) {
+  if (selected.provider !== 'azure') return [];
+  const item = prepared.detail.item;
+  return (current?.map?.workflows ?? []).filter(w => w.enabled && organizationOf(w.organization) === organizationOf(item.url) && w.project.toLowerCase() === item.project.toLowerCase());
+}
 function implementationSelection(item, selection) {
   const provider = item.url.startsWith('https://github.com/') ? 'github' : 'azure';
   return { provider, id: item.id, project: item.project, source: provider === 'azure' ? selection?.source || $('#todo-source').value || undefined : undefined,
@@ -42,7 +58,13 @@ async function openImplementation(item, selection, trigger) {
     const cancel = el('button', { type: 'button', class: 'secondary', textContent: t('Cancel') });
     const start = el('button', { type: 'button', textContent: t('Start'), disabled: true });
     const runs = el('div', { id: 'implementation-runs' });
-    const form = implementationForm = { request, previous, selected, prepared, machine, context, provider, model, effort, directoryList, start, runs, directories: [], catalog: [], generation: 0, creations: prepared.creations || {} };
+    const eligible = projectWorkflows(prepared, selected);
+    const workflow = el('select', { id: 'implementation-workflow' }, el('option', { value: 'none', textContent: t('No workflow') }),
+      el('option', { value: 'director', textContent: t('The director chooses') }), ...eligible.map(w => el('option', { value: w.id, textContent: w.name })));
+    const workflowNote = el('p', { class: 'hint', id: 'implementation-workflow-note', role: 'status', hidden: true });
+    const workflowRun = el('div', { id: 'implementation-workflow-run', 'aria-live': 'polite' });
+    const form = implementationForm = { request, previous, selected, prepared, machine, context, provider, model, effort, directoryList, start, runs, directories: [], catalog: [], generation: 0, creations: prepared.creations || {},
+      workflow, workflowNote, workflowRun, eligible, workflowMode: 'none', workflowId: null, workflowGeneration: 0, add };
     const leave = () => {
       ++implementationRequest; implementationForm = null;
       $('#implementation').hidden = true;
@@ -58,7 +80,9 @@ async function openImplementation(item, selection, trigger) {
     model.onchange = () => implementationEfforts(form);
     effort.onchange = () => implementationReady(form);
     machine.onchange = () => busy(machine, () => implementationMachine(form));
+    workflow.onchange = () => chooseWorkflow(form).catch(fail);
     start.onclick = () => busy(start, async () => {
+      if (form.workflowId) return startWorkflowRun(form);
       const result = await invoke('implementation_start', { machine: machine.value, item: selected, context: context.value, directories: form.directories, provider: provider.value, model: model.value, effort: effort.value });
       if (implementationForm !== form) return;
       done(t('Implementation run started.'));
@@ -68,11 +92,14 @@ async function openImplementation(item, selection, trigger) {
       el('h2', { textContent: prepared.planning ? t('Plan child work items') : t('Implement selected work item') }),
       el('p', { class: 'hint', textContent: prepared.planning ? t('Review and edit the proposed children before creating them. Existing children are included as context.') : t('The selected coding agent will work in the directories you choose.') }),
       prepared.planning ? null : el('p', { class: 'callout warn', id: 'implementation-permissions', textContent: t('The agent runs with full permissions on that computer: it runs commands, commits, pushes and opens pull requests there without asking anyone.') }),
+      eligible.length ? el('label', {}, t('Workflow'), workflow) : null,
+      workflowNote,
       el('label', {}, t('Implementation context'), context),
       el('label', {}, t('Execution machine'), machine),
       el('fieldset', {}, el('legend', { textContent: t('Working directories') }), directoryList, add),
       el('div', { class: 'grid' }, el('label', {}, t('Provider'), provider), el('label', {}, t('Model'), model), el('label', {}, t('Effort'), effort))),
       el('div', { class: 'actions implementation-footer' }, cancel, start),
+      workflowRun,
       el('section', { class: 'panel' }, el('h2', { textContent: t('Implementation runs') }), runs));
     await implementationMachine(form);
   } catch (error) {
@@ -89,7 +116,141 @@ function implementationReady(form) {
     form.start.disabled = form.writeReady === false || form.submitted || form.start.classList.contains('busy') || !(form.context.value.trim() && form.target.value && form.provider.value && form.model.value && form.effort.value);
     return;
   }
+  // With a workflow the machine, directories and agent are the workflow's own.
+  if (form.workflowMode && form.workflowMode !== 'none') {
+    // A started run is not started twice: Start waits for another choice.
+    form.start.disabled = form.start.classList.contains('busy') || !form.workflowId || form.workflowStarted;
+    return;
+  }
   form.start.disabled = form.start.classList.contains('busy') || !(form.machine.value && form.directories.length && form.provider.value && form.model.value && form.effort.value);
+}
+/** Locks or unlocks what a workflow supplies: the machine, directories, agent, model, effort and context. */
+function lockFields(form, locked) {
+  for (const field of [form.machine, form.provider, form.model, form.effort, form.context, form.add]) if (field) field.disabled = locked;
+  form.directoryList.classList.toggle('locked', locked);
+}
+/** Fills the locked fields with the workflow's own machine, checkouts and agent. */
+function fillFromWorkflow(form, workflow) {
+  // A machine's catalog still on its way must not replace what the workflow supplies.
+  ++form.generation;
+  const known = [...form.machine.options].some(o => o.value === workflow.machine);
+  if (!known) form.machine.append(el('option', { value: workflow.machine, textContent: t('Unknown machine') }));
+  form.machine.value = workflow.machine;
+  form.directories = (workflow.repositories ?? []).map(r => workflow.checkouts?.[r.id.toLowerCase()] ?? workflow.checkouts?.[r.id]).filter(Boolean);
+  implementationDirectories(form);
+  const agent = workflow.agent ?? {};
+  form.provider.replaceChildren(el('option', { value: agent.provider, textContent: providerNames[agent.provider] || agent.provider }));
+  form.model.replaceChildren(el('option', { value: agent.model, textContent: agent.model }));
+  form.effort.replaceChildren(el('option', { value: agent.effort, textContent: effortNames[agent.effort] || agent.effort }));
+  form.context.value = '';
+  form.workflowNote.hidden = false;
+  form.workflowNote.textContent = t('This run takes its machine, directories, agent, model, effort and instructions from the workflow {name}. To choose them yourself, start without a workflow.', { name: workflow.name });
+}
+/** What the person chose before a workflow took over, to give back with «No workflow». */
+function rememberChoices(form) {
+  form.remembered = { machine: form.machine.value, context: form.context.value, directories: [...form.directories],
+    provider: form.provider.value, model: form.model.value, effort: form.effort.value };
+}
+async function restoreChoices(form) {
+  const saved = form.remembered; form.remembered = null;
+  if (saved && [...form.machine.options].some(o => o.value === saved.machine)) form.machine.value = saved.machine;
+  await busy(form.machine, () => implementationMachine(form));
+  if (!saved || implementationForm !== form || form.workflowMode !== 'none') return;
+  form.context.value = saved.context;
+  // The directories belong to the machine they were chosen on.
+  if (form.machine.value === saved.machine) { form.directories = saved.directories; implementationDirectories(form); }
+  if ([...form.provider.options].some(o => o.value === saved.provider)) {
+    form.provider.value = saved.provider; implementationModels(form);
+    if ([...form.model.options].some(o => o.value === saved.model)) {
+      form.model.value = saved.model; implementationEfforts(form);
+      if ([...form.effort.options].some(o => o.value === saved.effort)) form.effort.value = saved.effort;
+    }
+  }
+  implementationReady(form);
+}
+/** The Workflow select changed: none, the director's classification, or a named workflow. */
+async function chooseWorkflow(form) {
+  const generation = ++form.workflowGeneration;
+  const mode = form.workflow.value === 'none' || form.workflow.value === 'director' ? form.workflow.value : 'id';
+  const was = form.workflowMode;
+  form.workflowMode = mode; form.workflowId = null; form.workflowStarted = false;
+  form.workflowRun.replaceChildren();
+  form.workflowNote.hidden = true;
+  if (mode === 'none') {
+    lockFields(form, false);
+    if (was !== 'none') await restoreChoices(form);
+    implementationReady(form);
+    return;
+  }
+  if (was === 'none') rememberChoices(form);
+  // A machine's catalog still on its way must not replace the locked values.
+  ++form.generation;
+  lockFields(form, true);
+  if (mode === 'id') {
+    const workflow = form.eligible.find(w => w.id === form.workflow.value);
+    form.workflowId = workflow.id;
+    fillFromWorkflow(form, workflow);
+    implementationReady(form);
+    await implementationRuns(form);
+    return;
+  }
+  // The director chooses: it classifies first and nothing starts until the person confirms.
+  implementationReady(form);
+  form.workflowNote.hidden = false;
+  form.workflowNote.textContent = t('Asking the workflow director…');
+  let choice;
+  try {
+    choice = await invoke('implementation_start', { item: form.selected, workflow: 'director' });
+  } catch (error) {
+    if (implementationForm === form && generation === form.workflowGeneration) form.workflowNote.textContent = tx(String(error?.message ?? error));
+    return;
+  }
+  if (implementationForm !== form || generation !== form.workflowGeneration) return;
+  const chosen = form.eligible.find(w => w.id === choice.workflow);
+  const again = el('button', { type: 'button', class: 'secondary small', textContent: t('Ask again') });
+  again.onclick = () => chooseWorkflow(form).catch(fail);
+  if (chosen) {
+    form.workflowId = chosen.id;
+    fillFromWorkflow(form, chosen);
+    form.workflowNote.hidden = true;
+    form.workflowRun.replaceChildren(el('div', { class: 'callout info', id: 'implementation-workflow-choice' },
+      el('p', {}, el('strong', { textContent: t('The director chose {name}', { name: chosen.name }) })), el('p', { textContent: choice.reason }), again));
+    implementationReady(form);
+    await implementationRuns(form);
+  } else {
+    form.workflowNote.hidden = true;
+    form.workflowRun.replaceChildren(el('div', { class: 'callout warn', id: 'implementation-workflow-choice' },
+      el('p', {}, el('strong', { textContent: t('The director chose no workflow') })), el('p', { textContent: choice.reason }),
+      el('p', { class: 'hint', textContent: t('Choose a workflow yourself, or start without one.') }), again));
+    implementationReady(form);
+  }
+}
+/** Starts the chosen workflow's run and shows its state here; the Workflows section follows it. */
+async function startWorkflowRun(form) {
+  const id = form.workflowId;
+  const result = await invoke('implementation_start', { item: form.selected, workflow: id });
+  if (implementationForm !== form) return;
+  done(t('Workflow run started.'));
+  const workflow = form.eligible.find(w => w.id === id);
+  const run = result.run;
+  const state = el('strong', { textContent: runState(run.state) });
+  const badgeBox = el('span', {}, badge(runState(run.state), 'info'));
+  const refresh = el('button', { type: 'button', class: 'secondary small', textContent: t('Refresh') });
+  const open = el('button', { type: 'button', class: 'secondary small', textContent: t('Open Workflows') });
+  refresh.onclick = () => busy(refresh, async () => {
+    const reply = await invoke('workflow_run_status', { run: run.id });
+    const label = runState(reply.run.state);
+    badgeBox.replaceChildren(badge(label, ['done'].includes(reply.run.state) ? 'ok' : ['failed', 'needs_attention', 'interrupted', 'unassigned'].includes(reply.run.state) ? 'warn' : 'info'));
+    state.textContent = label;
+  });
+  open.onclick = () => showTab('workflows');
+  form.workflowRun.replaceChildren(el('div', { class: 'callout ok', id: 'implementation-workflow-started' },
+    el('p', {}, badgeBox, ' ', el('strong', { textContent: workflow?.name ?? id })),
+    el('p', { class: 'hint', textContent: t('The run goes on by itself: it plans the item, stops for your review of the plan and then codes each child. Follow it in Workflows.') }),
+    el('div', { class: 'actions' }, refresh, open)));
+  form.workflowStarted = true;
+  implementationReady(form);
+  await implementationRuns(form);
 }
 function implementationModels(form) {
   const info = form.catalog.find(p => p.id === form.provider.value);
@@ -106,7 +267,7 @@ function implementationDirectories(form) {
   form.directoryList.replaceChildren(...form.directories.map(path => {
     const remove = el('button', { type: 'button', class: 'secondary small', textContent: t('Remove'), 'aria-label': t('Remove directory {path}', { path }) });
     remove.onclick = () => { form.directories = form.directories.filter(p => p !== path); implementationDirectories(form); };
-    return el('div', { class: 'implementation-path' }, el('code', { textContent: path }), remove);
+    return el('div', { class: 'implementation-path' }, el('code', { textContent: path }), form.workflowMode && form.workflowMode !== 'none' ? null : remove);
   }));
   implementationReady(form);
 }

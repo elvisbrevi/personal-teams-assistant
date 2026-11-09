@@ -331,9 +331,10 @@ host never relaunches an interrupted run or resubmits an uncertain child creatio
 Requires host and CLI `workflows_support: true`. A workflow is a saved recipe for implementing
 the items of one Azure DevOps project; a workflow block is a reusable part of it. This version
 holds the definitions, their settings, the workflow director's classification and workflow runs
-([below](#workflow-runs)); runs start only when asked (the watcher that starts them by itself, the
-acting blocks and the GUI's Runs views come later; progress summaries and their sending to Teams
-are in [workflow runs](#workflow-runs), without GUI controls yet). People edit the
+([below](#workflow-runs)); runs start when asked, from Implement or by themselves
+([automatic starts](#automatic-starts-and-the-implement-choice); the acting blocks and the GUI's Runs
+views come later; progress summaries and their sending to Teams are in [workflow runs](#workflow-runs),
+without GUI controls yet). People edit the
 definitions in the GUI's **Workflows** section (sidebar, after Activities; under More on a phone):
 the Workflows view for definitions and the Blocks view for the library, with Settings › Workflows
 for the ready states, the watcher and the workflow director. A launcher block can only be saved
@@ -406,7 +407,10 @@ Requires host and CLI `workflow_director_support: true`.
   `watch_interval_minutes` (default 5), `concurrency` (workflow runs that advance at once,
   default 2), `pull_request_wait_days` (default 7), the `director` (`machine`, `provider`,
   `model`, `effort`; none until chosen) and `ready_states` per organization and project, with
-  the defaults, the bounds and `editable`. With `--project NAME` (and `--organization URL` or
+  the defaults, the bounds, `editable` and `watcher` (the ready-state watcher on this computer:
+  `state` `watching`, `idle` while no ready state is configured, `waiting_for_director` or
+  `unavailable` where it never runs, the interval and `last_poll`; see [automatic starts](#automatic-starts-and-the-implement-choice)).
+  With `--project NAME` (and `--organization URL` or
   `--source ID` when needed) it adds `process_states`: the states that project's process has
   for its requirement, bug and listed task types. Choose ready states only from that list.
 - **Change them:** `pta workflows settings --set KEY VALUE [--set KEY VALUE…]` (MCP
@@ -548,6 +552,38 @@ run (any state but `done` and `cancelled`).
 The engine never merges, completes or changes a pull request or a work item; the coding agent
 opens the pull request as its instructions ask. A run uses the workflow as it was when the run got
 it.
+
+### Automatic starts and the Implement choice
+
+- **Automatic starts.** On the account owner's coordinator (never a computer signed in to it, a
+  worker or a shared portal account) a watcher looks every `watch_interval_minutes` (default 5) at
+  the HUs, bugs and listed tasks assigned to the user in the **ready states** of each project
+  (`pta workflows settings --set ready_states.PROJECT "STATE,STATE"`; read-only, the To-Do read
+  with the read credential, at most 100 items per project per poll, and at most 25 new runs per
+  poll). It is idle until a ready state is configured and needs no running Teams service. With
+  several enabled Azure sources, each ready-state entry is read through the source whose catalog
+  names its organization. For an item it has not seen in that state, it starts a run: when
+  exactly one enabled workflow of the project has `auto_start`, with that workflow directly (no
+  director needed); when several do, as `workflow_run_start` with `director: true`, and the
+  workflow director chooses among them. With several and no director configured nothing starts
+  and `watcher.state` is `waiting_for_director` (Home warns once). A project with no `auto_start`
+  workflow, a disabled workflow and an item the director finds no workflow for start no coding:
+  the last waits `unassigned` for `pta workflows assign RUN WORKFLOW --confirmed`. An item starts at most one run per ready state
+  (a seen ledger); one that leaves the state and comes back is seen again. Whether it ran and what
+  the last check found: `pta workflows settings` (`watcher`; kept in memory, so a restart empties
+  it). **The gate stands:** an automatic run only plans; it stops at `plan_review` (shown on Home
+  and in `status`'s `workflow_attention` with the item's link) and nothing is created in Azure
+  DevOps until the user reviews the plan and confirms the children with `implementation_create`.
+- **Implement with a workflow.** `implementation_start` (MCP) takes `workflow`: `none` (default;
+  the plain implementation run, unchanged), a workflow ID, or `director`. With a workflow ID (an
+  Azure item assigned to the user, an enabled workflow of its project) the host starts a workflow
+  run with that workflow's machine, checkout directories, agent, model, effort and instructions,
+  so omit `machine`, `directories`, `provider`, `model`, `effort` and `context` (giving them is
+  refused: to choose them, use `none`). Confirm it with the user as for `workflow_run_start`; the
+  reply is `{workflow, started: true, run}`. With `director` nothing starts: the reply is the
+  classification (`workflow`, `outcome`, `reason`, `candidates`) with `started: false`. Show the
+  user the choice and its reason, and start it only after they confirm by calling again with that
+  workflow ID. The GUI's Implement form has the same Workflow select.
 
 ## Create a request and inspect agent history
 
