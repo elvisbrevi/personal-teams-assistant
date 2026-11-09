@@ -1,6 +1,9 @@
 //! A synthetic Azure DevOps catalog for the engine's tests: work items, who they are assigned
 //! to and the pull requests of each repository branch. It has no way to write: every request
 //! the engine makes is recorded, and each is a read.
+// Only the Unix tests use the catalog (the fake provider CLIs are shell scripts), so on Windows its
+// items are unused: allowed there rather than gated one by one.
+#![cfg_attr(not(unix), allow(dead_code, unused_imports))]
 use crate::ado::workflow::PullRequest;
 use crate::tools::todo::{Detail, DetailField, Item};
 use std::collections::{BTreeMap, BTreeSet};

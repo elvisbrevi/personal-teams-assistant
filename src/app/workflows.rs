@@ -35,6 +35,8 @@ mod director;
 pub(super) mod engine;
 pub(super) mod implement;
 pub(super) mod record;
+#[cfg(all(test, unix))]
+mod rehearsal;
 pub(super) mod runs;
 pub(super) mod summary;
 #[cfg(test)]
