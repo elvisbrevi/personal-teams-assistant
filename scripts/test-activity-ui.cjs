@@ -53,6 +53,7 @@ test('every To-Do card opens its own detail after the list is rendered', async (
     todoOriginal: () => null, todoDate: () => null, t: x => x, tx: x => x, tn: () => '',
     closeTodoDetail() {}, todoSources: () => [{}], todoTitle: () => '', todoTypeOptions() {},
     loadWorkItemSessions: async () => {},
+    runLinkFor: () => null, refreshActiveRuns: async () => {},
     invoke: async () => ({ items, states: [], assignment_fields: [] }),
     loadTodoDetail: () => opened.push(vm.runInContext('todoSelection.item.id', context)),
   });
@@ -116,7 +117,7 @@ test('a task-category item opens task detail and workflow states get distinct co
 
 test('To-Do work item actions include a copy button that copies the original URL', async () => {
   const copied = [], notices = [];
-  const context = vm.createContext({
+  const context = vm.createContext({ runLinkFor: () => null,
     transport: { browser: true },
     el: (tag, props, ...children) => ({ tag, ...props, children }),
     icon: name => ({ icon: name }), t: key => key,

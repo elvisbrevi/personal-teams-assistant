@@ -34,7 +34,7 @@ The standard every change to `desktop/ui/` follows, so the owner's local page, t
 
 | Navigation | Contents |
 | --- | --- |
-| Daily work | Home (state, attention, setup, recent activity with its outcome tiles, status), To-Do (and its views: Create request, Implement, Agent history, Guides and instructions), Messages, Activities, Workflows (views: Workflows, Blocks) |
+| Daily work | Home (state, attention, setup, recent activity with its outcome tiles, status), To-Do (and its views: Create request, Implement, Agent history, Guides and instructions), Messages, Activities, Workflows (views: Workflows, Blocks, Runs; a run's detail opens from Runs, Home, Implement or a To-Do card and has a Back button) |
 | What feeds the answers | Knowledge (sources, repositories, GitHub), Test chat |
 | Footer | Settings, then the status pill and the web account |
 

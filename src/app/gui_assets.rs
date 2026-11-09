@@ -83,6 +83,7 @@ pub(super) const ASSETS: &[Asset] = &[
     asset!("workflows.js", "text/javascript; charset=utf-8", true),
     asset!("workflow-blocks.js", "text/javascript; charset=utf-8", true),
     asset!("run-states.js", "text/javascript; charset=utf-8", true),
+    asset!("workflow-runs.js", "text/javascript; charset=utf-8", true),
     asset!(
         "settings-general.js",
         "text/javascript; charset=utf-8",

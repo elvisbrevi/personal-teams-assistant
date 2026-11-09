@@ -1160,3 +1160,15 @@ body.directory-picker-open { overflow: hidden; }
   .workflow-repo, .workflow-block { grid-template-columns: minmax(0, 1fr); }
   .workflow-repo .actions, .workflow-block .actions { justify-content: flex-start; }
 }
+
+/* Workflows › Runs: rows that are buttons, a stage timeline with the status dots, children and pull requests. */
+.run-row { text-align: left; width: 100%; cursor: pointer; }
+.run-row.waits { border-color: var(--warn); }
+.run-head { display: flex; align-items: center; gap: .5rem; flex-wrap: wrap; margin-bottom: .5rem; }
+.run-timeline { list-style: none; margin: 0; padding: 0; display: grid; gap: .4rem; }
+.run-timeline li { display: grid; grid-template-columns: auto 1fr; gap: .5rem; align-items: baseline; }
+.run-timeline li small { display: block; color: var(--muted); }
+.run-timeline li.current strong { text-decoration: underline; text-underline-offset: .2em; }
+.run-pulls { margin: .25rem 0 0; padding-left: 1.1rem; }
+.run-actions { flex-wrap: wrap; }
+.run-send-text { width: 100%; min-height: 8rem; }

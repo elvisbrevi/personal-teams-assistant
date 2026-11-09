@@ -10,6 +10,7 @@ import { copy, link } from './markdown.js';
 import { startAssistant } from './profile.js';
 import { ensureWorkflowSettings, projectsWithoutReadyState, projectsWaitingForDirector } from './settings-workflows.js';
 import { runStateLabel } from './run-states.js';
+import { openWorkflowRun } from './workflow-runs.js';
 
 // ---------------------------------------------------------------- status and overview
 
@@ -211,7 +212,7 @@ function renderWorkflowAttention(s) {
     el('span', { class: 'status-value' }, el('span', { class: 'status-label', textContent: runStateLabel(run.state) }),
       el('strong', { textContent: run.item.title }),
       ...(run.attention ? [el('small', { textContent: tx(run.attention).slice(0, 240) })] : [])),
-    link(`#${run.item.id}`, run.item.url))));
+    link(`#${run.item.id}`, run.item.url), el('button', { type: 'button', class: 'secondary small run-open', textContent: t('Open run'), onclick: () => openWorkflowRun(run.id) }))));
 }
 
 function renderTiles(s) {

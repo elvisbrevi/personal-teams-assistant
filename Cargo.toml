@@ -1,6 +1,6 @@
 [package]
 name = "personal-teams-assistant"
-version = "0.12.8"
+version = "0.12.9"
 edition = "2024"
 rust-version = "1.95"
 build = "build.rs"
@@ -68,7 +68,7 @@ futures-util = { version = "0.3", features = ["sink"] }
 rand = "0.9"
 regex = "1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
-rusqlite = { version = "0.37", features = ["bundled"] }
+rusqlite = { version = "0.41", features = ["bundled", "fallible_uint"] }
 scraper = "0.24"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

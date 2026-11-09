@@ -188,7 +188,7 @@ pub(in crate::app) async fn run_for_block(
 }
 
 /// A launcher running now, as a test needs it.
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(in crate::app) fn busy_guard(state: &DesktopState) -> LauncherSlot {
     try_launcher_slot(state).unwrap()
 }

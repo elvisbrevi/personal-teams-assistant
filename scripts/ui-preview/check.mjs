@@ -194,7 +194,7 @@ check('axe: no WCAG 2.2 AA violations in any scan', !Object.keys(totals).length,
   await page.click('.todo-item:first-child .todo-select');
   await page.waitForSelector('#todo-detail-title');
   check('To-Do opens HU detail through the shared tool with source and project', await page.evaluate(() => window.__ptaLastDetail?.id === 5000 && window.__ptaLastDetail?.source === 'ado-activity' && window.__ptaLastDetail?.project === 'Payments'));
-  check('HU detail includes assignment, acceptance criteria, evidence, discussion and original link', (await page.textContent('#todo-detail-content')).includes('Ana Pérez') && await page.getByRole('heading', { name: 'Criterios de aceptación' }).count() === 1 && (await page.textContent('#todo-detail-content')).includes('Luis Soto') && await page.locator('#todo-detail-content .todo-detail-header .icon-button:visible').count() === 3 && await page.locator('#todo-detail-content .todo-detail-header button[aria-label="Copiar enlace del work item"]').count() === 1);
+  check('HU detail includes assignment, acceptance criteria, evidence, discussion and original link', (await page.textContent('#todo-detail-content')).includes('Ana Pérez') && await page.getByRole('heading', { name: 'Criterios de aceptación' }).count() === 1 && (await page.textContent('#todo-detail-content')).includes('Luis Soto') && await page.locator('#todo-detail-content .todo-detail-header .icon-button:visible').count() === 4 /* Implement, original link, copy, and #5000's workflow run */ && await page.locator('#todo-detail-content .todo-detail-header button[aria-label="Copiar enlace del work item"]').count() === 1);
   await page.locator('#todo-detail-content details').first().locator('summary').click();
   check('HU detail retains custom fields', (await page.textContent('#todo-detail-content details')).includes('feature/receipt-downloads'));
   const safeRichText = await page.evaluate(() => {
@@ -2423,15 +2423,16 @@ for (const [label, viewport] of [['desktop', { width: 1280, height: 900 }], ['ph
   const sent = await page.evaluate(() => window.__ptaLastImplementation);
   check(`implement workflow ${label}: Start sends the workflow and nothing the workflow supplies`, sent.workflow === 'payments-features' && !('machine' in sent) && !('directories' in sent) && !('provider' in sent) && !('context' in sent), JSON.stringify(sent));
   check(`implement workflow ${label}: the started run's state is shown inline with a link to Workflows`, /Planificando/.test(await page.locator('#implementation-workflow-started').innerText())
-    && await page.locator('#implementation-workflow-started button', { hasText: 'Abrir Workflows' }).count() === 1);
+    && await page.locator('#implementation-workflow-started button', { hasText: 'Abrir la ejecución' }).count() === 1);
   await page.locator('#implementation-workflow-started button', { hasText: 'Refresh' }).or(page.locator('#implementation-workflow-started button', { hasText: 'Actualizar' })).first().click();
   await page.waitForFunction(() => /Plan por revisar/.test(document.querySelector('#implementation-workflow-started')?.textContent || ''));
   const started = await scan(page);
   check(`implement workflow ${label}: the started run passes WCAG 2.2 AA`, started.length === 0, JSON.stringify(started));
   await page.screenshot({ path: `${out}/${label}-implementation-workflow-started.png`, fullPage: true });
   check(`implement workflow ${label}: no sideways scroll`, await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
-  await page.locator('#implementation-workflow-started button', { hasText: 'Abrir Workflows' }).click();
-  check(`implement workflow ${label}: the link opens the Workflows section`, await page.isVisible('#workflows'));
+  await page.locator('#implementation-workflow-started button', { hasText: 'Abrir la ejecución' }).click();
+  await page.waitForSelector('#run-detail-content #run-timeline');
+  check(`implement workflow ${label}: the link opens the run's detail`, await page.isVisible('#workflow-run-detail') && /Plan por revisar/.test(await page.locator('#run-detail-content').innerText()));
 
   // The director chooses: its choice and reason are shown before anything starts.
   await openForm();
@@ -2462,6 +2463,149 @@ for (const [label, viewport] of [['desktop', { width: 1280, height: 900 }], ['ph
   check(`implement workflow ${label}: none unlocks the form again`, await page.locator('#implementation-context').isEnabled() && await page.locator('#implementation-workflow-choice').count() === 0);
   await page.evaluate(() => { delete window.__ptaDirectorNone; });
   check(`implement workflow ${label}: no client errors`, errors.length === 0, errors.join('; '));
+  await context.close();
+}
+// Workflows › Runs: the list with the waiting runs first, a run's detail (timeline, children, sessions, pull
+// requests, block outcomes), the plan-review gate, assign, resume and cancel with their second press, the
+// director's summary and sending it to chats with mentions, Home's rows and the To-Do card link, with axe
+// scans, at desktop and phone widths (synthetic data).
+if (flag !== '--axe-only') for (const [label, viewport] of [['desktop', { width: 1280, height: 900 }], ['phone', { width: 393, height: 852 }]]) {
+  const phone = label === 'phone';
+  const { context, page, errors } = await open({ axe: true, context: { viewport, ...(phone ? { isMobile: true, hasTouch: true } : {}) } });
+  await page.evaluate(axeSource);
+  const calls = () => page.evaluate(() => window.__ptaWorkflowCalls);
+  const detailText = () => page.locator('#run-detail-content').innerText();
+  // The list: every run, those that wait for the person first. The Runs tab reached with the keyboard reads it.
+  await page.evaluate(() => showTab('workflows'));
+  await page.focus('#workflows-tab-list');
+  await page.keyboard.press('End');
+  await page.waitForSelector('#run-rows [data-run]');
+  check(`runs ${label}: the Runs tab chosen with the keyboard reads its list`, await page.isVisible('#workflows-runs'));
+  const order = await page.locator('#run-rows [data-run]').evaluateAll(rows => rows.map(r => r.dataset.state));
+  check(`runs ${label}: the list shows every run with those waiting for the person first`, order.length === 5 && order.slice(0, 3).every(s => ['plan_review', 'unassigned', 'needs_attention'].includes(s)) && order.slice(3).every(s => ['coding', 'done'].includes(s)), order.join(' '));
+  check(`runs ${label}: the summary counts the waiting runs`, /3 ejecuciones te esperan/.test(await page.locator('#runs-summary').innerText()));
+  const listScan = await scan(page);
+  check(`runs ${label}: the list passes WCAG 2.2 AA`, listScan.length === 0, JSON.stringify(listScan));
+  await page.screenshot({ path: `${out}/${label}-workflow-runs.png`, fullPage: true });
+  // Filters.
+  await page.selectOption('#runs-state', 'done');
+  await page.waitForFunction(() => document.querySelectorAll('#run-rows [data-run]').length === 1);
+  check(`runs ${label}: the state filter narrows the list`, (await calls()).some(c => c.method === 'workflow_runs' && c.state === 'done'));
+  await page.selectOption('#runs-state', '');
+  await page.waitForFunction(() => document.querySelectorAll('#run-rows [data-run]').length === 5);
+  // The detail of the coding run: timeline, children with sessions and pull requests, block outcomes, a summary and its send.
+  await page.click('#run-rows [data-run="3c5f1c9a-0d2e-4b7a-8f10-5a6b7c8d9e03"]');
+  await page.waitForSelector('#run-detail-content #run-timeline');
+  check(`runs ${label}: the detail shows the stages, the children, their pull requests and the block outcomes`,
+    await page.locator('#run-timeline li').count() === 5 && await page.locator('#run-children [data-child]').count() === 2
+    && await page.locator('#run-children .run-pulls li').count() === 1 && /Programando/.test(await detailText()) && await page.locator('#run-blocks .run-block').count() === 1);
+  check(`runs ${label}: a child's agent session can be opened`, await page.locator('#run-children button', { hasText: 'Abrir sesión del agente' }).count() === 2);
+  check(`runs ${label}: the stored summary and its send are shown`, await page.locator('#run-summary-text .md').count() === 1 && /1 envío/.test(await detailText()));
+  const detailScan = await scan(page);
+  check(`runs ${label}: the detail passes WCAG 2.2 AA`, detailScan.length === 0, JSON.stringify(detailScan));
+  await page.screenshot({ path: `${out}/${label}-workflow-run-detail.png`, fullPage: true });
+  check(`runs ${label}: no sideways scroll in the detail`, await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+  // Summary and sending: the sheet, one confirmation with the exact text, mentions, outcomes per chat.
+  await page.click('#run-summary');
+  await page.waitForFunction(() => /1 resumen anterior/.test(document.querySelector('#run-detail-content')?.textContent || ''));
+  check(`runs ${label}: Summary asks the director and shows the new text with the earlier one folded`, (await calls()).some(c => c.method === 'workflow_summary') && /va en «coding»/.test(await page.locator('#run-summary-text').innerText()));
+  await page.click('#run-send');
+  await page.waitForSelector('dialog.destination-picker');
+  await page.locator('dialog.destination-picker .directory-picker-row', { hasText: 'Payments team' }).locator('input').check();
+  await page.locator('dialog.destination-picker .directory-picker-row', { hasText: 'Ana Pérez' }).locator('input').check();
+  await page.locator('dialog.destination-picker button', { hasText: 'Continuar' }).click();
+  await page.waitForSelector('#run-send-panel');
+  check(`runs ${label}: the send shows the exact text and each destination with its members`, await page.locator('#run-send-text').inputValue().then(v => /va en «coding»/.test(v))
+    && await page.locator('#run-send-panel [data-chat]').count() === 2 && await page.locator('#run-send-panel [data-chat="19:abc@thread.v2"] input[type=checkbox]').count() === 3);
+  await page.locator('#run-send-panel [data-chat="19:abc@thread.v2"] input[value="Victoria Gómez"]').check();
+  await page.fill('#run-send-text', 'Resumen editado para el equipo.');
+  const sendButton = page.locator('#run-send-panel button', { hasText: 'Confirmar y enviar' });
+  await sendButton.click();
+  check(`runs ${label}: nothing is sent before the second press`, !(await calls()).some(c => c.method === 'workflow_summary_send'));
+  await page.locator('#run-send-panel button', { hasText: 'Enviar ahora a 2 chat(s)' }).click();
+  await page.waitForFunction(() => document.querySelectorAll('#run-send-panel .send-outcome[data-done]').length === 2);
+  const sends = (await calls()).filter(c => c.method === 'workflow_summary_send');
+  check(`runs ${label}: one confirmed send per chat, with the mention and the edited text`, sends.length === 2 && sends.every(s => s.confirmed && s.text === 'Resumen editado para el equipo.')
+    && sends.some(s => s.chat === '19:abc@thread.v2' && s.mentions.join() === 'Victoria Gómez') && sends.some(s => s.chat === '19:def@thread.v2' && s.mentions.length === 0), JSON.stringify(sends));
+  check(`runs ${label}: each destination keeps its outcome on screen after the sends`, await page.locator('#run-send-panel .send-outcome[data-done="sent"]').count() === 2 && await page.locator('#run-send-panel .actions button:not(.secondary)').isHidden());
+  // A send to the team chat whose result Teams did not confirm, as the host would have recorded it.
+  await page.evaluate(() => window.__ptaMarkUncertain('3c5f1c9a-0d2e-4b7a-8f10-5a6b7c8d9e03', '19:abc@thread.v2'));
+  await page.locator('#run-send-panel button', { hasText: 'Cerrar' }).click();
+  await page.waitForFunction(() => /4 envíos/.test(document.querySelector('#run-detail-content')?.textContent || ''));
+  check(`runs ${label}: the send records show on the run`, /4 envíos/.test(await detailText()));
+  // A chat whose earlier send of this summary is uncertain is left out unless the person sends again.
+  await page.click('#run-send');
+  await page.waitForSelector('dialog.destination-picker');
+  await page.locator('dialog.destination-picker .directory-picker-row', { hasText: 'Payments team' }).locator('input').check();
+  await page.locator('dialog.destination-picker button', { hasText: 'Continuar' }).click();
+  await page.waitForSelector('#run-send-panel [data-chat="19:abc@thread.v2"] .callout.warn');
+  const before = (await calls()).filter(c => c.method === 'workflow_summary_send').length;
+  await page.locator('#run-send-panel button', { hasText: 'Confirmar y enviar' }).click();
+  await page.locator('#run-send-panel button', { hasText: 'Enviar ahora a 1 chat(s)' }).click();
+  await page.waitForFunction(() => /Quedó fuera/.test(document.querySelector('#run-send-panel')?.textContent || ''));
+  check(`runs ${label}: an uncertain earlier send keeps the chat out until the person sends again`, (await calls()).filter(c => c.method === 'workflow_summary_send').length === before);
+  await page.locator('#run-send-panel button', { hasText: 'Cerrar' }).click();
+  // Back to the list, then the unassigned run: choose a workflow on a second press.
+  await page.click('#run-detail-back');
+  await page.waitForSelector('#run-rows [data-run]');
+  await page.click('#run-rows [data-run="3c5f1c9a-0d2e-4b7a-8f10-5a6b7c8d9e02"]');
+  await page.waitForSelector('#run-choose-workflow');
+  check(`runs ${label}: an unassigned run shows the director's reason`, /No encaja ninguno/.test(await detailText()));
+  await page.click('#run-choose-workflow');
+  await page.waitForSelector('#run-assign-workflow');
+  await page.selectOption('#run-assign-workflow', 'payments-features');
+  await page.locator('#run-assign button', { hasText: 'Asignar' }).click();
+  check(`runs ${label}: assign waits for a second press`, !(await calls()).some(c => c.method === 'workflow_run_assign'));
+  await page.locator('#run-assign button', { hasText: 'Confirmar asignar' }).click();
+  await page.waitForFunction(() => window.__ptaWorkflowCalls.some(c => c.method === 'workflow_run_assign'));
+  await page.waitForFunction(() => document.querySelector('#run-detail-content .run-head .badge')?.textContent === 'Planificando');
+  check(`runs ${label}: the workflow is assigned and the run plans`, (await calls()).some(c => c.method === 'workflow_run_assign' && c.workflow === 'payments-features' && c.confirmed));
+  // The run that needs attention: resume, then cancel, each on a second press.
+  await page.click('#run-detail-back');
+  await page.waitForSelector('#run-rows [data-run]');
+  await page.click('#run-rows [data-run="3c5f1c9a-0d2e-4b7a-8f10-5a6b7c8d9e04"]');
+  await page.waitForSelector('#run-attention');
+  check(`runs ${label}: a run that needs attention says why`, /permission prompt/.test(await detailText()));
+  await page.locator('.run-actions button', { hasText: 'Reanudar' }).click();
+  await page.locator('.run-actions button', { hasText: 'Confirmar reanudar' }).click();
+  await page.waitForFunction(() => window.__ptaWorkflowCalls.some(c => c.method === 'workflow_run_resume'));
+  await page.waitForFunction(() => document.querySelector('#run-detail-content .run-head .badge')?.textContent === 'Programando');
+  check(`runs ${label}: resume continues the run`, (await calls()).some(c => c.method === 'workflow_run_resume' && c.confirmed));
+  await page.locator('.run-actions button', { hasText: 'Cancelar ejecución' }).click();
+  await page.locator('.run-actions button', { hasText: 'Confirmar cancelar' }).click();
+  await page.waitForFunction(() => window.__ptaWorkflowCalls.some(c => c.method === 'workflow_run_cancel'));
+  await page.waitForFunction(() => document.querySelector('#run-detail-content .run-head .badge')?.textContent === 'Cancelada');
+  check(`runs ${label}: cancel ends the run`, (await calls()).some(c => c.method === 'workflow_run_cancel' && c.confirmed) && await page.locator('.run-actions button', { hasText: 'Cancelar ejecución' }).count() === 0);
+  // The gate from Home: the waiting run's row opens its detail, Review plan shows the children, a second press creates them.
+  await page.evaluate(() => showTab('overview'));
+  await page.waitForSelector('#workflow-attention [data-run]');
+  await page.click('#workflow-attention [data-run="3c5f1c9a-0d2e-4b7a-8f10-5a6b7c8d9e01"] .run-open');
+  await page.waitForSelector('#run-review-plan');
+  check(`runs ${label}: Home's row opens the waiting run with Review plan`, await page.isVisible('#workflow-run-detail') && /Plan por revisar/.test(await detailText()));
+  await page.click('#run-review-plan');
+  await page.waitForSelector('#run-plan-review fieldset');
+  check(`runs ${label}: Review plan shows the planning run's children`, await page.locator('#run-plan-review fieldset').count() === 2);
+  await page.locator('#run-plan-review fieldset').nth(1).locator('input[type=checkbox]').uncheck();
+  const gateScan = await scan(page);
+  check(`runs ${label}: the plan review passes WCAG 2.2 AA`, gateScan.length === 0, JSON.stringify(gateScan));
+  await page.screenshot({ path: `${out}/${label}-workflow-run-gate.png`, fullPage: true });
+  await page.locator('#run-plan-review button', { hasText: 'Crear los hijos seleccionados' }).click();
+  check(`runs ${label}: nothing is created before the second press`, !(await page.evaluate(() => window.__ptaLastChildCreation)));
+  await page.locator('#run-plan-review button', { hasText: 'Confirmar creación de hijos' }).click();
+  await page.waitForFunction(() => window.__ptaLastChildCreation);
+  await page.waitForFunction(() => ['Creando los hijos', 'Programando'].includes(document.querySelector('#run-detail-content .run-head .badge')?.textContent));
+  const creation = await page.evaluate(() => window.__ptaLastChildCreation);
+  check(`runs ${label}: confirming creates the selected children through implementation_create and the run goes on`, creation?.confirmed && creation.id === 'a7d0c2f4-5e6b-4c8d-9f01-2a3b4c5d6e7f' && creation.children.length === 1
+    && creation.item.id === 5003 && creation.item.provider === 'azure' && creation.item.task === false, JSON.stringify(creation));
+  // The To-Do card of an item with an active run links to it.
+  await page.evaluate(() => showTab('todo'));
+  await page.waitForSelector('#todo-list .todo-item');
+  await page.waitForSelector('#todo-list [data-run]');
+  check(`runs ${label}: a To-Do card shows its item's active run`, await page.locator('#todo-list [data-run]').count() >= 1);
+  await page.locator('#todo-list [data-run]').first().click();
+  await page.waitForSelector('#run-detail-content #run-timeline');
+  check(`runs ${label}: the card's link opens the run`, await page.isVisible('#workflow-run-detail'));
+  check(`runs ${label}: no client errors`, errors.length === 0, errors.join('; '));
   await context.close();
 }
 await browser.close();

@@ -51,6 +51,7 @@
   <link rel="modulepreload" href="workflow-blocks.js" fetchpriority="low">
   <link rel="modulepreload" href="settings-workflows.js" fetchpriority="low">
   <link rel="modulepreload" href="run-states.js" fetchpriority="low">
+  <link rel="modulepreload" href="workflow-runs.js" fetchpriority="low">
   <link rel="modulepreload" href="notices.js" fetchpriority="low">
   <link rel="modulepreload" href="dialogs.js" fetchpriority="low">
   <link rel="modulepreload" href="control.js" fetchpriority="low">
@@ -732,6 +733,7 @@
         <div id="workflows-tabs" class="subnav" role="tablist" aria-label="Workflow views">
           <button role="tab" id="workflows-tab-list" data-group="list" aria-controls="workflows-list" aria-selected="true">Workflows</button>
           <button role="tab" id="workflows-tab-blocks" data-group="blocks" aria-controls="workflows-blocks" aria-selected="false" tabindex="-1">Blocks</button>
+          <button role="tab" id="workflows-tab-runs" data-group="runs" aria-controls="workflows-runs" aria-selected="false" tabindex="-1">Runs</button>
         </div>
         <div id="workflows-list" role="tabpanel" aria-labelledby="workflows-tab-list">
           <div class="panel">
@@ -751,6 +753,24 @@
             <div id="blocks-problem" class="callout error" role="alert" hidden></div>
             <div id="block-rows" class="list"></div>
             <div class="actions"><button id="block-new" type="button" class="secondary">New block</button></div>
+          </div>
+        </div>
+        <div id="workflows-runs" role="tabpanel" aria-labelledby="workflows-tab-runs" hidden>
+          <div class="panel" id="runs-list-panel">
+            <div class="panel-head"><h2>Runs</h2><span id="runs-summary" class="hint"></span><button id="runs-refresh" type="button" class="secondary small"><svg class="icon"><use href="#i-refresh"/></svg>Refresh</button></div>
+            <p class="hint">Each run takes one work item through its workflow: the plan, your review of the children, their coding, the pull requests and the blocks. Runs that wait for you come first.</p>
+            <div class="todo-filters">
+              <label>State<select id="runs-state"><option value="">Every state</option><option value="plan_review">Plan to review</option><option value="unassigned">Needs a workflow</option><option value="needs_attention">Needs attention</option><option value="interrupted">Interrupted</option><option value="failed">Failed</option><option value="classifying">Choosing a workflow</option><option value="planning">Planning</option><option value="creating_children">Creating the children</option><option value="coding">Coding</option><option value="pull_requests">Waiting for pull requests</option><option value="blocks">Running the workflow's blocks</option><option value="done">Done</option><option value="cancelled">Cancelled</option></select></label>
+              <label>Workflow<select id="runs-workflow"><option value="">Every workflow</option></select></label>
+            </div>
+            <div id="runs-problem" class="callout error" role="alert" hidden></div>
+            <div id="run-rows" class="list"></div>
+          </div>
+          <div id="workflow-run-detail" hidden>
+            <div class="panel">
+              <div class="todo-heading"><button id="run-detail-back" type="button" class="secondary small"><svg class="icon"><use href="#i-back"/></svg>Back</button><h2 id="run-detail-title" tabindex="-1">Workflow run</h2></div>
+              <div id="run-detail-content"></div>
+            </div>
           </div>
         </div>
       </section>
