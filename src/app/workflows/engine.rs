@@ -107,6 +107,7 @@ impl Drop for Advancing<'_> {
 pub(in crate::app) enum Azure {
     Live,
     #[cfg(test)]
+    #[cfg_attr(not(unix), allow(dead_code))]
     Synthetic(Arc<super::synthetic::Catalog>),
 }
 impl Azure {
