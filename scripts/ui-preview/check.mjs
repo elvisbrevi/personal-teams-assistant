@@ -2475,9 +2475,12 @@ if (flag !== '--axe-only') for (const [label, viewport] of [['desktop', { width:
   await page.evaluate(axeSource);
   const calls = () => page.evaluate(() => window.__ptaWorkflowCalls);
   const detailText = () => page.locator('#run-detail-content').innerText();
-  // The list: every run, those that wait for the person first.
-  await page.evaluate(() => showTab('workflows', 'workflows-runs'));
+  // The list: every run, those that wait for the person first. The Runs tab reached with the keyboard reads it.
+  await page.evaluate(() => showTab('workflows'));
+  await page.focus('#workflows-tab-list');
+  await page.keyboard.press('End');
   await page.waitForSelector('#run-rows [data-run]');
+  check(`runs ${label}: the Runs tab chosen with the keyboard reads its list`, await page.isVisible('#workflows-runs'));
   const order = await page.locator('#run-rows [data-run]').evaluateAll(rows => rows.map(r => r.dataset.state));
   check(`runs ${label}: the list shows every run with those waiting for the person first`, order.length === 5 && order.slice(0, 3).every(s => ['plan_review', 'unassigned', 'needs_attention'].includes(s)) && order.slice(3).every(s => ['coding', 'done'].includes(s)), order.join(' '));
   check(`runs ${label}: the summary counts the waiting runs`, /3 ejecuciones te esperan/.test(await page.locator('#runs-summary').innerText()));
@@ -2520,12 +2523,28 @@ if (flag !== '--axe-only') for (const [label, viewport] of [['desktop', { width:
   await sendButton.click();
   check(`runs ${label}: nothing is sent before the second press`, !(await calls()).some(c => c.method === 'workflow_summary_send'));
   await page.locator('#run-send-panel button', { hasText: 'Enviar ahora a 2 chat(s)' }).click();
-  await page.waitForFunction(() => document.querySelectorAll('#run-send-panel .send-outcome[data-done]').length === 2 || !document.querySelector('#run-send-panel'));
+  await page.waitForFunction(() => document.querySelectorAll('#run-send-panel .send-outcome[data-done]').length === 2);
   const sends = (await calls()).filter(c => c.method === 'workflow_summary_send');
   check(`runs ${label}: one confirmed send per chat, with the mention and the edited text`, sends.length === 2 && sends.every(s => s.confirmed && s.text === 'Resumen editado para el equipo.')
     && sends.some(s => s.chat === '19:abc@thread.v2' && s.mentions.join() === 'Victoria Gómez') && sends.some(s => s.chat === '19:def@thread.v2' && s.mentions.length === 0), JSON.stringify(sends));
-  await page.waitForFunction(() => /3 envíos/.test(document.querySelector('#run-detail-content')?.textContent || ''));
-  check(`runs ${label}: the send records show on the run`, /3 envíos/.test(await detailText()));
+  check(`runs ${label}: each destination keeps its outcome on screen after the sends`, await page.locator('#run-send-panel .send-outcome[data-done="sent"]').count() === 2 && await page.locator('#run-send-panel .actions button:not(.secondary)').isHidden());
+  // A send to the team chat whose result Teams did not confirm, as the host would have recorded it.
+  await page.evaluate(() => window.__ptaMarkUncertain('3c5f1c9a-0d2e-4b7a-8f10-5a6b7c8d9e03', '19:abc@thread.v2'));
+  await page.locator('#run-send-panel button', { hasText: 'Cerrar' }).click();
+  await page.waitForFunction(() => /4 envíos/.test(document.querySelector('#run-detail-content')?.textContent || ''));
+  check(`runs ${label}: the send records show on the run`, /4 envíos/.test(await detailText()));
+  // A chat whose earlier send of this summary is uncertain is left out unless the person sends again.
+  await page.click('#run-send');
+  await page.waitForSelector('dialog.destination-picker');
+  await page.locator('dialog.destination-picker .directory-picker-row', { hasText: 'Payments team' }).locator('input').check();
+  await page.locator('dialog.destination-picker button', { hasText: 'Continuar' }).click();
+  await page.waitForSelector('#run-send-panel [data-chat="19:abc@thread.v2"] .callout.warn');
+  const before = (await calls()).filter(c => c.method === 'workflow_summary_send').length;
+  await page.locator('#run-send-panel button', { hasText: 'Confirmar y enviar' }).click();
+  await page.locator('#run-send-panel button', { hasText: 'Enviar ahora a 1 chat(s)' }).click();
+  await page.waitForFunction(() => /Quedó fuera/.test(document.querySelector('#run-send-panel')?.textContent || ''));
+  check(`runs ${label}: an uncertain earlier send keeps the chat out until the person sends again`, (await calls()).filter(c => c.method === 'workflow_summary_send').length === before);
+  await page.locator('#run-send-panel button', { hasText: 'Cerrar' }).click();
   // Back to the list, then the unassigned run: choose a workflow on a second press.
   await page.click('#run-detail-back');
   await page.waitForSelector('#run-rows [data-run]');

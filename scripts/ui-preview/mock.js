@@ -347,6 +347,9 @@
     for (const run of workflowRuns) for (const child of run.children) if (child.coding) workflowAgentRuns.push({ id: child.coding.id, machine: child.coding.machine, session_id: `sess-synthetic-${child.id}`, provider: 'codex', model: 'gpt-6.1-sol', started_at: '2026-10-13T12:00:00Z', finished_at: child.finished_at ? '2026-10-13T14:00:00Z' : null, item: { id: child.id, title: child.title, url: child.url }, planning: false, state: child.coding.state, created_at: '2026-10-13T12:00:00Z', output: '', permission_mode: 'danger-full-access', prompts: [], plan: null });
   }
   let statusReads = 0;
+  // A send whose result Teams did not confirm (`uncertain`), as the host records it, for the guard on the next send.
+  window.__ptaMarkUncertain = (run, chat) => { const found = workflowRuns.find(r => r.id === run); const latest = found.summaries[found.summaries.length - 1];
+    found.summary_sends.push({ id: crypto.randomUUID(), summary: latest.id, chat: { id: chat, topic: teamsChats.find(c => c.id === chat)?.topic, type: 'group' }, mentions: [], chars: latest.text.length, edited: false, outcome: 'uncertain', at: secs(Date.now()) }); };
   window.__ptaWorkflowCalls = [];
   const workflowHandlers = {
     workflow_runs: args => {

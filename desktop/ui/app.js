@@ -38,7 +38,7 @@ import {
 import { openGuides, renderGuides } from './guides.js';
 import { answerBubble, bubble, chosen, resizeComposer } from './chat.js';
 import { machineTrust } from './dialogs.js';
-import { closeWorkflowRun, loadWorkflowRuns } from './workflow-runs.js';
+import { closeWorkflowRun, loadWorkflowRuns, showRunsList } from './workflow-runs.js';
 
 // ---------------------------------------------------------------- wiring
 
@@ -162,12 +162,13 @@ $('#restart').onclick = () => busy($('#restart'), async () => {
 });
 $('#stop').onclick = () => busy($('#stop'), async () => { await invoke('stop_assistant'); await refreshLive(); done(t('Assistant stopped.')); });
 $('#activity-all').onclick = () => showTab('messages');
-$('#workflow-attention-open').onclick = () => { showTab('workflows', 'workflows-runs'); loadWorkflowRuns(); };
+$('#workflow-attention-open').onclick = () => showRunsList();
 $('#runs-refresh').onclick = () => loadWorkflowRuns();
 $('#runs-state').onchange = () => loadWorkflowRuns();
 $('#runs-workflow').onchange = () => loadWorkflowRuns();
 $('#run-detail-back').onclick = () => closeWorkflowRun();
-$('#workflows-tab-runs').addEventListener('click', () => loadWorkflowRuns());
+// The Runs tab reads its list when chosen with a click or the keyboard (arrow keys focus the tab they select).
+for (const event of ['click', 'focus']) $('#workflows-tab-runs').addEventListener(event, () => { if (!$('#workflows-runs').hidden && $('#workflow-run-detail').hidden) loadWorkflowRuns(); });
 $('#activity-notice-open').onclick = () => busy($('#activity-notice-open'), () => invoke('activity_open'));
 $('#activity-settings').onclick = () => showTab('settings', 'panel-registration');
 $('#activity-refresh').onclick = () => busy($('#activity-refresh'), loadRegistration);

@@ -14,7 +14,6 @@ import { loadRegistration, renderActivityNotice } from './activities.js';
 import { loadActivity, loadMessages } from './messages.js';
 import { loadKnowledge } from './knowledge.js';
 import { loadWorkflows } from './workflows.js';
-import { loadWorkflowRuns } from './workflow-runs.js';
 import { loadWorkflowSettings } from './settings-workflows.js';
 
 /** Views opened from To-Do: they have no navigation item of their own. */
@@ -36,7 +35,6 @@ function showTab(name, anchor) {
     // The section opens with its first view unless a link leads to another.
     if (!anchor) selectTab($('#workflows-tabs'), 'list');
     loadWorkflows();
-    if (anchor === 'workflows-runs') loadWorkflowRuns();
   }
   if (name === 'todo') loadTodo();
   if (name === 'agent-history') loadAgentHistory();

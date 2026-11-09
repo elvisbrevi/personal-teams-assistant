@@ -8,6 +8,7 @@
 import { t, tn, tx, uiLocale } from './i18n.js';
 import { invoke } from './control.js';
 import { $, badge, el, icon } from './dom.js';
+import { current } from './state.js';
 import { busy, done, notify } from './notices.js';
 import { selectTab, showTab } from './nav.js';
 import { chooseFromList } from './directory-sheet.js';
@@ -25,14 +26,17 @@ const POLL_MS = 15_000;
 
 const runsData = {
   /** @type {any[]} */ runs: [],
-  /** @type {any[]} */ workflows: [],
   /** The open run's ID, or null while the list shows. @type {string | null} */
   open: null,
   /** The open run's last record, as `workflow_run_status` returned it. @type {any} */
   record: null,
   /** The stored summary chosen for sending (the latest when unset). @type {string | null} */
   chosenSummary: null,
-  generation: 0,
+  /** Each list read and each detail read has its own counter, so one never discards the other. */
+  listGeneration: 0,
+  detailGeneration: 0,
+  /** The open run's agent sessions, as last read. @type {any[]} */
+  sessions: [],
   /** @type {ReturnType<typeof setInterval> | null} */
   timer: null,
   /** A send in progress or a confirmation open: the detail is not re-rendered meanwhile. */
@@ -66,24 +70,33 @@ function twice(label, confirm, act) {
   return button;
 }
 function workflowName(id) {
-  return runsData.workflows.find(w => w.id === id)?.name ?? id ?? t('No workflow');
+  return workflowsNow().find(w => w.id === id)?.name ?? id ?? t('No workflow');
+}
+/** The account's workflows as the profile holds them now. */
+function workflowsNow() {
+  return current?.map?.workflows ?? [];
+}
+/** An Azure DevOps organization's name from its URL (`dev.azure.com/NAME` or `NAME.visualstudio.com`), lowercased. */
+function organizationName(url) {
+  try {
+    const parsed = new URL(String(url ?? ''));
+    if (parsed.hostname === 'dev.azure.com') return decodeURIComponent(parsed.pathname.split('/').filter(Boolean)[0] ?? '').toLowerCase();
+    if (parsed.hostname.endsWith('.visualstudio.com')) return parsed.hostname.slice(0, -'.visualstudio.com'.length).toLowerCase();
+  } catch { /* not a URL */ }
+  return String(url ?? '').toLowerCase();
 }
 
 // ---- The list ----
 
 /** Reads the runs (filtered as the selects say) and the workflows their names come from. */
 async function loadWorkflowRuns() {
-  const generation = ++runsData.generation;
+  const generation = ++runsData.listGeneration;
   const problem = $('#runs-problem'); problem.hidden = true;
   const state = /** @type {HTMLSelectElement} */ ($('#runs-state')).value;
   const workflow = /** @type {HTMLSelectElement} */ ($('#runs-workflow')).value;
   try {
-    const [list, definitions] = await Promise.all([
-      invoke('workflow_runs', { ...(state ? { state } : {}), ...(workflow ? { workflow } : {}), limit: 100 }),
-      runsData.workflows.length ? Promise.resolve({ workflows: runsData.workflows }) : invoke('workflows_list'),
-    ]);
-    if (generation !== runsData.generation) return;
-    runsData.workflows = definitions.workflows ?? [];
+    const list = await invoke('workflow_runs', { ...(state ? { state } : {}), ...(workflow ? { workflow } : {}), limit: 100 });
+    if (generation !== runsData.listGeneration) return;
     fillWorkflowFilter(workflow);
     const runs = (list.runs ?? []).slice().sort((a, b) => Number(WAITING.includes(b.state)) - Number(WAITING.includes(a.state)) || b.updated_at - a.updated_at);
     runsData.runs = runs;
@@ -93,14 +106,14 @@ async function loadWorkflowRuns() {
     $('#run-rows').replaceChildren(...(runs.length ? runs.map(runRow) : [el('p', { class: 'hint', textContent: state || workflow ? t('No run matches these filters.') : t('No workflow run yet. Start one from a To-Do item\'s Implement, or let the watcher start them for items in a ready state.') })]));
     if (list.partial) $('#run-rows').append(el('p', { class: 'hint', textContent: t('Showing the most recent runs.') }));
   } catch (error) {
-    if (generation !== runsData.generation) return;
+    if (generation !== runsData.listGeneration) return;
     problem.hidden = false; problem.textContent = message(error);
   }
 }
 function fillWorkflowFilter(selected) {
   const select = /** @type {HTMLSelectElement} */ ($('#runs-workflow'));
   select.replaceChildren(el('option', { value: '', textContent: t('Every workflow') }),
-    ...runsData.workflows.map(w => el('option', { value: w.id, textContent: w.name, selected: w.id === selected })));
+    ...workflowsNow().map(w => el('option', { value: w.id, textContent: w.name, selected: w.id === selected })));
 }
 /** The active runs by item link, for the To-Do cards. */
 function rememberActive(runs) {
@@ -144,9 +157,9 @@ function runRow(run) {
 
 /** Opens one run in the Runs view (from a row, Home, Implement or a To-Do card). */
 async function openWorkflowRun(id, trigger = null) {
-  showTab('workflows', 'workflows-runs');
+  if ($('#workflows').hidden) showTab('workflows', 'workflows-runs');
   selectTab($('#workflows-tabs'), 'runs');
-  runsData.open = id; runsData.record = null; runsData.chosenSummary = null; runsData.holding = false;
+  runsData.open = id; runsData.record = null; runsData.sessions = []; runsData.chosenSummary = null; runsData.holding = false;
   $('#runs-list-panel').hidden = true;
   const detail = $('#workflow-run-detail'); detail.hidden = false;
   detail.dataset.trigger = trigger?.dataset.run ?? '';
@@ -155,7 +168,25 @@ async function openWorkflowRun(id, trigger = null) {
   $('#run-detail-title').focus({ preventScroll: true });
   await loadRunDetail();
   if (runsData.timer) clearInterval(runsData.timer);
-  runsData.timer = setInterval(() => { if (runsData.open && document.visibilityState === 'visible') loadRunDetail().catch(() => {}); }, POLL_MS);
+  runsData.timer = setInterval(() => {
+    // Only while the run's detail is on screen: leaving the section stops the reads.
+    if (!detailShown()) { if (runsData.timer) clearInterval(runsData.timer); runsData.timer = null; return; }
+    if (document.visibilityState === 'visible') loadRunDetail().catch(() => {});
+  }, POLL_MS);
+}
+/** Whether a run's detail is on screen now. */
+function detailShown() {
+  return Boolean(runsData.open) && !$('#workflows').hidden && !$('#workflows-runs').hidden && !$('#workflow-run-detail').hidden;
+}
+/** The Runs view's list (from Home's «Open Workflows»): any open detail closes, and the list is read once. */
+function showRunsList() {
+  if (runsData.timer) { clearInterval(runsData.timer); runsData.timer = null; }
+  runsData.open = null; runsData.record = null; runsData.holding = false;
+  $('#workflow-run-detail').hidden = true;
+  $('#runs-list-panel').hidden = false;
+  if ($('#workflows').hidden) showTab('workflows', 'workflows-runs');
+  selectTab($('#workflows-tabs'), 'runs');
+  return loadWorkflowRuns();
 }
 /** Back to the list; the row that opened the run gets the focus again. */
 function closeWorkflowRun() {
@@ -170,26 +201,26 @@ function closeWorkflowRun() {
 async function loadRunDetail() {
   const id = runsData.open;
   if (!id) return;
-  const generation = ++runsData.generation;
+  const generation = ++runsData.detailGeneration;
   let reply;
   try {
     reply = await invoke('workflow_run_status', { run: id });
   } catch (error) {
-    if (generation !== runsData.generation || runsData.open !== id) return;
+    if (generation !== runsData.detailGeneration || runsData.open !== id) return;
     $('#run-detail-content').replaceChildren(el('p', { class: 'callout error', role: 'alert', textContent: message(error) }));
     return;
   }
-  if (generation !== runsData.generation || runsData.open !== id) return;
+  if (generation !== runsData.detailGeneration || runsData.open !== id) return;
   const run = reply.run;
   const urls = [run.item.url, ...run.children.map(c => c.url)];
   let sessions = [];
   try { sessions = (await invoke('implementation_sessions', { urls })).sessions ?? []; } catch { /* shown without sessions */ }
-  if (generation !== runsData.generation || runsData.open !== id) return;
+  if (generation !== runsData.detailGeneration || runsData.open !== id) return;
   const detail = $('#run-detail-content');
   const typing = detail.contains(document.activeElement) && ['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement?.tagName ?? '');
-  if (runsData.record && (typing || runsData.holding)) { runsData.record = run; return; }
-  const same = runsData.record && JSON.stringify(runsData.record) === JSON.stringify(run);
-  runsData.record = run;
+  if (runsData.record && (typing || runsData.holding)) return;
+  const same = runsData.record && JSON.stringify([runsData.record, runsData.sessions]) === JSON.stringify([run, sessions]);
+  runsData.record = run; runsData.sessions = sessions;
   if (same) return;
   rememberActive([{ ...run, item: run.item }]);
   renderRunDetail(run, sessions);
@@ -299,8 +330,8 @@ async function showPlanReview(run, area, refresh) {
 
 /** An unassigned run: the enabled workflows of its project, with what the director said. */
 function showAssign(run, area, refresh) {
-  const same = w => w.enabled && w.project.toLowerCase() === run.item.project.toLowerCase() && w.organization.toLowerCase().replace(/\/+$/, '') === String(run.item.organization ?? '').toLowerCase().replace(/\/+$/, '');
-  const options = runsData.workflows.filter(same);
+  const same = w => w.enabled && w.project.toLowerCase() === run.item.project.toLowerCase() && organizationName(w.organization) === organizationName(run.item.organization);
+  const options = workflowsNow().filter(same);
   runsData.holding = true;
   const select = el('select', { id: 'run-assign-workflow' }, ...options.map(w => el('option', { value: w.id, textContent: `${w.name}${w.description ? ` — ${w.description}` : ''}` })));
   const assign = twice(t('Assign'), t('Confirm assign'), async () => {
@@ -324,7 +355,7 @@ function timeline(run) {
   const items = (run.timeline ?? []).map((stage, index, all) => {
     const current = index === all.length - 1 && !FINAL.includes(run.state);
     return el('li', { class: current ? 'current' : '' },
-      el('i', { class: `dot ${stage.outcome?.startsWith('failed') || stage.outcome?.startsWith('needs') ? 'warn' : stage.finished_at ? 'ok' : 'info'}`, 'aria-hidden': 'true' }),
+      el('i', { class: `dot ${/fail|needs|interrupt|cancel|uncertain|refused|timed|missing|abandon|permission/.test(stage.outcome ?? '') ? 'warn' : stage.finished_at ? 'ok' : 'info'}`, 'aria-hidden': 'true' }),
       el('div', {}, el('strong', { textContent: runStateLabel(stage.stage) }),
         el('small', { textContent: `${when(stage.started_at)}${stage.finished_at ? ` → ${when(stage.finished_at)}` : ''}${stage.outcome ? ` · ${tx(stage.outcome)}` : ''}` })));
   });
@@ -370,7 +401,7 @@ function summaries(run) {
   const history = older.length ? el('details', { class: 'fold' }, el('summary', { textContent: tn(older.length, '1 earlier summary', '{n} earlier summaries') }),
     el('div', { class: 'list' }, ...older.map(s => {
       const use = el('button', { type: 'button', class: 'link-button', textContent: t('Show this one') });
-      use.onclick = () => { runsData.chosenSummary = s.id; renderRunDetail(run, []); };
+      use.onclick = () => { runsData.chosenSummary = s.id; renderRunDetail(runsData.record ?? run, runsData.sessions); };
       return el('div', { class: 'resource' }, el('p', { class: 'resource-facts' }, el('small', { textContent: `${when(s.created_at)} · ${s.model ?? ''}` })), el('p', { textContent: s.text.slice(0, 240) }), use);
     }))) : null;
   const sends = (run.summary_sends ?? []).slice().reverse();
@@ -406,15 +437,23 @@ async function showSend(run, area, refresh) {
     const members = chat.type === 'group' ? (chat.members ?? []) : [];
     const boxes = members.map(name => { const box = el('input', { type: 'checkbox', value: name }); return { name, box, row: el('label', { class: 'check' }, box, name) }; });
     const outcome = el('p', { class: 'hint send-outcome', 'aria-live': 'polite' });
+    const doubtful = (run.summary_sends ?? []).some(s => s.summary === chosen.id && s.chat?.id === chat.id && s.outcome === 'uncertain');
+    const again = doubtful ? el('input', { type: 'checkbox' }) : null;
     const card = el('div', { class: 'resource run-destination', 'data-chat': chat.id },
       el('div', { class: 'resource-head' }, el('strong', { textContent: chat.topic || members.join(', ') }), badge(chat.type === 'group' ? t('Group chat') : t('Person'), 'muted')),
+      doubtful ? el('div', { class: 'callout warn' }, el('p', { textContent: t('An earlier send of this summary to this chat is uncertain: it may have been posted. Check Teams first; it is left out unless you send it again.') }),
+        el('label', { class: 'check' }, again, t('Send again anyway'))) : null,
       boxes.length ? el('fieldset', {}, el('legend', { textContent: t('Mention') }), ...boxes.map(b => b.row)) : null, outcome);
-    return { chat, boxes, outcome, card };
+    return { chat, boxes, outcome, card, again };
   });
   const send = twice(t('Confirm and send'), t('Send to {n} chat(s) now', { n: String(destinations.length) }), async () => {
     const edited = text.value.trim() !== chosen.text.trim();
     for (const destination of destinations) {
       if (destination.outcome.dataset.done) continue;
+      if (destination.again && !destination.again.checked) {
+        destination.outcome.replaceChildren(badge(t('Not sent'), 'muted'), ' ', el('span', { textContent: t('Left out: an earlier send may have been posted.') }));
+        continue;
+      }
       const mentions = destination.boxes.filter(b => b.box.checked).map(b => b.name);
       try {
         const reply = await invoke('workflow_summary_send', { run: run.id, summary: chosen.id, chat: destination.chat.id, mentions, ...(edited ? { text: text.value } : {}), confirmed: true });
@@ -426,11 +465,10 @@ async function showSend(run, area, refresh) {
       }
     }
     done(t('Sends finished; each destination shows its outcome.'));
-    runsData.holding = false;
-    runsData.record = null;
-    await loadRunDetail();
+    // Every destination has its outcome: nothing is left to send from this panel (busy() re-enables a button, so it hides).
+    send.hidden = destinations.every(d => d.outcome.dataset.done);
   });
-  const close = el('button', { type: 'button', class: 'link-button', textContent: t('Close') });
+  const close = el('button', { type: 'button', class: 'secondary', textContent: t('Close') });
   close.onclick = () => { runsData.holding = false; area.replaceChildren(); refresh(); };
   area.replaceChildren(el('div', { class: 'panel', id: 'run-send-panel' },
     el('h3', { textContent: t('Send this summary') }),
@@ -441,4 +479,4 @@ async function showSend(run, area, refresh) {
   text.focus();
 }
 
-export { loadWorkflowRuns, openWorkflowRun, closeWorkflowRun, refreshActiveRuns, activeRunFor, runLinkFor, WAITING };
+export { loadWorkflowRuns, openWorkflowRun, closeWorkflowRun, showRunsList, refreshActiveRuns, activeRunFor, runLinkFor, WAITING };

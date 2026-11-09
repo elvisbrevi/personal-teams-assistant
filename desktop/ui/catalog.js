@@ -2704,7 +2704,10 @@ const UI_CATALOG = { es: {
   "Each run takes one work item through its workflow: the plan, your review of the children, their coding, the pull requests and the blocks. Runs that wait for you come first.": "Cada ejecución lleva un work item por su workflow: el plan, tu revisión de los hijos, su programación, los pull requests y los bloques. Las que te esperan van primero.",
   "Every state": "Todos los estados",
   "Open the run": "Abrir la ejecución",
-  "Open run": "Abrir ejecución"
+  "Open run": "Abrir ejecución",
+  "An earlier send of this summary to this chat is uncertain: it may have been posted. Check Teams first; it is left out unless you send it again.": "Un envío anterior de este resumen a este chat quedó incierto: puede que se haya publicado. Revisa Teams primero; queda fuera a menos que lo envíes de nuevo.",
+  "Send again anyway": "Enviar de nuevo de todas formas",
+  "Left out: an earlier send may have been posted.": "Quedó fuera: un envío anterior puede haberse publicado."
 } };
 
 /** Host texts with a variable part (older runs and entries were stored in English). */
