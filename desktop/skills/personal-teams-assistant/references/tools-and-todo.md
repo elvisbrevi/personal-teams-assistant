@@ -398,6 +398,34 @@ nothing: every directory, repository, agent, chat and launcher is checked when s
 when used, and the fixed rules of the implementation agents still forbid work item writes,
 Teams sends, merging, publishing and deploying.
 
+### Operating sequence
+
+How a workflow takes an item from its ready state to its release, and where the person acts:
+
+1. **Set it up once** (GUI Workflows and Settings › Workflows, or `pta workflows save`, `blocks save`,
+   `settings --set`): a workflow per kind of work (its project, repositories, the machine and each
+   repository's checkout, the agent and instructions, its blocks, `auto_start`), the ready states of
+   the project, and the workflow director when several workflows start by themselves.
+2. **An item becomes ready.** The coordinator's watcher sees an assigned HU, bug or listed task in a
+   ready state and starts one run (directly with the only workflow that starts by itself, or through
+   the director); or the person starts one from Implement or with `pta workflows run ID`.
+3. **The run plans** with the workflow's machine, checkouts, agent, instructions and instruction
+   blocks, and stops at `plan_review`. A `plan_ready` block may tell the person.
+4. **The gate.** The person reviews the proposed children (GUI Runs › Review plan, or Implement) and
+   confirms them; only that `implementation_create` writes to Azure DevOps. Nothing passes the gate
+   without it. A task has no plan and goes straight to coding.
+5. **Children are coded one by one** in the checkout of the repository each names, each with its
+   own guide; each coding agent opens its pull request and reports its branch.
+6. **Pull requests are read** (never merged) until all are completed; an abandoned one, a missing
+   branch or the wait (`pull_request_wait_days`) stops the run in `needs_attention`.
+7. **Blocks act at their stage**: a launcher (an approved program of the coordinator, by digest)
+   when the pull requests are completed, notifications with mentions when the run is done or fails.
+8. **Report on request**: `workflow_summary` asks the director for a summary of the record, and
+   `workflow_summary_send` posts it, after the person confirms the exact text, to each chat chosen.
+9. **When something stops it** (`needs_attention`, `interrupted`, `failed`, `unassigned`), the run
+   says why; the person fixes the cause and resumes, assigns a workflow, or cancels. Nothing that
+   may already have happened is done again by a resume.
+
 ### Workflow settings and the director
 
 Requires host and CLI `workflow_director_support: true`.
