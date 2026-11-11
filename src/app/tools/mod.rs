@@ -1256,7 +1256,7 @@ pub(super) const TOOLS: &[Tool] = &[
     Tool {
         name: "message_style",
         title: "Teams message style",
-        description: "How answers look in Teams: enabled, the band's label, its position (top/bottom), the stripe color (accent, #RRGGBB) and width (stripe_width, 2-16 px), the band color, the label color, the robot icon and the text sizes (text_size, label_size).",
+        description: "How answers look in Teams: enabled, the band's label, its position (top/bottom), the stripe color (accent, #RRGGBB) and width (stripe_width, 2-16 px), the band color, the label color, the emoji before the label (icon on or off, emoji: any one emoji, 🤖 when omitted), the band's least height (band_height, 24-160 px, 0 or omitted fits the text) and the text sizes (text_size, label_size).",
         effect: Effect::Read,
         schema: none,
     },
@@ -1786,7 +1786,7 @@ pub(super) const TOOLS: &[Tool] = &[
     Tool {
         name: "message_style_update",
         title: "Change the Teams message style",
-        description: "Changes how answers look in Teams. Fields as message_style shows them; position is top or bottom, band is accent, emphasis, good, warning, attention or none, label_color is default, subtle, accent, good, warning or attention, text_size and label_size are small, default, medium, large or extralarge, stripe_width is 2 to 16 pixels, and an empty label uses the default in the reply language.",
+        description: "Changes how answers look in Teams. Fields as message_style shows them; position is top or bottom, band is accent, emphasis, good, warning, attention or none, label_color is default, subtle, accent, good, warning or attention, text_size and label_size are small, default, medium, large or extralarge, stripe_width is 2 to 16 pixels, band_height is 24 to 160 pixels or 0 to fit the text, emoji is any one emoji, and an empty label uses the default in the reply language.",
         effect: Effect::Local,
         schema: || {
             object(
@@ -2218,8 +2218,8 @@ pub(super) async fn run(name: &str, args: &Value) -> Result<Value, String> {
         "activity_history" => ipc("activity_history", json!({"day": args.get("day"), "from": args.get("from")})).await,
         "activity_settings" => Ok(ipc("snapshot", json!({})).await?["config"]["activity_registration"].clone()),
         "message_style" => {
-            let style = ipc("snapshot", json!({})).await?["config"]["message_style"].clone();
-            Ok(if style.is_null() { default_message_style() } else { style })
+            let config = ipc("snapshot", json!({})).await?["config"].clone();
+            Ok(crate::config::MessageStyle::fields(config.get("message_style").filter(|s| !s.is_null())))
         }
         "teams_reading" => {
             let config = ipc("snapshot", json!({})).await?["config"].clone();

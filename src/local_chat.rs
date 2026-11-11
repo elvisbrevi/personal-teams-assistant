@@ -99,6 +99,7 @@ pub async fn chat(
         config: config.clone(),
         store: store.clone(),
         client_state: String::new(),
+        config_path: None,
     });
     let pipeline = Pipeline {
         config: config.clone(),

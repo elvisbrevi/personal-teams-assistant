@@ -4,7 +4,7 @@ use super::{
     teams::{self, ConversationKind, GraphMessage, IncomingMessage},
 };
 use crate::{
-    config::Config,
+    config::{Config, Language, MessageStyle},
     state::{Store, Subscription},
 };
 use anyhow::{Context, Result, ensure};
@@ -102,6 +102,10 @@ pub struct Graph {
     pub config: Arc<Config>,
     pub store: Arc<Store>,
     pub client_state: String,
+    /// The profile file the running service loaded `config` from: the message style is read
+    /// from it again for each send, so a style the account syncs here applies without a
+    /// restart. `None` keeps `config`'s.
+    pub config_path: Option<String>,
 }
 
 fn call_hours(duration: &str) -> Option<f64> {
@@ -203,6 +207,14 @@ fn registration_message(
     })
 }
 impl Graph {
+    /// The message style and reply language to send with: the saved ones, else `config`'s.
+    pub(super) fn message_style(&self) -> (MessageStyle, Language) {
+        self.config_path
+            .as_deref()
+            .and_then(|path| Config::load(path).ok())
+            .map(|config| (config.message_style, config.llm.language))
+            .unwrap_or_else(|| (self.config.message_style.clone(), self.config.llm.language))
+    }
     pub async fn verify_account(&self) -> Result<()> {
         let me = self.request(Method::GET, "me", None, true).await?;
         ensure!(
@@ -1130,12 +1142,8 @@ impl Graph {
         // The configured style, like the assistant's answers. Graph mentions live in the HTML
         // body, so a message with mentions, or a card that does not fit, stays plain HTML.
         let card = if mentioned.is_empty() {
-            super::card::message(
-                &text,
-                &self.config.message_style,
-                self.config.llm.language,
-                &marker,
-            )
+            let (style, language) = self.message_style();
+            super::card::message(&text, &style, language, &marker)
         } else {
             None
         };
@@ -1578,13 +1586,9 @@ impl MessageAdapter for Graph {
             })
             .unwrap_or_default();
         // The configured style, or plain HTML when it is off or the card does not fit.
-        let body = super::card::message(
-            text,
-            &self.config.message_style,
-            self.config.llm.language,
-            &marker,
-        )
-        .unwrap_or_else(|| json!({"body":{"contentType":"html","content":content + &marker}}));
+        let (style, language) = self.message_style();
+        let body = super::card::message(text, &style, language, &marker)
+            .unwrap_or_else(|| json!({"body":{"contentType":"html","content":content + &marker}}));
         // Never retry a send: Graph provides no idempotency guarantee for this endpoint.
         let result = self.request(Method::POST, &path, Some(body), false).await?;
         let id = result["id"]

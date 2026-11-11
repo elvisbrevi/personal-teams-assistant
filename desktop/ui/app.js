@@ -138,8 +138,15 @@ $('#style-preset').addEventListener('change', () => {
   renderStylePreview();
   $('#style-preset').value = chosen;
 });
-['#style-enabled', '#style-label', '#style-position', '#style-accent', '#style-band', '#style-label-color', '#style-icon', '#style-stripe-width', '#style-text-size', '#style-label-size', '#llm-language']
+['#style-enabled', '#style-label', '#style-position', '#style-accent', '#style-band', '#style-label-color', '#style-icon', '#style-emoji', '#style-stripe-width', '#style-band-height', '#style-text-size', '#style-label-size', '#llm-language']
   .forEach(id => $(id).addEventListener('input', renderStylePreview));
+// A suggested emoji fills the field as if typed, so it marks the section edited and redraws the preview.
+document.querySelectorAll('#style-emoji-choices button').forEach(button => {
+  button.addEventListener('click', () => {
+    $('#style-emoji').value = button.dataset.emoji;
+    $('#style-emoji').dispatchEvent(new Event('input', { bubbles: true }));
+  });
+});
 document.querySelectorAll('#theme-choice button').forEach(button => {
   button.onclick = () => chooseLook(THEME_KEY, 'theme', button.dataset.themeChoice === 'system' ? null : button.dataset.themeChoice);
 });

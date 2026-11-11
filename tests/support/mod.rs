@@ -36,6 +36,7 @@ pub fn graph(server: &MockServer, store: Arc<Store>) -> Arc<Graph> {
         config: Arc::new(config()),
         store,
         client_state: "test-webhook-shared-secret-32-chars".into(),
+        config_path: None,
     })
 }
 pub async fn mock_message(server: &MockServer, text: &str) {

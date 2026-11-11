@@ -798,6 +798,7 @@ async fn all_chats_use_one_subscription_and_accept_chat_notifications() {
         config: Arc::new(cfg),
         store: store.clone(),
         client_state: "test-webhook-shared-secret-32-chars".into(),
+        config_path: None,
     });
     Mock::given(method("GET"))
         .and(path("/subscriptions"))
@@ -5417,6 +5418,7 @@ async fn teams_post_uses_the_message_style_unless_it_mentions_someone() {
         base_url: plain.base_url.clone(),
         store: plain.store.clone(),
         client_state: plain.client_state.clone(),
+        config_path: None,
     };
     Mock::given(method("POST"))
         .respond_with(ResponseTemplate::new(201).set_body_json(json!({"id": "m1"})))

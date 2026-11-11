@@ -703,11 +703,27 @@ check('axe: no WCAG 2.2 AA violations in any scan', !Object.keys(totals).length,
     return [getComputedStyle(card).borderLeftWidth, card.classList.contains('text-large'), card.classList.contains('label-size-medium')];
   });
   check('the preview follows the stripe width and text sizes', JSON.stringify(sized) === JSON.stringify(['8px', true, true]), JSON.stringify(sized));
+  await page.fill('#style-band-height', '12');
+  await page.click('#save');
+  await page.waitForTimeout(300);
+  check('a band lower than 24 px is refused before saving', await page.isVisible('#notice.error'));
+  await page.fill('#style-band-height', '56');
+  await page.fill('#style-emoji', 'IA');
+  await page.click('#save');
+  await page.waitForTimeout(300);
+  check('an emoji field with words is refused before saving', await page.isVisible('#notice.error'));
+  await page.click('#style-emoji-choices button[data-emoji="✨"]');
+  const band = await page.evaluate(() => [document.querySelector('#style-preview .teams-band').getBoundingClientRect().height,
+    document.querySelector('#style-preview-icon').textContent, document.querySelector('#style-emoji-choices button[data-emoji="✨"]').getAttribute('aria-pressed')]);
+  check('the preview follows the band height and the chosen emoji', Math.round(band[0]) === 56 && band[1] === '✨' && band[2] === 'true', JSON.stringify(band));
+  await page.uncheck('#style-icon');
+  check('the emoji field hides with the emoji', !await page.isVisible('#style-emoji') && !await page.isVisible('#style-preview-icon'));
+  await page.check('#style-icon');
   await page.click('#save');
   await page.waitForTimeout(300);
   check('the message style is saved', await page.evaluate(() => JSON.stringify(window.__ptaLastSave?.config?.message_style)) === JSON.stringify({
     enabled: true, label: 'Escrito por mi asistente', position: 'top', accent: '#13A10E', band: 'emphasis', label_color: 'good', icon: true,
-    stripe_width: 8, text_size: 'large', label_size: 'medium' }));
+    emoji: '✨', band_height: 56, stripe_width: 8, text_size: 'large', label_size: 'medium' }));
   check('message style has no page errors', errors.length === 0, errors.join(' | '));
   await context.close();
 }

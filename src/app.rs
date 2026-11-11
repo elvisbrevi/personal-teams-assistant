@@ -1721,6 +1721,7 @@ async fn profile_graph(state: &DesktopState) -> Result<ProfileGraph> {
             store,
             base_url: "https://graph.microsoft.com/v1.0".into(),
             client_state: String::new(),
+            config_path: None,
         },
     })
 }

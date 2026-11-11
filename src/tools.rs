@@ -959,6 +959,7 @@ mod tests {
                 store,
                 base_url: "https://graph.microsoft.com/v1.0".into(),
                 client_state: String::new(),
+                config_path: None,
             }),
         };
         let spec = ToolSpec::AzureDevopsStatus {

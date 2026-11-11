@@ -546,6 +546,7 @@ async fn a_notification_names_only_a_chat_the_user_belongs_to() {
         config: Arc::new(host.state.settings.config().unwrap()),
         store: Arc::new(crate::state::Store::open(&root.path().join("graph.db")).unwrap()),
         client_state: "synthetic-client-state-of-32-chars".into(),
+        config_path: None,
     });
     let session = || async { *host.state.activity_graph.lock().await = Some(graph.clone()) };
     session().await;

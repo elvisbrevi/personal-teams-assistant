@@ -81,6 +81,7 @@ pub async fn serve(
         config: config.clone(),
         store: store.clone(),
         client_state,
+        config_path: Some(path.to_owned()),
     });
     graph.verify_account().await?;
     let llm = Arc::new(llm);

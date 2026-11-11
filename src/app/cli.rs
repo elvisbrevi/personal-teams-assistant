@@ -54,8 +54,8 @@ Configuration
   config get FIELD         Reads a field by dotted path (e.g. policy.dry_run).
   config set FIELD JSON    Changes a field; the value is JSON (true, \"text\", [...], {...}).
                            Teams message style: config set message_style.enabled true (and .label,
-                           .position, .accent, .band, .label_color, .icon, .stripe_width,
-                           .text_size, .label_size).
+                           .position, .accent, .band, .label_color, .icon, .emoji, .band_height,
+                           .stripe_width, .text_size, .label_size).
                            Teams chats every computer of the account may read on request (follows the
                            account): config set teams_reading.all_chats true (and .personal_chat,
                            .chats [\"CHAT_ID\",...]). graph.discover_all_chats, graph.allowed_chats and
@@ -1880,9 +1880,7 @@ fn lookup<'a>(value: &'a Value, key: &str) -> Result<&'a Value> {
 /// Sections left out of the configuration while they hold their defaults, filled in so they
 /// can still be read and edited by path.
 fn with_default_sections(config: &mut Value) -> Result<()> {
-    if config.get("message_style").is_none() {
-        config["message_style"] = serde_json::to_value(crate::config::MessageStyle::default())?;
-    }
+    config["message_style"] = crate::config::MessageStyle::fields(config.get("message_style"));
     if config.get("teams_reading").is_none() {
         config["teams_reading"] = serde_json::to_value(crate::config::TeamsReading::default())?;
     }
