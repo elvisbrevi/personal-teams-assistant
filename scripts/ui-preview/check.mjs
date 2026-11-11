@@ -431,9 +431,18 @@ check('axe: no WCAG 2.2 AA violations in any scan', !Object.keys(totals).length,
   await page.click('#registration-weekdays label:nth-of-type(6)'); // Saturday on
   await page.click('#registration-weekdays label:nth-of-type(1)'); // Monday off
   await page.selectOption('#registration-schedule', 'daily');
+  // An effort field by type: added as a row, sent as a map; an incomplete row is refused first.
+  await page.evaluate(() => { document.querySelector('#registration-effort-types').closest('details').open = true; });
+  await page.click('#registration-effort-type-add');
+  await page.fill('#registration-effort-types .effort-type:last-child [data-kind]', 'Bug');
+  await page.click('#save');
+  await page.waitForTimeout(300);
+  check('a type without its effort field is refused before saving', (await page.textContent('#notice-text')).includes('campo con horas reales'), await page.textContent('#notice-text'));
+  await page.fill('#registration-effort-types .effort-type:last-child [data-field]', 'Custom.EsfuerzoReal');
   await page.click('#save');
   await page.waitForTimeout(400);
   const saved = await page.evaluate(() => window.__ptaLastSave?.config?.activity_registration);
+  check('save sends the effort field by type', JSON.stringify(saved?.effort_fields) === '{"Bug":"Custom.EsfuerzoReal"}', JSON.stringify(saved?.effort_fields));
   check('save sends the chosen workdays as numbers', JSON.stringify(saved?.weekdays) === '[2,3,4,5,6]', JSON.stringify(saved?.weekdays));
   check('save keeps the other registration values', saved?.daily_hours === 9 && saved?.schedule === 'daily' && saved?.at === '18:00' && saved?.interval_minutes === 60);
   check('flags clear after saving', !(await page.isVisible('#settings-tab-activity .flag.edited')) && !(await page.isVisible('#savebar')));

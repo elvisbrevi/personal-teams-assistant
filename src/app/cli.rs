@@ -376,7 +376,11 @@ Daily task record
   activity pending         Retired; always empty.
   activity resolve ID      Retired; refuses task creation.
   activity open [ID]        Opens Activities in the app.
-                           Configure with config set activity_registration.FIELD JSON.
+                           Configure with config set activity_registration.FIELD JSON. A day holds
+                           tasks and bugs with actual hours that day; a bug with tasks is their
+                           parent, not a row. Hours come from effort_field, or by type from
+                           effort_fields: config set activity_registration.effort_fields
+                           '{\"Bug\":\"Custom.EsfuerzoReal\"}'.
 
 Knowledge
   repos list | repos add|edit ALIAS PATH | repos remove ALIAS
@@ -1881,6 +1885,15 @@ fn lookup<'a>(value: &'a Value, key: &str) -> Result<&'a Value> {
 /// can still be read and edited by path.
 fn with_default_sections(config: &mut Value) -> Result<()> {
     config["message_style"] = crate::config::MessageStyle::fields(config.get("message_style"));
+    // Omitted while empty, like the sections above.
+    if let Some(registration) = config
+        .get_mut("activity_registration")
+        .and_then(Value::as_object_mut)
+    {
+        registration
+            .entry("effort_fields")
+            .or_insert_with(|| json!({}));
+    }
     if config.get("teams_reading").is_none() {
         config["teams_reading"] = serde_json::to_value(crate::config::TeamsReading::default())?;
     }

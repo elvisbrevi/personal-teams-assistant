@@ -24,15 +24,19 @@ Local reads do not grant Teams audiences or authorize external processing.
 `daily_hours` (default 9) is advisory. A snapshot saves every matching task even below or
 above that target; it never invents work or caps hours. `effort_field` identifies actual
 hours (default `Microsoft.VSTS.Scheduling.CompletedWork`), including custom numeric fields.
+`effort_fields` names another field for a work item type, such as bugs that keep their hours
+in `Custom.EsfuerzoReal`; types not listed use `effort_field`. Type names compare without
+case; the map replaces as a whole and is empty by default.
 `auto_register`, `write_source`, `task_kind`, `done_state` and `extra_fields` are legacy
 fields retained for profile compatibility. They cannot enable Azure writes. Task types
-(the process task and bug categories, so bugs with actual hours count) and completed states
-come from the project's process.
+(the process task and bug categories, so bugs with actual hours count) come from the
+project's process.
 
 ```sh
 pta config set activity_registration.sources '["azure-devops-status"]'
 pta config set activity_registration.time_zone '"America/Santiago"'
 pta config set activity_registration.at '"18:30"'
+pta config set activity_registration.effort_fields '{"Bug":"Custom.EsfuerzoReal"}'
 pta config set activity_registration.enabled true
 pta activity run
 pta activity run 2026-10-14
@@ -52,13 +56,16 @@ refuses task creation; `--context-stdin` is retired and non-empty context is rej
 
 ## Which tasks belong to a day
 
-A task belongs to the user/day when actual hours change or it enters a process-defined
-completed state while assigned to that user inside the configured local day. Hours are the
-net effort delta for that day, rather than the task's accumulated hours. Creation or a
-comment alone does not count as work. Historical assignments are checked: a later edit or
-handover does not move work to the new day or owner. A task without a parent HU or hours
-can still appear when completion is verified. Task title, state and description come from
-the last revision before the day's end; full detail is a fresh read.
+A task or bug belongs to the user/day when its actual hours grow while assigned to that user
+inside the configured local day. Hours are the net effort delta for that day in the type's
+effort field, rather than the item's accumulated hours. A day never holds a row of 0 h:
+closing an item, creating it or commenting on it without new hours does not count as work.
+A bug with tasks is not recorded itself, even with hours in its own field: its work is in
+its tasks, which show the bug as their parent, so each hour counts once. A bug without tasks
+counts like a task, with the hours of its own field. Historical assignments are checked: a
+later edit or handover does not move work to the new day or owner. A task without a parent
+HU can still appear. Title, state and description come from the last revision before the
+day's end; full detail is a fresh read.
 
 Bounds: 200 candidate tasks per project and 1,000 revisions per task, with an overall
 110-second Azure read deadline. Reaching a bound or failing a project read fails the snapshot
