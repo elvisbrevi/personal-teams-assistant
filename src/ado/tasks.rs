@@ -71,29 +71,37 @@ pub async fn list(
                 continue;
             }
             matched_project = true;
-            let category = todo::metadata(
-                client,
-                key,
-                cache,
-                project_url(
+            // Bugs carry actual hours like tasks. A process without a bug category
+            // answers it with 404, which leaves only the tasks; any other error fails.
+            let mut categories = Vec::new();
+            for name in ["Microsoft.TaskCategory", "Microsoft.BugCategory"] {
+                let url = project_url(
                     source,
                     project,
                     "dev.azure.com",
-                    &[
-                        "_apis",
-                        "wit",
-                        "workitemtypecategories",
-                        "Microsoft.TaskCategory",
-                    ],
-                )?,
-            )
-            .await?;
-            let kinds: Vec<_> = category["workItemTypes"]
-                .as_array()
-                .context("invalid task category")?
-                .iter()
-                .filter_map(|k| k["name"].as_str())
-                .collect();
+                    &["_apis", "wit", "workitemtypecategories", name],
+                )?;
+                match todo::metadata(client, key, cache, url).await {
+                    Ok(category) => categories.push(category),
+                    Err(error)
+                        if name == "Microsoft.BugCategory"
+                            && error.to_string().ends_with("returned HTTP 404") => {}
+                    Err(error) => return Err(error),
+                }
+            }
+            let mut kinds: Vec<&str> = Vec::new();
+            for category in &categories {
+                for kind in category["workItemTypes"]
+                    .as_array()
+                    .context("invalid task category")?
+                    .iter()
+                    .filter_map(|k| k["name"].as_str())
+                {
+                    if !kinds.contains(&kind) {
+                        kinds.push(kind);
+                    }
+                }
+            }
             ensure!(!kinds.is_empty() && kinds.len() <= 40, "invalid task types");
             let mut completed = BTreeSet::new();
             for kind in &kinds {
@@ -416,6 +424,86 @@ mod tests {
                 .all(|r| r.method == Method::GET || r.url.path().ends_with("/wiql")),
             "there are no work item writes"
         );
+        TEST_SERVER.with(|s| *s.borrow_mut() = None);
+    }
+
+    #[tokio::test]
+    async fn daily_tasks_include_bugs_with_actual_work() {
+        let server = MockServer::start().await;
+        TEST_SERVER.with(|s| *s.borrow_mut() = Some(Url::parse(&server.uri()).unwrap()));
+        let effort = "Custom.RealHours";
+        for (endpoint, value) in [
+            (
+                "/example/Payments/_apis/wit/workitemtypecategories/Microsoft.TaskCategory",
+                json!({"workItemTypes":[{"name":"Task"}]}),
+            ),
+            (
+                "/example/Payments/_apis/wit/workitemtypecategories/Microsoft.BugCategory",
+                json!({"workItemTypes":[{"name":"Bug"}]}),
+            ),
+            (
+                "/example/Payments/_apis/wit/workitemtypes/Task",
+                json!({"states":[{"name":"Done","category":"Completed"}]}),
+            ),
+            (
+                "/example/Payments/_apis/wit/workitemtypes/Bug",
+                json!({"states":[{"name":"In review","category":"InProgress"},{"name":"Done","category":"Completed"}]}),
+            ),
+            (
+                "/example/Payments/_apis/wit/workitems/7/revisions",
+                json!({"value":[{"fields":{
+                    "System.TeamProject":"Payments","System.WorkItemType":"Bug","System.Title":"Fix import",
+                    "System.State":"In review","System.ChangedDate":"2026-10-14T15:00:00Z","System.CreatedDate":"2026-10-14T15:00:00Z",
+                    "System.AssignedTo":{"uniqueName":"me@example.test"},effort:6.
+                }}]}),
+            ),
+        ] {
+            Mock::given(method("GET"))
+                .and(path(endpoint))
+                .respond_with(ResponseTemplate::new(200).set_body_json(value))
+                .mount(&server)
+                .await;
+        }
+        Mock::given(method("POST"))
+            .and(path("/example/Payments/_apis/wit/wiql"))
+            .respond_with(|r: &wiremock::Request| {
+                let query = r.body_json::<Value>().unwrap()["query"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned();
+                assert!(query.contains("IN ('Task','Bug')"));
+                ResponseTemplate::new(200).set_body_json(json!({"workItems":[{"id":7}]}))
+            })
+            .mount(&server)
+            .await;
+        let dir = tempfile::tempdir().unwrap();
+        let cache = Store::open(&dir.path().join("cache.db")).unwrap();
+        let settings = Settings {
+            time_zone: "America/Santiago".into(),
+            effort_field: effort.into(),
+            daily_hours: 9.,
+            ..Default::default()
+        };
+        let query = Query {
+            day: "2026-10-14".into(),
+            user: None,
+            source: Some("ado".into()),
+            project: None,
+        };
+        let catalog = "[[sources]]\norganization='https://dev.azure.com/example'\nprojects=['Payments']\nauthor_email='me@example.test'";
+        let day = list(
+            &Client::new(),
+            "test-key",
+            catalog,
+            &cache,
+            &query,
+            &settings,
+        )
+        .await
+        .unwrap();
+        assert_eq!(day.tasks.len(), 1);
+        assert_eq!(day.tasks[0].item.kind, "Bug");
+        assert_eq!(day.hours, 6.);
         TEST_SERVER.with(|s| *s.borrow_mut() = None);
     }
 }

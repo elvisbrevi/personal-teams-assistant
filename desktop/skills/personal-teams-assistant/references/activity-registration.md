@@ -26,7 +26,8 @@ above that target; it never invents work or caps hours. `effort_field` identifie
 hours (default `Microsoft.VSTS.Scheduling.CompletedWork`), including custom numeric fields.
 `auto_register`, `write_source`, `task_kind`, `done_state` and `extra_fields` are legacy
 fields retained for profile compatibility. They cannot enable Azure writes. Task types
-and completed states come from the project's process.
+(the process task and bug categories, so bugs with actual hours count) and completed states
+come from the project's process.
 
 ```sh
 pta config set activity_registration.sources '["azure-devops-status"]'
