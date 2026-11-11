@@ -292,8 +292,16 @@ pub struct MessageStyle {
     /// theme, so the label stays readable in both.
     pub band: BandColor,
     pub label_color: LabelColor,
-    /// A robot icon before the label.
+    /// An emoji before the label.
     pub icon: bool,
+    /// The emoji shown before the label; empty means 🤖. Sent as text: Teams does not draw
+    /// the card `Icon` element in chat messages. Omitted while it is the robot, like
+    /// `band_height` while 0, so hosts that predate both keep installing the account's style.
+    #[serde(skip_serializing_if = "MessageStyle::default_emoji")]
+    pub emoji: String,
+    /// The band's least height in pixels, 24 to 160; 0 fits it to its text.
+    #[serde(skip_serializing_if = "MessageStyle::fitted_band")]
+    pub band_height: u16,
     /// The stripe's width in pixels, 2 to 16.
     pub stripe_width: u8,
     /// The size of the message's text; headings stay a step larger.
@@ -311,6 +319,8 @@ impl Default for MessageStyle {
             band: BandColor::Accent,
             label_color: LabelColor::Default,
             icon: true,
+            emoji: Self::DEFAULT_EMOJI.into(),
+            band_height: 0,
             stripe_width: 4,
             text_size: TextSize::Default,
             label_size: TextSize::Small,
@@ -319,8 +329,28 @@ impl Default for MessageStyle {
 }
 impl MessageStyle {
     pub const MAX_LABEL_CHARS: usize = 80;
+    pub const DEFAULT_EMOJI: &str = "🤖";
+    /// Room for the longest emoji sequences (a family, a flag with its tag characters).
+    pub const MAX_EMOJI_CHARS: usize = 16;
     pub fn is_default(&self) -> bool {
         *self == Self::default()
+    }
+    /// Every field, the ones omitted while default included, as `config get` and the
+    /// `message_style` tool show the style; `saved` is the section as stored, maybe partial.
+    pub fn fields(saved: Option<&serde_json::Value>) -> serde_json::Value {
+        let style: Self = saved
+            .and_then(|saved| serde_json::from_value(saved.clone()).ok())
+            .unwrap_or_default();
+        let mut fields = serde_json::to_value(&style).unwrap_or_default();
+        fields["emoji"] = style.emoji().into();
+        fields["band_height"] = style.band_height.into();
+        fields
+    }
+    fn default_emoji(emoji: &str) -> bool {
+        matches!(emoji.trim(), "" | Self::DEFAULT_EMOJI)
+    }
+    fn fitted_band(height: &u16) -> bool {
+        *height == 0
     }
     pub fn validate(&self) -> Result<()> {
         ensure!(
@@ -338,7 +368,30 @@ impl MessageStyle {
             (2..=16).contains(&self.stripe_width),
             "the message style stripe is 2 to 16 pixels wide"
         );
+        ensure!(
+            self.band_height == 0 || (24..=160).contains(&self.band_height),
+            "the message style band is 24 to 160 pixels tall, or 0 to fit its text"
+        );
+        // Emoji are not ASCII, but for the digits, `#` and `*` of keycaps; this keeps words,
+        // spaces and Markdown out of the band.
+        let emoji = self.emoji.trim();
+        ensure!(
+            emoji.chars().count() <= Self::MAX_EMOJI_CHARS
+                && emoji
+                    .chars()
+                    .all(|c| !c.is_ascii() || c.is_ascii_digit() || c == '#' || c == '*')
+                && (emoji.is_empty() || !emoji.is_ascii())
+                && !emoji.chars().any(|c| c.is_control() || c.is_whitespace()),
+            "the message style emoji is one emoji"
+        );
         Ok(())
+    }
+    /// The emoji before the band's text: the configured one or the robot.
+    pub fn emoji(&self) -> &str {
+        match self.emoji.trim() {
+            "" => Self::DEFAULT_EMOJI,
+            emoji => emoji,
+        }
     }
     /// The band's text: the configured one or the default in the reply language.
     pub fn label(&self, language: Language) -> String {
@@ -532,7 +585,7 @@ impl Config {
 
 #[cfg(test)]
 mod tests {
-    use super::{Config, Language};
+    use super::{Config, Language, MessageStyle};
 
     #[test]
     fn graph_callbacks_keep_existing_urls_and_isolate_web_profiles() {
@@ -613,6 +666,45 @@ mod tests {
             let mut wrong = sized.clone();
             wrong.message_style.stripe_width = width;
             assert!(wrong.validate().is_err(), "{width}");
+        }
+        assert_eq!(partial.message_style.emoji(), "🤖");
+        assert_eq!(partial.message_style.band_height, 0);
+        // Older hosts reject unknown fields: the new ones are written only once changed.
+        assert!(
+            !saved.contains("emoji") && !saved.contains("band_height"),
+            "{saved}"
+        );
+        // Reading the style by path shows them anyway.
+        let fields = MessageStyle::fields(Some(&serde_json::json!({"enabled": true})));
+        assert_eq!(fields["enabled"], true);
+        assert_eq!(fields["emoji"], "🤖");
+        assert_eq!(fields["band_height"], 0);
+        for (height, valid) in [
+            (0, true),
+            (24, true),
+            (160, true),
+            (12, false),
+            (161, false),
+        ] {
+            let mut style = sized.clone();
+            style.message_style.band_height = height;
+            assert_eq!(style.validate().is_ok(), valid, "{height}");
+        }
+        for (emoji, valid) in [
+            ("", true),
+            ("✨", true),
+            ("👨‍👩‍👧‍👦", true),
+            ("1️⃣", true),
+            ("🏴󠁧󠁢󠁳󠁣󠁴󠁿", true),
+            ("a", false),
+            ("🤖 IA", false),
+            ("[x](https://evil.example)", false),
+            ("7", false),
+            ("🤖🤖🤖🤖🤖🤖🤖🤖🤖🤖🤖🤖🤖🤖🤖🤖🤖", false),
+        ] {
+            let mut style = sized.clone();
+            style.message_style.emoji = emoji.into();
+            assert_eq!(style.validate().is_ok(), valid, "{emoji}");
         }
         for (label, accent) in [
             ("a\nb", "#5B5FC7"),

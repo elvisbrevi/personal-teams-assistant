@@ -140,26 +140,23 @@ fn band(style: &MessageStyle, language: Language, stripe: &Value) -> Value {
     };
     let subtle = style.label_color == LabelColor::Subtle;
     let size = style.label_size.card();
-    let label = json!({"type": "TextBlock", "text": inline(&style.label(language)), "size": size,
-        "wrap": true, "color": color, "isSubtle": subtle});
-    // Fluent icons have their own scale; these match the text sizes.
-    let icon = match style.label_size {
-        TextSize::Small => "xSmall",
-        TextSize::Default => "Small",
-        TextSize::Medium => "Standard",
-        TextSize::Large => "Medium",
-        TextSize::ExtraLarge => "Large",
+    let text = |text: &str| {
+        json!({"type": "TextBlock", "text": inline(text), "size": size,
+        "wrap": true, "color": color, "isSubtle": subtle})
     };
     let column = |item: Value| json!({"type": "Column", "width": "auto", "verticalContentAlignment": "Center", "items": [item]});
     let mut columns = Vec::new();
     if style.icon {
-        // Teams draws its Fluent icon; a client without the Icon element shows the emoji.
-        columns.push(column(json!({"type": "Icon", "name": "Bot", "size": icon,
-            "color": color, "fallback": {"type": "TextBlock", "text": "🤖", "size": size}})));
+        // Plain text: Teams does not draw the card `Icon` element in chat messages.
+        columns.push(column(text(style.emoji())));
     }
-    columns.push(column(label));
+    columns.push(column(text(&style.label(language))));
     let mut band = json!({"type": "Container", "id": BAND,
         "items": [{"type": "ColumnSet", "horizontalAlignment": "Right", "columns": columns}]});
+    if style.band_height > 0 {
+        band["minHeight"] = json!(format!("{}px", style.band_height));
+        band["verticalContentAlignment"] = json!("Center");
+    }
     let background = match style.band {
         BandColor::Accent => "accent",
         BandColor::Emphasis => "emphasis",
@@ -568,8 +565,11 @@ mod tests {
         assert_eq!(band["bleed"], true);
         assert_eq!(band["spacing"], "Medium");
         let columns = band["items"][0]["columns"].as_array().unwrap();
-        assert_eq!(columns[0]["items"][0]["type"], "Icon");
+        assert_eq!(columns[0]["items"][0]["type"], "TextBlock");
+        assert_eq!(columns[0]["items"][0]["text"], "🤖");
         assert_eq!(columns[1]["items"][0]["text"], "Respuesta generada con IA");
+        // The band fits its text unless it has a height.
+        assert!(band.get("minHeight").is_none());
         assert_eq!(
             card["backgroundImage"]["url"],
             band["backgroundImage"]["url"]
@@ -593,6 +593,17 @@ mod tests {
         assert_eq!(columns[0]["items"][0]["text"], "Escrito por mi asistente");
         assert_eq!(columns[0]["items"][0]["isSubtle"], true);
         assert_eq!(body[1]["spacing"], "Medium");
+        // Any emoji, and a taller band with its text centered.
+        let tall = MessageStyle {
+            emoji: "✨".into(),
+            band_height: 48,
+            ..style()
+        };
+        let card = super::card("Hola", &tall, Language::Es);
+        let band = &card["body"][1];
+        assert_eq!(band["minHeight"], "48px");
+        assert_eq!(band["verticalContentAlignment"], "Center");
+        assert_eq!(band["items"][0]["columns"][0]["items"][0]["text"], "✨");
         // The default label follows the reply language.
         let english = MessageStyle {
             position: BandPosition::Top,
@@ -705,8 +716,7 @@ mod tests {
             "Large"
         );
         let band = body[5]["items"][0]["columns"].as_array().unwrap();
-        assert_eq!(band[0]["items"][0]["size"], "Standard");
-        assert_eq!(band[0]["items"][0]["fallback"]["size"], "Medium");
+        assert_eq!(band[0]["items"][0]["size"], "Medium");
         assert_eq!(band[1]["items"][0]["size"], "Medium");
     }
 

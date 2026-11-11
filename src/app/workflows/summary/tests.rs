@@ -647,6 +647,7 @@ impl Sending {
             config: Arc::new(config),
             store: Arc::new(crate::state::Store::open(&root.path().join("graph.db")).unwrap()),
             client_state: "synthetic-client-state-of-32-chars".into(),
+            config_path: None,
         });
         *host.state.activity_graph.lock().await = Some(graph.clone());
         Self {

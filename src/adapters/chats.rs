@@ -914,6 +914,44 @@ mod tests {
     }
 
     #[test]
+    fn the_running_service_sends_with_the_saved_message_style() {
+        struct NoToken;
+        #[async_trait::async_trait]
+        impl super::super::oauth::AccessToken for NoToken {
+            async fn access_token(&self) -> Result<String> {
+                anyhow::bail!("no Graph session")
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(crate::state::Store::open(&dir.path().join("cache.db")).unwrap());
+        let started = crate::config::Config::desktop_template().unwrap();
+        let path = dir.path().join("config.toml");
+        let mut graph = Graph {
+            client: reqwest::Client::new(),
+            token: Arc::new(NoToken),
+            config: Arc::new(started.clone()),
+            store,
+            base_url: "https://graph.microsoft.com/v1.0".into(),
+            client_state: String::new(),
+            config_path: None,
+        };
+        assert_eq!(graph.message_style().0, started.message_style);
+        // A style the account synced after the service started.
+        let mut saved = started.clone();
+        saved.message_style.enabled = true;
+        saved.message_style.label = "Synthetic label".into();
+        saved.llm.language = crate::config::Language::En;
+        std::fs::write(&path, toml::to_string(&saved).unwrap()).unwrap();
+        graph.config_path = Some(path.to_string_lossy().into_owned());
+        let (style, language) = graph.message_style();
+        assert_eq!(style, saved.message_style);
+        assert_eq!(language, crate::config::Language::En);
+        // An unreadable profile keeps the style the service started with.
+        std::fs::write(&path, "not a profile").unwrap();
+        assert_eq!(graph.message_style().0, started.message_style);
+    }
+
+    #[test]
     fn the_accounts_reading_scope_widens_reads_on_request_and_never_reception() {
         struct NoToken;
         #[async_trait::async_trait]
@@ -934,6 +972,7 @@ mod tests {
                 store: store.clone(),
                 base_url: "https://graph.microsoft.com/v1.0".into(),
                 client_state: String::new(),
+                config_path: None,
             }
         };
         // A computer that receives nothing reads nothing on request.

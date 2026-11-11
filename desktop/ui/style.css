@@ -934,7 +934,9 @@ body.directory-picker-open { overflow: hidden; }
 .teams-card { display: flex; flex-direction: column; max-width: 28rem; overflow: hidden; border: 1px solid var(--teams-border); border-left: var(--stripe-width, 4px) solid var(--stripe, #5b5fc7); border-radius: 8px; background: var(--teams-surface); color: var(--teams-text); }
 .teams-card.at-top { flex-direction: column-reverse; }
 .teams-card > p { margin: 0; padding: .8rem 1rem; font-size: .93rem; }
-.teams-band { display: flex; justify-content: flex-end; align-items: center; gap: .45rem; padding: .55rem 1rem; }
+.teams-band { display: flex; justify-content: flex-end; align-items: center; gap: .45rem; min-height: var(--band-height, auto); padding: .55rem 1rem; }
+.emoji-choices { margin: .25rem 0 .75rem; }
+.emoji-choices button { min-width: 2.6rem; padding: .35rem .55rem; font-size: var(--fs-lg); line-height: 1; }
 .teams-card.band-accent .teams-band { background: var(--teams-accent); }
 .teams-card.band-emphasis .teams-band { background: var(--teams-emphasis); }
 .teams-card.band-good .teams-band { background: var(--teams-good); }

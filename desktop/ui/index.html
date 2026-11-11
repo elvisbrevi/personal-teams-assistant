@@ -304,11 +304,20 @@
                   <label>Band color <small>Teams adapts it to its light or dark theme.</small><select id="style-band" class="cfg"><option value="accent">Lavender</option><option value="emphasis">Gray</option><option value="good">Green</option><option value="warning">Amber</option><option value="attention">Red</option><option value="none">No band color</option></select></label>
                   <label>Band text color<select id="style-label-color" class="cfg"><option value="default">Normal</option><option value="subtle">Soft</option><option value="accent">Accent</option><option value="good">Green</option><option value="warning">Amber</option><option value="attention">Red</option></select></label>
                 </div>
-                <label class="check"><input id="style-icon" class="cfg" type="checkbox"> Show a robot icon before the band text</label>
                 <div class="grid">
                   <label>Stripe width <small>In pixels, from 2 to 16.</small><input id="style-stripe-width" class="cfg" type="number" min="2" max="16" step="1" inputmode="numeric"></label>
+                  <label>Band height <small>In pixels, from 24 to 160. Empty fits the text.</small><input id="style-band-height" class="cfg" type="number" min="24" max="160" step="1" inputmode="numeric"></label>
+                </div>
+                <div class="grid">
                   <label>Message text size<select id="style-text-size" class="cfg"><option value="small">Small</option><option value="default">Normal</option><option value="medium">Medium</option><option value="large">Large</option><option value="extralarge">Extra large</option></select></label>
                   <label>Band text size<select id="style-label-size" class="cfg"><option value="small">Small</option><option value="default">Normal</option><option value="medium">Medium</option><option value="large">Large</option><option value="extralarge">Extra large</option></select></label>
+                </div>
+                <label class="check"><input id="style-icon" class="cfg" type="checkbox"> Show an emoji before the band text</label>
+                <div id="style-emoji-field">
+                  <div class="grid fill">
+                    <label>Emoji <small>Type or paste any emoji, or choose one below.</small><input id="style-emoji" class="cfg" autocomplete="off" spellcheck="false" translate="no"></label>
+                  </div>
+                  <div id="style-emoji-choices" class="segmented emoji-choices" role="group" aria-label="Suggested emoji"><button type="button" class="secondary" translate="no" data-emoji="🤖" aria-pressed="false">🤖</button><button type="button" class="secondary" translate="no" data-emoji="✨" aria-pressed="false">✨</button><button type="button" class="secondary" translate="no" data-emoji="💬" aria-pressed="false">💬</button><button type="button" class="secondary" translate="no" data-emoji="🧠" aria-pressed="false">🧠</button><button type="button" class="secondary" translate="no" data-emoji="💡" aria-pressed="false">💡</button><button type="button" class="secondary" translate="no" data-emoji="⚡" aria-pressed="false">⚡</button><button type="button" class="secondary" translate="no" data-emoji="🦾" aria-pressed="false">🦾</button><button type="button" class="secondary" translate="no" data-emoji="📝" aria-pressed="false">📝</button><button type="button" class="secondary" translate="no" data-emoji="✅" aria-pressed="false">✅</button><button type="button" class="secondary" translate="no" data-emoji="🚀" aria-pressed="false">🚀</button><button type="button" class="secondary" translate="no" data-emoji="👋" aria-pressed="false">👋</button><button type="button" class="secondary" translate="no" data-emoji="🔷" aria-pressed="false">🔷</button></div>
                 </div>
               </details>
               <p class="hint">Preview, in this app's theme. Teams shows the same card in its own light or dark theme.</p>
