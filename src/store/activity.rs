@@ -29,7 +29,14 @@ pub trait ActivityStore: Send + Sync {
     fn recorded(&self, since: &str, until: &str) -> Result<Vec<Entry>>;
     /// Finish a run the scheduler started: `completed` with its summary, otherwise `failed`
     /// with the error; from then on it is part of the record.
-    fn finish_run(&self, id: &str, summary: Option<&Summary>, error: &str) -> Result<()>;
+    /// `detail` is the failure's real cause, kept beside the generic `error` when not empty.
+    fn finish_run(
+        &self,
+        id: &str,
+        summary: Option<&Summary>,
+        error: &str,
+        detail: &str,
+    ) -> Result<()>;
     /// Finished runs, the newest first (at most 100); `day` keeps that day's.
     fn runs(&self, day: Option<&str>) -> Result<Vec<Value>>;
 }
@@ -206,9 +213,15 @@ impl ActivityStore for LocalActivity<'_> {
         Ok(entries)
     }
 
-    fn finish_run(&self, id: &str, summary: Option<&Summary>, error: &str) -> Result<()> {
+    fn finish_run(
+        &self,
+        id: &str,
+        summary: Option<&Summary>,
+        error: &str,
+        detail: &str,
+    ) -> Result<()> {
         self.db.connection().execute(
-            "UPDATE runs SET status=?2,summary=?3,diagnostics=json_set(diagnostics,'$.error',?4,'$.finished_at',?5) WHERE id=?1",
+            "UPDATE runs SET status=?2,summary=?3,diagnostics=CASE WHEN ?6='' THEN json_set(diagnostics,'$.error',?4,'$.finished_at',?5) ELSE json_set(diagnostics,'$.error',?4,'$.finished_at',?5,'$.detail',?6) END WHERE id=?1",
             params![
                 id,
                 if summary.is_some() {
@@ -219,6 +232,7 @@ impl ActivityStore for LocalActivity<'_> {
                 serde_json::to_string(&summary)?,
                 error,
                 Utc::now().timestamp(),
+                detail,
             ],
         )?;
         crate::mirror::wake();
@@ -406,9 +420,11 @@ pub(crate) mod contract {
             recorded_hours: 4.,
             ..Default::default()
         };
-        store.finish_run(&completed, Some(&summary), "").unwrap();
         store
-            .finish_run(&failed, None, "Tasks could not be read.")
+            .finish_run(&completed, Some(&summary), "", "")
+            .unwrap();
+        store
+            .finish_run(&failed, None, "Tasks could not be read.", "ado: HTTP 401")
             .unwrap();
         let ids = |day| -> Vec<String> {
             store
@@ -432,6 +448,8 @@ pub(crate) mod contract {
         assert_eq!(broken["status"], "failed");
         assert!(broken["summary"].is_null());
         assert_eq!(broken["diagnostics"]["error"], "Tasks could not be read.");
+        assert_eq!(broken["diagnostics"]["detail"], "ado: HTTP 401");
+        assert!(done["diagnostics"].get("detail").is_none());
         assert!(ids(Some("2026-10-15")).is_empty());
     }
 }
@@ -455,7 +473,7 @@ mod tests {
         let db = Database::open(&dir.path().join("activity-registration.db")).unwrap();
         let finished = db.claim_run(Some("slot-1"), "2026-10-13").unwrap().unwrap();
         LocalActivity::new(&db)
-            .finish_run(&finished, None, "Tasks could not be read.")
+            .finish_run(&finished, None, "Tasks could not be read.", "")
             .unwrap();
         let running = db.claim_run(Some("slot-2"), "2026-10-14").unwrap().unwrap();
         db.stage_run(&running, "Reading existing tasks").unwrap();

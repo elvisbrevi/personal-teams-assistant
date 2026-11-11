@@ -662,7 +662,7 @@
     self_chat_status: () => ({ diagnostics: { cursor: ['x', secs(ago(1))], unresolved_outputs: 0 } }),
     activity_history: args => ({ day: args.day || DAY, running: !!window.__ptaActivityRunning,
       days: taskDays.filter(d => (!args.from || d.day >= args.from) && d.day <= (args.day || DAY)).map(d => ({ ...d, tasks: d.tasks.length })),
-      record: taskDays.find(d => d.day === (args.day || DAY)) || null, entries: [], runs: [], summary: null, settings: snapshot.config.activity_registration }),
+      record: taskDays.find(d => d.day === (args.day || DAY)) || null, entries: [], runs: [], last_run: window.__ptaActivityLastRun || null, summary: null, settings: snapshot.config.activity_registration }),
     activity_status: () => ({}),
     save_settings: args => { window.__ptaLastSave = structuredClone(args); snapshot.config = args.config; snapshot.map = args.map; snapshot.loaded_config = structuredClone(args.config); snapshot.tunnel_config = args.tunnelConfig; return {}; },
     start_assistant: () => { snapshot.running = true; return {}; },

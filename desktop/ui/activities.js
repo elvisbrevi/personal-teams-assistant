@@ -127,7 +127,9 @@ async function loadRegistration() {
   }
   const latest = history.last_run || history.runs[0];
   $('#activity-result').hidden = !latest || !['failed', 'interrupted'].includes(latest.status);
-  $('#activity-result').textContent = latest?.diagnostics?.error ? tx(latest.diagnostics.error) : t('The last task snapshot did not finish. Try saving the day again.');
+  const failure = latest?.diagnostics?.error ? tx(latest.diagnostics.error) : t('The last task snapshot did not finish. Try saving the day again.');
+  const cause = latest?.diagnostics?.detail;
+  $('#activity-result').replaceChildren(el('div', {}, failure, cause ? el('p', { class: 'callout-detail', textContent: t('Cause: {cause}', { cause: tx(cause) }) }) : null));
   if (finished && latest?.status === 'completed') done(t('Daily tasks saved.'));
   if (finished && activityDay && !activityTask) await openActivityDay(activityDay, false);
 }

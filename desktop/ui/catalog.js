@@ -868,6 +868,7 @@ const UI_CATALOG = { es: {
   "Save a day’s tasks": "Guardar las tareas de un día",
   "Reads existing Azure tasks and saves the list for this day. The schedule does the same automatically.": "Consulta las tareas existentes de Azure y guarda el listado de este día. El horario hace lo mismo automáticamente.",
   "Save tasks": "Guardar tareas",
+  "Cause: {cause}": "Causa: {cause}",
   "Back to days": "Volver a los días",
   "Back to tasks": "Volver a las tareas",
   "Answers about what you did can read the daily task record, with task links, HU and hours. Add the activity record as a source to authorize it for each conversation.": "Las respuestas sobre qué hiciste pueden consultar el registro diario, con enlaces a las tareas, HU y horas. Añade el registro de actividades como fuente para autorizarlo en cada conversación.",
