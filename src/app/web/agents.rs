@@ -11,7 +11,8 @@
 //!
 //! The endpoint is stateless. `initialize` returns an `Mcp-Session-Id` that is a sealed note of
 //! the account and whether the client can ask the user (elicitation); nothing is stored. Only a
-//! confirmation in flight is held in memory, until the user answers or five minutes pass.
+//! confirmation in flight is held in memory, until the user answers or it expires, and so is a
+//! session whose question expired, which is not asked through the client again.
 //!
 //! Each tool runs through `tools::run`, the same code as `pta mcp`, with its host operations
 //! forwarded to the signed-in account's host with `Transport::Agent`: the portal's per-account
@@ -35,11 +36,11 @@ const ENDPOINT_RATE: usize = 600;
 /// How long a tool may run; one that waits for a model gets longer.
 const RUN: Duration = Duration::from_secs(120);
 const MODEL_RUN: Duration = Duration::from_secs(300);
-/// How long a confirmation waits for the user's answer.
-const ASK: Duration = Duration::from_secs(300);
 /// Confirmations in flight, in total and per account.
 const PENDING: usize = 64;
 const PENDING_PER_ACCOUNT: usize = 8;
+/// Sessions remembered as unable to show a question; past this, a session is asked again.
+const SILENCED: usize = 1024;
 /// An `Mcp-Session-Id` lasts at most this long; the client then initializes again.
 const SESSION_SECONDS: u64 = 12 * 3600;
 const SESSION_DOMAIN: &[u8] = b"personal-teams-assistant/remote-mcp-session/v1";
@@ -53,6 +54,9 @@ type Waiting = oneshot::Sender<Value>;
 pub(super) struct Agents {
     key: [u8; 32],
     pending: std::sync::Mutex<HashMap<String, Waiting>>,
+    /// Sessions whose question expired unanswered, until the session itself expires: their
+    /// confirmations are decided by `confirmed: true`, as for a client without elicitation.
+    silenced: std::sync::Mutex<HashMap<String, u64>>,
 }
 impl Agents {
     pub(super) fn new() -> Self {
@@ -62,7 +66,24 @@ impl Agents {
         Self {
             key,
             pending: std::sync::Mutex::new(HashMap::new()),
+            silenced: std::sync::Mutex::new(HashMap::new()),
         }
+    }
+    /// Stop asking through the client of the session `token`, valid until `expires`.
+    fn silence(&self, token: &str, expires: u64) {
+        let mut silenced = self.silenced.lock().unwrap_or_else(|e| e.into_inner());
+        let now = access::now();
+        silenced.retain(|_, until| *until > now);
+        if silenced.len() < SILENCED {
+            silenced.insert(token.to_owned(), expires);
+        }
+    }
+    fn silenced(&self, token: &str) -> bool {
+        self.silenced
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(token)
+            .is_some_and(|until| *until > access::now())
     }
     fn wait(&self, account: &str, id: &str, waiting: Waiting) -> bool {
         let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
@@ -402,9 +423,16 @@ async fn request(
             rpc(json!({"jsonrpc": "2.0", "id": id, "result": {"tools": offered}}))
         }
         "tools/call" => {
-            let elicitation = session.as_ref().is_some_and(|s| s.elicitation)
-                && accepts(headers, "text/event-stream");
-            call(portal, account, elicitation, id, params, started).await
+            // The session's token, to stop asking through a client that let a question expire.
+            let asking = session
+                .as_ref()
+                .filter(|s| s.elicitation && accepts(headers, "text/event-stream"))
+                .and_then(|s| {
+                    let token = headers.get("mcp-session-id")?.to_str().ok()?;
+                    Some((token.to_owned(), s.expires))
+                })
+                .filter(|(token, _)| !portal.agents.silenced(token));
+            call(portal, account, asking, id, params, started).await
         }
         _ => {
             record(label, "-32601", started);
@@ -417,10 +445,12 @@ async fn request(
     }
 }
 
+/// `asking` is the session (token and expiry) whose client is asked to confirm; without it,
+/// `confirmed: true` decides.
 async fn call(
     portal: Arc<Portal>,
     account: Account,
-    elicitation: bool,
+    asking: Option<(String, u64)>,
     id: Value,
     params: Value,
     started: Instant,
@@ -477,7 +507,7 @@ async fn call(
         record(operation, code, started);
         return rpc(json!({"jsonrpc": "2.0", "id": id, "result": result}));
     };
-    if !elicitation {
+    let Some((token, expires)) = asking else {
         if !protocol::approved(&Answer::Unanswered, &args) {
             record(operation, "unconfirmed", started);
             return rpc(
@@ -491,7 +521,7 @@ async fn call(
         let (result, code) = execute(dispatch, tool.name, &args).await;
         record(operation, code, started);
         return rpc(json!({"jsonrpc": "2.0", "id": id, "result": result}));
-    }
+    };
     // Ask the user through the client on this request's event stream; the client answers with a
     // POST of its own, delivered to the waiting confirmation.
     let (sender, receiver) = mpsc::channel::<Bytes>(4);
@@ -512,11 +542,18 @@ async fn call(
             return;
         } else {
             let asked = Instant::now();
-            let reply = tokio::time::timeout(ASK, answered).await;
+            let reply = tokio::time::timeout(protocol::ANSWER_WITHIN, answered).await;
             portal.agents.forget(&account.id, &ask);
             match reply {
                 Ok(Ok(reply)) => protocol::answer(&reply, asked.elapsed()),
-                _ => Answer::Unanswered,
+                Ok(Err(_)) => Answer::Unanswered,
+                Err(_) => {
+                    // The client holds questions where nobody answers them: from now on the
+                    // user answers in the conversation.
+                    portal.agents.silence(&token, expires);
+                    let _ = sender.send(event(&protocol::withdrawn(&ask))).await;
+                    Answer::Expired
+                }
             }
         };
         let (result, code) = if !protocol::approved(&answer, &args) {

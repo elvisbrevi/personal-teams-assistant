@@ -12,12 +12,13 @@
 //! reinterpreted. The organization (its name, entries and documenting sources) and the work
 //! item guides are account data too, and travel with it. The chats each computer receives stay
 //! its own; the account's separate reading scope (`teams_reading`, chat IDs included) travels,
-//! and only reads on request use it. Workflows, their blocks and their settings (ready states,
+//! and only reads on request use it. The message style (`message_style`) travels too, so a
+//! message any computer of the account sends looks the same in Teams. Workflows, their blocks and their settings (ready states,
 //! the watcher, the workflow director) travel too, but change only on the account's
 //! coordinator (where their runs live): synchronization carries them to the account's other
 //! computers and never back.
 use crate::{
-    config::{Config, Language, LlmChoice, TeamsReading},
+    config::{Config, Language, LlmChoice, MessageStyle, TeamsReading},
     index::Note,
     knowledge::{Access, Context, KnowledgeMap, Resource},
     organization::{Entry, Organization},
@@ -42,7 +43,7 @@ pub const MAX_NOTE_PAGES: usize = 256;
 pub const MAX_NOTES: usize = NOTES_PAGE * MAX_NOTE_PAGES;
 
 /// The documented list of portable settings, shown to users and agents.
-pub const SETTINGS_FIELDS: [&str; 10] = [
+pub const SETTINGS_FIELDS: [&str; 11] = [
     "llm.language",
     "llm.style",
     "llm.chain",
@@ -53,6 +54,7 @@ pub const SETTINGS_FIELDS: [&str; 10] = [
     "teams_reading.all_chats",
     "teams_reading.personal_chat",
     "teams_reading.chats",
+    "message_style",
 ];
 /// What synchronization carries besides the settings.
 pub const COLLECTIONS: [&str; 9] = [
@@ -84,6 +86,10 @@ pub struct Settings {
     /// nothing, so an account that never set it keeps the document an older host computes.
     #[serde(default, skip_serializing_if = "TeamsReading::is_default")]
     pub teams_reading: TeamsReading,
+    /// How the account's messages look in Teams. Left out while it is the default (plain
+    /// messages), so an account that never set it keeps the document an older host computes.
+    #[serde(default, skip_serializing_if = "MessageStyle::is_default")]
+    pub message_style: MessageStyle,
 }
 
 impl Settings {
@@ -97,6 +103,7 @@ impl Settings {
             max_message_age_seconds: config.policy.max_message_age_seconds,
             sensitive_patterns: config.policy.sensitive_patterns.clone(),
             teams_reading: config.teams_reading.clone(),
+            message_style: config.message_style.clone(),
         }
     }
     /// Write the portable fields into a profile's configuration. An empty chain keeps the
@@ -112,6 +119,7 @@ impl Settings {
         config.policy.max_message_age_seconds = self.max_message_age_seconds;
         config.policy.sensitive_patterns = self.sensitive_patterns.clone();
         config.teams_reading = self.teams_reading.clone();
+        config.message_style = self.message_style.clone();
     }
     /// The existing validation rules, applied to the settings alone.
     pub fn check(&self) -> Result<()> {
@@ -1076,6 +1084,42 @@ mod tests {
         assert!(widen(&|r| r.chats.clear()).is_ok());
         let mut invalid = account.clone();
         invalid.settings.teams_reading.chats = vec!["../me".into()];
+        assert!(invalid.check().is_err());
+    }
+
+    #[test]
+    fn the_message_style_follows_the_account() {
+        let (config, map) = profile();
+        // Left out while it is the default: the document and digest an older host computes.
+        let plain = Document::project(&config, &map);
+        assert!(
+            !serde_json::to_string(&plain)
+                .unwrap()
+                .contains("message_style")
+        );
+        let mut coordinator = config.clone();
+        coordinator.message_style.enabled = true;
+        coordinator.message_style.accent = "#2F80ED".into();
+        coordinator.message_style.label = "Synthetic label".into();
+        let account = Document::project(&coordinator, &map);
+        account.check().unwrap();
+        assert_ne!(account.digest(&[]), plain.digest(&[]));
+
+        // A computer that never set a style sends in the account's.
+        let (installed, _, _) = account.install(&config, &map, |_| true);
+        assert_eq!(installed.message_style, coordinator.message_style);
+
+        // A change made on any computer reaches the account's document.
+        let mut after = account.clone();
+        after.settings.message_style.stripe_width = 8;
+        let mut next = account.clone();
+        Patch::between(&account, &after)
+            .apply_to(&mut next, &BTreeSet::new())
+            .unwrap();
+        assert_eq!(next.settings.message_style.stripe_width, 8);
+
+        let mut invalid = account.clone();
+        invalid.settings.message_style.accent = "blue".into();
         assert!(invalid.check().is_err());
     }
 }
