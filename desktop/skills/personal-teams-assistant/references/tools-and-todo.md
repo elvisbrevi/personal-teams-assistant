@@ -140,8 +140,8 @@ printf '%s\n' '{"id":4502,"source":"azure-devops-status","project":"Payments"}' 
 
 `list_azure_tasks` requires an exact day and optionally selects an Azure email/uniqueName (`user`),
 source and project. The configured catalog user is the default. It reads historical daily
-hours and completions within the configured time zone, process task category and project
-scope. `get_azure_task` reads one task with the same detail schema and safeguards as HU detail.
+hours and completions within the configured time zone, the process task and bug categories
+(bugs with actual hours count like tasks) and project scope. `get_azure_task` reads one task with the same detail schema and safeguards as HU detail.
 Neither writes to Azure. The Activities screen uses daily saved copies and reuses To-Do's
 cards, detail rendering and original-link icon. See [daily task record](activity-registration.md)
 for date attribution, limits, scheduling and saved history.
