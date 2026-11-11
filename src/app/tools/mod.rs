@@ -675,6 +675,18 @@ pub(super) const TOOLS: &[Tool] = &[
         },
     },
     Tool {
+        name: "update_latest",
+        title: "Update to the newest release",
+        description: "Update an installation to the newest stable release in one request: check crates.io, prepare that release (or reuse the prepared copy) and install it with the same deferral, restart, health check and automatic rollback as update_apply. Without machine it updates this computer (its owner only); with machine (an ID from machine_list whose capabilities.upgrade is true) the account's coordinator asks that online computer to update itself. The version is never an argument. Returns `outcome`: `current` (nothing newer), `staging` (preparing; it installs by itself when ready), `deferred` (waiting for work in progress) or `applying`. Poll update_status here, or machine_list for another computer's version and update state; never repeat the request automatically. Needs the user's confirmation. Afterwards MCP clients of the updated computer must reconnect.",
+        effect: Effect::External,
+        schema: || {
+            object(
+                json!({"machine":string("Optional account machine ID; omit to update this computer."),"confirmed":confirmed()}),
+                &[],
+            )
+        },
+    },
+    Tool {
         name: "update_cancel",
         title: "Cancel a waiting update",
         description: "Cancel an update request that is deferred because work is in progress. An update that is already being applied cannot be cancelled.",
@@ -2108,6 +2120,10 @@ pub(super) async fn run(name: &str, args: &Value) -> Result<Value, String> {
             args.as_object_mut().unwrap().remove("confirmed");
             ipc("crate_update_stage", args).await
         }
+        "update_latest" => match args["machine"].as_str() {
+            Some(machine) => ipc("machine_upgrade", json!({"machine":machine})).await,
+            None => ipc("crate_update_latest", json!({})).await,
+        },
         "migration_inspect" => ipc("variable_migration_inspect", args.clone()).await,
         "migration_status" => ipc("variable_migration_status", args.clone()).await,
         "migration_run" => {
@@ -2609,6 +2625,12 @@ pub(super) fn confirmation(name: &str, args: &Value) -> Option<String> {
             "Install the prepared version {} now? The application and pta are replaced and the application restarts; the previous version is restored if the new one is not healthy.",
             args["version"].as_str().unwrap_or_default()
         ),
+        "update_latest" => match args["machine"].as_str() {
+            Some(machine) => format!(
+                "Update machine {machine} to the newest release? It prepares it, then replaces the application and pta there and restarts it once nothing would be interrupted; the previous version is restored if the new one is not healthy."
+            ),
+            None => "Update this computer to the newest release? It prepares it, then replaces the application and pta and restarts the application once nothing would be interrupted; the previous version is restored if the new one is not healthy.".into(),
+        },
         "migration_run" => format!(
             "Copy the application credentials {} into account {} (originals stay untouched)?",
             args["items"]

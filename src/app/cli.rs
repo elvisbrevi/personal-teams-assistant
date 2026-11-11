@@ -331,7 +331,14 @@ Start at login (this computer only, per user, no administrator rights)
                            Removes only the entry install created. A host it is running keeps running until it
                            quits.
 
-Updates (this computer only; the shared server's operator updates it separately)
+Updates (the shared server's operator updates it separately)
+  update [--machine NAME] [--confirmed]
+                           Updates to the newest stable release in one step: checks crates.io, prepares that release
+                           (or reuses the prepared copy) and installs it like update apply, once nothing would be
+                           interrupted. Without --machine it updates this computer; --machine NAME (or ID, from the
+                           account's machine list) asks that online computer of the account to update itself through the
+                           coordinator. In a terminal it asks before acting; elsewhere repeat with --confirmed after the
+                           person agreed. Progress: update status here, the machine list for another computer.
   update status            Installed, running and available versions, how this installation was built and the state of any
                            prepared update; reads local state only. Staging is not installation: the installed version
                            keeps running unchanged.
@@ -675,6 +682,7 @@ async fn update_command(args: &[String]) -> Result<Reply> {
             .context("missing version; consult --help")
     };
     match words.get(1).copied() {
+        None => update_latest(args).await,
         // While an update is applied no host may be running: read its journal instead of starting one.
         Some("status") => match applying_status() {
             Some(reply) => Ok(reply),
@@ -741,6 +749,122 @@ async fn update_command(args: &[String]) -> Result<Reply> {
         }
         _ => anyhow::bail!("unknown command or invalid argument count"),
     }
+}
+
+/// `pta update [--machine NAME]`: the newest release on this computer or on another of the account.
+async fn update_latest(args: &[String]) -> Result<Reply> {
+    let Some(wanted) = option(args, "--machine") else {
+        if let Some(reply) = asked(
+            args,
+            "Update this computer to the newest release? The application and pta are replaced and the application restarts once nothing would be interrupted; the previous version is restored if the new one is not healthy.".into(),
+        ) {
+            return Ok(reply);
+        }
+        return call("crate_update_latest", json!({}), None, true).await;
+    };
+    let listed = call("machine_list", json!({}), None, true).await?;
+    if !listed.ok {
+        return Ok(listed);
+    }
+    let machines = listed.data["machines"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let matches: Vec<&Value> = machines
+        .iter()
+        .filter(|m| m["trust"] != "revoked")
+        .filter(|m| {
+            m["id"] == wanted
+                || m["name"]
+                    .as_str()
+                    .is_some_and(|n| n.trim().eq_ignore_ascii_case(wanted.trim()))
+        })
+        .collect();
+    let machine = match matches.as_slice() {
+        [machine] => *machine,
+        [] => {
+            return Ok(Reply::error(
+                "invalid_input",
+                2,
+                "No machine of this account has that name or ID. List them with pta tools call machine_list.",
+            ));
+        }
+        _ => {
+            return Ok(Reply::error(
+                "invalid_input",
+                2,
+                "Several machines have that name: use the machine's ID (pta tools call machine_list).",
+            ));
+        }
+    };
+    let id = machine["id"].as_str().unwrap_or_default();
+    let name = machine["name"].as_str().unwrap_or(id);
+    if let Some(reply) = asked(
+        args,
+        format!(
+            "Update machine {name} to the newest release? It prepares it there, then replaces the application and pta and restarts it once nothing would be interrupted; the previous version is restored if the new one is not healthy."
+        ),
+    ) {
+        return Ok(reply);
+    }
+    let mut reply = call("machine_upgrade", json!({"machine":id}), None, true).await?;
+    if reply.ok {
+        reply.data["machine"] = json!(name);
+    }
+    Ok(reply)
+}
+
+/// Like [`unconfirmed`], but a person at a terminal answers the question there instead.
+fn asked(args: &[String], question: String) -> Option<Reply> {
+    if args.iter().any(|a| a == "--confirmed") {
+        return None;
+    }
+    // `execute` drops --json and --non-interactive from `args`; the process's own arguments keep them.
+    let interactive = std::io::stdin().is_terminal()
+        && std::io::stderr().is_terminal()
+        && !std::env::args().any(|a| a == "--json" || a == "--non-interactive");
+    if !interactive {
+        return unconfirmed(args, question);
+    }
+    eprint!("{question} [y/N] ");
+    let mut answer = String::new();
+    let yes = std::io::stdin().read_line(&mut answer).is_ok()
+        && matches!(
+            answer.trim().to_lowercase().as_str(),
+            "y" | "yes" | "s" | "si" | "sí"
+        );
+    (!yes).then(|| Reply::error("invalid_input", 2, "Cancelled; nothing was changed."))
+}
+
+/// What `pta update` started, in words.
+fn update_text(data: &Value) -> Option<String> {
+    let target = data["target"].as_str().unwrap_or_default();
+    let place = data["machine"]
+        .as_str()
+        .map_or_else(|| "this computer".to_owned(), |m| format!("machine {m}"));
+    let follow = if data["machine"].is_string() {
+        "Follow it in the machine list (pta tools call machine_list)."
+    } else {
+        "Follow it with pta update status."
+    };
+    Some(match data["outcome"].as_str()? {
+        "current" => format!(
+            "{} already runs the newest release ({}).",
+            if data["machine"].is_string() {
+                place
+            } else {
+                "This computer".into()
+            },
+            data["running"].as_str().unwrap_or("current")
+        ),
+        "staging" => format!(
+            "Preparing version {target} on {place}; it is installed by itself once ready and nothing would be interrupted. {follow}"
+        ),
+        "deferred" => format!(
+            "Version {target} is ready on {place} and waits for work in progress to finish. {follow} pta update cancel withdraws it there."
+        ),
+        _ => format!("Installing version {target} on {place}: the application restarts. {follow}"),
+    })
 }
 
 /// The state of an update that is being applied, from its journal. The host is stopped for part of
@@ -1981,6 +2105,7 @@ pub(super) fn validate_args(args: &[String]) -> Result<()> {
             | ["tools", "list"]
             | ["tools", "call", _]
             | ["service", "status" | "install" | "uninstall"]
+            | ["update"]
             | ["update", "status" | "check" | "cancel"]
             | ["update", "stage" | "apply" | "dismiss", _]
             | ["update", "unattended", "on" | "off"]
@@ -2223,6 +2348,7 @@ pub(super) fn validate_args(args: &[String]) -> Result<()> {
                 || p.as_slice() == ["cloud", "repair"]
                 || p.as_slice()
                     .starts_with(&["cloud", "installations", "revoke"])
+                || p.as_slice() == ["update"]
                 || p.as_slice().starts_with(&["update", "stage"])
                 || p.as_slice().starts_with(&["update", "apply"])
                 || p.as_slice().starts_with(&["update", "unattended"])
@@ -2263,7 +2389,10 @@ pub(super) fn validate_args(args: &[String]) -> Result<()> {
         ("--replace", p.as_slice() == ["cloud", "pull"]),
         ("--label", p.as_slice() == ["cloud", "connect"]),
         ("--keep", p.as_slice().starts_with(&["cloud", "resolve"])),
-        ("--machine", p.as_slice() == ["cloud", "lost"]),
+        (
+            "--machine",
+            p.as_slice() == ["cloud", "lost"] || p.as_slice() == ["update"],
+        ),
         (
             "--target",
             p.as_slice()
@@ -3408,6 +3537,7 @@ async fn execute(mut args: Vec<String>) -> Result<Reply> {
 fn human(command: &str, data: &Value) -> Option<String> {
     match command.split(' ').next()? {
         "status" => Some(status_text(data)),
+        "update" if data["outcome"].is_string() => update_text(data),
         "start" | "restart" if data["running"] == true => Some("Assistant running.".into()),
         "stop" if data["running"] == false => Some("Assistant stopped.".into()),
         "app" if command == "app quit" && data["quitting"] == true => {

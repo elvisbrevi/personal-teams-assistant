@@ -463,7 +463,8 @@
           </div>
           <div class="panel" id="panel-registration-schedule">
             <h2>Schedule</h2>
-            <label class="check"><input id="registration-enabled" class="cfg" type="checkbox"> Run on a schedule while this app is open</label>
+            <label class="check"><input id="registration-enabled" class="cfg" type="checkbox"> Save my tasks automatically on this schedule</label>
+            <p class="hint">The application’s background service does it, on the server when you use the portal: this page and the app can stay closed.</p>
             <div class="grid">
               <label>Schedule<select id="registration-schedule" class="cfg"><option value="daily">Once a day</option><option value="interval">Every interval within a window</option></select></label>
               <label id="registration-at-field">Daily time<input id="registration-at" class="cfg" type="time"></label>
@@ -706,18 +707,18 @@
         <header class="page-head"><span class="page-tile" aria-hidden="true"><svg class="icon"><use href="#i-check"/></svg></span><div class="page-title"><h1>Activities</h1><p>Your existing tasks, saved by day to answer what you did.</p></div></header>
         <div id="activity-master">
           <div class="toolbar"><button id="activity-settings" class="secondary"><svg class="icon"><use href="#i-settings"/></svg>Schedule settings</button><button id="activity-refresh" class="secondary"><svg class="icon"><use href="#i-refresh"/></svg>Refresh</button></div>
-          <div class="panel">
-            <h2>Recorded days</h2>
-            <div class="grid"><label>From<input id="activity-log-from" type="date"></label><label>To<input id="activity-log-to" type="date"></label></div>
-            <p id="activity-log-total" class="hint" role="status"></p>
-            <div id="activity-log" class="cards"></div>
-          </div>
           <details class="panel fold-panel"><summary>Save a day’s tasks</summary>
             <p class="hint">Reads existing Azure tasks and saves the list for this day. The schedule does the same automatically.</p>
             <div class="day-bar"><label class="day-field">Day<input id="activity-day" type="date"></label><button id="activity-run"><svg class="icon"><use href="#i-check"/></svg>Save tasks</button></div>
           </details>
           <p id="activity-progress" class="callout info" role="status" hidden>Saving the day’s tasks…</p>
           <p id="activity-result" class="callout error" role="status" hidden></p>
+          <div class="panel">
+            <h2>Recorded days</h2>
+            <div class="grid"><label>From<input id="activity-log-from" type="date"></label><label>To<input id="activity-log-to" type="date"></label></div>
+            <p id="activity-log-total" class="hint" role="status"></p>
+            <div id="activity-log" class="cards"></div>
+          </div>
         </div>
         <div id="activity-day-view" hidden>
           <div class="toolbar"><button id="activity-days-back" class="secondary"><svg class="icon"><use href="#i-back"/></svg>Back to days</button></div>

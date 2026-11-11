@@ -17,7 +17,7 @@ fn summary(machine: &Machine) -> Value {
         "trust":if machine.revoked {"revoked"} else {"trusted"},"online":online,
         "presence":if !online {"offline"} else if machine.assistant_phase.is_none() {"unknown"} else {"online"},
         "last_seen":machine.seen,"last_known":!online,"assistant_phase":machine.assistant_phase,
-        "capabilities":{"management":machine.management_support,"directories":machine.management_support,"implementation":machine.management_support,"assistant":machine.assistant_phase.is_some()},
+        "capabilities":{"management":machine.management_support,"directories":machine.management_support,"implementation":machine.management_support,"assistant":machine.assistant_phase.is_some(),"upgrade":machine.upgrade},
         "roots":if machine.revoked {Vec::new()} else {machine.roots.clone()},
         "version":machine.host_version,"update":machine.update})
 }
@@ -27,11 +27,15 @@ pub(super) async fn list(host: &Arc<Host>) -> Result<Value> {
     let state = &host.state.implementation;
     let data = state.registry.lock().await;
     let config = host.state.settings.config()?;
+    let invocation = authority::invocation(&host.state)?;
+    // This computer's own row offers its update only to its local owner, like every update here.
+    let upgrade = crate::app::maintenance::remote_capable(host)
+        && crate::app::maintenance::is_local_owner(&invocation.scope, invocation.transport);
     let local = json!({"id":data.id,"name":data.settings.name,"os":std::env::consts::OS,
         "online":true,"local":true,"presence":"online","trust":"trusted","last_seen":now(),"last_known":false,
         "assistant_phase":*host.state.phase.borrow(),"roots":data.settings.roots,
         "version":env!("CARGO_PKG_VERSION"),"update":crate::app::maintenance::report(host),
-        "capabilities":{"management":true,"directories":config.server.webhook_prefix.is_empty(),"implementation":authority::invocation(&host.state)?.scope.owner,"assistant":true}});
+        "capabilities":{"management":true,"directories":config.server.webhook_prefix.is_empty(),"implementation":invocation.scope.owner,"assistant":true,"upgrade":upgrade}});
     let mut machines = vec![local];
     machines.extend(
         data.machines

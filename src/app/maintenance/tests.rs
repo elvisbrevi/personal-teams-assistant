@@ -444,6 +444,7 @@ async fn only_the_local_owner_can_check_or_stage_a_portal_session_machine_or_oth
             ("crate_update_dismiss", json!({"version":"0.9.14"})),
             ("crate_update_apply", json!({"version":"0.9.14"})),
             ("crate_update_cancel", json!({})),
+            ("crate_update_latest", json!({})),
         ] {
             let reply = call(&f.host, transport, op, args).await;
             assert!(!reply.ok, "{name} {op}");
@@ -1448,3 +1449,91 @@ async fn an_interrupted_update_is_undone_before_status_is_reported() {
 }
 
 mod archive;
+
+#[tokio::test]
+async fn updating_to_the_newest_release_needs_nothing_when_it_already_runs() {
+    let _serial = SERIAL.lock().await;
+    let server = registry(&[line("0.9.12", false), line("0.9.13", false)]).await;
+    let f = fixture(&server);
+    let reply = call(&f.host, Local, "crate_update_latest", json!({})).await;
+    assert!(reply.ok, "{:?}", reply.message);
+    assert_eq!(reply.data["outcome"], "current");
+    assert_eq!(reply.data["target"], Value::Null);
+    assert!(f.arguments().is_none());
+    assert!(!f.staged().exists());
+    // No argument chooses anything.
+    let forged = call(
+        &f.host,
+        Local,
+        "crate_update_latest",
+        json!({"version":"0.9.14"}),
+    )
+    .await;
+    assert_eq!(forged.code, "invalid_input");
+}
+
+#[tokio::test]
+async fn a_prepared_newest_release_is_installed_by_the_same_request_and_a_keychain_mac_waits_for_its_person()
+ {
+    let _serial = SERIAL.lock().await;
+    let server = registry(&[line("0.9.14", false)]).await;
+    let f = fixture(&server);
+    with_pair(&f);
+    // Asked from another device, a Mac whose credentials are in the Keychain is updated at the
+    // computer instead: the new version would wait for someone to allow it.
+    let mut env = f.env.clone();
+    env.keychain = Some(true);
+    *TEST.lock().unwrap() = Some(env);
+    let remote = remote_latest(&f.host).await.unwrap_err();
+    assert!(remote.to_string().contains("Keychain"), "{remote}");
+    assert!(core::apply::read(&directory(&f.host)).is_none());
+    // The person at that computer is asked by macOS and can allow it.
+    let reply = call(&f.host, Local, "crate_update_latest", json!({})).await;
+    assert!(reply.ok, "{:?}", reply.message);
+    assert_eq!(reply.data["outcome"], "applying");
+    assert_eq!(reply.data["target"], "0.9.14");
+    assert_eq!(installed(&f, core::CRATE), format!("{OLD} {}", core::CRATE));
+    let again = call(&f.host, Local, "crate_update_latest", json!({})).await;
+    assert_eq!(again.data["outcome"], "applying");
+    let history = call(&f.host, Local, "crate_update_status", json!({}))
+        .await
+        .data["unattended"]["history"]
+        .clone();
+    assert!(
+        history
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["event"] == "update_requested" && e["by"] == "cli"),
+        "{history}"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn one_request_prepares_the_newest_release_and_then_installs_it() {
+    let _serial = SERIAL.lock().await;
+    let server = registry(&[line("0.9.14", false)]).await;
+    let f = fixture(&server);
+    f.cargo("0.9.14", false);
+    let reply = remote_latest(&f.host).await.unwrap();
+    assert_eq!(reply["outcome"], "staging");
+    assert_eq!(reply["target"], "0.9.14");
+    // Once prepared, the same request goes on to the ordinary install, without being asked again.
+    let mut state = Value::Null;
+    for _ in 0..400 {
+        state = call(&f.host, Local, "crate_update_status", json!({}))
+            .await
+            .data["state"]
+            .clone();
+        if state == "applying" {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(state, "applying");
+    assert!(f.arguments().unwrap().contains("--version 0.9.14"));
+    let journal = core::apply::read(&directory(&f.host)).unwrap();
+    assert_eq!(journal.to, "0.9.14");
+    assert!(!journal.intent.unattended);
+}

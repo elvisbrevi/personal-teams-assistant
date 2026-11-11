@@ -42,6 +42,8 @@ const KEYCHAIN: &str = "On this Mac the Keychain asks to allow each new version 
 const MANAGED: &str =
     "Updates for this server are applied by its operator; there is nothing to install from here.";
 const LOCAL_ONLY: &str = "Updating this installation needs the local owner of the computer: use the application (the local page pta app open shows) or pta on that computer.";
+/// Why a Mac whose credentials are in the Keychain is not updated at another device's request.
+const KEYCHAIN_REMOTE: &str = "On this Mac the Keychain asks to allow each new version of the application before it may read the saved credentials, so it is updated at the computer: run pta update there (or use Settings > Advanced > Updates) and choose Always Allow when macOS asks.";
 
 pub(super) fn handles(method: &str) -> bool {
     method.starts_with("crate_update_")
@@ -471,6 +473,24 @@ struct UnattendedArgs {
     enabled: bool,
 }
 
+/// Who asked to update to the newest release, as its audit records it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum By {
+    Cli,
+    LocalPage,
+    /// Another device of the account, through the coordinator.
+    Remote,
+}
+impl By {
+    fn label(self) -> &'static str {
+        match self {
+            By::Cli => "cli",
+            By::LocalPage => "local_page",
+            By::Remote => "remote",
+        }
+    }
+}
+
 pub(super) async fn operate(host: &Arc<Host>, request: &control::Request) -> Reply {
     let Ok(invocation) = authority::invocation(&host.state) else {
         return Reply::error("authority_denied", 6, authority::ACCOUNT_UNAVAILABLE);
@@ -500,6 +520,17 @@ pub(super) async fn operate(host: &Arc<Host>, request: &control::Request) -> Rep
                 2,
                 "Give the prepared version to install, as shown by the update status.",
             ),
+        },
+        "crate_update_latest" => match serde_json::from_value::<NoArgs>(request.args.clone()) {
+            Ok(_) => {
+                let by = if invocation.transport == Transport::Window {
+                    By::LocalPage
+                } else {
+                    By::Cli
+                };
+                latest(host, &env, by).await
+            }
+            Err(_) => Reply::error("invalid_input", 2, "This operation takes no arguments."),
         },
         "crate_update_cancel" => match serde_json::from_value::<NoArgs>(request.args.clone()) {
             Ok(_) => apply::cancel(host, &env),
@@ -1192,6 +1223,188 @@ pub(super) async fn unattended(host: &Arc<Host>, env: &Environment) -> Pass {
     } else {
         Pass::Applying
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Updating to the newest release in one request.
+
+/// Profiles whose requested update waits for its preparation to end before it is installed.
+static FOLLOWING: StdMutex<std::collections::BTreeSet<PathBuf>> =
+    StdMutex::new(std::collections::BTreeSet::new());
+
+fn with_outcome(mut data: Value, outcome: &str, version: Option<Version>) -> Reply {
+    data["outcome"] = json!(outcome);
+    data["target"] = json!(version.map(|v| v.to_string()));
+    Reply::success(data)
+}
+
+/// Updates this installation to the newest stable release in one request: it checks the registry,
+/// prepares that release (or reuses the prepared copy) and then asks for the ordinary install,
+/// which defers while work is in progress, restarts, checks health and rolls back. The version is
+/// never the caller's: it is whatever the pinned registry lists as newest right now.
+pub(super) async fn latest(host: &Arc<Host>, env: &Environment, by: By) -> Reply {
+    if let Err(diagnostic) = core::inspect(&env.exe) {
+        return Reply::error("not_ready", 3, &diagnostic);
+    }
+    if let Some(diagnostic) = apply::unsupported(env) {
+        return Reply::error("not_ready", 3, diagnostic);
+    }
+    let dir = directory(host);
+    let _ = journal::recover(&dir, now());
+    if journal::read(&dir).is_some_and(|j| !j.phase.finished()) {
+        return with_outcome(status(host, env), "applying", None);
+    }
+    if let Err(message) = refresh(host, env).await {
+        return Reply::error("dependency_or_network", 5, &message);
+    }
+    let saved = load(&dir);
+    let installed = core::inspect(&env.exe).ok().map(|i| i.version);
+    let Some(offer) = available(saved.latest.as_deref(), env.running, installed) else {
+        return with_outcome(status(host, env), "current", None);
+    };
+    if by == By::Remote && keychain(env) {
+        return Reply::error("not_ready", 3, KEYCHAIN_REMOTE);
+    }
+    if saved.deferred.is_some() && staged(&dir, &saved, Some(offer)).is_some() {
+        return with_outcome(status(host, env), "deferred", Some(offer));
+    }
+    audit(
+        &dir,
+        "update_requested",
+        Some(offer),
+        None,
+        Some(by.label()),
+    );
+    let preparing = live()
+        .get(dir.parent().unwrap())
+        .map(|stage| stage.version.clone());
+    match preparing {
+        Some(version) if version == offer.to_string() => {}
+        Some(_) => {
+            return Reply::error(
+                "state_conflict",
+                6,
+                "Another version is being prepared. Wait for it to finish, then update again.",
+            );
+        }
+        None if staged(&dir, &saved, Some(offer)).is_some() => {
+            let reply = apply::request(host, env, &offer.to_string(), false).await;
+            if !reply.ok {
+                return reply;
+            }
+            let outcome = if reply.data["state"] == "deferred" {
+                "deferred"
+            } else {
+                "applying"
+            };
+            return with_outcome(reply.data, outcome, Some(offer));
+        }
+        None => {
+            let reply = stage(host, env, &offer.to_string()).await;
+            if !reply.ok {
+                return reply;
+            }
+        }
+    }
+    follow(host.clone(), env.clone(), offer);
+    with_outcome(status(host, env), "staging", Some(offer))
+}
+
+/// Installs the requested release once its preparation ends; a failed preparation is recorded and
+/// left for the person, never retried.
+fn follow(host: Arc<Host>, env: Environment, version: Version) {
+    let dir = directory(&host);
+    let profile = dir.parent().unwrap().to_path_buf();
+    if !FOLLOWING
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(profile.clone())
+    {
+        return;
+    }
+    tokio::spawn(async move {
+        while live().contains_key(&profile) {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        }
+        FOLLOWING
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&profile);
+        let saved = load(&dir);
+        if staged(&dir, &saved, Some(version)).is_none() {
+            let error = saved
+                .stage
+                .filter(|s| s.version == version.to_string())
+                .and_then(|s| s.error);
+            audit(&dir, "update_stage", Some(version), error, None);
+            return;
+        }
+        if saved.deferred.is_some() {
+            return;
+        }
+        let reply = apply::request(&host, &env, &version.to_string(), false).await;
+        if !reply.ok {
+            audit(&dir, "update_apply", Some(version), reply.message, None);
+        }
+    });
+}
+
+/// Whether another device of the account may ask this installation to update itself: this host is
+/// the local owner of a supported installation it can restart by itself.
+pub(super) fn remote_capable(host: &Host) -> bool {
+    let env = environment();
+    is_local_owner(&host.state.authority, Transport::Local)
+        && core::inspect(&env.exe).is_ok()
+        && apply::unsupported(&env).is_none()
+}
+
+/// A request from another device of the account, received through the coordinator: the same
+/// update to the newest release, only on a host that owns its installation.
+pub(super) async fn remote_latest(host: &Arc<Host>) -> Result<Value> {
+    ensure!(
+        is_local_owner(&host.state.authority, Transport::Local),
+        "{MANAGED}"
+    );
+    let reply = latest(host, &environment(), By::Remote).await;
+    ensure!(
+        reply.ok,
+        "{}",
+        reply
+            .message
+            .as_deref()
+            .unwrap_or("The update could not start.")
+    );
+    Ok(reply.data)
+}
+
+/// The update to the newest release asked from this installation's own row of the machine list:
+/// only its local owner (the local page or pta on this computer) may, like every update here.
+pub(super) async fn own_latest(host: &Arc<Host>) -> Result<Value> {
+    let invocation = authority::invocation(&host.state)?;
+    ensure!(
+        is_local_owner(&invocation.scope, invocation.transport),
+        "{}",
+        if invocation.scope.shared || !invocation.scope.owner {
+            MANAGED
+        } else {
+            LOCAL_ONLY
+        }
+    );
+    let by = if invocation.transport == Transport::Window {
+        By::LocalPage
+    } else {
+        By::Cli
+    };
+    let reply = latest(host, &environment(), by).await;
+    ensure!(
+        reply.ok,
+        "{}",
+        reply
+            .message
+            .as_deref()
+            .unwrap_or("The update could not start.")
+    );
+    Ok(reply.data)
 }
 
 /// Removes what earlier updates left behind, unless one is running.

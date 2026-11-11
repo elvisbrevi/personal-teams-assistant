@@ -469,6 +469,7 @@ pub(super) const PORTAL_METHODS: &[&str] = &[
     "machine_disconnect",
     "machine_teams",
     "machine_assistant",
+    "machine_upgrade",
     "implementation_sessions",
     "implementation_open_session",
     "implementation_mobile_session",

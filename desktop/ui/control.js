@@ -34,7 +34,7 @@ import { browserMicrosoftLogin } from './dialogs.js';
  *   'llm_providers' | 'machine_assistant' | 'machine_browse' | 'machine_detail' |
  *   'machine_directories' | 'machine_disconnect' | 'machine_join_command' | 'machine_list' | 'machine_login' |
  *   'machine_login_cancel' | 'machine_login_finish' | 'machine_revoke' | 'machine_save' |
- *   'machine_settings' | 'machine_teams' | 'machine_update' | 'notes_list' | 'notes_remove' |
+ *   'machine_settings' | 'machine_teams' | 'machine_update' | 'machine_upgrade' | 'notes_list' | 'notes_remove' |
  *   'notes_save' | 'open_azure_cli_login' | 'open_github_login' | 'open_work_item' |
  *   'portable_status' | 'question_associate' | 'restart' | 'save_settings' | 'self_chat_disable' |
  *   'self_chat_enable' | 'self_chat_status' | 'service_install' | 'service_status' | 'service_uninstall' | 'setup_readiness' | 'snapshot' | 'start_assistant' |
