@@ -31,11 +31,59 @@ function updateSummary(machine) {
   const parts = [version];
   if (update.failed) parts.push(t('update {version} failed and was rolled back', { version: update.failed }));
   else if (update.state === 'applying') parts.push(t('installing an update'));
+  else if (update.state === 'staging') parts.push(t('preparing an update'));
+  else if (update.state === 'deferred' && update.pending) parts.push(t('update {version} waits for work in progress', { version: update.pending }));
   else if (update.pending) parts.push(t('update {version} pending', { version: update.pending }));
   parts.push(update.unattended ? t('updates itself') : t('updates when asked'));
   return parts.join(' · ');
 }
+/** @param {string | null | undefined} a @param {string | null | undefined} b */
+function newer(a, b) {
+  const parse = (/** @type {string | null | undefined} */ v) => (v || '').split('.').map(Number);
+  const [x, y] = [parse(a), parse(b)];
+  if (x.length !== 3 || y.length !== 3 || [...x, ...y].some(Number.isNaN)) return false;
+  for (let i = 0; i < 3; i++) if (x[i] !== y[i]) return x[i] > y[i];
+  return false;
+}
+/** The newest release any machine of the account runs or was offered: what an older one can reach. */
+function newestKnown(machines) {
+  let newest = null;
+  for (const machine of machines) for (const version of [machine.version, machine.update?.pending]) {
+    if (version && (!newest || newer(version, newest))) newest = version;
+  }
+  return newest;
+}
+/** Update the machine to the newest release: a second press confirms, the machine does the rest. */
+function upgradeButton(machine, newest) {
+  const state = machine.update?.state;
+  const behind = Boolean(machine.update?.pending) || newer(newest, machine.version);
+  if (!machine.capabilities?.upgrade || machine.trust === 'revoked' || !behind || state === 'applying') return null;
+  const target = machine.update?.pending || newest;
+  const button = el('button', { type: 'button', class: 'secondary small', textContent: target ? t('Update to {version}', { version: target }) : t('Update'),
+    'aria-label': target ? t('Update to {version}: {machine}', { version: target, machine: machine.name }) : t('Update: {machine}', { machine: machine.name }),
+    disabled: !machine.online || state === 'staging' || state === 'deferred' });
+  let confirmed = false;
+  button.onclick = () => busy(button, async () => {
+    if (!confirmed) {
+      confirmed = true; button.textContent = t('Confirm update');
+      button.setAttribute('aria-label', t('Confirm update: {machine}', { machine: machine.name }));
+      return;
+    }
+    for (const other of document.querySelectorAll('.machine-choice button')) other.disabled = true;
+    try {
+      const result = await invoke('machine_upgrade', { machine: machine.id });
+      const name = machine.name;
+      done({
+        current: t('{machine} already runs the newest release.', { machine: name }),
+        staging: t('Preparing the update on {machine}; it installs itself when ready and restarts.', { machine: name }),
+        deferred: t('The update on {machine} waits for work in progress to finish.', { machine: name }),
+      }[result?.outcome] || t('Installing the update on {machine}; it restarts.', { machine: name }));
+    } finally { renderTeamsMachines(await invoke('machine_list')); }
+  });
+  return button;
+}
 function renderTeamsMachines(fleet) {
+  const newest = newestKnown(fleet.machines);
   for (const id of ['machine-list']) {
     const list = $('#' + id);
     list.replaceChildren(...fleet.machines.map(machine => {
@@ -72,7 +120,7 @@ function renderTeamsMachines(fleet) {
         el('label', { class: 'check' }, radio, el('strong', { textContent: machine.name }), el('span', { textContent: machine.os })),
         badge(machine.trust === 'revoked' ? t('Revoked') : machine.presence === 'unknown' ? t('Status unknown') : machine.online ? t('Online') : t('Offline'), machine.online && machine.trust !== 'revoked' ? 'ok' : 'muted'),
         el('span', { class: 'hint', textContent: machine.online ? phaseText : t('Last reported assistant state: {state}', { state: phaseText }) }),
-        el('span', { class: 'hint', textContent: updateSummary(machine) }), el('div', { class: 'machine-actions' }, control, manage));
+        el('span', { class: 'hint', textContent: updateSummary(machine) }), el('div', { class: 'machine-actions' }, control, ...[upgradeButton(machine, newest)].filter(Boolean), manage));
     }));
   }
 }
@@ -112,7 +160,6 @@ async function editAccountMachine(machine, trigger) {
       el('p', { textContent: `${detail.os} · ${detail.presence === 'online' ? t('Online') : detail.presence === 'offline' ? t('Offline') : t('Status unknown')}` }),
       el('p', { class: 'hint', textContent: detail.last_seen ? t('Last seen: {time}', { time: new Date(detail.last_seen * 1000).toLocaleString(uiLocale()) }) : t('Status unknown') }),
       el('p', { class: 'hint', textContent: updateSummary(detail) }),
-      el('p', { class: 'hint', textContent: t('Each computer updates itself on its own; updates are not started from here.') }),
       el('label', {}, t('Machine name'), name), el('h3', { textContent: t('Allowed directory roots') }), roots, choose,
       el('p', { class: 'hint', textContent: t('Empty roots grant no execution access. Revocation denies future account access; a running program may retain information already received.') })),
     el('div', { class: 'directory-picker-footer' }, revoke, save));

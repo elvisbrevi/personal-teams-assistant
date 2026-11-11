@@ -1319,10 +1319,29 @@ for (const [label, ctx] of [['machine-desktop', {}], ['machine-phone', { viewpor
   await page.waitForFunction(() => window.__ptaMachineUpdate?.name === 'Travel laptop' && !document.querySelector('dialog[aria-label="Administrar máquina"]'));
 
   check(`${label}: remote roots and name share the host operation`, await page.evaluate(() => window.__ptaMachineUpdate.roots[0] === '/work/application' && !window.__ptaLastMachineAssistant));
+  check(`${label}: a machine whose version is unknown offers no update`, await page.locator('#machine-list button:has-text("Actualizar a")').count() === 0);
+  await page.evaluate(() => { window.__ptaMachineOlder = true; return loadMachines(); });
+  const upgrade = page.getByRole('button', { name: 'Actualizar a 0.11.6: Travel laptop', exact: true });
+  await upgrade.waitFor();
+  check(`${label}: an older machine offers its update to the newest known release`, (await upgrade.textContent()) === 'Actualizar a 0.11.6'
+    && await page.getByRole('button', { name: /: Preview server$/ }).filter({ hasText: 'Actualizar a' }).count() === 0);
+  await page.evaluate(axeSource);
+  check(`${label}: the machine list with an update passes axe`, (await scan(page)).length === 0, JSON.stringify(await scan(page)));
+  await upgrade.click();
+  const confirm = page.getByRole('button', { name: 'Confirmar actualización: Travel laptop', exact: true });
+  check(`${label}: a machine update requires its explicit second tap`, !await page.evaluate(() => window.__ptaMachineUpgrade) && await confirm.isVisible());
+  await confirm.click();
+  await page.waitForFunction(() => window.__ptaMachineUpgrade);
+  check(`${label}: the machine update names only the machine`, await page.evaluate(() => JSON.stringify(window.__ptaMachineUpgrade) === JSON.stringify({ machine: '22222222-2222-4222-8222-222222222222' })));
+  await page.waitForFunction(() => document.querySelector('#machine-list')?.textContent.includes('preparando una actualización'));
+  check(`${label}: a machine preparing its update shows it and offers no second request`, await page.locator('#machine-list button:has-text("Actualizar a")').isDisabled());
   await page.evaluate(() => { window.__ptaMachineOffline = true; loadMachines(); });
   await page.getByRole('button', { name: 'Administrar máquina: Travel laptop', exact: true }).click();
   await editor.waitFor();
   check(`${label}: offline machine roots cannot be changed`, await editor.getByRole('button', { name: 'Elegir directorios', exact: true }).isDisabled());
+  // The tap that opened the editor leaves the pointer on the edge of its footer, where a mouse's hover lift moves
+  // the button away from it and back on every frame (a phone has no hover).
+  await page.mouse.move(0, 0);
   await editor.getByRole('button', { name: 'Revocar máquina', exact: true }).click();
   check(`${label}: revocation requires its explicit second tap`, !await page.evaluate(() => window.__ptaMachineRevoked));
   await editor.getByRole('button', { name: 'Confirmar revocación', exact: true }).click();

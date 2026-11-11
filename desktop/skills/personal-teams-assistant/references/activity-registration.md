@@ -80,7 +80,9 @@ CLI and MCP. See [tools-and-todo.md](tools-and-todo.md).
 The screen opens with recorded days, newest first, optionally filtered by From/To. Select a
 day for its task list, then a task for the reused To-Do detail view. Task cards and detail
 headers have a separate link icon opening Azure. Back restores list position and focus.
-**Save a day's tasks** allows a manual snapshot; **Schedule settings** opens its settings.
+**Save a day's tasks**, folded at the top of the screen, allows a manual snapshot; **Schedule
+settings** opens its settings. The schedule runs in the application's background service (on
+the server for the portal), so the page and the app may stay closed.
 The daily target is a warning and never blocks navigation or saving.
 
 ## Answers from the record

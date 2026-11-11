@@ -81,6 +81,9 @@ struct Machine {
     /// Whether its last poll said it runs the workflow director (`workflow_direct`).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     workflow_direct: bool,
+    /// Whether its last poll said another device may ask it to update itself (`machine_upgrade`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    upgrade: bool,
 }
 impl Machine {
     /// Trusted and seen in its last polls (a worker polls every two seconds).
@@ -741,6 +744,14 @@ async fn operation(host: &Arc<Host>, method: &str, args: &Value) -> Result<Value
             let machine = args["machine"].as_str().context("Choose a machine.")?;
             fleet::call(host, machine, method, args.clone()).await
         }
+        "machine_upgrade" => {
+            let machine = args["machine"].as_str().context("Choose a machine.")?;
+            ensure!(
+                args.as_object().is_some_and(|a| a.len() == 1),
+                "Updating a machine takes only the machine: the version is always the newest release."
+            );
+            fleet::call(host, machine, method, json!({})).await
+        }
         "implementation_start" => {
             let request: Start = serde_json::from_value(args.clone())?;
             uuid(&request.machine)?;
@@ -982,6 +993,7 @@ async fn local(host: &Arc<Host>, method: &str, args: &Value) -> Result<Value> {
     if !matches!(
         method,
         "machine_assistant"
+            | "machine_upgrade"
             | "implementation_runs"
             | "machine_roots"
             | "machine_browse"
@@ -1005,6 +1017,7 @@ async fn local(host: &Arc<Host>, method: &str, args: &Value) -> Result<Value> {
         // Boxed: the session is a large future, kept off the stack of every machine call.
         "workflow_direct" => Box::pin(director::answer(host, args)).await,
         "machine_roots" => management::save_roots(host, args).await,
+        "machine_upgrade" => Box::pin(crate::app::maintenance::remote_latest(host)).await,
         "implementation_mobile_session" => mobile_session(host, args).await,
         "machine_assistant" => {
             let method = match args["action"].as_str() {
@@ -1782,6 +1795,89 @@ mod tests {
                 "{method}"
             );
         }
+    }
+    #[tokio::test]
+    async fn another_device_asks_a_capable_worker_to_update_and_relays_its_reason() {
+        let root = tempfile::tempdir().unwrap();
+        let host = host(root.path());
+        let worker = uuid::Uuid::new_v4().to_string();
+        let registration =
+            fleet::register(&host, &json!({"id":worker,"name":"Worker","os":"windows"}))
+                .await
+                .unwrap();
+        let token = registration["token"].as_str().unwrap();
+        // An older worker, or one whose installation cannot update itself, is not asked.
+        let poll = json!({"id":worker,"token":token,"action":"poll","assistant_phase":"stopped"});
+        fleet::protocol(&host, &poll).await.unwrap();
+        let listed = operation(&host, "machine_detail", &json!({"machine":worker}))
+            .await
+            .unwrap();
+        assert_eq!(listed["capabilities"]["upgrade"], false);
+        let refused = operation(&host, "machine_upgrade", &json!({"machine":worker}))
+            .await
+            .unwrap_err();
+        assert!(refused.to_string().contains("pta update"), "{refused}");
+        // The version is never an argument.
+        assert!(
+            operation(
+                &host,
+                "machine_upgrade",
+                &json!({"machine":worker,"version":"9.9.9"})
+            )
+            .await
+            .is_err()
+        );
+        // A worker never reaches it as a coordinator operation of its own.
+        assert!(
+            fleet::protocol(
+                &host,
+                &json!({"id":worker,"token":token,"action":"call","method":"machine_upgrade","args":{}}),
+            )
+            .await
+            .is_err()
+        );
+
+        let poll = json!({"id":worker,"token":token,"action":"poll","assistant_phase":"stopped","upgrade_support":true});
+        fleet::protocol(&host, &poll).await.unwrap();
+        let listed = operation(&host, "machine_detail", &json!({"machine":worker}))
+            .await
+            .unwrap();
+        assert_eq!(listed["capabilities"]["upgrade"], true);
+        let ask = |host: Arc<Host>, worker: String| {
+            tokio::spawn(async move {
+                operation(&host, "machine_upgrade", &json!({"machine":worker})).await
+            })
+        };
+        let claim = || async {
+            tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    let reply = fleet::protocol(&host, &poll).await.unwrap();
+                    if !reply["command"].is_null() {
+                        break reply["command"].clone();
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .unwrap()
+        };
+        let call = ask(host.clone(), worker.clone());
+        let command = claim().await;
+        assert_eq!(command["method"], "machine_upgrade");
+        assert_eq!(command["args"], json!({}));
+        fleet::protocol(&host, &json!({"id":worker,"token":token,"action":"poll","upgrade_support":true,"results":[{"id":command["id"],"result":{"ok":true,"data":{"outcome":"staging","target":"0.99.0"}}}]})).await.unwrap();
+        assert_eq!(call.await.unwrap().unwrap()["outcome"], "staging");
+        // A refusal on the machine comes back with its own reason.
+        let call = ask(host.clone(), worker.clone());
+        let command = claim().await;
+        fleet::protocol(&host, &json!({"id":worker,"token":token,"action":"poll","upgrade_support":true,"results":[{"id":command["id"],"result":{"ok":false,"error":"Keychain: update it at the computer."}}]})).await.unwrap();
+        let error = call.await.unwrap().unwrap_err();
+        assert!(error.to_string().contains("Keychain"), "{error}");
+        // This computer's own row is updated here, and only by its local owner.
+        let own = host.state.implementation.registry.lock().await.id.clone();
+        let list = operation(&host, "machine_list", &json!({})).await.unwrap();
+        assert_eq!(list["machines"][0]["id"], own.as_str());
+        assert!(list["machines"][0]["capabilities"]["upgrade"].is_boolean());
     }
     #[tokio::test]
     async fn a_worker_answers_checkout_inspect_only_once_its_poll_says_it_can() {

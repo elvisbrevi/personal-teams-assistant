@@ -31,7 +31,9 @@ async fn exchange(connection: &Connection, mut body: Value) -> Result<Value> {
         .bearer_auth(token)
         .json(&body)
         .timeout(Duration::from_secs(
-            if body["args"]["method"] == "machine_assistant" {
+            if body["args"]["method"] == "machine_assistant"
+                || body["args"]["method"] == "machine_upgrade"
+            {
                 110
             } else {
                 45
@@ -335,6 +337,7 @@ pub(in crate::app) async fn register(host: &Arc<Host>, args: &Value) -> Result<V
         update: None,
         checkout_inspect: false,
         workflow_direct: false,
+        upgrade: false,
     });
     state.save(&data)?;
     drop(data);
@@ -429,6 +432,7 @@ pub(in crate::app) async fn protocol(host: &Arc<Host>, args: &Value) -> Result<V
             machine.update = super::UpdateReport::parse(&args["update"]);
             machine.checkout_inspect = args["checkout_inspect_support"] == true;
             machine.workflow_direct = args["workflow_direct_support"] == true;
+            machine.upgrade = args["upgrade_support"] == true;
         }
         state.save(&data)?;
     }
@@ -646,6 +650,7 @@ pub(super) async fn call(
     ensure!(
         [
             "machine_assistant",
+            "machine_upgrade",
             "machine_roots",
             "machine_browse",
             "implementation_catalog",
@@ -663,6 +668,10 @@ pub(super) async fn call(
     let state = &host.state.implementation;
     let own = state.registry.lock().await.id.clone();
     if machine == own {
+        // This installation's own update needs its local owner, never another device's request.
+        if method == "machine_upgrade" {
+            return crate::app::maintenance::own_latest(host).await;
+        }
         return local(host, method, &args).await;
     }
     if let Some(connection) = state.connection()? {
@@ -692,6 +701,18 @@ pub(super) async fn call(
                 .iter()
                 .any(|m| m.id == machine && m.management_support),
             "Update this execution machine before browsing or running implementations."
+        );
+    }
+    if method == "machine_upgrade" {
+        ensure!(
+            state
+                .registry
+                .lock()
+                .await
+                .machines
+                .iter()
+                .any(|m| m.id == machine && m.upgrade),
+            "This machine cannot be updated from another device: update it at the computer with pta update. Its version is too old for remote updates, or its installation is not one the application updates by itself."
         );
     }
     if method == "workflow_direct" {
@@ -741,7 +762,7 @@ pub(super) async fn call(
     }
     // The director's session answers within its own bound (`director::SESSION_SECONDS`).
     for _ in 0..match method {
-        "machine_assistant" => 360,
+        "machine_assistant" | "machine_upgrade" => 360,
         "workflow_direct" => 4 * super::director::WAIT_SECONDS,
         _ => 160,
     } {
@@ -761,6 +782,16 @@ pub(super) async fn call(
         if let Some(index) = calls.iter().position(|c| c.id == id && c.result.is_some()) {
             let call = calls.remove(index);
             let result = call.result.unwrap();
+            if method == "machine_upgrade" && result["ok"] != true {
+                // The machine's own reason (a fixed message of this package) says what to do.
+                anyhow::bail!(
+                    "{}",
+                    result["error"]
+                        .as_str()
+                        .filter(|e| !e.is_empty() && e.len() <= 600)
+                        .unwrap_or("The machine could not start the update. Check it with pta update status on that computer.")
+                );
+            }
             ensure!(
                 result["ok"] == true,
                 "{}",
@@ -781,6 +812,11 @@ pub(super) async fn call(
     if method == "machine_assistant" {
         anyhow::bail!(
             "The machine did not confirm the assistant state. Refresh machines before trying again."
+        );
+    }
+    if method == "machine_upgrade" {
+        anyhow::bail!(
+            "The machine did not confirm the update. Refresh machines to see its version and update state before asking again."
         );
     }
     if matches!(method, "machine_roots" | "machine_browse") {
@@ -825,7 +861,7 @@ async fn poll(host: Arc<Host>) {
             let polled = remote(
                 &connection,
                 json!({"action":"poll","id":own,"results":results,"sessions":sessions,"session_cursor":next,"assistant_phase":assistant_phase,"management_support":true,"roots":roots,
-                    "host_version":env!("CARGO_PKG_VERSION"),"update":crate::app::maintenance::report(&host),"checkout_inspect_support":true,"workflow_direct_support":true}),
+                    "host_version":env!("CARGO_PKG_VERSION"),"update":crate::app::maintenance::report(&host),"checkout_inspect_support":true,"workflow_direct_support":true,"upgrade_support":crate::app::maintenance::remote_capable(&host)}),
             )
             .await;
             standing::note(&host.state, &polled);
@@ -840,6 +876,7 @@ async fn poll(host: Arc<Host>) {
                 if let Some(command) = reply["command"].as_object() {
                     // Long calls run beside the poll, so presence keeps flowing meanwhile.
                     if command["method"] == "machine_assistant"
+                        || command["method"] == "machine_upgrade"
                         || command["method"] == "workflow_direct"
                     {
                         let host = host.clone();
@@ -849,6 +886,10 @@ async fn poll(host: Arc<Host>) {
                             let result = local(&host, method, &command["args"]).await;
                             let result = match result {
                                 Ok(data) => json!({"ok":true,"data":data}),
+                                // An update's refusal says what to do on that computer.
+                                Err(error) if method == "machine_upgrade" => {
+                                    json!({"ok":false,"error":error.to_string()})
+                                }
                                 Err(_) => json!({"ok":false}),
                             };
                             json!({"id":command["id"],"result":result})
@@ -1001,6 +1042,7 @@ mod tests {
             update: None,
             checkout_inspect: false,
             workflow_direct: false,
+            upgrade: false,
         });
         data.teams_machine = worker.clone();
         assert!(leased(&mut data, &worker));

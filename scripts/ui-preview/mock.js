@@ -174,8 +174,10 @@
   let teamsMachine = machineId;
   const machinePhases = { [machineId]: "stopped", [remoteMachineId]: "stopped" };
   let remoteName = 'Preview Mac', remoteRoots = [], remoteRevoked = false;
-  const machineMetadata = (id, name, os, local) => ({ id, name, os, local, trust: !local && remoteRevoked ? 'revoked' : 'trusted', online: !(!local && (window.__ptaMachineOffline || remoteRevoked)), presence: !local && (window.__ptaMachineOffline || remoteRevoked) ? 'offline' : 'online', last_seen: Math.floor(Date.now() / 1000), roots: local ? machineSettings.roots : remoteRoots, capabilities: { management: true, directories: true, assistant: true }, assistant_phase: machinePhases[id],
-    version: local ? '0.11.5' : null, update: local ? { state: 'staged', pending: '0.11.6', failed: null, unattended: true } : null });
+  const machineMetadata = (id, name, os, local) => ({ id, name, os, local, trust: !local && remoteRevoked ? 'revoked' : 'trusted', online: !(!local && (window.__ptaMachineOffline || remoteRevoked)), presence: !local && (window.__ptaMachineOffline || remoteRevoked) ? 'offline' : 'online', last_seen: Math.floor(Date.now() / 1000), roots: local ? machineSettings.roots : remoteRoots, capabilities: { management: true, directories: true, assistant: true, upgrade: !local }, assistant_phase: machinePhases[id],
+    version: local ? '0.11.5' : window.__ptaMachineOlder ? '0.11.4' : null,
+    update: local ? { state: 'staged', pending: '0.11.6', failed: null, unattended: true }
+      : window.__ptaMachineOlder ? { state: window.__ptaMachineUpgraded ? 'staging' : 'current', pending: null, failed: null, unattended: false } : null });
   let machineSettings = { id: machineId, name: 'Preview server', coordinator: null, roots: ['/work'] };
   const azureCli = () => {
     const state = window.__ptaAzureCliState || (scenario === 'fresh' ? 'not_authenticated' : 'authenticated');
@@ -566,6 +568,11 @@
       if (window.__ptaMachineAssistantError) throw new Error('Assistant control failed.');
       machinePhases[args.machine] = args.action === 'start' ? 'running' : 'stopped';
       return { assistant_phase: machinePhases[args.machine] };
+    },
+    machine_upgrade: args => {
+      window.__ptaMachineUpgrade = structuredClone(args);
+      window.__ptaMachineUpgraded = true;
+      return { outcome: 'staging', target: '0.11.6' };
     },
     machine_teams: args => { if (window.__ptaTeamsMachineError) throw new Error('Machine selection failed.'); teamsMachine = args.machine; window.__ptaTeamsMachine = args.machine; return { handover_pending: true }; },
     implementation_request_catalog: args => ({ write_ready: args.provider === 'azure' ? azureCli().authenticated : githubCli().authenticated, azure_cli: args.provider === 'azure' ? azureCli() : null, github_cli: args.provider === 'github' ? githubCli() : null, targets: requestTargets(args), recent: requestTargets(args).slice(0, 3).reverse(), providers: providers.providers.filter(p => p.transport === 'cli' && p.available) }),
