@@ -288,8 +288,8 @@
             <label>Answer style<textarea id="llm-style" class="cfg" rows="3"></textarea></label>
           </div>
           <div class="panel" id="panel-message-style">
-            <h2>Message style in Teams</h2>
-            <p class="hint">Sends what the assistant writes in Teams as a card with a colored stripe and a band that says it was written with AI. Messages an agent posts with <code>teams_post</code> keep the plain format.</p>
+            <h2>Message style in Teams <span class="badge info">Account</span></h2>
+            <p class="hint">Sends what the assistant writes in Teams, and what an agent posts with <code>teams_post</code>, as a card with a colored stripe and a band that says it was written with AI. Every computer of your account uses it.</p>
             <label class="check"><input id="style-enabled" class="cfg" type="checkbox"> Show the assistant's messages as a card with a band</label>
             <div id="style-fields">
               <div class="grid">
@@ -349,7 +349,7 @@
           </div>
           <div id="panel-account-config" class="panel" hidden>
             <div class="panel-head"><h2>Account configuration</h2><span id="account-config-state" class="badge muted"></span></div>
-            <p class="hint">Your preferences, model choices, sources and their audiences, contexts, questions, verified notes and the Teams chats read on request follow your account. Folders, credentials, sign-ins, tunnels and the chats each computer receives stay on each computer. Synchronize from the account indicator in the sidebar.</p>
+            <p class="hint">Your preferences, model choices, sources and their audiences, contexts, questions, verified notes, the Teams chats read on request and the message style follow your account. Folders, credentials, sign-ins, tunnels and the chats each computer receives stay on each computer. Synchronize from the account indicator in the sidebar.</p>
             <p id="account-standing" class="callout warn" role="status" hidden></p>
             <p id="account-config-summary" class="hint" role="status"></p>
             <p id="account-config-problem" class="callout warn" role="status" hidden></p>

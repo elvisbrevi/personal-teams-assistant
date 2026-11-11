@@ -10,14 +10,21 @@
 //! cannot show the question falls back to `confirmed: true`: Claude Code under a host without
 //! dialogs answers `cancel` at once, and the Claude desktop app declines for the user before a
 //! person could have read it. A `decline` the user had time to give always stops the action.
+//! A question nobody answers within [`ANSWER_WITHIN`] expires: Claude Code under Remote Control
+//! from a phone holds it where no form is shown. An expired question does nothing, even with
+//! `confirmed: true`, and the session stops asking through the client, so the agent asks the
+//! user in the conversation and calls again with `confirmed: true`.
 //!
 //! stdout carries only protocol messages; nothing else is printed.
 
 use super::control::Reply;
 use serde_json::{Value, json};
 use std::collections::VecDeque;
-use std::time::{Duration, Instant};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines, Stdin, Stdout};
+use std::time::Duration;
+use tokio::io::{
+    AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader, Lines, Stdin, Stdout,
+};
+use tokio::time::Instant;
 
 pub(super) const PROTOCOLS: [&str; 3] = ["2025-06-18", "2025-03-26", "2024-11-05"];
 
@@ -35,10 +42,15 @@ pub(super) enum Answer {
     /// Cancelled or failed: the question never reached an answer (the client could not show
     /// it, or the user dismissed it without choosing).
     Unanswered,
+    /// No reply within [`ANSWER_WITHIN`]: the client may hold the question where nobody sees
+    /// it. It approves nothing, whatever the agent sent.
+    Expired,
 }
 
 /// No person reads a confirmation and answers it sooner than this.
 pub(super) const READING: Duration = Duration::from_secs(1);
+/// A confirmation waits this long for the client's reply, then expires.
+pub(super) const ANSWER_WITHIN: Duration = Duration::from_secs(120);
 
 /// `after` is how long the client took to reply. A refusal sooner than a person could have
 /// read the question is the client's own, not the user's: the question was never shown.
@@ -74,21 +86,24 @@ pub(super) fn listed(tool: &Tool) -> Value {
 }
 /// The confirmation rule, the same on every transport: an explicit answer from the user decides;
 /// without one, only `confirmed: true` (set after the user approved in the conversation) does.
+/// An expired question decides nothing in its own call: the agent asks the user first.
 pub(super) fn approved(answer: &Answer, args: &Value) -> bool {
     match answer {
         Answer::Approved => true,
-        Answer::Refused => false,
+        Answer::Refused | Answer::Expired => false,
         Answer::Unanswered => args["confirmed"] == true,
     }
 }
 /// The tool result that stops an unconfirmed action.
 pub(super) fn unconfirmed(answer: &Answer, question: &str) -> Value {
-    let text = if *answer == Answer::Refused {
-        "The user did not confirm this action; nothing was done.".to_owned()
-    } else {
-        format!(
+    let text = match answer {
+        Answer::Refused => "The user did not confirm this action; nothing was done.".to_owned(),
+        Answer::Expired => format!(
+            "Nobody answered the confirmation in time (this client may be unable to show it); nothing was done. Ask the user «{question}» in the conversation and, only if they approve this exact action, call again with confirmed: true."
+        ),
+        _ => format!(
             "This needs the user's confirmation: ask them «{question}» and, only if they approve this exact action, call again with confirmed: true. Nothing was done."
-        )
+        ),
     };
     json!({"content": [{"type": "text", "text": text}], "isError": true})
 }
@@ -108,10 +123,16 @@ pub(super) fn elicitation(id: &str, question: &str) -> Value {
         "requestedSchema": {"type": "object", "properties": {"confirm": {"type": "boolean", "title": "Confirm", "description": "Yes, do it"}}, "required": ["confirm"]},
     }})
 }
+/// Withdraws the elicitation `id` once it expired, so a client that shows it later drops it.
+pub(super) fn withdrawn(id: &str) -> Value {
+    json!({"jsonrpc": "2.0", "method": "notifications/cancelled", "params": {
+        "requestId": id, "reason": "The confirmation expired; nothing was done.",
+    }})
+}
 
-pub(super) struct Server {
-    lines: Lines<BufReader<Stdin>>,
-    out: Stdout,
+pub(super) struct Server<R = BufReader<Stdin>, W = Stdout> {
+    lines: Lines<R>,
+    out: W,
     /// Messages read while waiting for the user's answer, handled next.
     queued: VecDeque<Value>,
     /// The client can ask the user (MCP elicitation).
@@ -121,9 +142,15 @@ pub(super) struct Server {
 
 impl Server {
     pub(super) fn new() -> Self {
+        Self::over(BufReader::new(tokio::io::stdin()), tokio::io::stdout())
+    }
+}
+
+impl<R: AsyncBufRead + Unpin, W: AsyncWrite + Unpin> Server<R, W> {
+    fn over(input: R, out: W) -> Self {
         Self {
-            lines: BufReader::new(tokio::io::stdin()).lines(),
-            out: tokio::io::stdout(),
+            lines: input.lines(),
+            out,
             queued: VecDeque::new(),
             elicitation: false,
             asked: 0,
@@ -154,8 +181,21 @@ impl Server {
         self.out.write_all(text.as_bytes()).await?;
         self.out.flush().await
     }
-    /// Ask the user, through the client, to confirm `question`; messages that arrive meanwhile
-    /// are kept for later.
+    /// The user's answer to `question`: asked through the client while it can ask. Once a
+    /// question expires, the client holds questions where nobody answers them, so the session
+    /// stops asking and `confirmed: true` decides from then on.
+    async fn confirmation(&mut self, question: &str) -> Answer {
+        if !self.elicitation {
+            return Answer::Unanswered;
+        }
+        let answer = self.ask(question).await;
+        if answer == Answer::Expired {
+            self.elicitation = false;
+        }
+        answer
+    }
+    /// Ask the user, through the client, to confirm `question`, for at most [`ANSWER_WITHIN`];
+    /// messages that arrive meanwhile are kept for later.
     async fn ask(&mut self, question: &str) -> Answer {
         self.asked += 1;
         let id = format!("confirm-{}", self.asked);
@@ -164,15 +204,25 @@ impl Server {
             return Answer::Unanswered;
         }
         let asked = Instant::now();
-        while let Some(message) = self.next_from_client().await {
-            if message.get("id").and_then(Value::as_str) == Some(id.as_str())
-                && message.get("method").is_none()
-            {
-                return answer(&message, asked.elapsed());
+        let deadline = asked + ANSWER_WITHIN;
+        loop {
+            match tokio::time::timeout_at(deadline, self.next_from_client()).await {
+                Ok(Some(message)) => {
+                    if message.get("id").and_then(Value::as_str) == Some(id.as_str())
+                        && message.get("method").is_none()
+                    {
+                        return answer(&message, asked.elapsed());
+                    }
+                    self.queued.push_back(message);
+                }
+                Ok(None) => return Answer::Unanswered,
+                Err(_) => {
+                    // A late reply is a response nobody waits for, and is dropped.
+                    let _ = self.send(withdrawn(&id)).await;
+                    return Answer::Expired;
+                }
             }
-            self.queued.push_back(message);
         }
-        Answer::Unanswered
     }
     /// The next message from the client itself, not from the queue.
     async fn next_from_client(&mut self) -> Option<Value> {
@@ -203,11 +253,7 @@ impl Server {
             None
         };
         if let Some(question) = question {
-            let answer = if self.elicitation {
-                self.ask(&question).await
-            } else {
-                Answer::Unanswered
-            };
+            let answer = self.confirmation(&question).await;
             if !approved(&answer, &args) {
                 return Ok(unconfirmed(&answer, &question));
             }
@@ -308,9 +354,80 @@ pub(super) async fn config() -> Reply {
 
 #[cfg(test)]
 mod tests {
-    use super::{Answer, READING, answer};
-    use serde_json::json;
+    use super::{ANSWER_WITHIN, Answer, READING, Server, answer, approved, unconfirmed};
+    use serde_json::{Value, json};
     use std::time::Duration;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    #[tokio::test(start_paused = true)]
+    async fn an_unanswered_question_expires_and_the_conversation_decides_after_it() {
+        let (_client, input) = tokio::io::duplex(4096);
+        let (output, read) = tokio::io::duplex(4096);
+        let mut server = Server::over(BufReader::new(input), output);
+        server.elicitation = true;
+        let confirmed = json!({"confirmed": true});
+
+        // Remote Control on a phone never shows the form: nobody answers, and nothing runs
+        // even though the agent said the user approved.
+        let started = tokio::time::Instant::now();
+        let answer = server.confirmation("Send this?").await;
+        assert_eq!(answer, Answer::Expired);
+        assert!(started.elapsed() >= ANSWER_WITHIN);
+        assert!(!approved(&answer, &confirmed));
+        let result = unconfirmed(&answer, "Send this?");
+        assert!(
+            result["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("in the conversation")
+        );
+        let mut lines = BufReader::new(read).lines();
+        let mut next = async || -> Value {
+            serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap()
+        };
+        let asked = next().await;
+        assert_eq!(asked["method"], "elicitation/create");
+        let withdrawn = next().await;
+        assert_eq!(withdrawn["method"], "notifications/cancelled");
+        assert_eq!(withdrawn["params"]["requestId"], asked["id"]);
+
+        // The session stops asking: the user's answer in the conversation decides at once.
+        let answer = server.confirmation("Send this?").await;
+        assert_eq!(answer, Answer::Unanswered);
+        assert!(approved(&answer, &confirmed));
+        assert!(!approved(&answer, &json!({})));
+        drop(server);
+        assert!(lines.next_line().await.unwrap().is_none(), "asked again");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_refusal_given_in_time_stops_the_action_and_the_session_keeps_asking() {
+        let (mut client, input) = tokio::io::duplex(4096);
+        let (output, read) = tokio::io::duplex(4096);
+        let mut server = Server::over(BufReader::new(input), output);
+        server.elicitation = true;
+        let user = tokio::spawn(async move {
+            let mut lines = BufReader::new(read).lines();
+            let asked: Value =
+                serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            let ping = json!({"jsonrpc": "2.0", "id": 9, "method": "ping"});
+            let decline =
+                json!({"jsonrpc": "2.0", "id": asked["id"], "result": {"action": "decline"}});
+            client
+                .write_all(format!("{ping}\n{decline}\n").as_bytes())
+                .await
+                .unwrap();
+            client
+        });
+        let answer = server.confirmation("Send this?").await;
+        assert_eq!(answer, Answer::Refused);
+        assert!(!approved(&answer, &json!({"confirmed": true})));
+        assert!(server.elicitation);
+        // What arrived meanwhile is handled next.
+        assert_eq!(server.queued.pop_front().unwrap()["method"], "ping");
+        drop(user.await.unwrap());
+    }
 
     #[test]
     fn only_an_explicit_answer_overrides_the_confirmed_argument() {

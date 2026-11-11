@@ -464,6 +464,78 @@ async fn confirmations_use_elicitation_when_offered_and_confirmed_true_otherwise
 }
 
 #[tokio::test]
+async fn an_expired_question_runs_nothing_and_the_session_stops_asking() {
+    let (_dir, portal, entries, _issuer) = configured_fixture().await;
+    let (alice_host, _alice_lock) = fake_host(&portal, &entries[0]).await;
+    let alice = assertion(&entries[0]);
+    let initialized = post(
+        &portal,
+        Some(&alice),
+        &[],
+        message(1, "initialize", json!({"capabilities":{"elicitation":{}}})),
+    )
+    .await;
+    let session = initialized.headers()["mcp-session-id"]
+        .to_str()
+        .unwrap()
+        .to_owned();
+    let send = |id| {
+        call(
+            id,
+            "answer_send",
+            json!({"resource":"synthetic-resource","confirmed":true}),
+        )
+    };
+    let data = |bytes: &[u8]| -> Value {
+        let text = String::from_utf8(bytes.to_vec()).unwrap();
+        serde_json::from_str(text.trim().strip_prefix("event: message\ndata: ").unwrap()).unwrap()
+    };
+
+    // A client that never shows the question (Remote Control on a phone): it expires, is
+    // withdrawn, and nothing runs although the agent said the user approved.
+    let streamed = post(
+        &portal,
+        Some(&alice),
+        &[("mcp-session-id", &session)],
+        send(2),
+    )
+    .await;
+    let mut events = streamed.into_body().into_data_stream();
+    let asked = data(&events.next().await.unwrap().unwrap());
+    assert_eq!(asked["method"], "elicitation/create");
+    tokio::time::pause();
+    let withdrawn = data(&events.next().await.unwrap().unwrap());
+    tokio::time::resume();
+    assert_eq!(withdrawn["method"], "notifications/cancelled");
+    assert_eq!(withdrawn["params"]["requestId"], asked["id"]);
+    let done = data(&events.next().await.unwrap().unwrap());
+    assert_eq!(done["id"], 2);
+    assert_eq!(done["result"]["isError"], true);
+    assert!(text(&done).contains("in the conversation"));
+    assert!(host_methods(&alice_host).await.is_empty());
+    // A late answer reaches nothing.
+    let late = json!({"jsonrpc":"2.0","id":asked["id"],"result":{"action":"accept","content":{"confirm":true}}});
+    assert_eq!(
+        post(&portal, Some(&alice), &[], late).await.status(),
+        StatusCode::BAD_REQUEST
+    );
+    assert!(host_methods(&alice_host).await.is_empty());
+
+    // The session is not asked again: the user's answer in the conversation decides.
+    let reply = post(
+        &portal,
+        Some(&alice),
+        &[("mcp-session-id", &session)],
+        send(3),
+    )
+    .await;
+    assert_ne!(reply.headers()[header::CONTENT_TYPE], "text/event-stream");
+    let reply = json_body(reply).await;
+    assert_eq!(reply["result"]["isError"], false, "{reply}");
+    assert_eq!(host_methods(&alice_host).await.len(), 1);
+}
+
+#[tokio::test]
 async fn requests_are_bounded_in_size_and_rate_and_logged_without_content() {
     let (_dir, portal, entries, _issuer) = configured_fixture().await;
     let alice = assertion(&entries[0]);
