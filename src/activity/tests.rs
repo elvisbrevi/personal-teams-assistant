@@ -67,6 +67,34 @@ fn legacy_profiles_get_disabled_registration_and_invalid_fields_are_rejected() {
 }
 
 #[test]
+fn effort_fields_by_type_fall_back_to_the_default_and_are_validated() {
+    let mut s = Settings::default();
+    // Hosts that predate the map keep loading a profile that never set it.
+    assert!(!toml::to_string(&s).unwrap().contains("effort_fields"));
+    s.effort_fields
+        .insert("Bug".into(), "Custom.EsfuerzoReal".into());
+    s.validate().unwrap();
+    assert!(toml::to_string(&s).unwrap().contains("effort_fields"));
+    assert_eq!(s.effort_field_for("Bug"), "Custom.EsfuerzoReal");
+    assert_eq!(s.effort_field_for("bug"), "Custom.EsfuerzoReal");
+    assert_eq!(
+        s.effort_field_for("Task"),
+        "Microsoft.VSTS.Scheduling.CompletedWork"
+    );
+    for (kind, field) in [
+        ("Bug", "Microsoft.VSTS.Scheduling.RemainingWork"),
+        ("Bug", "System.State"),
+        ("", "Custom.Hours"),
+        (" Bug", "Custom.Hours"),
+        ("BUG", "Custom.Hours"),
+    ] {
+        let mut wrong = s.clone();
+        wrong.effort_fields.insert(kind.into(), field.into());
+        assert!(wrong.validate().is_err(), "{kind} = {field}");
+    }
+}
+
+#[test]
 fn daily_snapshots_replace_atomically_keep_legacy_data_and_supply_verified_recap_links() {
     use crate::tools::{
         tasks::{Day, Task},

@@ -1249,7 +1249,7 @@ pub(super) const TOOLS: &[Tool] = &[
     Tool {
         name: "activity_settings",
         title: "Activity registration settings",
-        description: "Daily task snapshot settings: enabled, schedule, workdays, time zone, Azure sources, advisory daily hours and effort field. Legacy write settings are ignored.",
+        description: "Daily task snapshot settings: enabled, schedule, workdays, time zone, Azure sources, advisory daily hours, the effort field and effort_fields (the field by work item type, such as {\"Bug\": \"Custom.EsfuerzoReal\"}; other types use effort_field). Legacy write settings are ignored.",
         effect: Effect::Read,
         schema: none,
     },
@@ -1774,7 +1774,7 @@ pub(super) const TOOLS: &[Tool] = &[
     Tool {
         name: "activity_settings_update",
         title: "Change activity registration",
-        description: "Changes the read-only daily task schedule, time zone, sources, advisory daily hours and effort field.",
+        description: "Changes the read-only daily task schedule, time zone, sources, advisory daily hours, effort field and effort_fields (work item type → field holding its actual hours; replaces the whole map).",
         effect: Effect::Local,
         schema: || {
             object(
@@ -2216,7 +2216,14 @@ pub(super) async fn run(name: &str, args: &Value) -> Result<Value, String> {
         "index_status" => ipc("index_status", json!({})).await,
         "activity_status" => ipc("activity_status", json!({})).await,
         "activity_history" => ipc("activity_history", json!({"day": args.get("day"), "from": args.get("from")})).await,
-        "activity_settings" => Ok(ipc("snapshot", json!({})).await?["config"]["activity_registration"].clone()),
+        "activity_settings" => {
+            let mut settings = ipc("snapshot", json!({})).await?["config"]["activity_registration"].clone();
+            // Omitted while empty; shown so it can be read and changed like the rest.
+            if let Some(settings) = settings.as_object_mut() {
+                settings.entry("effort_fields").or_insert_with(|| json!({}));
+            }
+            Ok(settings)
+        }
         "message_style" => {
             let config = ipc("snapshot", json!({})).await?["config"].clone();
             Ok(crate::config::MessageStyle::fields(config.get("message_style").filter(|s| !s.is_null())))

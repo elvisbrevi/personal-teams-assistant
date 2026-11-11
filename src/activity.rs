@@ -40,6 +40,11 @@ pub struct Settings {
     pub task_kind: String,
     pub done_state: String,
     pub effort_field: String,
+    /// The field that holds actual hours for a work item type (`Bug = "Custom.EsfuerzoReal"`);
+    /// a type not listed uses `effort_field`. Omitted while empty, so hosts that predate it
+    /// keep loading the account's configuration.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub effort_fields: BTreeMap<String, String>,
     pub extra_fields: BTreeMap<String, Value>,
 }
 impl Default for Settings {
@@ -60,6 +65,7 @@ impl Default for Settings {
             task_kind: "Task".into(),
             done_state: "Done".into(),
             effort_field: "Microsoft.VSTS.Scheduling.CompletedWork".into(),
+            effort_fields: BTreeMap::new(),
             extra_fields: BTreeMap::new(),
         }
     }
@@ -157,11 +163,31 @@ impl Settings {
                 && !self.done_state.chars().any(char::is_control),
             "invalid completed state"
         );
+        let effort = |name: &str| {
+            valid_field(name)
+                && !name.starts_with("System.")
+                && name != "Microsoft.VSTS.Scheduling.RemainingWork"
+        };
+        ensure!(effort(&self.effort_field), "invalid effort field");
         ensure!(
-            valid_field(&self.effort_field)
-                && !self.effort_field.starts_with("System.")
-                && self.effort_field != "Microsoft.VSTS.Scheduling.RemainingWork",
-            "invalid effort field"
+            self.effort_fields.len() <= 40
+                && self.effort_fields.iter().all(|(kind, field)| {
+                    !kind.trim().is_empty()
+                        && kind.trim() == kind
+                        && kind.len() <= 128
+                        && !kind.chars().any(char::is_control)
+                        && effort(field)
+                }),
+            "invalid effort field for a work item type"
+        );
+        ensure!(
+            self.effort_fields
+                .keys()
+                .map(|kind| kind.to_lowercase())
+                .collect::<BTreeSet<_>>()
+                .len()
+                == self.effort_fields.len(),
+            "a work item type has more than one effort field"
         );
         ensure!(
             self.sources.len() <= 10
@@ -170,6 +196,14 @@ impl Settings {
         );
         validate_fields(&self.extra_fields)?;
         Ok(())
+    }
+    /// The field that holds actual hours for work items of `kind`; type names compare
+    /// without case, as Azure DevOps does.
+    pub fn effort_field_for(&self, kind: &str) -> &str {
+        self.effort_fields
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case(kind))
+            .map_or(&self.effort_field, |(_, field)| field)
     }
     pub fn zoned(&self, now: DateTime<Utc>) -> DateTime<FixedOffset> {
         if self.time_zone == "local" {

@@ -468,6 +468,11 @@
             <details class="fold">
               <summary>Where the hours come from <small>Advanced</small></summary>
               <label>Effort field <small>The task field that holds actual hours, such as Microsoft.VSTS.Scheduling.CompletedWork.</small><input id="registration-effort" class="cfg" translate="no" placeholder="Microsoft.VSTS.Scheduling.CompletedWork" spellcheck="false"></label>
+              <fieldset>
+                <legend>Effort field by type <small>For a type that keeps its actual hours in another field, such as bugs in Custom.EsfuerzoReal. Other types use the field above.</small></legend>
+                <div id="registration-effort-types"></div>
+                <button type="button" class="secondary small" id="registration-effort-type-add">Add a type</button>
+              </fieldset>
             </details>
           </div>
           <div class="panel" id="panel-registration-schedule">

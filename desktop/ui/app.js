@@ -25,7 +25,7 @@ import {
   setActivityDay, setActivityDayRequest, setActivityDetailRequest, setActivityRunning, setActivityTask,
   showActivityView,
 } from './activities.js';
-import { renderScheduleFields } from './settings-daily.js';
+import { addEffortType, renderScheduleFields } from './settings-daily.js';
 import { folded, loadActivity, loadMessages, renderMessages, setFilter } from './messages.js';
 import {
   addRepositorySource, listGithub, loadNotes, newNoteContexts, noteOrigin, openSources, recordSource,
@@ -157,6 +157,7 @@ document.querySelectorAll('#style-choice button').forEach(button => {
   button.onclick = () => chooseLook(STYLE_KEY, 'style', button.dataset.style === DEFAULT_STYLE ? null : button.dataset.style);
 });
 $('#registration-schedule').addEventListener('change', renderScheduleFields);
+$('#registration-effort-type-add').addEventListener('click', addEffortType);
 $('#notice-close').onclick = () => { $('#notice').hidden = true; };
 $('#save').onclick = () => busy($('#save'), async () => { await save(); done(t('Settings saved.')); });
 $('#discard').onclick = () => busy($('#discard'), async () => { await reload(); notify(t('Changes discarded.')); });
