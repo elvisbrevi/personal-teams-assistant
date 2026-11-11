@@ -42,7 +42,9 @@ pta --json activity history 2026-10-01..2026-10-20
 ```
 
 Runs return immediately. Poll `activity status` until `running=false`, then inspect the
-record and the latest run's status/diagnostics. Failed or interrupted reads preserve the
+record and the latest run's status/diagnostics. A failed run keeps a generic `error` and the
+real cause in `detail` (the source and the read's message, such as a missing read credential
+or an Azure HTTP status), which Activities shows as «Cause». Failed or interrupted reads preserve the
 previous saved day; a successful re-run replaces that day instead of duplicating tasks.
 Empty days are saved explicitly and remain different from days never read. Legacy confirmed
 tasks remain readable. `activity pending` returns no new decisions and `activity resolve`

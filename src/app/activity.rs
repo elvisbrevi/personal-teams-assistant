@@ -134,26 +134,47 @@ pub(super) async fn run(
     let run_id = id.clone();
     *task = Some(tokio::spawn(async move {
         let result: Result<Day> = async {
-            let mut day = Day {day:date.to_string(),time_zone:config.activity_registration.time_zone.clone(),target_hours:config.activity_registration.daily_hours,..Default::default()};
+            let mut day = Day {
+                day: date.to_string(),
+                time_zone: config.activity_registration.time_zone.clone(),
+                target_hours: config.activity_registration.daily_hours,
+                ..Default::default()
+            };
             let mut seen = std::collections::BTreeSet::new();
             for source in selected {
-                ensure!(authority::invocation(&h.state)?.scope.admitted, "Account binding changed.");
-                let value = tools::todo::read(&h.state, "list_azure_tasks", &json!({"day":date.to_string(),"source":source})).await.map_err(|_| anyhow::anyhow!("Existing Azure tasks could not be read. Check the selected sources and read credentials; the previous record was retained."))?;
+                ensure!(
+                    authority::invocation(&h.state)?.scope.admitted,
+                    "Account binding changed."
+                );
+                let value = tools::todo::read(
+                    &h.state,
+                    "list_azure_tasks",
+                    &json!({"day":date.to_string(),"source":source}),
+                )
+                .await
+                .map_err(|error| anyhow::anyhow!("{source}: {}", cause(&error)))?;
                 let read: Day = serde_json::from_value(value)?;
                 for task in read.tasks {
-                    if seen.insert(task.item.url.clone()) { day.hours += task.hours; day.tasks.push(task); }
+                    if seen.insert(task.item.url.clone()) {
+                        day.hours += task.hours;
+                        day.tasks.push(task);
+                    }
                 }
             }
             day.saved_at = Utc::now().timestamp();
-            ensure!(authority::invocation(&h.state)?.scope.admitted, "Account binding changed.");
+            ensure!(
+                authority::invocation(&h.state)?.scope.admitted,
+                "Account binding changed."
+            );
             LocalActivity::new(&db).save_day(&day)?;
             Ok(day)
-        }.await;
+        }
+        .await;
         if !authority::invocation(&h.state).is_ok_and(|i| i.scope.admitted) {
             return;
         }
         // The GUI's activities tab follows the run; there is no native notification.
-        let (summary, error) = match result {
+        let (summary, error, detail) = match result {
             Ok(day) => {
                 let remaining = (day.target_hours - day.hours).max(0.);
                 let warnings = if remaining > 0. {
@@ -171,16 +192,24 @@ pub(super) async fn run(
                     ..Default::default()
                 };
                 let _ = LocalActivity::new(&db).save_summary(&day.day, &summary);
-                (Some(summary), String::new())
+                (Some(summary), String::new(), String::new())
             }
-            Err(_) => {
+            Err(failure) => {
                 let error = "Existing Azure tasks could not be saved. Check the selected sources and read credentials; the previous record was retained.".to_owned();
-                (None, error)
+                (None, error, format!("{failure:#}"))
             }
         };
-        let _ = LocalActivity::new(&db).finish_run(&run_id, summary.as_ref(), &error);
+        let _ = LocalActivity::new(&db).finish_run(&run_id, summary.as_ref(), &error, &detail);
     }));
     Ok(json!({"id":id,"day":date.to_string(),"running":true}))
+}
+/// A tool error without its `[code] ` prefix, as the run's detail shows it.
+fn cause(error: &str) -> &str {
+    error
+        .strip_prefix('[')
+        .and_then(|rest| rest.split_once("] "))
+        .filter(|(code, _)| code.chars().all(|c| c.is_ascii_lowercase() || c == '_'))
+        .map_or(error, |(_, message)| message)
 }
 pub(super) async fn resolve(_host: &Arc<Host>, _id: String, _resolution: Value) -> Result<Value> {
     anyhow::bail!(Rejected::Input(
@@ -228,5 +257,23 @@ pub(super) async fn schedule(host: Arc<Host>) {
             }
         }
         tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn a_failed_read_keeps_its_cause_without_the_code() {
+        assert_eq!(
+            super::cause(
+                "[not_ready] Azure read credential unavailable; inspect credentials list."
+            ),
+            "Azure read credential unavailable; inspect credentials list."
+        );
+        assert_eq!(
+            super::cause("Azure DevOps read wiql returned HTTP 401"),
+            "Azure DevOps read wiql returned HTTP 401"
+        );
+        assert_eq!(super::cause("[RPF] project"), "[RPF] project");
     }
 }
