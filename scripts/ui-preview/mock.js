@@ -286,7 +286,21 @@
   const crowd = Array.from({ length: 24 }, (_, i) => `Synthetic member ${String(i + 1).padStart(2, '0')}`);
   teamsChats.push({ id: '19:crowd@thread.v2', type: 'group', topic: crowd.join(', '), members: crowd, last_updated: '2026-10-12T10:00:00Z', readable: false });
   let workflowSettings = { ready_states: scenario === 'full' ? [{ organization: org, project: 'Payments', states: ['Ready for development'] }] : [],
-    watch_interval_minutes: 5, concurrency: 2, pull_request_wait_days: 7, director: { machine: '11111111-1111-4111-8111-111111111111', provider: 'claude', model: 'claude-sonnet-5-5', effort: 'medium' } };
+    watch_interval_minutes: 5, concurrency: 2, pull_request_wait_days: 7, director: { machine: '11111111-1111-4111-8111-111111111111', provider: 'claude', model: 'claude-sonnet-5-5', effort: 'medium' },
+    project_directors: [] };
+  // Which director each project gets (src/workflows/director.rs `resolve`): its own, the agent its
+  // enabled workflows share, or the general one.
+  const directors = () => {
+    const projects = [...new Set([...workflows.map(w => w.project), ...workflowSettings.ready_states.map(r => r.project), ...workflowSettings.project_directors.map(p => p.project)])];
+    return projects.map(project => {
+      const own = workflowSettings.project_directors.find(p => p.project === project);
+      if (own) return { organization: org, project, director: own.director, source: 'project' };
+      const enabled = workflows.filter(w => w.project === project && w.enabled);
+      const shared = enabled.length && enabled.every(w => w.machine === enabled[0].machine && JSON.stringify(w.agent) === JSON.stringify(enabled[0].agent));
+      if (shared) return { organization: org, project, director: { machine: enabled[0].machine, ...enabled[0].agent }, source: 'workflow' };
+      return { organization: org, project, director: workflowSettings.director, source: workflowSettings.director ? 'global' : null };
+    });
+  };
   const processStates = { Payments: ['New', 'Ready for development', 'Developing', 'Awaiting validation', 'Finished'], Exports: ['New', 'Approved', 'Committed', 'Done'] };
   const usedBy = () => Object.fromEntries(workflowBlocks.map(b => [b.id, workflows.filter(w => w.blocks.includes(b.id)).map(w => w.id)]));
   const syncWorkflows = () => { snapshot.map.workflows = structuredClone(workflows); snapshot.map.workflow_blocks = structuredClone(workflowBlocks); };
@@ -422,6 +436,7 @@
         return { workflow: structuredClone(workflow), saved: true, warnings: [] };
       }
       const workflow = structuredClone(args.workflow);
+      if (workflow.allow?.length && !args.confirmed) throw new Error(`[invalid_input] Confirm with the user, then save with confirmed: true. Save workflow ${workflow.id}?`);
       for (const [id, dir] of Object.entries(workflow.checkouts)) {
         const name = workflow.repositories.find(r => r.id.toLowerCase() === id)?.name;
         if (dir.includes('documentation')) throw new Error(`The origin of ${dir} (${org}/${workflow.project}/_git/handbook) names another repository than ${name}.`);
@@ -471,7 +486,7 @@
     // project, its process's states.
     workflow_settings: args => {
       window.__ptaWorkflowCalls.push({ method: 'workflow_settings', ...structuredClone(args) });
-      const reply = { settings: structuredClone(workflowSettings), editable: true,
+      const reply = { settings: structuredClone(workflowSettings), directors: directors(), editable: true,
         defaults: { watch_interval_minutes: 5, concurrency: 2, pull_request_wait_days: 7, director: null, ready_states: [] },
         bounds: { watch_interval_minutes: [1, 60], concurrency: [1, 4], pull_request_wait_days: [1, 60], ready_states_per_project: 20, projects_with_ready_states: 50 },
         // The ready-state watcher on this computer (src/app/workflows/watcher.rs `view`).
@@ -495,7 +510,11 @@
         workflowSettings.ready_states = workflowSettings.ready_states.filter(r => r.project !== change.project);
         if (change.states.length) workflowSettings.ready_states.push({ organization: org, project: change.project, states: change.states });
       }
-      return { settings: structuredClone(workflowSettings), saved: true, warnings: [] };
+      for (const change of args.project_directors ?? []) {
+        workflowSettings.project_directors = workflowSettings.project_directors.filter(p => p.project !== change.project);
+        if (change.director) workflowSettings.project_directors.push({ organization: org, project: change.project, director: change.director });
+      }
+      return { settings: structuredClone(workflowSettings), directors: directors(), saved: true, warnings: [] };
     },
   };
   const handlers = {

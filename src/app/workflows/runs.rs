@@ -82,7 +82,7 @@ pub(in crate::app) fn describe_start(
     item: u64,
 ) -> String {
     let what = START_EFFECT;
-    let place = place
+    let place_text = place
         .map(|w| {
             format!(
                 " on machine {} with {} {} {},",
@@ -91,10 +91,23 @@ pub(in crate::app) fn describe_start(
         })
         .unwrap_or_default();
     match workflow {
-        Some(id) => format!("Start workflow {id} for Azure work item {item}:{place} {what}"),
-        None => format!(
-            "Start a workflow run for Azure work item {item}: the workflow director chooses the workflow (or none, and the run waits for you to assign one); then, on that workflow's machine and agent, {what}"
+        Some(id) => format!(
+            "Start workflow {id} for Azure work item {item}:{place_text} {what}{}",
+            place.map(allow_effect).unwrap_or_default()
         ),
+        None => format!(
+            "Start a workflow run for Azure work item {item}: the workflow director chooses the workflow (or none, and the run waits for you to assign one); then, on that workflow's machine and agent, {what}; its coding agents may also do what that workflow allows (work items, Teams messages, merges or deployments, when it lists them in allow)"
+        ),
+    }
+}
+/// What a workflow's coding agents may do beyond the fixed rules, as a clause a start's
+/// confirmation ends with; empty when it allows nothing.
+pub(in crate::app) fn allow_effect(workflow: &crate::workflows::Workflow) -> String {
+    let lifted = crate::workflows::describe_allow(&workflow.allow);
+    if lifted.is_empty() {
+        String::new()
+    } else {
+        format!("; beyond the fixed rules, {lifted}")
     }
 }
 

@@ -10,7 +10,7 @@ import { loadWorkItemSessions, openAgentSession } from './sessions.js';
 import { chooseDirectories } from './directory-sheet.js';
 import { providerNames } from './home.js';
 import { effortNames } from './settings-models.js';
-import { runStateLabel as runState } from './run-states.js';
+import { allowNames, runStateLabel as runState } from './run-states.js';
 import { openWorkflowRun } from './workflow-runs.js';
 
 let implementationForm = null;
@@ -92,7 +92,7 @@ async function openImplementation(item, selection, trigger) {
     $('#implementation-content').replaceChildren(el('div', { class: 'panel' },
       el('h2', { textContent: prepared.planning ? t('Plan child work items') : t('Implement selected work item') }),
       el('p', { class: 'hint', textContent: prepared.planning ? t('Review and edit the proposed children before creating them. Existing children are included as context.') : t('The selected coding agent will work in the directories you choose.') }),
-      prepared.planning ? null : el('p', { class: 'callout warn', id: 'implementation-permissions', textContent: t('The agent runs with full permissions on that computer: it runs commands, commits, pushes and opens pull requests there without asking anyone.') }),
+      prepared.planning ? null : el('p', { class: 'callout warn', id: 'implementation-permissions', textContent: t('The agent runs with full permissions on that computer: it runs commands, commits, pushes and opens pull requests there without asking anyone. It never changes work items, sends Teams messages, merges, publishes or deploys, unless a workflow allows it.') }),
       eligible.length ? el('label', {}, t('Workflow'), workflow) : null,
       workflowNote,
       el('label', {}, t('Implementation context'), context),
@@ -145,7 +145,9 @@ function fillFromWorkflow(form, workflow) {
   form.effort.replaceChildren(el('option', { value: agent.effort, textContent: effortNames[agent.effort] || agent.effort }));
   form.context.value = '';
   form.workflowNote.hidden = false;
-  form.workflowNote.textContent = t('This run takes its machine, directories, agent, model, effort and instructions from the workflow {name}. To choose them yourself, start without a workflow.', { name: workflow.name });
+  const allowed = allowNames(workflow.allow);
+  form.workflowNote.textContent = [t('This run takes its machine, directories, agent, model, effort and instructions from the workflow {name}. To choose them yourself, start without a workflow.', { name: workflow.name }),
+    allowed.length ? t('Its coding agent may also: {actions}.', { actions: allowed.join(', ') }) : null].filter(Boolean).join(' ');
 }
 /** What the person chose before a workflow took over, to give back with «No workflow». */
 function rememberChoices(form) {

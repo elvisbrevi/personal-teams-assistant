@@ -66,20 +66,24 @@ fn answer(bench: &Bench, workflow: &str) {
 #[tokio::test]
 async fn an_item_entering_a_ready_state_starts_one_run_once_and_again_after_it_leaves_and_returns()
 {
-    // No director: exactly one workflow starts by itself, so the run takes it directly.
+    // No director configured: the one workflow that starts by itself lends its machine and
+    // agent, and the director chooses it.
     let bench = Bench::new().await;
     only_the_hu(&bench);
     set_ready(&bench, &["Ready"]);
     edit_workflow(&bench, |w| w.auto_start = true);
+    answer(&bench, "payments");
     let watcher = &bench.host.state.workflows.watcher;
 
-    // Due now: one run, started by the watcher.
+    // Due now: one run, started by the watcher, classified by the director.
     super::tick(&bench.host, &bench.azure, 1_000).await;
     let started = runs(&bench);
     assert_eq!(started.len(), 1);
     assert!(started[0].auto_start && started[0].item.id == HU);
-    assert_eq!(started[0].state, Phase::Planning);
-    assert_eq!(started[0].workflow.as_deref(), Some("payments"));
+    assert_eq!(started[0].state, Phase::Classifying);
+    let planned = bench.state(&started[0].id, Phase::Planning).await;
+    assert_eq!(planned.workflow.as_deref(), Some("payments"));
+    assert_eq!(bench.count("directions"), 1);
     // The ledger row names the run it asked for, and that run exists.
     let rows = watcher.rows(&url(HU));
     assert_eq!(rows.len(), 1);
@@ -115,6 +119,47 @@ async fn an_item_entering_a_ready_state_starts_one_run_once_and_again_after_it_l
     assert_eq!(back["started"], 1);
     assert_eq!(runs(&bench).len(), 2);
     assert!(bench.catalog.only_reads());
+}
+
+#[tokio::test]
+async fn the_director_classifies_even_one_workflow_and_an_item_it_does_not_fit_waits_unassigned() {
+    let bench = Bench::new().await;
+    only_the_hu(&bench);
+    set_ready(&bench, &["Ready"]);
+    edit_workflow(&bench, |w| w.auto_start = true);
+    answer(&bench, "");
+    assert_eq!(poll(&bench).await["started"], 1);
+    let id = runs(&bench)[0].id.clone();
+    let run = bench.state(&id, Phase::Unassigned).await;
+    assert!(run.workflow.is_none() && run.attention.is_some());
+    assert_eq!(bench.count("directions"), 1);
+    assert_eq!(bench.count("starts") + bench.count("plans"), 0);
+}
+
+#[tokio::test]
+async fn without_a_director_that_can_classify_the_one_workflow_takes_the_item_directly() {
+    let bench = Bench::new().await;
+    only_the_hu(&bench);
+    set_ready(&bench, &["Ready"]);
+    edit_workflow(&bench, |w| w.auto_start = true);
+    // The project's own director is on a machine this account does not have.
+    let mut map = bench.host.state.settings.map().unwrap();
+    map.workflow_settings.project_directors = vec![crate::workflows::director::ProjectDirector {
+        organization: super::super::synthetic::ORGANIZATION.into(),
+        project: "Payments".into(),
+        director: crate::workflows::director::Director {
+            machine: uuid::Uuid::new_v4().to_string(),
+            provider: "opencode".into(),
+            model: "provider/model".into(),
+            effort: "default".into(),
+        },
+    }];
+    bench.host.state.settings.save_map(&map).unwrap();
+    assert_eq!(poll(&bench).await["started"], 1);
+    let run = runs(&bench).remove(0);
+    assert_eq!(run.state, Phase::Planning);
+    assert_eq!(run.workflow.as_deref(), Some("payments"));
+    assert_eq!(bench.count("directions"), 0);
 }
 
 #[tokio::test]
@@ -198,6 +243,10 @@ async fn several_workflows_that_start_by_themselves_wait_for_a_director() {
     only_the_hu(&bench);
     set_ready(&bench, &["Ready"]);
     second_and_manual(&bench);
+    // They differ in agent, so they lend no shared one.
+    let mut map = bench.host.state.settings.map().unwrap();
+    map.workflows[1].agent.effort = "high".into();
+    bench.host.state.settings.save_map(&map).unwrap();
     // No director: nothing is read or started, and the view says what it waits for.
     let waiting = poll(&bench).await;
     assert_eq!(waiting["started"], 0);

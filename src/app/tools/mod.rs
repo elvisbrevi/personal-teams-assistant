@@ -1042,7 +1042,7 @@ pub(super) const TOOLS: &[Tool] = &[
     Tool {
         name: "implementation_start",
         title: "Start work item implementation",
-        description: "HU/bug/Epic: propose children for review. Task/development bug/issue: run the selected coding agent in the selected directories, fully autonomous with full permissions on that computer: it never asks or waits and finishes the request, including branch, commits, push, pull request and tests when asked. Never changes work items, sends Teams messages, merges, publishes or deploys. With workflow (an Azure item only; omit the machine, directories, provider, model, effort and context, which the workflow supplies): a workflow ID starts a workflow run on the coordinator (it plans an HU or bug read-only, waits for the user's review of the plan, then codes each created child one after another with full permissions on the workflow's machine; see workflow_runs); director asks the workflow director and returns its choice and reason (workflow, outcome, reason, candidates) WITHOUT starting anything, so show it to the user and call again with the chosen workflow ID; none (the default) is the plain run described above.",
+        description: "HU/bug/Epic: propose children for review. Task/development bug/issue: run the selected coding agent in the selected directories, fully autonomous with full permissions on that computer: it never asks or waits and finishes the request, including branch, commits, push, pull request and tests when asked. Without a workflow it never changes work items, sends Teams messages, merges, publishes or deploys; a workflow run's coding agents may do only what that workflow's allow lists (workflow_show). With workflow (an Azure item only; omit the machine, directories, provider, model, effort and context, which the workflow supplies): a workflow ID starts a workflow run on the coordinator (it plans an HU or bug read-only, waits for the user's review of the plan, then codes each created child one after another with full permissions on the workflow's machine; see workflow_runs); director asks the workflow director and returns its choice and reason (workflow, outcome, reason, candidates) WITHOUT starting anything, so show it to the user and call again with the chosen workflow ID; none (the default) is the plain run described above.",
         effect: Effect::External,
         schema: || {
             object(
@@ -1486,11 +1486,11 @@ pub(super) const TOOLS: &[Tool] = &[
     Tool {
         name: "workflow_save",
         title: "Save a workflow",
-        description: "Adds or replaces a workflow by id on the account's coordinator: workflow {id, name, description, enabled, auto_start, organization (https://dev.azure.com/NAME), project, repositories [{id, name}] from workflow_repositories, machine (machine_list ID; the coordinator's own ID for it), checkouts {repository id: absolute canonical directory inside that machine's allowed roots}, agent {provider codex|claude|opencode, model, effort} installed there, instructions (at most 8000 characters), blocks (existing block IDs, at most 10)}. The host checks the project, the catalog, each checkout (inside the roots, no symbolic link alias, a Git checkout whose origin names that repository) and the agent on the machine; what it cannot verify (an offline or older machine, a checkout without an origin) comes back in warnings. Give only id and enabled to enable or disable a workflow; nothing else changes. Limits: 50 workflows, 20 repositories each.",
-        effect: Effect::Local,
+        description: "Adds or replaces a workflow by id on the account's coordinator: workflow {id, name, description, enabled, auto_start, organization (https://dev.azure.com/NAME), project, repositories [{id, name}] from workflow_repositories, machine (machine_list ID; the coordinator's own ID for it), checkouts {repository id: absolute canonical directory inside that machine's allowed roots}, agent {provider codex|claude|opencode, model, effort} installed there, instructions (at most 8000 characters), blocks (existing block IDs, at most 10), allow (what its coding runs may do that the fixed rules otherwise forbid, each at most once: work_items to create and change Azure DevOps or GitHub work items and issues, teams to send Teams messages, merge to complete and merge pull requests, deploy to publish and deploy; empty by default)}. A workflow that allows anything needs the user's confirmation of what it allows; its planning run and every run without it keep every prohibition. The host checks the project, the catalog, each checkout (inside the roots, no symbolic link alias, a Git checkout whose origin names that repository) and the agent on the machine; what it cannot verify (an offline or older machine, a checkout without an origin) comes back in warnings. Give only id and enabled to enable or disable a workflow; nothing else changes. Limits: 50 workflows, 20 repositories each.",
+        effect: Effect::External,
         schema: || {
             object(
-                json!({"workflow": {"type": "object", "description": "The whole workflow definition."}, "id": string("With enabled only: the workflow to enable or disable."), "enabled": {"type": "boolean", "description": "With id only: enable (true) or disable (false)."}}),
+                json!({"workflow": {"type": "object", "description": "The whole workflow definition."}, "id": string("With enabled only: the workflow to enable or disable."), "enabled": {"type": "boolean", "description": "With id only: enable (true) or disable (false)."}, "confirmed": confirmed()}),
                 &[],
             )
         },
@@ -1517,7 +1517,7 @@ pub(super) const TOOLS: &[Tool] = &[
     Tool {
         name: "workflow_block_save",
         title: "Save a workflow block",
-        description: "Adds or replaces a workflow block by id on the account's coordinator. kind instruction: text (at most 8000 characters), no stage. kind teams_notification: stage (before_planning, plan_ready, children_created, child_done, pull_requests_completed, done or failed), chat {id from teams_chats, name}, mentions (member display names of at most 100 characters without a closing bracket, at most 20) and template (at most 4000 characters; placeholders {item}, {link}, {pull_requests}, {summary}, {state}, rendered by code when it posts); the engine posts it once at its stage, as the user, through the path of teams_post (never retried; an unknown result is uncertain), and its mentions are resolved against the chat's members only; saving it needs the user's confirmation of that chat and text, and the chat must be one the user belongs to (checked against their chats when a Microsoft session can read them here; otherwise a warning); mentions are resolved against the chat's members when it posts. kind launcher: stage and launcher {id, digest} of an approved launcher of the coordinator, run at its stage only while it is still approved with that digest (its output is never kept; a failed or timed-out launcher stops the run in needs_attention); it needs confirmation too, and only the owner saves one, in the local page or their own portal, so this tool is refused for it from MCP and the CLI. An instruction block saves without confirmation. Limit: 100 blocks.",
+        description: "Adds or replaces a workflow block by id on the account's coordinator. kind instruction: text (at most 8000 characters), no stage. kind teams_notification: stage (before_planning, plan_ready, children_created, coding_started (each coding run its machine accepted: a task's own, or each child's), child_done, pull_requests_completed, done or failed), chat {id from teams_chats, name}, mentions (member display names of at most 100 characters without a closing bracket, at most 20) and template (at most 4000 characters; placeholders {item} (Title (#ID)), {id} and {title} (its parts, the title without square brackets, e.g. [{id} - {title}]({link})), {link}, {pull_requests}, {summary}, {state}, rendered by code when it posts); the engine posts it once at its stage, as the user, through the path of teams_post (never retried; an unknown result is uncertain), and its mentions are resolved against the chat's members only; saving it needs the user's confirmation of that chat and text, and the chat must be one the user belongs to (checked against their chats when a Microsoft session can read them here; otherwise a warning); mentions are resolved against the chat's members when it posts. kind launcher: stage and launcher {id, digest} of an approved launcher of the coordinator, run at its stage only while it is still approved with that digest (its output is never kept; a failed or timed-out launcher stops the run in needs_attention); it needs confirmation too, and only the owner saves one, in the local page or their own portal, so this tool is refused for it from MCP and the CLI. An instruction block saves without confirmation. Limit: 100 blocks.",
         effect: Effect::External,
         schema: || {
             object(
@@ -1548,7 +1548,7 @@ pub(super) const TOOLS: &[Tool] = &[
     Tool {
         name: "workflow_settings",
         title: "Workflow settings",
-        description: "The workflow settings: ready_states per organization and project (the workflow states that mean ready to develop), watch_interval_minutes (default 5), concurrency (default 2), pull_request_wait_days (default 7) and the workflow director {machine, provider, model, effort}, with the defaults, the bounds and whether this computer is the coordinator where they change (editable). watcher: the ready-state watcher on this computer (state watching, idle while no ready state is configured, or unavailable on a computer signed in to a coordinator and for a shared portal account; the interval; the last poll since the host started: items read, runs started, projects covered fully or partially, errors; and the next poll). The watcher lists the HUs, bugs and listed tasks assigned to the user in the ready states (read credential only, at most 100 items per project and 25 new runs per poll) and starts a run with the workflow director choosing among the enabled workflows of the project that start by themselves (auto_start); a run stops at plan_review, and nothing is created before the user confirms the plan. With project (and organization or source when needed), also process_states: the states that project's process has for its requirement, bug and listed task types, which ready states are chosen from.",
+        description: "The workflow settings: ready_states per organization and project (the workflow states that mean ready to develop), watch_interval_minutes (default 5), concurrency (default 2), pull_request_wait_days (default 7), the account's workflow director {machine, provider, model, effort} and project_directors [{organization, project, director}], with the defaults, the bounds and whether this computer is the coordinator where they change (editable). directors: for every project with ready states, its own director or a workflow, the director that classifies and summarizes its items and its source: project (its own), workflow (the machine and agent its enabled workflows that start by themselves share, or all its enabled ones when none does) or global (the account's), or none. watcher: the ready-state watcher on this computer (state watching, idle while no ready state is configured, or unavailable on a computer signed in to a coordinator and for a shared portal account; the interval; the last poll since the host started: items read, runs started, projects covered fully or partially, errors; and the next poll). The watcher lists the HUs, bugs and listed tasks assigned to the user in the ready states (read credential only, at most 100 items per project and 25 new runs per poll) and starts a run with the project's director choosing among the enabled workflows of the project that start by themselves (auto_start), even when there is only one (the run waits unassigned when it does not fit); only when no director can classify does the only such workflow take the item directly; a run stops at plan_review, and nothing is created before the user confirms the plan. With project (and organization or source when needed), also process_states: the states that project's process has for its requirement, bug and listed task types, which ready states are chosen from.",
         effect: Effect::Read,
         schema: || {
             object(
@@ -1560,11 +1560,11 @@ pub(super) const TOOLS: &[Tool] = &[
     Tool {
         name: "workflow_settings_update",
         title: "Change the workflow settings",
-        description: "Changes the workflow settings on the account's coordinator; only the fields given change. watch_interval_minutes 1-60, concurrency 1-4, pull_request_wait_days 1-60; director {machine (machine_list ID; the coordinator's own ID for it), provider codex|claude|opencode, model, effort} installed on that machine: the fields given are merged with the stored director (a new one needs all four), or null clears it; ready_states [{organization?, project, states}] replaces each project's ready states (states empty clears them; a project in several organizations needs organization), and every state must be one of that project's process states (workflow_settings with project lists them). Refusals say why; what the machine cannot answer now comes back in warnings.",
+        description: "Changes the workflow settings on the account's coordinator; only the fields given change. watch_interval_minutes 1-60, concurrency 1-4, pull_request_wait_days 1-60; director {machine (machine_list ID; the coordinator's own ID for it), provider codex|claude|opencode, model, effort} installed on that machine: the fields given are merged with the stored director (a new one needs all four), or null clears it; project_directors [{organization?, project, director}] sets a project's own director (director holds the fields to change, merged with that project's stored one; a new one needs all four) or clears it (director null or left out; the project then falls back to its workflows' shared agent or the account's director); ready_states [{organization?, project, states}] replaces each project's ready states (states empty clears them; a project in several organizations needs organization), and every state must be one of that project's process states (workflow_settings with project lists them). Refusals say why; what the machine cannot answer now comes back in warnings.",
         effect: Effect::Local,
         schema: || {
             object(
-                json!({"watch_interval_minutes": {"type": "integer", "minimum": 1, "maximum": 60}, "concurrency": {"type": "integer", "minimum": 1, "maximum": 4}, "pull_request_wait_days": {"type": "integer", "minimum": 1, "maximum": 60}, "director": {"type": ["object", "null"], "description": "The director's fields to change, {machine, provider, model, effort} (all four for a new director), or null to clear it."}, "ready_states": {"type": "array", "items": {"type": "object"}, "description": "[{organization?, project, states}]; states empty clears that project's."}, "source": string("Enabled Azure source ID the states are read from; optional when exactly one is enabled.")}),
+                json!({"watch_interval_minutes": {"type": "integer", "minimum": 1, "maximum": 60}, "concurrency": {"type": "integer", "minimum": 1, "maximum": 4}, "pull_request_wait_days": {"type": "integer", "minimum": 1, "maximum": 60}, "director": {"type": ["object", "null"], "description": "The director's fields to change, {machine, provider, model, effort} (all four for a new director), or null to clear it."}, "project_directors": {"type": "array", "items": {"type": "object"}, "description": "[{organization?, project, director: {machine?, provider?, model?, effort?} or null}]."}, "ready_states": {"type": "array", "items": {"type": "object"}, "description": "[{organization?, project, states}]; states empty clears that project's."}, "source": string("Enabled Azure source ID the states are read from; optional when exactly one is enabled.")}),
                 &[],
             )
         },
@@ -1572,7 +1572,7 @@ pub(super) const TOOLS: &[Tool] = &[
     Tool {
         name: "workflow_classify",
         title: "Classify a work item into a workflow",
-        description: "Dry run: reads the Azure DevOps work item fresh, asks the workflow director (its machine, CLI, model and effort in workflow_settings, the direct prompt) which enabled workflow of the item's project fits it, and checks the answer in code: the reply's workflow is an ID the director was sent, enabled and of the item's project, or null with reason unrecognized, disabled or other_project (also for an answer that is not the JSON asked for, or none), or with the director's reason when it chose none. Also returns the outcome, what the director said, the candidates, the item's verified link and the run and native session IDs; the session is read-only and tool-less and appears in Agent history (implementation_history). Nothing starts and nothing is written to Azure DevOps.",
+        description: "Dry run: reads the Azure DevOps work item fresh, asks the project's workflow director (its own, else the machine and agent its workflows share, else the account's; workflow_settings directors shows which; the direct prompt) which enabled workflow of the item's project fits it, and checks the answer in code: the reply's workflow is an ID the director was sent, enabled and of the item's project, or null with reason unrecognized, disabled or other_project (also for an answer that is not the JSON asked for, or none), or with the director's reason when it chose none. Also returns the outcome, what the director said, which director answered (directed_by: machine, provider, model, effort, source), the candidates, the item's verified link and the run and native session IDs; the session is read-only and tool-less and appears in Agent history (implementation_history). Nothing starts and nothing is written to Azure DevOps.",
         effect: Effect::Local,
         schema: || {
             object(
@@ -1584,7 +1584,7 @@ pub(super) const TOOLS: &[Tool] = &[
     Tool {
         name: "workflow_run_start",
         title: "Start a workflow run",
-        description: "Starts a workflow run on the account's coordinator for an Azure DevOps work item assigned to the user (an HU, bug or task): with workflow (an enabled workflow of the item's project) or director: true (the workflow director chooses; when it chooses none, or there is no director, the run waits unassigned for workflow_run_assign). The engine then advances it by itself every 30 seconds: an HU or bug is planned on the workflow's machine with its agent, checkouts, instructions and instruction blocks (untrusted input under the fixed rules) and stops at plan_review until the user reviews and confirms the children with implementation_create (nothing is created without it); then each created child is coded in turn, with full permissions on that machine, in the checkout of the repository it names (or the workflow's first), and the engine reads (never writes) the pull request of the branch each session reports and waits until every one is completed. A task is coded directly. Refused for a disabled workflow, a workflow of another project, an item not assigned to the user and an item with an active run. Returns the run record (workflow_run_status).",
+        description: "Starts a workflow run on the account's coordinator for an Azure DevOps work item assigned to the user (an HU, bug or task): with workflow (an enabled workflow of the item's project) or director: true (the workflow director chooses; when it chooses none, or there is no director, the run waits unassigned for workflow_run_assign). The engine then advances it by itself every 30 seconds: an HU or bug is planned on the workflow's machine with its agent, checkouts, instructions and instruction blocks (untrusted input under the fixed rules) and stops at plan_review until the user reviews and confirms the children with implementation_create (nothing is created without it); then each created child is coded in turn, with full permissions on that machine, in the checkout of the repository it names (or the workflow's first), and the engine reads (never writes) the pull request of the branch each session reports and waits until every one is completed. A task is coded directly. The coding agents keep the fixed rules (no work item writes, Teams messages, merges, publishing or deploying) except what the workflow's allow lifts, as the run got the workflow (the confirmation says what). Refused for a disabled workflow, a workflow of another project, an item not assigned to the user and an item with an active run. Returns the run record (workflow_run_status).",
         effect: Effect::External,
         schema: || {
             object(
@@ -1651,7 +1651,7 @@ pub(super) const TOOLS: &[Tool] = &[
     Tool {
         name: "workflow_summary",
         title: "Summarize a workflow run",
-        description: "Asks the workflow director (its machine, CLI, model and effort in workflow_settings, the direct prompt plus a summarize task that code appends) for a progress summary of one workflow run, written in the configured language (Markdown, at most 4000 characters), and stores it on the run (summaries, the last 20: id, text, created_at, provider, model and native session_id). It runs a model on the director's machine, so it takes time and uses that agent's quota, and it needs no confirmation (like workflow_classify, it writes only the summary on the run, rotating the 20 kept, and the session in Agent history, nothing to a provider): the input is the run record (the item's title and verified link, the workflow, every stage with timestamps and outcome, the children with links, coding run states and pull requests, block outcomes and the attention text), never a session transcript or launcher output; the session is read-only and tool-less and appears in Agent history (implementation_history, purpose summary). The director writes no links: any URL it wrote is dropped and code appends the verified links of the item and of the children and pull requests the summary names. An empty or malformed answer is an error and stores nothing. Runs only on the owner's coordinator. Show the user the summary before offering workflow_summary_send.",
+        description: "Asks the run's project's workflow director (the same one that classifies it: workflow_settings directors; the direct prompt plus a summarize task that code appends) for a progress summary of one workflow run, written in the configured language (Markdown, at most 4000 characters), and stores it on the run (summaries, the last 20: id, text, created_at, provider, model and native session_id). It runs a model on the director's machine, so it takes time and uses that agent's quota, and it needs no confirmation (like workflow_classify, it writes only the summary on the run, rotating the 20 kept, and the session in Agent history, nothing to a provider): the input is the run record (the item's title and verified link, the workflow, every stage with timestamps and outcome, the children with links, coding run states and pull requests, block outcomes and the attention text), never a session transcript or launcher output; the session is read-only and tool-less and appears in Agent history (implementation_history, purpose summary). The director writes no links: any URL it wrote is dropped and code appends the verified links of the item and of the children and pull requests the summary names. An empty or malformed answer is an error and stores nothing. Runs only on the owner's coordinator. Show the user the summary before offering workflow_summary_send.",
         effect: Effect::Local,
         schema: || object(json!({"run": string("The workflow run's ID.")}), &["run"]),
     },
@@ -2518,6 +2518,38 @@ pub(super) async fn question(name: &str, args: &Value) -> Result<Option<String>,
     let Some(asked) = confirmation(name, args) else {
         return Ok(None);
     };
+    // A start with a named workflow says what that workflow lets its coding agents do, read
+    // from the coordinator; when it cannot be read, the host refuses an unknown workflow anyway.
+    let named = match name {
+        "workflow_run_start" => args["workflow"].as_str(),
+        "implementation_start" => args["workflow"]
+            .as_str()
+            .filter(|w| !matches!(*w, "none" | "director")),
+        _ => None,
+    };
+    if let Some(id) = named {
+        let shown = run("workflow_show", &json!({"id": id})).await.ok();
+        if let Some(workflow) = shown.and_then(|s| {
+            serde_json::from_value::<crate::workflows::Workflow>(s["workflow"].clone()).ok()
+        }) {
+            return Ok(Some(if name == "workflow_run_start" {
+                format!(
+                    "{}?",
+                    super::workflows::runs::describe_start(
+                        Some(id),
+                        Some(&workflow),
+                        args["id"].as_u64().unwrap_or_default()
+                    )
+                )
+            } else {
+                let effect = super::workflows::runs::allow_effect(&workflow);
+                match asked.strip_suffix('?') {
+                    Some(text) if !effect.is_empty() => format!("{text}{effect}?"),
+                    _ => asked,
+                }
+            }));
+        }
+    }
     let edited = args["text"].as_str().is_some_and(|t| !t.trim().is_empty());
     if name != "workflow_summary_send" || edited {
         return Ok(Some(asked));
@@ -2583,6 +2615,14 @@ pub(super) fn confirmation(name: &str, args: &Value) -> Option<String> {
                     block.id,
                     super::workflows::describe(&block)
                 ),
+                _ => return None,
+            }
+        }
+        // Only a workflow that lifts a fixed rule of its coding agents asks; one that allows
+        // nothing, or one the host will refuse as malformed, goes straight to the host.
+        "workflow_save" => {
+            match serde_json::from_value::<crate::workflows::Workflow>(args["workflow"].clone()) {
+                Ok(workflow) => super::workflows::describe_workflow(&workflow)?,
                 _ => return None,
             }
         }
@@ -2845,8 +2885,9 @@ mod tests {
                     tool.name
                 );
             }
-            // A block save asks by the block's kind (`the_catalog_lists_the_workflow_...`).
-            if tool.name == "workflow_block_save" {
+            // A block save asks by the block's kind, a workflow save by what it allows
+            // (`the_catalog_lists_the_workflow_...`).
+            if matches!(tool.name, "workflow_block_save" | "workflow_save") {
                 continue;
             }
             let ask = confirmation(
@@ -2889,7 +2930,7 @@ mod tests {
             ("workflow_show", "read"),
             ("workflow_blocks_list", "read"),
             ("workflow_repositories", "read"),
-            ("workflow_save", "local"),
+            ("workflow_save", "needs confirmation"),
             ("workflow_block_remove", "local"),
             ("workflow_remove", "needs confirmation"),
             ("workflow_block_save", "needs confirmation"),
@@ -2928,6 +2969,22 @@ mod tests {
             json!({"block":{"id":"base","name":"Base","kind":"instruction","text":"Branch."}});
         assert!(confirmation("workflow_block_save", &instruction).is_none());
         assert!(confirmation("workflow_block_save", &json!({"block":{"kind":"poem"}})).is_none());
+        // A workflow asks only when it lifts a fixed rule of its coding agents, and says which.
+        let mut workflow =
+            serde_json::to_value(crate::workflows::tests::workflow("payments")).unwrap();
+        assert!(confirmation("workflow_save", &json!({"workflow": workflow})).is_none());
+        workflow["allow"] = json!(["merge", "teams"]);
+        let question = confirmation("workflow_save", &json!({"workflow": workflow})).unwrap();
+        assert!(
+            question.starts_with("Save workflow payments?"),
+            "{question}"
+        );
+        assert!(
+            question.contains("send Teams messages; complete and merge pull requests"),
+            "{question}"
+        );
+        assert!(!question.contains("deploy"), "{question}");
+        assert!(confirmation("workflow_save", &json!({"id":"payments","enabled":true})).is_none());
         assert!(
             confirmation("workflow_remove", &json!({"id":"payments"}))
                 .unwrap()

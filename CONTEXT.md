@@ -182,7 +182,7 @@ The coding agent's own conversation associated with an implementation run and it
 _Avoid_: run ID
 
 **Workflow**:
-A saved recipe for implementing the items of one Azure DevOps project: the repositories it works on, the execution machine and the checkout of each repository there, the coding agent, its instructions and an ordered list of workflow blocks. It travels with the account and changes only on the coordinator. It grants nothing: every directory, repository, agent, chat and launcher is checked when it is saved and again when it is used.
+A saved recipe for implementing the items of one Azure DevOps project: the repositories it works on, the execution machine and the checkout of each repository there, the coding agent, its instructions and an ordered list of workflow blocks. It travels with the account and changes only on the coordinator. It grants nothing: every directory, repository, agent, chat and launcher is checked when it is saved and again when it is used. The one exception is its `allow`, which the user confirms when saving it: the fixed rules its own coding runs may break (work item writes, Teams messages, merging, publishing and deploying).
 _Avoid_: pipeline (Azure DevOps' own), automation, recipe (in user-facing text)
 
 **Workflow block**:
@@ -190,7 +190,7 @@ A reusable part of a workflow: an instruction the agents read, a Teams notificat
 _Avoid_: step, plugin
 
 **Workflow director**:
-The model-backed selector and summarizer configured in Settings › Workflows: it chooses which enabled workflow fits an item, or none, and writes progress summaries; code checks its choice and it decides nothing else. Distinct from the coordinator, which stays the user's main installation.
+The model-backed selector and summarizer of a project's items: it chooses which enabled workflow fits an item, or none, and writes progress summaries; code checks its choice and it decides nothing else. A project's director is its own when Settings › Workflows sets one, otherwise the machine and agent its workflows share, otherwise the account's general director. Distinct from the coordinator, which stays the user's main installation.
 _Avoid_: coordinator, orchestrator, dispatcher
 
 **Workflow run**:

@@ -406,6 +406,70 @@ async fn a_save_is_refused_before_anything_is_read_when_the_map_alone_refuses_it
 }
 
 #[tokio::test]
+async fn a_workflow_that_lifts_a_fixed_rule_is_saved_only_once_the_user_confirmed_it() {
+    let root = tempfile::tempdir().unwrap();
+    let host = host(root.path());
+    let own = implementation::test_machine(&host, None).await;
+    let mut w = workflow("payments", &own);
+    w.allow = vec![
+        crate::workflows::Allow::Merge,
+        crate::workflows::Allow::WorkItems,
+    ];
+    // Unconfirmed: refused with what it allows, before anything is read.
+    let refused = call(&host, Local, "workflow_save", json!({"workflow":w})).await;
+    assert_eq!(refused.code, "invalid_input");
+    let text = refused.message.unwrap();
+    assert!(text.contains("confirmed: true"), "{text}");
+    assert!(text.contains("complete and merge pull requests"), "{text}");
+    assert!(text.contains("work items"), "{text}");
+    // Confirmed: it goes on to the checks (here, the Azure source this host lacks).
+    let refused = call(
+        &host,
+        Local,
+        "workflow_save",
+        json!({"workflow":w,"confirmed":true}),
+    )
+    .await;
+    assert_eq!(refused.code, "not_ready", "{:?}", refused.message);
+    // An unknown action, or one listed twice, is refused as the definition's error.
+    let mut value = serde_json::to_value(&w).unwrap();
+    value["allow"] = json!(["merge", "everything"]);
+    let refused = call(
+        &host,
+        Local,
+        "workflow_save",
+        json!({"workflow":value,"confirmed":true}),
+    )
+    .await;
+    assert_eq!(refused.code, "invalid_input");
+    assert!(refused.message.unwrap().contains("everything"));
+    value["allow"] = json!(["merge", "merge"]);
+    let refused = call(
+        &host,
+        Local,
+        "workflow_save",
+        json!({"workflow":value,"confirmed":true}),
+    )
+    .await;
+    assert_eq!(refused.code, "invalid_input");
+    // list and show always say what a workflow allows, empty included.
+    let mut plain = workflow("plain", &own);
+    plain.enabled = true;
+    w.allow.sort();
+    store(&host, vec![plain, w]);
+    let list = call(&host, Local, "workflows_list", json!({})).await.data;
+    assert_eq!(list["workflows"][0]["allow"], json!([]));
+    assert_eq!(
+        list["workflows"][1]["allow"],
+        json!(["work_items", "merge"])
+    );
+    let shown = call(&host, Local, "workflow_show", json!({"id":"payments"}))
+        .await
+        .data;
+    assert_eq!(shown["workflow"]["allow"], json!(["work_items", "merge"]));
+}
+
+#[tokio::test]
 async fn checkouts_are_inspected_by_their_machine_and_an_older_worker_is_unknown() {
     let root = tempfile::tempdir().unwrap();
     let host = host(root.path());
@@ -755,6 +819,138 @@ async fn the_director_must_be_an_installed_agent_on_a_machine_of_the_account() {
 }
 
 #[tokio::test]
+async fn each_project_shows_the_director_it_gets_and_where_it_comes_from() {
+    let root = tempfile::tempdir().unwrap();
+    let host = host(root.path());
+    let own = implementation::test_machine(&host, None).await;
+    let mut payments = workflow("payments", &own);
+    payments.enabled = true;
+    payments.auto_start = true;
+    store(&host, vec![payments.clone()]);
+    let directors = |host: &Arc<Host>| {
+        let host = host.clone();
+        async move {
+            call(&host, Local, "workflow_settings", json!({}))
+                .await
+                .data["directors"]
+                .clone()
+        }
+    };
+    // By default the director runs where the project's workflow runs, with its agent.
+    let shown = directors(&host).await;
+    assert_eq!(shown[0]["project"], "Payments");
+    assert_eq!(shown[0]["source"], "workflow");
+    assert_eq!(shown[0]["director"]["machine"], own.as_str());
+    assert_eq!(shown[0]["director"]["model"], "gpt-6.1-sol");
+    // A project nobody names needs its organization; a new director needs every field; the
+    // machine must be the account's.
+    let update = |entry: Value| json!({"project_directors": [entry]});
+    let refused = call(
+        &host,
+        Local,
+        "workflow_settings_update",
+        update(json!({"project":"Unknown","director":{"machine":own}})),
+    )
+    .await;
+    assert_eq!(refused.code, "invalid_input");
+    assert!(
+        refused
+            .message
+            .unwrap()
+            .contains("Give the organization of project Unknown")
+    );
+    let refused = call(
+        &host,
+        Local,
+        "workflow_settings_update",
+        update(json!({"project":"payments","director":{"model":"m"}})),
+    )
+    .await;
+    assert_eq!(refused.code, "invalid_input");
+    let text = refused.message.unwrap();
+    assert!(
+        text.contains("Project Payments has no director of its own yet")
+            && text.contains("missing machine, provider, effort"),
+        "{text}"
+    );
+    let stranger = uuid::Uuid::new_v4().to_string();
+    let refused = call(
+        &host,
+        Local,
+        "workflow_settings_update",
+        update(json!({"project":"Payments","director":{"machine":stranger,"provider":"codex","model":"m","effort":"low"}})),
+    )
+    .await;
+    assert_eq!(refused.code, "invalid_input");
+    assert!(
+        refused
+            .message
+            .unwrap()
+            .contains("not an execution machine")
+    );
+    // The project's own director comes first.
+    let mut map = host.state.settings.map().unwrap();
+    map.workflow_settings.project_directors = vec![crate::workflows::director::ProjectDirector {
+        organization: "https://dev.azure.com/example".into(),
+        project: "Payments".into(),
+        director: crate::workflows::director::Director {
+            machine: own.clone(),
+            provider: "claude".into(),
+            model: "project-model".into(),
+            effort: "high".into(),
+        },
+    }];
+    host.state.settings.save_map(&map).unwrap();
+    let shown = directors(&host).await;
+    assert_eq!(shown[0]["source"], "project");
+    assert_eq!(shown[0]["director"]["model"], "project-model");
+    // Cleared by project, in any letter case: back to the workflow's.
+    let cleared = call(
+        &host,
+        Local,
+        "workflow_settings_update",
+        update(json!({"project":"payments","director":null})),
+    )
+    .await;
+    assert!(cleared.ok, "{:?}", cleared.message);
+    assert_eq!(cleared.data["settings"]["project_directors"], json!([]));
+    assert_eq!(cleared.data["directors"][0]["source"], "workflow");
+    // Two workflows that start by themselves with different agents: the account's director,
+    // or none, and the watcher then waits for one.
+    let mut second = payments.clone();
+    second.id = "second".into();
+    second.agent.effort = "high".into();
+    store(&host, vec![payments, second]);
+    let mut map = host.state.settings.map().unwrap();
+    map.workflow_settings.ready_states = vec![crate::workflows::director::ReadyStates {
+        organization: "https://dev.azure.com/example".into(),
+        project: "Payments".into(),
+        states: vec!["Ready".into()],
+    }];
+    host.state.settings.save_map(&map).unwrap();
+    let reply = call(&host, Local, "workflow_settings", json!({}))
+        .await
+        .data;
+    assert!(
+        reply["directors"][0]["director"].is_null() && reply["directors"][0]["source"].is_null()
+    );
+    assert_eq!(reply["watcher"]["waiting_projects"], json!(["Payments"]));
+    let mut map = host.state.settings.map().unwrap();
+    map.workflow_settings.director = Some(crate::workflows::director::Director {
+        machine: own.clone(),
+        provider: "codex".into(),
+        model: "global-model".into(),
+        effort: "low".into(),
+    });
+    host.state.settings.save_map(&map).unwrap();
+    let reply = call(&host, Local, "workflow_settings", json!({}))
+        .await
+        .data;
+    assert_eq!(reply["directors"][0]["source"], "global");
+    assert_eq!(reply["watcher"]["waiting_projects"], json!([]));
+}
+
+#[tokio::test]
 async fn ready_states_must_be_states_of_the_projects_process() {
     let root = tempfile::tempdir().unwrap();
     let host = host(root.path());
@@ -896,6 +1092,14 @@ async fn the_director_chooses_only_an_enabled_workflow_of_the_items_project_and_
         model: "test-model".into(),
         effort: "low".into(),
     };
+    // The project's own director answers, before the machine and agent its workflows share.
+    let mut map = host.state.settings.map().unwrap();
+    map.workflow_settings.project_directors = vec![crate::workflows::director::ProjectDirector {
+        organization: "https://dev.azure.com/example".into(),
+        project: "Payments".into(),
+        director: director.clone(),
+    }];
+    host.state.settings.save_map(&map).unwrap();
     let logs = tempfile::tempdir().unwrap();
     // SAFETY: test-only variable read by no other test.
     unsafe { std::env::set_var("PTA_CLASSIFY_TEST_SECRET", "must-not-leak") };
@@ -979,7 +1183,7 @@ async fn the_director_chooses_only_an_enabled_workflow_of_the_items_project_and_
                 scope: host.state.authority.clone(),
                 transport: Local,
             },
-            director::classify_item(&host, &director, &detail("Payments"), false),
+            director::classify_item(&host, &detail("Payments"), false),
         )
         .await;
         crate::llm::implementation::use_test_cli(None);
@@ -988,6 +1192,8 @@ async fn the_director_chooses_only_an_enabled_workflow_of_the_items_project_and_
         assert_eq!(reply["outcome"], outcome, "case {n}: {reply}");
         assert_eq!(reply["reason"], reason, "case {n}: {reply}");
         assert_eq!(reply["dry_run"], true);
+        assert_eq!(reply["directed_by"]["source"], "project", "case {n}");
+        assert_eq!(reply["directed_by"]["model"], "test-model", "case {n}");
         // Only the enabled workflows of the item's project were sent.
         let candidates: Vec<&str> = reply["candidates"]
             .as_array()
@@ -1056,12 +1262,31 @@ async fn the_director_chooses_only_an_enabled_workflow_of_the_items_project_and_
             scope: host.state.authority.clone(),
             transport: Local,
         },
-        director::classify_item(&host, &director, &detail("Cards"), false),
+        director::classify_item(&host, &detail("Cards"), false),
     )
     .await
     .unwrap();
     assert!(alone["workflow"].is_null() && alone["run"].is_null());
     assert_eq!(alone["outcome"], "none");
+    // Without the project's own director, its workflows' differing agents and no account
+    // director, nobody is asked.
+    let mut map = host.state.settings.map().unwrap();
+    map.workflow_settings.project_directors.clear();
+    map.workflows[1].agent.effort = "high".into();
+    host.state.settings.save_map(&map).unwrap();
+    let none = authority::within(
+        authority::Invocation {
+            scope: host.state.authority.clone(),
+            transport: Local,
+        },
+        director::classify_item(&host, &detail("Payments"), false),
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        none.starts_with("[not_ready] Project Payments has no workflow director"),
+        "{none}"
+    );
 }
 
 #[tokio::test]
@@ -1083,8 +1308,9 @@ async fn classification_needs_an_azure_item_and_a_director() {
         json!({"provider":"azure","id":41}),
     )
     .await;
+    // The director is resolved for the item's project, so the item is read first: here there
+    // is no Azure source to read it.
     assert_eq!(no_director.code, "not_ready");
-    assert!(no_director.message.unwrap().contains("workflow director"));
     let extra = call(
         &host,
         Local,

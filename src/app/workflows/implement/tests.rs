@@ -82,15 +82,12 @@ async fn a_workflow_run_takes_its_place_and_agent_from_the_workflow_not_from_the
 #[tokio::test]
 async fn the_director_choice_is_returned_for_confirmation_and_nothing_starts() {
     let bench = Bench::new().await;
-    // No director: nothing to ask.
-    let missing = start(&bench.host, &request("director"), &bench.azure)
-        .await
-        .unwrap_err();
-    assert!(missing.starts_with("[not_ready]"), "{missing}");
     bench.director();
     let choice = start(&bench.host, &request("director"), &bench.azure)
         .await
         .unwrap();
+    // The project's only workflow lends its machine and agent before the account's director.
+    assert_eq!(choice["directed_by"]["source"], "workflow");
     assert_eq!(choice["started"], false);
     assert_eq!(choice["workflow"], "payments");
     assert_eq!(choice["outcome"], "chosen");

@@ -12,6 +12,7 @@ import { applying } from './profile.js';
 import { providerNames } from './home.js';
 import { fillAgentChoices } from './settings-models.js';
 import { blockSummary, KIND_NAMES, loadLaunchers, renderBlocks, STAGE_NAMES } from './workflow-blocks.js';
+import { ALLOWS, allowNames } from './run-states.js';
 
 /** The host's limits (src/workflows.rs), checked here before anything is sent. */
 const LIMITS = { name: 80, description: 2000, instructions: 8000, repositories: 20, blocks: 10 };
@@ -85,7 +86,7 @@ function blankWorkflow() {
   const azure = azureSources()[0];
   const machine = workflowData.machines.find(m => m.id === workflowData.thisMachine) ?? workflowData.machines.find(m => m.online);
   return { id: '', name: '', description: '', enabled: true, auto_start: false, organization: azure?.tool?.organization ?? '', project: '',
-    repositories: [], machine: machine?.id ?? '', checkouts: {}, agent: { provider: '', model: '', effort: '' }, instructions: '', blocks: [], updated_at: 0, changed: true };
+    repositories: [], machine: machine?.id ?? '', checkouts: {}, agent: { provider: '', model: '', effort: '' }, instructions: '', blocks: [], allow: [], updated_at: 0, changed: true };
 }
 
 function renderWorkflows() {
@@ -111,7 +112,8 @@ function workflowFacts(workflow) {
     `${t('Repositories')}: ${workflow.repositories.map(r => r.name).join(', ') || t('none')}`,
     `${t('Machine')}: ${workflow.machine ? machineName(workflow.machine) : t('none')}`, agent,
     tn(workflow.blocks.length, '1 block', '{n} blocks'),
-    workflow.updated_at ? t('Changed {when}', { when: changedAt(workflow.updated_at) }) : t('Not saved yet')].join(' · ');
+    workflow.allow?.length ? `${t('Also allowed')}: ${allowNames(workflow.allow).join(', ')}` : null,
+    workflow.updated_at ? t('Changed {when}', { when: changedAt(workflow.updated_at) }) : t('Not saved yet')].filter(Boolean).join(' · ');
 }
 
 function workflowRow(draft, saved) {
@@ -389,6 +391,25 @@ function workflowEditor(draft, saved, renderFacts) {
   const readyStates = el('button', { type: 'button', class: 'link-button', textContent: t('Choose the ready states') });
   readyStates.onclick = () => showTab('settings', 'panel-workflow-ready');
 
+  // What its coding agent may also do: each box lifts one fixed rule, confirmed when saved.
+  draft.allow ??= [];
+  const confirmation = el('div', { class: 'callout warn', role: 'status', hidden: true });
+  let reviewing = false;
+  const unreview = () => { reviewing = false; confirmation.hidden = true; save.textContent = saved ? t('Save workflow') : t('Create workflow'); };
+  const allowBoxes = ALLOWS.map(({ id, name, effect }) => {
+    const box = el('input', { type: 'checkbox', checked: draft.allow.includes(id), 'data-allow': id });
+    box.onchange = () => {
+      const chosen = new Set(draft.allow);
+      if (box.checked) chosen.add(id); else chosen.delete(id);
+      draft.allow = ALLOWS.map(a => a.id).filter(key => chosen.has(key));
+      unreview(); touched();
+    };
+    return el('label', { class: 'check' }, box, el('span', {}, name(), el('small', { textContent: effect() })));
+  });
+  const allowField = el('fieldset', { class: 'workflow-allow' }, el('legend', { textContent: t('What its coding agent may also do') }),
+    el('p', { class: 'hint', textContent: t('By default the coding agent never changes work items, sends Teams messages, merges, publishes or deploys. Each box lifts one of those rules in every coding run of this workflow, also those that start by themselves; its planning run and runs without this workflow keep them all.') }),
+    el('div', { class: 'choice-list' }, ...allowBoxes));
+
   // Save, enable or disable, remove.
   const save = el('button', { type: 'button', textContent: saved ? t('Save workflow') : t('Create workflow') });
   save.onclick = () => busy(save, async () => {
@@ -399,10 +420,21 @@ function workflowEditor(draft, saved, renderFacts) {
       id: saved ? saved.id : draft.id, name: draft.name.trim(), description: draft.description, enabled: saved ? saved.enabled : true,
       auto_start: Boolean(draft.auto_start), organization: draft.organization, project: draft.project,
       repositories: draft.repositories.map(({ id, name }) => ({ id, name })), machine: draft.machine, checkouts: { ...draft.checkouts },
-      agent: { ...draft.agent }, instructions: draft.instructions, blocks: [...draft.blocks], updated_at: saved?.updated_at ?? 0,
+      agent: { ...draft.agent }, instructions: draft.instructions, blocks: [...draft.blocks], allow: [...draft.allow], updated_at: saved?.updated_at ?? 0,
     };
+    // Lifting a fixed rule is confirmed with what it lets the agent do, before it is sent.
+    const lifting = workflow.allow.length > 0;
+    if (lifting && !reviewing) {
+      reviewing = true;
+      confirmation.replaceChildren(el('p', { textContent: t('In every coding run of this workflow, also those that start by themselves, the agent will be able to, as you and without asking:') }),
+        el('ul', {}, ...ALLOWS.filter(a => workflow.allow.includes(a.id)).map(a => el('li', {}, el('strong', { textContent: a.name() }), ` · ${a.effect()}`))));
+      confirmation.hidden = false;
+      save.textContent = t('Confirm and save');
+      return;
+    }
     try {
-      const reply = await applying(() => invoke('workflow_save', { workflow }));
+      const reply = await applying(() => invoke('workflow_save', { workflow, confirmed: lifting }));
+      unreview();
       const result = reply.workflow ?? workflow;
       const list = reply.warnings ?? [];
       verification.set(result.id, checkoutStates(result, list));
@@ -469,10 +501,11 @@ function workflowEditor(draft, saved, renderFacts) {
     instructions,
     el('fieldset', {}, el('legend', { textContent: t('Blocks, in order') }), blockList,
       el('div', { class: 'workflow-add' }, el('label', {}, t('Block from the library'), addChoice), addBlock), el('div', { class: 'actions' }, library)),
+    allowField,
     el('label', { class: 'check' }, autoStart, el('span', {}, t('Start by itself when an assigned item reaches a ready state'),
       el('small', { textContent: t('The ready states are chosen per project in Settings. Children are still created only after you confirm their plan.') }))),
     el('div', { class: 'actions' }, readyStates),
-    problem, warnings, el('div', { class: 'actions' }, ...actions));
+    el('div', { class: 'workflow-allow-review' }, confirmation), problem, warnings, el('div', { class: 'actions' }, ...actions));
 }
 
 /** What the host would refuse before reading anything, in the order of the form. */

@@ -13,7 +13,7 @@ import { busy, done, notify } from './notices.js';
 import { selectTab, showTab } from './nav.js';
 import { chooseFromList } from './directory-sheet.js';
 import { link, markdown } from './markdown.js';
-import { runStateLabel } from './run-states.js';
+import { allowNames, runStateLabel } from './run-states.js';
 import { openAgentSession } from './sessions.js';
 import { planChildrenReview } from './implementation.js';
 import { STAGE_NAMES } from './workflow-blocks.js';
@@ -244,7 +244,8 @@ function renderRunDetail(run, sessions) {
   const facts = el('dl', { class: 'todo-fields' },
     ...[[t('Type'), tx(run.item.kind)], [t('Project'), run.item.project], [t('Started at'), when(run.created_at)], [t('Last change'), when(run.updated_at)],
       ...(run.finished_at ? [[t('Finished at'), when(run.finished_at)]] : []),
-      ...(run.auto_start ? [[t('Started by'), t('The watcher (a ready state)')]] : [])]
+      ...(run.auto_start ? [[t('Started by'), t('The watcher (a ready state)')]] : []),
+      ...(run.allow?.length ? [[t('Also allowed'), allowNames(run.allow).join(', ')]] : [])]
       .map(([label, value]) => el('div', {}, el('dt', { textContent: label }), el('dd', { textContent: value }))));
   const notes = [];
   if (run.attention) notes.push(el('div', { class: `callout ${WAITING.includes(run.state) ? 'warn' : 'info'}`, id: 'run-attention' }, el('p', { textContent: tx(run.attention) })));

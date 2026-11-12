@@ -11,7 +11,7 @@
 //! (`workflows::director::judge`): nothing starts and nothing is written but the session's
 //! record, which Agent history lists.
 use super::*;
-use crate::workflows::director::{self as core, Director, ReadyStates, Settings};
+use crate::workflows::director::{self as core, Director, ProjectDirector, ReadyStates, Settings};
 
 pub(in crate::app) const METHODS: [&str; 3] = [
     "workflow_settings",
@@ -53,6 +53,17 @@ struct DirectorChange {
     #[serde(default)]
     effort: Option<String>,
 }
+/// One project's own director to set or clear: `director` holds the fields to change, merged
+/// with the project's stored director (a new one needs all four), or null (or nothing) clears it.
+#[derive(Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProjectDirectorChange {
+    #[serde(default)]
+    organization: Option<String>,
+    project: String,
+    #[serde(default)]
+    director: Option<DirectorChange>,
+}
 #[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct UpdateArgs {
@@ -67,6 +78,8 @@ struct UpdateArgs {
     director: Option<DirectorChange>,
     #[serde(default)]
     ready_states: Vec<ReadyChange>,
+    #[serde(default)]
+    project_directors: Vec<ProjectDirectorChange>,
     /// The Azure source the ready states are read from, when several are enabled.
     #[serde(default)]
     source: Option<String>,
@@ -91,7 +104,52 @@ fn view(settings: &Settings) -> Value {
         "pull_request_wait_days": settings.pull_request_wait_days,
         "director": settings.director,
         "ready_states": settings.ready_states,
+        "project_directors": settings.project_directors,
     })
+}
+/// Which director each project gets and where it comes from (`project`, `workflow` or
+/// `global`; none without one): every project with ready states, its own director or a
+/// workflow. The same resolution classifies and summarizes (`core::resolve`).
+fn directors(settings: &Settings, workflows: &[crate::workflows::Workflow]) -> Vec<Value> {
+    let mut projects: Vec<(String, String, String)> = Vec::new();
+    let named = settings
+        .ready_states
+        .iter()
+        .map(|r| (&r.organization, &r.project))
+        .chain(
+            settings
+                .project_directors
+                .iter()
+                .map(|p| (&p.organization, &p.project)),
+        )
+        .chain(workflows.iter().map(|w| (&w.organization, &w.project)));
+    for (url, project) in named {
+        let Some(organization) = crate::workflows::organization_name(url) else {
+            continue;
+        };
+        if !projects
+            .iter()
+            .any(|(o, _, p)| *o == organization && p.eq_ignore_ascii_case(project))
+        {
+            projects.push((
+                organization,
+                url.trim_end_matches('/').to_owned(),
+                project.clone(),
+            ));
+        }
+    }
+    projects
+        .into_iter()
+        .map(|(organization, url, project)| {
+            let resolved = core::resolve(settings, workflows, &organization, &project);
+            json!({
+                "organization": url,
+                "project": project,
+                "director": resolved.as_ref().map(|r| &r.director),
+                "source": resolved.as_ref().map(|r| r.source.word()),
+            })
+        })
+        .collect()
 }
 fn bounds() -> Value {
     let range = |r: std::ops::RangeInclusive<u32>| json!([r.start(), r.end()]);
@@ -122,6 +180,7 @@ async fn show(host: &Arc<Host>, args: ShowArgs) -> Result<Value, String> {
     let map = state.settings.map().map_err(fail)?;
     let mut reply = json!({
         "settings": view(&map.workflow_settings),
+        "directors": directors(&map.workflow_settings, &map.workflows),
         "defaults": view(&Settings::default()),
         "bounds": bounds(),
         "editable": editable(state)?,
@@ -151,6 +210,9 @@ struct Resolved {
     director: Option<Option<Director>>,
     ready: Vec<ReadyStates>,
     cleared: Vec<(String, String)>,
+    /// Each project's own director after the change (organization name and project,
+    /// lowercased), or none to clear it.
+    projects: Vec<((String, String), Option<ProjectDirector>)>,
 }
 
 fn same_ready(stored: &ReadyStates, organization: &str, project: &str) -> bool {
@@ -184,6 +246,87 @@ fn apply(settings: &mut Settings, args: &UpdateArgs, resolved: &Resolved) {
             .ready_states
             .retain(|r| !same_ready(r, &organization, &entry.project));
         settings.ready_states.push(entry.clone());
+    }
+    for ((organization, project), own) in &resolved.projects {
+        let position = settings.project_directors.iter().position(|p| {
+            crate::workflows::organization_name(&p.organization).as_deref()
+                == Some(organization.as_str())
+                && p.project.eq_ignore_ascii_case(project)
+        });
+        match (position, own) {
+            (Some(index), Some(own)) => settings.project_directors[index] = own.clone(),
+            (Some(index), None) => {
+                settings.project_directors.remove(index);
+            }
+            (None, Some(own)) => settings.project_directors.push(own.clone()),
+            (None, None) => {}
+        }
+    }
+}
+
+/// A project director change's organization (its lowercased name and its URL) and project as
+/// the settings and workflows spell them: by the organization given, or the only one that names
+/// the project.
+fn project_of(
+    map: &KnowledgeMap,
+    change: &ProjectDirectorChange,
+) -> Result<(String, String, String), String> {
+    let settings = &map.workflow_settings;
+    let given = change
+        .organization
+        .as_deref()
+        .map(|o| {
+            crate::workflows::organization_name(o)
+                .ok_or_else(|| invalid("Give the organization as https://dev.azure.com/NAME."))
+        })
+        .transpose()?;
+    let mut known: Vec<(String, String, String)> = Vec::new();
+    let named = settings
+        .project_directors
+        .iter()
+        .map(|p| (&p.organization, &p.project))
+        .chain(
+            settings
+                .ready_states
+                .iter()
+                .map(|r| (&r.organization, &r.project)),
+        )
+        .chain(map.workflows.iter().map(|w| (&w.organization, &w.project)));
+    for (url, project) in named {
+        let Some(organization) = crate::workflows::organization_name(url) else {
+            continue;
+        };
+        if project.eq_ignore_ascii_case(&change.project)
+            && given.as_ref().is_none_or(|g| *g == organization)
+            && !known.iter().any(|(o, _, _)| *o == organization)
+        {
+            known.push((
+                organization,
+                url.trim_end_matches('/').to_owned(),
+                project.clone(),
+            ));
+        }
+    }
+    match (known.as_slice(), given) {
+        ([one], _) => Ok(one.clone()),
+        ([], Some(organization)) => Ok((
+            organization,
+            change
+                .organization
+                .as_deref()
+                .unwrap_or_default()
+                .trim_end_matches('/')
+                .to_owned(),
+            change.project.trim().to_owned(),
+        )),
+        ([], None) => Err(invalid(format!(
+            "Give the organization of project {} (https://dev.azure.com/NAME): no workflow or ready state names it.",
+            change.project
+        ))),
+        _ => Err(invalid(format!(
+            "Project {} is in several organizations; give its organization.",
+            change.project
+        ))),
     }
 }
 
@@ -338,12 +481,14 @@ pub(super) async fn update(
         && args.director.is_none()
         && !clear_director
         && args.ready_states.is_empty()
+        && args.project_directors.is_empty()
     {
         return Err(invalid(
-            "Give at least one setting to change: watch_interval_minutes, concurrency, pull_request_wait_days, director or ready_states.",
+            "Give at least one setting to change: watch_interval_minutes, concurrency, pull_request_wait_days, director, ready_states or project_directors.",
         ));
     }
-    let stored = state.settings.map().map_err(fail)?.workflow_settings;
+    let map = state.settings.map().map_err(fail)?;
+    let stored = map.workflow_settings.clone();
     let (clearing, wanted): (Vec<ReadyChange>, Vec<ReadyChange>) = args
         .ready_states
         .iter()
@@ -363,6 +508,38 @@ pub(super) async fn update(
     };
     for change in &clearing {
         resolved.cleared.extend(resolve_clear(&stored, change)?);
+    }
+    for change in &args.project_directors {
+        let (organization, url, project) = project_of(&map, change)?;
+        let key = (organization.clone(), project.to_lowercase());
+        if resolved.projects.iter().any(|(k, _)| *k == key) {
+            return Err(invalid(format!(
+                "Project {project} has its director changed once per update."
+            )));
+        }
+        let own = match &change.director {
+            None => None,
+            Some(fields) => {
+                let current = stored.project_directors.iter().find(|p| {
+                    crate::workflows::organization_name(&p.organization).as_deref()
+                        == Some(organization.as_str())
+                        && p.project.eq_ignore_ascii_case(&project)
+                });
+                let director =
+                    merge_director(current.map(|p| &p.director), fields).map_err(|e| {
+                        e.replace(
+                            "There is no workflow director yet",
+                            &format!("Project {project} has no director of its own yet"),
+                        )
+                    })?;
+                Some(ProjectDirector {
+                    organization: url.clone(),
+                    project: project.clone(),
+                    director,
+                })
+            }
+        };
+        resolved.projects.push((key, own));
     }
     // Everything the settings alone can refuse, before the process or a machine is read: the
     // scalars, the director and the clearings on the stored list, and each new entry's shape.
@@ -438,13 +615,23 @@ pub(super) async fn update(
     if let Some(Some(director)) = &resolved.director {
         warnings.extend(verify_director(host, director).await?);
     }
+    for own in resolved.projects.iter().filter_map(|(_, own)| own.as_ref()) {
+        warnings.extend(
+            verify_director(host, &own.director)
+                .await
+                .map_err(|e| format!("{e} (the director of {})", own.project))?,
+        );
+    }
     let saved = change(host, |map| {
         apply(&mut map.workflow_settings, &args, &resolved);
         core::validate(&map.workflow_settings).map_err(invalid)?;
         Ok(map.workflow_settings.clone())
     })
     .await?;
-    Ok(json!({"settings":view(&saved),"saved":true,"warnings":warnings}))
+    let workflows = state.settings.map().map_err(fail)?.workflows;
+    Ok(
+        json!({"settings":view(&saved),"directors":directors(&saved, &workflows),"saved":true,"warnings":warnings}),
+    )
 }
 
 /// The director's machine must be the account's, and its agent installed there; what the
@@ -564,28 +751,36 @@ pub(super) async fn classify_for(
 ) -> Result<Value, String> {
     let state = &host.state;
     require_coordinator(state)?;
-    let director = state
-        .settings
-        .map()
-        .map_err(fail)?
-        .workflow_settings
-        .director
-        .ok_or_else(|| {
-            "[not_ready] Choose the workflow director first (pta workflows settings --set director.machine ID --set director.provider P --set director.model M --set director.effort E).".to_owned()
-        })?;
     let read = azure.item(state, source, project, id);
     let detail = tokio::time::timeout(std::time::Duration::from_secs(ITEM_SECONDS), read)
         .await
         .map_err(|_| "[network] The work item could not be read in time.".to_owned())??;
-    classify_item(host, &director, &detail, false).await
+    classify_item(host, &detail, false).await
 }
 
-/// Classify an item already read: ask the director on its machine and check its answer. With
-/// `auto_only` (a run the watcher started) it chooses among the workflows that start by
-/// themselves only.
+/// The director of a project as the map holds it now (`core::resolve`), by its organization's
+/// URL or name.
+pub(super) fn director_for(
+    map: &KnowledgeMap,
+    organization: &str,
+    project: &str,
+) -> Option<core::Resolved> {
+    let name = crate::workflows::organization_name(organization)
+        .unwrap_or_else(|| organization.to_lowercase());
+    core::resolve(&map.workflow_settings, &map.workflows, &name, project)
+}
+/// What a project without a director is told.
+pub(super) fn no_director(project: &str) -> String {
+    format!(
+        "[not_ready] Project {project} has no workflow director: its workflows differ in machine or agent and neither the project nor the account has one. Choose it in Settings › Workflows, or pta workflows settings --set project_director.{project}.machine ID … (or director.machine ID …)."
+    )
+}
+
+/// Classify an item already read: ask its project's director (`director_for`) on its machine and
+/// check its answer. With `auto_only` (a run the watcher started) it chooses among the
+/// workflows that start by themselves only.
 pub(super) async fn classify_item(
     host: &Arc<Host>,
-    director: &Director,
     detail: &crate::tools::todo::Detail,
     auto_only: bool,
 ) -> Result<Value, String> {
@@ -618,6 +813,11 @@ pub(super) async fn classify_item(
             "dry_run": true,
         }));
     }
+    let resolved = director_for(&map, &organization, &item.project)
+        .ok_or_else(|| no_director(&item.project))?;
+    let director = &resolved.director;
+    let directed_by = json!({"machine": director.machine, "provider": director.provider,
+        "model": director.model, "effort": director.effort, "source": resolved.source.word()});
     let machine = implementation::machine_facts(host, &director.machine)
         .await
         .map_err(fail)?
@@ -683,6 +883,7 @@ pub(super) async fn classify_item(
         "reason": judgment.reason,
         "director": {"workflow": judgment.said, "reason": judgment.said_reason},
         "problem": answer.direction.problem,
+        "directed_by": directed_by,
         "candidates": listed,
         "item": verified,
         "run": answer.run,

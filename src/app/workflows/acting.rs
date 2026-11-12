@@ -4,7 +4,9 @@
 //! **Stages.** An acting block names the stage at which it acts, and a stage occurs in a run
 //! when its record says so (`occurrences`): `before_planning` before the planning run starts,
 //! `plan_ready` when the run waits in `plan_review`, `children_created` once the creation ledger
-//! confirmed the children, `child_done` for each child whose coding run ended done, then
+//! confirmed the children, `coding_started` for each coding run its machine accepted (a task's
+//! own, which has no planning stage, or each child's), `child_done` for each child whose coding
+//! run ended done, then
 //! `pull_requests_completed` and `done` in the `blocks` stage, and `failed` when the run fails.
 //! The blocks of one occurrence run in the workflow's order.
 //!
@@ -105,12 +107,16 @@ pub(in crate::app) fn occurrences(run: &Run) -> Vec<Occurrence> {
         ));
     }
     if coding {
-        for child in run
-            .children
-            .iter()
-            .filter(|c| c.outcome.as_deref() == Some("done"))
-        {
-            found.push(at(Stage::ChildDone, format!("child_done:{}", child.id)));
+        for child in &run.children {
+            if child.coding.as_ref().is_some_and(|c| c.started) {
+                found.push(at(
+                    Stage::CodingStarted,
+                    format!("coding_started:{}", child.id),
+                ));
+            }
+            if child.outcome.as_deref() == Some("done") {
+                found.push(at(Stage::ChildDone, format!("child_done:{}", child.id)));
+            }
         }
     }
     if run.state == Phase::Blocks {
@@ -378,6 +384,7 @@ fn stage_word(stage: Stage) -> &'static str {
         Stage::BeforePlanning => "before_planning",
         Stage::PlanReady => "plan_ready",
         Stage::ChildrenCreated => "children_created",
+        Stage::CodingStarted => "coding_started",
         Stage::ChildDone => "child_done",
         Stage::PullRequestsCompleted => "pull_requests_completed",
         Stage::Done => "done",
@@ -447,6 +454,7 @@ fn state_word(run: &Run, stage: Stage) -> &'static str {
         Stage::Failed => "failed",
         Stage::PlanReady => "plan_review",
         Stage::BeforePlanning => "planning",
+        Stage::CodingStarted => "coding",
         _ => run.state.word(),
     }
 }
@@ -477,17 +485,22 @@ fn latest_summary(run: &Run) -> String {
 }
 
 /// The template with its placeholders replaced, by code and in one pass: what replaces one is
-/// never read as another placeholder or as a mention. At `child_done` the item is the child
-/// that was coded (its title, number and link, and its pull requests); at every other stage it
+/// never read as another placeholder or as a mention. `{item}` is `Title (#ID)`; `{id}` and
+/// `{title}` are its parts, the title without square brackets. At `coding_started` and
+/// `child_done` the item is the child being coded (its title, number and link, and its pull
+/// requests); at every other stage it
 /// is the run's work item with the pull requests of all its children.
 pub(in crate::app) fn render(run: &Run, block: &Block, occurrence: &Occurrence) -> String {
-    let child = (occurrence.stage == Stage::ChildDone)
-        .then(|| {
-            run.children
-                .iter()
-                .find(|c| occurrence.key == format!("child_done:{}", c.id))
-        })
-        .flatten();
+    let prefix = match occurrence.stage {
+        Stage::ChildDone => Some("child_done"),
+        Stage::CodingStarted => Some("coding_started"),
+        _ => None,
+    };
+    let child = prefix.and_then(|prefix| {
+        run.children
+            .iter()
+            .find(|c| occurrence.key == format!("{prefix}:{}", c.id))
+    });
     let (title, id, link) = match child {
         Some(c) => (c.title.as_str(), c.id, c.url.as_str()),
         None => (run.item.title.as_str(), run.item.id, run.item.url.as_str()),
@@ -496,8 +509,11 @@ pub(in crate::app) fn render(run: &Run, block: &Block, occurrence: &Occurrence) 
         Some(c) => pull_request_links(c.pull_requests.iter()),
         None => pull_request_links(run.children.iter().flat_map(|c| c.pull_requests.iter())),
     };
-    let values: [(&str, String); 5] = [
+    let values: [(&str, String); 7] = [
         ("item", format!("{} (#{})", plain(title, 300), id)),
+        ("id", id.to_string()),
+        // Without brackets, so `[{id} - {title}]({link})` stays one Markdown link.
+        ("title", plain(title, 300).replace(['[', ']'], "")),
         ("link", link.to_owned()),
         ("pull_requests", pulls),
         ("summary", latest_summary(run)),
