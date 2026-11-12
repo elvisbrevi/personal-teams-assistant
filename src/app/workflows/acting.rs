@@ -477,7 +477,8 @@ fn latest_summary(run: &Run) -> String {
 }
 
 /// The template with its placeholders replaced, by code and in one pass: what replaces one is
-/// never read as another placeholder or as a mention. At `child_done` the item is the child
+/// never read as another placeholder or as a mention. `{item}` is `Title (#ID)`; `{id}` and
+/// `{title}` are its parts, the title without square brackets. At `child_done` the item is the child
 /// that was coded (its title, number and link, and its pull requests); at every other stage it
 /// is the run's work item with the pull requests of all its children.
 pub(in crate::app) fn render(run: &Run, block: &Block, occurrence: &Occurrence) -> String {
@@ -496,8 +497,11 @@ pub(in crate::app) fn render(run: &Run, block: &Block, occurrence: &Occurrence) 
         Some(c) => pull_request_links(c.pull_requests.iter()),
         None => pull_request_links(run.children.iter().flat_map(|c| c.pull_requests.iter())),
     };
-    let values: [(&str, String); 5] = [
+    let values: [(&str, String); 7] = [
         ("item", format!("{} (#{})", plain(title, 300), id)),
+        ("id", id.to_string()),
+        // Without brackets, so `[{id} - {title}]({link})` stays one Markdown link.
+        ("title", plain(title, 300).replace(['[', ']'], "")),
         ("link", link.to_owned()),
         ("pull_requests", pulls),
         ("summary", latest_summary(run)),

@@ -36,7 +36,15 @@ pub const MAX_MENTIONS: usize = 20;
 pub const MAX_MENTION: usize = 100;
 pub const MAX_TEMPLATE: usize = 4000;
 /// The placeholders a notification template may hold; code renders them.
-pub const PLACEHOLDERS: [&str; 5] = ["item", "link", "pull_requests", "summary", "state"];
+pub const PLACEHOLDERS: [&str; 7] = [
+    "item",
+    "id",
+    "title",
+    "link",
+    "pull_requests",
+    "summary",
+    "state",
+];
 /// The coding agents a workflow can run (the installed CLIs of the implementation flow).
 pub const PROVIDERS: [&str; 3] = ["codex", "claude", "opencode"];
 
@@ -193,7 +201,8 @@ pub struct Block {
     /// The display names of the chat members a notification mentions.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mentions: Vec<String>,
-    /// A notification's text, with `{item}`, `{link}`, `{pull_requests}`, `{summary}` and `{state}`.
+    /// A notification's text, with `{item}`, `{id}`, `{title}`, `{link}`, `{pull_requests}`,
+    /// `{summary}` and `{state}`.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub template: String,
     /// A launcher block's approved launcher of the coordinator.
@@ -338,7 +347,7 @@ pub fn validate_block(block: &Block) -> Result<()> {
             let unknown = unknown_placeholders(&block.template);
             ensure!(
                 unknown.is_empty(),
-                "Teams notification block {id} uses unknown placeholders ({}); the template may use {{item}}, {{link}}, {{pull_requests}}, {{summary}} and {{state}}.",
+                "Teams notification block {id} uses unknown placeholders ({}); the template may use {{item}}, {{id}}, {{title}}, {{link}}, {{pull_requests}}, {{summary}} and {{state}}.",
                 unknown.join(", ")
             );
             ensure!(
@@ -1069,6 +1078,19 @@ pub(crate) mod tests {
         assert_eq!(
             Allow::ALL.map(Allow::word),
             ["work_items", "teams", "merge", "deploy"]
+        );
+    }
+
+    #[test]
+    fn a_template_may_name_the_items_number_and_title_apart() {
+        let mut block = notification("notify");
+        block.template = "[{id} - {title}]({link}) is {state}".into();
+        assert!(validate_block(&block).is_ok());
+        block.template = "{identifier}".into();
+        let error = validate_block(&block).unwrap_err().to_string();
+        assert!(
+            error.contains("identifier") && error.contains("{id}, {title}"),
+            "{error}"
         );
     }
 

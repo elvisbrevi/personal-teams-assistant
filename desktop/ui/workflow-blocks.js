@@ -18,7 +18,7 @@ const STAGE_NAMES = {
 };
 /** The placeholders a notification's template may hold; code fills them in when it posts. */
 const PLACEHOLDERS = {
-  item: t('the work item\'s number and title'), link: t('its link'), pull_requests: t('the links of its pull requests'), summary: t('the director\'s progress summary'), state: t('the run\'s state'),
+  item: t('the work item\'s number and title'), id: t('the work item\'s number alone'), title: t('the work item\'s title alone'), link: t('its link'), pull_requests: t('the links of its pull requests'), summary: t('the director\'s progress summary'), state: t('the run\'s state'),
 };
 const LIMITS = { name: 80, text: 8000, template: 4000, mentions: 20, mention: 100, chat: 200 };
 /** A name cut to the host's limit, with an ellipsis when it was longer. */

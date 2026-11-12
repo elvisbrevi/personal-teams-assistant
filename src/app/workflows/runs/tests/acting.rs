@@ -209,7 +209,7 @@ async fn a_done_notification_posts_once_with_rendered_placeholders_and_the_resol
     bench.acting(vec![notification(
         "notify",
         Stage::Done,
-        "{item} is {state}: {link}\nPull requests:\n{pull_requests}\nSummary: {summary}",
+        "{item} is {state}: {link}\nPull requests:\n{pull_requests}\nSummary: {summary}\nAs a link: [{id} - {title}]({link})",
         &["Victoria"],
     )]);
     let teams = Teams::new(&bench.host, &["Victoria Gómez", "Ana Pérez"], 201).await;
@@ -231,6 +231,8 @@ async fn a_done_notification_posts_once_with_rendered_placeholders_and_the_resol
     let html = body["body"]["content"].as_str().unwrap();
     assert!(html.contains("<at id=\"0\">Victoria Gómez</at>"), "{html}");
     assert!(html.contains("Fix rounding (#200) is done"), "{html}");
+    // `{id}` and `{title}` are the item's number and title, for a link of one's own.
+    assert!(html.contains("200 - Fix rounding"), "{html}");
     assert!(
         html.contains("https://dev.azure.com/example/Payments/_workitems/edit/200"),
         "{html}"

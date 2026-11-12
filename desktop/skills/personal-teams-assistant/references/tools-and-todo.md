@@ -362,7 +362,8 @@ workflow settings.
    - `teams_notification`: `stage` (`before_planning`, `plan_ready`, `children_created`,
      `child_done`, `pull_requests_completed`, `done`, `failed`), `chat` `{id, name}` from
      `teams_chats`, `mentions` (member display names of at most 100 characters without `]`, at most 20) and `template` (at most 4000
-     characters; only `{item}`, `{link}`, `{pull_requests}`, `{summary}` and `{state}`). Show the user the
+     characters; only `{item}` (`Title (#ID)`), `{id}` and `{title}` (its parts, e.g.
+     `[{id} - {title}]({link})`), `{link}`, `{pull_requests}`, `{summary}` and `{state}`). Show the user the
      chat and the text and save it with `--confirmed` (MCP: the confirmation names them); the
      reply echoes `chat`, `mentions` and `template`. The chat must be one the user belongs to:
      a chat `teams_chats` does not list is refused, and when no Microsoft session can read the
