@@ -145,12 +145,22 @@ pub(crate) fn locate(program: &str) -> Option<PathBuf> {
         .find(|path| executable(path))
 }
 
+/// Whether a CLI gets the host's variable `name`. Windows matches names without case and stores
+/// some in mixed case (`SystemRoot`, `SystemDrive`, `windir`, `ComSpec`).
+fn passed(name: &str, windows: bool) -> bool {
+    name.starts_with("LC_")
+        || PASSED_ENV.iter().any(|passed| {
+            if windows {
+                passed.eq_ignore_ascii_case(name)
+            } else {
+                *passed == name
+            }
+        })
+}
+
 pub(crate) fn child_env(binary: &Path) -> Vec<(OsString, OsString)> {
     let mut env: Vec<(OsString, OsString)> = std::env::vars_os()
-        .filter(|(name, _)| {
-            name.to_str()
-                .is_some_and(|n| PASSED_ENV.contains(&n) || n.starts_with("LC_"))
-        })
+        .filter(|(name, _)| name.to_str().is_some_and(|n| passed(n, cfg!(windows))))
         .collect();
     let mut path: Vec<PathBuf> = binary.parent().map(Path::to_path_buf).into_iter().collect();
     if let Some(inherited) = std::env::var_os("PATH") {
@@ -971,6 +981,31 @@ mod tests {
             success,
             stdout: stdout.into(),
             stderr: String::new(),
+        }
+    }
+
+    #[test]
+    fn windows_variable_names_pass_in_the_case_the_system_stores_them() {
+        // Windows stores `SystemRoot`, `SystemDrive`, `windir` and `ComSpec` in that case; a CLI
+        // without `SystemRoot` cannot open a network connection there.
+        for name in ["SystemRoot", "SystemDrive", "windir", "ComSpec", "Path"] {
+            assert_eq!(passed(name, true), name != "Path", "{name}");
+        }
+        for name in ["SYSTEMROOT", "USERPROFILE", "LC_ALL", "https_proxy"] {
+            assert!(passed(name, true), "{name}");
+            assert!(passed(name, false), "{name}");
+        }
+        // Elsewhere names are case-sensitive, and host credentials never pass on any system.
+        for name in ["SystemRoot", "home", "Https_Proxy"] {
+            assert!(!passed(name, false), "{name}");
+        }
+        for name in [
+            "GH_TOKEN",
+            "AZURE_DEVOPS_EXT_PAT",
+            "PTA_PROFILE_DIR",
+            "systemroot_file",
+        ] {
+            assert!(!passed(name, true) && !passed(name, false), "{name}");
         }
     }
 
