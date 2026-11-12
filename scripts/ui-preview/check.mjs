@@ -2218,6 +2218,18 @@ if (flag !== '--axe-only') for (const [label, viewport] of [['desktop', { width:
   await page.waitForTimeout(300);
   const reordered = (await calls()).filter(c => c.method === 'workflow_save' && c.workflow?.id === 'payments-features').pop();
   check(`workflows ${label}: blocks are reordered and saved in order`, reordered?.workflow.blocks.join() === 'notify-release,base-branch', JSON.stringify(reordered?.workflow?.blocks));
+  // A box that lifts a fixed rule of the coding agent is reviewed first, then saved confirmed.
+  const savesBefore = (await calls()).filter(c => c.method === 'workflow_save' && c.workflow?.id === 'payments-features').length;
+  await payments.locator('input[data-allow="merge"]').check();
+  await payments.locator('button', { hasText: 'Guardar workflow' }).click();
+  await page.waitForTimeout(300);
+  check(`workflows ${label}: allowing an action shows what it authorizes before anything is sent`,
+    await payments.locator('.workflow-allow-review .callout.warn', { hasText: 'Completar pull requests' }).isVisible()
+    && (await calls()).filter(c => c.method === 'workflow_save' && c.workflow?.id === 'payments-features').length === savesBefore);
+  await payments.locator('button', { hasText: 'Confirmar y guardar' }).click();
+  await page.waitForTimeout(300);
+  const allowed = (await calls()).filter(c => c.method === 'workflow_save' && c.workflow?.id === 'payments-features').pop();
+  check(`workflows ${label}: an allowed action is saved with confirmation`, allowed?.confirmed === true && allowed.workflow.allow.join() === 'merge', JSON.stringify(allowed));
   await payments.locator('input.switch').click();
   await page.waitForTimeout(300);
   check(`workflows ${label}: the switch disables a workflow and nothing else`, (await calls()).some(c => c.method === 'workflow_save' && c.id === 'payments-features' && c.enabled === false && !c.workflow));
@@ -2308,6 +2320,8 @@ if (flag !== '--axe-only') for (const [label, viewport] of [['desktop', { width:
   await page.waitForFunction(() => document.querySelectorAll('#workflow-ready-states [data-project="Exports"] input').length === 4).catch(() => {});
   check(`workflow settings ${label}: the section's link opens the category`, await page.getAttribute('#settings-tab-workflows', 'aria-selected') === 'true' && await page.isVisible('#panel-workflow-ready'));
   check(`workflow settings ${label}: ready states are the process's discovered states`, await page.locator('#workflow-ready-states [data-project="Payments"] input').count() === 5);
+  check(`workflow settings ${label}: each project says which director it gets and from where`,
+    /Director: .+, de /.test(await page.locator('#workflow-ready-states [data-project="Payments"] .workflow-director-line').textContent() ?? ''));
   check(`workflow settings ${label}: the category passes axe`, (await scan(page)).length === 0, JSON.stringify(await scan(page)));
   await page.locator('#workflow-ready-states [data-project="Exports"] label', { hasText: 'Approved' }).locator('input').check();
   await page.fill('#workflow-interval', '10');
@@ -2329,7 +2343,7 @@ if (flag !== '--axe-only') for (const [label, viewport] of [['desktop', { width:
   await page.waitForTimeout(600);
   const update = (await calls()).find(c => c.method === 'workflow_settings_update');
   check(`workflow settings ${label}: the save bar saves only what changed: ready states, watcher and director`, update?.watch_interval_minutes === 10 && update.concurrency === 3
-    && !('pull_request_wait_days' in update) && JSON.stringify(update.ready_states) === '[{"organization":"https://dev.azure.com/contoso","project":"Exports","states":["Approved"]}]'
+    && !('pull_request_wait_days' in update) && !('project_directors' in update) && JSON.stringify(update.ready_states) === '[{"organization":"https://dev.azure.com/contoso","project":"Exports","states":["Approved"]}]'
     && update.director.model === 'claude-opus-5-5' && update.director.machine === '11111111-1111-4111-8111-111111111111', JSON.stringify(update));
   check(`workflow settings ${label}: saving clears the save bar`, await page.isHidden('#savebar') && await page.isHidden('#settings-tab-workflows .flag.edited'));
 

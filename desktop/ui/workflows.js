@@ -505,7 +505,7 @@ function workflowEditor(draft, saved, renderFacts) {
     el('label', { class: 'check' }, autoStart, el('span', {}, t('Start by itself when an assigned item reaches a ready state'),
       el('small', { textContent: t('The ready states are chosen per project in Settings. Children are still created only after you confirm their plan.') }))),
     el('div', { class: 'actions' }, readyStates),
-    confirmation, problem, warnings, el('div', { class: 'actions' }, ...actions));
+    el('div', { class: 'workflow-allow-review' }, confirmation), problem, warnings, el('div', { class: 'actions' }, ...actions));
 }
 
 /** What the host would refuse before reading anything, in the order of the form. */
