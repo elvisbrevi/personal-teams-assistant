@@ -9,6 +9,7 @@ use personal_teams_assistant::{
     adapters::{
         MessageAdapter,
         graph::{Graph, PostRefusal},
+        images::{Image, ImageRefusal},
         webhook::{self, WebState},
     },
     knowledge::{Access, KnowledgeMap, Resource},
@@ -5380,6 +5381,7 @@ async fn teams_post_sends_formatted_html_with_graph_mentions_once() {
         .post_chat(
             "chat1",
             "Hola @[ana pérez], **revisa** `esto`:\n- uno\n- dos",
+            &[],
         )
         .await
         .unwrap();
@@ -5425,8 +5427,11 @@ async fn teams_post_uses_the_message_style_unless_it_mentions_someone() {
         .expect(2)
         .mount(&server)
         .await;
-    graph.post_chat("self", "**Hola** a mí").await.unwrap();
-    graph.post_chat("chat1", "Hola @[Ana Pérez]").await.unwrap();
+    graph.post_chat("self", "**Hola** a mí", &[]).await.unwrap();
+    graph
+        .post_chat("chat1", "Hola @[Ana Pérez]", &[])
+        .await
+        .unwrap();
     let posts: Vec<serde_json::Value> = server
         .received_requests()
         .await
@@ -5476,10 +5481,10 @@ async fn teams_post_refuses_unknown_ambiguous_mentions_and_foreign_chats_without
         ("hola @[Zoe]", PostRefusal::UnknownMention),
         ("hola @[Ana]", PostRefusal::AmbiguousMention),
     ] {
-        let error = graph.post_chat("chat1", text).await.unwrap_err();
+        let error = graph.post_chat("chat1", text, &[]).await.unwrap_err();
         assert_eq!(error.downcast_ref::<PostRefusal>(), Some(&expected));
     }
-    let error = graph.post_chat("../x", "hola").await.unwrap_err();
+    let error = graph.post_chat("../x", "hola", &[]).await.unwrap_err();
     assert_eq!(
         error.downcast_ref::<PostRefusal>(),
         Some(&PostRefusal::InvalidChat)
@@ -5490,7 +5495,7 @@ async fn teams_post_refuses_unknown_ambiguous_mentions_and_foreign_chats_without
         json!([{"userId": "someone-else", "displayName": "Otra"}]),
     )
     .await;
-    let error = graph.post_chat("chat1", "hola").await.unwrap_err();
+    let error = graph.post_chat("chat1", "hola", &[]).await.unwrap_err();
     assert_eq!(
         error.downcast_ref::<PostRefusal>(),
         Some(&PostRefusal::NotMember)
@@ -5519,7 +5524,7 @@ async fn teams_post_to_a_chat_graph_does_not_know_is_a_refusal_without_sending()
         .expect(0)
         .mount(&server)
         .await;
-    let error = graph.post_chat("ghost", "hola").await.unwrap_err();
+    let error = graph.post_chat("ghost", "hola", &[]).await.unwrap_err();
     assert_eq!(
         error.downcast_ref::<PostRefusal>(),
         Some(&PostRefusal::NotMember)
@@ -5538,10 +5543,175 @@ async fn teams_post_failure_is_uncertain_and_never_retried() {
         .expect(1)
         .mount(&server)
         .await;
-    let error = graph.post_chat("chat1", "hola").await.unwrap_err();
+    let error = graph.post_chat("chat1", "hola", &[]).await.unwrap_err();
     assert_eq!(
         error.downcast_ref::<PostRefusal>(),
         Some(&PostRefusal::Uncertain)
+    );
+}
+
+/// A GIF header of `width`×`height`, padded to `len` bytes.
+fn gif_bytes(width: u16, height: u16, len: usize) -> Vec<u8> {
+    let mut bytes = b"GIF89a".to_vec();
+    bytes.extend(width.to_le_bytes());
+    bytes.extend(height.to_le_bytes());
+    bytes.resize(len, 7);
+    bytes
+}
+fn image(name: &str, alt: &str, len: usize) -> Image {
+    Image::new(name, alt, gif_bytes(480, 400, len)).unwrap()
+}
+/// A Graph with the message style on, the user's personal chat and `chat1`, and its store's path.
+async fn styled_post_fixture(server: &MockServer) -> (Graph, std::path::PathBuf) {
+    let dir = Box::leak(Box::new(tempfile::tempdir().unwrap()));
+    let probe = teams_post_fixture(server, json!([])).await;
+    server.reset().await;
+    let plain = support::graph(server, support::store(dir));
+    let me = plain.config.graph.user_id.clone();
+    Mock::given(method("GET"))
+        .and(path("/me"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": me})))
+        .mount(server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/chats/chat1/members"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"value": teams_members(&probe)})),
+        )
+        .mount(server)
+        .await;
+    let mut config = (*plain.config).clone();
+    config.message_style.enabled = true;
+    let graph = Graph {
+        config: Arc::new(config),
+        client: plain.client.clone(),
+        token: plain.token.clone(),
+        base_url: plain.base_url.clone(),
+        store: plain.store.clone(),
+        client_state: plain.client_state.clone(),
+        config_path: None,
+    };
+    (graph, dir.path().join("test.db"))
+}
+fn post_events(store: &std::path::Path) -> Vec<String> {
+    personal_teams_assistant::state::Store::inspect(store, true, 20, None, false)
+        .unwrap()
+        .iter()
+        .filter(|e| e["kind"] == "teams_post")
+        .map(|e| e["detail"].as_str().unwrap().to_owned())
+        .collect()
+}
+async fn posted(server: &MockServer) -> Vec<serde_json::Value> {
+    server
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .filter(|r| r.method.as_str() == "POST")
+        .map(|r| r.body_json().unwrap())
+        .collect()
+}
+
+#[tokio::test]
+async fn teams_post_embeds_images_as_hosted_contents_in_plain_html_once() {
+    use base64::Engine;
+    let server = MockServer::start().await;
+    let (graph, store) = styled_post_fixture(&server).await;
+    Mock::given(method("POST"))
+        .and(path("/chats/48:notes/messages"))
+        .respond_with(ResponseTemplate::new(201).set_body_json(json!({"id": "m1"})))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let images = [
+        image("homero.gif", "Homero <b>\"escondido\"</b>", 1_050_994),
+        image("dos.gif", "", 64),
+    ];
+    let sent = graph
+        .post_chat("self", "**Mira** esto", &images)
+        .await
+        .unwrap();
+    assert_eq!(sent["status"], "sent");
+    assert_eq!(sent["images"][0]["name"], "homero.gif");
+    assert_eq!(sent["images"][0]["type"], "image/gif");
+    assert_eq!(sent["images"][0]["bytes"], 1_050_994);
+    assert!(sent["images"][0].get("data").is_none());
+    assert!(sent["style"].as_str().unwrap().starts_with("plain"));
+
+    let posts = posted(&server).await;
+    assert_eq!(posts.len(), 1);
+    let body = &posts[0];
+    // Plain HTML even with the style on: the card never carries an image.
+    assert!(body.get("attachments").is_none(), "{body}");
+    let html = body["body"]["content"].as_str().unwrap();
+    assert_eq!(body["body"]["contentType"], "html");
+    let first = "<p><img src=\"../hostedContents/1/$value\" alt=\"Homero &lt;b&gt;&quot;escondido&quot;&lt;/b&gt;\" width=\"480\" height=\"400\"></p>";
+    let second =
+        "<p><img src=\"../hostedContents/2/$value\" alt=\"\" width=\"480\" height=\"400\"></p>";
+    let text = html.find("<b>Mira</b>").unwrap();
+    let (one, two) = (html.find(first).unwrap(), html.find(second).unwrap());
+    let marker = html.find("personalteams.invalid/output/").unwrap();
+    assert!(text < one && one < two && two < marker, "{html}");
+    let hosted = body["hostedContents"].as_array().unwrap();
+    assert_eq!(hosted.len(), 2);
+    for (at, image) in images.iter().enumerate() {
+        assert_eq!(
+            hosted[at]["@microsoft.graph.temporaryId"],
+            (at + 1).to_string()
+        );
+        assert_eq!(hosted[at]["contentType"], "image/gif");
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(hosted[at]["contentBytes"].as_str().unwrap())
+            .unwrap();
+        assert_eq!(bytes, image.bytes);
+    }
+    // The record counts the images and their bytes, never their content or names.
+    assert_eq!(post_events(&store), ["sent images=2 bytes=1051058"]);
+}
+
+#[tokio::test]
+async fn teams_post_with_images_is_uncertain_or_refused_and_never_retried() {
+    for (status, expected, recorded) in [
+        (500, PostRefusal::Uncertain, "uncertain images=1 bytes=64"),
+        (413, PostRefusal::Refused, "refused images=1 bytes=64"),
+    ] {
+        let server = MockServer::start().await;
+        let (graph, store) = styled_post_fixture(&server).await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(status))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let error = graph
+            .post_chat("chat1", "", &[image("a.gif", "", 64)])
+            .await
+            .unwrap_err();
+        assert_eq!(error.downcast_ref::<PostRefusal>(), Some(&expected));
+        assert_eq!(posted(&server).await.len(), 1);
+        assert_eq!(post_events(&store), [recorded]);
+    }
+}
+
+#[tokio::test]
+async fn teams_post_refuses_too_many_or_too_large_images_before_any_request() {
+    let server = MockServer::start().await;
+    let (graph, _) = styled_post_fixture(&server).await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(201).set_body_json(json!({"id": "m1"})))
+        .expect(0)
+        .mount(&server)
+        .await;
+    let many = vec![image("a.gif", "", 64); 5];
+    let error = graph.post_chat("self", "hola", &many).await.unwrap_err();
+    assert_eq!(
+        error.downcast_ref::<ImageRefusal>(),
+        Some(&ImageRefusal::TooMany)
+    );
+    let large = vec![image("a.gif", "", 1_500_000); 2];
+    let error = graph.post_chat("self", "hola", &large).await.unwrap_err();
+    assert_eq!(
+        error.downcast_ref::<ImageRefusal>(),
+        Some(&ImageRefusal::TooLarge)
     );
 }
 

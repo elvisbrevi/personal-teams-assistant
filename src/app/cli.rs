@@ -100,8 +100,11 @@ Messages and diagnostics
                            Messages matching TEXT in the chats this profile reads: Microsoft Search, else their
                            history read directly (bounded; partial and warnings say so, and next_cursor goes to
                            --before for older matches). 25 by default, at most 100.
-  teams send CHAT          Posts the Markdown text on stdin as you in a chat (ID from `teams chats`, or
-                           `self`); @[Display Name] mentions a chat member. Sent once, never retried.
+  teams send CHAT [--image PATH [--alt TEXT]]...
+                           Posts the Markdown text on stdin as you in a chat (ID from `teams chats`, or
+                           `self`); @[Display Name] mentions a chat member. --image embeds a PNG, JPEG or
+                           GIF file in the message after the text (up to 4, 2.9 MB together; the text may
+                           then be empty). Sent once, never retried.
   logs [--limit N]         Host events.
   chat | test simulate     Real pipeline with a SimulationRequest JSON on stdin; never sends to Teams.
   test connectivity        Reads the connected Microsoft account (without sending).
@@ -550,6 +553,38 @@ fn protected_value() -> Result<String> {
     }
     Ok(value)
 }
+/// The images of `teams send`: each `--image PATH`, read here (the host never opens a path),
+/// with the `--alt TEXT` that follows it.
+fn post_images(args: &[String]) -> Result<Vec<crate::adapters::images::Image>> {
+    let mut named: Vec<(&str, &str)> = Vec::new();
+    for (at, arg) in args.iter().enumerate() {
+        let value = || {
+            args.get(at + 1)
+                .map(String::as_str)
+                .context("missing value; consult --help")
+        };
+        match arg.as_str() {
+            "--image" => named.push((value()?, "")),
+            "--alt" => {
+                let last = named
+                    .last_mut()
+                    .context("--alt follows the --image it describes")?;
+                last.1 = value()?;
+            }
+            _ => {}
+        }
+    }
+    ensure!(
+        named.len() <= crate::adapters::images::MAX_IMAGES,
+        crate::adapters::images::ImageRefusal::TooMany
+    );
+    let images = named
+        .iter()
+        .map(|(path, alt)| crate::adapters::images::Image::read(std::path::Path::new(path), alt))
+        .collect::<Result<Vec<_>, _>>()?;
+    crate::adapters::images::check(&images)?;
+    Ok(images)
+}
 /// The words of a command without its flags and their values.
 fn words(args: &[String]) -> Vec<&str> {
     let mut words = Vec::new();
@@ -601,6 +636,8 @@ fn words(args: &[String]) -> Vec<&str> {
                 | "--workflow"
                 | "--send"
                 | "--mention"
+                | "--image"
+                | "--alt"
                 | "--text-file"
                 | "--summary"
                 | "--state"
@@ -2009,7 +2046,7 @@ pub(super) fn validate_args(args: &[String]) -> Result<()> {
             | "--token-expires" | "--keep" | "--machine" | "--since" | "--until" | "--before"
             | "--from" | "--chat" | "--query" | "--wiki" | "--author" | "--project"
             | "--organization" | "--workflow" | "--state" | "--send" | "--mention"
-            | "--text-file" | "--summary" => {
+            | "--text-file" | "--summary" | "--image" | "--alt" => {
                 i += 1;
                 ensure!(
                     args.get(i)
@@ -2600,6 +2637,8 @@ pub(super) fn validate_args(args: &[String]) -> Result<()> {
             "--mention",
             matches!(p.as_slice(), ["workflows", "summary", _]),
         ),
+        ("--image", matches!(p.as_slice(), ["teams", "send", _])),
+        ("--alt", matches!(p.as_slice(), ["teams", "send", _])),
         (
             "--text-file",
             matches!(p.as_slice(), ["workflows", "summary", _]),
@@ -2759,7 +2798,7 @@ async fn execute(mut args: Vec<String>) -> Result<Reply> {
         }
         "capabilities" => {
             return Ok(Reply::success(
-                json!({"contract":control::CONTRACT,"commands":HELP,"skill_version":env!("CARGO_PKG_VERSION"),"activity_registration_support":true,"web_support":true,"web_access_support":true,"knowledge_index_support":true,"mcp_support":true,"tools_support":true,"todo_support":true,"implementation_support":true,"workflows_support":true,"workflow_director_support":true,"workflow_runs_support":true,"machine_pairing_support":true,"machine_login_support":true,"machine_management_support":true,"account_variables_support":true,"account_portable_support":true,"account_authority_support":true,"shared_accounts_support":true,"cloud_store_support":true,"cloud_mirror_support":true,"cloud_disconnect_support":true,"cloud_primary_support":true,"cloud_migration_support":true,"cloud_installations_support":true,"cloud_handoff_support":true,"cloud_delivery_support":true,"cloud_restore_support":true,"cloud_conflicts_support":true,"cloud_lost_support":true,"cloud_repair_support":true,"teams_read_support":true,"audit_pages_support":true,"service_support":true}),
+                json!({"contract":control::CONTRACT,"commands":HELP,"skill_version":env!("CARGO_PKG_VERSION"),"activity_registration_support":true,"web_support":true,"web_access_support":true,"knowledge_index_support":true,"mcp_support":true,"tools_support":true,"todo_support":true,"implementation_support":true,"workflows_support":true,"workflow_director_support":true,"workflow_runs_support":true,"machine_pairing_support":true,"machine_login_support":true,"machine_management_support":true,"account_variables_support":true,"account_portable_support":true,"account_authority_support":true,"shared_accounts_support":true,"cloud_store_support":true,"cloud_mirror_support":true,"cloud_disconnect_support":true,"cloud_primary_support":true,"cloud_migration_support":true,"cloud_installations_support":true,"cloud_handoff_support":true,"cloud_delivery_support":true,"cloud_restore_support":true,"cloud_conflicts_support":true,"cloud_lost_support":true,"cloud_repair_support":true,"teams_read_support":true,"teams_images_support":true,"audit_pages_support":true,"service_support":true}),
             ));
         }
         "skill" => return crate::app::skill::command(action, args.get(2).map(String::as_str)),
@@ -2847,14 +2886,21 @@ async fn execute(mut args: Vec<String>) -> Result<Reply> {
                 .await
             }
             _ => {
-                let text = stdin_text()?;
-                call(
-                    "teams_post",
-                    json!({"chat": positional(&args, 2)?, "text": text}),
-                    None,
-                    true,
-                )
-                .await
+                let images = post_images(&args)?;
+                // With images the text is optional: a terminal on stdin means there is none.
+                let text = if images.is_empty() || !std::io::stdin().is_terminal() {
+                    stdin_text()?
+                } else {
+                    String::new()
+                };
+                let mut post = json!({"chat": positional(&args, 2)?, "text": text});
+                if !images.is_empty() {
+                    post["images"] = images
+                        .iter()
+                        .map(crate::adapters::images::Image::wire)
+                        .collect();
+                }
+                call("teams_post", post, None, true).await
             }
         };
     }
@@ -3946,6 +3992,47 @@ mod wiki_tests {
         ]
         .map(str::to_owned);
         assert_eq!(words(&args), ["azure", "wiki", "search", "w"]);
+    }
+
+    #[test]
+    fn teams_send_reads_each_image_with_the_alt_that_follows_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let (one, two) = (dir.path().join("uno.gif"), dir.path().join("dos.gif"));
+        std::fs::write(&one, crate::adapters::images::tests::gif(480, 400, 64)).unwrap();
+        std::fs::write(&two, crate::adapters::images::tests::gif(2, 2, 32)).unwrap();
+        let args: Vec<String> = [
+            "teams",
+            "send",
+            "self",
+            "--image",
+            one.to_str().unwrap(),
+            "--alt",
+            "Homero",
+            "--image",
+            two.to_str().unwrap(),
+        ]
+        .map(str::to_owned)
+        .to_vec();
+        assert!(validate_args(&args).is_ok());
+        assert_eq!(words(&args), ["teams", "send", "self"]);
+        let images = post_images(&args).unwrap();
+        let named: Vec<(&str, &str)> = images
+            .iter()
+            .map(|i| (i.name.as_str(), i.alt.as_str()))
+            .collect();
+        assert_eq!(named, [("uno.gif", "Homero"), ("dos.gif", "")]);
+        // An alt before any image, a missing value, a non-image and a foreign command fail.
+        let fail =
+            |args: &[&str]| post_images(&args.iter().map(|a| a.to_string()).collect::<Vec<_>>());
+        assert!(fail(&["teams", "send", "self", "--alt", "x"]).is_err());
+        assert!(fail(&["teams", "send", "self", "--image"]).is_err());
+        let text = dir.path().join("notas.gif");
+        std::fs::write(&text, "hola").unwrap();
+        assert!(fail(&["teams", "send", "self", "--image", text.to_str().unwrap()]).is_err());
+        let foreign: Vec<String> = ["teams", "messages", "self", "--image", "x"]
+            .map(str::to_owned)
+            .to_vec();
+        assert!(validate_args(&foreign).is_err());
     }
 
     #[test]

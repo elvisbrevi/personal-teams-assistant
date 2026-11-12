@@ -244,6 +244,9 @@ impl<R: AsyncBufRead + Unpin, W: AsyncWrite + Unpin> Server<R, W> {
             return Err((-32602, "arguments must be an object".into()));
         }
         super::tools::validate(name, &args).map_err(|message| (-32602, message))?;
+        if let Err(message) = super::tools::prepare(name, &mut args) {
+            return Ok(outcome(Err(message)));
+        }
         let question = if tool.effect == Effect::External {
             match super::tools::question(name, &args).await {
                 Ok(question) => question,

@@ -131,6 +131,8 @@ struct Endpoint {
     #[serde(default)]
     teams_read_support: bool,
     #[serde(default)]
+    teams_images_support: bool,
+    #[serde(default)]
     audit_pages_support: bool,
     contract: u32,
     port: u16,
@@ -598,6 +600,12 @@ async fn client_with_transport(
             "Incompatible host: update the host and CLI together before reading Teams chats."
         );
         ensure!(
+            endpoint.teams_images_support
+                || request.method != "teams_post"
+                || request.args.get("images").is_none_or(Value::is_null),
+            "Incompatible host: update the host and CLI together before posting images to Teams."
+        );
+        ensure!(
             endpoint.audit_pages_support || request.method != "audit_list",
             "Incompatible host: update the host and CLI together before paging the audit."
         );
@@ -724,6 +732,7 @@ pub(crate) fn launch(
             cloud_lost_support: true,
             cloud_repair_support: true,
             teams_read_support: true,
+            teams_images_support: true,
             audit_pages_support: true,
             contract: CONTRACT,
             port: listener.local_addr()?.port(),
@@ -733,7 +742,8 @@ pub(crate) fn launch(
     )?;
     let router = Router::new()
         .route("/control", post(endpoint))
-        .layer(DefaultBodyLimit::max(1_000_000))
+        // Room for the images of one Teams post (up to 2.9 MB, a third more in base64).
+        .layer(DefaultBodyLimit::max(4_500_000))
         .with_state(Arc::new(LocalState {
             host: host.clone(),
             token,
@@ -1619,6 +1629,7 @@ mod tests {
                 cloud_lost_support: true,
                 cloud_repair_support: true,
                 teams_read_support: true,
+                teams_images_support: true,
                 audit_pages_support: true,
                 account_authority_support: true,
                 shared_accounts_support: true,
@@ -1666,6 +1677,7 @@ mod tests {
                 cloud_lost_support: true,
                 cloud_repair_support: true,
                 teams_read_support: true,
+                teams_images_support: true,
                 audit_pages_support: true,
                 account_authority_support: true,
                 shared_accounts_support: true,
@@ -1728,6 +1740,7 @@ mod tests {
                     cloud_lost_support: true,
                     cloud_repair_support: true,
                     teams_read_support: true,
+                    teams_images_support: true,
                     audit_pages_support: true,
                     account_authority_support: true,
                     shared_accounts_support: true,

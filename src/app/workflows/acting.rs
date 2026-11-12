@@ -593,7 +593,7 @@ pub(in crate::app) async fn post(
         }
     };
     let store = Some(graph.store.clone());
-    let attempt = match graph.post_chat(chat, text).await {
+    let attempt = match graph.post_chat(chat, text, &[]).await {
         Ok(sent) => Attempt {
             outcome: "sent",
             reason: None,

@@ -1052,10 +1052,17 @@ impl Graph {
         self.list_collection(&format!("chats/{chat}/members")).await
     }
     /// Post a new message, as the user, in a chat they belong to (`self` is their personal chat).
-    /// `markdown` is rendered like the assistant's answers; `@[Name]` mentions a chat member.
+    /// `markdown` is rendered like the assistant's answers; `@[Name]` mentions a chat member;
+    /// `images` follow the text inside the message itself, as Graph hosted contents.
     /// Like every send it happens at most once: a result that may have reached Teams is
     /// reported as uncertain and never retried.
-    pub async fn post_chat(&self, chat: &str, markdown: &str) -> Result<Value> {
+    pub async fn post_chat(
+        &self,
+        chat: &str,
+        markdown: &str,
+        images: &[super::images::Image],
+    ) -> Result<Value> {
+        super::images::check(images)?;
         let own_chat = self.config.graph.self_chat.as_ref().map(|c| c.id.as_str());
         let id = if chat == "self" {
             own_chat.unwrap_or("48:notes")
@@ -1139,14 +1146,16 @@ impl Graph {
                 format!("<p><a href=\"https://personalteams.invalid/output/{nonce}\">PTA</a></p>")
             })
             .unwrap_or_default();
-        // The configured style, like the assistant's answers. Graph mentions live in the HTML
-        // body, so a message with mentions, or a card that does not fit, stays plain HTML.
-        let card = if mentioned.is_empty() {
-            let (style, language) = self.message_style();
+        // The configured style, like the assistant's answers. Graph mentions and images live
+        // in the HTML body, so a message with mentions or images, or a card that does not fit,
+        // stays plain HTML. The card never carries an image.
+        let (style, language) = self.message_style();
+        let card = if mentioned.is_empty() && images.is_empty() {
             super::card::message(&text, &style, language, &marker)
         } else {
             None
         };
+        content.push_str(&image_tags(images));
         content.push_str(&marker);
         ensure!(
             card.is_some() || content.len() <= 27_800,
@@ -1154,6 +1163,18 @@ impl Graph {
         );
         let mut body =
             card.unwrap_or_else(|| json!({"body":{"contentType":"html","content":content}}));
+        if !images.is_empty() {
+            body["hostedContents"] = hosted_contents(images);
+        }
+        let tally = if images.is_empty() {
+            String::new()
+        } else {
+            format!(
+                " images={} bytes={}",
+                images.len(),
+                images.iter().map(|i| i.bytes.len()).sum::<usize>()
+            )
+        };
         if !mentioned.is_empty() {
             body["mentions"] = mentioned
                 .iter()
@@ -1178,9 +1199,10 @@ impl Graph {
             Err(error) => {
                 let refused = refused_by_graph(&error);
                 // The request went out: a log that cannot be written never changes the outcome.
+                let outcome = if refused { "refused" } else { "uncertain" };
                 if self
                     .store
-                    .event("teams_post", if refused { "refused" } else { "uncertain" })
+                    .event("teams_post", &format!("{outcome}{tally}"))
                     .is_err()
                 {
                     tracing::warn!(event = "teams_post_event_not_recorded");
@@ -1201,10 +1223,18 @@ impl Graph {
                 .map_err(|_| PostRefusal::Uncertain)?;
         }
         self.store
-            .event("teams_post", "sent")
+            .event("teams_post", &format!("sent{tally}"))
             .map_err(|_| PostRefusal::Uncertain)?;
-        Ok(json!({"status":"sent","chat":id,"message_id":sent,
-            "mentions":mentioned.iter().map(|(_, n)| n).collect::<Vec<_>>()}))
+        let mut result = json!({"status":"sent","chat":id,"message_id":sent,
+            "mentions":mentioned.iter().map(|(_, n)| n).collect::<Vec<_>>()});
+        if !images.is_empty() {
+            result["images"] = images.iter().map(super::images::Image::describe).collect();
+            if style.enabled {
+                result["style"] =
+                    json!("plain: a message with images is sent without the message style card");
+            }
+        }
+        Ok(result)
     }
     async fn list_chats(&self) -> Result<Vec<String>> {
         let mut chats = Vec::new();
@@ -1599,6 +1629,37 @@ impl MessageAdapter for Graph {
         }
         Ok(id.into())
     }
+}
+
+/// The images of a posted message after its text, each in its own paragraph, pointing at the
+/// hosted content of the same number. Only the escaped alt text comes from the caller.
+fn image_tags(images: &[super::images::Image]) -> String {
+    images
+        .iter()
+        .enumerate()
+        .map(|(at, image)| {
+            format!(
+                "<p><img src=\"../hostedContents/{}/$value\" alt=\"{}\" width=\"{}\" height=\"{}\"></p>",
+                at + 1,
+                teams::escape_text(&image.alt),
+                image.width,
+                image.height
+            )
+        })
+        .collect()
+}
+/// Graph's hosted contents for [`image_tags`]: the bytes in base64 and the type read from them.
+fn hosted_contents(images: &[super::images::Image]) -> Value {
+    use base64::Engine;
+    images
+        .iter()
+        .enumerate()
+        .map(|(at, image)| {
+            json!({"@microsoft.graph.temporaryId": (at + 1).to_string(),
+                "contentBytes": base64::engine::general_purpose::STANDARD.encode(&image.bytes),
+                "contentType": image.kind.content_type()})
+        })
+        .collect()
 }
 
 /// Why a message was not posted: fixed explanations that are safe to show as they are.

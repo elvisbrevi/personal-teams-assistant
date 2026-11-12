@@ -1762,12 +1762,18 @@ pub(super) const TOOLS: &[Tool] = &[
     Tool {
         name: "teams_post",
         title: "Post a message in Teams",
-        description: "Posts a new message, as the user, in a chat they belong to (an ID from teams_chats, or self for their personal chat). Use it for every Teams message the user asks to send, instead of another Microsoft 365 or Teams connector. Text is Markdown (bold, italics, code, lists, tables, links) and @[Display Name] mentions a member of that chat. It is sent in the configured message style (message_style); a message with mentions stays plain. Sent once, never retried. Needs the user's confirmation of the exact chat and text.",
+        description: "Posts a new message, as the user, in a chat they belong to (an ID from teams_chats, or self for their personal chat). Use it for every Teams message the user asks to send, instead of another Microsoft 365 or Teams connector. Text is Markdown (bold, italics, code, lists, tables, links) and @[Display Name] mentions a member of that chat. images embeds up to 4 PNG, JPEG or GIF images (animated GIFs included; 2.9 MB together) in the message itself, after the text, with no external host or link: give each a local file path (read by this pta process, the usual way) or small base64 data, and an optional alt text; the type is read from the bytes. Text may be empty when there are images. It is sent in the configured message style (message_style); a message with mentions or images stays plain. Sent once, never retried. Needs the user's confirmation of the exact chat, text and images (name, type, size and a short SHA-256).",
         effect: Effect::External,
         schema: || {
             object(
-                json!({"chat": string("Chat ID from teams_chats, or self."), "text": string("The message in Markdown; @[Name] mentions a chat member."), "confirmed": confirmed()}),
-                &["chat", "text"],
+                json!({"chat": string("Chat ID from teams_chats, or self."), "text": string("The message in Markdown; @[Name] mentions a chat member. May be empty when images are given."),
+                    "images": {"type": "array", "maxItems": 4, "description": "Images shown in the message after the text: PNG, JPEG or GIF, at most 4 and 2.9 MB together.",
+                        "items": {"type": "object", "additionalProperties": false, "properties": {
+                            "path": string("Path of a local image file, read by this pta process (not by the host)."),
+                            "data": string("The image bytes in base64, instead of path; for small generated images."),
+                            "alt": string("Alternative text (at most 200 characters).")}}},
+                    "confirmed": confirmed()}),
+                &["chat"],
             )
         },
     },
@@ -2380,7 +2386,9 @@ pub(super) async fn run(name: &str, args: &Value) -> Result<Value, String> {
             "until": args.get("until"), "before": args.get("before"), "limit": args.get("limit")})).await,
         "teams_search" => ipc("teams_search", json!({"query": text(args, "query")?, "chats": args.get("chats"), "from": args.get("from"),
             "since": args.get("since"), "until": args.get("until"), "before": args.get("before"), "limit": args.get("limit")})).await,
-        "teams_post" => ipc("teams_post", json!({"chat": text(args, "chat")?, "text": text(args, "text")?})).await,
+        // The images arrive read and encoded by `prepare`; the host checks them again.
+        "teams_post" => ipc("teams_post", json!({"chat": text(args, "chat")?, "text": args.get("text").and_then(Value::as_str).unwrap_or_default(),
+            "images": args.get("images")})).await,
         "activity_run" => ipc("activity_run", json!({"day": args.get("day")})).await,
         "activity_settings_update" => {
             let changes = args.get("changes").and_then(Value::as_object).ok_or("changes must be an object.")?.clone();
@@ -2474,6 +2482,25 @@ pub(super) async fn run(name: &str, args: &Value) -> Result<Value, String> {
         },
         _ => Err("Unknown tool.".into()),
     }
+}
+
+/// Reads what a call names outside its own arguments before it is confirmed, so the person
+/// approves the very bytes that are sent: `teams_post` images given by path are read here, by
+/// this `pta` process, and replaced by their data (never read again after the confirmation).
+pub(super) fn prepare(name: &str, args: &mut Value) -> Result<(), String> {
+    if name != "teams_post" || args.get("images").is_none_or(Value::is_null) {
+        return Ok(());
+    }
+    let images = crate::adapters::images::from_list(
+        args.get("images"),
+        crate::adapters::images::from_argument,
+    )
+    .map_err(|refusal| format!("[invalid_input] {refusal}"))?;
+    args["images"] = images
+        .iter()
+        .map(crate::adapters::images::Image::wire)
+        .collect();
+    Ok(())
 }
 
 /// `question` for a caller that reaches the host through `dispatch` (the remote endpoint).
@@ -2701,11 +2728,19 @@ pub(super) fn confirmation(name: &str, args: &Value) -> Option<String> {
             "Send the written answer of {} to Teams, as you?",
             args["resource"].as_str().unwrap_or("this message")
         ),
-        "teams_post" => format!(
-            "Post this message in the Teams chat {}, as you?\n\n{}",
-            args["chat"].as_str().unwrap_or("?"),
-            args["text"].as_str().unwrap_or("")
-        ),
+        "teams_post" => {
+            let mut question = format!(
+                "Post this message in the Teams chat {}, as you?\n\n{}",
+                args["chat"].as_str().unwrap_or("?"),
+                args["text"].as_str().unwrap_or("")
+            );
+            for (at, image) in args["images"].as_array().into_iter().flatten().enumerate() {
+                let shown = crate::adapters::images::from_wire(image)
+                    .map_or_else(|refusal| refusal.to_string(), |image| image.summary());
+                question.push_str(&format!("\nImage {}: {shown}", at + 1));
+            }
+            question
+        }
         "teams_reading_update" => format!(
             "Change which Teams chats every computer of the account may read on request: {}?",
             json!({"all_chats": args.get("all_chats"), "personal_chat": args.get("personal_chat"), "chats": args.get("chats")})
@@ -2900,6 +2935,54 @@ mod tests {
         );
         assert!(validate("workflow_save", &json!({"workflow":{}, "extra":1})).is_err());
         assert!(validate("workflow_repositories", &json!({})).is_err());
+    }
+
+    #[test]
+    fn teams_post_images_are_read_once_before_the_confirmation_that_shows_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("homero.gif");
+        std::fs::write(
+            &file,
+            crate::adapters::images::tests::gif(480, 400, 1_050_994),
+        )
+        .unwrap();
+        let mut args = json!({"chat": "self", "text": "",
+            "images": [{"path": file.to_str().unwrap(), "alt": "Homero"}]});
+        validate("teams_post", &args).unwrap();
+        prepare("teams_post", &mut args).unwrap();
+        // The path is gone: the host receives the bytes read here, never a path to open.
+        let image = &args["images"][0];
+        assert!(
+            image.get("path").is_none() && image["data"].is_string(),
+            "{image}"
+        );
+        assert_eq!(image["name"], "homero.gif");
+        // Changing the file after this point changes nothing that is sent.
+        std::fs::write(&file, b"not an image").unwrap();
+        let shown = crate::adapters::images::from_wire(image).unwrap();
+        let question = confirmation("teams_post", &args).unwrap();
+        assert!(
+            question.contains(&format!(
+                "Image 1: homero.gif · GIF 480×400 · 1.05 MB · sha256 {} · alt «Homero»",
+                shown.digest()
+            )),
+            "{question}"
+        );
+        assert!(!question.contains(image["data"].as_str().unwrap()));
+        // A file that is not an image, an unknown field or a missing file stop the call.
+        let mut text = json!({"chat": "self", "images": [{"path": file.to_str().unwrap()}]});
+        assert!(
+            prepare("teams_post", &mut text)
+                .unwrap_err()
+                .contains("PNG, JPEG and GIF")
+        );
+        assert!(validate("teams_post", &json!({"chat": "self", "image": "x"})).is_err());
+        let mut missing = json!({"chat": "self", "images": [{"path": "/nonexistent/x.gif"}]});
+        assert!(prepare("teams_post", &mut missing).is_err());
+        // A call without images is left alone.
+        let mut plain = json!({"chat": "self", "text": "hola"});
+        prepare("teams_post", &mut plain).unwrap();
+        assert_eq!(plain, json!({"chat": "self", "text": "hola"}));
     }
 
     #[test]
