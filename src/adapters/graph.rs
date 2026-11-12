@@ -961,7 +961,12 @@ impl Graph {
                 continue;
             }
             if !status.is_success() {
-                return Err(anyhow::Error::new(GraphHttpError(status.as_u16())));
+                // Only Graph's error codes are kept: fixed identifiers, never its message.
+                let codes = super::bounded_json::<Value>(response, 64_000)
+                    .await
+                    .map(|body| error_codes(&body))
+                    .unwrap_or_default();
+                return Err(anyhow::Error::new(GraphHttpError(status.as_u16(), codes)));
             }
             if status.as_u16() == 204 {
                 return Ok(Value::Null);
@@ -1208,7 +1213,9 @@ impl Graph {
                     tracing::warn!(event = "teams_post_event_not_recorded");
                 }
                 return Err(if refused {
-                    PostRefusal::Refused
+                    PostRefusal::Refused {
+                        cause: refusal_cause(&error),
+                    }
                 } else {
                     PostRefusal::Uncertain
                 }
@@ -1671,8 +1678,11 @@ pub enum PostRefusal {
     UnknownMention,
     AmbiguousMention,
     TooLong,
-    /// Teams answered with a client error: nothing was sent.
-    Refused,
+    /// Teams answered with a client error: nothing was sent. `cause` holds its HTTP status and
+    /// Graph's error codes.
+    Refused {
+        cause: String,
+    },
     /// The request may have reached Teams: check there; it is never retried.
     Uncertain,
 }
@@ -1691,7 +1701,10 @@ impl std::fmt::Display for PostRefusal {
                 "A mention matches several members; write the full display name."
             }
             Self::TooLong => "The message exceeds the Teams size limit.",
-            Self::Refused => "Teams refused the message; nothing was sent.",
+            Self::Refused { cause } if !cause.is_empty() => {
+                return write!(f, "Teams refused the message ({cause}); nothing was sent.");
+            }
+            Self::Refused { .. } => "Teams refused the message; nothing was sent.",
             Self::Uncertain => "The result is unknown; check Teams by hand. It is never retried.",
         })
     }
@@ -1736,8 +1749,44 @@ fn refused_by_graph(error: &anyhow::Error) -> bool {
         .is_some_and(|e| (400..500).contains(&e.0))
 }
 
+/// The HTTP status and the error codes Graph answered with (`error.code` and the inner error's).
 #[derive(Debug)]
-struct GraphHttpError(u16);
+struct GraphHttpError(u16, Vec<String>);
+/// Graph's error codes from an error body: identifiers of letters, digits, `.`, `_` and `-` up to
+/// 64 characters, so nothing else the body says (its message, IDs) is kept.
+fn error_codes(body: &Value) -> Vec<String> {
+    let error = &body["error"];
+    [
+        &error["code"],
+        &error["innerError"]["code"],
+        &error["innererror"]["code"],
+    ]
+    .into_iter()
+    .filter_map(Value::as_str)
+    .filter(|code| {
+        !code.is_empty()
+            && code.len() <= 64
+            && code
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+    })
+    .fold(Vec::new(), |mut codes, code| {
+        if !codes.iter().any(|c| c == code) {
+            codes.push(code.to_owned());
+        }
+        codes
+    })
+}
+/// `HTTP 413, RequestEntityTooLarge`: what a refused post says about why.
+fn refusal_cause(error: &anyhow::Error) -> String {
+    match error.downcast_ref::<GraphHttpError>() {
+        Some(GraphHttpError(status, codes)) => std::iter::once(format!("HTTP {status}"))
+            .chain(codes.iter().cloned())
+            .collect::<Vec<_>>()
+            .join(", "),
+        None => String::new(),
+    }
+}
 /// The HTTP status Graph refused a request with, if that is what failed.
 pub fn http_status(error: &anyhow::Error) -> Option<u16> {
     error.downcast_ref::<GraphHttpError>().map(|e| e.0)
@@ -1758,6 +1807,22 @@ impl std::error::Error for GraphHttpError {}
 #[cfg(test)]
 mod registration_tests {
     use super::*;
+
+    #[test]
+    fn only_graph_error_codes_are_kept_from_an_error_body() {
+        let body = json!({"error": {"code": "BadRequest", "message": "Bad hosted content for ana@example.com",
+            "innerError": {"code": "InvalidHostedContent", "request-id": "7d1c"}}});
+        assert_eq!(error_codes(&body), ["BadRequest", "InvalidHostedContent"]);
+        // Repeated codes once; anything that is not an identifier is dropped.
+        let odd = json!({"error": {"code": "Forbidden", "innererror": {"code": "Forbidden"}}});
+        assert_eq!(error_codes(&odd), ["Forbidden"]);
+        let free = json!({"error": {"code": "user ana@example.com is blocked"}});
+        assert!(error_codes(&free).is_empty());
+        assert!(error_codes(&json!("not json")).is_empty());
+        let error = anyhow::Error::new(GraphHttpError(400, vec!["BadRequest".into()]));
+        assert_eq!(refusal_cause(&error), "HTTP 400, BadRequest");
+        assert_eq!(refusal_cause(&anyhow::anyhow!("other")), "");
+    }
 
     #[test]
     fn call_without_description_needs_attendance_and_hu_context() {
