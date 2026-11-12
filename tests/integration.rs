@@ -5673,12 +5673,22 @@ async fn teams_post_embeds_images_as_hosted_contents_in_plain_html_once() {
 async fn teams_post_with_images_is_uncertain_or_refused_and_never_retried() {
     for (status, expected, recorded) in [
         (500, PostRefusal::Uncertain, "uncertain images=1 bytes=64"),
-        (413, PostRefusal::Refused, "refused images=1 bytes=64"),
+        (
+            413,
+            PostRefusal::Refused {
+                cause: "HTTP 413, RequestEntityTooLarge".into(),
+            },
+            "refused images=1 bytes=64",
+        ),
     ] {
         let server = MockServer::start().await;
         let (graph, store) = styled_post_fixture(&server).await;
+        // Graph's error body: its codes are kept, its message (free text, IDs) never is.
+        let answer = json!({"error": {"code": "RequestEntityTooLarge",
+            "message": "Payload of user ana@example.com too large",
+            "innerError": {"code": "RequestEntityTooLarge", "request-id": "1234"}}});
         Mock::given(method("POST"))
-            .respond_with(ResponseTemplate::new(status))
+            .respond_with(ResponseTemplate::new(status).set_body_json(answer))
             .expect(1)
             .mount(&server)
             .await;
@@ -5687,9 +5697,21 @@ async fn teams_post_with_images_is_uncertain_or_refused_and_never_retried() {
             .await
             .unwrap_err();
         assert_eq!(error.downcast_ref::<PostRefusal>(), Some(&expected));
+        let shown = error.downcast_ref::<PostRefusal>().unwrap().to_string();
+        assert!(
+            !shown.contains("ana@") && !shown.contains("1234"),
+            "{shown}"
+        );
         assert_eq!(posted(&server).await.len(), 1);
         assert_eq!(post_events(&store), [recorded]);
     }
+    assert_eq!(
+        PostRefusal::Refused {
+            cause: "HTTP 413, RequestEntityTooLarge".into()
+        }
+        .to_string(),
+        "Teams refused the message (HTTP 413, RequestEntityTooLarge); nothing was sent."
+    );
 }
 
 #[tokio::test]

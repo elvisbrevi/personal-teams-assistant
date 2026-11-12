@@ -223,7 +223,7 @@ fn fail<E: Into<anyhow::Error>>(error: E) -> String {
     if let Some(refusal) = error.downcast_ref::<crate::adapters::graph::PostRefusal>() {
         use crate::adapters::graph::PostRefusal::{Refused, Uncertain};
         return match refusal {
-            Refused | Uncertain => format!("[error] {refusal}"),
+            Refused { .. } | Uncertain => format!("[error] {refusal}"),
             _ => format!("[invalid_input] {refusal}"),
         };
     }
