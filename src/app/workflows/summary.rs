@@ -678,7 +678,7 @@ async fn send(host: &Arc<Host>, args: SendArgs) -> Result<Value, String> {
     }
     // One request, never retried. `post_chat` reports every failure after the request as
     // uncertain; whatever else fails happened before it, and nothing was sent.
-    let result = graph.post_chat(chat, &message).await;
+    let result = graph.post_chat(chat, &message, &[]).await;
     let (outcome, detail, message_id) = match &result {
         Ok(sent) => ("sent", None, sent["message_id"].as_str().map(str::to_owned)),
         Err(error) => match error.downcast_ref::<PostRefusal>() {

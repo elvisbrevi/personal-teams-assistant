@@ -1,6 +1,7 @@
 pub mod card;
 pub mod chats;
 pub mod graph;
+pub mod images;
 pub mod oauth;
 pub mod teams;
 pub mod webhook;

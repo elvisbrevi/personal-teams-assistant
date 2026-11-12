@@ -56,6 +56,9 @@ pub struct ChatLine {
     /// An answer or post this app sent (it carries the app's output marker).
     pub assistant: bool,
     pub text: String,
+    /// Images shown in the message (its hosted contents); `text` names each as `[image]`.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub images: usize,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub truncated: bool,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
@@ -67,6 +70,45 @@ pub struct ChatLine {
     pub url: Option<String>,
     #[serde(skip)]
     pub at: DateTime<Utc>,
+}
+
+fn is_zero(count: &usize) -> bool {
+    *count == 0
+}
+
+/// `[image]` or `[image: alt]` for each image of a message's HTML, in order. Emoji drawn as
+/// images are text, not pictures, and are left out.
+fn image_labels(html: &str) -> Vec<String> {
+    if !html.contains("<img") {
+        return Vec::new();
+    }
+    let fragment = scraper::Html::parse_fragment(html);
+    let selector = scraper::Selector::parse("img").unwrap();
+    fragment
+        .select(&selector)
+        .filter(|img| {
+            !img.value()
+                .attr("itemtype")
+                .is_some_and(|t| t.contains("Emoji"))
+        })
+        .map(|img| {
+            let alt: String = img
+                .value()
+                .attr("alt")
+                .unwrap_or_default()
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+                .chars()
+                .take(200)
+                .collect();
+            if alt.is_empty() {
+                "[image]".to_owned()
+            } else {
+                format!("[image: {alt}]")
+            }
+        })
+        .collect()
 }
 
 /// A message another one replies to or quotes, as Teams shows it.
@@ -265,6 +307,15 @@ impl Graph {
         if assistant {
             text = text.trim_end_matches("PTA").trim_end().to_owned();
         }
+        // An image has no text of its own: it reads as `[image]`, or `[image: alt]`.
+        let images = image_labels(raw);
+        if !images.is_empty() {
+            text = std::iter::once(text)
+                .chain(images.iter().cloned())
+                .filter(|part| !part.is_empty())
+                .collect::<Vec<_>>()
+                .join("\n");
+        }
         let truncated = text.chars().count() > TEXT;
         if truncated {
             text = text.chars().take(TEXT).collect();
@@ -285,6 +336,7 @@ impl Graph {
             mine: from["user"]["id"].as_str() == Some(self.config.graph.user_id.as_str()),
             assistant,
             text,
+            images: images.len(),
             truncated,
             edited: !value["lastEditedDateTime"].is_null(),
             replies_to: quotes(value),
@@ -827,12 +879,32 @@ mod tests {
             mine: false,
             assistant: false,
             text: String::new(),
+            images: 0,
             truncated: false,
             edited: false,
             replies_to: Vec::new(),
             url: None,
             at,
         }
+    }
+
+    #[test]
+    fn images_read_as_labels_and_emoji_stay_out() {
+        let html = concat!(
+            "<p>Mira</p><p><img src=\"../hostedContents/1/$value\" alt=\"Homero  en\nlos arbustos\"></p>",
+            "<p><img src=\"https://graph.microsoft.com/v1.0/chats/x/messages/1/hostedContents/aW1n/$value\"></p>",
+            "<img itemtype=\"http://schema.skype.com/Emoji\" alt=\"😀\">"
+        );
+        assert_eq!(
+            image_labels(html),
+            ["[image: Homero en los arbustos]", "[image]"]
+        );
+        assert!(image_labels("<p>Sin imágenes</p>").is_empty());
+        // The alt text is data: markup in it stays text.
+        assert_eq!(
+            image_labels("<img alt=\"&lt;b&gt;x&lt;/b&gt;\">"),
+            ["[image: <b>x</b>]"]
+        );
     }
 
     #[test]

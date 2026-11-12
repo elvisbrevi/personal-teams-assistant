@@ -227,6 +227,9 @@ fn fail<E: Into<anyhow::Error>>(error: E) -> String {
             _ => format!("[invalid_input] {refusal}"),
         };
     }
+    if let Some(refusal) = error.downcast_ref::<crate::adapters::images::ImageRefusal>() {
+        return format!("[invalid_input] {refusal}");
+    }
     if let Some(message) = error.downcast_ref::<crate::adapters::oauth::AuthorizationRequired>() {
         return format!("[not_ready] {message}");
     }
@@ -562,7 +565,8 @@ async fn teams_search(
     Ok(value)
 }
 
-/// Post a message the user wrote, once, in a chat they belong to.
+/// Post a message the user wrote, once, in a chat they belong to, with the images the `pta`
+/// process read for it (checked again here: the host never opens a path).
 async fn teams_post(
     state: &DesktopState,
     args: &serde_json::Value,
@@ -576,11 +580,14 @@ async fn teams_post(
     if chat.is_empty() || chat.len() > 512 || chat.chars().any(char::is_control) {
         return Err("[invalid_input] Name the chat: an ID from teams_chats, or self.".into());
     }
-    if message.is_empty() || message.chars().count() > 20_000 {
+    let images =
+        crate::adapters::images::from_list(args.get("images"), crate::adapters::images::from_wire)
+            .map_err(fail)?;
+    if (message.is_empty() && images.is_empty()) || message.chars().count() > 20_000 {
         return Err("[invalid_input] The message is empty or too long.".into());
     }
     let graph = teams_graph(state).await.map_err(fail)?;
-    graph.post_chat(chat, message).await.map_err(fail)
+    graph.post_chat(chat, message, &images).await.map_err(fail)
 }
 
 fn validate_teams_setup(config: &Config) -> Result<()> {
