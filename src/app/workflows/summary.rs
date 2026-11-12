@@ -338,9 +338,10 @@ async fn summarize(host: &Arc<Host>, args: SummaryArgs) -> Result<Value, String>
     require_engine(state)?;
     let run = found(state, &args.run)?;
     let map = state.settings.map().map_err(fail)?;
-    let director = map.workflow_settings.director.clone().ok_or_else(|| {
-        "[not_ready] Choose the workflow director first (pta workflows settings --set director.machine ID --set director.provider P --set director.model M --set director.effort E).".to_owned()
-    })?;
+    // The same director that classifies the run's project.
+    let director = super::director::director_for(&map, &run.item.organization, &run.item.project)
+        .ok_or_else(|| super::director::no_director(&run.item.project))?
+        .director;
     let machine = implementation::machine_facts(host, &director.machine)
         .await
         .map_err(fail)?

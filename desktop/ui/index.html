@@ -526,7 +526,7 @@
           </div>
           <div class="panel" id="panel-workflow-director">
             <h2>Workflow director</h2>
-            <p class="hint">The director reads each item and your enabled workflows' descriptions and chooses one, or none; it decides nothing else, and code checks its choice. It runs without tools, read-only.</p>
+            <p class="hint">The director reads each item and your enabled workflows' descriptions and chooses one, or none; it decides nothing else, and code checks its choice. It runs without tools, read-only. Each project uses its own director when it has one (under Ready states), else the machine and agent its workflows share; this general director is for a project whose workflows differ.</p>
             <div id="workflow-director" class="grid"></div>
             <div class="actions"><button id="workflow-director-prompt" type="button" class="link-button">Edit the director's instructions</button></div>
           </div>

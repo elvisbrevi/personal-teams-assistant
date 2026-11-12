@@ -6,6 +6,12 @@
 //! without it until a value changes. (The map's `[[workflows]]` key already names the
 //! definitions, so the settings cannot be a `[workflows]` table.)
 //!
+//! Which director classifies and summarizes the items of a project is resolved by `resolve`: the
+//! project's own director (`project_directors`) when it has one; otherwise the machine and agent
+//! of the project's workflows when they all share them (the enabled ones that start by
+//! themselves, or every enabled one when none does), so the director runs where the workflow
+//! runs without being configured apart; otherwise the account's director; otherwise none.
+//!
 //! The director chooses a workflow for a work item and decides nothing else: code sends it the
 //! enabled workflows of the item's project (`candidates`) and checks its answer (`judge`): the
 //! ID must be one it sent, and still exist, be enabled and belong to the item's organization
@@ -45,6 +51,9 @@ pub struct Settings {
     /// The states that mean «ready to develop», per organization and project.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub ready_states: Vec<ReadyStates>,
+    /// The director of one project, before its workflows' agent and the account's director.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub project_directors: Vec<ProjectDirector>,
 }
 impl Default for Settings {
     fn default() -> Self {
@@ -54,6 +63,7 @@ impl Default for Settings {
             pull_request_wait_days: DEFAULT_PULL_REQUEST_WAIT_DAYS,
             director: None,
             ready_states: Vec::new(),
+            project_directors: Vec::new(),
         }
     }
 }
@@ -72,6 +82,99 @@ pub struct ReadyStates {
     pub organization: String,
     pub project: String,
     pub states: Vec<String>,
+}
+
+/// The director of one project: it classifies and summarizes that project's items.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectDirector {
+    /// `https://dev.azure.com/NAME`.
+    pub organization: String,
+    pub project: String,
+    pub director: Director,
+}
+
+/// Where the director of a project comes from.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Source {
+    /// The project's own director (`project_directors`).
+    Project,
+    /// The machine and agent its workflows share.
+    Workflow,
+    /// The account's director (`director`).
+    Global,
+}
+impl Source {
+    pub fn word(self) -> &'static str {
+        match self {
+            Source::Project => "project",
+            Source::Workflow => "workflow",
+            Source::Global => "global",
+        }
+    }
+}
+
+/// The director that classifies and summarizes a project's items, and where it comes from.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Resolved {
+    pub director: Director,
+    pub source: Source,
+}
+
+/// The workflows whose machine and agent the director takes by default: the enabled ones of the
+/// project that start by themselves, or every enabled one when none does.
+pub fn defaults<'a>(
+    workflows: &'a [Workflow],
+    organization: &str,
+    project: &str,
+) -> Vec<&'a Workflow> {
+    let enabled = candidates(workflows, organization, project);
+    let automatic: Vec<&Workflow> = enabled.iter().copied().filter(|w| w.auto_start).collect();
+    if automatic.is_empty() {
+        enabled
+    } else {
+        automatic
+    }
+}
+
+/// The director of a project (its organization's lowercased name): its own; else the machine
+/// and agent all its default workflows share; else the account's; else none.
+pub fn resolve(
+    settings: &Settings,
+    workflows: &[Workflow],
+    organization: &str,
+    project: &str,
+) -> Option<Resolved> {
+    if let Some(own) = settings.project_directors.iter().find(|p| {
+        organization_name(&p.organization).as_deref() == Some(organization)
+            && p.project.eq_ignore_ascii_case(project)
+    }) {
+        return Some(Resolved {
+            director: own.director.clone(),
+            source: Source::Project,
+        });
+    }
+    let shared = defaults(workflows, organization, project);
+    if let Some(first) = shared.first()
+        && shared
+            .iter()
+            .all(|w| w.machine == first.machine && w.agent == first.agent)
+    {
+        return Some(Resolved {
+            director: Director {
+                machine: first.machine.clone(),
+                provider: first.agent.provider.clone(),
+                model: first.agent.model.clone(),
+                effort: first.agent.effort.clone(),
+            },
+            source: Source::Workflow,
+        });
+    }
+    settings.director.clone().map(|director| Resolved {
+        director,
+        source: Source::Global,
+    })
 }
 
 /// The workflow director: an installed CLI, model and effort on one machine of the account.
@@ -149,22 +252,51 @@ pub fn validate(settings: &Settings) -> Result<()> {
         );
     }
     if let Some(director) = &settings.director {
-        ensure!(
-            uuid::Uuid::parse_str(&director.machine).is_ok() && director.machine.len() == 36,
-            "The workflow director needs the ID of its machine (pta tools call machine_list)."
-        );
-        ensure!(
-            PROVIDERS.contains(&director.provider.as_str())
-                && crate::llm::valid_model(&director.model)
-                && !director.effort.is_empty()
-                && director.effort.len() <= 40
-                && director
-                    .effort
-                    .chars()
-                    .all(|c| c.is_ascii_alphanumeric() || c == '-'),
-            "The workflow director needs its agent: provider (codex, claude or opencode), model and effort."
-        );
+        validate_director(director, "The workflow director")?;
     }
+    ensure!(
+        settings.project_directors.len() <= MAX_READY_PROJECTS,
+        "At most {MAX_READY_PROJECTS} projects have their own director."
+    );
+    let mut directed = BTreeSet::new();
+    for own in &settings.project_directors {
+        let organization = organization_name(&own.organization).ok_or_else(|| {
+            anyhow::anyhow!(
+                "The director of {} needs its organization URL (https://dev.azure.com/NAME).",
+                own.project
+            )
+        })?;
+        ensure!(
+            line(&own.project, 120),
+            "A project's director names its Azure DevOps project (at most 120 characters)."
+        );
+        ensure!(
+            directed.insert((organization, own.project.to_lowercase())),
+            "Project {} has its own director once.",
+            own.project
+        );
+        validate_director(&own.director, &format!("The director of {}", own.project))?;
+    }
+    Ok(())
+}
+
+/// A director's fields: its machine's ID and an agent of a known provider.
+fn validate_director(director: &Director, whose: &str) -> Result<()> {
+    ensure!(
+        uuid::Uuid::parse_str(&director.machine).is_ok() && director.machine.len() == 36,
+        "{whose} needs the ID of its machine (pta tools call machine_list)."
+    );
+    ensure!(
+        PROVIDERS.contains(&director.provider.as_str())
+            && crate::llm::valid_model(&director.model)
+            && !director.effort.is_empty()
+            && director.effort.len() <= 40
+            && director
+                .effort
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-'),
+        "{whose} needs its agent: provider (codex, claude or opencode), model and effort."
+    );
     Ok(())
 }
 
@@ -390,6 +522,124 @@ mod tests {
         assert_eq!(
             unknown_states(&["Ready".into(), "Readyy".into()], &process),
             ["Readyy"]
+        );
+    }
+
+    fn director(machine: &str, model: &str) -> Director {
+        Director {
+            machine: machine.into(),
+            provider: "codex".into(),
+            model: model.into(),
+            effort: "low".into(),
+        }
+    }
+
+    #[test]
+    fn a_project_director_comes_first_then_the_shared_workflow_agent_then_the_global_one() {
+        const OTHER: &str = "0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d";
+        let mut payments = workflow("payments");
+        payments.auto_start = true;
+        let mut refunds = workflow("refunds");
+        refunds.auto_start = true;
+        // A manual workflow on another machine is not among the defaults while one starts by
+        // itself.
+        let mut manual = workflow("manual");
+        manual.machine = OTHER.into();
+        let mut all = vec![payments, refunds, manual];
+        let mut settings = Settings::default();
+        let resolved = |settings: &Settings, all: &[Workflow]| {
+            resolve(settings, all, "example", "payments").map(|r| (r.director, r.source))
+        };
+        // Every candidate shares machine and agent: the workflow's.
+        let (shared, source) = resolved(&settings, &all).unwrap();
+        assert_eq!(source, Source::Workflow);
+        assert_eq!(shared.machine, MACHINE);
+        assert_eq!(
+            (
+                shared.provider.as_str(),
+                shared.model.as_str(),
+                shared.effort.as_str()
+            ),
+            ("codex", "gpt-6.1-sol", "medium")
+        );
+        // They differ: the global director, or none without one.
+        all[1].agent.effort = "high".into();
+        assert_eq!(resolved(&settings, &all), None);
+        settings.director = Some(director(MACHINE, "global-model"));
+        assert_eq!(resolved(&settings, &all).unwrap().1, Source::Global);
+        // Nothing starts by itself: every enabled workflow is a default.
+        for w in &mut all {
+            w.auto_start = false;
+        }
+        all[1].agent.effort = "medium".into();
+        assert_eq!(resolved(&settings, &all).unwrap().1, Source::Global);
+        all[2].enabled = false;
+        assert_eq!(resolved(&settings, &all).unwrap().1, Source::Workflow);
+        // The project's own director wins, by organization and project in any letter case.
+        settings.project_directors = vec![ProjectDirector {
+            organization: "https://dev.azure.com/Example".into(),
+            project: "PAYMENTS".into(),
+            director: director(OTHER, "project-model"),
+        }];
+        let (own, source) = resolved(&settings, &all).unwrap();
+        assert_eq!(
+            (own.model.as_str(), source),
+            ("project-model", Source::Project)
+        );
+        assert!(
+            resolve(&settings, &all, "other", "payments")
+                .is_some_and(|r| r.source == Source::Global)
+        );
+        // A project without workflows has only the global director.
+        assert_eq!(
+            resolve(&settings, &all, "example", "billing")
+                .unwrap()
+                .source,
+            Source::Global
+        );
+        assert_eq!(Source::Workflow.word(), "workflow");
+    }
+
+    #[test]
+    fn a_project_has_its_own_director_once_with_valid_fields() {
+        let own = |project: &str, director: Director| ProjectDirector {
+            organization: "https://dev.azure.com/example".into(),
+            project: project.into(),
+            director,
+        };
+        let mut settings = Settings {
+            project_directors: vec![own("Payments", director(MACHINE, "m"))],
+            ..Default::default()
+        };
+        assert!(validate(&settings).is_ok());
+        assert!(!settings.is_default());
+        let text = toml::to_string(&settings).unwrap();
+        assert_eq!(toml::from_str::<Settings>(&text).unwrap(), settings);
+        settings
+            .project_directors
+            .push(own("payments", director(MACHINE, "m")));
+        assert!(
+            validate(&settings)
+                .unwrap_err()
+                .to_string()
+                .contains("once")
+        );
+        settings.project_directors.pop();
+        settings.project_directors[0].director.machine = "this-computer".into();
+        assert!(
+            validate(&settings)
+                .unwrap_err()
+                .to_string()
+                .contains("The director of Payments")
+        );
+        settings.project_directors[0].director.machine = MACHINE.into();
+        settings.project_directors[0].organization = "https://example.com/x".into();
+        assert!(validate(&settings).is_err());
+        // Left out while empty, so a map without it is unchanged.
+        assert!(
+            !toml::to_string(&Settings::default())
+                .unwrap()
+                .contains("project_directors")
         );
     }
 

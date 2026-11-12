@@ -445,14 +445,21 @@ Knowledge
   workflows repositories --project NAME [--organization URL] [--source ID]
                            The project's Git repositories (read credential, cached five minutes).
   workflows settings [--project NAME [--organization URL] [--source ID]]
-                           Ready states, watcher interval, concurrency, pull-request wait and the
-                           workflow director; with --project, the states that project's process has.
+                           Ready states, watcher interval, concurrency, pull-request wait, the
+                           workflow director and each project's own director, and which director
+                           each project gets (directors: source project, workflow or global); with
+                           --project, the states that project's process has.
   workflows settings --set KEY VALUE [--set KEY VALUE…] [--source ID]
                            KEY: watch_interval_minutes (1-60), concurrency (1-4),
                            pull_request_wait_days (1-60), director.machine|provider|model|effort,
-                           director none, ready_states.PROJECT \"STATE,STATE\" (empty clears), or
-                           ready_states with JSON {organization?, project, states}. Ready states must
-                           be the process's; the director's agent must be installed on its machine.
+                           director none, ready_states.PROJECT \"STATE,STATE\" (empty clears),
+                           ready_states with JSON {organization?, project, states},
+                           project_director.PROJECT.machine|provider|model|effort,
+                           project_director.PROJECT none, or project_director with JSON
+                           {organization?, project, director}. A project's director is its own,
+                           else the machine and agent its workflows share, else the account's.
+                           Ready states must be the process's; a director's agent must be
+                           installed on its machine.
   workflows classify ID [--project NAME] [--source ID]
                            Dry run: the workflow the director chooses for an Azure work item, checked
                            by code (an enabled workflow of its project, or none with the reason).
@@ -995,8 +1002,52 @@ fn settings_update(sets: &[(String, String)]) -> Result<Value> {
     let mut director = Value::Null;
     let mut director_changed = false;
     let mut ready = Vec::new();
+    // Each project's own director, in the order first named: `{project, director}`.
+    let mut projects: Vec<Value> = Vec::new();
     for (key, value) in sets {
         match key.as_str() {
+            "project_director" => {
+                let entry: Value = serde_json::from_str(value).context(
+                    "project_director takes JSON {organization?, project, director: {machine, provider, model, effort} or null}",
+                )?;
+                projects.push(entry);
+            }
+            _ if key.starts_with("project_director.") => {
+                let rest = &key["project_director.".len()..];
+                let field = rest
+                    .rsplit_once('.')
+                    .filter(|(_, f)| matches!(*f, "machine" | "provider" | "model" | "effort"));
+                let (project, field) = match field {
+                    Some((project, field)) => (project, Some(field)),
+                    None => (rest, None),
+                };
+                ensure!(
+                    !project.trim().is_empty(),
+                    "project_director.PROJECT needs the project's name"
+                );
+                let position = match projects.iter().position(|p| p["project"] == project) {
+                    Some(index) => index,
+                    None => {
+                        projects.push(json!({"project": project, "director": {}}));
+                        projects.len() - 1
+                    }
+                };
+                match field {
+                    Some(field) => {
+                        if !projects[position]["director"].is_object() {
+                            projects[position]["director"] = json!({});
+                        }
+                        projects[position]["director"][field] = json!(value);
+                    }
+                    None => {
+                        ensure!(
+                            value == "none",
+                            "project_director.{project} takes none; set its fields with project_director.{project}.machine, .provider, .model and .effort"
+                        );
+                        projects[position]["director"] = Value::Null;
+                    }
+                }
+            }
             "watch_interval_minutes" | "concurrency" | "pull_request_wait_days" => {
                 let number: u32 = value
                     .parse()
@@ -1043,6 +1094,9 @@ fn settings_update(sets: &[(String, String)]) -> Result<Value> {
     }
     if !ready.is_empty() {
         body["ready_states"] = json!(ready);
+    }
+    if !projects.is_empty() {
+        body["project_directors"] = json!(projects);
     }
     Ok(body)
 }
@@ -4304,6 +4358,29 @@ mod wiki_tests {
             json!({"project":"Billing","states":[]})
         );
         assert_eq!(body["ready_states"][2]["project"], "Cards");
+        // A project's own director: its fields by project (a dotted name keeps its dots), or
+        // none to clear it, or a JSON entry.
+        let own = settings_update(&[
+            ("project_director.Pay.ments.machine".into(), "m-1".into()),
+            ("project_director.Pay.ments.model".into(), "gpt-6.1-sol".into()),
+            ("project_director.Billing".into(), "none".into()),
+            (
+                "project_director".into(),
+                r#"{"organization":"https://dev.azure.com/example","project":"Cards","director":null}"#.into(),
+            ),
+        ])
+        .unwrap();
+        assert_eq!(
+            own["project_directors"][0],
+            json!({"project":"Pay.ments","director":{"machine":"m-1","model":"gpt-6.1-sol"}})
+        );
+        assert_eq!(
+            own["project_directors"][1],
+            json!({"project":"Billing","director":null})
+        );
+        assert_eq!(own["project_directors"][2]["project"], "Cards");
+        assert!(settings_update(&[("project_director.Billing".into(), "x".into())]).is_err());
+        assert!(settings_update(&[("project_director.".into(), "none".into())]).is_err());
         let cleared = settings_update(&[("director".into(), "none".into())]).unwrap();
         assert!(cleared["director"].is_null() && cleared.get("director").is_some());
         assert!(settings_update(&[("concurrency".into(), "two".into())]).is_err());

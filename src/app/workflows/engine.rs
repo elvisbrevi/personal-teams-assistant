@@ -429,9 +429,11 @@ fn transient(error: &str) -> bool {
 async fn classify(host: &Arc<Host>, azure: &Azure, run: Run, now: i64) -> Result<bool> {
     let state = &host.state.workflows;
     let map = host.state.settings.map()?;
-    let verdict: std::result::Result<Value, String> = match &map.workflow_settings.director {
+    // The project's director: its own, its workflows' shared agent or the account's.
+    let directed = super::director::director_for(&map, &run.item.organization, &run.item.project);
+    let verdict: std::result::Result<Value, String> = match directed {
         None => Err("No workflow director is configured; assign a workflow to this run.".into()),
-        Some(director) => {
+        Some(_) => {
             match azure
                 .item(
                     &host.state,
@@ -444,7 +446,6 @@ async fn classify(host: &Arc<Host>, azure: &Azure, run: Run, now: i64) -> Result
                 Ok(detail) => {
                     Box::pin(super::director::classify_item(
                         host,
-                        director,
                         &detail,
                         run.auto_start,
                     ))

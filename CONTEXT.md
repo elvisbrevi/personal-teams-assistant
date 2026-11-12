@@ -190,7 +190,7 @@ A reusable part of a workflow: an instruction the agents read, a Teams notificat
 _Avoid_: step, plugin
 
 **Workflow director**:
-The model-backed selector and summarizer configured in Settings › Workflows: it chooses which enabled workflow fits an item, or none, and writes progress summaries; code checks its choice and it decides nothing else. Distinct from the coordinator, which stays the user's main installation.
+The model-backed selector and summarizer of a project's items: it chooses which enabled workflow fits an item, or none, and writes progress summaries; code checks its choice and it decides nothing else. A project's director is its own when Settings › Workflows sets one, otherwise the machine and agent its workflows share, otherwise the account's general director. Distinct from the coordinator, which stays the user's main installation.
 _Avoid_: coordinator, orchestrator, dispatcher
 
 **Workflow run**:

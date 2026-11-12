@@ -3,10 +3,14 @@
 //! listed tasks assigned to the user in the ready states of each configured project (the To-Do
 //! read `list_azure_hus`, with the same assignment rules, the read credential and the process
 //! cache), and starts a workflow run for each item it has not seen in that state yet, through
-//! the engine's own start path (`runs::start_confirmed`): the one enabled workflow of the
-//! project that starts by itself (`auto_start`) when there is exactly one, or the director's
-//! choice among them when there are several (without a director the project waits for one and
-//! nothing starts). It reads and starts runs, nothing else: the plan-review gate still stands
+//! the engine's own start path (`runs::start_confirmed`) with the project's director choosing
+//! among its enabled workflows that start by themselves (`auto_start`), even when there is only
+//! one, so an item that workflow does not fit waits unassigned. The director is the project's
+//! own, else the machine and agent its workflows share, else the account's
+//! (`workflows::director::resolve`). Only when no director can classify (none resolves, or its
+//! machine cannot run the director) does the one workflow that starts by itself take the item
+//! directly; with several and no director the project waits for one and nothing starts. It
+//! reads and starts runs, nothing else: the plan-review gate still stands
 //! between a run and any child, and it never changes a source's audiences.
 //!
 //! The seen ledger (`workflow_seen` in `workflows.db`) makes an item in a given ready state
@@ -36,7 +40,7 @@ pub(in crate::app) const MAX_STARTS: usize = 25;
 /// How often the task looks at whether a poll is due.
 const TICK_SECONDS: u64 = 30;
 /// What a project with several workflows that start by themselves and no director reports.
-const WAITING: &str = "Waiting for a director: several workflows of this project start by themselves and no workflow director is configured to choose among them.";
+const WAITING: &str = "Waiting for a director: several workflows of this project start by themselves, they differ in machine or agent, and neither the project nor the account has a workflow director to choose among them.";
 
 /// The watcher's state on the profile: its seen ledger and its last poll.
 pub(in crate::app) struct Watcher {
@@ -213,16 +217,16 @@ fn waiting_for_director(
     settings: &Settings,
     workflows: &[crate::workflows::Workflow],
 ) -> Vec<String> {
-    if settings.director.is_some() {
-        return Vec::new();
-    }
     settings
         .ready_states
         .iter()
         .filter(|r| !r.states.is_empty())
         .filter(|r| {
-            crate::workflows::organization_name(&r.organization)
-                .is_some_and(|o| auto_workflows(workflows, &o, &r.project).len() > 1)
+            crate::workflows::organization_name(&r.organization).is_some_and(|o| {
+                auto_workflows(workflows, &o, &r.project).len() > 1
+                    && crate::workflows::director::resolve(settings, workflows, &o, &r.project)
+                        .is_none()
+            })
         })
         .map(|r| r.project.clone())
         .collect()
@@ -363,20 +367,36 @@ async fn project(
     };
     // Only the workflows that start by themselves are asked about; with none, nothing is read.
     let candidates = auto_workflows(&map.workflows, &organization, &ready.project);
+    // The director classifies whenever one can: it may find that even the only workflow does
+    // not fit the item.
+    let director = crate::workflows::director::resolve(
+        &map.workflow_settings,
+        &map.workflows,
+        &organization,
+        &ready.project,
+    );
+    let usable = match &director {
+        Some(resolved) => implementation::machine_facts(host, &resolved.director.machine)
+            .await
+            .ok()
+            .flatten()
+            .is_some_and(|m| m.own || m.direct),
+        None => false,
+    };
     let direct = match candidates.as_slice() {
         [] => {
             return named(
                 json!({"complete": true, "skipped": "No enabled workflow of this project starts by itself (auto_start)."}),
             );
         }
-        // Exactly one: it needs no director.
+        _ if director.is_some() && (usable || candidates.len() > 1) => None,
+        // No director can classify: the one workflow that starts by itself takes the item.
         [only] => Some(only.clone()),
-        _ if map.workflow_settings.director.is_none() => {
+        _ => {
             return named(
                 json!({"complete": true, "skipped": WAITING, "waiting_for_director": true}),
             );
         }
-        _ => None,
     };
     // The enabled source that holds the organization, when several are enabled.
     let source = match tools::todo::source_for(state, &ready.organization) {
