@@ -368,8 +368,8 @@ workflow settings.
      not checked when saving; they are matched to the chat's members when it posts.
    - `launcher`: `stage` and `launcher` `{id, digest}` of a launcher approved on the coordinator
      with that program digest, confirmed like a notification. Only the owner saves one, at the coordinator's local page or in
-     their own portal session, as when approving a launcher: the CLI, MCP, the remote agent
-     endpoint, machine credentials and shared portal accounts are refused.
+     their own portal session: the CLI, MCP, the remote agent endpoint, machine credentials
+     and shared portal accounts are refused.
 4. `pta workflows save` (MCP `workflow_save` with `workflow`), JSON on stdin: `id`, `name`,
    `description` (what the director will read to choose it), `enabled`, `auto_start`,
    `organization` (`https://dev.azure.com/NAME`), `project`, `repositories` `[{id, name}]` as

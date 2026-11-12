@@ -2489,7 +2489,7 @@ const UI_CATALOG = { es: {
   "The members you mention are matched to the chat's members again when it posts.": "Las personas que menciones se vuelven a comparar con los miembros del chat al publicar.",
   "Placeholders: {item} the work item, {link} its link, {pull_requests} its pull requests, {summary} the director's summary, {state} the run's state. Select one to insert it.": "Marcadores: {item} el work item, {link} su enlace, {pull_requests} sus pull requests, {summary} el resumen del director, {state} el estado de la ejecución. Selecciona uno para insertarlo.",
   "the run's state": "el estado de la ejecución",
-  "Only you save a launcher block, at this computer's local page or in your own portal session, as when approving a launcher. Open one of them to choose the launcher.": "Solo tú guardas un bloque de lanzador, en la página local de este computador o en tu propia sesión del portal, como al aprobar un lanzador. Abre una de ellas para elegir el lanzador.",
+  "Only you save a launcher block, at this computer's local page or in your own portal session. Open one of them to choose the launcher.": "Solo tú guardas un bloque de lanzador, en la página local de este computador o en tu propia sesión del portal. Abre una de ellas para elegir el lanzador.",
   "Open local programs in Settings": "Abrir los programas locales en Ajustes",
   "There is no approved launcher on this computer yet. Define one with pta, review it and approve it in Settings › Variables, then choose it here.": "Aún no hay lanzadores aprobados en este computador. Define uno con pta, revísalo y apruébalo en Ajustes › Variables, y luego elígelo aquí.",
   "Choose a launcher": "Elige un lanzador",

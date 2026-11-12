@@ -252,7 +252,7 @@ function blockEditor(draft, saved) {
 
   const launcherFields = () => {
     if (!launcherState.owner) {
-      return [el('p', { class: 'callout info', textContent: t('Only you save a launcher block, at this computer\'s local page or in your own portal session, as when approving a launcher. Open one of them to choose the launcher.') })];
+      return [el('p', { class: 'callout info', textContent: t('Only you save a launcher block, at this computer\'s local page or in your own portal session. Open one of them to choose the launcher.') })];
     }
     if (!launcherState.launchers.length) {
       const open = el('button', { type: 'button', class: 'link-button', textContent: t('Open local programs in Settings') });
