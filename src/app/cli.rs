@@ -298,13 +298,17 @@ Account variables
                            --settings also replaces this computer's portable settings with the account's (backed up).
                            Repeat the same command to resume an interrupted migration; originals are never changed.
   variables migrate status    The durable outcome of the migration for the signed-in account.
-  variables launcher list     Approved local launchers (owner's trusted machine only).
+  variables launcher list     Local launchers, proposed and approved (owner's trusted machine only).
   variables launcher define NAME --description TEXT --program PATH --directory DIR --env ENV=ID [--env ...]
                            [--arg ARG ...] [--timeout SECONDS] --confirmed
                            Proposes a program to receive the named variables as environment variables of that one
                            process (never arguments). Protected settings such as PATH or LD_* are refused. It runs
-                           nothing until the user approves it in the application (Settings › Credentials;
-                           pta app open shows it).
+                           nothing until the owner approves it (launcher approve, or Settings › Credentials in the
+                           application pta app open shows, or the owner's portal).
+  variables launcher approve NAME [--digest SHA256] --confirmed
+                           The owner approves a proposed launcher on this machine. Without --confirmed it shows the
+                           program, its SHA-256, arguments, folder and variables to review; --digest pins the
+                           reviewed SHA-256, so a definition that changed since is refused.
   variables launcher run NAME [--pin ENV=VERSION ...] --confirmed
                            Runs it with the values resolved now; prints status and references, never output or values.
   variables launcher remove NAME [--confirmed]
@@ -1815,6 +1819,58 @@ async fn variables_command(args: &[String]) -> Result<Reply> {
             }
             call("variable_launcher_define", body, None, true).await
         }
+        ("launcher", Some("approve")) => {
+            let name = word(3)?;
+            let listed = call("variable_consumer_list", json!({}), None, true).await?;
+            if !listed.ok {
+                return Ok(listed);
+            }
+            let Some(launcher) = listed.data["launchers"]
+                .as_array()
+                .and_then(|all| all.iter().find(|l| l["id"] == name))
+            else {
+                return Ok(Reply::error(
+                    "invalid_input",
+                    2,
+                    "There is no launcher with that name on this machine.",
+                ));
+            };
+            let digest = launcher["digest"].as_str().unwrap_or_default();
+            // A digest given is the one the user reviewed: a definition changed since is refused.
+            let digest = option(args, "--digest").unwrap_or(digest);
+            let variables: Vec<String> = launcher["variables"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|v| {
+                    let named = v["variable"]["name"].as_str().or(v["id"].as_str());
+                    format!(
+                        "{}={}",
+                        v["env"].as_str().unwrap_or_default(),
+                        named.unwrap_or_default()
+                    )
+                })
+                .collect();
+            if let Some(reply) = unconfirmed(
+                args,
+                format!(
+                    "Approve launcher {name}: program {} (SHA-256 {digest}) with arguments {} in {}, receiving the variables {} as environment variables whenever it runs?",
+                    launcher["program"],
+                    launcher["args"],
+                    launcher["directory"],
+                    serde_json::to_string(&variables)?
+                ),
+            ) {
+                return Ok(reply);
+            }
+            call(
+                "variable_launcher_approve",
+                json!({"id":name,"digest":digest}),
+                None,
+                true,
+            )
+            .await
+        }
         ("launcher", Some("run")) => {
             let name = word(3)?;
             let versions = pairs(options(args, "--pin"), |v| v.parse::<u64>().ok(), "--pin")?;
@@ -2137,7 +2193,12 @@ pub(super) fn validate_args(args: &[String]) -> Result<()> {
             | ["variables", "unbind" | "check", _]
             | ["variables", "bind", _, _]
             | ["variables", "launcher", "list"]
-            | ["variables", "launcher", "define" | "remove" | "run", _]
+            | [
+                "variables",
+                "launcher",
+                "define" | "approve" | "remove" | "run",
+                _
+            ]
             | [
                 "variables",
                 "entry",
@@ -2370,6 +2431,8 @@ pub(super) fn validate_args(args: &[String]) -> Result<()> {
                 || p.as_slice().starts_with(&["variables", "check"])
                 || p.as_slice()
                     .starts_with(&["variables", "launcher", "define"])
+                || p.as_slice()
+                    .starts_with(&["variables", "launcher", "approve"])
                 || p.as_slice().starts_with(&["variables", "launcher", "run"])
                 || p.as_slice()
                     .starts_with(&["variables", "launcher", "remove"])
@@ -2418,6 +2481,11 @@ pub(super) fn validate_args(args: &[String]) -> Result<()> {
             "--program",
             p.as_slice()
                 .starts_with(&["variables", "launcher", "define"]),
+        ),
+        (
+            "--digest",
+            p.as_slice()
+                .starts_with(&["variables", "launcher", "approve"]),
         ),
         (
             "--directory",

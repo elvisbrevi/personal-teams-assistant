@@ -103,6 +103,7 @@ pub(super) const TOOLS: &[(&str, Remote)] = &[
     ("consumer_unbind", Offered),
     ("consumer_check", Offered),
     ("launcher_define", Denied(LAUNCHERS)),
+    ("launcher_approve", Denied(LAUNCHERS)),
     ("launcher_remove", Denied(LAUNCHERS)),
     ("launcher_run", Denied(LAUNCHERS)),
     ("delivery_list", Offered),

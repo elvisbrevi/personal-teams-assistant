@@ -526,24 +526,24 @@ mod launchers {
         let shown = call(&m.host, Local, "variable_consumer_list", json!({})).await;
         assert_eq!(shown.data["launchers"][0]["approved"], false);
         let digest = shown.data["launchers"][0]["digest"].clone();
-        for transport in [Local, Machine] {
-            let refused = call(
+        let refused = call(
+            &m.host,
+            Machine,
+            "variable_launcher_approve",
+            json!({"id":"deploy","digest":digest}),
+        )
+        .await;
+        assert!(!refused.ok);
+        for transport in [Window, Local] {
+            let stale = call(
                 &m.host,
                 transport,
                 "variable_launcher_approve",
-                json!({"id":"deploy","digest":digest}),
+                json!({"id":"deploy","digest":"0".repeat(64)}),
             )
             .await;
-            assert!(!refused.ok, "{transport:?}");
+            assert_eq!(stale.code, "state_conflict", "{transport:?}");
         }
-        let stale = call(
-            &m.host,
-            Window,
-            "variable_launcher_approve",
-            json!({"id":"deploy","digest":"0".repeat(64)}),
-        )
-        .await;
-        assert_eq!(stale.code, "state_conflict");
         assert!(
             !call(
                 &m.host,
@@ -554,7 +554,15 @@ mod launchers {
             .await
             .ok
         );
-        approve(&m, "deploy").await;
+        // The owner approves on the local channel (the CLI's and MCP's confirmation).
+        let approved = call(
+            &m.host,
+            Local,
+            "variable_launcher_approve",
+            json!({"id":"deploy","digest":digest}),
+        )
+        .await;
+        assert!(approved.ok, "{:?}", approved.message);
 
         let listed = call(&m.host, Local, "variable_consumer_list", json!({})).await;
         assert_eq!(listed.data["launchers_available"], true);

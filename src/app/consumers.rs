@@ -308,20 +308,18 @@ async fn run(
             }
         }
         "variable_launcher_approve" => {
-            // A person approves what an agent may only propose: at this machine's window or in
-            // the owner's own portal session, never on the local channel shared with agents.
+            // The installation's owner approves the definition they were shown: at this
+            // machine's window, on its local CLI/MCP channel (after the confirmation each asks
+            // for) or in their own portal session. Machines and remote agents never approve.
             if !invocation.scope.owner {
                 return Err(vault::Error::Conflict(authority::EXECUTION_DENIED.into()));
             }
-            if !matches!(
-                transport,
-                authority::Transport::Window | authority::Transport::Browser
-            ) {
+            if !(local || transport == authority::Transport::Browser) {
                 if let Ok(store) = state.store(host) {
                     store.audit("launcher_approve", None, "denied_client");
                 }
                 return Err(vault::Error::Conflict(
-                    "Only the user approves a launcher, in this machine's application (the local page pta app open shows) or the owner's portal."
+                    "Only the owner approves a launcher, on this machine (its application or pta) or in the owner's portal."
                         .into(),
                 ));
             }

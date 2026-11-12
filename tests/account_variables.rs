@@ -928,11 +928,27 @@ async fn a_consumer_uses_a_variable_by_reference_and_nothing_shows_the_value() {
         "consumer_unbind",
         "consumer_check",
         "launcher_define",
+        "launcher_approve",
         "launcher_remove",
         "launcher_run",
     ] {
         assert!(tools.iter().any(|t| t["name"] == name), "{name}");
     }
+    // The owner approves from the CLI only a launcher this machine has.
+    let (code, missing) = f
+        .json(
+            &["variables", "launcher", "approve", "tool", "--confirmed"],
+            None,
+        )
+        .await;
+    assert_eq!(code, 2, "{missing}");
+    assert!(
+        missing["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("no launcher with that name"),
+        "{missing}"
+    );
 
     // Deleting the variable leaves the binding in place and unusable: no fallback.
     let (_, current) = f.json(&["variables", "list"], None).await;

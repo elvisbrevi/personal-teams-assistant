@@ -3094,14 +3094,15 @@ async fn consumer_bindings_are_private_per_account_and_shared_accounts_run_no_pr
                 {
                     continue;
                 }
-                // The owner's portal session approves (here: a launcher that does not exist).
+                // The owner's portal session and local channel approve (here: a launcher that
+                // does not exist).
                 if host.state.authority.owner
-                    && transport == Browser
+                    && matches!(transport, Browser | Local)
                     && method == "variable_launcher_approve"
                 {
                     let approval = invoke(
                         host,
-                        Browser,
+                        transport,
                         method,
                         json!({"id":"deploy","digest":"0".repeat(64)}),
                     )

@@ -538,7 +538,7 @@ async fn save_block(host: &Arc<Host>, args: BlockSaveArgs) -> Result<Value, Stri
                 ))
             {
                 return Err(conflict(
-                    "Only the owner saves a launcher block, in this computer's application (the local page pta app open shows) or the owner's own portal, as when approving a launcher.",
+                    "Only the owner saves a launcher block, in this computer's application (the local page pta app open shows) or the owner's own portal.",
                 ));
             }
             let reference = block.launcher.clone().unwrap_or_default();

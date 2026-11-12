@@ -504,17 +504,18 @@ async fn the_page_has_the_windows_authority_and_the_control_token_still_does_not
     assert_eq!(window.data["value"], reveal.data["value"]);
 
     // The control endpoint's local token (the CLI, MCP, tools and agents) never reveals or
-    // approves, even while a page session is open.
+    // approves a delivery destination, even while a page session is open. The owner approves
+    // a launcher there too (the CLI's and MCP's confirmation), so it reaches the definition.
     let local = call(&host, Local, "variable_reveal", json!({"id":entry})).await;
     assert!(!local.ok);
     assert!(!text(&local).contains("synthetic-page-value"));
     let launcher = json!({"id":id(),"digest":"0".repeat(64)});
-    let refused = call(&host, Local, "variable_launcher_approve", launcher.clone()).await;
-    assert!(!refused.ok);
+    let reached = call(&host, Local, "variable_launcher_approve", launcher.clone()).await;
+    assert!(!reached.ok);
     assert!(
-        text(&refused).contains("Only the user approves"),
+        text(&reached).contains("no launcher with that name"),
         "{}",
-        text(&refused)
+        text(&reached)
     );
     let refused = call(&host, Local, "variable_delivery_approve", launcher.clone()).await;
     assert!(!refused.ok);
@@ -528,7 +529,7 @@ async fn the_page_has_the_windows_authority_and_the_control_token_still_does_not
         let reply = page_call(&host, &signed, method, launcher.clone()).await;
         assert!(!reply.ok);
         assert!(
-            !text(&reply).contains("Only the user approves"),
+            !text(&reply).contains("Only the"),
             "{method}: {}",
             text(&reply)
         );
