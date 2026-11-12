@@ -713,6 +713,7 @@ async fn planning(
                 source: run.item.source.clone(),
                 detail,
                 planning: true,
+                allow: Vec::new(),
             },
         )
         .await;
@@ -993,6 +994,8 @@ async fn coding(
                 source: run.item.source.clone(),
                 detail,
                 planning: false,
+                // As the run's definition holds it: later edits do not change this run.
+                allow: workflow.allow.clone(),
             },
         )
         .await;

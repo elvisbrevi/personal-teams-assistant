@@ -182,7 +182,7 @@ The coding agent's own conversation associated with an implementation run and it
 _Avoid_: run ID
 
 **Workflow**:
-A saved recipe for implementing the items of one Azure DevOps project: the repositories it works on, the execution machine and the checkout of each repository there, the coding agent, its instructions and an ordered list of workflow blocks. It travels with the account and changes only on the coordinator. It grants nothing: every directory, repository, agent, chat and launcher is checked when it is saved and again when it is used.
+A saved recipe for implementing the items of one Azure DevOps project: the repositories it works on, the execution machine and the checkout of each repository there, the coding agent, its instructions and an ordered list of workflow blocks. It travels with the account and changes only on the coordinator. It grants nothing: every directory, repository, agent, chat and launcher is checked when it is saved and again when it is used. The one exception is its `allow`, which the user confirms when saving it: the fixed rules its own coding runs may break (work item writes, Teams messages, merging, publishing and deploying).
 _Avoid_: pipeline (Azure DevOps' own), automation, recipe (in user-facing text)
 
 **Workflow block**:

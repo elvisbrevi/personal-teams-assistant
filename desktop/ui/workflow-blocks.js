@@ -178,7 +178,7 @@ function blockEditor(draft, saved) {
   const instructionFields = () => {
     const text = el('textarea', { value: draft.text, rows: 6, maxLength: LIMITS.text });
     text.oninput = () => { draft.text = text.value; touched(); };
-    return [el('label', {}, t('Instruction'), el('small', { textContent: t('What the planning and coding agents read, as untrusted input under the fixed rules: it cannot let them write work items, post to Teams, merge or deploy.') }), text, counted(text, LIMITS.text))];
+    return [el('label', {}, t('Instruction'), el('small', { textContent: t('What the planning and coding agents read, as untrusted input under the fixed rules: it cannot let them write work items, post to Teams, merge or deploy; only what the workflow allows can.') }), text, counted(text, LIMITS.text))];
   };
 
   const notificationFields = () => {

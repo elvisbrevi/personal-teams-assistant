@@ -456,6 +456,8 @@ impl Run {
         let mut value = serde_json::to_value(self).unwrap_or_default();
         value["stage"] = json!(self.stopped_in.unwrap_or(self.state).word());
         value["waits_on_user"] = json!(self.state.waits_on_user());
+        // What its coding runs may do beyond the fixed rules, as the definition it got holds it.
+        value["allow"] = json!(self.definition.as_ref().map(|d| &d.allow));
         value
     }
     /// The run in a list: its identity, item, state, stage and what it waits for.

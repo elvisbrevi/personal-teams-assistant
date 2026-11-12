@@ -90,6 +90,9 @@ struct SaveArgs {
     id: Option<String>,
     #[serde(default)]
     enabled: Option<bool>,
+    /// The user confirmed what the workflow's `allow` lets its coding agents do.
+    #[serde(default)]
+    confirmed: bool,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -130,6 +133,25 @@ fn require_coordinator(state: &DesktopState) -> Result<(), String> {
     } else {
         Err("[not_ready] This computer is signed in to the account's coordinator, where workflows are saved and run: change them there (its local page, its portal or its pta). They reach this computer with the account's configuration.".into())
     }
+}
+
+/// A workflow as the operations show it: `allow` always present, empty when it allows nothing.
+fn shown(workflow: &Workflow) -> Value {
+    let mut value = serde_json::to_value(workflow).unwrap_or_default();
+    value["allow"] = json!(workflow.allow);
+    value
+}
+
+/// What a person confirms before a workflow whose coding agents may do more than the fixed
+/// rules allow is saved; none when it allows nothing.
+pub(super) fn describe_workflow(workflow: &Workflow) -> Option<String> {
+    let lifted = core::describe_allow(&workflow.allow);
+    (!lifted.is_empty()).then(|| {
+        format!(
+            "Save workflow {}? In every run it starts (also those that start by themselves), {lifted}, when its instructions ask for it. Its planning run, and every run without this workflow, keep every prohibition.",
+            workflow.id
+        )
+    })
 }
 
 /// What a person confirms before a block that acts is saved.
@@ -178,7 +200,8 @@ async fn operation(host: &Arc<Host>, method: &str, args: &Value) -> Result<Value
         "workflows_list" => {
             ensure_no_arguments(args)?;
             let map = state.settings.map().map_err(fail)?;
-            Ok(json!({"workflows":map.workflows,"editable":editable(state)?}))
+            let workflows: Vec<Value> = map.workflows.iter().map(shown).collect();
+            Ok(json!({"workflows":workflows,"editable":editable(state)?}))
         }
         "workflow_show" => {
             let a: IdArgs = parse(args)?;
@@ -193,7 +216,7 @@ async fn operation(host: &Arc<Host>, method: &str, args: &Value) -> Result<Value
                 .iter()
                 .filter_map(|id| map.workflow_blocks.iter().find(|b| &b.id == id))
                 .collect();
-            Ok(json!({"workflow":workflow,"blocks":blocks,"editable":editable(state)?}))
+            Ok(json!({"workflow":shown(workflow),"blocks":blocks,"editable":editable(state)?}))
         }
         "workflow_blocks_list" => {
             ensure_no_arguments(args)?;
@@ -305,7 +328,7 @@ async fn save(host: &Arc<Host>, args: SaveArgs) -> Result<Value, String> {
     let state = &host.state;
     require_coordinator(state)?;
     match (args.workflow, args.id, args.enabled) {
-        // Enabling or disabling changes nothing else.
+        // Enabling or disabling changes nothing else (what it allows was confirmed when saved).
         (None, Some(id), Some(enabled)) => {
             let workflow = change(host, |map| {
                 let workflow = map
@@ -317,7 +340,7 @@ async fn save(host: &Arc<Host>, args: SaveArgs) -> Result<Value, String> {
                 Ok(workflow.clone())
             })
             .await?;
-            Ok(json!({"workflow":workflow,"saved":true,"warnings":[]}))
+            Ok(json!({"workflow":shown(&workflow),"saved":true,"warnings":[]}))
         }
         (Some(value), None, None) => {
             let mut workflow: Workflow = serde_json::from_value(value)
@@ -325,6 +348,16 @@ async fn save(host: &Arc<Host>, args: SaveArgs) -> Result<Value, String> {
             workflow.updated_at = now();
             // Refuses checkouts keyed twice by one repository, then keys them in lowercase.
             core::validate_workflow(&workflow).map_err(invalid)?;
+            workflow.allow.sort();
+            // Lifting a fixed rule of its coding agents is the user's decision, confirmed with
+            // what it lets them do.
+            if let Some(question) = describe_workflow(&workflow)
+                && !args.confirmed
+            {
+                return Err(invalid(format!(
+                    "Confirm with the user, then save with confirmed: true. {question}"
+                )));
+            }
             workflow.checkouts = std::mem::take(&mut workflow.checkouts)
                 .into_iter()
                 .map(|(id, directory)| (id.to_lowercase(), directory))
@@ -340,7 +373,7 @@ async fn save(host: &Arc<Host>, args: SaveArgs) -> Result<Value, String> {
                 Ok(())
             })
             .await?;
-            Ok(json!({"workflow":saved,"saved":true,"warnings":warnings}))
+            Ok(json!({"workflow":shown(&saved),"saved":true,"warnings":warnings}))
         }
         _ => Err(invalid(
             "Give the workflow to save, or its id and enabled to enable or disable it.",

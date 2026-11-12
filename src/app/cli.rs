@@ -426,10 +426,12 @@ Knowledge
   prompts list | prompts show ID         The implementation agents' instructions (plan, code, request, direct).
   prompts edit ID | prompts reset ID     JSON on stdin: {\"instructions\": TEXT}; reset restores the default.
   workflows list | workflows show ID     Workflows: recipes for implementing the items of one Azure DevOps project.
-  workflows save           JSON on stdin: id, name, description, enabled, auto_start, organization
+  workflows save [--confirmed]   JSON on stdin: id, name, description, enabled, auto_start, organization
                            (https://dev.azure.com/NAME), project, repositories [{id, name}], machine (ID),
                            checkouts {REPOSITORY_ID: DIRECTORY}, agent {provider, model, effort},
-                           instructions (at most 8000 characters) and blocks (IDs). Checked against the
+                           instructions (at most 8000 characters), blocks (IDs) and allow: what its coding
+                           runs may do that the fixed rules forbid (work_items, teams, merge, deploy;
+                           empty by default; any of them needs --confirmed). Checked against the
                            project's catalog, the machine's roots and checkouts and its installed CLIs;
                            what cannot be verified comes back as warnings. Saved on the coordinator only.
   workflows enable ID | workflows disable ID   Changes only whether the workflow is enabled.
@@ -1103,7 +1105,19 @@ async fn workflows_command(args: &[String]) -> Result<Reply> {
     let (method, body) = match (words.get(1).copied(), words.get(2).copied()) {
         (Some("list"), _) => ("workflows_list", json!({})),
         (Some("show"), _) => ("workflow_show", json!({"id":id(2)?})),
-        (Some("save"), _) => ("workflow_save", json!({"workflow":input()?})),
+        (Some("save"), _) => {
+            let workflow = input()?;
+            // A workflow that lifts a fixed rule of its coding agents is confirmed with what it
+            // allows, as MCP asks; one that allows nothing is saved without it.
+            let mut body = json!({"workflow":workflow});
+            if let Some(question) = super::tools::confirmation("workflow_save", &body) {
+                if let Some(reply) = unconfirmed(args, question) {
+                    return Ok(reply);
+                }
+                body["confirmed"] = json!(true);
+            }
+            ("workflow_save", body)
+        }
         (Some(action @ ("enable" | "disable")), _) => (
             "workflow_save",
             json!({"id":id(2)?,"enabled":action == "enable"}),
@@ -1181,11 +1195,28 @@ async fn workflows_command(args: &[String]) -> Result<Reply> {
                 workflow.is_some() != director,
                 "give --workflow WORKFLOW or --director"
             );
-            let question = super::tools::confirmation(
+            let mut question = super::tools::confirmation(
                 "workflow_run_start",
                 &json!({"id":id,"workflow":workflow}),
             )
             .unwrap_or_default();
+            // A named workflow's machine, agent and what it allows, read from the coordinator.
+            if let Some(name) = workflow
+                && !confirmed
+            {
+                let shown = call("workflow_show", json!({"id":name}), None, true).await?;
+                if !shown.ok {
+                    return Ok(shown);
+                }
+                if let Ok(definition) = serde_json::from_value::<crate::workflows::Workflow>(
+                    shown.data["workflow"].clone(),
+                ) {
+                    question = format!(
+                        "{}?",
+                        super::workflows::runs::describe_start(Some(name), Some(&definition), id)
+                    );
+                }
+            }
             if let Some(reply) = unconfirmed(args, question) {
                 return Ok(reply);
             }
@@ -2443,6 +2474,7 @@ pub(super) fn validate_args(args: &[String]) -> Result<()> {
                     ]
                 )
                 || p.as_slice() == ["workflows", "blocks", "save"]
+                || p.as_slice() == ["workflows", "save"]
                 || p.as_slice() == ["cloud", "migrate"]
                 || p.as_slice() == ["cloud", "rollback"]
                 || p.as_slice() == ["cloud", "erase"]
@@ -4184,8 +4216,7 @@ mod wiki_tests {
         let check =
             |args: &[&str]| validate_args(&args.iter().map(|a| a.to_string()).collect::<Vec<_>>());
         for args in [
-            &["workflows", "save", "--confirmed"][..],
-            &["workflows", "enable", "payments", "--confirmed"],
+            &["workflows", "enable", "payments", "--confirmed"][..],
             &["workflows", "blocks", "remove", "base", "--confirmed"],
             &["workflows", "list", "--project", "Payments"],
             &["workflows", "repositories", "--project"],
@@ -4433,6 +4464,7 @@ mod help_tests {
             &["workflows", "list"],
             &["workflows", "show", "payments"],
             &["workflows", "save"],
+            &["workflows", "save", "--confirmed"],
             &["workflows", "enable", "payments"],
             &["workflows", "disable", "payments"],
             &["workflows", "remove", "payments", "--confirmed"],

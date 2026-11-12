@@ -406,6 +406,70 @@ async fn a_save_is_refused_before_anything_is_read_when_the_map_alone_refuses_it
 }
 
 #[tokio::test]
+async fn a_workflow_that_lifts_a_fixed_rule_is_saved_only_once_the_user_confirmed_it() {
+    let root = tempfile::tempdir().unwrap();
+    let host = host(root.path());
+    let own = implementation::test_machine(&host, None).await;
+    let mut w = workflow("payments", &own);
+    w.allow = vec![
+        crate::workflows::Allow::Merge,
+        crate::workflows::Allow::WorkItems,
+    ];
+    // Unconfirmed: refused with what it allows, before anything is read.
+    let refused = call(&host, Local, "workflow_save", json!({"workflow":w})).await;
+    assert_eq!(refused.code, "invalid_input");
+    let text = refused.message.unwrap();
+    assert!(text.contains("confirmed: true"), "{text}");
+    assert!(text.contains("complete and merge pull requests"), "{text}");
+    assert!(text.contains("work items"), "{text}");
+    // Confirmed: it goes on to the checks (here, the Azure source this host lacks).
+    let refused = call(
+        &host,
+        Local,
+        "workflow_save",
+        json!({"workflow":w,"confirmed":true}),
+    )
+    .await;
+    assert_eq!(refused.code, "not_ready", "{:?}", refused.message);
+    // An unknown action, or one listed twice, is refused as the definition's error.
+    let mut value = serde_json::to_value(&w).unwrap();
+    value["allow"] = json!(["merge", "everything"]);
+    let refused = call(
+        &host,
+        Local,
+        "workflow_save",
+        json!({"workflow":value,"confirmed":true}),
+    )
+    .await;
+    assert_eq!(refused.code, "invalid_input");
+    assert!(refused.message.unwrap().contains("everything"));
+    value["allow"] = json!(["merge", "merge"]);
+    let refused = call(
+        &host,
+        Local,
+        "workflow_save",
+        json!({"workflow":value,"confirmed":true}),
+    )
+    .await;
+    assert_eq!(refused.code, "invalid_input");
+    // list and show always say what a workflow allows, empty included.
+    let mut plain = workflow("plain", &own);
+    plain.enabled = true;
+    w.allow.sort();
+    store(&host, vec![plain, w]);
+    let list = call(&host, Local, "workflows_list", json!({})).await.data;
+    assert_eq!(list["workflows"][0]["allow"], json!([]));
+    assert_eq!(
+        list["workflows"][1]["allow"],
+        json!(["work_items", "merge"])
+    );
+    let shown = call(&host, Local, "workflow_show", json!({"id":"payments"}))
+        .await
+        .data;
+    assert_eq!(shown["workflow"]["allow"], json!(["work_items", "merge"]));
+}
+
+#[tokio::test]
 async fn checkouts_are_inspected_by_their_machine_and_an_older_worker_is_unknown() {
     let root = tempfile::tempdir().unwrap();
     let host = host(root.path());

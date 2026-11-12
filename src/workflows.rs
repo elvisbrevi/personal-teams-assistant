@@ -40,6 +40,60 @@ pub const PLACEHOLDERS: [&str; 5] = ["item", "link", "pull_requests", "summary",
 /// The coding agents a workflow can run (the installed CLIs of the implementation flow).
 pub const PROVIDERS: [&str; 3] = ["codex", "claude", "opencode"];
 
+/// What a workflow lets the coding agents of its runs do that the fixed rules otherwise forbid
+/// (`llm::implementation::code_rules`). Nothing else changes: the planning run, a plain
+/// implementation run, a request and the director keep every prohibition.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum Allow {
+    /// Create and change Azure DevOps or GitHub work items and issues.
+    WorkItems,
+    /// Send Teams messages.
+    Teams,
+    /// Merge (complete) pull requests.
+    Merge,
+    /// Publish and deploy.
+    Deploy,
+}
+impl Allow {
+    pub const ALL: [Allow; 4] = [Allow::WorkItems, Allow::Teams, Allow::Merge, Allow::Deploy];
+    pub fn word(self) -> &'static str {
+        match self {
+            Allow::WorkItems => "work_items",
+            Allow::Teams => "teams",
+            Allow::Merge => "merge",
+            Allow::Deploy => "deploy",
+        }
+    }
+    /// What it lets a coding agent do, in the words a person confirms.
+    pub fn effect(self) -> &'static str {
+        match self {
+            Allow::WorkItems => {
+                "create and change Azure DevOps and GitHub work items and issues (their state, fields and comments)"
+            }
+            Allow::Teams => "send Teams messages",
+            Allow::Merge => "complete and merge pull requests",
+            Allow::Deploy => "publish and deploy (releases, pipelines, packages)",
+        }
+    }
+}
+/// What a workflow's `allow` lets its coding agents do, as a person confirms it; empty when it
+/// allows nothing.
+pub fn describe_allow(allow: &[Allow]) -> String {
+    let effects: Vec<&str> = Allow::ALL
+        .into_iter()
+        .filter(|a| allow.contains(a))
+        .map(Allow::effect)
+        .collect();
+    if effects.is_empty() {
+        return String::new();
+    }
+    format!(
+        "its coding agents may also {}, as you, without asking",
+        effects.join("; ")
+    )
+}
+
 /// A saved recipe for implementing items of one Azure DevOps project.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -70,6 +124,10 @@ pub struct Workflow {
     /// Block IDs, in order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub blocks: Vec<String>,
+    /// What its coding runs may do that the fixed rules otherwise forbid (none by default);
+    /// saving a workflow that allows anything needs the user's confirmation.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allow: Vec<Allow>,
     /// When it last changed (Unix seconds); set by the host when it is saved.
     #[serde(default)]
     pub updated_at: i64,
@@ -404,6 +462,10 @@ pub fn validate_workflow(workflow: &Workflow) -> Result<()> {
     ensure!(
         workflow.blocks.iter().collect::<BTreeSet<_>>().len() == workflow.blocks.len(),
         "Workflow {id} lists each block once."
+    );
+    ensure!(
+        workflow.allow.iter().collect::<BTreeSet<_>>().len() == workflow.allow.len(),
+        "Workflow {id} lists each allowed action once (work_items, teams, merge, deploy)."
     );
     ensure!(workflow.updated_at >= 0, "Invalid date in workflow {id}.");
     Ok(())
@@ -976,6 +1038,38 @@ pub(crate) mod tests {
         let legacy = crate::knowledge::KnowledgeMap::parse("[[resources]]\nid = \"wiki\"\ndescription = \"Wiki\"\ntopics = []\nenabled = false\nexternal_processing = false\nallowed_conversations = []\nkind = \"url\"\nurl = \"https://example.com\"\n").unwrap();
         assert!(legacy.workflows.is_empty() && legacy.workflow_blocks.is_empty());
         assert!(!toml::to_string(&legacy).unwrap().contains("workflow"));
+    }
+
+    #[test]
+    fn allow_takes_each_known_action_once_and_is_left_out_while_empty() {
+        let mut w = workflow("payments");
+        assert!(!toml::to_string(&w).unwrap().contains("allow"));
+        w.allow = vec![Allow::WorkItems, Allow::Teams, Allow::Merge, Allow::Deploy];
+        assert!(validate_workflow(&w).is_ok());
+        let text = toml::to_string(&w).unwrap();
+        assert!(
+            text.contains(r#"allow = ["work_items", "teams", "merge", "deploy"]"#),
+            "{text}"
+        );
+        assert_eq!(toml::from_str::<Workflow>(&text).unwrap(), w);
+        w.allow = vec![Allow::Merge, Allow::Merge];
+        assert!(validate_workflow(&w).is_err());
+        let unknown = serde_json::from_value::<Workflow>(serde_json::json!({
+            "id": "w", "name": "W", "organization": "https://dev.azure.com/example",
+            "project": "P", "machine": MACHINE, "agent": {"provider": "codex", "model": "m", "effort": "low"},
+            "allow": ["work_items", "everything"]
+        }));
+        assert!(unknown.unwrap_err().to_string().contains("everything"));
+        assert_eq!(describe_allow(&[]), "");
+        let described = describe_allow(&[Allow::Deploy, Allow::Teams]);
+        assert!(
+            described
+                .starts_with("its coding agents may also send Teams messages; publish and deploy")
+        );
+        assert_eq!(
+            Allow::ALL.map(Allow::word),
+            ["work_items", "teams", "merge", "deploy"]
+        );
     }
 
     #[test]

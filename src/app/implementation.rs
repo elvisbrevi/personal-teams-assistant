@@ -280,6 +280,12 @@ pub(crate) struct Launch {
     /// the run's budget; untrusted input, like the guides.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     organization: Vec<crate::organization::Entry>,
+    /// What the workflow that asked for this coding run lifts from its fixed rules
+    /// (`Workflow::allow`). Only the workflow engine sets it, and only on a coding run;
+    /// `implementation_start` never does, and a worker that predates the field ignores it and
+    /// keeps every prohibition.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) allow: Vec<crate::workflows::Allow>,
 }
 #[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct Run {
@@ -840,6 +846,7 @@ fn build_launch(
         request,
         detail,
         language: host.state.settings.config()?.llm.language,
+        allow: Vec::new(),
     })
 }
 
@@ -856,6 +863,8 @@ pub(super) struct Planned {
     pub source: Option<String>,
     pub detail: Detail,
     pub planning: bool,
+    /// What the workflow lifts from the coding rules; ignored for a planning run.
+    pub allow: Vec<crate::workflows::Allow>,
 }
 /// Launch a run the engine planned, through the same `implementation_launch` call as
 /// `implementation_start`. The call is idempotent by run ID: asking again for a run the machine
@@ -882,7 +891,10 @@ pub(super) async fn launch_planned(host: &Arc<Host>, planned: Planned) -> Result
         model: planned.model,
         effort: planned.effort,
     };
-    let launch = build_launch(host, planned.id, request, planned.detail, planned.planning)?;
+    let mut launch = build_launch(host, planned.id, request, planned.detail, planned.planning)?;
+    if !planned.planning {
+        launch.allow = planned.allow;
+    }
     fleet::call(
         host,
         &launch.request.machine,
@@ -1328,13 +1340,15 @@ async fn run(host: &Arc<Host>, launch: Launch) {
         }
         .await
     } else {
-        let prompt = crate::llm::implementation::coding_prompt(&instructions, &input);
+        let prompt =
+            crate::llm::implementation::coding_prompt(&instructions, &input, &launch.allow);
         crate::llm::implementation::execute(
             &request.provider,
             &request.model,
             &request.effort,
             &request.directories,
             &prompt,
+            &launch.allow,
             &observer,
             remote,
         )
