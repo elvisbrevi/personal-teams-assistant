@@ -360,7 +360,7 @@ workflow settings.
    `workflow_block_save`), JSON on stdin with `id`, `name`, `kind` and that kind's fields:
    - `instruction`: `text` (at most 8000 characters), no stage; saved without confirmation.
    - `teams_notification`: `stage` (`before_planning`, `plan_ready`, `children_created`,
-     `child_done`, `pull_requests_completed`, `done`, `failed`), `chat` `{id, name}` from
+     `coding_started`, `child_done`, `pull_requests_completed`, `done`, `failed`), `chat` `{id, name}` from
      `teams_chats`, `mentions` (member display names of at most 100 characters without `]`, at most 20) and `template` (at most 4000
      characters; only `{item}` (`Title (#ID)`), `{id}` and `{title}` (its parts, e.g.
      `[{id} - {title}]({link})`), `{link}`, `{pull_requests}`, `{summary}` and `{state}`). Show the user the
@@ -545,7 +545,9 @@ run (any state but `done` and `cancelled`).
   nothing to Azure DevOps. Resume only after the user looked at the cause.
 - **Blocks that act:** the engine runs a run's notification and launcher blocks by itself at
   their stage (`before_planning`, `plan_ready` while the run waits for the plan review,
-  `children_created`, `child_done` once per child, `pull_requests_completed`, `done`, `failed`),
+  `children_created`, `coding_started` once per coding run its machine accepted (a task's own,
+  the way to announce that a task started, or each child's), `child_done` once per child,
+  `pull_requests_completed`, `done`, `failed`),
   in the workflow's order and at most once per occurrence of the stage. A notification posts once
   to the chat the user confirmed when saving the block, as the user, through the same path as
   `teams_post`: the placeholders are filled by code (`{summary}` is the run's latest stored

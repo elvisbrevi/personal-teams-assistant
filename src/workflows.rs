@@ -176,6 +176,8 @@ pub enum Stage {
     BeforePlanning,
     PlanReady,
     ChildrenCreated,
+    /// Each coding run its machine accepted: a task's own, or each child's.
+    CodingStarted,
     ChildDone,
     PullRequestsCompleted,
     Done,

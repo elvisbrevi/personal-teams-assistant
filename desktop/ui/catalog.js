@@ -2557,6 +2557,7 @@ const UI_CATALOG = { es: {
   "The library has no blocks yet": "La biblioteca aún no tiene bloques",
   "Open the block library": "Abrir la biblioteca de bloques",
   "Choose the ready states": "Elegir los estados listos",
+  "Each coding run started": "Al iniciar cada ejecución de código",
   "the work item's number alone": "solo el número del work item",
   "the work item's title alone": "solo el título del work item",
   "its own director": "su propio director",

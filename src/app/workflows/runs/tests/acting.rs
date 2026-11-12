@@ -491,6 +491,43 @@ async fn every_stage_of_an_hu_run_acts_in_its_turn_and_a_child_is_told_once() {
 }
 
 #[tokio::test]
+async fn a_task_run_says_once_that_its_coding_started_while_it_codes() {
+    let bench = Bench::new().await;
+    bench.merged();
+    bench.mode("mode", "block");
+    bench.acting(vec![notification(
+        "started",
+        Stage::CodingStarted,
+        "Started [{id} - {title}]({link}): {state}",
+        &[],
+    )]);
+    let teams = Teams::new(&bench.host, &["Ana Pérez"], 201).await;
+    let id = bench.start(TASK).await;
+    teams.attach(&bench.host).await;
+    // Once the machine accepted the coding run, while it still codes.
+    bench
+        .until(&id, |r| {
+            r.block_outcomes
+                .iter()
+                .any(|o| o.occurrence == format!("coding_started:{TASK}"))
+        })
+        .await;
+    assert_eq!(bench.run(&id).state, Phase::Coding);
+    let posts = teams.posts().await;
+    assert_eq!(posts.len(), 1, "{posts:?}");
+    assert!(
+        posts[0].contains("200 - Fix rounding") && posts[0].contains(": coding"),
+        "{}",
+        posts[0]
+    );
+    bench.release();
+    let run = bench.state(&id, Phase::Done).await;
+    assert_eq!(teams.posts().await.len(), 1);
+    assert_eq!(run.block_outcomes.len(), 1);
+    assert_eq!(run.block_outcomes[0].stage, Some(Stage::CodingStarted));
+}
+
+#[tokio::test]
 async fn a_failed_run_posts_its_failed_blocks_once_for_each_failure() {
     let bench = Bench::new().await;
     bench.acting(vec![notification(

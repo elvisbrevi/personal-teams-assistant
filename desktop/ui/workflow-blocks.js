@@ -11,10 +11,10 @@ import { chooseFromList } from './directory-sheet.js';
 import { changedAt, loadWorkflows, slug, workflowData } from './workflows.js';
 
 const KIND_NAMES = { instruction: t('Instruction'), teams_notification: t('Teams notification'), launcher: t('Launcher') };
-const STAGES = ['before_planning', 'plan_ready', 'children_created', 'child_done', 'pull_requests_completed', 'done', 'failed'];
+const STAGES = ['before_planning', 'plan_ready', 'children_created', 'coding_started', 'child_done', 'pull_requests_completed', 'done', 'failed'];
 const STAGE_NAMES = {
   before_planning: t('Before planning'), plan_ready: t('Plan ready for review'), children_created: t('Children created'),
-  child_done: t('Each child done'), pull_requests_completed: t('Pull requests completed'), done: t('Run done'), failed: t('Run failed'),
+  coding_started: t('Each coding run started'), child_done: t('Each child done'), pull_requests_completed: t('Pull requests completed'), done: t('Run done'), failed: t('Run failed'),
 };
 /** The placeholders a notification's template may hold; code fills them in when it posts. */
 const PLACEHOLDERS = {
