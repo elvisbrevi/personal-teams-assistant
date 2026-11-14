@@ -547,7 +547,7 @@ async fn a_task_run_works_in_every_repository_of_its_workflow_and_waits_for_each
     let coding = child.coding.clone().unwrap();
     assert_eq!(
         launched_directories(&bench, &coding.id),
-        [bench.web.clone(), bench.api.clone()]
+        [bench.web.as_path(), bench.api.as_path()]
     );
     assert_eq!(child.directory.as_deref(), Some(bench.web.as_path()));
     assert_eq!(child.repository.as_ref().unwrap().name, "payments-web");
@@ -689,7 +689,7 @@ async fn a_planned_child_keeps_its_one_repository_and_two_task_runs_of_a_workflo
     let child = &run.children[0];
     assert_eq!(
         launched_directories(&bench, &child.coding.as_ref().unwrap().id),
-        [bench.web.clone()]
+        [bench.web.as_path()]
     );
     let prompt = fs::read_to_string(bench.log.join("coding.3")).unwrap();
     assert!(prompt.contains("in the checkout of repository payments-web at"));
