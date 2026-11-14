@@ -69,6 +69,7 @@ async function reload() {
   $('#cloudflare-tunnel').checked = config.server.cloudflare_tunnel;
   field('#allowed-chats', config.graph.allowed_chats.join('\n'));
   $('#dry-run').checked = config.policy.dry_run;
+  field('#history-messages', config.policy.history_messages ?? 10);
   $('#discover-chats').checked = config.graph.discover_all_chats;
   const reading = config.teams_reading ?? {};
   $('#reading-all-chats').checked = Boolean(reading.all_chats);
@@ -109,6 +110,9 @@ function collectSettings() {
   config.server.bind = $('#bind').value.trim();
   config.server.cloudflare_tunnel = $('#cloudflare-tunnel').checked;
   config.policy.dry_run = $('#dry-run').checked;
+  const history = Number($('#history-messages').value);
+  if (!Number.isInteger(history) || history < 1 || history > 50) throw t('Earlier messages read must be a whole number from 1 to 50.');
+  config.policy.history_messages = history;
   collectRegistrationSettings();
   collectEmbeddings();
   collectMessageStyle();

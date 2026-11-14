@@ -18,6 +18,7 @@ pub(super) mod login;
 mod management;
 pub(super) mod paths;
 mod requests;
+pub(super) mod sessions;
 mod store;
 pub(super) use fleet::register;
 pub(crate) use store::Database;
@@ -84,6 +85,9 @@ struct Machine {
     /// Whether its last poll said another device may ask it to update itself (`machine_upgrade`).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     upgrade: bool,
+    /// Whether its last poll said it summarizes its agent sessions (`agent_sessions_local`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    agent_sessions: bool,
 }
 impl Machine {
     /// Trusted and seen in its last polls (a worker polls every two seconds).
@@ -671,6 +675,7 @@ async fn operation(host: &Arc<Host>, method: &str, args: &Value) -> Result<Value
         | "implementation_request_status"
         | "implementation_history" => requests::operate(host, method, args).await,
         "implementation_sessions" => fleet::session_index(host, args).await,
+        "implementation_recent_sessions" => sessions::operate(host, args).await,
         "implementation_mobile_session" => {
             ensure!(
                 args["confirmed"] == true,
@@ -1037,6 +1042,7 @@ async fn local(host: &Arc<Host>, method: &str, args: &Value) -> Result<Value> {
     let state = &host.state.implementation;
     match method {
         "machine_browse" => browse_machine(host, args),
+        "agent_sessions_local" => sessions::local(host, args).await,
         "checkout_inspect" => {
             let allowed = roots(host).await?;
             checkout::inspect_all(&args["paths"], &allowed)

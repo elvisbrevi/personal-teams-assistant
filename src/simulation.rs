@@ -32,6 +32,9 @@ pub struct SimulationResult {
     pub references: Vec<crate::evidence::Reference>,
     pub partial: bool,
     pub warnings: Vec<String>,
+    /// The working sessions the answer took the work in progress from.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub agent_sessions: Vec<crate::state::SessionUse>,
 }
 
 /// A simulation that cannot run as asked; the message says what is missing.
@@ -186,6 +189,7 @@ pub async fn run(
         references: audit.references,
         partial: audit.partial,
         warnings: audit.coverage_warnings,
+        agent_sessions: audit.agent_sessions,
     })
 }
 
