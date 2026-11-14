@@ -103,6 +103,10 @@ pub(super) fn input(run: &Run, language: crate::config::Language, now: i64) -> V
             "coding_run": c.coding.as_ref().map(|i| json!({"started": i.started, "state": i.state})),
             "started_at": c.started_at.and_then(time), "finished_at": c.finished_at.and_then(time),
             "branch": c.branch, "outcome": c.outcome,
+            "other_branches": c.branches.iter().take(20).map(|b| json!({
+                "repository": b.repository.name, "branch": b.branch,
+            })).collect::<Vec<_>>(),
+            "ignored_branches": c.ignored_branches,
             "pull_requests": c.pull_requests.iter().take(20).map(|p| json!({
                 "id": p.id, "title": bounded(&p.title, 200), "status": p.status, "url": p.url,
                 "created_at": p.created_at, "closed_at": p.closed_at, "accepted": p.accepted,

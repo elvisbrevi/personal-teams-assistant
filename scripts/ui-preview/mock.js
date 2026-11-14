@@ -373,6 +373,12 @@
     found.summary_sends.push({ id: crypto.randomUUID(), summary: latest.id, chat: { id: chat, topic: teamsChats.find(c => c.id === chat)?.topic, type: 'group' }, mentions: [], chars: latest.text.length, edited: false, outcome: 'uncertain', at: secs(Date.now()) }); };
   // A run in the line for one of the `concurrency` slots (its place, 1 next), or out of it with null.
   window.__ptaQueueRun = (run, position) => { workflowRuns.find(r => r.id === run).queue_position = position; };
+  // A task's child that reported branches in two repositories and one the workflow does not have, as a resume past its
+  // coding run records them.
+  window.__ptaDeliverTask = run => { const child = workflowRuns.find(r => r.id === run).children[0];
+    Object.assign(child, { branch: 'feature/5012-rounding', branches: [{ repository: { id: '0f3c2a1b-0000-4000-8000-000000000002', name: 'payments-web' }, branch: 'feature/5012-rounding-web' }], ignored_branches: ['billing'],
+      pull_requests: [{ id: 51, repository: '0f3c2a1b-0000-4000-8000-000000000001', title: 'Fix rounding in refunds', status: 'active', url: `${org}/Payments/_git/payments-api/pullrequest/51`, created_at: '2026-10-13T20:00:00Z', closed_at: null },
+        { id: 52, repository: '0f3c2a1b-0000-4000-8000-000000000002', title: 'Show the rounded refunds', status: 'active', url: `${org}/Payments/_git/payments-web/pullrequest/52`, created_at: '2026-10-13T20:05:00Z', closed_at: null }] }); };
   // A run's item with another title (the list's long-title check).
   window.__ptaRetitleRun = (run, title) => { workflowRuns.find(r => r.id === run).item.title = title; };
   window.__ptaWorkflowCalls = [];
