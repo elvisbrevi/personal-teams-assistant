@@ -845,7 +845,7 @@ async fn versions(host: &Arc<Host>) -> Step {
     }
     if matches!(
         data["state"].as_str(),
-        Some("staging" | "applying" | "deferred")
+        Some("staging" | "waiting" | "applying" | "deferred")
     ) {
         return step
             .is("waiting", VERSIONS_BUSY)
