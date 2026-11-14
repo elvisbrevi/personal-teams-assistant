@@ -1377,11 +1377,19 @@ async fn a_failed_pull_request_read_waits_for_the_poll_interval_and_a_success_cl
     bench.state(&id, Phase::PullRequests).await;
     bench.catalog.failing_pulls.store(true, Ordering::SeqCst);
     bench.offset.store(301, Ordering::SeqCst);
+    // The tick reads the clock itself: a second may pass between it and these reads.
+    let before = bench.now();
     bench.tick_with(300).await;
+    let after = bench.now();
     let run = bench.run(&id);
     assert_eq!(run.state, Phase::PullRequests);
     assert!(run.error.unwrap().contains("could not be read"));
-    assert_eq!(run.checked_at, Some(bench.now()));
+    assert!(
+        run.checked_at
+            .is_some_and(|t| (before..=after).contains(&t)),
+        "{:?} not in {before}..={after}",
+        run.checked_at
+    );
     let reads = bench.reads("pullrequests");
     bench.tick_with(300).await;
     bench.tick_with(300).await;
