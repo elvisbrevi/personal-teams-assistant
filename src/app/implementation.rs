@@ -88,6 +88,10 @@ struct Machine {
     /// Whether its last poll said it summarizes its agent sessions (`agent_sessions_local`).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     agent_sessions: bool,
+    /// Whether its last poll said a director's call may carry the item for the session's name
+    /// (`session_names_support`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    session_names: bool,
 }
 impl Machine {
     /// Trusted and seen in its last polls (a worker polls every two seconds).
@@ -1253,8 +1257,9 @@ async fn mobile_session(host: &Arc<Host>, args: &Value) -> Result<Value> {
     let id = args["id"].as_str().context("Choose a recorded run.")?;
     uuid(id)?;
     let db = &host.state.implementation.db;
-    let (provider, model, effort, session, working, planning, active, reported) =
+    let (provider, model, effort, session, working, planning, active, reported, name) =
         if let Some(run) = db.get(id)? {
+            let name = run_name(&run.launch);
             let request = run.launch.request;
             ensure!(
                 request.machine == host.state.implementation.registry.lock().await.id,
@@ -1269,6 +1274,7 @@ async fn mobile_session(host: &Arc<Host>, args: &Value) -> Result<Value> {
                 run.launch.planning,
                 ["running", "planning"].contains(&run.state.as_str()),
                 run.remote,
+                name,
             )
         } else {
             let record = db
@@ -1284,6 +1290,7 @@ async fn mobile_session(host: &Arc<Host>, args: &Value) -> Result<Value> {
                 true,
                 record["state"] == "generating",
                 serde_json::from_value::<mobile::Access>(record["remote"].clone()).ok(),
+                recorded_name(&record),
             )
         };
     let session = session.context("The agent has not reported a session ID yet.")?;
@@ -1334,7 +1341,7 @@ async fn mobile_session(host: &Arc<Host>, args: &Value) -> Result<Value> {
                 &session,
                 reported.as_ref().and_then(|r| r.session_id.as_deref()),
                 &working,
-                planning,
+                (planning, &name),
                 observer.clone(),
             )
             .await?;
@@ -1351,6 +1358,23 @@ async fn mobile_session(host: &Arc<Host>, args: &Value) -> Result<Value> {
             Ok(json!({"remote":access,"pairing":pairing}))
         }
         _ => anyhow::bail!("Choose connect, pair or close for this mobile session."),
+    }
+}
+
+/// A coding or planning run's session name, from the work item the launch carries.
+fn run_name(launch: &Launch) -> crate::llm::implementation::SessionName {
+    let item = &launch.detail.item;
+    crate::llm::implementation::SessionName::item(item.id, &item.title)
+}
+/// The session name of a recorded request, classification or summary session.
+fn recorded_name(record: &Value) -> crate::llm::implementation::SessionName {
+    use crate::llm::implementation::{DirectTask, SessionName};
+    let item = record["item"]["id"].as_u64();
+    match record["purpose"].as_str() {
+        Some("request") => SessionName::request(record["kind"].as_str().unwrap_or_default()),
+        Some("classification") => DirectTask::Classify.session_name(item),
+        Some("summary") => DirectTask::Summarize.session_name(item),
+        _ => SessionName::default(),
     }
 }
 
@@ -1382,6 +1406,7 @@ async fn run(host: &Arc<Host>, launch: Launch) {
         host.state.implementation.db.session(&launch.id, session)
     };
     let remote = remote_observer(host, &launch.id);
+    let name = run_name(&launch);
     let result = if launch.planning {
         async {
             let plan = crate::llm::implementation::plan(
@@ -1389,6 +1414,7 @@ async fn run(host: &Arc<Host>, launch: Launch) {
                 &request.directories,
                 &instructions,
                 &input,
+                &name,
                 &observer,
                 remote.clone(),
             )
@@ -1414,6 +1440,7 @@ async fn run(host: &Arc<Host>, launch: Launch) {
             &request.directories,
             &prompt,
             &launch.allow,
+            &name,
             &observer,
             remote,
         )
@@ -2177,6 +2204,8 @@ mod tests {
         assert_eq!(command["method"], "workflow_direct");
         assert_eq!(command["args"]["provider"], "claude");
         assert_eq!(command["args"]["instructions"], "Choose.");
+        // A worker that does not say it names sessions gets no item: it would refuse the field.
+        assert!(command["args"].get("item").is_none());
         // In flight, the session is in Agent history as generating, on the worker.
         let generating = host.state.implementation.db.requests(None).unwrap();
         assert!(
@@ -2213,6 +2242,8 @@ mod tests {
             "https://dev.azure.com/example/Payments/_workitems/edit/41"
         );
         // A session ID that is not one is dropped, and the answer is kept.
+        let mut poll = poll.clone();
+        poll["session_names_support"] = json!(true);
         let asking = tokio::spawn(ask(host.clone(), director.clone(), item.clone()));
         let command = tokio::time::timeout(Duration::from_secs(5), async {
             loop {
@@ -2225,6 +2256,8 @@ mod tests {
         })
         .await
         .unwrap();
+        // A worker that names sessions gets the item's ID for the director's session name.
+        assert_eq!(command["args"]["item"], 41);
         let result = json!({"ok":true,"data":{"answer":{"workflow":"payments","reason":"Pagos."},"problem":"Free text the worker made up",
             "session_id":"../../etc/passwd","started_at":"yesterday","finished_at":null}});
         let mut answered = poll.clone();
