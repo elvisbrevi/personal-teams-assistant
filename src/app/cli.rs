@@ -396,7 +396,11 @@ Knowledge
   sources enable|disable ID
   sources audience ID      JSON on stdin: allowed_conversations, allowed_senders, external_processing.
                            A whole repository is a source too: {\"kind\":\"repository\",\"repository\":\"ALIAS\",...};
-                           the verified notes: {\"kind\":\"notes\",...} (optional \"contexts\" keeps only theirs).
+                           the verified notes: {\"kind\":\"notes\",...} (optional \"contexts\" keeps only theirs);
+                           recent agent sessions: {\"kind\":\"tool\",\"tool\":{\"type\":\"agent_sessions\",\"sessions\":10}}.
+  sources sessions [--limit N]  What an agent sessions source reads now: the newest Claude Code, Codex and
+                           OpenCode sessions of the account's machines (default 10, at most 50), summarized
+                           without secrets, file contents or paths; offline machines are listed as unavailable.
   contexts list | contexts show ID | contexts add | contexts edit ID | contexts remove ID
                            Subjects such as «cobros»: JSON on stdin with id, name, description, keywords,
                            sources (IDs) and instructions. A request naming one reads its sources.
@@ -2416,7 +2420,7 @@ pub(super) fn validate_args(args: &[String]) -> Result<()> {
             | ["repos", "list"]
             | ["repos", "add" | "edit" | "clone", _, _]
             | ["repos", "remove" | "sync", _]
-            | ["sources", "list" | "add"]
+            | ["sources", "list" | "add" | "sessions"]
             | [
                 "sources",
                 "show" | "edit" | "remove" | "enable" | "disable" | "audience",
@@ -2670,7 +2674,8 @@ pub(super) fn validate_args(args: &[String]) -> Result<()> {
             ["audit", "logs", "notes", "variables"].contains(&p[0])
                 || (p[0] == "teams" && p.get(1) != Some(&"send"))
                 || p.as_slice().starts_with(&["azure", "wiki", "search"])
-                || p.as_slice() == ["workflows", "runs"],
+                || p.as_slice() == ["workflows", "runs"]
+                || p.as_slice() == ["sources", "sessions"],
         ),
         (
             "--offset",
@@ -3042,6 +3047,18 @@ async fn execute(mut args: Vec<String>) -> Result<Reply> {
             }
             _ => call("answer_send", json!({"resource":resource}), None, true).await,
         };
+    }
+    if command == "sources" && action == "sessions" {
+        let limit = option(&args, "--limit")
+            .map(|v| v.parse::<u64>().context("invalid limit"))
+            .transpose()?;
+        return call(
+            "implementation_recent_sessions",
+            json!({"limit":limit}),
+            None,
+            true,
+        )
+        .await;
     }
     if ["notes", "knowledge", "index"].contains(&command) {
         let flag = |name: &str| {

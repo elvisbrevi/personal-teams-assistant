@@ -103,8 +103,26 @@ pub struct Audit {
     /// The user's judgment of the answer, given in the app or by an agent.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub feedback: Option<Feedback>,
+    /// The user's working sessions an answer took the work in progress from (an agent
+    /// sessions source), without their content.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub agent_sessions: Vec<SessionUse>,
     /// Processing steps in order. Details name decisions and counts, never message content.
     pub trace: Vec<TraceStep>,
+}
+/// One working session an answer used: the source that authorized it and which session.
+#[derive(Clone, Default, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct SessionUse {
+    pub source: String,
+    /// `claude`, `codex` or `opencode`.
+    pub provider: String,
+    pub session_id: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub machine: String,
+    /// The PTA run that started it, when one did.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub run: String,
 }
 #[derive(Clone, Default, Debug, Serialize, Deserialize)]
 #[serde(default)]

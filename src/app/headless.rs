@@ -49,6 +49,10 @@ pub(crate) fn run(
             }),
         });
         consumers::install(&host);
+        // Agent sessions sources read every machine of the account through this host.
+        crate::sessions::install(Some(Arc::new(
+            super::implementation::sessions::FleetReader::new(&host),
+        )));
         tokio::spawn(cloud::run(host.clone()));
         if let Some(page) = page::launch(host.clone()) {
             tokio::spawn(page);

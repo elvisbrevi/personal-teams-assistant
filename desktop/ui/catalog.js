@@ -2765,7 +2765,30 @@ const UI_CATALOG = { es: {
   "Open run": "Abrir ejecución",
   "An earlier send of this summary to this chat is uncertain: it may have been posted. Check Teams first; it is left out unless you send it again.": "Un envío anterior de este resumen a este chat quedó incierto: puede que se haya publicado. Revisa Teams primero; queda fuera a menos que lo envíes de nuevo.",
   "Send again anyway": "Enviar de nuevo de todas formas",
-  "Left out: an earlier send may have been posted.": "Quedó fuera: un envío anterior puede haberse publicado."
+  "Left out: an earlier send may have been posted.": "Quedó fuera: un envío anterior puede haberse publicado.",
+  "What my coding agents are working on, from their recent sessions.": "En qué están trabajando mis agentes de código, según sus sesiones recientes.",
+  "The most recent session of your coding agents, on every machine of your account": "La sesión más reciente de tus agentes de código, en cada máquina de tu cuenta",
+  "The {n} most recent sessions of your coding agents, on every machine of your account": "Las {n} sesiones más recientes de tus agentes de código, en cada máquina de tu cuenta",
+  "Show what it reads": "Ver lo que lee",
+  "Sessions to read": "Sesiones que lee",
+  "Newest first across Claude Code, Codex and OpenCode, at most 50.": "Las más recientes primero, entre Claude Code, Codex y OpenCode; como máximo 50.",
+  "offline": "sin conexión",
+  "needs an update": "necesita actualizarse",
+  "did not answer": "no respondió",
+  "could not be read": "no se pudieron leer",
+  "No session could be read.": "No se pudo leer ninguna sesión.",
+  "No agent sessions on the machines of your account yet.": "Aún no hay sesiones de agentes en las máquinas de tu cuenta.",
+  "Asked": "Pedido",
+  "Latest request": "Último pedido",
+  "Concluded": "Conclusión",
+  "Still open": "Pendiente",
+  "Started for": "Iniciada para",
+  "Sessions of {machine} unavailable: {reason}.": "Sesiones de {machine} no disponibles: {reason}.",
+  "Earlier messages read must be a whole number from 1 to 50.": "Los mensajes anteriores leídos deben ser un número entero de 1 a 50.",
+  "When no question covers a message, the assistant can say what your coding agents are already working on: it reads summaries of your latest Claude Code, Codex and OpenCode sessions on the machines of your account, without secrets, file contents or paths. Add it as a source to authorize it for each conversation.": "Cuando ninguna pregunta cubre un mensaje, el asistente puede decir en qué ya están trabajando tus agentes de código: lee resúmenes de tus últimas sesiones de Claude Code, Codex y OpenCode en las máquinas de tu cuenta, sin secretos, contenidos de archivos ni rutas. Agrégalo como fuente para autorizarlo en cada conversación.",
+  "Add agent sessions": "Agregar sesiones de agentes",
+  "Earlier messages read": "Mensajes anteriores leídos",
+  "How many earlier messages of the same chat the assistant reads before deciding whether and how to answer, so a message that refers back («the one I mentioned») makes sense. From 1 to 50.": "Cuántos mensajes anteriores del mismo chat lee el asistente antes de decidir si responde y cómo, para que tenga sentido un mensaje que remite a otro anterior («el que te mencioné»). De 1 a 50."
 } };
 
 /** Host texts with a variable part (older runs and entries were stored in English). */

@@ -389,6 +389,10 @@ nav button, .status-row, .activity-row, .segmented button, .subnav [role=tab], .
 .resource-edit .actions { margin: .2rem 0 0; justify-content: flex-end; }
 .resource-edit .resource-toggles { margin: .3rem 0 .9rem; }
 .resource-edit label > small { display: block; margin: .1rem 0 .2rem; }
+.session-preview:empty { display: none; }
+.session-summary p { margin: .2rem 0 0; font-size: var(--fs-sm); overflow-wrap: anywhere; }
+.session-summary small { color: var(--muted); font-size: var(--fs-sm); }
+.session-summary .label { font-weight: 600; }
 /* Dashed: a slot to fill in, not something saved yet. */
 .add-form { margin-top: .9rem; padding: .2rem 1rem; border: var(--bw) dashed var(--edge); border-radius: var(--radius-card); }
 .add-form[open] { padding-bottom: 1rem; }

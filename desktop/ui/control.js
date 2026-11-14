@@ -28,7 +28,7 @@ import { browserMicrosoftLogin } from './dialogs.js';
  *   'implementation_create' | 'implementation_creation' | 'implementation_history' |
  *   'implementation_mobile_session' | 'implementation_open_session' | 'implementation_prepare' |
  *   'implementation_request_catalog' | 'implementation_request_start' |
- *   'implementation_request_status' | 'implementation_runs' | 'implementation_sessions' |
+ *   'implementation_recent_sessions' | 'implementation_request_status' | 'implementation_runs' | 'implementation_sessions' |
  *   'implementation_start' | 'import_existing' | 'index_refresh' | 'index_status' |
  *   'list_azure_hus' | 'list_azure_tasks' | 'list_github_epics' | 'list_github_issues' |
  *   'llm_providers' | 'machine_assistant' | 'machine_browse' | 'machine_detail' |

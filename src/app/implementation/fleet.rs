@@ -53,7 +53,7 @@ async fn exchange(connection: &Connection, mut body: Value) -> Result<Value> {
     }
     crate::adapters::bounded_json(response, 1_000_000).await
 }
-async fn remote(connection: &Connection, body: Value) -> Result<Value> {
+pub(super) async fn remote(connection: &Connection, body: Value) -> Result<Value> {
     let result = exchange(connection, body).await?;
     ensure!(
         result["ok"] == true,
@@ -338,6 +338,7 @@ pub(in crate::app) async fn register(host: &Arc<Host>, args: &Value) -> Result<V
         checkout_inspect: false,
         workflow_direct: false,
         upgrade: false,
+        agent_sessions: false,
     });
     state.save(&data)?;
     drop(data);
@@ -433,6 +434,7 @@ pub(in crate::app) async fn protocol(host: &Arc<Host>, args: &Value) -> Result<V
             machine.checkout_inspect = args["checkout_inspect_support"] == true;
             machine.workflow_direct = args["workflow_direct_support"] == true;
             machine.upgrade = args["upgrade_support"] == true;
+            machine.agent_sessions = args["agent_sessions_support"] == true;
         }
         state.save(&data)?;
     }
@@ -550,6 +552,9 @@ pub(in crate::app) async fn protocol(host: &Arc<Host>, args: &Value) -> Result<V
         }
         "call" => match args["method"].as_str().unwrap_or_default() {
             "implementation_sessions" => Box::pin(session_index(host, &args["args"])).await,
+            "implementation_recent_sessions" => {
+                Box::pin(super::sessions::operate(host, &args["args"])).await
+            }
             "implementation_create" | "implementation_creation" => {
                 Box::pin(super::operation(
                     host,
@@ -660,7 +665,8 @@ pub(super) async fn call(
             "implementation_cancel",
             "implementation_mobile_session",
             "checkout_inspect",
-            "workflow_direct"
+            "workflow_direct",
+            "agent_sessions_local"
         ]
         .contains(&method),
         "Unavailable execution operation."
@@ -861,7 +867,7 @@ async fn poll(host: Arc<Host>) {
             let polled = remote(
                 &connection,
                 json!({"action":"poll","id":own,"results":results,"sessions":sessions,"session_cursor":next,"assistant_phase":assistant_phase,"management_support":true,"roots":roots,
-                    "host_version":env!("CARGO_PKG_VERSION"),"update":crate::app::maintenance::report(&host),"checkout_inspect_support":true,"workflow_direct_support":true,"upgrade_support":crate::app::maintenance::remote_capable(&host)}),
+                    "host_version":env!("CARGO_PKG_VERSION"),"update":crate::app::maintenance::report(&host),"checkout_inspect_support":true,"workflow_direct_support":true,"agent_sessions_support":true,"upgrade_support":crate::app::maintenance::remote_capable(&host)}),
             )
             .await;
             standing::note(&host.state, &polled);
@@ -1043,6 +1049,7 @@ mod tests {
             checkout_inspect: false,
             workflow_direct: false,
             upgrade: false,
+            agent_sessions: false,
         });
         data.teams_machine = worker.clone();
         assert!(leased(&mut data, &worker));

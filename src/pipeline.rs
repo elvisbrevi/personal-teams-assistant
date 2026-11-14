@@ -20,8 +20,9 @@ pub fn holding_reply(language: Language) -> &'static str {
     }
 }
 const HOLDING_AFTER: std::time::Duration = std::time::Duration::from_secs(300);
-/// Earlier messages of the conversation given to the model to interpret the current one.
-pub const HISTORY_MESSAGES: usize = 10;
+/// Earlier messages of the conversation given to the model to interpret the current one, by
+/// default (`policy.history_messages`).
+pub const HISTORY_MESSAGES: usize = crate::config::DEFAULT_HISTORY_MESSAGES;
 const HISTORY_CHARS: usize = 6000;
 
 /// Model calls have no deadline; this tracks when to tell the sender the answer is coming.
@@ -357,6 +358,8 @@ impl Pipeline {
                 .available(&message.conversation, &message.sender)
         };
         let mut history: Option<String> = None;
+        // An answer that says the user is already on it, from their working sessions.
+        let mut sessions_answer: Option<String> = None;
         audit.available_sources = available.iter().map(|r| r.id.clone()).collect();
         let matched_question = if let Some(questions) = &self.knowledge.questions {
             let context = self.history(&message, &mut audit, &mut history).await;
@@ -390,18 +393,35 @@ impl Pipeline {
                 return self.store.record(resource, &audit);
             }
         } else if self.knowledge.questions.is_some() && !drafting {
-            audit.reason = "no_matching_question".into();
-            audit.step(
-                "question",
-                "no configured question matched; left for review",
-            );
-            return self.store.record(resource, &audit);
+            // No question covers it; the user's working sessions may already be on it.
+            let context = self.history(&message, &mut audit, &mut history).await;
+            sessions_answer = self
+                .from_agent_sessions(
+                    resource,
+                    &message,
+                    &current,
+                    &context,
+                    &available,
+                    own_chat,
+                    &mut audit,
+                    &mut holding,
+                )
+                .await?;
+            if sessions_answer.is_none() {
+                audit.reason = "no_matching_question".into();
+                audit.step(
+                    "question",
+                    "no configured question matched; left for review",
+                );
+                return self.store.record(resource, &audit);
+            }
         }
         // Earlier messages say what a short follow-up refers to («¿y el endpoint de test?»).
         // Read once, when an intent decision or an answer first needs them.
         // A reply to an activity review in the personal chat may ask to link the work it found
         // to work items; that conversation is handled before any intent decision.
-        let report_tasks = self.case_on("report_tasks")
+        let report_tasks = sessions_answer.is_none()
+            && self.case_on("report_tasks")
             && !personal_request(&current)
             && (report_tasks_request(&current) || self.case_named("report_tasks", &current));
         let mut link_plan = None;
@@ -456,6 +476,9 @@ impl Pipeline {
             );
             false
         } else if link_reply.is_some() {
+            false
+        } else if sessions_answer.is_some() {
+            audit.step("intent", "work in progress in the user's working sessions");
             false
         } else if matched_question.is_some() {
             audit.step("intent", "configured question");
@@ -582,6 +605,12 @@ impl Pipeline {
         let mut link_offer: Option<LinkOffer> = None;
         let proposal = if let Some(reply) = link_reply {
             reply
+        } else if let Some(answer) = sessions_answer {
+            audit.reason = "agent_session_answer".into();
+            // A follow-up resolves against this exchange, like any other answer.
+            context_question = Some(current.chars().take(1800).collect());
+            context_answer = Some(answer.clone());
+            answer
         } else if is_greeting {
             audit.reason = "deterministic_greeting".into();
             self.config.policy.greeting.clone()
@@ -1405,6 +1434,7 @@ impl Pipeline {
                         review,
                         proposing,
                         unprompted,
+                        in_progress: false,
                         guidance: draft.as_ref().map_or("", |d| d.guidance.as_str()),
                         previous_draft: draft.as_ref().map_or("", |d| d.previous.as_str()),
                         context_instructions: context.map_or("", |c| c.instructions.as_str()),
@@ -2280,6 +2310,188 @@ impl Pipeline {
     /// Await a model call without a deadline. If it is still running when the holding
     /// deadline passes, send the deterministic notice once; the intent is recorded first so
     /// a retried job never sends it again, and a failed send is never retried.
+    /// The answer that says the user is already on it, when no configured question matches
+    /// and an agent sessions source is authorized for this conversation and sender: a model
+    /// picks, among the closed keys of the recent sessions, those about what the message asks
+    /// or refers to (with the chat's earlier messages), and the answer is written from them
+    /// alone. `None` leaves the message as it was: no such source, no session read, or none
+    /// about it. The tail of `run` checks and sends it like any other answer.
+    #[allow(clippy::too_many_arguments)]
+    async fn from_agent_sessions(
+        &self,
+        resource: &str,
+        message: &crate::adapters::teams::IncomingMessage,
+        current: &str,
+        history: &str,
+        available: &[&crate::knowledge::Resource],
+        own_chat: bool,
+        audit: &mut Audit,
+        holding: &mut Holding,
+    ) -> Result<Option<String>> {
+        let Some((source, limit)) = available.iter().find_map(|r| match &r.access {
+            Access::Tool {
+                tool: crate::tools::ToolSpec::AgentSessions { sessions },
+            } => Some((*r, *sessions)),
+            _ => None,
+        }) else {
+            return Ok(None);
+        };
+        audit.tools.push("read_agent_sessions".into());
+        let listing = match tokio::time::timeout(
+            std::time::Duration::from_secs(crate::sessions::READ_SECONDS),
+            crate::sessions::reader().recent(limit),
+        )
+        .await
+        {
+            Ok(Ok(listing)) => listing,
+            _ => {
+                tracing::warn!(event = "agent_sessions_unavailable");
+                audit.step("agent sessions", format!("{}: unreadable", source.id));
+                return Ok(None);
+            }
+        };
+        audit.step(
+            "agent sessions",
+            format!(
+                "{}: {} sessions read, {} machines or agents unavailable",
+                source.id,
+                listing.sessions.len(),
+                listing.unavailable.len()
+            ),
+        );
+        audit.coverage_warnings.extend(
+            listing
+                .unavailable
+                .iter()
+                .map(|gap| crate::sessions::unavailable_note(gap).trim().to_owned()),
+        );
+        if listing.sessions.is_empty() {
+            return Ok(None);
+        }
+        let keyed: Vec<(String, &crate::sessions::Summary)> = listing
+            .sessions
+            .iter()
+            .enumerate()
+            .map(|(i, s)| (format!("s{}", i + 1), s))
+            .collect();
+        let choices: BTreeMap<String, String> = keyed
+            .iter()
+            .map(|(key, s)| {
+                (
+                    key.clone(),
+                    self.redactor
+                        .redact(&crate::sessions::evidence(&[(key.clone(), *s)])),
+                )
+            })
+            .collect();
+        let chosen = match self
+            .awaiting_model(
+                holding,
+                resource,
+                message,
+                audit,
+                self.llm.select_sessions(current, history, &choices),
+            )
+            .await?
+        {
+            Ok(chosen) => chosen,
+            Err(_) => {
+                tracing::warn!(event = "session_selection_unavailable");
+                audit.step("agent sessions", "no model could choose among them");
+                return Ok(None);
+            }
+        };
+        let selected: Vec<(String, &crate::sessions::Summary)> = keyed
+            .iter()
+            .filter(|(key, _)| chosen.contains(key))
+            .cloned()
+            .collect();
+        if selected.is_empty() {
+            audit.step("agent sessions", "none is about this message");
+            return Ok(None);
+        }
+        audit.step(
+            "agent sessions",
+            format!("{} about this message", selected.len()),
+        );
+        audit.selected_sources = vec![source.id.clone()];
+        audit.used_sources = vec![source.id.clone()];
+        audit.agent_sessions = selected
+            .iter()
+            .map(|(_, s)| crate::state::SessionUse {
+                source: source.id.clone(),
+                provider: s.provider.clone(),
+                session_id: s.session_id.clone(),
+                machine: s.machine.clone(),
+                run: s
+                    .started_by
+                    .as_ref()
+                    .map(|r| r.run.clone())
+                    .unwrap_or_default(),
+            })
+            .collect();
+        let evidence: String = self
+            .redactor
+            .redact(&crate::sessions::evidence(&selected))
+            .chars()
+            .take(self.config.policy.max_context_chars)
+            .collect();
+        let person = if own_chat {
+            None
+        } else {
+            self.knowledge
+                .person_for(&message.sender, &message.sender_name)
+        };
+        let recipient = person.map_or_else(String::new, |p| {
+            let mut text = format!("Name: {}.", p.name);
+            for (label, part) in [
+                (" How the user addresses them: ", &p.address),
+                (" About them: ", &p.notes),
+            ] {
+                if !part.trim().is_empty() {
+                    text.push_str(label);
+                    text.push_str(part.trim());
+                }
+            }
+            self.redactor.redact(&text)
+        });
+        if let Some(person) = person {
+            audit.person = Some(person.id.clone());
+            audit.step("person", person.id.clone());
+        }
+        audit.provider = Some(self.llm.name().into());
+        self.checkpoint(resource, audit, "generating")?;
+        let generated = self
+            .awaiting_model(
+                holding,
+                resource,
+                message,
+                audit,
+                self.llm.generate_response(GenerationInput {
+                    question: current,
+                    evidence: &evidence,
+                    history,
+                    in_progress: true,
+                    prompts: self.prompts(),
+                    recipient: &recipient,
+                    ..Default::default()
+                }),
+            )
+            .await??;
+        if let Some(provider) = &generated.provider {
+            audit.provider = Some(provider.clone());
+        }
+        audit.provider_fallbacks = generated.fallbacks.clone();
+        audit.detailed = Some(generated.detailed);
+        audit.step(
+            "model",
+            format!(
+                "{} answered from working sessions",
+                audit.provider.as_deref().unwrap_or("the model")
+            ),
+        );
+        Ok(Some(generated.answer))
+    }
     async fn awaiting_model<T>(
         &self,
         holding: &mut Holding,
@@ -2378,7 +2590,11 @@ impl Pipeline {
         if let Some(text) = cached {
             return text.clone();
         }
-        let history = match self.adapter.history(message, HISTORY_MESSAGES).await {
+        let history = match self
+            .adapter
+            .history(message, self.config.policy.history_messages)
+            .await
+        {
             Ok(history) => history,
             Err(_) => {
                 tracing::warn!(event = "conversation_history_unavailable");

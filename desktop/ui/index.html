@@ -286,6 +286,7 @@
             </label>
             <label>Language <small>The language of this app, of what the assistant writes in Teams (including notices and sources) and of the tasks it drafts. It overrides the style.</small><select id="llm-language" class="cfg" translate="no"><option value="es">Español</option><option value="en">English</option></select></label>
             <label>Answer style<textarea id="llm-style" class="cfg" rows="3"></textarea></label>
+            <label>Earlier messages read <small>How many earlier messages of the same chat the assistant reads before deciding whether and how to answer, so a message that refers back («the one I mentioned») makes sense. From 1 to 50.</small><input id="history-messages" class="cfg" type="number" min="1" max="50" step="1" inputmode="numeric"></label>
           </div>
           <div class="panel" id="panel-message-style">
             <h2>Message style in Teams <span class="badge info">Account</span></h2>
@@ -835,6 +836,12 @@
               <div class="grow">
                 <p>Answers about what you did can read the daily task record, with task links, HU and hours. Add the activity record as a source to authorize it for each conversation.</p>
                 <div class="actions"><button id="add-record" type="button" class="secondary">Add activity record</button></div>
+              </div>
+            </div>
+            <div id="sessions-offer" class="callout info" hidden>
+              <div class="grow">
+                <p>When no question covers a message, the assistant can say what your coding agents are already working on: it reads summaries of your latest Claude Code, Codex and OpenCode sessions on the machines of your account, without secrets, file contents or paths. Add it as a source to authorize it for each conversation.</p>
+                <div class="actions"><button id="add-sessions-source" type="button" class="secondary">Add agent sessions</button></div>
               </div>
             </div>
             <details class="add-form">

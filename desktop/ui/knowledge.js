@@ -16,7 +16,7 @@ import { renderContexts, renderOrganization } from './knowledge-map.js';
 const toolNames = {
   azure_devops_wiki: 'Azure DevOps Wiki', azure_devops_status: t('Azure DevOps activity'), azure_devops: t('Azure DevOps work items'),
   sql_server: 'SQL Server', rabbitmq: t('RabbitMQ queue'), http: 'HTTP GET', teams_messages: t('My Teams messages'),
-  activity_record: t('Activity record'),
+  activity_record: t('Activity record'), agent_sessions: t('Agent sessions'),
 };
 
 /** The activity record as a new source: disabled, without audiences or external processing. */
@@ -24,6 +24,14 @@ function recordSource() {
   return { id: 'activity-record', description: t('Existing Azure tasks saved by day, with their HU and hours.'),
     topics: [], enabled: false, external_processing: false, allowed_conversations: [], allowed_senders: [],
     kind: 'tool', tool: { type: 'activity_record' } };
+}
+
+/** The user's recent agent sessions as a new source: disabled, without audiences or external processing. */
+function sessionsSource() {
+  const id = current.map.resources.some(r => r.id === 'agent-sessions') ? 'recent-agent-sessions' : 'agent-sessions';
+  return { id, description: t('What my coding agents are working on, from their recent sessions.'),
+    topics: [], enabled: false, external_processing: false, allowed_conversations: [], allowed_senders: [],
+    kind: 'tool', tool: { type: 'agent_sessions', sessions: 10 } };
 }
 
 /** An inline Azure DevOps catalog as its organizations' names. */
@@ -65,6 +73,7 @@ function accessText(resource) {
   if (tool.repository) return `${t('Catalog')}: ${tool.repository} / ${tool.path}`;
   if (tool.catalog?.length) return `${t('Catalog')}: ${catalogText(tool.catalog)}`;
   if (tool.type === 'activity_record') return t('Daily task record, read on this device');
+  if (tool.type === 'agent_sessions') return tn(tool.sessions ?? 10, 'The most recent session of your coding agents, on every machine of your account', 'The {n} most recent sessions of your coding agents, on every machine of your account');
   if (tool.url) return tool.url;
   if (tool.operation) return `${t('Fixed query')}: ${tool.operation}`;
   if (tool.type === 'teams_messages') return t('Your own messages, read with the connected Microsoft account');
@@ -94,6 +103,7 @@ function renderResources() {
     container.append(el('div', { class: 'empty' }, el('p', { textContent: t('No sources yet. Add a repository or a file from one, or register the Wiki with pta sources add.') })));
   }
   $('#record-offer').hidden = resources.some(r => r.tool?.type === 'activity_record');
+  $('#sessions-offer').hidden = resources.some(r => r.tool?.type === 'agent_sessions');
   for (const resource of resources) {
     let state = sourceState(resource);
     const facts = el('p', { class: 'resource-facts' });
@@ -145,6 +155,19 @@ function renderResources() {
           state = next;
         })),
       el('div', { class: 'actions' }, ...actions));
+    if (resource.tool?.type === 'agent_sessions') {
+      const count = el('input', { type: 'number', min: 1, max: 50, step: 1, value: resource.tool.sessions ?? 10, inputMode: 'numeric' });
+      count.oninput = () => {
+        const n = Number(count.value);
+        if (Number.isInteger(n) && n >= 1 && n <= 50) { resource.tool.sessions = n; renderFacts(); markDirty({ target: count }); }
+      };
+      const shown = el('div', { class: 'list session-preview', 'aria-live': 'polite' });
+      const preview = el('button', { type: 'button', class: 'secondary small', textContent: t('Show what it reads') });
+      preview.onclick = () => busy(preview, async () => renderSessionPreview(shown, await invoke('implementation_recent_sessions', { limit: resource.tool.sessions ?? 10 })));
+      actions.unshift(preview);
+      edit.insertBefore(el('label', {}, t('Sessions to read'), el('small', { textContent: t('Newest first across Claude Code, Codex and OpenCode, at most 50.') }), count), edit.lastElementChild);
+      edit.append(shown);
+    }
     if (resource.kind === 'urls' || Array.isArray(resource.tool?.page_urls)) {
       const urls = el('textarea', { rows: 4, value: (resource.urls ?? resource.tool.page_urls).join('\n'), spellcheck: false });
       urls.oninput = () => { if (resource.kind === 'urls') resource.urls = lines(urls.value); else resource.tool.page_urls = lines(urls.value); renderFacts(); markDirty({ target: urls }); };
@@ -156,6 +179,36 @@ function renderResources() {
       facts, toggles, edit));
   }
   renderOrganization();
+}
+
+const agentNames = { claude: 'Claude Code', codex: 'Codex', opencode: 'OpenCode' };
+const unavailableReasons = {
+  offline: t('offline'), outdated: t('needs an update'), no_answer: t('did not answer'), unreadable: t('could not be read'),
+};
+
+/** What an agent sessions source reads now, as the owner sees it before authorizing it. */
+function renderSessionPreview(container, listing) {
+  const sessions = listing?.sessions ?? [];
+  const gaps = listing?.unavailable ?? [];
+  container.replaceChildren();
+  if (!sessions.length) container.append(el('p', { class: 'hint', textContent: gaps.length ? t('No session could be read.') : t('No agent sessions on the machines of your account yet.') }));
+  for (const session of sessions) {
+    const parts = [[t('Asked'), session.asked], [t('Latest request'), session.latest], [t('Concluded'), session.concluded], [t('Still open'), session.open]]
+      .filter(([, text]) => text);
+    const run = session.started_by;
+    container.append(el('div', { class: 'row session-summary' },
+      el('div', { class: 'grow' },
+        el('strong', { textContent: [agentNames[session.provider] ?? session.provider, session.machine, session.project].filter(Boolean).join(' · ') }),
+        el('small', { textContent: ` ${ago(Date.parse(session.updated_at))}` }),
+        ...parts.map(([label, text]) => el('p', {}, el('span', { class: 'label', textContent: `${label}: ` }), text)),
+        run?.work_item_url ? el('p', {}, el('span', { class: 'label', textContent: `${t('Started for')}: ` }),
+          el('a', { href: run.work_item_url, target: '_blank', rel: 'noopener', textContent: run.work_item_title || run.work_item_url })) : null)));
+  }
+  for (const gap of gaps) {
+    container.append(el('p', { class: 'hint', textContent: t('Sessions of {machine} unavailable: {reason}.', {
+      machine: [gap.machine, agentNames[gap.provider] ?? gap.provider].filter(Boolean).join(' · '),
+      reason: unavailableReasons[gap.reason] ?? gap.reason }) }));
+  }
 }
 
 /** Removed sources leave the contexts and the organization that named them. */
@@ -335,7 +388,7 @@ function setNoteOrigin(value) { noteOrigin = value; }
 function setNewNoteContexts(value) { newNoteContexts = value; }
 
 export {
-  toolNames, recordSource, kindName, openSources, renderResources, renderRepositories, addRepositorySource,
+  toolNames, recordSource, sessionsSource, kindName, openSources, renderResources, renderRepositories, addRepositorySource,
   noteOrigin, loadNotes, newNoteContexts, renderNoteContexts, renderNotes, loadKnowledge, listGithub,
   setNewNoteContexts, setNoteOrigin,
 };

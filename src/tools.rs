@@ -75,6 +75,17 @@ pub enum ToolSpec {
     /// and hours, and verified work not registered yet. Read locally from
     /// `activity-registration.db`; no credential or network.
     ActivityRecord {},
+    /// The user's most recent coding-agent sessions (Claude Code, Codex, OpenCode) on the
+    /// account's machines, as bounded summaries without secrets, file contents or paths
+    /// (`crate::sessions`), plus the sessions PTA started with their work items.
+    AgentSessions {
+        /// How many sessions, newest first across the agents (1–50).
+        #[serde(default = "default_sessions")]
+        sessions: usize,
+    },
+}
+fn default_sessions() -> usize {
+    crate::sessions::DEFAULT_LIMIT
 }
 /// One Azure DevOps organization of a catalog: the projects to read (`*` = the projects of the
 /// teams the user belongs to) and the user's author email.
@@ -186,6 +197,10 @@ impl ToolSpec {
                 }
             }
             Self::TeamsMessages {} | Self::ActivityRecord {} => {}
+            Self::AgentSessions { sessions } => ensure!(
+                (1..=crate::sessions::MAX_LIMIT).contains(sessions),
+                "an agent sessions source reads between 1 and 50 sessions"
+            ),
         }
         Ok(())
     }
@@ -271,6 +286,7 @@ impl ToolSpec {
             Self::Http { .. } => "http_get",
             Self::TeamsMessages {} => "get_own_teams_messages",
             Self::ActivityRecord {} => "read_recorded_activities",
+            Self::AgentSessions { .. } => "read_agent_sessions",
         }
     }
     /// Sources an activity review reads: Azure DevOps activity, Wiki edits, own messages.
@@ -750,6 +766,20 @@ impl ReadOnlyTool for Tools {
                 ToolSpec::ActivityRecord {} => {
                     anyhow::bail!("the activity record is read by the pipeline")
                 }
+                ToolSpec::AgentSessions { sessions } => {
+                    let listing = crate::sessions::reader().recent(*sessions).await?;
+                    let keyed: Vec<_> = listing
+                        .sessions
+                        .iter()
+                        .enumerate()
+                        .map(|(i, s)| (format!("s{}", i + 1), s))
+                        .collect();
+                    let mut text = crate::sessions::evidence(&keyed);
+                    for gap in &listing.unavailable {
+                        text.push_str(&crate::sessions::unavailable_note(gap));
+                    }
+                    Ok(text)
+                }
                 ToolSpec::Http { url, secret_ref } => {
                     let mut req = self.client.get(url);
                     if let Some(s) = secret_ref {
@@ -767,6 +797,7 @@ impl ReadOnlyTool for Tools {
             ToolSpec::AzureDevopsStatus { .. } => 180,
             ToolSpec::AzureDevopsWiki { .. } => 32,
             ToolSpec::TeamsMessages {} => 60,
+            ToolSpec::AgentSessions { .. } => crate::sessions::READ_SECONDS,
             _ => 5,
         };
         tokio::time::timeout(std::time::Duration::from_secs(seconds), operation).await?
