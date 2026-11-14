@@ -280,6 +280,20 @@ still raised one, its text (bounded, redacted) is in the run's `prompts` and the
 in records from older hosts). Failures, cancellations and interruptions stay distinct. An interrupted run retains its session ID, with no invented finish time. The
 coordinator receives durable session updates, including last-known records for offline machines.
 
+Every run or session that did not end with its answer has `failure`: `{cause, exit_code?,
+stderr?, text}`, chosen by code on the machine that ran it, and `text` is one sentence naming
+the next action. The causes: `cli_missing`, `model_unavailable`, `cli_exited_at_start` (with
+`exit_code`, and `stderr` the kind of the CLI's first stderr line: `missing_variable`,
+`not_signed_in`, `unknown_model`, `unknown_flag` or `other`), `stream_ended` (with
+`exit_code`), `output_limit` (the final report was too large to read), `timeout`, `cancelled`,
+`permission_prompt`, `invalid_answer`, `agent_error` (the CLI reported the turn as an error),
+`no_report`, `host_restarted`, `machine_offline` and `unknown` (a machine that predates causes,
+or a cause this version does not know). What a CLI wrote on stderr is never recorded or shown:
+to see it, run the CLI in a terminal on that machine. `implementation_runs`,
+`implementation_history` and `implementation_sessions` return it; report the `text` and act on
+the cause (for example install or sign in to the CLI, or update the machine) instead of
+guessing from `output`.
+
 `implementation_runs` filters by machine and optional run `id` or `work_item_url`, returns the
 latest 100 matching executions within an 800 KB response budget and their session/timing/result fields; `partial` signals an omitted older result. Request a run by `id` to retrieve it individually. `implementation_sessions`
 reads the account's session index for up to 100 canonical work item URLs, with up to three recent summaries per item, prioritizing active executions. Work item details show
@@ -510,7 +524,10 @@ Requires host and CLI `workflow_director_support: true`.
   the item's project, with the director's one-line `reason` (in the user's language) and
   `outcome: "chosen"`; otherwise `workflow` is `null` with `reason` and `outcome`
   `unrecognized` (an ID it did not send, an answer that is not the JSON asked for, no answer),
-  `disabled` or `other_project`, or `none` with the director's reason when it chose none. The
+  `disabled` or `other_project`, or `none` with the director's reason when it chose none. A
+  session that gave no answer adds `failure` (the vocabulary of `implementation_runs`, chosen by
+  the director's machine; `unknown` from one that predates causes), and a director that could
+  not run fails with `The workflow director did not run.` and the cause's sentence. The
   reply also has what the director said (`director`), which director answered (`directed_by`:
   machine, provider, model, effort and `source`), the `candidates`, the item's verified
   link, and `run` and `session_id`: the session appears in Agent history
@@ -551,14 +568,19 @@ run (any state but `done` and `cancelled`).
   whole record: the stage timeline with times and outcomes, the planning run and each child's
   coding run (`implementation_runs` with the machine and ID shows them), the creation ledger entry
   (`implementation_creation`), every child's verified link, branch and pull requests with their
-  links and status, and `attention` (what to look at) or `error`. Report links as they are.
+  links and status, and `attention` (what to look at) or `error`. A planning or coding run that
+  did not end with its answer has its machine's cause in `planning.failure` or the child's
+  `coding.failure`, and a classification without an answer in `classification.failure`
+  (`{cause, exit_code?, stderr?}`, the vocabulary of `implementation_runs`). Report links as they are.
 - **States:** `classifying`, `unassigned`, `planning`, `plan_review`, `creating_children`,
   `coding`, `pull_requests`, `blocks` (the `pull_requests_completed` and `done` blocks run here),
   `done`, `failed`, `cancelled`, `interrupted`, `needs_attention`. A coding run that ends
   `permission_prompt`, `failed`, `needs_attention` or `interrupted`, an abandoned pull request, a
   session that reported no branch, an uncertain creation, a run that delivered no child and a
   wait longer than `pull_request_wait_days` stop the run in `needs_attention`, naming the cause and the linked run
-  or pull request. A restart while a planning or coding run was active leaves it `interrupted`.
+  or pull request; for a coding or planning run the attention text is `… ended STATE: SENTENCE`,
+  the sentence of the session's cause. A director that gave no answer leaves the run
+  `unassigned` with `The workflow director gave no answer: SENTENCE Assign a workflow to this run.` A restart while a planning or coding run was active leaves it `interrupted`.
 - **Resume:** `pta workflows resume RUN --confirmed` (MCP `workflow_run_resume`) continues a
   `failed`, `interrupted` or `needs_attention` run from the stage it stopped in, accepting what
   stopped it: a new planning run replaces one that did not end ready, the children that were
@@ -607,7 +629,8 @@ run (any state but `done` and `cancelled`).
   is in Agent history (`implementation_history`, `purpose: "summary"`). The director writes no
   links: URLs it wrote are dropped and code appends a **Links** list with the verified links of the
   item and of the children and pull requests the text names; report them as they are. An empty or
-  malformed answer is an error and nothing is stored. Needs a director (Settings › Workflows) on a
+  malformed answer, or a session that could not run, is an error that names the cause's sentence;
+  nothing is stored and the run's `error` says `The progress summary failed: …`. Needs a director (Settings › Workflows) on a
   machine running 0.12.6 or later. Show the user the summary before offering to send it.
 - **Send a summary to Teams:** `pta workflows summary RUN --send CHAT_ID [--mention NAME…]
   [--text-file PATH] [--summary ID] --confirmed` (MCP `workflow_summary_send` with `run`,

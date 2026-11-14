@@ -33,7 +33,7 @@ impl Database {
             CREATE INDEX IF NOT EXISTS agent_session_item ON agent_session_index(item_url,requested_at);
             BEGIN IMMEDIATE;
             INSERT INTO agent_run_events(run_id) SELECT id FROM agent_runs WHERE state IN ('running','planning');
-            UPDATE agent_runs SET state='interrupted' WHERE state IN ('running','planning');
+            UPDATE agent_runs SET state='interrupted',payload=json_set(payload,'$.failure',json('{\"cause\":\"host_restarted\"}')) WHERE state IN ('running','planning');
             COMMIT;")?;
         // A Claude session kept after its run lives only as long as the host that kept it: once
         // it starts again none is connected, and its record says so (and reaches the coordinator).
@@ -42,6 +42,7 @@ impl Database {
             UPDATE agent_runs SET payload=json_set(payload,'$.remote',json('{OFFLINE}')) WHERE provider='claude' AND json_extract(payload,'$.remote.status')='connected';
             COMMIT;"))?;
         db.execute_batch(&format!("CREATE TABLE IF NOT EXISTS request_runs (id TEXT PRIMARY KEY, state TEXT NOT NULL, requested_at TEXT NOT NULL, payload TEXT NOT NULL);
+            UPDATE request_runs SET payload=json_set(payload,'$.failure',json('{{\"cause\":\"host_restarted\"}}')) WHERE state='generating';
             UPDATE request_runs SET state=CASE WHEN state='sending' THEN 'uncertain' ELSE 'interrupted' END WHERE state IN ('generating','sending');
             UPDATE request_runs SET payload=json_set(payload,'$.remote',json('{OFFLINE}')) WHERE json_extract(payload,'$.provider')='claude' AND json_extract(payload,'$.remote.status')='connected';"))?;
         Ok(Self(std::sync::Mutex::new(db)))
@@ -239,6 +240,19 @@ impl Database {
         let tx = db.transaction()?;
         if tx.execute("UPDATE agent_runs SET session_id=COALESCE(?2,session_id),started_at=COALESCE(started_at,?3) WHERE id=?1 AND state IN ('running','planning')",params![id,session,chrono::Utc::now().to_rfc3339()])?>0 { tx.execute("INSERT INTO agent_run_events(run_id) VALUES (?1)",[id])?; }
         tx.commit()?;
+        Ok(())
+    }
+    /// Record why a run did not end with its answer, before it finishes.
+    pub(super) fn failure(
+        &self,
+        id: &str,
+        failure: &crate::llm::implementation::Failure,
+    ) -> Result<()> {
+        let value = serde_json::to_string(failure)?;
+        self.0.lock().unwrap().execute(
+            "UPDATE agent_runs SET payload=json_set(payload,'$.failure',json(?2)) WHERE id=?1 AND state IN ('running','planning')",
+            params![id, value],
+        )?;
         Ok(())
     }
     /// Record the permission prompts a run still raised, before it finishes.

@@ -12,6 +12,7 @@ import { openAgentSession, sessionDestination, sessionIsMobile, sessionLifeBadge
 import { implementationEfforts, implementationModels, implementationReady } from './implementation.js';
 import { loadAzureCliStatus, loadGithubCliStatus, providerNames } from './home.js';
 import { effortNames } from './settings-models.js';
+import { failureText } from './run-states.js';
 
 // ---------------------------------------------------------------- request creation and agent history
 let requestForm = null;
@@ -162,6 +163,7 @@ function agentRunCard(run) {
     el('div', { class: 'actions' }, open, copySession),
     open.disabled ? el('p', { class: 'hint', textContent: destination.reason }) : null,
     run.output ? el('p', { class: 'hint', textContent: tx(run.output) }) : null,
+    run.failure ? el('p', { class: 'callout warn run-failure', textContent: failureText(run.failure) }) : null,
     run.state === 'uncertain' ? el('p', { class: 'callout warn', textContent: t('The provider may have created the request. Inspect it before creating another; this execution will not be retried.') }) : null,
     run.state === 'needs_attention' && run.purpose === 'request' ? el('p', { class: 'callout warn', textContent: t('The issue was created, but its Epic type or assignment could not be confirmed. Review the original issue.') }) : null);
   return card;

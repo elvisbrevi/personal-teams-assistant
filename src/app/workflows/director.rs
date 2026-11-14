@@ -869,13 +869,18 @@ pub(super) async fn classify_item(
         &organization,
         &item.project,
     );
-    let verdict = json!({
+    // Why the director gave no answer, from the fixed vocabulary.
+    let failure = answer.direction.failure.map(|f| f.view());
+    let mut verdict = json!({
         "workflow": judgment.workflow,
         "outcome": judgment.verdict.word(),
         "reason": judgment.reason,
         "director": {"workflow": judgment.said, "reason": judgment.said_reason},
         "candidates": sent,
     });
+    if let Some(failure) = &failure {
+        verdict["failure"] = failure.clone();
+    }
     implementation::director::record(host, &answer.run, verdict).map_err(fail)?;
     Ok(json!({
         "workflow": judgment.workflow,
@@ -883,6 +888,7 @@ pub(super) async fn classify_item(
         "reason": judgment.reason,
         "director": {"workflow": judgment.said, "reason": judgment.said_reason},
         "problem": answer.direction.problem,
+        "failure": failure,
         "directed_by": directed_by,
         "candidates": listed,
         "item": verified,

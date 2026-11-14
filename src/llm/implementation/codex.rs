@@ -251,15 +251,24 @@ impl Client {
                 }
                 if method == "turn/completed" && p["turn"]["id"] == turn_id {
                     interrupt.complete = true;
-                    return Ok::<_, anyhow::Error>(p["turn"]["status"] == "completed" && !text.trim().is_empty());
+                    return Ok::<_, anyhow::Error>(p["turn"]["status"] == "completed");
                 }
             }
         }).await;
         // At the limit the turn is interrupted (`Interrupt`) and the run records why.
-        let Ok(ok) = ok else {
-            return Outcome::redacted(false, LIMIT_REACHED, &prompts);
+        let Ok(completed) = ok else {
+            return Ok(Outcome::redacted(false, LIMIT_REACHED, &prompts)?
+                .because(Failure::of(Cause::Timeout)));
         };
-        Outcome::redacted(ok?, &text, &prompts)
+        let completed = completed?;
+        let ok = completed && !text.trim().is_empty();
+        Ok(
+            Outcome::redacted(ok, &text, &prompts)?.because(Failure::of(if completed {
+                Cause::NoReport
+            } else {
+                Cause::AgentError
+            })),
+        )
     }
 }
 /// Server requests of the app-server protocol that wait for a person: approvals, questions and

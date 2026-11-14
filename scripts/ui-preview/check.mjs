@@ -2657,6 +2657,8 @@ if (flag !== '--axe-only') for (const [label, viewport] of [['desktop', { width:
   await page.click('#run-rows [data-run="3c5f1c9a-0d2e-4b7a-8f10-5a6b7c8d9e04"]');
   await page.waitForSelector('#run-attention');
   check(`runs ${label}: a run that needs attention says why`, /permission prompt/.test(await detailText()));
+  const stoppedWhy = await page.locator('#run-failure').textContent().catch(() => '');
+  check(`runs ${label}: the cause its machine reported is shown in the user's language`, /^Por qué se detuvo .*solicitud de permiso/.test(stoppedWhy ?? '') && /solicitud de permiso/.test(await page.locator('.run-child-failure').first().textContent()), stoppedWhy);
   await page.locator('.run-actions button', { hasText: 'Reanudar' }).click();
   await page.locator('.run-actions button', { hasText: 'Confirmar reanudar' }).click();
   await page.waitForFunction(() => window.__ptaWorkflowCalls.some(c => c.method === 'workflow_run_resume'));

@@ -480,6 +480,7 @@ Knowledge
                            Runs, newest first, and those waiting on you (attention); a run waiting
                            for a slot has waiting_for_slot and its queue_position (1 is next).
   workflows status RUN                   One run: stages, implementation runs, children, pull requests.
+                           A session that did not end with its answer shows why (failure: a fixed cause).
   workflows resume RUN --confirmed       Continues a failed, interrupted or needs_attention run from its
                            stage, accepting what stopped it; never submits a plan or starts a started
                            coding run again.

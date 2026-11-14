@@ -10,7 +10,7 @@ import { loadWorkItemSessions, openAgentSession } from './sessions.js';
 import { chooseDirectories } from './directory-sheet.js';
 import { providerNames } from './home.js';
 import { effortNames } from './settings-models.js';
-import { allowNames, runStateLabel as runState } from './run-states.js';
+import { allowNames, failureText, runStateLabel as runState } from './run-states.js';
 import { openWorkflowRun } from './workflow-runs.js';
 
 let implementationForm = null;
@@ -343,6 +343,7 @@ async function implementationRuns(form) {
     const panel = el('article', { class: 'implementation-run' }, badge(tx(run.state), ['done', 'completed', 'created'].includes(run.state) ? 'ok' : ['permission_prompt', 'needs_attention', 'failed'].includes(run.state) ? 'warn' : 'info'), el('strong', { textContent: `${providerNames[run.provider] || run.provider || ''} · ${run.model || ''}` }),
       el('dl', { class: 'todo-fields' }, ...[[t('Requested at'), run.created_at], [t('Started at'), run.started_at], [t('Finished at'), run.finished_at]].map(([label, value]) => el('div', {}, el('dt', { textContent: label }), el('dd', { textContent: value ? new Date(value).toLocaleString(uiLocale()) : t('Not recorded') }))),
         el('div', {}, el('dt', { textContent: t('Permission mode') }), el('dd', { class: 'implementation-permission-mode', textContent: permissionMode(run.permission_mode) }))));
+    if (run.failure) panel.append(el('p', { class: 'callout warn run-failure', textContent: failureText(run.failure) }));
     if (run.prompts?.length) panel.append(el('div', { class: 'callout warn implementation-prompts' }, el('div', {},
       el('p', { textContent: t('The coding CLI still stopped on a permission prompt, which nobody answered. Remove its cause on that computer:') }),
       el('pre', { class: 'implementation-output', textContent: run.prompts.join('\n') }))));
