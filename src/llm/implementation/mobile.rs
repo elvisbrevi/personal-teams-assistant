@@ -131,6 +131,9 @@ struct Session {
     child: Child,
     input: ChildStdin,
     output: BufReader<ChildStdout>,
+    lines: super::lines::Lines,
+    /// An event could not be read within the stream's bounds and was skipped.
+    skipped: bool,
     _tree: ProcessTree,
     stderr: tokio::task::JoinHandle<std::io::Result<Vec<u8>>>,
     remote_connected: bool,
@@ -154,16 +157,21 @@ impl Session {
     }
     async fn next(&mut self) -> Result<Value> {
         loop {
-            let mut line = Vec::new();
-            let count = (&mut self.output)
-                .take(256_001)
-                .read_until(b'\n', &mut line)
-                .await?;
-            ensure!(
-                count > 0 && count <= 256_000,
-                "The remote agent connection ended or exceeded its output limit."
-            );
-            if let Ok(value) = serde_json::from_slice::<Value>(&line) {
+            // A line is read in bounded memory: an oversized one is read without its payload
+            // or skipped, never the end of the session.
+            let bytes = self.output.fill_buf().await?;
+            let (used, line) = if bytes.is_empty() {
+                let line = self.lines.finish();
+                ensure!(line.is_some(), "The remote agent connection ended.");
+                (0, line)
+            } else {
+                self.lines.feed(bytes)
+            };
+            self.output.consume(used);
+            if line == Some(super::lines::Line::Skipped) {
+                self.skipped = true;
+            }
+            if let Some(super::lines::Line::Event(value)) = line {
                 // The provider bridge forwards prompts to the signed-in person's app and
                 // injects their response itself. The host never grants an approval.
                 if value["type"] == "control_request" {
@@ -313,6 +321,8 @@ async fn spawn(
         ),
         input: child.stdin.take().unwrap(),
         output: BufReader::new(child.stdout.take().unwrap()),
+        lines: super::lines::Lines::new(),
+        skipped: false,
         stderr: tokio::spawn(tail(child.stderr.take().unwrap())),
         child,
         remote_connected: false,
@@ -490,6 +500,7 @@ async fn follow_session(
         for prompt in std::mem::take(&mut session.prompts) {
             keep_prompt(&mut prompts, &prompt);
         }
+        let text = noted(text, session.skipped, planning);
         return Outcome::redacted(false, &text, &prompts);
     };
     followed?;
@@ -499,6 +510,7 @@ async fn follow_session(
     for prompt in std::mem::take(&mut session.prompts) {
         keep_prompt(&mut events.prompts, &prompt);
     }
+    let text = noted(std::mem::take(&mut events.text), session.skipped, planning);
     if access.status == "connected" {
         if retain(id, session, access, remote.clone()).await.is_err() {
             remote(Access::unavailable())?;
@@ -506,7 +518,7 @@ async fn follow_session(
     } else {
         let _ = session.child.kill().await;
     }
-    Outcome::redacted(ok, &events.text, &events.prompts)
+    Outcome::redacted(ok, &text, &events.prompts)
 }
 
 pub(crate) async fn reconnect(
@@ -846,6 +858,120 @@ while read -r line; do :; done"##,
         assert!(!outcome.ok);
         assert!(outcome.text.starts_with(LIMIT_REACHED), "{}", outcome.text);
         assert!(outcome.text.contains("Waiting."));
+    }
+
+    /// A shell function for the fake CLI: `image N` prints Claude Code's line for a tool
+    /// result that read an image of N base64 bytes, which the line carries twice.
+    #[cfg(unix)]
+    const IMAGE: &str = r##"image() {
+  printf '%s' '{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"read-1","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"'
+  head -c "$1" /dev/zero | tr '\0' A
+  printf '%s' '"}}]}]},"parent_tool_use_id":null,"tool_use_result":{"type":"image","file":{"base64":"'
+  head -c "$1" /dev/zero | tr '\0' A
+  printf '%s\n' '","type":"image/png"}}}'
+}
+"##;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn reading_large_images_does_not_end_the_session() {
+        let root = tempfile::tempdir().unwrap();
+        // Lines of about 300 KB and 5 MB between ordinary events.
+        let binary = fake_session(
+            root.path(),
+            &format!(
+                r##"{IMAGE}printf '%s\n' '{{"type":"assistant","message":{{"role":"assistant","content":[{{"type":"text","text":"Checking the screenshots."}}]}}}}'
+image 150000
+printf '%s\n' '{{"type":"assistant","message":{{"role":"assistant","content":[{{"type":"text","text":"Checking the larger one."}}]}}}}'
+image 2500000
+printf '%s\n' '{{"type":"result","is_error":false,"result":"Opened the pull request.\nBranch: feature/screenshots"}}'
+printf '%s\n' '{{"type":"system","subtype":"session_state_changed","state":"idle"}}'
+while read -r line; do :; done"##
+            ),
+        );
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(20),
+            run_session(
+                &binary,
+                root.path(),
+                (Duration::from_secs(60), Duration::from_secs(5)),
+            ),
+        )
+        .await
+        .expect("The session did not end after its last turn");
+        // `done`: it completed, raised no prompt and its report is the final turn's.
+        assert!(outcome.ok);
+        assert!(outcome.prompts.is_empty());
+        assert_eq!(
+            outcome.text,
+            "Opened the pull request.\nBranch: feature/screenshots"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn events_after_an_oversized_line_are_read_and_a_skipped_one_is_noted_once() {
+        let root = tempfile::tempdir().unwrap();
+        let binary = fake_session(
+            root.path(),
+            &format!(
+                r##"{IMAGE}image 2500000
+printf '%s\n' '{{"type":"control_request","request_id":"ask-1","request":{{"subtype":"can_use_tool","tool_name":"Bash","input":{{"command":"az boards work-item update"}}}}}}'
+read -r answer
+case "$answer" in *'"request_id":"ask-1"'*) ;; *) exit 11;; esac
+image 150000
+printf '%s\n' '{{"type":"system","subtype":"status","session_id":"22222222-2222-4222-8222-222222222222"}}'
+# Two events that cannot be read: one that is not JSON, one far over the kept bound.
+printf '%s' '{{"type":"user","secret":'; head -c 300000 /dev/zero | tr '\0' 7; printf '%s\n' ']'
+printf '%s' '{{"type":"user","parts":['; i=0; while [ $i -lt 6 ]; do printf '"'; head -c 200000 /dev/zero | tr '\0' S; printf '",'; i=$((i+1)); done; printf '%s\n' '""]}}'
+image 150000
+printf '%s\n' '{{"type":"result","session_id":"22222222-2222-4222-8222-222222222222","is_error":false,"result":"Done.\nBranch: feature/after"}}'
+printf '%s\n' '{{"type":"system","subtype":"session_state_changed","state":"idle"}}'
+while read -r line; do :; done"##
+            ),
+        );
+        let observed = std::sync::Mutex::new(Vec::new());
+        let args = arguments(
+            "claude",
+            "synthetic-model",
+            "low",
+            &[root.path().into()],
+            false,
+        )
+        .unwrap();
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(20),
+            follow_session(
+                &binary,
+                &args,
+                root.path(),
+                "Synthetic coding task",
+                &uuid::Uuid::new_v4().to_string(),
+                false,
+                &|id| {
+                    observed.lock().unwrap().extend(id.map(str::to_owned));
+                    Ok(())
+                },
+                Arc::new(|_| Ok(())),
+                (Duration::from_secs(60), Duration::from_secs(5)),
+            ),
+        )
+        .await
+        .expect("The session did not end after its last turn")
+        .unwrap();
+        assert_eq!(
+            observed.lock().unwrap().last().map(String::as_str),
+            Some("22222222-2222-4222-8222-222222222222")
+        );
+        assert_eq!(
+            outcome.prompts,
+            [r#"Bash: {"command":"az boards work-item update"}"#]
+        );
+        assert!(outcome.ok);
+        assert_eq!(
+            outcome.text,
+            format!("Done.\nBranch: feature/after\n\n{SKIPPED_EVENT}")
+        );
     }
 
     #[test]

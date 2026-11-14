@@ -1,6 +1,7 @@
 //! Interactive coding is separate from the tool-less answer providers.
 use super::agent;
 mod codex;
+mod lines;
 pub(crate) mod mobile;
 use crate::workflows::Allow;
 use anyhow::{Result, ensure};
@@ -231,6 +232,20 @@ pub(crate) struct Outcome {
 /// `LIMIT_REACHED`.
 const SESSION_LIMIT: Duration = Duration::from_secs(7200);
 const LIMIT_REACHED: &str = "The agent session was still working when it reached the two-hour limit of a run and was stopped; read its session for what it left unfinished.";
+/// A coding run's report ends with this, once, when an event of its stream could not be read
+/// within the bounds of `lines` and was skipped; nothing of the event is kept.
+const SKIPPED_EVENT: &str = "An event in the agent's output was too large or malformed to read and was skipped; read its session for what it held.";
+/// A coding run's report with the note that an event was skipped. A planning, request or
+/// classification session returns JSON, which stays as it is.
+fn noted(mut text: String, skipped: bool, planning: bool) -> String {
+    if skipped && !planning {
+        if !text.trim().is_empty() {
+            text.push_str("\n\n");
+        }
+        text.push_str(SKIPPED_EVENT);
+    }
+    text
+}
 /// At most this many prompts of this many characters are kept for a run.
 const PROMPTS: usize = 8;
 const PROMPT_CHARS: usize = 2000;
@@ -598,6 +613,8 @@ struct Events {
     failed: bool,
     /// Permission prompts the provider still raised and nobody answered.
     prompts: Vec<String>,
+    /// An event could not be read within the stream's bounds (`lines`) and was skipped.
+    skipped: bool,
 }
 impl Events {
     fn event(
@@ -697,28 +714,30 @@ async fn events(
     requested: &str,
 ) -> Result<Events> {
     let mut result = Events::default();
-    let mut pending = Vec::new();
+    let mut lines = lines::Lines::new();
     let mut buffer = [0; 8192];
-    let mut clipped = false;
     loop {
         let count = stream.read(&mut buffer).await?;
+        let mut line = |line| match line {
+            lines::Line::Event(event) => result.event(provider, &event, observer, requested),
+            lines::Line::Skipped => {
+                result.skipped = true;
+                Ok(())
+            }
+            lines::Line::Ignored => Ok(()),
+        };
         if count == 0 {
-            if let Ok(event) = serde_json::from_slice::<Value>(&pending) {
-                result.event(provider, &event, observer, requested)?;
+            if let Some(last) = lines.finish() {
+                line(last)?;
             }
             return Ok(result);
         }
-        for byte in &buffer[..count] {
-            if *byte == b'\n' {
-                if !clipped && let Ok(event) = serde_json::from_slice::<Value>(&pending) {
-                    result.event(provider, &event, observer, requested)?;
-                }
-                pending.clear();
-                clipped = false;
-            } else if pending.len() < 256_000 {
-                pending.push(*byte);
-            } else {
-                clipped = true;
+        let mut bytes = &buffer[..count];
+        while !bytes.is_empty() {
+            let (used, read) = lines.feed(bytes);
+            bytes = &bytes[used..];
+            if let Some(read) = read {
+                line(read)?;
             }
         }
     }
@@ -888,6 +907,7 @@ async fn execute_allowing(
     } else {
         events.text
     };
+    let text = noted(text, events.skipped, planning);
     Outcome::redacted(ok, &text, &events.prompts)
 }
 
@@ -953,6 +973,27 @@ mod tests {
         finish.send(()).unwrap();
         assert_eq!(reading.await.unwrap().text, "Done");
         writing.await.unwrap();
+    }
+    #[tokio::test]
+    async fn an_oversized_line_in_another_cli_stream_is_read_or_skipped_not_dropped() {
+        let mut stream = b"{\"type\":\"thread.started\",\"thread_id\":\"t-1\"}\n".to_vec();
+        // An item far over the old line limit still counts once its long payload is dropped.
+        stream.extend(
+            serde_json::to_vec(&json!({"type":"item.completed","item":{"type":"agent_message","text":"Read the log.","output":"A".repeat(400_000)}})).unwrap(),
+        );
+        stream.extend(b"\n{\"type\":\"item.started\",\"item\":");
+        stream.extend(vec![b'7'; 300_000]);
+        stream.extend(b"\n");
+        let read = events(stream.as_slice(), "codex", &|_| Ok(()), "")
+            .await
+            .unwrap();
+        assert_eq!(read.text, "Read the log.");
+        assert!(read.skipped);
+        assert_eq!(
+            noted("Report.".into(), true, false),
+            format!("Report.\n\n{SKIPPED_EVENT}")
+        );
+        assert_eq!(noted("{}".into(), true, true), "{}");
     }
     #[cfg(unix)]
     #[tokio::test]

@@ -306,7 +306,10 @@ subagent) stays `running` until a later turn finishes and the CLI reports it idl
 pending, or its process exits; a session that says nothing more ends five seconds after its last
 turn. The run's report and its `done` or `needs_attention` come from the last turn. While it runs
 it keeps its directories reserved and its workflow run's slot. A session still working after two
-hours is stopped and the run ends `needs_attention`, saying so, with its last report.
+hours is stopped and the run ends `needs_attention`, saying so, with its last report. A huge
+output line (an image the agent read, for example) never ends a session: its payload is dropped
+while it is read, and an event that still cannot be read is skipped, noted once at the end of
+the run's report with a fixed sentence.
 Internal Teams model calls remain tool-less and ephemeral without remote access.
 
 Use `implementation_mobile_session` with `machine`, recorded run `id`, `action` (`connect`,
