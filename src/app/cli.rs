@@ -951,6 +951,9 @@ fn update_text(data: &Value) -> Option<String> {
             },
             data["running"].as_str().unwrap_or("current")
         ),
+        "staging" if data["waiting_for_archive"].is_object() => format!(
+            "Version {target} is published, but its archive for {place} is not attached to the release yet. It is prepared and installed by itself once the archive appears (it waits up to 30 minutes) and nothing would be interrupted. {follow}"
+        ),
         "staging" => format!(
             "Preparing version {target} on {place}; it is installed by itself once ready and nothing would be interrupted. {follow}"
         ),
@@ -5120,5 +5123,22 @@ mod help_tests {
             Some("Assistant running.")
         );
         assert!(human("config show", &json!({})).is_none());
+    }
+
+    #[test]
+    fn an_update_that_waits_for_its_release_archive_says_so() {
+        let waiting = json!({"outcome": "staging", "target": "0.12.22", "machine": "Windows",
+            "waiting_for_archive": {"version": "0.12.22"}});
+        let text = human("update", &waiting).unwrap();
+        assert!(
+            text.starts_with("Version 0.12.22 is published, but its archive for machine Windows is not attached to the release yet."),
+            "{text}"
+        );
+        let preparing = json!({"outcome": "staging", "target": "0.12.22"});
+        assert!(
+            human("update", &preparing)
+                .unwrap()
+                .starts_with("Preparing version 0.12.22 on this computer")
+        );
     }
 }

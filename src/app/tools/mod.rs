@@ -468,7 +468,7 @@ pub(super) const TOOLS: &[Tool] = &[
     Tool {
         name: "update_status",
         title: "Installation update status",
-        description: "The installed, running and available versions of this package on this computer, how this installation was built (features and target; or why it cannot be updated from here), the last check and the state of any prepared update (staging, staged, failed) with build progress. On a shared server it only says the operator manages updates. Reads local state; makes no network call. A prepared update is not an installed one: the installed version keeps running unchanged.",
+        description: "The installed, running and available versions of this package on this computer, how this installation was built (features and target; or why it cannot be updated from here), the last check and the state of any prepared update (staging, waiting for its release archive, staged, failed) with build progress. On a shared server it only says the operator manages updates. Reads local state; makes no network call. A prepared update is not an installed one: the installed version keeps running unchanged.",
         effect: Effect::Read,
         schema: none,
     },
@@ -482,7 +482,7 @@ pub(super) const TOOLS: &[Tool] = &[
     Tool {
         name: "update_stage",
         title: "Prepare an update",
-        description: "Build the exact release `version` (the one update_check reported as available) with Cargo into this profile's maintenance directory, with locked dependencies and the same features and target as the installed copy, then verify the matched application and pta pair. Nothing is installed or replaced and the current version keeps running; poll update_status for progress. The registry, crate, directory and command are fixed: no argument can choose them, and a version that is not the registry's newest is refused. Needs the user's confirmation and the owner of this computer. The build runs without any account variable or credential.",
+        description: "Build the exact release `version` (the one update_check reported as available) with Cargo into this profile's maintenance directory, with locked dependencies and the same features and target as the installed copy, then verify the matched application and pta pair. Nothing is installed or replaced and the current version keeps running; poll update_status for progress. The registry, crate, directory and command are fixed: no argument can choose them, and a version that is not the registry's newest is refused. On an installation made by the install command whose release archive is not attached yet, it waits for the archive up to 30 minutes (state waiting) instead of failing. Needs the user's confirmation and the owner of this computer. The build runs without any account variable or credential.",
         effect: Effect::External,
         schema: || {
             object(
@@ -689,7 +689,7 @@ pub(super) const TOOLS: &[Tool] = &[
     Tool {
         name: "update_latest",
         title: "Update to the newest release",
-        description: "Update an installation to the newest stable release in one request: check crates.io, prepare that release (or reuse the prepared copy) and install it with the same deferral, restart, health check and automatic rollback as update_apply. Without machine it updates this computer (its owner only); with machine (an ID from machine_list whose capabilities.upgrade is true) the account's coordinator asks that online computer to update itself. The version is never an argument. Returns `outcome`: `current` (nothing newer), `staging` (preparing; it installs by itself when ready), `deferred` (waiting for work in progress) or `applying`. Poll update_status here, or machine_list for another computer's version and update state; never repeat the request automatically. Needs the user's confirmation. Afterwards MCP clients of the updated computer must reconnect.",
+        description: "Update an installation to the newest stable release in one request: check crates.io, prepare that release (or reuse the prepared copy) and install it with the same deferral, restart, health check and automatic rollback as update_apply. Without machine it updates this computer (its owner only); with machine (an ID from machine_list whose capabilities.upgrade is true) the account's coordinator asks that online computer to update itself. The version is never an argument. Returns `outcome`: `current` (nothing newer), `staging` (preparing, or with `waiting_for_archive` waiting up to 30 minutes for the release archive; it installs by itself when ready), `deferred` (waiting for work in progress) or `applying`. Poll update_status here, or machine_list for another computer's version and update state; never repeat the request automatically. Needs the user's confirmation. Afterwards MCP clients of the updated computer must reconnect.",
         effect: Effect::External,
         schema: || {
             object(

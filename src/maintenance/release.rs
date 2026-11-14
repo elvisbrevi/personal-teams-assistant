@@ -223,6 +223,43 @@ async fn fetch(
     })
 }
 
+/// Whether the release of `version` already holds both the archive for `target` and its `.sha256`.
+/// The crate reaches the registry minutes before the release job attaches the archives, so an
+/// archive installation counts a version as available only once this is true. Nothing is
+/// downloaded and no redirect is followed: the release host answers an attached asset with its own
+/// redirect to the download (the download itself still follows only `source.hosts`) and a missing
+/// one, or a release that does not exist yet, with 404.
+pub async fn published(source: &Source, version: &Version, target: &str) -> Result<bool> {
+    ensure!(
+        valid_target(target),
+        "The recorded build target is not valid."
+    );
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .https_only(source.https_only)
+        .timeout(Duration::from_secs(CONNECT_SECONDS))
+        .connect_timeout(Duration::from_secs(CONNECT_SECONDS))
+        .user_agent(format!(
+            "{CRATE}/{} (update check)",
+            env!("CARGO_PKG_VERSION")
+        ))
+        .build()?;
+    let name = archive_name(target, version);
+    for file in [format!("{name}.sha256"), name] {
+        let response = client
+            .get(source.url(version, &file))
+            .send()
+            .await
+            .map_err(|_| Failure::Unreachable)?;
+        match response.status().as_u16() {
+            200 | 301 | 302 | 303 | 307 | 308 => {}
+            404 => return Ok(false),
+            status => bail!(Failure::Status(status)),
+        }
+    }
+    Ok(true)
+}
+
 /// The digest a `.sha256` asset publishes for `file`: `HEX  NAME` (as `sha256sum` writes it, the
 /// name possibly marked binary with `*`). The named file must be exactly `file`.
 pub fn published_digest(text: &str, file: &str) -> Result<String> {
@@ -298,6 +335,13 @@ fn write_binary(mut from: impl Read, to: &Path) -> Result<()> {
     let mut file = options
         .open(to)
         .context("The archive holds the same executable twice, so nothing was taken from it.")?;
+    // The creation mode is narrowed by the process umask; the executables get the same mode
+    // whatever it is.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(fs::Permissions::from_mode(0o755))?;
+    }
     let copied = std::io::copy(&mut (&mut from).take(MAX_BINARY + 1), &mut file)
         .context("The archive could not be unpacked.")?;
     ensure!(

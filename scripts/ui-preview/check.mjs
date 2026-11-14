@@ -1356,8 +1356,11 @@ for (const [label, ctx] of [['machine-desktop', {}], ['machine-phone', { viewpor
   await upgrade.click();
   const confirm = page.getByRole('button', { name: 'Confirmar actualización: Travel laptop', exact: true });
   check(`${label}: a machine update requires its explicit second tap`, !await page.evaluate(() => window.__ptaMachineUpgrade) && await confirm.isVisible());
+  await page.evaluate(() => { window.__ptaMachineUpgradeWaits = true; });
   await confirm.click();
   await page.waitForFunction(() => window.__ptaMachineUpgrade);
+  check(`${label}: a machine that waits for its release archive says so`, await page.getByText('Travel laptop espera el archivo de la versión 0.11.6').first().isVisible());
+  await page.evaluate(() => { window.__ptaMachineUpgradeWaits = false; });
   check(`${label}: the machine update names only the machine`, await page.evaluate(() => JSON.stringify(window.__ptaMachineUpgrade) === JSON.stringify({ machine: '22222222-2222-4222-8222-222222222222' })));
   await page.waitForFunction(() => document.querySelector('#machine-list')?.textContent.includes('preparando una actualización'));
   check(`${label}: a machine preparing its update shows it and offers no second request`, await page.locator('#machine-list button:has-text("Actualizar a")').isDisabled());
@@ -1879,6 +1882,21 @@ for (const [label, viewport] of [['desktop', { width: 1440, height: 900 }], ['ph
   await page.evaluate(axeSource);
   check(`${label}: the updates panel passes axe`, (await scan(page)).length === 0, JSON.stringify(await scan(page)));
   check(`${label}: the updates panel keeps the phone boundary`, await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+  // A release whose archive is not attached yet is not offered; preparing it waits for the archive and can be cancelled.
+  await page.evaluate(() => { window.__ptaUpdateArchiveLate(true); window.__ptaUpdateSet('idle', null); return loadUpdates(); });
+  await panel.locator('#update-progress').getByText('aún no está adjunto a la versión').waitFor();
+  check(`${label}: a release without its archive is not offered as available`, await panel.locator('#update-versions').innerText().then(text => !/Disponible\s*0\.9\.14/.test(text)) && await offer.isHidden() && await panel.locator('#update-stage').isEnabled());
+  await panel.locator('#update-stage').click();
+  await panel.locator('#update-progress').getByText('Esperando el archivo de 0.9.14').waitFor();
+  check(`${label}: preparing it waits for the archive, labelled, and can be cancelled`, await panel.locator('#update-state').innerText() === 'Esperando el archivo de la versión'
+    && await panel.locator('#update-cancel').isVisible() && await panel.locator('#update-stage').isDisabled() && await page.evaluate(() => JSON.stringify(window.__ptaUpdateCalls.at(-1)) === '{"method":"stage","version":"0.9.14"}'));
+  await page.evaluate(axeSource);
+  check(`${label}: waiting for the archive passes axe`, (await scan(page)).length === 0, JSON.stringify(await scan(page)));
+  await panel.locator('#update-cancel').click();
+  await panel.locator('#update-cancel').waitFor({ state: 'hidden' });
+  check(`${label}: cancelling withdraws the wait`, await page.evaluate(() => window.__ptaUpdateCalls.at(-1).method === 'cancel') && await panel.locator('#update-state').innerText() === 'Al día');
+  await page.evaluate(() => { window.__ptaUpdateArchiveLate(false); window.__ptaUpdateFail(); return loadUpdates(); });
+  await panel.locator('#update-error').waitFor();
   // Unattended updating: off by default, this computer only, changed only by an explicit choice.
   const unattended = panel.locator('#update-unattended-toggle');
   check(`${label}: unattended updating is offered, off by default`, await unattended.isVisible() && !(await unattended.isChecked()) && await page.evaluate(() => !window.__ptaUpdateCalls.some(c => c.method === 'unattended')));
