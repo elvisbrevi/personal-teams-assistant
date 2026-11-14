@@ -651,6 +651,50 @@ pub(super) async fn call(
     method: &str,
     args: Value,
 ) -> Result<Value> {
+    call_bounded(host, machine, method, args, None).await
+}
+/// `call`, waiting at most `bound` for the machine's answer (never longer than `call` would).
+pub(super) async fn call_within(
+    host: &Arc<Host>,
+    machine: &str,
+    method: &str,
+    args: Value,
+    bound: Duration,
+) -> Result<Value> {
+    call_bounded(host, machine, method, args, Some(bound)).await
+}
+/// Removes a queued machine call when its caller stops waiting, however it stops (an answer,
+/// a refusal, the end of the wait, or a caller that gives up and drops the future), so calls
+/// that nobody waits for never fill the queue.
+struct Pending {
+    host: Arc<Host>,
+    id: String,
+}
+impl Drop for Pending {
+    fn drop(&mut self) {
+        let id = std::mem::take(&mut self.id);
+        if let Ok(mut calls) = self.host.state.implementation.calls.try_lock() {
+            calls.retain(|c| c.id != id);
+        } else if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            let host = self.host.clone();
+            runtime.spawn(async move {
+                host.state
+                    .implementation
+                    .calls
+                    .lock()
+                    .await
+                    .retain(|c| c.id != id);
+            });
+        }
+    }
+}
+async fn call_bounded(
+    host: &Arc<Host>,
+    machine: &str,
+    method: &str,
+    args: Value,
+    bound: Option<Duration>,
+) -> Result<Value> {
     authority::require_account(&host.state)?;
     ensure!(
         [
@@ -766,12 +810,20 @@ pub(super) async fn call(
             result: None,
         });
     }
+    let _pending = Pending {
+        host: host.clone(),
+        id: id.clone(),
+    };
     // The director's session answers within its own bound (`director::SESSION_SECONDS`).
-    for _ in 0..match method {
+    let polls = match method {
         "machine_assistant" | "machine_upgrade" => 360,
         "workflow_direct" => 4 * super::director::WAIT_SECONDS,
         _ => 160,
-    } {
+    };
+    let polls = bound.map_or(polls, |bound| {
+        polls.min(u64::try_from(bound.as_millis() / 250).unwrap_or(u64::MAX))
+    });
+    for _ in 0..polls {
         tokio::time::sleep(Duration::from_millis(250)).await;
         authority::require_account(&host.state)?;
         ensure!(

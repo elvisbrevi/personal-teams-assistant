@@ -72,10 +72,11 @@ async fn recent_now(host: &Arc<Host>, limit: usize) -> Result<Listing> {
     gather(host, limit).await
 }
 
-/// On the coordinator: its own sessions, every online machine's and PTA's own runs.
+/// On the coordinator: its own sessions and every online machine's, named with the runs PTA
+/// recorded for them.
 pub(super) async fn gather(host: &Arc<Host>, limit: usize) -> Result<Listing> {
     let version = management::version(host)?;
-    let (own_id, machines) = {
+    let (own_name, machines) = {
         let data = host.state.implementation.registry.lock().await;
         let machines: Vec<(String, String, Option<&'static str>)> = data
             .machines
@@ -92,11 +93,12 @@ pub(super) async fn gather(host: &Arc<Host>, limit: usize) -> Result<Listing> {
                 (m.id.clone(), m.name.clone(), gap)
             })
             .collect();
-        (data.id.clone(), machines)
+        (data.settings.name.clone(), machines)
     };
     let mut parts = vec![own(host, limit).await?];
     let mut unavailable = Vec::new();
     let mut asks = tokio::task::JoinSet::new();
+    let mut asked_of = std::collections::HashMap::new();
     for (id, name, gap) in machines {
         if let Some(reason) = gap {
             unavailable.push(Unavailable {
@@ -107,21 +109,43 @@ pub(super) async fn gather(host: &Arc<Host>, limit: usize) -> Result<Listing> {
             continue;
         }
         let host = host.clone();
-        asks.spawn(async move {
-            let asked = tokio::time::timeout(
+        let task = asks.spawn(async move {
+            // Bounded inside the call, so a machine that does not answer leaves nothing pending.
+            fleet::call_within(
+                &host,
+                &id,
+                "agent_sessions_local",
+                json!({"limit":limit}),
                 Duration::from_secs(crate::sessions::READ_SECONDS - 5),
-                fleet::call(&host, &id, "agent_sessions_local", json!({"limit":limit})),
             )
-            .await;
-            (name, asked)
+            .await
         });
+        asked_of.insert(task.id(), name);
     }
-    while let Some(Ok((name, asked))) = asks.join_next().await {
-        match asked
-            .ok()
-            .and_then(Result::ok)
-            .and_then(|v| serde_json::from_value::<Listing>(v).ok())
-        {
+    let (answered, silent) = answers(asks, asked_of).await;
+    parts.extend(answered);
+    unavailable.extend(silent);
+    let (runs, gap) = runs_or_gap(
+        host.state.implementation.db.list(None, None, false),
+        own_name,
+    );
+    unavailable.extend(gap);
+    Ok(combine(parts, unavailable, &runs, limit))
+}
+/// The machines' answers, each named by the coordinator; a machine whose answer failed, was
+/// not a listing or whose task ended abnormally is `no_answer`, never left out.
+async fn answers(
+    mut asks: tokio::task::JoinSet<Result<Value>>,
+    mut asked_of: std::collections::HashMap<tokio::task::Id, String>,
+) -> (Vec<Listing>, Vec<Unavailable>) {
+    let (mut parts, mut unavailable) = (Vec::new(), Vec::new());
+    while let Some(joined) = asks.join_next_with_id().await {
+        let (task, answer) = match joined {
+            Ok((task, answer)) => (task, answer.ok()),
+            Err(error) => (error.id(), None),
+        };
+        let name = asked_of.remove(&task).unwrap_or_default();
+        match answer.and_then(|v| serde_json::from_value::<Listing>(v).ok()) {
             Some(mut listing) => {
                 // The coordinator's name for the machine, whatever it calls itself.
                 for session in &mut listing.sessions {
@@ -139,31 +163,30 @@ pub(super) async fn gather(host: &Arc<Host>, limit: usize) -> Result<Listing> {
             }),
         }
     }
-    let names: Vec<(String, String)> = {
-        let data = host.state.implementation.registry.lock().await;
-        data.machines
-            .iter()
-            .map(|m| (m.id.clone(), m.name.clone()))
-            .chain([(own_id, data.settings.name.clone())])
-            .collect()
-    };
-    let runs = host
-        .state
-        .implementation
-        .db
-        .list(None, None, false)
-        .unwrap_or_default();
-    Ok(combine(parts, unavailable, &runs, &names, limit))
+    (parts, unavailable)
+}
+/// PTA's recorded runs; a records database that cannot be read is reported, not taken as none.
+fn runs_or_gap(runs: Result<Vec<Run>>, machine: String) -> (Vec<Run>, Option<Unavailable>) {
+    match runs {
+        Ok(runs) => (runs, None),
+        Err(_) => (
+            Vec::new(),
+            Some(Unavailable {
+                machine,
+                provider: "pta".into(),
+                reason: "unreadable".into(),
+            }),
+        ),
+    }
 }
 
-/// The listings and PTA's runs as one listing: a run whose native session is listed names it;
-/// one that is not (its machine is offline, or the agent's store was cleaned) is listed from
-/// its own record, with the item it worked on.
+/// The machines' listings as one, newest first, each session PTA started named with its run
+/// and work item. A run is never listed from its own record: its session is read only from the
+/// machine that holds it, which leaves out a private one and is not asked when offline.
 fn combine(
     parts: Vec<Listing>,
     unavailable: Vec<Unavailable>,
     runs: &[Run],
-    names: &[(String, String)],
     limit: usize,
 ) -> Listing {
     let scrubber = crate::sessions::Scrubber::new();
@@ -181,77 +204,10 @@ fn combine(
             ))
         })
         .collect();
-    let mut native = Listing::merge(parts, crate::sessions::MAX_LIMIT);
-    let listed: Vec<String> = native
-        .sessions
-        .iter()
-        .map(|s| s.session_id.clone())
-        .collect();
-    let recorded: Vec<Summary> = runs
-        .iter()
-        .filter(|run| {
-            run.session_id
-                .as_ref()
-                .is_some_and(|id| !listed.contains(id))
-        })
-        .map(|run| {
-            let updated = run
-                .finished_at
-                .clone()
-                .or_else(|| run.started_at.clone())
-                .unwrap_or_else(|| run.created_at.clone());
-            let at = |t: &str| {
-                chrono::DateTime::parse_from_rfc3339(t)
-                    .map(|t| {
-                        t.with_timezone(&chrono::Utc)
-                            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
-                    })
-                    .unwrap_or_default()
-            };
-            Summary {
-                provider: run.launch.request.provider.clone(),
-                session_id: run.session_id.clone().unwrap_or_default(),
-                machine: names
-                    .iter()
-                    .find(|(id, _)| id == &run.launch.request.machine)
-                    .map(|(_, name)| name.clone())
-                    .unwrap_or_default(),
-                project: String::new(),
-                started_at: at(run.started_at.as_deref().unwrap_or(&run.created_at)),
-                updated_at: at(&updated),
-                asked: scrubber.scrub(&format!(
-                    "{} «{}»",
-                    if run.launch.planning {
-                        "Plan the children of"
-                    } else {
-                        "Implement"
-                    },
-                    run.launch.detail.item.title
-                )),
-                latest: String::new(),
-                concluded: scrubber.scrub(tail(&run.output, 2000)),
-                open: if matches!(run.state.as_str(), "running" | "planning") {
-                    "The run is still working.".into()
-                } else {
-                    String::new()
-                },
-                started_by: None,
-            }
-        })
-        .collect();
-    native.sessions.extend(recorded);
-    let mut listing = Listing::merge([native], limit);
+    let mut listing = Listing::merge(parts, limit);
     listing.unavailable.extend(unavailable);
     listing.attribute(&started);
     listing
-}
-/// The last `max` bytes of `text`, at a character boundary.
-fn tail(text: &str, max: usize) -> &str {
-    let mut start = text.len().saturating_sub(max);
-    while !text.is_char_boundary(start) {
-        start += 1;
-    }
-    &text[start..]
 }
 
 /// This computer's own sessions, when the person this host acts for owns the computer: a
@@ -283,52 +239,120 @@ pub(super) async fn local(host: &Arc<Host>, args: &Value) -> Result<Value> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn offline_machines_are_unavailable_and_runs_keep_their_work_item() {
-        let summary = |id: &str, at: &str| Summary {
-            provider: "claude".into(),
+    fn run(session: &str) -> Run {
+        let mut run: Run = serde_json::from_value(json!({"launch":{"id":"run-1","request":{"machine":"m-desk","item":{"provider":"azure","id":7,"project":"Payments","source":"azure","task":true},"context":"Synthetic task","directories":["/work"],"provider":"codex","model":"test-model","effort":"high"},"detail":{"item":{"id":7,"title":"Retry payments","url":"https://dev.azure.com/org/proj/_workitems/edit/7","project":"Payments","state":"Active","kind":"Task","created_at":null,"dates":[]},"fields":[],"comments":[],"relations":[],"history":[],"partial":false,"warnings":[]},"language":"en","planning":false},"state":"running","created_at":"2026-11-12T09:00:00Z","finished_at":null,"output":"Opened the branch; the pipeline is still running.","plan":null,"session_id":"x","started_at":"2026-11-12T09:01:00Z"}))
+        .unwrap();
+        run.session_id = Some(session.into());
+        run
+    }
+    fn summary(id: &str, at: &str) -> Summary {
+        Summary {
+            provider: "codex".into(),
             session_id: id.into(),
             machine: "laptop".into(),
             started_at: at.into(),
             updated_at: at.into(),
             asked: "Fix it".into(),
             ..Default::default()
+        }
+    }
+
+    #[test]
+    fn runs_name_their_listed_sessions_and_never_add_one_the_machine_left_out() {
+        let offline = Unavailable {
+            machine: "desk".into(),
+            provider: String::new(),
+            reason: "offline".into(),
         };
-        let run: Run = serde_json::from_value(json!({"launch":{"id":"run-1","request":{"machine":"m-desk","item":{"provider":"azure","id":7,"project":"Payments","source":"azure","task":true},"context":"Synthetic task","directories":["/work"],"provider":"codex","model":"test-model","effort":"high"},"detail":{"item":{"id":7,"title":"Retry payments","url":"https://dev.azure.com/org/proj/_workitems/edit/7","project":"Payments","state":"Active","kind":"Task","created_at":null,"dates":[]},"fields":[],"comments":[],"relations":[],"history":[],"partial":false,"warnings":[]},"language":"en","planning":false},"state":"running","created_at":"2026-11-12T09:00:00Z","finished_at":null,"output":"Opened the branch; the pipeline is still running.","plan":null,"session_id":"codex-native","started_at":"2026-11-12T09:01:00Z"}))
-        .unwrap();
+        // "private-run" is a PTA run whose session its machine left out as private (or did
+        // not list); its record must not bring it back with its output.
         let listing = combine(
             vec![Listing {
-                sessions: vec![summary("claude-1", "2026-11-12T10:00:00Z")],
+                sessions: vec![summary("codex-native", "2026-11-12T10:00:00Z")],
                 unavailable: vec![],
             }],
-            vec![Unavailable {
-                machine: "desk".into(),
-                provider: String::new(),
-                reason: "offline".into(),
-            }],
-            &[run],
-            &[("m-desk".into(), "desk".into())],
+            vec![offline.clone()],
+            &[run("codex-native"), run("private-run")],
             10,
         );
+        assert_eq!(listing.unavailable, [offline]);
+        assert_eq!(listing.sessions.len(), 1);
+        let started = listing.sessions[0].started_by.as_ref().unwrap();
         assert_eq!(
-            listing.unavailable,
-            [Unavailable {
-                machine: "desk".into(),
-                provider: String::new(),
-                reason: "offline".into()
-            }]
+            (started.run.as_str(), started.work_item_url.as_str()),
+            ("run-1", "https://dev.azure.com/org/proj/_workitems/edit/7")
         );
-        assert_eq!(listing.sessions.len(), 2);
-        let recorded = &listing.sessions[1];
-        assert_eq!(recorded.session_id, "codex-native");
-        assert_eq!(recorded.machine, "desk");
-        assert_eq!(recorded.asked, "Implement «Retry payments»");
-        assert_eq!(recorded.open, "The run is still working.");
-        let started = recorded.started_by.as_ref().unwrap();
-        assert_eq!(
-            started.work_item_url,
-            "https://dev.azure.com/org/proj/_workitems/edit/7"
-        );
-        assert_eq!(started.run, "run-1");
+        let text = serde_json::to_string(&listing).unwrap();
+        assert!(!text.contains("private-run") && !text.contains("Opened the branch"));
+    }
+
+    #[tokio::test]
+    async fn a_failed_or_panicked_machine_answer_is_no_answer_and_the_runs_database_is_reported() {
+        let mut asks = tokio::task::JoinSet::new();
+        let mut asked_of = std::collections::HashMap::new();
+        let answered = asks.spawn(async {
+            Ok(json!({"sessions":[summary("a", "2026-11-12T10:00:00Z")],"unavailable":[]}))
+        });
+        asked_of.insert(answered.id(), "laptop".to_string());
+        let failed = asks.spawn(async { Err(anyhow::anyhow!("refused")) });
+        asked_of.insert(failed.id(), "desk".to_string());
+        let panicked = asks.spawn(async { panic!("synthetic panic") });
+        asked_of.insert(panicked.id(), "build".to_string());
+        let (parts, mut gaps) = answers(asks, asked_of).await;
+        assert_eq!(parts.len(), 1);
+        assert_eq!(parts[0].sessions[0].machine, "laptop");
+        gaps.sort_by(|a, b| a.machine.cmp(&b.machine));
+        let named: Vec<_> = gaps
+            .iter()
+            .map(|g| (g.machine.as_str(), g.reason.as_str()))
+            .collect();
+        assert_eq!(named, [("build", "no_answer"), ("desk", "no_answer")]);
+        let (runs, gap) = runs_or_gap(Err(anyhow::anyhow!("locked")), "coordinator".into());
+        assert!(runs.is_empty());
+        assert_eq!(gap.unwrap().reason, "unreadable");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_machine_that_does_not_answer_leaves_no_pending_call() {
+        let root = tempfile::tempdir().unwrap();
+        let host = super::super::tests::host(root.path());
+        let id = uuid::Uuid::new_v4().to_string();
+        fleet::register(
+            &host,
+            &json!({"id":id,"name":"Worker","os":"linux","account_version":"synthetic"}),
+        )
+        .await
+        .unwrap();
+        let version = management::version(&host).unwrap();
+        {
+            let mut data = host.state.implementation.registry.lock().await;
+            let machine = data.machines.iter_mut().find(|m| m.id == id).unwrap();
+            machine.account_version = version;
+            machine.seen = now();
+            machine.agent_sessions = true;
+        }
+        let pending = || async { host.state.implementation.calls.lock().await.len() };
+        // A bounded wait that ends without an answer removes its call.
+        let bounded = fleet::call_within(
+            &host,
+            &id,
+            "agent_sessions_local",
+            json!({"limit":10}),
+            Duration::from_secs(2),
+        )
+        .await;
+        assert!(bounded.is_err());
+        assert_eq!(pending().await, 0);
+        // So does a caller that stops waiting, many times over: the queue never fills.
+        for _ in 0..70 {
+            let gave_up = tokio::time::timeout(
+                Duration::from_secs(1),
+                fleet::call(&host, &id, "agent_sessions_local", json!({"limit":10})),
+            )
+            .await;
+            assert!(gave_up.is_err());
+        }
+        tokio::task::yield_now().await;
+        assert_eq!(pending().await, 0);
     }
 }

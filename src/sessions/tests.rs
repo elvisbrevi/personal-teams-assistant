@@ -388,8 +388,12 @@ fn listings_merge_newest_first_and_name_the_runs_pta_started() {
         },
     )]);
     assert_eq!(merged.sessions[1].started_by.as_ref().unwrap().run, "run-1");
+    // The evidence says a run started it, but names no work item: an answer may name one only
+    // with its verified link, and the prompt forbids naming them.
     let text = evidence(&[("s1".into(), &merged.sessions[1])]);
-    assert!(text.contains("«Retry payments» (https://dev.azure.com/org/proj/_workitems/edit/7)"));
+    assert!(text.contains("Started by the assistant") && text.contains("run state running"));
+    assert!(!text.contains("Retry payments") && !text.contains("dev.azure.com"));
+    assert!(crate::llm::prompts::IN_PROGRESS.contains("never name or number a work item"));
 }
 
 #[test]
@@ -420,4 +424,366 @@ fn a_long_session_is_read_from_its_start_and_its_end_and_long_lines_are_skipped(
         ("First request", "Final answer")
     );
     assert_eq!(session.updated_at, at(5));
+}
+
+fn claude_lines(root: &Path, id: &str, lines: &[Value]) -> PathBuf {
+    let path = root.join(format!("claude/projects/p/{id}.jsonl"));
+    write_lines(&path, lines);
+    path
+}
+fn user(id: &str, text: &str) -> Value {
+    json!({"type":"user","sessionId":id,"cwd":"/w/p","message":{"role":"user","content":text},"timestamp":at(1)})
+}
+fn agent(id: &str, text: &str) -> Value {
+    json!({"type":"assistant","sessionId":id,"message":{"role":"assistant","content":[{"type":"text","text":text}]},"timestamp":at(2)})
+}
+fn claude_only(dir: &Path) -> Roots {
+    Roots {
+        claude: Some(dir.join("claude")),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn the_private_mark_is_seen_in_any_form_and_anywhere_in_the_session() {
+    for form in [
+        "#private!",
+        "#private?",
+        "\"#private\"",
+        "**#private**",
+        "`#private`",
+        "(#PRIVATE)",
+    ] {
+        assert!(
+            marked_private(&format!("look at this {form} please")),
+            "{form}"
+        );
+    }
+    assert!(!marked_private("#privateness"));
+    assert!(!marked_private("see #private-notes"));
+    let dir = tempfile::tempdir().unwrap();
+    // In the unread middle of a long file.
+    let mut lines = vec![user("middle", "First request")];
+    let filler = "x".repeat(200_000);
+    for _ in 0..8 {
+        lines.push(agent("middle", &filler));
+    }
+    lines.push(user("middle", "keep this #private!"));
+    for _ in 0..8 {
+        lines.push(agent("middle", &filler));
+    }
+    lines.push(agent("middle", "Final answer"));
+    let path = claude_lines(dir.path(), "middle", &lines);
+    assert!(std::fs::metadata(&path).unwrap().len() > HEAD_BYTES + TAIL_BYTES);
+    // In a user line too long to parse.
+    claude_lines(
+        dir.path(),
+        "long",
+        &[
+            user("long", "First request"),
+            user("long", &format!("{} #private", "y".repeat(300_000))),
+            agent("long", "Done"),
+        ],
+    );
+    // Said by the agent, not the user: not private.
+    claude_lines(
+        dir.path(),
+        "said",
+        &[
+            user("said", "How do I hide a session?"),
+            agent("said", "Write #private in a request."),
+        ],
+    );
+    let listing = local(&claude_only(dir.path()), 10, "m");
+    let ids: Vec<_> = listing
+        .sessions
+        .iter()
+        .map(|s| s.session_id.as_str())
+        .collect();
+    assert_eq!(ids, ["said"]);
+    assert!(listing.unavailable.is_empty());
+}
+
+#[test]
+fn secrets_in_every_shape_never_reach_a_summary() {
+    let scrubber = Scrubber::new();
+    let base64 =
+        "q9Zk3+Lm8/Rt5Wx2Yb7/Nc4Vd6Fh1Jg0/Kp2Ls9Mn3Bv5Cx7Zq1We4Rt6Yu8Io0Pa2Sd4Fg6Hj8Kl0Zx2Cv4Bn6==";
+    let text = format!(
+        "Before.\n\"DB_PASSWORD\": \"hunter2\"\n{{\"secret\": \"hunter3\", \"auth\": \"dXNlcjpwYXNz\"}}\nPassword:\nHunter4!\nrun it with --password Hunter5\nthe password is Hunter6!\nla contraseña es Hunter7\nla clave: Hunter8\nAccountKey={base64}\nstorage key {base64}\nAfter."
+    );
+    let kept = scrubber.scrub(&text);
+    assert_eq!(kept, "Before. After.");
+    let open = scrubber.pending(
+        "Rotated most of them.\nexport API_KEY=sk-live-abc.def123 is still not yet rotated\nThe deploy is still pending.",
+    );
+    assert_eq!(open, "The deploy is still pending");
+    // Ordinary words are kept.
+    assert_eq!(
+        scrubber.scrub("Author: Ana. Tests passed: 12. Design: done."),
+        "Author: Ana. Tests passed: 12. Design: done."
+    );
+}
+
+#[test]
+fn code_blocks_and_injected_text_are_dropped_by_their_own_markers() {
+    let scrubber = Scrubber::new();
+    assert_eq!(
+        scrubber.scrub("Wrap it in ``` fences.\n```\nlet key = 1;\n```\nThen deploy."),
+        "Wrap it in ``` fences. Then deploy."
+    );
+    assert_eq!(
+        scrubber.scrub("Outer:\n````\n```\ninner code\n```\nstill code\n````\nDone."),
+        "Outer: Done."
+    );
+    assert_eq!(
+        scrubber.scrub(
+            "<system-reminder>Note <example>x</example> INJECTED TAIL</system-reminder>Real request <div>kept</div>"
+        ),
+        "Real request <div>kept</div>"
+    );
+    // Shell output, task notifications and compaction summaries are not the user's requests.
+    let dir = tempfile::tempdir().unwrap();
+    let mut compact = user("c", "Summary of the earlier conversation");
+    compact["isCompactSummary"] = json!(true);
+    claude_lines(
+        dir.path(),
+        "c",
+        &[
+            user("c", "<bash-input>cat notes.txt</bash-input>"),
+            user(
+                "c",
+                "<bash-stdout>SHELL OUTPUT</bash-stdout><bash-stderr></bash-stderr>",
+            ),
+            user("c", "<task-notification>TASK DONE</task-notification>"),
+            compact,
+            user("c", "Fix the retry"),
+            agent("c", "Fixed."),
+        ],
+    );
+    let listing = local(&claude_only(dir.path()), 10, "m");
+    let session = &listing.sessions[0];
+    assert_eq!(
+        (session.asked.as_str(), session.latest.as_str()),
+        ("Fix the retry", "")
+    );
+    let text = serde_json::to_string(&listing).unwrap();
+    for never in [
+        "SHELL OUTPUT",
+        "TASK DONE",
+        "earlier conversation",
+        "notes.txt",
+    ] {
+        assert!(!text.contains(never), "{never}");
+    }
+}
+
+#[test]
+fn absolute_paths_keep_only_their_last_component() {
+    let scrubber = Scrubber::new();
+    for (text, kept) in [
+        (
+            r"Saved C:\Users\First Last\Clients\Acme Corp\plan.docx today",
+            "Saved plan.docx today",
+        ),
+        (
+            "Open /Users/name/Library/Application Support/Acme/x now",
+            "Open x now",
+        ),
+        ("cwd:/home/name/clients/acme", "cwd:acme"),
+        (
+            "see file:///home/name/clients/notes.txt",
+            "see file://notes.txt",
+        ),
+        ("<p>/home/name/clients/y</p>", "<p>y</p>"),
+        ("@/home/name/clients/z", "@z"),
+        (
+            "PR at https://dev.azure.com/org/proj/_git/repo/pullrequest/12",
+            "PR at https://dev.azure.com/org/proj/_git/repo/pullrequest/12",
+        ),
+    ] {
+        assert_eq!(scrubber.scrub(text), kept, "{text}");
+    }
+}
+
+#[test]
+fn a_store_or_session_that_cannot_be_read_is_unavailable_not_empty() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("opencode");
+    std::fs::create_dir_all(&root).unwrap();
+    let db = rusqlite::Connection::open(root.join("opencode.db")).unwrap();
+    db.execute_batch(
+        "CREATE TABLE session(id TEXT, parent_id TEXT, directory TEXT, time_created INTEGER, time_updated INTEGER);
+         CREATE TABLE message(id TEXT, session_id TEXT, time_created INTEGER, data TEXT);
+         CREATE TABLE part(id TEXT, message_id TEXT, session_id TEXT, data TEXT);
+         INSERT INTO session VALUES('ses_bad', NULL, '/w/a', 1793000000000, 1793000600000);
+         INSERT INTO message VALUES('m1', 'ses_bad', 1793000000000, 'not json');
+         INSERT INTO session VALUES('ses_ns', NULL, '/w/b', 1793000000000000000, 1793000600000000000);
+         INSERT INTO message VALUES('m2', 'ses_ns', 1793000000000000000, '{\"role\":\"user\"}');
+         INSERT INTO part VALUES('p2', 'm2', 'ses_ns', '{\"type\":\"text\",\"text\":\"Hello\"}');",
+    )
+    .unwrap();
+    let listing = local(
+        &Roots {
+            opencode: Some(root),
+            ..Default::default()
+        },
+        10,
+        "m",
+    );
+    assert!(listing.sessions.is_empty());
+    assert_eq!(
+        listing.unavailable,
+        [Unavailable {
+            machine: "m".into(),
+            provider: "opencode".into(),
+            reason: "unreadable".into()
+        }]
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = claude_lines(
+            dir.path(),
+            "locked",
+            &[user("locked", "Hi"), agent("locked", "Hello")],
+        );
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+        // Only meaningful when permissions bind (not as root).
+        if std::fs::File::open(&path).is_err() {
+            let listing = local(&claude_only(dir.path()), 10, "m");
+            assert!(listing.sessions.is_empty());
+            assert_eq!(listing.unavailable[0].reason, "unreadable");
+        }
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+}
+
+#[test]
+fn opencode_reads_its_latest_messages_and_marks_beyond_them() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("opencode");
+    std::fs::create_dir_all(&root).unwrap();
+    let mut db = rusqlite::Connection::open(root.join("opencode.db")).unwrap();
+    db.execute_batch(
+        "CREATE TABLE session(id TEXT, parent_id TEXT, directory TEXT, time_created INTEGER, time_updated INTEGER);
+         CREATE TABLE message(id TEXT, session_id TEXT, time_created INTEGER, data TEXT);
+         CREATE TABLE part(id TEXT, message_id TEXT, session_id TEXT, data TEXT);
+         INSERT INTO session VALUES('ses_long', NULL, '/w/long', 1793000000000, 1793009000000);
+         INSERT INTO session VALUES('ses_marked', NULL, '/w/marked', 1793000000000, 1793008000000);",
+    )
+    .unwrap();
+    let tx = db.transaction().unwrap();
+    for (session, count) in [("ses_long", 2100), ("ses_marked", 200)] {
+        for n in 0..count {
+            let role = if n % 2 == 0 { "user" } else { "assistant" };
+            let message = format!("{session}-m{n:05}");
+            let text = match (session, n) {
+                (_, 0) => "First request".to_owned(),
+                ("ses_marked", 100) => "this one is #private!".to_owned(),
+                (_, n) if n == count - 1 => "Latest answer".to_owned(),
+                (_, n) => format!("message {n}"),
+            };
+            tx.execute(
+                "INSERT INTO message VALUES(?1, ?2, ?3, ?4)",
+                rusqlite::params![
+                    message,
+                    session,
+                    1_793_000_000_000i64 + n as i64,
+                    json!({"role":role}).to_string()
+                ],
+            )
+            .unwrap();
+            tx.execute(
+                "INSERT INTO part VALUES(?1, ?2, ?3, ?4)",
+                rusqlite::params![
+                    format!("{message}-p1"),
+                    message,
+                    session,
+                    json!({"type":"text","text":text}).to_string()
+                ],
+            )
+            .unwrap();
+            if n == count - 1 {
+                // A large tool part is never loaded.
+                tx.execute(
+                    "INSERT INTO part VALUES(?1, ?2, ?3, ?4)",
+                    rusqlite::params![
+                        format!("{message}-p0"),
+                        message,
+                        session,
+                        json!({"type":"tool","state":{"output":"T".repeat(300_000)}}).to_string()
+                    ],
+                )
+                .unwrap();
+            }
+        }
+    }
+    tx.commit().unwrap();
+    let listing = local(
+        &Roots {
+            opencode: Some(root),
+            ..Default::default()
+        },
+        10,
+        "m",
+    );
+    assert!(listing.unavailable.is_empty(), "{:?}", listing.unavailable);
+    let ids: Vec<_> = listing
+        .sessions
+        .iter()
+        .map(|s| s.session_id.as_str())
+        .collect();
+    assert_eq!(ids, ["ses_long"]);
+    let session = &listing.sessions[0];
+    assert_eq!(
+        (session.asked.as_str(), session.concluded.as_str()),
+        ("First request", "Latest answer")
+    );
+    assert!(!serde_json::to_string(&listing).unwrap().contains("TTTT"));
+}
+
+#[test]
+fn opencode_files_are_private_by_a_mark_beyond_the_messages_summarized() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("opencode");
+    let storage = root.join("storage");
+    let info = storage.join("session/project1/ses_files.json");
+    std::fs::create_dir_all(info.parent().unwrap()).unwrap();
+    std::fs::write(
+        &info,
+        json!({"id":"ses_files","directory":"/w/q","time":{"created":1_793_000_000_000i64,"updated":1_793_000_600_000i64}}).to_string(),
+    )
+    .unwrap();
+    for n in 0..120 {
+        let message = format!("msg_{n:05}");
+        let dir = storage.join("message/ses_files");
+        std::fs::create_dir_all(&dir).unwrap();
+        let role = if n % 2 == 0 { "user" } else { "assistant" };
+        std::fs::write(
+            dir.join(format!("{message}.json")),
+            json!({"id":message,"role":role,"time":{"created":1_793_000_000_000i64 + n}})
+                .to_string(),
+        )
+        .unwrap();
+        let parts = storage.join(format!("part/{message}"));
+        std::fs::create_dir_all(&parts).unwrap();
+        let text = if n == 40 { "keep it #private" } else { "text" };
+        std::fs::write(
+            parts.join("prt_1.json"),
+            json!({"id":"prt_1","type":"text","text":text}).to_string(),
+        )
+        .unwrap();
+    }
+    let listing = local(
+        &Roots {
+            opencode: Some(root),
+            ..Default::default()
+        },
+        10,
+        "m",
+    );
+    assert!(listing.sessions.is_empty());
+    assert!(listing.unavailable.is_empty());
 }

@@ -153,17 +153,27 @@ impl Roots {
 }
 
 /// The `limit` most recent sessions of every CLI under `roots`, newest first. A CLI whose
-/// store does not exist adds nothing; one whose store cannot be read is reported unavailable.
+/// store does not exist adds nothing; one whose store, or any of whose sessions, cannot be
+/// read is reported unavailable, never as having fewer sessions.
 pub fn local(roots: &Roots, limit: usize, machine: &str) -> Listing {
     let limit = limit.clamp(1, MAX_LIMIT);
     let scrubber = Scrubber::new();
     let mut parts = Vec::new();
     let mut unavailable = Vec::new();
-    let mut read = |provider: &str, result: Result<Vec<Summary>>| match result {
-        Ok(found) => parts.push(Listing {
-            sessions: found,
-            unavailable: Vec::new(),
-        }),
+    let mut read = |provider: &str, result: Result<Found>| match result {
+        Ok(found) => {
+            if found.failed > 0 {
+                unavailable.push(Unavailable {
+                    machine: machine.into(),
+                    provider: provider.into(),
+                    reason: "unreadable".into(),
+                });
+            }
+            parts.push(Listing {
+                sessions: found.sessions,
+                unavailable: Vec::new(),
+            });
+        }
         Err(_) => unavailable.push(Unavailable {
             machine: machine.into(),
             provider: provider.into(),
@@ -217,7 +227,7 @@ pub fn reader() -> Arc<dyn Reader> {
 }
 
 /// The summaries as evidence for an answer, each under its closed key (`s1`, `s2`…), with no
-/// directory, file or command beyond the project's name.
+/// directory, file or command beyond the project's name and no work item name or link.
 pub fn evidence(sessions: &[(String, &Summary)]) -> String {
     let mut text = String::new();
     for (key, s) in sessions {
@@ -252,12 +262,12 @@ pub fn evidence(sessions: &[(String, &Summary)]) -> String {
                 text.push_str(&format!("{label}: {part}\n"));
             }
         }
-        if let Some(run) = &s.started_by
-            && !run.work_item_url.is_empty()
-        {
+        // The work item is not named: an answer names a work item only with its verified link,
+        // and this evidence carries none.
+        if let Some(run) = &s.started_by {
             text.push_str(&format!(
-                "Started by the assistant for the work item «{}» ({}), state {}\n",
-                run.work_item_title, run.work_item_url, run.state
+                "Started by the assistant to work on one of the user's work items; run state {}\n",
+                run.state
             ));
         }
         text.push('\n');
@@ -287,14 +297,36 @@ fn day_time(rfc3339: &str) -> String {
         .unwrap_or_default()
 }
 
+/// The tags the CLIs wrap around text that is not the user's own (reminders, slash commands,
+/// shell input and output, task notifications, hooks, environment and instructions), removed
+/// with everything inside them up to the closing tag of the same name.
+const INJECTED: &[&str] = &[
+    "system-reminder",
+    "command-name",
+    "command-message",
+    "command-args",
+    "command-contents",
+    "local-command-stdout",
+    "local-command-stderr",
+    "local-command-caveat",
+    "bash-input",
+    "bash-stdout",
+    "bash-stderr",
+    "task-notification",
+    "user-prompt-submit-hook",
+    "environment_context",
+    "user_instructions",
+];
+
 /// What a session's own text keeps before it leaves the machine.
 pub struct Scrubber {
     redactor: crate::security::Redactor,
     secret: Vec<regex::Regex>,
     opaque: regex::Regex,
     path: regex::Regex,
-    fence: regex::Regex,
-    tags: regex::Regex,
+    pending: regex::Regex,
+    /// A key that leaves its value for the next line: `Password:`, `"secret" =`.
+    bare_key: regex::Regex,
 }
 impl Default for Scrubber {
     fn default() -> Self {
@@ -306,12 +338,16 @@ impl Scrubber {
         let secret = [
             // Credentials inside any URL, not only HTTP ones.
             r"(?i)\b[a-z][a-z0-9+.-]*://[^\s/@:]+:[^\s/@]+@",
-            // Connection strings and key–value credentials.
-            r"(?i)\b(?:password|passwd|pwd|user\s*id|uid|account\s*key|accountkey|shared\s*access\s*key|sharedaccesskey|sharedaccesssignature|sig|secret|client[_-]?secret|api[_-]?key|apikey|token|access[_-]?key|private[_-]?key|credential|credentials|auth)\s*[:=]",
-            r"(?i)\b(?:server|data source|host)\s*=[^;\n]*;",
-            // Environment values named like secrets: `export DB_PASSWORD=…`, `GH_TOKEN: …`.
-            r"\b[A-Z][A-Z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD|PASS|PWD|CREDENTIALS?|SAS)[A-Z0-9_]*\s*[:=]",
-            r"-----(?:BEGIN|END) [A-Z ]*-----",
+            // A key whose name says it is secret, quoted or not, before its value:
+            // `DB_PASSWORD=…`, `"db_password": …`, `secret: …`, `AccountKey=…`, `apiKey:`.
+            r#"(?i)(?:^|[^a-z0-9])(?:[a-z0-9]+[_.-])*(?:password|passwd|passphrase|pwd|secret|token|api_?key|apikey|accountkey|account_key|access_?key|private_?key|sharedaccesskey|sharedaccesssignature|client_?secret|auth|authorization|credentials?|sas|signature|connection_?string|contraseña|contrasena|clave|credencial(?:es)?)(?:[_.-][a-z0-9]+)*["']?\s*[:=]"#,
+            // Connection strings.
+            r"(?i)\b(?:server|data source|host|endpoint)\s*=[^;\n]*;",
+            // Flags that take one: `--password X`, `-p:…`, `--api-key X`.
+            r"(?i)(?:^|\s)--?(?:password|passwd|pass|pwd|token|secret|api-?key|key|auth|client-secret|access-key|sas)\b",
+            // Prose about one, in English or Spanish: `the password is …`, `la clave: …`.
+            r"(?i)\b(?:passwords?|passwd|passphrases?|contraseñas?|contrasenas?|claves?|secrets?|secretos?|tokens?|credentials?|credenciales?|api ?keys?|private ?keys?|llaves? privadas?|access ?keys?)\b",
+            r"-----(?:BEGIN|END)[A-Z ]*-----",
             r"\b(?:AKIA|ASIA)[A-Z0-9]{12,}\b",
             r"\bxox[abprs]-[A-Za-z0-9-]{8,}",
         ]
@@ -321,59 +357,129 @@ impl Scrubber {
             redactor: crate::security::Redactor::new(&[], Vec::new())
                 .expect("built-in redaction patterns"),
             secret,
-            opaque: regex::Regex::new(r"[A-Za-z0-9+/_\-]{32,}").expect("valid opaque pattern"),
-            // Only where a path starts a word: a URL's own path is not a directory.
+            opaque: regex::Regex::new(r"[A-Za-z0-9+/_=\-]{32,}").expect("valid opaque pattern"),
+            // An absolute path wherever it starts (a line, a space, punctuation, `cwd:`,
+            // `file://`), its directories possibly with spaces; never a URL's own path, which
+            // follows `//`. Only its last component is kept.
             path: regex::Regex::new(
-                r#"(^|[\s"'`(=\[])(?:[A-Za-z]:[\\/]|\\\\|~[\\/]|/)(?:[^\s\\/"'`<>|:*?]+[\\/])+([^\s\\/"'`<>|:*?]*)"#,
+                r#"(?P<pre>^|[\s"'`(\[{=<>@,;|]|[^/\s]:|file://)(?:[A-Za-z]:[\\/]|\\\\|~[\\/]|/)(?:[^\s\\/"'`<>|:*?]+(?: [^\s\\/"'`<>|:*?]+)*[\\/])+(?P<last>[^\s\\/"'`<>|:*?]*)"#,
             )
             .expect("valid path pattern"),
-            fence: regex::Regex::new(r"(?s)```.*?(?:```|\z)|~~~.*?(?:~~~|\z)")
-                .expect("valid fence pattern"),
-            tags: regex::Regex::new(
-                r"(?s)<(system-reminder|command-[a-z]+|local-command-[a-z]+|environment_context|user_instructions|ide_[a-z_]+)>.*?(?:</[a-z_-]+>|\z)",
+            bare_key: regex::Regex::new(
+                r#"(?i)(?:password|passwd|passphrase|pwd|secret|token|key|auth|authorization|credentials?|sas|signature|string|contraseña|contrasena|clave|credencial(?:es)?)["']?\s*[:=]\s*["']?\s*$"#,
             )
-            .expect("valid tag pattern"),
+            .expect("valid key pattern"),
+            pending: regex::Regex::new(
+                r"(?i)\b(?:todo|pending|pendiente|pendientes|next step|next steps|siguiente paso|próximo paso|falta|faltan|remaining|still|todavía|aún|blocked|bloquead[oa]s?|waiting|esperando|not yet|once|cuando termine)\b",
+            )
+            .expect("valid pending pattern"),
         }
     }
-    /// Whether a line looks like it carries a secret.
+    /// Whether a line looks like it carries a secret, or talks about one.
     pub fn secret(&self, line: &str) -> bool {
         !self.redactor.clean(line)
             || self.secret.iter().any(|p| p.is_match(line))
-            // A long run of letters and digits (a token, key, signature or hash), not a long
-            // word or a path.
-            || self.opaque.find_iter(line).any(|m| {
-                let run = m.as_str();
-                run.chars().any(|c| c.is_ascii_digit())
-                    && run.chars().any(|c| c.is_ascii_alphabetic())
-                    && run.matches('/').count() <= 2
-            })
+            || self.opaque.find_iter(line).any(|m| opaque(m.as_str()))
     }
-    /// The text without code blocks, tags the CLIs inject, secret-looking lines or directory
-    /// names, on one line and bounded.
-    pub fn scrub(&self, text: &str) -> String {
-        let text = self.fence.replace_all(text, " ");
-        let text = self.tags.replace_all(&text, " ");
+    /// The lines of `text` worth keeping: no fenced code, no injected blocks, no line that looks
+    /// like a secret (nor the line after a key that leaves its value for it), no PEM block, and
+    /// absolute paths reduced to their last component.
+    fn lines(&self, text: &str) -> Vec<String> {
+        let text = without_injected(text);
         let mut kept = Vec::new();
+        let mut fence: Option<(char, usize)> = None;
         let mut in_key = false;
+        let mut value_next = false;
         for line in text.lines() {
+            let trimmed = line.trim_start();
+            let run = |c: char| trimmed.chars().take_while(|&x| x == c).count();
+            if let Some((c, n)) = fence {
+                if run(c) >= n && trimmed.trim_start_matches(c).trim().is_empty() {
+                    fence = None;
+                }
+                continue;
+            }
+            if let Some(c) = ['`', '~'].into_iter().find(|&c| run(c) >= 3) {
+                fence = Some((c, run(c)));
+                continue;
+            }
             if line.contains("-----BEGIN") {
                 in_key = true;
             }
-            let skip = in_key || self.secret(line);
+            let secret = in_key || self.secret(line);
             if line.contains("-----END") {
                 in_key = false;
             }
-            if skip {
+            if line.trim().is_empty() {
                 continue;
             }
-            let line = self.path.replace_all(line, "${1}${2}");
+            if std::mem::take(&mut value_next) || secret {
+                // `Password:` alone leaves its value on the next line.
+                value_next = secret && self.bare_key.is_match(line);
+                continue;
+            }
+            let line = self.path.replace_all(line, "${pre}${last}");
             let line = line.trim().trim_start_matches(['#', '>', '-', '*']).trim();
             if !line.is_empty() {
                 kept.push(line.to_owned());
             }
         }
-        bounded(&kept.join(" "), PART_CHARS)
+        kept
     }
+    /// The text as one bounded line of what `lines` keeps.
+    pub fn scrub(&self, text: &str) -> String {
+        bounded(&self.lines(text).join(" "), PART_CHARS)
+    }
+    /// The sentences of an answer that leave something pending, from the lines it keeps.
+    fn pending(&self, answer: &str) -> String {
+        let sentences: Vec<String> = self
+            .lines(answer)
+            .iter()
+            .flat_map(|line| line.split(['.', '!', '?']).map(str::trim))
+            .filter(|s| !s.is_empty() && self.pending.is_match(s))
+            .map(str::to_owned)
+            .collect();
+        bounded(&sentences.join(". "), PART_CHARS)
+    }
+}
+/// A long run of letters and digits that reads as a token, key, signature or hash, not a long
+/// word or a path of words.
+fn opaque(run: &str) -> bool {
+    let digits = run.chars().filter(char::is_ascii_digit).count();
+    let upper = run.chars().filter(char::is_ascii_uppercase).count();
+    let letters = run.chars().filter(char::is_ascii_alphabetic).count();
+    digits > 0
+        && letters > 0
+        && (!run.contains('/') || run.contains(['+', '=']) || (upper >= 3 && digits >= 3))
+}
+/// `text` without the blocks the CLIs inject, each closed by the tag of its own name (to the end
+/// when it is never closed).
+fn without_injected(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find('<') {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + 1..];
+        let name_len = after
+            .find(|c: char| !(c.is_ascii_alphanumeric() || c == '-' || c == '_'))
+            .unwrap_or(after.len());
+        let name = &after[..name_len];
+        let injected = after[name_len..].starts_with(['>', ' '])
+            && (INJECTED.contains(&name) || name.starts_with("ide_") || name.starts_with("ide-"));
+        if !injected {
+            out.push('<');
+            rest = after;
+            continue;
+        }
+        let close = format!("</{name}>");
+        rest = match after.find(&close) {
+            Some(end) => &after[end + close.len()..],
+            None => "",
+        };
+        out.push(' ');
+    }
+    out.push_str(rest);
+    out
 }
 fn bounded(text: &str, max: usize) -> String {
     let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -387,19 +493,96 @@ fn bounded(text: &str, max: usize) -> String {
     cut.push('…');
     cut
 }
-/// The sentences of an answer that leave something pending.
-fn pending(scrubber: &Scrubber, answer: &str) -> String {
-    let marker = regex::Regex::new(
-        r"(?i)\b(?:todo|pending|pendiente|pendientes|next step|next steps|siguiente paso|próximo paso|falta|faltan|remaining|still|todavía|aún|blocked|bloquead[oa]s?|waiting|esperando|not yet|once|cuando termine)\b",
-    )
-    .expect("valid pending pattern");
-    let text = scrubber.fence.replace_all(answer, " ");
-    let sentences: Vec<&str> = text
-        .split(['\n', '.', '!', '?'])
-        .map(str::trim)
-        .filter(|s| !s.is_empty() && marker.is_match(s) && !scrubber.secret(s))
-        .collect();
-    scrubber.scrub(&sentences.join(". "))
+
+/// Whether `text` carries the private mark as a token of its own (`#private`, `#private!`,
+/// `"#private"`, `**#private**`), not as part of a longer word.
+pub fn marked_private(text: &str) -> bool {
+    mark_in(text.as_bytes(), true)
+}
+/// The mark in raw bytes; at the end of the slice the next byte is unknown and counts as a
+/// boundary when `end_is_boundary`.
+fn mark_in(bytes: &[u8], end_is_boundary: bool) -> bool {
+    let mark = PRIVATE_MARK.as_bytes();
+    let word = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+    bytes.windows(mark.len()).enumerate().any(|(i, w)| {
+        w.eq_ignore_ascii_case(mark)
+            && (i == 0 || !word(bytes[i - 1]))
+            && match bytes.get(i + mark.len()) {
+                Some(&next) => !word(next) && next != b'-',
+                None => end_is_boundary,
+            }
+    })
+}
+/// Whether the mark appears anywhere in the file, read in bounded chunks.
+fn file_has_mark(path: &Path) -> Result<bool> {
+    let mut file = std::fs::File::open(path)?;
+    let mut window: Vec<u8> = Vec::new();
+    let mut chunk = vec![0; 64 * 1024];
+    loop {
+        let n = file.read(&mut chunk)?;
+        window.extend_from_slice(&chunk[..n]);
+        if mark_in(&window, n == 0) {
+            return Ok(true);
+        }
+        if n == 0 {
+            return Ok(false);
+        }
+        // Keep enough to see a mark that crosses chunks, and the byte before it.
+        let keep = window.len().min(PRIVATE_MARK.len() + 1);
+        window.drain(..window.len() - keep);
+    }
+}
+/// Whether the user marked a JSON-lines session private in any request, wherever it is in the
+/// file. Only a file that contains the mark is parsed; a line too long to parse that contains it
+/// counts as marked.
+fn jsonl_private(path: &Path, request: &dyn Fn(&Value) -> Option<String>) -> Result<bool> {
+    if !file_has_mark(path)? {
+        return Ok(false);
+    }
+    let mut reader = std::io::BufReader::new(std::fs::File::open(path)?);
+    let mut line = Vec::new();
+    loop {
+        line.clear();
+        let n = Read::take(&mut reader, LINE_BYTES as u64 + 1).read_until(b'\n', &mut line)?;
+        if n == 0 {
+            return Ok(false);
+        }
+        if line.last() != Some(&b'\n') && n > LINE_BYTES {
+            if long_line_has_mark(&mut reader, &line)? {
+                return Ok(true);
+            }
+            continue;
+        }
+        if mark_in(&line, true)
+            && let Ok(value) = serde_json::from_slice::<Value>(&line)
+            && request(&value).is_some_and(|text| marked_private(&text))
+        {
+            return Ok(true);
+        }
+    }
+}
+/// Reads the rest of a long line in chunks, looking for the mark.
+fn long_line_has_mark(reader: &mut dyn BufRead, head: &[u8]) -> Result<bool> {
+    let mut found = mark_in(head, false);
+    let mut carry = head[head.len().saturating_sub(PRIVATE_MARK.len() + 1)..].to_vec();
+    loop {
+        let buffer = reader.fill_buf()?;
+        if buffer.is_empty() {
+            return Ok(found || mark_in(&carry, true));
+        }
+        let (chunk, end) = match buffer.iter().position(|&b| b == b'\n') {
+            Some(i) => (&buffer[..i], true),
+            None => (buffer, false),
+        };
+        carry.extend_from_slice(chunk);
+        found |= mark_in(&carry, end);
+        let used = chunk.len() + usize::from(end);
+        carry.drain(..carry.len().saturating_sub(PRIVATE_MARK.len() + 1));
+        reader.consume(used);
+        if end {
+            return Ok(found);
+        }
+    }
 }
 
 /// One message of a session, in order.
@@ -416,9 +599,30 @@ struct Parsed {
     updated: Option<String>,
     messages: Vec<Message>,
 }
+/// What a reader found: the summaries, and how many sessions it could not read.
+#[derive(Default)]
+struct Found {
+    sessions: Vec<Summary>,
+    failed: usize,
+}
+impl Found {
+    fn add(&mut self, read: Result<Option<Summary>>) {
+        match read {
+            Ok(Some(summary)) => self.sessions.push(summary),
+            Ok(None) => {}
+            Err(_) => self.failed += 1,
+        }
+    }
+}
 impl Parsed {
-    fn summary(self, provider: &str, modified: SystemTime, scrubber: &Scrubber) -> Option<Summary> {
-        // A session the user marked private, or one with no request of theirs, is not listed.
+    /// The summary, `None` for a session with no request of the user's or one marked private
+    /// in what was read, and an error when no time can be told for it.
+    fn summary(
+        self,
+        provider: &str,
+        modified: Option<SystemTime>,
+        scrubber: &Scrubber,
+    ) -> Result<Option<Summary>> {
         let requests: Vec<&Message> = self
             .messages
             .iter()
@@ -426,15 +630,21 @@ impl Parsed {
             .collect();
         if requests.is_empty()
             || self.id.is_empty()
-            || self.messages.iter().any(|m| {
-                m.user
-                    && m.text
-                        .split(|c: char| c.is_whitespace() || ",.;:()[]".contains(c))
-                        .any(|w| w.eq_ignore_ascii_case(PRIVATE_MARK))
-            })
+            || requests.iter().any(|m| marked_private(&m.text))
         {
-            return None;
+            return Ok(None);
         }
+        let updated = self
+            .updated
+            .or_else(|| self.messages.iter().rev().find_map(|m| m.at.clone()))
+            .and_then(|t| normalized(&t))
+            .or_else(|| modified.and_then(system_time))
+            .ok_or_else(|| anyhow::anyhow!("the session has no readable time"))?;
+        let started = self
+            .started
+            .or_else(|| self.messages.iter().find_map(|m| m.at.clone()))
+            .and_then(|t| normalized(&t))
+            .unwrap_or_else(|| updated.clone());
         let asked = scrubber.scrub(&requests[0].text);
         let last_request = requests.last().map(|m| scrubber.scrub(&m.text));
         let answer_index = self
@@ -448,26 +658,15 @@ impl Parsed {
         let open = match (answer_index, request_index) {
             (Some(a), Some(r)) if r > a => last_request.clone().unwrap_or_default(),
             (None, _) => last_request.clone().unwrap_or_default(),
-            (Some(a), _) => pending(scrubber, &self.messages[a].text),
+            (Some(a), _) => scrubber.pending(&self.messages[a].text),
         };
-        let modified: chrono::DateTime<chrono::Utc> = modified.into();
-        let updated = self
-            .updated
-            .or_else(|| self.messages.iter().rev().find_map(|m| m.at.clone()))
-            .and_then(|t| normalized(&t))
-            .unwrap_or_else(|| modified.to_rfc3339_opts(chrono::SecondsFormat::Secs, true));
-        let started = self
-            .started
-            .or_else(|| self.messages.iter().find_map(|m| m.at.clone()))
-            .and_then(|t| normalized(&t))
-            .unwrap_or_else(|| updated.clone());
         let project = self
             .cwd
             .trim_end_matches(['/', '\\'])
             .rsplit(['/', '\\'])
             .next()
             .unwrap_or_default();
-        Some(Summary {
+        Ok(Some(Summary {
             provider: provider.into(),
             session_id: self.id.chars().take(128).collect(),
             machine: String::new(),
@@ -483,7 +682,7 @@ impl Parsed {
             concluded,
             open,
             started_by: None,
-        })
+        }))
     }
 }
 fn normalized(time: &str) -> Option<String> {
@@ -494,6 +693,12 @@ fn normalized(time: &str) -> Option<String> {
 }
 fn from_millis(ms: i64) -> Option<String> {
     chrono::DateTime::from_timestamp_millis(ms)
+        .map(|t| t.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
+}
+/// A file time as RFC 3339, or none when it is out of range.
+fn system_time(time: SystemTime) -> Option<String> {
+    let since = time.duration_since(SystemTime::UNIX_EPOCH).ok()?;
+    chrono::DateTime::from_timestamp(i64::try_from(since.as_secs()).ok()?, since.subsec_nanos())
         .map(|t| t.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
 }
 
@@ -580,229 +785,302 @@ fn text_of(content: &Value, kinds: &[&str]) -> String {
     }
 }
 
+/// A Claude Code line as the user's own request (`true`) or the agent's answer, with its text;
+/// none for side chains, meta and compaction summaries, tool results, and lines whose text is
+/// only what Claude Code injects (shell input and output, commands, task notifications).
+fn claude_message(line: &Value) -> Option<(bool, String)> {
+    if [
+        "isSidechain",
+        "isMeta",
+        "isCompactSummary",
+        "isVisibleInTranscriptOnly",
+    ]
+    .iter()
+    .any(|flag| line[*flag] == true)
+    {
+        return None;
+    }
+    let user = match line["type"].as_str() {
+        Some("user") => true,
+        Some("assistant") => false,
+        _ => return None,
+    };
+    let text = text_of(&line["message"]["content"], &["text"]);
+    let own = without_injected(&text);
+    let own = own.trim();
+    (!own.is_empty() && !own.starts_with("[Request interrupted")).then(|| (user, own.to_owned()))
+}
 /// Claude Code: one JSON-lines file per session under `projects/<directory>/`.
-fn claude(root: &Path, limit: usize, scrubber: &Scrubber) -> Result<Vec<Summary>> {
-    let files = newest(root, 2, limit + 10, &|p| {
+fn claude(root: &Path, limit: usize, scrubber: &Scrubber) -> Result<Found> {
+    let files = newest(root, 2, limit * 2 + 10, &|p| {
         p.extension().is_some_and(|e| e == "jsonl")
     })?;
-    let mut sessions = Vec::new();
+    let mut found = Found::default();
     for (path, modified) in files {
-        let Ok(lines) = json_lines(&path) else {
-            continue;
-        };
-        let mut parsed = Parsed {
-            id: path
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or_default()
-                .into(),
-            ..Default::default()
-        };
-        for line in &lines {
-            if line["isSidechain"] == true || line["isMeta"] == true {
-                continue;
-            }
-            if let Some(cwd) = line["cwd"].as_str()
-                && parsed.cwd.is_empty()
-            {
-                parsed.cwd = cwd.into();
-            }
-            // The file is named after the session; a resumed one may carry older IDs inside.
-            if let Some(id) = line["sessionId"].as_str()
-                && parsed.id.is_empty()
-            {
-                parsed.id = id.into();
-            }
-            let user = match line["type"].as_str() {
-                Some("user") => true,
-                Some("assistant") => false,
-                _ => continue,
-            };
-            let text = text_of(&line["message"]["content"], &["text"]);
-            if text.trim().is_empty() {
-                continue;
-            }
+        if found.sessions.len() == limit {
+            break;
+        }
+        found.add(claude_session(&path, modified, scrubber));
+    }
+    Ok(found)
+}
+fn claude_session(
+    path: &Path,
+    modified: SystemTime,
+    scrubber: &Scrubber,
+) -> Result<Option<Summary>> {
+    if jsonl_private(path, &|line| {
+        claude_message(line).and_then(|(user, text)| user.then_some(text))
+    })? {
+        return Ok(None);
+    }
+    let lines = json_lines(path)?;
+    // The file is named after the session; a resumed one may carry older IDs inside.
+    let mut parsed = Parsed {
+        id: path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or_default()
+            .into(),
+        ..Default::default()
+    };
+    for line in &lines {
+        if let Some(cwd) = line["cwd"].as_str()
+            && parsed.cwd.is_empty()
+        {
+            parsed.cwd = cwd.into();
+        }
+        if let Some((user, text)) = claude_message(line) {
             parsed.messages.push(Message {
                 user,
                 text,
                 at: line["timestamp"].as_str().map(str::to_owned),
             });
         }
-        if let Some(summary) = parsed.summary("claude", modified, scrubber) {
-            sessions.push(summary);
-        }
-        if sessions.len() == limit {
-            break;
-        }
     }
-    Ok(sessions)
+    parsed.summary("claude", Some(modified), scrubber)
 }
 
+/// A Codex rollout line as a message: from its events (`user_message`, `agent_message`) or,
+/// in older rollouts, its response items, never the environment or instructions it injects.
+/// The first element says whether it is an event.
+fn codex_message(line: &Value) -> Option<(bool, bool, String)> {
+    let (kind, payload) = match line["type"].as_str() {
+        Some(kind) if line.get("payload").is_some() => (kind, &line["payload"]),
+        Some(_) => ("response_item", line),
+        None => return None,
+    };
+    match (kind, payload["type"].as_str()) {
+        ("event_msg", Some(kind @ ("user_message" | "agent_message"))) => Some((
+            true,
+            kind == "user_message",
+            payload["message"].as_str().unwrap_or_default().into(),
+        )),
+        ("response_item", Some("message")) => {
+            let user = payload["role"] == "user";
+            if !user && payload["role"] != "assistant" {
+                return None;
+            }
+            let text = text_of(&payload["content"], &["input_text", "output_text"]);
+            let injected = [
+                "<environment_context>",
+                "<user_instructions>",
+                "# AGENTS.md",
+            ]
+            .iter()
+            .any(|p| text.trim_start().starts_with(p));
+            (!injected).then_some((false, user, text))
+        }
+        _ => None,
+    }
+}
 /// Codex: `sessions/YYYY/MM/DD/rollout-*.jsonl`, one file per session.
-fn codex(root: &Path, limit: usize, scrubber: &Scrubber) -> Result<Vec<Summary>> {
-    let files = newest(root, 4, limit + 10, &|p| {
+fn codex(root: &Path, limit: usize, scrubber: &Scrubber) -> Result<Found> {
+    let files = newest(root, 4, limit * 2 + 10, &|p| {
         p.extension().is_some_and(|e| e == "jsonl")
             && p.file_name()
                 .and_then(|n| n.to_str())
                 .is_some_and(|n| n.starts_with("rollout-"))
     })?;
-    let mut sessions = Vec::new();
+    let mut found = Found::default();
     for (path, modified) in files {
-        let Ok(lines) = json_lines(&path) else {
-            continue;
-        };
-        let mut parsed = Parsed::default();
-        let mut events = Vec::new();
-        let mut items = Vec::new();
-        for line in &lines {
-            let (kind, payload) = match line["type"].as_str() {
-                Some(kind) if line.get("payload").is_some() => (kind, &line["payload"]),
-                // Older rollouts: the metadata first, then the items themselves.
-                None if line.get("id").is_some() => ("session_meta", line),
-                Some(_) => ("response_item", line),
-                None => continue,
-            };
-            let at = line["timestamp"].as_str().map(str::to_owned);
-            match (kind, payload["type"].as_str()) {
-                ("session_meta", _) => {
-                    parsed.id = payload["id"].as_str().unwrap_or_default().into();
-                    parsed.cwd = payload["cwd"].as_str().unwrap_or_default().into();
-                    parsed.started = payload["timestamp"].as_str().map(str::to_owned);
-                }
-                ("event_msg", Some(kind @ ("user_message" | "agent_message"))) => {
-                    events.push(Message {
-                        user: kind == "user_message",
-                        text: payload["message"].as_str().unwrap_or_default().into(),
-                        at,
-                    });
-                }
-                ("response_item", Some("message")) => {
-                    let user = payload["role"] == "user";
-                    if !user && payload["role"] != "assistant" {
-                        continue;
-                    }
-                    let text = text_of(&payload["content"], &["input_text", "output_text"]);
-                    // Codex sends its environment and the project's instructions as user text.
-                    let injected = [
-                        "<environment_context>",
-                        "<user_instructions>",
-                        "# AGENTS.md",
-                    ]
-                    .iter()
-                    .any(|p| text.trim_start().starts_with(p));
-                    if !injected {
-                        items.push(Message { user, text, at });
-                    }
-                }
-                _ => {}
-            }
-        }
-        parsed.messages = if events.iter().any(|m| m.user) {
-            events
-        } else {
-            items
-        };
-        parsed.updated = lines
-            .iter()
-            .rev()
-            .find_map(|l| l["timestamp"].as_str().map(str::to_owned));
-        if let Some(summary) = parsed.summary("codex", modified, scrubber) {
-            sessions.push(summary);
-        }
-        if sessions.len() == limit {
+        if found.sessions.len() == limit {
             break;
         }
+        found.add(codex_session(&path, modified, scrubber));
     }
-    Ok(sessions)
+    Ok(found)
+}
+fn codex_session(
+    path: &Path,
+    modified: SystemTime,
+    scrubber: &Scrubber,
+) -> Result<Option<Summary>> {
+    if jsonl_private(path, &|line| {
+        codex_message(line).and_then(|(_, user, text)| user.then_some(text))
+    })? {
+        return Ok(None);
+    }
+    let lines = json_lines(path)?;
+    let mut parsed = Parsed::default();
+    let mut events = Vec::new();
+    let mut items = Vec::new();
+    for line in &lines {
+        // Older rollouts start with the metadata itself, without a type.
+        let meta = if line["type"] == "session_meta" {
+            Some(&line["payload"])
+        } else {
+            (line["type"].is_null() && line.get("id").is_some()).then_some(line)
+        };
+        if let Some(meta) = meta {
+            parsed.id = meta["id"].as_str().unwrap_or_default().into();
+            parsed.cwd = meta["cwd"].as_str().unwrap_or_default().into();
+            parsed.started = meta["timestamp"].as_str().map(str::to_owned);
+            continue;
+        }
+        let at = line["timestamp"].as_str().map(str::to_owned);
+        if let Some((event, user, text)) = codex_message(line) {
+            let message = Message { user, text, at };
+            if event {
+                events.push(message);
+            } else {
+                items.push(message);
+            }
+        }
+    }
+    parsed.messages = if events.iter().any(|m| m.user) {
+        events
+    } else {
+        items
+    };
+    parsed.updated = lines
+        .iter()
+        .rev()
+        .find_map(|l| l["timestamp"].as_str().map(str::to_owned));
+    parsed.summary("codex", Some(modified), scrubber)
 }
 
 /// OpenCode: its database (`opencode.db`) or, in older versions, JSON files under `storage/`.
-fn opencode(root: &Path, limit: usize, scrubber: &Scrubber) -> Result<Vec<Summary>> {
+fn opencode(root: &Path, limit: usize, scrubber: &Scrubber) -> Result<Found> {
     let database = root.join("opencode.db");
     if database.is_file() {
         return opencode_database(&database, limit, scrubber);
     }
     let storage = root.join("storage");
     if !storage.join("session").is_dir() {
-        return Ok(Vec::new());
+        return Ok(Found::default());
     }
     let files = newest(&storage.join("session"), 2, limit * 3 + 10, &|p| {
         p.extension().is_some_and(|e| e == "json")
     })?;
-    let read = |path: &Path| -> Option<Value> {
-        let mut text = String::new();
-        std::fs::File::open(path)
-            .ok()?
-            .take(LINE_BYTES as u64)
-            .read_to_string(&mut text)
-            .ok()?;
-        serde_json::from_str(&text).ok()
-    };
-    let mut sessions = Vec::new();
+    let mut found = Found::default();
     for (path, modified) in files {
-        let Some(info) = read(&path) else { continue };
-        // A sub-agent's session belongs to its parent's.
-        if info["parentID"].is_string() {
-            continue;
-        }
-        let id = info["id"].as_str().unwrap_or_default();
-        if id.is_empty() || id.contains(['/', '\\', '.']) {
-            continue;
-        }
-        let mut messages = Vec::new();
-        let message_dir = storage.join("message").join(id);
-        let mut entries: Vec<Value> = std::fs::read_dir(&message_dir)
-            .into_iter()
-            .flatten()
-            .flatten()
-            .take(2000)
-            .filter_map(|e| read(&e.path()))
-            .collect();
-        entries.sort_by_key(|m| m["time"]["created"].as_i64().unwrap_or_default());
-        for message in first_and_last(entries) {
-            let Some(message_id) = message["id"].as_str().filter(|i| !i.contains(['/', '\\']))
-            else {
-                continue;
-            };
-            let mut parts: Vec<Value> = std::fs::read_dir(storage.join("part").join(message_id))
-                .into_iter()
-                .flatten()
-                .flatten()
-                .take(500)
-                .filter_map(|e| read(&e.path()))
-                .collect();
-            parts.sort_by(|a, b| a["id"].as_str().cmp(&b["id"].as_str()));
-            messages.push(Message {
-                user: message["role"] == "user",
-                text: opencode_text(&parts),
-                at: message["time"]["created"].as_i64().and_then(from_millis),
-            });
-        }
-        let parsed = Parsed {
-            id: id.into(),
-            cwd: info["directory"].as_str().unwrap_or_default().into(),
-            started: info["time"]["created"].as_i64().and_then(from_millis),
-            updated: info["time"]["updated"].as_i64().and_then(from_millis),
-            messages,
-        };
-        if let Some(summary) = parsed.summary("opencode", modified, scrubber) {
-            sessions.push(summary);
-        }
-        if sessions.len() == limit {
+        if found.sessions.len() == limit {
             break;
         }
+        found.add(opencode_file_session(&storage, &path, modified, scrubber));
     }
-    Ok(sessions)
+    Ok(found)
+}
+/// A small JSON file; a larger one is not read.
+fn read_json(path: &Path) -> Result<Value> {
+    anyhow::ensure!(
+        std::fs::metadata(path)?.len() <= LINE_BYTES as u64,
+        "file too large"
+    );
+    Ok(serde_json::from_slice(&std::fs::read(path)?)?)
+}
+/// The files of a directory sorted by name (OpenCode's IDs sort by time); none when it does not
+/// exist, an error past `max`.
+fn sorted_files(dir: &Path, max: usize) -> Result<Vec<PathBuf>> {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error.into()),
+    };
+    let mut files = Vec::new();
+    for entry in entries {
+        files.push(entry?.path());
+        anyhow::ensure!(files.len() <= max, "too many files");
+    }
+    files.sort();
+    Ok(files)
+}
+fn opencode_file_session(
+    storage: &Path,
+    path: &Path,
+    modified: SystemTime,
+    scrubber: &Scrubber,
+) -> Result<Option<Summary>> {
+    let info = read_json(path)?;
+    // A sub-agent's session belongs to its parent's.
+    if info["parentID"].is_string() {
+        return Ok(None);
+    }
+    let id = info["id"].as_str().unwrap_or_default();
+    anyhow::ensure!(
+        !id.is_empty() && !id.contains(['/', '\\', '.']),
+        "invalid session ID"
+    );
+    let mut messages = Vec::new();
+    for file in sorted_files(&storage.join("message").join(id), 20_000)? {
+        let message = read_json(&file)?;
+        let message_id = message["id"].as_str().unwrap_or_default().to_owned();
+        anyhow::ensure!(
+            !message_id.is_empty() && !message_id.contains(['/', '\\', '.']),
+            "invalid message ID"
+        );
+        messages.push((message_id, message));
+    }
+    messages.sort_by_key(|(_, m)| m["time"]["created"].as_i64().unwrap_or_default());
+    // Every request of the user, wherever it is, may mark the session private.
+    for (message_id, message) in &messages {
+        if message["role"] == "user" {
+            for part in sorted_files(&storage.join("part").join(message_id), 2_000)? {
+                if file_has_mark(&part)?
+                    && read_json(&part).map_or(true, |p| marked_private(&opencode_text(&[p])))
+                {
+                    return Ok(None);
+                }
+            }
+        }
+    }
+    let mut read = Vec::new();
+    for (message_id, message) in first_and_last(messages) {
+        let mut parts = Vec::new();
+        for part in sorted_files(&storage.join("part").join(&message_id), 2_000)?
+            .into_iter()
+            .take(200)
+        {
+            // A large part is a tool's output, never text worth a summary.
+            if let Ok(part) = read_json(&part) {
+                parts.push(part);
+            }
+        }
+        read.push(Message {
+            user: message["role"] == "user",
+            text: opencode_text(&parts),
+            at: message["time"]["created"].as_i64().and_then(from_millis),
+        });
+    }
+    Parsed {
+        id: id.into(),
+        cwd: info["directory"].as_str().unwrap_or_default().into(),
+        started: info["time"]["created"].as_i64().and_then(from_millis),
+        updated: info["time"]["updated"].as_i64().and_then(from_millis),
+        messages: read,
+    }
+    .summary("opencode", Some(modified), scrubber)
 }
 /// The messages a summary reads: the first ones (the request) and the latest ones.
 fn first_and_last<T>(mut messages: Vec<T>) -> Vec<T> {
-    const FIRST: usize = 10;
-    const LAST: usize = 60;
-    if messages.len() > FIRST + LAST {
-        messages.drain(FIRST..messages.len() - LAST);
+    if messages.len() > FIRST_MESSAGES + LAST_MESSAGES {
+        messages.drain(FIRST_MESSAGES..messages.len() - LAST_MESSAGES);
     }
     messages
 }
+const FIRST_MESSAGES: usize = 10;
+const LAST_MESSAGES: usize = 60;
 /// The text parts of an OpenCode message the user or the model wrote (not synthetic ones).
 fn opencode_text(parts: &[Value]) -> String {
     parts
@@ -812,7 +1090,7 @@ fn opencode_text(parts: &[Value]) -> String {
         .collect::<Vec<_>>()
         .join("\n")
 }
-fn opencode_database(path: &Path, limit: usize, scrubber: &Scrubber) -> Result<Vec<Summary>> {
+fn opencode_database(path: &Path, limit: usize, scrubber: &Scrubber) -> Result<Found> {
     let db = rusqlite::Connection::open_with_flags(
         path,
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
@@ -856,52 +1134,96 @@ fn opencode_database(path: &Path, limit: usize, scrubber: &Scrubber) -> Result<V
             ))
         })?
         .collect::<std::result::Result<Vec<_>, _>>()?;
-    let mut sessions = Vec::new();
+    let mut found = Found::default();
     for (id, directory, created, updated) in rows {
-        let mut messages = Vec::new();
-        let mut statement = db.prepare(
-            "SELECT id, time_created, data FROM message WHERE session_id = ?1 ORDER BY time_created LIMIT 2000",
-        )?;
-        let found = statement
-            .query_map([&id], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, i64>(1)?,
-                    row.get::<_, String>(2)?,
-                ))
-            })?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        for (message_id, at, data) in first_and_last(found) {
-            let data: Value = serde_json::from_str(&data).unwrap_or_default();
-            let mut statement =
-                db.prepare("SELECT data FROM part WHERE message_id = ?1 ORDER BY id LIMIT 500")?;
-            let parts: Vec<Value> = statement
-                .query_map([&message_id], |row| row.get::<_, String>(0))?
-                .filter_map(|data| serde_json::from_str(&data.ok()?).ok())
-                .collect();
-            messages.push(Message {
-                user: data["role"] == "user",
-                text: opencode_text(&parts),
-                at: from_millis(at),
-            });
-        }
-        let parsed = Parsed {
-            id,
-            cwd: directory,
-            started: from_millis(created),
-            updated: from_millis(updated),
-            messages,
-        };
-        let modified = SystemTime::UNIX_EPOCH
-            + std::time::Duration::from_millis(u64::try_from(updated).unwrap_or_default());
-        if let Some(summary) = parsed.summary("opencode", modified, scrubber) {
-            sessions.push(summary);
-        }
-        if sessions.len() == limit {
+        if found.sessions.len() == limit {
             break;
         }
+        found.add(opencode_row(&db, id, directory, created, updated, scrubber));
     }
-    Ok(sessions)
+    Ok(found)
+}
+fn opencode_row(
+    db: &rusqlite::Connection,
+    id: String,
+    directory: String,
+    created: i64,
+    updated: i64,
+    scrubber: &Scrubber,
+) -> Result<Option<Summary>> {
+    // Every request of the user, wherever it is, may mark the session private.
+    let mut statement = db.prepare(
+        "SELECT p.data, m.data FROM part p JOIN message m ON m.id = p.message_id \
+         WHERE m.session_id = ?1 AND p.data LIKE '%#private%' LIMIT 200",
+    )?;
+    let marked = statement
+        .query_map([&id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    for (part, message) in marked {
+        let message: Value = serde_json::from_str(&message)?;
+        if message["role"] == "user"
+            && serde_json::from_str::<Value>(&part)
+                .map_or(true, |p| marked_private(&opencode_text(&[p])))
+        {
+            return Ok(None);
+        }
+    }
+    // The first messages (the request) and the latest ones, in order.
+    let read = |order: &str, count: usize| -> Result<Vec<(String, i64, String)>> {
+        let mut statement = db.prepare(&format!(
+            "SELECT id, time_created, data FROM message WHERE session_id = ?1 \
+             ORDER BY time_created {order}, id {order} LIMIT ?2"
+        ))?;
+        let rows = statement
+            .query_map(rusqlite::params![&id, count as i64], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    };
+    let mut rows = read("ASC", FIRST_MESSAGES)?;
+    let mut latest = read("DESC", LAST_MESSAGES)?;
+    latest.reverse();
+    for row in latest {
+        if !rows.iter().any(|(seen, _, _)| seen == &row.0) {
+            rows.push(row);
+        }
+    }
+    let mut parts = db.prepare(
+        "SELECT data FROM part WHERE message_id = ?1 AND length(data) <= ?2 \
+         AND json_extract(data, '$.type') = 'text' \
+         AND IFNULL(json_extract(data, '$.synthetic'), 0) = 0 ORDER BY id LIMIT 50",
+    )?;
+    let mut messages = Vec::new();
+    for (message_id, at, data) in rows {
+        let data: Value = serde_json::from_str(&data)?;
+        let texts = parts
+            .query_map(rusqlite::params![&message_id, LINE_BYTES as i64], |row| {
+                row.get::<_, String>(0)
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?
+            .iter()
+            .map(|part| serde_json::from_str::<Value>(part))
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        messages.push(Message {
+            user: data["role"] == "user",
+            text: opencode_text(&texts),
+            at: from_millis(at),
+        });
+    }
+    let modified = u64::try_from(updated)
+        .ok()
+        .and_then(|ms| SystemTime::UNIX_EPOCH.checked_add(std::time::Duration::from_millis(ms)));
+    Parsed {
+        id,
+        cwd: directory,
+        started: from_millis(created),
+        updated: from_millis(updated),
+        messages,
+    }
+    .summary("opencode", modified, scrubber)
 }
 
 #[cfg(test)]
