@@ -500,8 +500,9 @@ impl Direction {
         }
     }
 }
-/// Ask the workflow director to choose a workflow, in the same retained, tool-less, read-only
-/// native session as planning and requests, in its private directory.
+/// Ask the workflow director to choose a workflow, in the same tool-less, read-only native
+/// session as planning and requests, in its private directory; unlike theirs, its session is
+/// never retained after the answer.
 pub(crate) async fn direct(
     task: DirectTask,
     choice: (&str, &str, &str),
@@ -512,12 +513,14 @@ pub(crate) async fn direct(
     remote: mobile::Observer,
 ) -> Result<Direction> {
     let binary = locate(choice.0).ok_or_else(|| anyhow::anyhow!("Selected CLI is unavailable."))?;
-    let outcome = execute_at(
+    // One read-only turn: its process ends with the answer, never retained.
+    let outcome = execute_allowing(
         &binary,
         choice,
         &[directory],
         &task.prompt(instructions, input),
         Some(task.schema()),
+        (&[], false),
         observer,
         remote,
     )
@@ -561,7 +564,7 @@ pub(crate) async fn execute(
         directories,
         prompt,
         None,
-        allow,
+        (allow, true),
         observer,
         remote,
     )
@@ -757,12 +760,14 @@ async fn execute_at(
         directories,
         prompt,
         schema,
-        &[],
+        (&[], true),
         observer,
         remote,
     )
     .await
 }
+/// One session; `keep` lets a Claude session that ended with its answer stay reachable after
+/// it (`mobile::execute`).
 #[allow(clippy::too_many_arguments)]
 async fn execute_allowing(
     binary: &std::path::Path,
@@ -770,7 +775,7 @@ async fn execute_allowing(
     directories: &[PathBuf],
     prompt: &str,
     schema: Option<Value>,
-    allow: &[Allow],
+    (allow, keep): (&[Allow], bool),
     observer: SessionObserver<'_>,
     remote: mobile::Observer,
 ) -> Result<Outcome> {
@@ -818,7 +823,7 @@ async fn execute_allowing(
             &directories[0],
             prompt,
             &requested,
-            planning,
+            (planning, keep),
             observer,
             remote,
         )

@@ -5,6 +5,7 @@ use super::super::synthetic::{self, Catalog};
 use super::*;
 use crate::ado::workflow::PullRequest;
 use crate::store::settings::SettingsStore;
+use crate::llm::implementation::mobile;
 use crate::workflows::{Agent, Repository, Workflow};
 use std::sync::atomic::{AtomicI64, Ordering};
 
@@ -1048,6 +1049,203 @@ async fn a_coding_run_holds_its_slot_and_directories_until_the_session_ends_not_
             r.children[0].coding.as_ref().is_some_and(|c| c.started)
         })
         .await;
+}
+
+/// Code with a Claude CLI whose Remote Control connects and whose turn runs `body`.
+fn connected_claude(bench: &Bench, body: &str) {
+    let cli = bench.log.join("claude");
+    crate::llm::implementation::mobile::fake::connected_cli(&cli, &bench.log, body);
+    crate::llm::implementation::use_test_cli(Some(cli));
+    let mut map = bench.host.state.settings.map().unwrap();
+    map.workflows[0].agent = Agent {
+        provider: "claude".into(),
+        model: "synthetic-model".into(),
+        effort: "low".into(),
+    };
+    bench.host.state.settings.save_map(&map).unwrap();
+}
+/// The session of implementation run `id` as Agent history shows it.
+async fn history_session(bench: &Bench, id: &str) -> Value {
+    let history = implementation::operate(&bench.host, "implementation_history", &json!({}))
+        .await
+        .unwrap();
+    let run = history["runs"].as_array().unwrap().iter().find(|r| r["id"] == id);
+    let run = run.unwrap();
+    json!({"session_alive":run["session_alive"],"handed_to_user":run["handed_to_user"]})
+}
+
+#[tokio::test]
+async fn a_done_coding_session_is_handed_to_the_user_until_its_workflow_run_is_cancelled() {
+    let bench = Bench::new().await;
+    connected_claude(
+        &bench,
+        r#"printf '%s\n' '{"type":"result","is_error":false,"result":"Implemented.\nBranch: feature/kept"}'"#,
+    );
+    let id = bench.start(TASK).await;
+    let run = bench.state(&id, Phase::PullRequests).await;
+    let coding = run.children[0].coding.clone().unwrap().id;
+    assert_eq!(bench.implementation(&coding).await, "done");
+    let pid = mobile::fake::pids(&bench.log).pop().unwrap();
+    // The run ended done: its session stays reachable and belongs to the user now.
+    assert!(mobile::fake::runs(&pid));
+    let kept = json!({"session_alive":true,"handed_to_user":true});
+    let status = bench
+        .op("workflow_run_status", json!({"run":id}))
+        .await
+        .unwrap();
+    let shown = &status["run"]["children"][0]["coding"];
+    assert_eq!(
+        json!({"session_alive":shown["session_alive"],"handed_to_user":shown["handed_to_user"]}),
+        kept
+    );
+    assert_eq!(history_session(&bench, &coding).await, kept);
+
+    // Cancelling the workflow run stops every session it started, a kept one included.
+    let cancelled = bench
+        .op("workflow_run_cancel", json!({"run":id,"confirmed":true}))
+        .await
+        .unwrap();
+    assert_eq!(cancelled["sessions_stopped"], json!([coding]));
+    assert!(cancelled["warning"].is_null());
+    assert!(mobile::fake::ends(&pid).await);
+    let gone = json!({"session_alive":false,"handed_to_user":false});
+    let status = bench
+        .op("workflow_run_status", json!({"run":id}))
+        .await
+        .unwrap();
+    let shown = &status["run"]["children"][0]["coding"];
+    assert_eq!(
+        json!({"session_alive":shown["session_alive"],"handed_to_user":shown["handed_to_user"]}),
+        gone
+    );
+    assert_eq!(history_session(&bench, &coding).await, gone);
+}
+
+#[tokio::test]
+async fn a_coding_run_that_does_not_end_done_stops_its_session() {
+    // A turn that answered but raised a prompt nobody answered (`permission_prompt`), and one
+    // that failed (`needs_attention`).
+    for (body, ended) in [
+        (
+            r#"printf '%s\n' '{"type":"control_request","request_id":"ask-1","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"git push"}}}'
+read -r answer
+printf '%s\n' '{"type":"result","is_error":false,"result":"Pushed nothing.\nBranch: feature/asked"}'"#,
+            "permission_prompt",
+        ),
+        (
+            r#"printf '%s\n' '{"type":"result","is_error":true,"result":"Could not finish."}'"#,
+            "needs_attention",
+        ),
+    ] {
+        let bench = Bench::new().await;
+        connected_claude(&bench, body);
+        let id = bench.start(TASK).await;
+        let run = bench.state(&id, Phase::NeedsAttention).await;
+        let coding = run.children[0].coding.clone().unwrap().id;
+        assert_eq!(bench.implementation(&coding).await, ended);
+        let pid = mobile::fake::pids(&bench.log).pop().unwrap();
+        assert!(mobile::fake::ends(&pid).await, "{ended}");
+        assert_eq!(
+            history_session(&bench, &coding).await,
+            json!({"session_alive":false,"handed_to_user":false})
+        );
+    }
+}
+
+#[tokio::test]
+async fn cancelling_a_run_stops_a_kept_session_on_a_worker_machine() {
+    let bench = Bench::new().await;
+    let worker = uuid::Uuid::new_v4().to_string();
+    let registration = implementation::fleet::register(
+        &bench.host,
+        &json!({"id":worker,"name":"Worker","os":"linux"}),
+    )
+    .await
+    .unwrap();
+    let token = registration["token"].as_str().unwrap().to_owned();
+    // The worker reports a coding run that ended done, its Claude session kept for the user.
+    let coding = uuid::Uuid::new_v4().to_string();
+    let url = "https://dev.azure.com/example/Payments/_workitems/edit/300";
+    let poll = json!({"id":worker,"token":token,"action":"poll","sessions":[{"id":coding,
+        "machine":worker,"item":{"id":300,"title":"Worker task","url":url,"project":"Payments",
+        "state":"Active","kind":"Task","created_at":null,"dates":[]},"provider":"claude",
+        "model":"synthetic-model","effort":"low","state":"done",
+        "session_id":"77777777-7777-4777-8777-777777777777",
+        "remote":{"status":"connected","url":"https://claude.ai/code/session_Remote123",
+            "expires_at":chrono::Utc::now().timestamp() + 3600},
+        "created_at":"2026-11-14T10:00:00+00:00","started_at":null,"finished_at":null}]});
+    implementation::fleet::protocol(&bench.host, &poll)
+        .await
+        .unwrap();
+    let mut run = Run::new(
+        Item {
+            id: 300,
+            url: url.into(),
+            ..Default::default()
+        },
+        bench.now(),
+    );
+    run.state = Phase::PullRequests;
+    run.children = vec![record::Child {
+        id: 300,
+        title: "Worker task".into(),
+        url: url.into(),
+        coding: Some(record::Implementation {
+            id: coding.clone(),
+            machine: worker.clone(),
+            started: true,
+            state: Some("done".into()),
+        }),
+        outcome: Some("done".into()),
+        ..Default::default()
+    }];
+    assert!(bench.host.state.workflows.db.insert(&run).unwrap());
+    let status = bench
+        .op("workflow_run_status", json!({"run":run.id}))
+        .await
+        .unwrap();
+    assert_eq!(
+        status["run"]["children"][0]["coding"]["handed_to_user"],
+        true
+    );
+    let cancelling = {
+        let (host, azure, id) = (bench.host.clone(), bench.azure.clone(), run.id.clone());
+        tokio::spawn(async move {
+            operation(
+                &host,
+                "workflow_run_cancel",
+                &json!({"run":id,"confirmed":true}),
+                &azure,
+            )
+            .await
+        })
+    };
+    let poll = json!({"id":worker,"token":token,"action":"poll"});
+    let command = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let reply = implementation::fleet::protocol(&bench.host, &poll)
+                .await
+                .unwrap();
+            if !reply["command"].is_null() {
+                break reply["command"].clone();
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    // The worker is asked to stop that run's session (it closes it, the run is finished).
+    assert_eq!(command["method"], "implementation_cancel");
+    assert_eq!(command["args"]["id"], coding.as_str());
+    let mut answered = poll.clone();
+    answered["results"] =
+        json!([{"id":command["id"],"result":{"ok":true,"data":{"cancelled":true}}}]);
+    implementation::fleet::protocol(&bench.host, &answered)
+        .await
+        .unwrap();
+    let cancelled = cancelling.await.unwrap().unwrap();
+    assert_eq!(cancelled["sessions_stopped"], json!([coding]));
+    assert_eq!(cancelled["run"]["state"], "cancelled");
 }
 
 #[test]

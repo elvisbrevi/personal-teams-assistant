@@ -312,9 +312,49 @@ async fn recover(host: &Arc<Host>) -> Result<std::collections::HashSet<String>> 
                 ),
             );
             state.db.save(&run)?;
+            stop_sessions(host, &run, None).await;
         }
     }
     Ok(unrecovered)
+}
+
+/// Stop every agent session of the run's implementation runs that is still alive, a session
+/// kept after its run included (`implementation_cancel` on its machine), except `except`'s.
+/// Returns the implementation runs whose session was stopped and, when a machine could not be
+/// reached, what to do about each run it holds.
+pub(in crate::app) async fn stop_sessions(
+    host: &Arc<Host>,
+    run: &Run,
+    except: Option<&str>,
+) -> (Vec<String>, Vec<String>) {
+    let (mut stopped, mut warnings) = (Vec::new(), Vec::new());
+    let mut unreachable = std::collections::HashSet::new();
+    for implementation in run.implementations() {
+        if except == Some(implementation.id.as_str()) {
+            continue;
+        }
+        let alive = implementation::session_life(host, &implementation.id)
+            .await
+            .is_some_and(|life| life["session_alive"] == true);
+        if !alive {
+            continue;
+        }
+        let machine = &implementation.machine;
+        let reached = !unreachable.contains(machine)
+            && implementation::cancel_run(host, machine, &implementation.id)
+                .await
+                .is_ok();
+        if reached {
+            stopped.push(implementation.id.clone());
+        } else {
+            unreachable.insert(machine.clone());
+            warnings.push(format!(
+                "The session of implementation run {} may still be alive on machine {}, which could not be reached; once it is reachable, stop it there with implementation_cancel (machine {}, id {}).",
+                implementation.id, machine, machine, implementation.id
+            ));
+        }
+    }
+    (stopped, warnings)
 }
 
 /// Record the observed state of the run's active implementation run.
@@ -393,6 +433,11 @@ async fn advance(host: &Arc<Host>, azure: &Azure, id: &str, now: i64, poll: i64)
             Ok(true) => {
                 run.updated_at = now;
                 state.db.save(&run)?;
+                if run.state.stops_sessions() {
+                    drop(guard);
+                    stop_sessions(host, &run, None).await;
+                    return Ok(());
+                }
             }
             Ok(false) => return Ok(()),
             Err(error) => {
@@ -400,8 +445,9 @@ async fn advance(host: &Arc<Host>, azure: &Azure, id: &str, now: i64, poll: i64)
                     security::Redactor::new(&[], Vec::new()).expect("built-in redaction patterns");
                 run.stop(Phase::Failed, now, redactor.redact(&error));
                 state.db.save(&run)?;
-                // The blocks of the `failed` stage.
                 drop(guard);
+                stop_sessions(host, &run, None).await;
+                // The blocks of the `failed` stage.
                 acting::execute(host, id, now).await?;
                 return Ok(());
             }

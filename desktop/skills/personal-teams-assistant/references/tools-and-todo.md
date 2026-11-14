@@ -297,8 +297,17 @@ and [Claude Remote Control](https://code.claude.com/docs/en/remote-control).
 Mobile/PWA session access uses the provider's own login on the execution machine.
 New implementation/request sessions try to enable it automatically. Codex uses its shared Remote
 Control daemon so the phone sees the same live thread. Claude publishes a real remote session
-whose `session_…` ID differs from the local UUID. The retained Claude process serves mobile for
-up to two hours (at most 16 per host) after the PTA run ended.
+whose `session_…` ID differs from the local UUID. After its run the Claude process keeps serving
+mobile for up to two hours (at most 16 per host) only when the run ended with its answer (a
+coding run `done`, a planning run `plan_ready`): the session is then **handed to the user** and is
+theirs to continue. Every other ending stops its process (a failed turn, the time limit,
+`needs_attention`, `permission_prompt`, `failed`, a cancel, a restart of the host), and so does
+cancelling a finished run with `implementation_cancel`; the workflow director's sessions are
+never kept. A stopped session is reachable again only when the user opens it with
+`implementation_mobile_session`. `implementation_runs`, `implementation_history`,
+`implementation_sessions` and each implementation run in `workflow_run_status` say
+`session_alive` (its process exists now) and `handed_to_user` (it outlived its run): read them
+instead of guessing from the run's state or the machine's processes.
 
 A coding run is finished when its agent's work is, not at its first turn end: a Claude session
 that ends a turn while a background task it started is still pending (a pipeline it watches, a
@@ -580,10 +589,13 @@ run (any state but `done` and `cancelled`).
   with the blocks that have not run and never runs that launcher again. Blocks never post to a
   Teams channel, only to chats, and a block cannot do anything but these two things.
 - **Cancel:** `pta workflows cancel RUN --confirmed` (MCP `workflow_run_cancel`) cancels the active
-  planning or coding run (its file changes stay) and the run advances no more; a creation already
-  being sent is not stopped. When the run's machine cannot be reached, the reply's `warning` names
-  the run and the machine: relay it, and cancel that run there with `implementation_cancel` once
-  the machine is reachable.
+  planning or coding run (its file changes stay), stops every other session the run started that
+  is still alive (a coding session handed to the user after `done`, or one the user opened again;
+  the reply lists them in `sessions_stopped`) and the run advances no more; a creation already
+  being sent is not stopped. A run that ends `failed` or `interrupted` stops those sessions too;
+  `needs_attention` keeps a `done` coding session handed to the user. When a machine cannot be
+  reached, the reply's `warning` names the run and the machine: relay it, and cancel that run
+  there with `implementation_cancel` once the machine is reachable.
 
 - **Summarize:** `pta workflows summary RUN` (MCP `workflow_summary`, which **runs a model** and needs no confirmation, like `workflow_classify`:
   it takes up to about a minute and uses the director's agent quota) has the workflow director
@@ -668,7 +680,7 @@ Agents use the same operations through `pta tools call` or MCP:
 1. `implementation_request_catalog` with `provider: azure|github` and, for Azure, `source`. It returns exact `targets`, up to three `recent` targets, CLI session/write readiness and available coding CLI providers/models/efforts. Keep a target as returned; arbitrary or edited targets are rejected.
 2. After the user approves the context, target, type and agent, call `implementation_request_start` with a new stable UUID `id`, the exact `target`, `kind: epic|hu|bug`, `context`, CLI `provider`, `model`, `effort` and `confirmed: true`. Azure requires the authenticated Azure CLI session on this host; read credentials cannot create requests. GitHub uses the GitHub CLI session that supplied the repository list, including its own assignment; the GitHub App connection does not authorize this flow. The process defines the actual Azure work item type. Creation uses its To-Do developer assignment role (or Assigned To) and description/reproduction field.
 3. Inspect `implementation_request_status` with `id` until generation/sending ends. Reusing that ID with the same submission only reads the saved record; another submission cannot reuse it. After any timeout inspect status, never start a replacement automatically. A failed/uncertain send is never retried. An uncertain request may already exist: inspect the provider first. If GitHub silently drops the Epic type or own assignment, `needs_attention` preserves its verified issue URL for review.
-4. `implementation_history` takes no arguments and returns the latest 100 recorded local requests and local/cached implementation sessions, bounded to 800 KB; `partial` indicates bounded history. The GUI's Agent history screen opens from To-Do. Run IDs belong to PTA; session IDs belong to the native coding CLI. Missing session IDs and finish times remain empty, including interrupted executions.
+4. `implementation_history` takes no arguments and returns the latest 100 recorded local requests and local/cached implementation sessions, bounded to 800 KB; `partial` indicates bounded history. Each entry says `session_alive` and `handed_to_user`. The GUI's Agent history screen opens from To-Do. Run IDs belong to PTA; session IDs belong to the native coding CLI. Missing session IDs and finish times remain empty, including interrupted executions.
 5. Use `implementation_open_session` with the recorded `machine` and run `id` on that machine's native desktop. The existing Codex/Claude platform limits apply; OpenCode and unsupported remote/mobile sessions retain their ID with an explanation rather than an invented app URL.
 
 Daily task snapshots, activity runs and all evidence tools remain read-only. This is a distinct explicit request-creation action; it does not authorize autonomous work item creation by the assistant.

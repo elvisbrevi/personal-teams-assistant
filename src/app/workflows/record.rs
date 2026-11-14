@@ -80,6 +80,10 @@ impl State {
     pub(in crate::app) fn finished(self) -> bool {
         matches!(self, State::Done | State::Cancelled)
     }
+    /// A run that ends here stops every agent session its implementation runs left alive.
+    pub(in crate::app) fn stops_sessions(self) -> bool {
+        matches!(self, State::Failed | State::Cancelled | State::Interrupted)
+    }
     /// Stopped until the user resumes it.
     pub(in crate::app) fn stopped(self) -> bool {
         matches!(
@@ -449,6 +453,12 @@ impl Run {
                 .and_then(|c| c.coding.as_ref()),
             _ => None,
         }
+    }
+    /// Every implementation run it asked for: the planning run and each child's coding run.
+    pub(in crate::app) fn implementations(&self) -> impl Iterator<Item = &Implementation> {
+        self.planning
+            .iter()
+            .chain(self.children.iter().filter_map(|c| c.coding.as_ref()))
     }
     /// It waits in the line for a slot: in a stage that takes one, without one.
     pub(in crate::app) fn waits_for_slot(&self) -> bool {

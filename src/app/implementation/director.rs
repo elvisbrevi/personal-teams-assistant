@@ -1,7 +1,7 @@
-//! The workflow director's session. It runs on the director's machine in the same retained,
-//! tool-less, read-only, closed-JSON session as planning (`llm::implementation::direct`), in a
-//! private temporary directory under `implementation/directors/` removed when the session
-//! ends, with the restricted child environment;
+//! The workflow director's session. It runs on the director's machine in the same tool-less,
+//! read-only, closed-JSON session as planning (`llm::implementation::direct`), never retained
+//! after its answer, in a private temporary directory under `implementation/directors/` removed
+//! when the session ends, with the restricted child environment;
 //! on another machine it is the additive one-shot call `workflow_direct` (`answer`), which a
 //! worker runs beside its poll and advertises with `workflow_direct_support`. The coordinator
 //! records each session as an agent session in `request_runs` (purpose `classification`: the

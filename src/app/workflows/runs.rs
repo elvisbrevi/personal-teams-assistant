@@ -191,7 +191,9 @@ pub(super) async fn operation(
             }
             let a: StatusArgs = parse(args)?;
             let run = found(&host.state, &a.run)?;
-            Ok(json!({"run": placed(run.view(), &run, &places(&host.state)?)}))
+            let mut view = placed(run.view(), &run, &places(&host.state)?);
+            sessions(host, &mut view).await;
+            Ok(json!({ "run": view }))
         }
         "workflow_run_resume" => resume(host, parse(args)?).await,
         "workflow_run_cancel" => cancel(host, parse(args)?).await,
@@ -389,6 +391,26 @@ async fn resume(host: &Arc<Host>, args: RunArgs) -> Result<Value, String> {
     Ok(json!({"run": run.view(), "resumed": true, "accepted": accepted}))
 }
 
+/// Mark each implementation run in a run's view with whether its agent session is alive and
+/// was handed to the user (`implementation::session_life`); unknown ones stay unmarked.
+async fn sessions(host: &Arc<Host>, view: &mut Value) {
+    async fn mark(host: &Arc<Host>, target: &mut Value) {
+        let id = target["id"].as_str().unwrap_or_default().to_owned();
+        if let Some(life) = implementation::session_life(host, &id).await {
+            target["session_alive"] = life["session_alive"].clone();
+            target["handed_to_user"] = life["handed_to_user"].clone();
+        }
+    }
+    if view["planning"].is_object() {
+        mark(host, &mut view["planning"]).await;
+    }
+    for index in 0..view["children"].as_array().map_or(0, Vec::len) {
+        if view["children"][index]["coding"].is_object() {
+            mark(host, &mut view["children"][index]["coding"]).await;
+        }
+    }
+}
+
 async fn cancel(host: &Arc<Host>, args: RunArgs) -> Result<Value, String> {
     let state = &host.state;
     require_coordinator(state)?;
@@ -405,7 +427,7 @@ async fn cancel(host: &Arc<Host>, args: RunArgs) -> Result<Value, String> {
     let active = run.active_implementation().cloned();
     if !args.confirmed {
         return Err(invalid(format!(
-            "Confirm with the user, then cancel with confirmed: true. Cancel workflow run {}{}? It stops advancing for good; the file changes stay.",
+            "Confirm with the user, then cancel with confirmed: true. Cancel workflow run {}{}? It stops advancing for good and stops every session it started that is still alive; the file changes stay.",
             run.id,
             active
                 .as_ref()
@@ -415,6 +437,7 @@ async fn cancel(host: &Arc<Host>, args: RunArgs) -> Result<Value, String> {
     }
     let mut cancelled = None;
     let mut warning = None;
+    let mut asked = None;
     if let Some(active) = &active {
         // Only a run still in flight is cancelled. When its machine cannot be asked, the run
         // may be running there (even one whose launch was not confirmed yet): the cancellation
@@ -427,6 +450,7 @@ async fn cancel(host: &Arc<Host>, args: RunArgs) -> Result<Value, String> {
             Err(_) => true,
         };
         if present {
+            asked = Some(active.id.as_str());
             match implementation::cancel_run(host, &active.machine, &active.id).await {
                 Ok(()) => cancelled = Some(active.id.clone()),
                 Err(_) => {
@@ -438,10 +462,17 @@ async fn cancel(host: &Arc<Host>, args: RunArgs) -> Result<Value, String> {
             }
         }
     }
+    // Every other session the run started and that is still alive stops too: a coding session
+    // kept after its run, or one the user opened again.
+    let (stopped, unreached) = engine::stop_sessions(host, &run, asked).await;
+    let warning = warning
+        .into_iter()
+        .chain(unreached)
+        .reduce(|all, next| format!("{all} {next}"));
     run.cancel(now());
     state.workflows.db.save(&run).map_err(fail)?;
     Ok(
-        json!({"run": run.view(), "cancelled": true, "implementation_cancelled": cancelled, "warning": warning}),
+        json!({"run": run.view(), "cancelled": true, "implementation_cancelled": cancelled, "sessions_stopped": stopped, "warning": warning}),
     )
 }
 

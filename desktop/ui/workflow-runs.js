@@ -14,7 +14,7 @@ import { selectTab, showTab } from './nav.js';
 import { chooseFromList } from './directory-sheet.js';
 import { link, markdown } from './markdown.js';
 import { allowNames, runStateLabel } from './run-states.js';
-import { openAgentSession } from './sessions.js';
+import { openAgentSession, sessionLifeBadge } from './sessions.js';
 import { planChildrenReview } from './implementation.js';
 import { STAGE_NAMES } from './workflow-blocks.js';
 
@@ -261,7 +261,7 @@ function renderRunDetail(run, sessions) {
   if (run.attention) notes.push(el('div', { class: `callout ${WAITING.includes(run.state) ? 'warn' : 'info'}`, id: 'run-attention' }, el('p', { textContent: tx(run.attention) })));
   if (run.error) notes.push(el('div', { class: 'callout error', role: 'alert' }, el('p', { textContent: tx(run.error) })));
   if (run.classification?.reason) notes.push(el('p', { class: 'hint', id: 'run-classification', textContent: t('The director said: {reason}', { reason: run.classification.reason }) }));
-  detail.replaceChildren(head, facts, ...notes, runActions(run, sessionButton), timeline(run), children(run, sessionButton), blocks(run), summaries(run));
+  detail.replaceChildren(head, facts, ...notes, runActions(run, sessionButton), timeline(run), children(run, sessionButton, sessions), blocks(run), summaries(run));
   if (focusId) /** @type {HTMLElement | null} */ (document.getElementById(focusId))?.focus({ preventScroll: true });
 }
 
@@ -290,7 +290,9 @@ function runActions(run, sessionButton) {
   if (!FINAL.includes(run.state)) {
     const cancel = twice(t('Cancel run'), t('Confirm cancel'), async () => {
       const reply = await invoke('workflow_run_cancel', { run: run.id, confirmed: true });
-      if (reply.warning) notify(tx(reply.warning), 'warn'); else done(t('Run cancelled.'));
+      const stopped = reply.sessions_stopped?.length ?? 0;
+      if (reply.warning) notify(tx(reply.warning), 'warn');
+      else done(stopped ? tn(stopped, 'Run cancelled; 1 session still alive was stopped.', 'Run cancelled; {n} sessions still alive were stopped.') : t('Run cancelled.'));
       await refresh();
     });
     cancel.classList.add('danger');
@@ -374,13 +376,14 @@ function timeline(run) {
     items.length ? el('ol', { class: 'run-timeline' }, ...items) : el('p', { class: 'hint', textContent: t('No stage yet.') }));
 }
 
-function children(run, sessionButton) {
+function children(run, sessionButton, sessions) {
   const rows = (run.children ?? []).map(child => {
+    const life = sessionLifeBadge(sessions.find(s => s.id === child.coding?.id));
     const state = child.coding?.state ?? (child.coding ? t('Starting') : t('Waiting'));
     const prs = child.pull_requests ?? [];
     return el('div', { class: 'resource run-child', 'data-child': String(child.id) },
       el('div', { class: 'resource-head' }, badge(tx(state), state === 'done' ? 'ok' : ['failed', 'permission_prompt', 'interrupted', 'needs_attention', 'missing'].includes(state) ? 'warn' : 'info'),
-        link(`#${child.id} ${child.title}`, child.url), el('span', { class: 'grow' }), sessionButton(child.coding)),
+        link(`#${child.id} ${child.title}`, child.url), el('span', { class: 'grow' }), life, sessionButton(child.coding)),
       el('p', { class: 'resource-facts' }, el('small', { textContent: [child.repository?.name, child.branch ? t('Branch {name}', { name: child.branch }) : null, child.outcome ? tx(child.outcome) : null].filter(Boolean).join(' · ') })),
       prs.length ? el('ul', { class: 'run-pulls' }, ...prs.map(pr => el('li', {}, link(pr.title ? `!${pr.id} ${pr.title}` : pr.url, pr.url), ' ', badge(tx(pr.status), pr.status === 'completed' ? 'ok' : pr.status === 'abandoned' ? 'warn' : 'info')))) : null);
   });
