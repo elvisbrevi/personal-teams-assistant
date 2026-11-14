@@ -2546,6 +2546,30 @@ if (flag !== '--axe-only') for (const [label, viewport] of [['desktop', { width:
   const listScan = await scan(page);
   check(`runs ${label}: the list passes WCAG 2.2 AA`, listScan.length === 0, JSON.stringify(listScan));
   await page.screenshot({ path: `${out}/${label}-workflow-runs.png`, fullPage: true });
+  // Every row is a card with one layout: a state badge with text, then the number and title, the type and the facts,
+  // each inside the card and none over another, with a short title and with one of 200 characters, in both modes.
+  const cardsFit = () => page.locator('#run-rows [data-run]').evaluateAll(rows => rows.map(row => {
+    const card = row.getBoundingClientRect();
+    const parts = [...row.querySelector('.card-main').children].map(part => part.getBoundingClientRect());
+    const inside = parts.every(r => r.left >= card.left && r.right <= card.right && r.top >= card.top && r.bottom <= card.bottom);
+    const apart = parts.every((r, i) => i === 0 || r.top >= parts[i - 1].bottom - 0.5);
+    const title = row.querySelector('.run-row-title');
+    const order = [...row.querySelector('.card-main').children].map(part => part.className.split(' ')[0]);
+    return { inside, apart, unclipped: title.scrollWidth <= title.clientWidth + 1, badge: Boolean(row.querySelector('.card-meta .badge')?.textContent.trim()), order: order.slice(0, 3).join() };
+  }));
+  const fitOk = fits => fits.length === 5 && fits.every(f => f.inside && f.apart && f.unclipped && f.badge && f.order === 'card-meta,run-row-title,run-row-kind');
+  const shortFit = await cardsFit();
+  check(`runs ${label}: every card shows its state badge, then the title, the type and the facts inside the card`, fitOk(shortFit), JSON.stringify(shortFit));
+  await page.evaluate(() => window.__ptaRetitleRun('3c5f1c9a-0d2e-4b7a-8f10-5a6b7c8d9e01', 'Improve settlement reporting so that every merchant sees the daily, weekly and monthly sums of their settlements with the fees, the refunds and the chargebacks of each period, and can export'.padEnd(200, '.')));
+  await page.click('#runs-refresh');
+  await page.waitForFunction(() => (document.querySelector('#run-rows [data-run="3c5f1c9a-0d2e-4b7a-8f10-5a6b7c8d9e01"] .run-row-title')?.textContent.length ?? 0) > 200);
+  const longFit = await cardsFit();
+  check(`runs ${label}: a 200-character title wraps inside its card without covering the rest`, fitOk(longFit) && await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), JSON.stringify(longFit));
+  await page.emulateMedia({ colorScheme: 'dark' });
+  const darkScan = await scan(page);
+  check(`runs ${label}: the list in dark mode passes WCAG 2.2 AA`, darkScan.length === 0, JSON.stringify(darkScan));
+  await page.emulateMedia({ colorScheme: 'light' });
+  await page.evaluate(() => window.__ptaRetitleRun('3c5f1c9a-0d2e-4b7a-8f10-5a6b7c8d9e01', 'Improve settlement reporting'));
   // Filters.
   await page.selectOption('#runs-state', 'done');
   await page.waitForFunction(() => document.querySelectorAll('#run-rows [data-run]').length === 1);
