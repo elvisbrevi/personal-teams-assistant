@@ -958,6 +958,166 @@ async fn at_most_concurrency_runs_advance_and_a_disabled_workflow_finishes_its_r
     assert_eq!(bench.count("starts"), 2);
 }
 
+#[test]
+fn the_line_for_a_slot_is_creation_order_and_a_retrying_run_keeps_its_place() {
+    let item = |id: u64| Item {
+        id,
+        url: format!("https://dev.azure.com/example/Payments/_workitems/edit/{id}"),
+        ..Default::default()
+    };
+    // Oldest first: a run retrying its classification until 200, then three waiting to code.
+    let mut runs: Vec<Run> = (1..=4).map(|id| Run::new(item(id), 100)).collect();
+    runs[0].retry_at = Some(200);
+    runs[0].retries = 1;
+    for run in &mut runs[1..] {
+        run.state = Phase::Coding;
+    }
+    let ids: Vec<String> = runs.iter().map(|r| r.id.clone()).collect();
+    // A run created later never takes the slot first, whichever asks first.
+    assert!(!record::may_take_slot(&runs, &ids[2], 1, 150));
+    assert!(!record::may_take_slot(&runs, &ids[3], 1, 150));
+    // Waiting out its retry, the retrying run is out of the line.
+    assert!(record::may_take_slot(&runs, &ids[1], 1, 150));
+    // Once its retry is due it is back in its place: nobody created after it passes it.
+    assert!(!record::may_take_slot(&runs, &ids[1], 1, 200));
+    let places = record::positions(&runs, 200);
+    assert_eq!(places.get(&ids[0]), None);
+    assert_eq!(places[&ids[1]], 2);
+    runs[0].state = Phase::Coding;
+    runs[0].retry_at = None;
+    assert!(record::may_take_slot(&runs, &ids[0], 1, 200));
+    // A slot held is not free; a second slot goes to the next in the line only.
+    runs[0].admitted = true;
+    assert!(!record::may_take_slot(&runs, &ids[1], 1, 200));
+    assert!(record::may_take_slot(&runs, &ids[1], 2, 200));
+    assert!(!record::may_take_slot(&runs, &ids[2], 2, 200));
+    let places = record::positions(&runs, 200);
+    assert_eq!(places.get(&ids[0]), None);
+    assert_eq!(
+        (places[&ids[1]], places[&ids[2]], places[&ids[3]]),
+        (1, 2, 3)
+    );
+    // A slot is kept from one stage that takes it to the next, never from classifying.
+    let mut classified = Run::new(item(5), 100);
+    classified.admitted = true;
+    classified.advance(Phase::Coding, 110, "chosen: payments");
+    assert!(classified.waits_for_slot());
+}
+
+/// The item each coding session was asked to implement, in the order they started.
+fn coded(bench: &Bench) -> Vec<u64> {
+    (1..=bench.count("starts"))
+        .map(|n| {
+            let prompt = fs::read_to_string(bench.log.join(format!("coding.{n}"))).unwrap();
+            [TASK, 201, 202, 203, 204, 205]
+                .into_iter()
+                .find(|id| prompt.contains(&format!("You are implementing Task {id} ")))
+                .unwrap()
+        })
+        .collect()
+}
+
+fn place(listed: &Value, id: &str) -> (bool, Value) {
+    let run = listed["runs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["id"] == id)
+        .unwrap();
+    (
+        run["waiting_for_slot"].as_bool().unwrap(),
+        run["queue_position"].clone(),
+    )
+}
+
+#[tokio::test]
+async fn runs_are_coded_in_the_order_they_were_created_with_one_slot() {
+    let bench = Bench::new().await;
+    let mut map = bench.host.state.settings.map().unwrap();
+    map.workflow_settings.concurrency = 1;
+    bench.host.state.settings.save_map(&map).unwrap();
+    bench.director();
+    let mut ids = Vec::new();
+    for item in 201..=205 {
+        bench.catalog.add(
+            synthetic::detail(item, "Task", "task", &format!("Task {item}"), "Anywhere."),
+            true,
+        );
+        ids.push(bench.start_director(item).await);
+    }
+    for id in &ids {
+        bench.state(id, Phase::PullRequests).await;
+    }
+    assert_eq!(coded(&bench), vec![201, 202, 203, 204, 205]);
+}
+
+#[tokio::test]
+async fn a_run_whose_director_failed_twice_is_coded_before_the_runs_created_after_it() {
+    let bench = Bench::new().await;
+    let mut map = bench.host.state.settings.map().unwrap();
+    map.workflow_settings.concurrency = 1;
+    bench.host.state.settings.save_map(&map).unwrap();
+    bench.director();
+    for item in [201, 202, 203] {
+        bench.catalog.add(
+            synthetic::detail(item, "Task", "task", &format!("Task {item}"), "Anywhere."),
+            true,
+        );
+    }
+    // The only slot codes.
+    bench.mode("mode", "block");
+    let first = bench.start(TASK).await;
+    bench
+        .until(&first, |r| {
+            r.children[0].coding.as_ref().is_some_and(|c| c.started)
+        })
+        .await;
+    let retried = bench.start_director(201).await;
+    let second = bench.start_director(202).await;
+    let third = bench.start_director(203).await;
+    // The director cannot read the oldest of the three for now.
+    bench.catalog.failing_items.lock().unwrap().insert(201);
+    // The two created after it are classified while the slot codes, and wait for it.
+    let run = bench.state(&second, Phase::Coding).await;
+    assert!(!run.admitted);
+    let run = bench.state(&third, Phase::Coding).await;
+    assert!(!run.admitted);
+    assert_eq!(bench.count("directions"), 2);
+    assert_eq!(bench.count("starts"), 1);
+    bench.until(&retried, |r| r.retries == 1).await;
+    bench.offset.store(61, Ordering::SeqCst);
+    let run = bench.until(&retried, |r| r.retries == 2).await;
+    assert_eq!(run.state, Phase::Classifying);
+    // Waiting out its retry, it is not in the line.
+    let listed = bench.op("workflow_runs", json!({})).await.unwrap();
+    assert_eq!(place(&listed, &retried), (false, Value::Null));
+    assert_eq!(place(&listed, &second), (true, json!(1)));
+    assert_eq!(place(&listed, &third), (true, json!(2)));
+    assert_eq!(place(&listed, &first), (false, Value::Null));
+    // It answers on its next try and takes its place, before the two created after it.
+    bench.catalog.failing_items.lock().unwrap().remove(&201);
+    bench.offset.store(61 + 121, Ordering::SeqCst);
+    bench.state(&retried, Phase::Coding).await;
+    let listed = bench.op("workflow_runs", json!({})).await.unwrap();
+    assert_eq!(place(&listed, &retried), (true, json!(1)));
+    assert_eq!(place(&listed, &second), (true, json!(2)));
+    assert_eq!(place(&listed, &third), (true, json!(3)));
+    let status = bench
+        .op("workflow_run_status", json!({"run": third}))
+        .await
+        .unwrap();
+    assert_eq!(status["run"]["waiting_for_slot"], true);
+    assert_eq!(status["run"]["queue_position"], 3);
+    assert_eq!(bench.count("starts"), 1);
+    // The slot frees.
+    bench.mode("mode", "done");
+    bench.release();
+    for id in [&first, &retried, &second, &third] {
+        bench.state(id, Phase::PullRequests).await;
+    }
+    assert_eq!(coded(&bench), vec![TASK, 201, 202, 203]);
+}
+
 #[tokio::test]
 async fn a_start_needs_an_enabled_workflow_of_the_items_project_an_assigned_item_and_confirmation()
 {
@@ -1215,7 +1375,7 @@ async fn a_run_with_no_child_created_needs_attention_instead_of_finishing() {
 }
 
 #[tokio::test]
-async fn an_unreachable_director_releases_its_slot_and_is_asked_again_later() {
+async fn an_unreachable_director_holds_up_no_other_run_and_is_asked_again_later() {
     let bench = Bench::new().await;
     let mut map = bench.host.state.settings.map().unwrap();
     map.workflow_settings.concurrency = 1;

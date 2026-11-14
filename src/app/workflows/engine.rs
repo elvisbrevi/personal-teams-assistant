@@ -10,9 +10,12 @@
 //! machine is asked to launch it, and the launch is idempotent by that ID, so an interruption
 //! anywhere resumes from the last recorded stage without a second start. Only the coordinator
 //! advances runs (never a computer signed in to one, never a shared portal account that is not
-//! the owner's), at most `concurrency` of them in the stages that take a slot.
+//! the owner's), at most `concurrency` of them in the stages that take a slot. Slots go first in,
+//! first out: a run takes one only when no run created before it waits for one (`record::line`),
+//! whichever run's task asks first, so a run that gave a slot back keeps its place. Classifying
+//! takes no slot: the director's sessions run beside the coding runs, one at a time.
 use super::acting;
-use super::record::{Child, Implementation, Item, Run, State as Phase, Store};
+use super::record::{self, Child, Implementation, Item, Run, State as Phase, Store};
 use super::*;
 use crate::ado::workflow::PullRequest;
 use crate::tools::todo::Detail;
@@ -35,6 +38,8 @@ pub(in crate::app) struct State {
     pub(in crate::app) watcher: super::watcher::Watcher,
     locks: std::sync::Mutex<HashMap<String, Arc<Mutex<()>>>>,
     admission: Mutex<()>,
+    /// One director classification at a time, apart from the `concurrency` slots.
+    classifying: Mutex<()>,
     advancing: AtomicUsize,
     recovered: AtomicBool,
     /// The attempts left without a result were settled once after a start.
@@ -51,6 +56,7 @@ impl State {
             watcher: super::watcher::Watcher::open(&root.join("workflows.db"))?,
             locks: std::sync::Mutex::new(HashMap::new()),
             admission: Mutex::new(()),
+            classifying: Mutex::new(()),
             advancing: AtomicUsize::new(0),
             recovered: AtomicBool::new(false),
             settled: AtomicBool::new(false),
@@ -245,7 +251,8 @@ pub(in crate::app) async fn tick(
     }
     let driven: Vec<Phase> = Phase::ALL.into_iter().filter(|s| s.driven()).collect();
     let mut runs = state.db.list(&driven, None, -1)?;
-    // The oldest first: they take the free slots first.
+    // The oldest first; which of them takes a free slot is decided by the line (`admit`), not
+    // by the order their tasks ask in.
     runs.reverse();
     for run in runs {
         if unrecovered.contains(&run.id) || !state.inflight.lock().unwrap().insert(run.id.clone()) {
@@ -327,19 +334,16 @@ fn set_observed(run: &mut Run, observed: &str) {
     }
 }
 
-/// Take a slot for a run in a stage that needs one, when one is free.
-async fn admit(host: &Arc<Host>, run: &mut Run) -> Result<bool> {
+/// Take a slot for a run in a stage that needs one, when one is free and no run created before
+/// it waits for one.
+async fn admit(host: &Arc<Host>, run: &mut Run, now: i64) -> Result<bool> {
     let state = &host.state.workflows;
     let _admission = state.admission.lock().await;
     let concurrency = host.state.settings.map()?.workflow_settings.concurrency as usize;
-    let slotted: Vec<Phase> = Phase::ALL.into_iter().filter(|s| s.takes_slot()).collect();
-    let taken = state
-        .db
-        .list(&slotted, None, -1)?
-        .iter()
-        .filter(|r| r.admitted && r.id != run.id)
-        .count();
-    if taken >= concurrency {
+    let driven: Vec<Phase> = Phase::ALL.into_iter().filter(|s| s.driven()).collect();
+    let mut runs = state.db.list(&driven, None, -1)?;
+    runs.reverse();
+    if !record::may_take_slot(&runs, &run.id, concurrency, now) {
         return Ok(false);
     }
     run.admitted = true;
@@ -362,7 +366,7 @@ async fn advance(host: &Arc<Host>, azure: &Azure, id: &str, now: i64, poll: i64)
         if run.retry_at.is_some_and(|at| now < at) {
             return Ok(());
         }
-        if run.state.takes_slot() && !run.admitted && !admit(host, &mut run).await? {
+        if run.waits_for_slot() && !admit(host, &mut run, now).await? {
             return Ok(());
         }
         let _advancing = Advancing::new(&state.advancing);
@@ -428,6 +432,7 @@ fn transient(error: &str) -> bool {
 /// the run changed.
 async fn classify(host: &Arc<Host>, azure: &Azure, run: Run, now: i64) -> Result<bool> {
     let state = &host.state.workflows;
+    let classifying = state.classifying.lock().await;
     let map = host.state.settings.map()?;
     // The project's director: its own, its workflows' shared agent or the account's.
     let directed = super::director::director_for(&map, &run.item.organization, &run.item.project);
@@ -455,6 +460,7 @@ async fn classify(host: &Arc<Host>, azure: &Azure, run: Run, now: i64) -> Result
             }
         }
     };
+    drop(classifying);
     let lock = state.lock(&run.id);
     let _guard = lock.lock().await;
     let Some(mut run) = state.db.get(&run.id)? else {
@@ -468,11 +474,11 @@ async fn classify(host: &Arc<Host>, azure: &Azure, run: Run, now: i64) -> Result
         Err(error) if error.starts_with("[not_ready]") || error.starts_with("[network]") => {
             let note = error.split_once("] ").map_or(error.as_str(), |(_, t)| t);
             run.error = Some(note.to_owned());
-            // Asked again later, one minute doubling up to half an hour, without a slot
-            // meanwhile, so an unreachable director never blocks other runs.
+            // Asked again later, one minute doubling up to half an hour; meanwhile it is out of
+            // the line, so an unreachable director never holds up other runs, and back in its
+            // place once its retry is due.
             run.retries = run.retries.saturating_add(1);
             run.retry_at = Some(now + (60i64 << run.retries.min(5).saturating_sub(1)).min(1800));
-            run.admitted = false;
             run.updated_at = now;
             state.db.save(&run)?;
             return Ok(false);

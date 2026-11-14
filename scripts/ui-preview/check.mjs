@@ -2549,6 +2549,14 @@ if (flag !== '--axe-only') for (const [label, viewport] of [['desktop', { width:
   await page.selectOption('#runs-state', 'done');
   await page.waitForFunction(() => document.querySelectorAll('#run-rows [data-run]').length === 1);
   check(`runs ${label}: the state filter narrows the list`, (await calls()).some(c => c.method === 'workflow_runs' && c.state === 'done'));
+  // A run waiting in the line for a slot says so, with its place.
+  await page.evaluate(() => window.__ptaQueueRun('3c5f1c9a-0d2e-4b7a-8f10-5a6b7c8d9e03', 2));
+  await page.selectOption('#runs-state', 'coding');
+  await page.waitForFunction(() => [...document.querySelectorAll('#run-rows [data-run]')].map(r => r.dataset.state).join() === 'coding');
+  check(`runs ${label}: a run waiting for a slot shows its place in the line`, /Esperando un turno, posición 2/.test(await page.locator('#run-rows').innerText()));
+  const queuedScan = await scan(page);
+  check(`runs ${label}: the list with a run waiting for a slot passes WCAG 2.2 AA`, queuedScan.length === 0, JSON.stringify(queuedScan));
+  await page.evaluate(() => window.__ptaQueueRun('3c5f1c9a-0d2e-4b7a-8f10-5a6b7c8d9e03', null));
   await page.selectOption('#runs-state', '');
   await page.waitForFunction(() => document.querySelectorAll('#run-rows [data-run]').length === 5);
   // The detail of the coding run: timeline, children with sessions and pull requests, block outcomes, a summary and its send.

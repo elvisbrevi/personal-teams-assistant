@@ -6,7 +6,7 @@
 //! workflow's agent and, once the user confirmed the children, codes each one with full
 //! permissions on the workflow's machine.
 use super::engine::{self, Azure};
-use super::record::{Item, Run, State as Phase};
+use super::record::{self, Item, Run, State as Phase};
 use super::*;
 
 pub(in crate::app) const METHODS: [&str; 6] = [
@@ -111,6 +111,21 @@ pub(in crate::app) fn allow_effect(workflow: &crate::workflows::Workflow) -> Str
     }
 }
 
+/// The place in the line for a slot of every run waiting for one (1 is next).
+fn places(state: &DesktopState) -> Result<HashMap<String, usize>, String> {
+    let driven: Vec<Phase> = Phase::ALL.into_iter().filter(|s| s.driven()).collect();
+    let mut runs = state.workflows.db.list(&driven, None, -1).map_err(fail)?;
+    runs.reverse();
+    Ok(record::positions(&runs, now()))
+}
+/// A run's view or summary with whether it waits for a slot and its place in the line.
+fn placed(mut value: Value, run: &Run, places: &HashMap<String, usize>) -> Value {
+    let place = places.get(&run.id);
+    value["waiting_for_slot"] = json!(place.is_some());
+    value["queue_position"] = json!(place);
+    value
+}
+
 pub(super) fn found(state: &DesktopState, id: &str) -> Result<Run, String> {
     if uuid::Uuid::parse_str(id).is_err() {
         return Err(invalid("Give the workflow run's ID."));
@@ -175,7 +190,8 @@ pub(super) async fn operation(
                 run: String,
             }
             let a: StatusArgs = parse(args)?;
-            Ok(json!({"run": found(&host.state, &a.run)?.view()}))
+            let run = found(&host.state, &a.run)?;
+            Ok(json!({"run": placed(run.view(), &run, &places(&host.state)?)}))
         }
         "workflow_run_resume" => resume(host, parse(args)?).await,
         "workflow_run_cancel" => cancel(host, parse(args)?).await,
@@ -324,8 +340,9 @@ fn list(state: &DesktopState, args: ListArgs) -> Result<Value, String> {
         .db
         .list(&states, args.workflow.as_deref(), limit)
         .map_err(fail)?;
+    let places = places(state)?;
     Ok(json!({
-        "runs": runs.iter().map(Run::summary).collect::<Vec<_>>(),
+        "runs": runs.iter().map(|r| placed(r.summary(), r, &places)).collect::<Vec<_>>(),
         "attention": attention(state).map_err(fail)?,
     }))
 }

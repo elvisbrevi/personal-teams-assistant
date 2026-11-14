@@ -445,8 +445,8 @@ How a workflow takes an item from its ready state to its release, and where the 
 Requires host and CLI `workflow_director_support: true`.
 
 - **Read them:** `pta workflows settings` (MCP `workflow_settings`) shows
-  `watch_interval_minutes` (default 5), `concurrency` (workflow runs that advance at once,
-  default 2), `pull_request_wait_days` (default 7), the account's `director` (`machine`,
+  `watch_interval_minutes` (default 5), `concurrency` (workflow runs that plan, code or act at
+  once, first in, first out; classifying takes no slot; default 2), `pull_request_wait_days` (default 7), the account's `director` (`machine`,
   `provider`, `model`, `effort`; none until chosen), `ready_states` and `project_directors` (a
   project's own director) per organization and project, `directors` (for each project, the
   director that classifies and summarizes its items and its `source`: `project` its own,
@@ -524,7 +524,10 @@ run (any state but `done` and `cancelled`).
 - **Follow:** `pta workflows runs [--state STATE] [--workflow W] [--limit N]` (MCP
   `workflow_runs`) lists runs newest first, with `attention`: the runs waiting on the user
   (`plan_review`, `unassigned`, `needs_attention`, `interrupted`, `failed`; `status` carries them
-  too as `workflow_attention`). `pta workflows status RUN` (MCP `workflow_run_status`) is the
+  too as `workflow_attention`). A run in a stage that takes one of the `concurrency` slots
+  (`planning`, `creating_children`, `coding`, `blocks`) without one shows `waiting_for_slot:
+  true` and its `queue_position` (1 is next): slots go in creation order, and a run whose
+  classification is retrying keeps its place once its retry is due. `pta workflows status RUN` (MCP `workflow_run_status`) is the
   whole record: the stage timeline with times and outcomes, the planning run and each child's
   coding run (`implementation_runs` with the machine and ID shows them), the creation ledger entry
   (`implementation_creation`), every child's verified link, branch and pull requests with their

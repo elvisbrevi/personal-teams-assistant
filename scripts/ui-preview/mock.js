@@ -350,7 +350,8 @@
       summaries: [], summary_sends: [], attention: null, error: null, auto_start: true, created_at: secs(NOW - 604_800_000), updated_at: secs(NOW - 499_000_000), finished_at: secs(NOW - 499_000_000) },
   ] : [];
   const runSummary = run => ({ id: run.id, workflow: run.workflow, item: { id: run.item.id, title: run.item.title, url: run.item.url, kind: run.item.kind, category: run.item.category, project: run.item.project }, state: run.state, stage: run.stopped_in ?? run.state, attention: run.attention,
-    waits_on_user: ['plan_review', 'unassigned', 'needs_attention', 'interrupted', 'failed'].includes(run.state), children: run.children.length, pull_requests: run.children.flatMap(c => c.pull_requests.map(p => ({ url: p.url, status: p.status }))), created_at: run.created_at, updated_at: run.updated_at, finished_at: run.finished_at });
+    waits_on_user: ['plan_review', 'unassigned', 'needs_attention', 'interrupted', 'failed'].includes(run.state), children: run.children.length, pull_requests: run.children.flatMap(c => c.pull_requests.map(p => ({ url: p.url, status: p.status }))), created_at: run.created_at, updated_at: run.updated_at, finished_at: run.finished_at,
+    waiting_for_slot: Boolean(run.queue_position), queue_position: run.queue_position ?? null });
   const runView = run => { const view = { ...structuredClone(run), stage: run.stopped_in ?? run.state, waits_on_user: runSummary(run).waits_on_user }; delete view.fresh; return view; };
   const findRun = id => { const run = workflowRuns.find(r => r.id === id); if (!run) throw new Error(`[invalid_input] Workflow run ${id} is not recorded.`); return run; };
   // The plan-review run's planning run, as implementation_runs lists it on its machine, with the plan the person reviews;
@@ -366,6 +367,8 @@
   // A send whose result Teams did not confirm (`uncertain`), as the host records it, for the guard on the next send.
   window.__ptaMarkUncertain = (run, chat) => { const found = workflowRuns.find(r => r.id === run); const latest = found.summaries[found.summaries.length - 1];
     found.summary_sends.push({ id: crypto.randomUUID(), summary: latest.id, chat: { id: chat, topic: teamsChats.find(c => c.id === chat)?.topic, type: 'group' }, mentions: [], chars: latest.text.length, edited: false, outcome: 'uncertain', at: secs(Date.now()) }); };
+  // A run in the line for one of the `concurrency` slots (its place, 1 next), or out of it with null.
+  window.__ptaQueueRun = (run, position) => { workflowRuns.find(r => r.id === run).queue_position = position; };
   window.__ptaWorkflowCalls = [];
   const workflowHandlers = {
     workflow_runs: args => {
