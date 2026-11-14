@@ -96,6 +96,9 @@ struct Endpoint {
     /// The workflow run operations (`workflows::runs_handles`).
     #[serde(default)]
     workflow_runs_support: bool,
+    /// The workflow supervisor's operations (`workflows::supervisor_handles`).
+    #[serde(default)]
+    workflow_supervisor_support: bool,
     #[serde(default)]
     wiki_support: bool,
     #[serde(default)]
@@ -529,6 +532,10 @@ async fn client_with_transport(
             "Incompatible workflows host: update the host and CLI together before starting or following workflow runs."
         );
         ensure!(
+            endpoint.workflow_supervisor_support || !workflows::supervisor_handles(&request.method),
+            "Incompatible workflows host: update the host and CLI together before using the workflow supervisor."
+        );
+        ensure!(
             endpoint.workflow_runs_support
                 || request.method != "implementation_start"
                 || workflows::implement::choice(&request.args).is_none(),
@@ -714,6 +721,7 @@ pub(crate) fn launch(
             workflows_support: true,
             workflow_director_support: true,
             workflow_runs_support: true,
+            workflow_supervisor_support: true,
             machine_pairing_support: true,
             machine_login_support: true,
             machine_management_support: true,
@@ -1611,6 +1619,7 @@ mod tests {
                 workflows_support: true,
                 workflow_director_support: true,
                 workflow_runs_support: true,
+                workflow_supervisor_support: true,
                 machine_pairing_support: true,
                 machine_login_support: true,
                 machine_management_support: true,
@@ -1659,6 +1668,7 @@ mod tests {
                 workflows_support: true,
                 workflow_director_support: true,
                 workflow_runs_support: true,
+                workflow_supervisor_support: true,
                 machine_pairing_support: true,
                 machine_login_support: true,
                 machine_management_support: true,
@@ -1722,6 +1732,7 @@ mod tests {
                     workflows_support: true,
                     workflow_director_support: true,
                     workflow_runs_support: true,
+                    workflow_supervisor_support: true,
                     machine_pairing_support: true,
                     machine_login_support: true,
                     machine_management_support: true,

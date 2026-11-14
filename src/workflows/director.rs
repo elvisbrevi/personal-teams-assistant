@@ -382,7 +382,12 @@ fn validate_supervisor(supervisor: &Supervisor) -> Result<()> {
         );
         Ok(())
     };
-    within("looks_per_day", supervisor.looks_per_day, LOOKS_PER_DAY, "looks")?;
+    within(
+        "looks_per_day",
+        supervisor.looks_per_day,
+        LOOKS_PER_DAY,
+        "looks",
+    )?;
     within(
         "min_interval_minutes",
         supervisor.min_interval_minutes,
@@ -406,10 +411,7 @@ fn validate_supervisor(supervisor: &Supervisor) -> Result<()> {
     match supervisor.agent() {
         Some(agent) => validate_director(&agent, "The workflow supervisor"),
         None if missing.len() == 4 && !supervisor.enabled => Ok(()),
-        None => anyhow::bail!(
-            "The workflow supervisor needs its {}.",
-            missing.join(", ")
-        ),
+        None => anyhow::bail!("The workflow supervisor needs its {}.", missing.join(", ")),
     }
 }
 
@@ -639,7 +641,10 @@ mod tests {
             ..Default::default()
         };
         let error = validate(&bare).unwrap_err().to_string();
-        assert!(error.contains("machine, provider, model, effort"), "{error}");
+        assert!(
+            error.contains("machine, provider, model, effort"),
+            "{error}"
+        );
         let partial = Settings {
             supervisor: Supervisor {
                 model: String::new(),
@@ -647,7 +652,12 @@ mod tests {
             },
             ..Default::default()
         };
-        assert!(validate(&partial).unwrap_err().to_string().contains("model"));
+        assert!(
+            validate(&partial)
+                .unwrap_err()
+                .to_string()
+                .contains("model")
+        );
         for (field, value) in [
             ("looks_per_day", 0),
             ("looks_per_day", 101),

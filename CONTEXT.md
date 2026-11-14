@@ -194,7 +194,7 @@ The model-backed selector and summarizer of a project's items: it chooses which 
 _Avoid_: coordinator, orchestrator, dispatcher
 
 **Workflow supervisor**:
-The model-backed agent on the coordinator that looks after the account's workflow runs: on events (a run stopped, waited too long, lost its machine or disagrees with its session, a batch ended) or on request, it reads what the runs' agents did, checks their final reports against facts code read, drafts handover notes, work items and summaries, and proposes actions the user confirms. It changes no code and writes nothing outside the run's record by itself, except moving a run it looks at ahead in the queue and what the user pre-approved for a workflow. Distinct from the workflow director, which only chooses a workflow and summarizes.
+The model-backed agent on the coordinator that looks after the account's workflow runs: on events (a run stopped, waited too long, lost its machine or disagrees with its session) or on request, it reads what the runs' agents did, checks their final reports against facts code read, drafts handover notes, work items and summaries, and proposes actions the user confirms. By itself it changes no code and writes nothing outside the run's record, except moving the run it looks at ahead in the queue. Distinct from the workflow director, which only chooses a workflow and summarizes.
 _Avoid_: orchestrator, monitor, watchdog
 
 **Workflow run**:

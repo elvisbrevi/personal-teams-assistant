@@ -244,6 +244,7 @@ pub(super) async fn operation(
             let run = found(&host.state, &a.run)?;
             let mut view = placed(run.view(), &run, &places(&host.state)?);
             sessions(host, &mut view).await;
+            view["supervising"] = json!(super::supervisor::queued(&host.state, &run.id));
             Ok(json!({ "run": view }))
         }
         "workflow_run_resume" => resume(host, parse(args)?).await,

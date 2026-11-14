@@ -532,6 +532,20 @@
             <div id="workflow-director" class="grid"></div>
             <div class="actions"><button id="workflow-director-prompt" type="button" class="link-button">Edit the director's instructions</button></div>
           </div>
+          <div class="panel" id="panel-workflow-supervisor">
+            <h2>Workflow supervisor</h2>
+            <p class="hint">The supervisor looks after your runs: when one stops, waits too long, loses its machine or disagrees with its session, it reads what the agents actually did, checks their final reports against the work item, pull requests and branches, and drafts a handover note, work items and a summary. It runs without tools, read-only, and changes nothing by itself but its notes on the run and a run's place in the queue: every other step it proposes waits for you.</p>
+            <label class="check"><input id="workflow-supervisor-enabled" type="checkbox"> Supervisor on</label>
+            <div id="workflow-supervisor" class="grid"></div>
+            <div class="grid">
+              <label>Looks per day <small>From 1 to 100; your own requests are not counted.</small><input id="workflow-supervisor-looks" type="number" min="1" max="100" step="1" inputmode="numeric"></label>
+              <label>Minutes between looks at a run <small>From 10 to 1440.</small><input id="workflow-supervisor-interval" type="number" min="10" max="1440" step="1" inputmode="numeric"></label>
+              <label>Waiting before a look (hours) <small>From 1 to 48.</small><input id="workflow-supervisor-wait" type="number" min="1" max="48" step="1" inputmode="numeric"></label>
+              <label>Machine unseen before a look (minutes) <small>From 5 to 240.</small><input id="workflow-supervisor-offline" type="number" min="5" max="240" step="1" inputmode="numeric"></label>
+              <label>Session limit (seconds) <small>From 60 to 600.</small><input id="workflow-supervisor-seconds" type="number" min="60" max="600" step="1" inputmode="numeric"></label>
+            </div>
+            <div class="actions"><button id="workflow-supervisor-prompt" type="button" class="link-button">Edit the supervisor's instructions</button></div>
+          </div>
           <div id="workflow-settings-warnings" class="callout warn" role="status" hidden></div>
           <div id="workflow-settings-problem" class="callout error" role="alert" hidden></div>
         </div>

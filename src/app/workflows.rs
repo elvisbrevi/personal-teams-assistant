@@ -39,6 +39,7 @@ pub(super) mod record;
 mod rehearsal;
 pub(super) mod runs;
 pub(super) mod summary;
+pub(super) mod supervisor;
 #[cfg(test)]
 pub(super) mod synthetic;
 pub(super) mod watcher;
@@ -48,6 +49,11 @@ pub(super) fn handles(method: &str) -> bool {
         || director::METHODS.contains(&method)
         || runs::METHODS.contains(&method)
         || summary::METHODS.contains(&method)
+        || supervisor::METHODS.contains(&method)
+}
+/// The workflow supervisor's operations (`workflow_supervisor_support`).
+pub(super) fn supervisor_handles(method: &str) -> bool {
+    supervisor::METHODS.contains(&method)
 }
 /// The workflow run operations, and the summaries of a run (`workflow_runs_support`).
 pub(super) fn runs_handles(method: &str) -> bool {
@@ -195,6 +201,9 @@ async fn operation(host: &Arc<Host>, method: &str, args: &Value) -> Result<Value
     }
     if summary::METHODS.contains(&method) {
         return summary::operation(host, method, args).await;
+    }
+    if supervisor::METHODS.contains(&method) {
+        return supervisor::operation(host, method, args, &engine::Azure::Live).await;
     }
     match method {
         "workflows_list" => {

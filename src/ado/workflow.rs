@@ -180,7 +180,9 @@ pub(crate) async fn branch_exists(
         .as_array()
         .context("invalid Azure DevOps refs")?;
     let wanted = format!("refs/heads/{branch}");
-    Ok(page.iter().any(|r| r["name"].as_str() == Some(wanted.as_str())))
+    Ok(page
+        .iter()
+        .any(|r| r["name"].as_str() == Some(wanted.as_str())))
 }
 
 /// Whether the item is assigned to the source's user: its Assigned To, or a developer role of

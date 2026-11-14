@@ -837,10 +837,7 @@ async fn call_bounded(
     let polls = match method {
         "machine_assistant" | "machine_upgrade" => 360,
         "workflow_direct" => {
-            4 * asked_seconds.map_or(
-                super::director::WAIT_SECONDS,
-                super::director::wait_seconds,
-            )
+            4 * asked_seconds.map_or(super::director::WAIT_SECONDS, super::director::wait_seconds)
         }
         _ => 160,
     };

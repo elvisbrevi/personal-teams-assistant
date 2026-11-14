@@ -87,7 +87,7 @@ $('#todo-more').onclick = () => busy($('#todo-more'), async () => {
 $('#todo-agent-guides').onclick = () => { showTab('agent-guides'); $('#agent-guides h1').focus(); };
 $('#agent-guides-back').onclick = () => { showTab('todo'); $('#todo-agent-guides').focus(); };
 $('#teams-machine-open').onclick = () => showTab('settings', 'panel-machines');
-$('#todo-create').onclick = openRequest;
+$('#todo-create').onclick = () => openRequest();
 $('#todo-agent-history').onclick = () => showTab('agent-history');
 $('#agent-history-back').onclick = () => showTab('todo');
 $('#agent-history-refresh').onclick = () => busy($('#agent-history-refresh'), loadAgentHistory);

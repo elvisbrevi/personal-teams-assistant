@@ -570,6 +570,12 @@ impl Run {
                 .map(|p| json!({"url": p.url, "status": p.status})).collect::<Vec<_>>(),
             "continues": self.continues,
             "restarted_as": self.restarted_as,
+            "supervision": self.supervision.last().map(|l| json!({
+                "look": l.id, "event": l.event, "outcome": l.outcome, "created_at": l.created_at,
+                "proposed": self.supervision.iter().flat_map(|l| &l.actions).filter(|a| a.state == "proposed").count(),
+                "not_verified": l.checks.iter().filter(|c| c.result == "not_verified").count(),
+            })),
+            "ahead": self.ahead_since.is_some(),
             "created_at": self.created_at,
             "updated_at": self.updated_at,
             "finished_at": self.finished_at,

@@ -42,6 +42,8 @@ pub(in crate::app) struct State {
     pub(in crate::app) db: Store,
     /// The ready-state watcher: its seen ledger and last poll (`watcher`).
     pub(in crate::app) watcher: super::watcher::Watcher,
+    /// The workflow supervisor: its events and looks, and whether one runs now.
+    pub(in crate::app) supervision: super::supervisor::Supervision,
     locks: std::sync::Mutex<HashMap<String, Arc<Mutex<()>>>>,
     admission: Mutex<()>,
     /// One director classification at a time, apart from the `concurrency` slots.
@@ -60,6 +62,7 @@ impl State {
         Ok(Self {
             db: Store::open(&root.join("workflows.db"))?,
             watcher: super::watcher::Watcher::open(&root.join("workflows.db"))?,
+            supervision: super::supervisor::Supervision::open(&root.join("workflows.db"))?,
             locks: std::sync::Mutex::new(HashMap::new()),
             admission: Mutex::new(()),
             classifying: Mutex::new(()),
@@ -185,6 +188,20 @@ impl Azure {
         branch: &str,
     ) -> Result<Vec<PullRequest>, String> {
         self.pull_requests(state, run, repository, branch).await
+    }
+    /// The bounded summaries of these implementation runs' own sessions (the workflow
+    /// supervisor), and whether some could not be read: through the machine channel, or a
+    /// test's synthetic summaries, never this computer's own agent stores.
+    pub(in crate::app) async fn run_sessions(
+        &self,
+        host: &Arc<Host>,
+        runs: Vec<String>,
+    ) -> Result<(Vec<Value>, bool)> {
+        match self {
+            Self::Live => implementation::run_session_summaries(host, runs).await,
+            #[cfg(test)]
+            Self::Synthetic(catalog) => Ok((catalog.sessions(&runs), false)),
+        }
     }
     /// Whether a branch exists in a workflow repository now (the workflow supervisor).
     pub(in crate::app) async fn branch_exists(
@@ -1711,6 +1728,13 @@ pub(in crate::app) async fn schedule(host: Arc<Host>) {
             .is_err()
         {
             tracing::warn!(event = "workflow_engine_not_ready");
+        }
+        // The supervisor looks after the runs the engine just advanced (nothing when it is off).
+        if super::supervisor::tick(&host, &Azure::Live, now)
+            .await
+            .is_err()
+        {
+            tracing::warn!(event = "workflow_supervisor_not_ready");
         }
         tokio::time::sleep(std::time::Duration::from_secs(TICK_SECONDS)).await;
     }

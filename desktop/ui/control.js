@@ -46,9 +46,10 @@ import { browserMicrosoftLogin } from './dialogs.js';
  *   'variable_launcher_run' | 'variable_list' | 'variable_migration_inspect' |
  *   'variable_migration_run' | 'variable_rename' | 'variable_reveal' | 'variable_update' |
  *   'workflow_block_remove' | 'workflow_block_save' | 'workflow_blocks_list' | 'workflow_remove' |
- *   'workflow_repositories' | 'workflow_run_assign' | 'workflow_run_cancel' | 'workflow_run_restart' | 'workflow_run_resume' |
+ *   'workflow_repositories' | 'workflow_run_assign' | 'workflow_run_cancel' | 'workflow_run_requeue' | 'workflow_run_restart' | 'workflow_run_resume' |
  *   'workflow_run_status' | 'workflow_runs' | 'workflow_runs_pause' | 'workflow_runs_unpause' | 'workflow_save' | 'workflow_settings' | 'workflow_settings_update' | 'workflow_show' | 'workflow_summary' |
- *   'workflow_summary_send' | 'workflows_list'
+ *   'workflow_summary_send' | 'workflow_supervise' | 'workflow_supervision' | 'workflow_supervision_act' |
+ *   'workflow_supervision_dismiss' | 'workflows_list'
  * )} Method
  */
 /**

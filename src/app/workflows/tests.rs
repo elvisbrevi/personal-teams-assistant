@@ -819,6 +819,107 @@ async fn the_director_must_be_an_installed_agent_on_a_machine_of_the_account() {
 }
 
 #[tokio::test]
+async fn the_supervisor_must_be_an_installed_agent_and_starts_off() {
+    let root = tempfile::tempdir().unwrap();
+    let host = host(root.path());
+    let own = implementation::test_machine(&host, None).await;
+    let shown = call(&host, Local, "workflow_settings", json!({})).await;
+    assert!(shown.ok, "{:?}", shown.message);
+    assert_eq!(shown.data["settings"]["supervisor"]["enabled"], false);
+    assert_eq!(shown.data["defaults"]["supervisor"]["looks_per_day"], 24);
+    assert_eq!(
+        shown.data["bounds"]["supervisor"]["session_seconds"],
+        json!([60, 600])
+    );
+    // On without an agent: refused, naming what is missing, and nothing is saved.
+    let bare = call(
+        &host,
+        Local,
+        "workflow_settings_update",
+        json!({"supervisor":{"enabled":true}}),
+    )
+    .await;
+    assert_eq!(bare.code, "invalid_input");
+    assert!(
+        bare.message
+            .unwrap()
+            .contains("machine, provider, model, effort")
+    );
+    // An agent not installed on its machine is refused like the director's.
+    let missing = call(
+        &host,
+        Local,
+        "workflow_settings_update",
+        json!({"supervisor":{"enabled":true,"machine":own,"provider":"codex","model":"synthetic-model-that-is-not-installed","effort":"low"}}),
+    )
+    .await;
+    assert_eq!(missing.code, "invalid_input", "{:?}", missing.message);
+    let message = missing.message.unwrap();
+    assert!(
+        message.contains("the workflow supervisor's machine")
+            && (message.contains("not installed") || message.contains("has no model")),
+        "{message}"
+    );
+    assert!(!stored_map(&host).contains("supervisor"));
+    // Its bounds alone change without an agent, merged with the defaults, and only they are written.
+    let bounds = call(
+        &host,
+        Local,
+        "workflow_settings_update",
+        json!({"supervisor":{"looks_per_day":12}}),
+    )
+    .await;
+    assert!(bounds.ok, "{:?}", bounds.message);
+    let saved = host
+        .state
+        .settings
+        .map()
+        .unwrap()
+        .workflow_settings
+        .supervisor;
+    assert_eq!(
+        (saved.looks_per_day, saved.session_seconds, saved.enabled),
+        (12, 180, false)
+    );
+    let out = call(
+        &host,
+        Local,
+        "workflow_settings_update",
+        json!({"supervisor":{"session_seconds":601}}),
+    )
+    .await;
+    assert_eq!(out.code, "invalid_input");
+    assert!(out.message.unwrap().contains("session_seconds"));
+    // null turns it off and clears it.
+    let cleared = call(
+        &host,
+        Local,
+        "workflow_settings_update",
+        json!({"supervisor":null}),
+    )
+    .await;
+    assert!(cleared.ok, "{:?}", cleared.message);
+    assert!(
+        host.state
+            .settings
+            .map()
+            .unwrap()
+            .workflow_settings
+            .supervisor
+            .is_default()
+    );
+    // A machine credential reaches none of it.
+    let from_machine = call(
+        &host,
+        Machine,
+        "workflow_settings_update",
+        json!({"supervisor":{"looks_per_day":5}}),
+    )
+    .await;
+    assert!(!from_machine.ok);
+}
+
+#[tokio::test]
 async fn each_project_shows_the_director_it_gets_and_where_it_comes_from() {
     let root = tempfile::tempdir().unwrap();
     let host = host(root.path());

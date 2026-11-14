@@ -5,7 +5,11 @@
 // child review, confirmed with `implementation_create`), assigning a workflow to an unassigned
 // run, resume, cancel, restart with a handover note (`workflow_run_restart`), a progress summary
 // by the director (`workflow_summary`), sending one summary to Teams chats
-// (`workflow_summary_send`, one confirmed send per chat); the pauses above the list are
+// (`workflow_summary_send`, one confirmed send per chat), and the workflow supervisor's looks
+// (`workflow_supervise`): its assessment, the checks of the final report, its drafts and the
+// actions it proposes, each carried out once with `workflow_supervision_act` and the person's
+// confirmation (a proposed restart, resume or cancel replaces that run action while it waits), a
+// run moved ahead or back in the queue (`workflow_run_requeue`); the pauses above the list are
 // `workflow-pause.js`.
 import { t, tn, tx, uiLocale } from './i18n.js';
 import { invoke } from './control.js';
@@ -20,6 +24,8 @@ import { openAgentSession, sessionLifeBadge } from './sessions.js';
 import { planChildrenReview } from './implementation.js';
 import { STAGE_NAMES } from './workflow-blocks.js';
 import { renderPauses } from './workflow-pause.js';
+import { openRequest } from './todo-request.js';
+import { ensureWorkflowSettings, workflowSettings } from './settings-workflows.js';
 
 /** The states in which a run waits on the person (src/app/workflows/record.rs `waits_on_user`). */
 const WAITING = ['plan_review', 'unassigned', 'needs_attention', 'interrupted', 'failed'];
@@ -154,6 +160,11 @@ function slotBadge(run) {
   return run.waiting_for_slot ? badge(t('Waiting for a slot, position {n}', { n: run.queue_position }), 'muted') : null;
 }
 
+/** A run the supervisor or the person moved ahead in the queue. */
+function aheadBadge(run) {
+  return run.waiting_for_slot && run.ahead_since ? badge(t('Moved ahead'), 'info') : null;
+}
+
 /** A run a pause holds: nothing new starts for it until the pause ends. */
 function pausedBadge(run) {
   return run.paused ? badge(t('Paused'), 'muted') : null;
@@ -261,7 +272,7 @@ function renderRunDetail(run, sessions) {
     return open;
   };
   const head = el('div', { class: 'run-head' },
-    badge(runStateLabel(run.state), tone(run.state)), slotBadge(run), pausedBadge(run), badge(workflowName(run.workflow), 'muted'), el('span', { class: 'grow' }), link(t('Open the work item'), run.item.url));
+    badge(runStateLabel(run.state), tone(run.state)), slotBadge(run), aheadBadge(run), pausedBadge(run), badge(workflowName(run.workflow), 'muted'), el('span', { class: 'grow' }), link(t('Open the work item'), run.item.url));
   const facts = el('dl', { class: 'todo-fields' },
     ...[[t('Type'), tx(run.item.kind)], [t('Project'), run.item.project], [t('Started at'), when(run.created_at)], [t('Last change'), when(run.updated_at)],
       ...(run.finished_at ? [[t('Finished at'), when(run.finished_at)]] : []),
@@ -282,15 +293,16 @@ function renderRunDetail(run, sessions) {
   const stopped = WAITING.includes(run.state) ? (run.classification?.failure ?? run.planning?.failure ?? (run.children ?? []).map(c => c.coding?.failure).find(Boolean)) : null;
   if (stopped) notes.push(el('div', { class: 'callout warn', id: 'run-failure' }, el('p', {}, el('strong', { textContent: t('Why it stopped') }), ' ', failureText(stopped))));
   if (run.handover) notes.push(el('details', { class: 'fold', id: 'run-handover' }, el('summary', { textContent: t('Handover note from the previous run') }), el('p', { class: 'run-handover-text', textContent: run.handover })));
-  detail.replaceChildren(head, facts, ...notes, runActions(run, sessionButton), timeline(run), children(run, sessionButton, sessions), blocks(run), summaries(run));
+  const area = el('div', { id: 'run-action-area' });
+  const refresh = async () => { runsData.holding = false; runsData.record = null; await loadRunDetail(); };
+  detail.replaceChildren(head, facts, ...notes, runActions(run, sessionButton, area, refresh), supervision(run, area, refresh),
+    timeline(run), children(run, sessionButton, sessions), blocks(run), summaries(run));
   if (focusId) /** @type {HTMLElement | null} */ (document.getElementById(focusId))?.focus({ preventScroll: true });
 }
 
 /** The actions the run's state allows, each the host's operation and nothing else. */
-function runActions(run, sessionButton) {
+function runActions(run, sessionButton, area, refresh) {
   const actions = el('div', { class: 'actions run-actions' });
-  const area = el('div', { id: 'run-action-area' });
-  const refresh = async () => { runsData.holding = false; runsData.record = null; await loadRunDetail(); };
   if (run.state === 'plan_review' && run.planning) {
     const review = el('button', { type: 'button', textContent: t('Review plan'), id: 'run-review-plan' });
     review.onclick = () => busy(review, () => showPlanReview(run, area, refresh));
@@ -301,19 +313,20 @@ function runActions(run, sessionButton) {
     choose.onclick = () => showAssign(run, area, refresh);
     actions.append(choose);
   }
-  if (RESUMABLE.includes(run.state)) {
+  // A restart, resume or cancel the supervisor proposed is carried out from its proposal instead.
+  if (RESUMABLE.includes(run.state) && !proposal(run, 'resume')) {
     actions.append(twice(t('Resume'), t('Confirm resume'), async () => {
       const reply = await invoke('workflow_run_resume', { run: run.id, confirmed: true });
       done(reply.accepted ? t('Run resumed; what stopped it was accepted.') : t('Run resumed.'));
       await refresh();
     }));
   }
-  if (!FINAL.includes(run.state) && run.workflow) {
+  if (!FINAL.includes(run.state) && run.workflow && !proposal(run, 'restart')) {
     const restart = el('button', { type: 'button', class: 'secondary', textContent: t('Restart with a note'), id: 'run-restart-open' });
     restart.onclick = () => showRestart(run, area, refresh);
     actions.append(restart);
   }
-  if (!FINAL.includes(run.state)) {
+  if (!FINAL.includes(run.state) && !proposal(run, 'cancel')) {
     const cancel = twice(t('Cancel run'), t('Confirm cancel'), async () => {
       const reply = await invoke('workflow_run_cancel', { run: run.id, confirmed: true });
       const stopped = reply.sessions_stopped?.length ?? 0;
@@ -337,6 +350,25 @@ function runActions(run, sessionButton) {
     const send = el('button', { type: 'button', class: 'secondary', textContent: t('Send by Teams'), id: 'run-send' });
     send.onclick = () => busy(send, () => showSend(run, area, refresh));
     actions.append(send);
+  }
+  ensureWorkflowSettings();
+  if (workflowSettings?.settings?.supervisor?.enabled && !(run.supervising ?? []).length) {
+    const look = el('button', { type: 'button', class: 'secondary', textContent: t('Ask the supervisor'), id: 'run-supervise' });
+    look.onclick = () => busy(look, async () => {
+      await invoke('workflow_supervise', { run: run.id });
+      done(t('The supervisor is looking at this run; its notes appear here.'));
+      await refresh();
+    });
+    actions.append(look);
+  }
+  if (run.waiting_for_slot) {
+    const requeue = el('button', { type: 'button', class: 'secondary', id: 'run-requeue', textContent: run.ahead_since ? t('Back to its place') : t('Move ahead') });
+    requeue.onclick = () => busy(requeue, async () => {
+      await invoke('workflow_run_requeue', { run: run.id, ahead: !run.ahead_since });
+      done(run.ahead_since ? t('The run is back in its place in the queue.') : t('The run goes ahead in the queue.'));
+      await refresh();
+    });
+    actions.append(requeue);
   }
   return el('div', {}, actions, area);
 }
@@ -385,15 +417,22 @@ function handoverDraft(run) {
   lines.push('', t('Left to do:'), '- ');
   return lines.join('\n');
 }
-/** Restart: this run ends and a new one of its workflow starts for its item, with the person's handover note for its coding runs. */
-function showRestart(run, area, refresh) {
+/**
+ * Restart: this run ends and a new one of its workflow starts for its item, with the person's handover note for its coding runs.
+ * With the supervisor's proposal, its drafted note is the starting point and the restart is carried out as that proposal.
+ */
+function showRestart(run, area, refresh, proposed = null) {
   runsData.holding = true;
-  const note = el('textarea', { class: 'run-restart-note', id: 'run-restart-note', maxLength: MAX_HANDOVER, value: handoverDraft(run) });
+  const draft = proposed ? proposed.look.handover : handoverDraft(run);
+  const note = el('textarea', { class: 'run-restart-note', id: 'run-restart-note', maxLength: MAX_HANDOVER, value: draft });
   const count = el('small', { class: 'hint', id: 'run-restart-count' });
   const counted = () => { count.textContent = t('{n} of {max} characters', { n: String(note.value.length), max: String(MAX_HANDOVER) }); };
   note.oninput = counted; counted();
   const restart = twice(t('Restart'), t('Confirm restart'), async () => {
-    const reply = await invoke('workflow_run_restart', { run: run.id, ...(note.value.trim() ? { note: note.value } : {}), confirmed: true });
+    const edited = note.value.trim() !== draft.trim();
+    const reply = proposed
+      ? (await act(run, proposed, edited && note.value.trim() ? { note: note.value } : {})).result
+      : await invoke('workflow_run_restart', { run: run.id, ...(note.value.trim() ? { note: note.value } : {}), confirmed: true });
     if (reply.warning) notify(tx(reply.warning), 'warn');
     else done(reply.paused ? t('Run restarted; the new run waits for the pause to end.') : t('Run restarted; the new run starts from its first stage.'));
     runsData.holding = false;
@@ -405,6 +444,7 @@ function showRestart(run, area, refresh) {
   area.replaceChildren(el('div', { class: 'panel', id: 'run-restart' },
     el('h3', { textContent: t('Restart with a handover note') }),
     el('p', { class: 'hint', textContent: t('This run is cancelled, its live sessions stop and the file changes stay; a new run of the same workflow starts for this work item from its first stage. Each of its coding runs gets your note, which is posted nowhere: not to Teams, not to the work item.') }),
+    proposed ? el('p', { class: 'hint', textContent: t('The supervisor drafted this note. Left as it is, the coding runs read it as the supervisor\'s; edited, it is yours.') }) : null,
     el('label', {}, t('Handover note'), note), count,
     el('div', { class: 'actions' }, restart, close)));
   note.focus();
@@ -429,6 +469,188 @@ function showAssign(run, area, refresh) {
     run.classification?.reason ? el('p', { class: 'hint', textContent: t('The director said: {reason}', { reason: run.classification.reason }) }) : null,
     options.length ? el('label', {}, t('Workflow'), select) : el('p', { class: 'callout warn', textContent: t('No enabled workflow covers this project. Enable or create one first.') }),
     el('div', { class: 'actions' }, options.length ? assign : null, close)));
+}
+
+// ---- The supervisor ----
+
+/** What each action the supervisor may propose does, for the person. */
+const ACTION_NAMES = {
+  restart: () => t('Restart with the drafted note'),
+  resume: () => t('Resume the run'),
+  cancel: () => t('Cancel the run'),
+  pause_project: () => t('Pause this project\'s runs'),
+  create_work_item: () => t('Create the drafted work item'),
+  post_summary: () => t('Send the drafted summary by Teams'),
+  move_ahead: () => t('Move the run ahead in the queue'),
+};
+const ACTION_STATES = {
+  proposed: () => t('Proposed'), done: () => t('Done by the supervisor'), attempting: () => t('In progress'), executed: () => t('Carried out'),
+  refused: () => t('Refused'), uncertain: () => t('Uncertain'), opened: () => t('Opened in Create request'), expired: () => t('Expired'), dismissed: () => t('Set aside'),
+};
+const EVENT_NAMES = {
+  run_stopped: () => t('The run stopped'), run_waiting: () => t('The run waited too long'), machine_offline: () => t('Its machine went offline'),
+  session_disagrees: () => t('Its state and its session disagree'), requested: () => t('You asked'),
+};
+
+/** The supervisor's latest look at a run, or null. */
+function latestLook(run) {
+  const looks = run.supervision ?? [];
+  return looks.length ? looks[looks.length - 1] : null;
+}
+/** A proposal of the latest look for `action` that still waits for the person. */
+function proposal(run, action) {
+  const look = latestLook(run);
+  const found = look?.actions?.find(a => a.action === action && a.state === 'proposed');
+  return found ? { look, action: found } : null;
+}
+/** Carry out one proposal, as the person confirmed it. */
+function act(run, proposed, extra = {}) {
+  return invoke('workflow_supervision_act', { run: run.id, look: proposed.look.id, action: proposed.action.id, ...extra, confirmed: true });
+}
+
+/** The controls of one proposal: the action itself (twice, or its panel) and setting it aside. */
+function proposalControls(run, proposed, area, refresh) {
+  const controls = [];
+  const after = async text => { done(text); await refresh(); };
+  switch (proposed.action.action) {
+    case 'restart': {
+      const open = el('button', { type: 'button', class: 'secondary', id: 'run-restart-open', textContent: t('Restart with a note') });
+      open.onclick = () => showRestart(run, area, refresh, proposed);
+      controls.push(open);
+      break;
+    }
+    case 'resume':
+      controls.push(twice(t('Resume'), t('Confirm resume'), async () => { await act(run, proposed); await after(t('Run resumed.')); }));
+      break;
+    case 'cancel': {
+      const cancel = twice(t('Cancel run'), t('Confirm cancel'), async () => { await act(run, proposed); await after(t('Run cancelled.')); });
+      cancel.classList.add('danger');
+      controls.push(cancel);
+      break;
+    }
+    case 'pause_project':
+      controls.push(twice(t('Pause'), t('Confirm pause'), async () => { await act(run, proposed); await after(t('The project\'s runs are paused.')); }));
+      break;
+    case 'post_summary': {
+      const send = el('button', { type: 'button', class: 'secondary', textContent: t('Send by Teams') });
+      send.onclick = () => busy(send, () => showProposedSend(run, proposed, area, refresh, send));
+      controls.push(send);
+      break;
+    }
+    case 'create_work_item': {
+      const create = el('button', { type: 'button', class: 'secondary', textContent: t('Open Create request') });
+      create.onclick = () => busy(create, async () => {
+        const reply = await act(run, proposed);
+        const draft = reply.create_request ?? {};
+        const description = [draft.title, draft.description, draft.repository ? t('Repository: {name}', { name: draft.repository }) : null].filter(Boolean).join('\n\n');
+        await openRequest({ provider: 'azure', project: draft.project, organization: draft.organization, kind: draft.type === 'bug' ? 'bug' : 'hu', context: description });
+      });
+      controls.push(create);
+      break;
+    }
+    default: break;
+  }
+  const dismiss = el('button', { type: 'button', class: 'link-button', textContent: t('Set aside') });
+  dismiss.onclick = () => busy(dismiss, async () => {
+    await invoke('workflow_supervision_dismiss', { run: run.id, look: proposed.look.id, action: proposed.action.id });
+    await after(t('Proposal set aside.'));
+  });
+  controls.push(dismiss);
+  return controls;
+}
+
+/** The supervisor's latest look: what it found, the checks of the report, its drafts and proposals; older looks folded. */
+function supervision(run, area, refresh) {
+  const looks = run.supervision ?? [];
+  const queued = run.supervising ?? [];
+  const parts = [];
+  if (queued.length) parts.push(el('p', { class: 'hint', id: 'run-supervising', role: 'status', textContent: queued.some(q => q.state === 'running') ? t('The supervisor is looking at this run…') : t('A look at this run is queued.') }));
+  const look = latestLook(run);
+  if (!look) return parts.length ? el('div', { id: 'run-supervision' }, ...parts) : el('div', {});
+  const head = el('div', { class: 'panel-head' }, el('h3', { textContent: t('Supervisor') }),
+    el('span', { class: 'hint', textContent: [EVENT_NAMES[look.event]?.() ?? look.event, when(look.created_at), look.supervised_by?.model].filter(Boolean).join(' · ') }));
+  const body = [head];
+  if (look.outcome !== 'done') {
+    body.push(el('div', { class: 'callout warn' }, el('p', {}, el('strong', { textContent: t('The look gave no answer.') }), ' ', look.failure ? failureText(look.failure) : '')));
+  } else {
+    const a = look.assessment ?? {};
+    body.push(el('dl', { class: 'todo-fields run-assessment' },
+      ...[[t('Done'), a.done], [t('Left'), a.left], [t('Recommends'), a.recommendation]].filter(([, v]) => v)
+        .map(([label, value]) => el('div', {}, el('dt', { textContent: label }), el('dd', { textContent: value })))));
+    const checks = look.checks ?? [];
+    if (checks.length) {
+      body.push(el('div', { class: 'list run-checks' }, ...checks.map(c => el('div', { class: 'resource run-check', 'data-result': c.result },
+        el('div', { class: 'resource-head' }, badge(c.result === 'verified' ? t('Verified') : t('Not verified'), c.result === 'verified' ? 'ok' : 'warn'), el('span', { textContent: c.claim })),
+        el('p', { class: 'resource-facts' }, el('small', { textContent: tx(c.fact) }))))));
+    }
+    if (look.unverified?.length) body.push(el('div', {}, el('strong', { textContent: t('It could not verify') }), el('ul', {}, ...look.unverified.map(u => el('li', { textContent: u })))));
+    const gaps = [...(look.unread ?? []).map(u => t('Not read: {what}', { what: u })), ...(look.truncated ?? []).map(u => t('Cut to fit: {what}', { what: u }))];
+    if (gaps.length) body.push(el('p', { class: 'hint run-look-gaps', textContent: gaps.join(' · ') }));
+    if (look.handover) body.push(el('details', { class: 'fold' }, el('summary', { textContent: t('Drafted handover note') }), el('p', { class: 'run-handover-text', textContent: look.handover })));
+    if (look.summary) body.push(el('details', { class: 'fold' }, el('summary', { textContent: t('Drafted summary') }), markdown(look.summary)));
+    if (look.work_items?.length) {
+      body.push(el('details', { class: 'fold' }, el('summary', { textContent: tn(look.work_items.length, '1 drafted work item', '{n} drafted work items') }),
+        el('div', { class: 'list' }, ...look.work_items.map(w => el('div', { class: 'resource' },
+          el('div', { class: 'resource-head' }, badge(w.type === 'bug' ? t('Bug') : t('HU'), 'muted'), el('strong', { textContent: w.title })),
+          el('p', { textContent: w.description }), w.reason ? el('p', { class: 'hint', textContent: w.reason }) : null)))));
+    }
+    const actions = look.actions ?? [];
+    if (actions.length) {
+      body.push(el('div', { class: 'list run-proposals' }, ...actions.map(action => {
+        const waiting = action.state === 'proposed';
+        return el('div', { class: 'resource run-proposal', 'data-action': action.action, 'data-state': action.state },
+          el('div', { class: 'resource-head' }, badge(ACTION_STATES[action.state]?.() ?? action.state, waiting ? 'warn' : ['executed', 'done'].includes(action.state) ? 'ok' : 'muted'),
+            el('strong', { textContent: ACTION_NAMES[action.action]?.() ?? action.action })),
+          action.reason ? el('p', { class: 'hint', textContent: action.reason }) : null,
+          action.outcome ? el('p', { class: 'hint', textContent: tx(action.outcome) }) : null,
+          waiting ? el('div', { class: 'actions' }, ...proposalControls(run, { look, action }, area, refresh)) : null);
+      })));
+    }
+  }
+  const older = looks.slice(0, -1).reverse();
+  if (older.length) {
+    body.push(el('details', { class: 'fold' }, el('summary', { textContent: tn(older.length, '1 earlier look', '{n} earlier looks') }),
+      el('div', { class: 'list' }, ...older.map(l => el('div', { class: 'resource' },
+        el('p', { class: 'resource-facts' }, el('small', { textContent: [EVENT_NAMES[l.event]?.() ?? l.event, when(l.created_at)].join(' · ') })),
+        l.assessment?.recommendation ? el('p', { textContent: l.assessment.recommendation }) : null)))));
+  }
+  return el('div', { id: 'run-supervision' }, ...parts, el('article', { class: 'panel run-look' }, ...body));
+}
+
+/** The supervisor's drafted summary to one chat: the chat, its mentions, then one confirmation with the exact text. */
+async function showProposedSend(run, proposed, area, refresh, trigger) {
+  const directory = (await invoke('teams_chats', {})).chats ?? [];
+  const chats = directory.filter(c => c.id !== 'self' && !String(c.id).startsWith('48:'));
+  const picked = await new Promise(resolve => {
+    const dialog = chooseFromList({
+      trigger, title: t('Send the summary to'), multiple: false, allLabel: t('Chats'),
+      items: chats.map(c => ({ value: c.id, label: c.topic || (c.members ?? []).join(', '), detail: c.type === 'group' ? tn((c.members ?? []).length, '1 member', '{n} members') : t('Person') })),
+      empty: t('No chat to choose: connect the Microsoft account first.'), confirm: t('Continue'),
+      countText: n => tn(n, '1 chat chosen', '{n} chats chosen'),
+      apply: values => resolve(values),
+    });
+    dialog.addEventListener('close', () => resolve([]), { once: true });
+  });
+  const chat = chats.find(c => c.id === picked[0]);
+  if (!chat) return;
+  runsData.holding = true;
+  const members = chat.type === 'group' ? (chat.members ?? []) : [];
+  const boxes = members.map(name => ({ name, box: el('input', { type: 'checkbox', value: name }) }));
+  const send = twice(t('Confirm and send'), t('Send now'), async () => {
+    await act(run, proposed, { chat: chat.id, mentions: boxes.filter(b => b.box.checked).map(b => b.name) });
+    runsData.holding = false;
+    area.replaceChildren();
+    done(t('Summary sent.'));
+    await refresh();
+  });
+  const close = el('button', { type: 'button', class: 'secondary', textContent: t('Close') });
+  close.onclick = () => { runsData.holding = false; area.replaceChildren(); refresh(); };
+  area.replaceChildren(el('div', { class: 'panel', id: 'run-proposed-send' },
+    el('h3', { textContent: t('Send the supervisor\'s summary') }),
+    el('p', { class: 'hint', textContent: t('Exactly this text is posted as you in {chat}, once, with the members you tick mentioned. Nothing is sent until you confirm.', { chat: chat.topic || members.join(', ') }) }),
+    markdown(proposed.look.summary),
+    boxes.length ? el('fieldset', {}, el('legend', { textContent: t('Mention') }), ...boxes.map(b => el('label', { class: 'check' }, b.box, b.name))) : null,
+    el('div', { class: 'actions' }, send, close)));
 }
 
 // ---- Timeline, children, blocks ----

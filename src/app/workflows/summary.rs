@@ -216,7 +216,7 @@ fn mentioned(text: &str, link: &Link) -> bool {
 
 /// What the model wrote, made safe to store and send: no URL, link, HTML tag or mention marker
 /// of its own, no control characters; at most `limit` characters.
-fn clean(text: &str, limit: usize) -> String {
+pub(super) fn clean(text: &str, limit: usize) -> String {
     let patterns: [(&str, &str); 7] = [
         // Images and links keep their words.
         (
