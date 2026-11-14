@@ -483,7 +483,8 @@ Knowledge
   workflows resume RUN --confirmed       Continues a failed, interrupted or needs_attention run from its
                            stage, accepting what stopped it; never submits a plan or starts a started
                            coding run again.
-  workflows cancel RUN --confirmed       Cancels the run and its active implementation run.
+  workflows cancel RUN --confirmed       Cancels the run and its active implementation run, and stops
+                           every session the run started that is still alive.
   workflows assign RUN WORKFLOW --confirmed   Gives an unassigned run an enabled workflow of its project.
   workflows summary RUN    The workflow director writes a progress summary of the run from its record
                            (stages, children, pull requests, block outcomes; Markdown, at most 4000

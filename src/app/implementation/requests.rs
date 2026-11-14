@@ -133,6 +133,7 @@ pub(super) async fn operate(host: &Arc<Host>, method: &str, args: &Value) -> Res
             let mut runs = state.db.history()?;
             let registry = state.registry.lock().await;
             for run in &mut runs {
+                mark_session(run, &registry.id).await;
                 run["online"] = json!(
                     run["machine"] == registry.id
                         || registry

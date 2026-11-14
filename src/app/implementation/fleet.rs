@@ -919,7 +919,17 @@ async fn poll(host: Arc<Host>) {
         tokio::time::sleep(Duration::from_secs(2)).await;
     }
 }
+/// The agent sessions of the given work items (`implementation_sessions`), each marked with
+/// whether its process is alive and was handed to the user (`mark_session`).
 pub(super) async fn session_index(host: &Arc<Host>, args: &Value) -> Result<Value> {
+    let mut result = sessions_of(host, args).await?;
+    let own = host.state.implementation.registry.lock().await.id.clone();
+    for session in result["sessions"].as_array_mut().into_iter().flatten() {
+        mark_session(session, &own).await;
+    }
+    Ok(result)
+}
+async fn sessions_of(host: &Arc<Host>, args: &Value) -> Result<Value> {
     let urls: Vec<String> = serde_json::from_value(args["urls"].clone())?;
     ensure!(urls.len() <= 100, "Too many work items.");
     for url in &urls {

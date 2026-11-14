@@ -284,13 +284,27 @@ pub(crate) async fn close(id: &str) {
         });
     }
 }
-#[cfg(all(test, unix))]
-async fn is_live(id: &str) -> bool {
+/// Whether the session `id` is retained and its process still runs on this machine.
+pub(crate) async fn alive(id: &str) -> bool {
     sessions()
         .lock()
         .await
         .get(id)
         .is_some_and(|live| !live.task.is_finished())
+}
+
+/// Records a connected session `offline` when its follow ends without retaining it, on every
+/// path: an answer, an error, the limit, or the run's task aborted (a cancel) with the session.
+struct Disconnect(Option<Observer>);
+impl Drop for Disconnect {
+    fn drop(&mut self) {
+        if let Some(observer) = self.0.take() {
+            let _ = observer(Access {
+                status: "offline".into(),
+                ..Access::default()
+            });
+        }
+    }
 }
 
 async fn spawn(
@@ -417,6 +431,8 @@ impl Activity {
 }
 
 /// Run one Claude session; a coding session (`planning` false) is autonomous until it ends.
+/// With `keep`, a session that ended with its answer stays reachable through Remote Control
+/// for the person (`retain`); any other session's process ends with its run.
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn execute(
     binary: &std::path::Path,
@@ -424,7 +440,7 @@ pub(super) async fn execute(
     directory: &std::path::Path,
     prompt: &str,
     id: &str,
-    planning: bool,
+    (planning, keep): (bool, bool),
     observer: SessionObserver<'_>,
     remote: Observer,
 ) -> Result<Outcome> {
@@ -434,7 +450,7 @@ pub(super) async fn execute(
         directory,
         prompt,
         id,
-        planning,
+        (planning, keep),
         observer,
         remote,
         (SESSION_LIMIT, SETTLE),
@@ -451,7 +467,7 @@ async fn follow_session(
     directory: &std::path::Path,
     prompt: &str,
     id: &str,
-    planning: bool,
+    (planning, keep): (bool, bool),
     observer: SessionObserver<'_>,
     remote: Observer,
     (limit, settle): (Duration, Duration),
@@ -463,6 +479,9 @@ async fn follow_session(
         .await
         .unwrap_or_else(|_| Access::unavailable());
     remote(access.clone())?;
+    // Declared after the session, so it is dropped first: the record says offline as the
+    // process tree ends.
+    let mut offline = Disconnect((access.status == "connected").then(|| remote.clone()));
     session.autonomous = !planning;
     session.send(json!({"type":"user","message":{"role":"user","content":prompt},"parent_tool_use_id":null,"session_id":id})).await?;
     let mut events = Events::default();
@@ -511,7 +530,8 @@ async fn follow_session(
         keep_prompt(&mut events.prompts, &prompt);
     }
     let text = noted(std::mem::take(&mut events.text), session.skipped, planning);
-    if access.status == "connected" {
+    if keep && ok && access.status == "connected" {
+        offline.0 = None;
         if retain(id, session, access, remote.clone()).await.is_err() {
             remote(Access::unavailable())?;
         }
@@ -565,6 +585,71 @@ pub(crate) async fn reconnect(
     let access = session.enable().await?;
     retain(id, session, access.clone(), observer).await?;
     Ok(access)
+}
+
+/// A fake Claude CLI whose Remote Control connects, for tests here and in the host's.
+#[cfg(all(test, unix))]
+pub(crate) mod fake {
+    use std::path::Path;
+    use std::time::Duration;
+    /// Install at `binary` a Claude CLI that appends its process ID to `log/pids`, connects
+    /// Remote Control, reads the prompt, runs `body` (which prints its turn; the prompt line is
+    /// in `$prompt`), says it is idle and then stays open, as a kept session does.
+    pub(crate) fn connected_cli(binary: &Path, log: &Path, body: &str) {
+        let script = r##"#!/bin/sh
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = '--session-id' ]; then shift; session="$1"; fi
+  shift
+done
+echo $$ >> '{log}/pids'
+read -r initialize
+printf '%s
+' '{"type":"control_response","response":{"subtype":"success","request_id":"pta-initialize","response":{}}}'
+read -r remote
+printf '%s
+' '{"type":"control_response","response":{"subtype":"success","request_id":"pta-remote","response":{"session_url":"https://claude.ai/code/session_Remote123"}}}'
+read -r prompt
+printf '{"type":"system","subtype":"init","session_id":"%s"}
+' "$session"
+{body}
+printf '%s
+' '{"type":"system","subtype":"session_state_changed","state":"idle"}'
+while read -r line; do :; done
+"##;
+        crate::llm::agent::install_fake_cli(
+            binary,
+            &script
+                .replace("{log}", &log.display().to_string())
+                .replace("{body}", body),
+        );
+    }
+    /// The process IDs the fake CLIs logged in `log`, in start order.
+    pub(crate) fn pids(log: &Path) -> Vec<String> {
+        std::fs::read_to_string(log.join("pids"))
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_owned)
+            .collect()
+    }
+    /// Whether process `pid` still runs (a zombie has ended).
+    pub(crate) fn runs(pid: &str) -> bool {
+        let output = std::process::Command::new("ps")
+            .args(["-o", "stat=", "-p", pid])
+            .output()
+            .unwrap();
+        let stat = String::from_utf8_lossy(&output.stdout);
+        output.status.success() && !stat.trim().is_empty() && !stat.trim().starts_with('Z')
+    }
+    /// Whether process `pid` ends within five seconds.
+    pub(crate) async fn ends(pid: &str) -> bool {
+        for _ in 0..100 {
+            if !runs(pid) {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        false
+    }
 }
 
 #[cfg(test)]
@@ -640,7 +725,7 @@ while read -r control; do :; done
         assert!(result.ok);
         assert_eq!(result.text, "Completed synthetic check.");
         let id = native.lock().unwrap().clone();
-        assert!(is_live(&id).await);
+        assert!(alive(&id).await);
         {
             let updates = observed.lock().unwrap();
             assert_eq!(
@@ -653,8 +738,132 @@ while read -r control; do :; done
             );
         }
         close(&id).await;
-        assert!(!is_live(&id).await);
+        assert!(!alive(&id).await);
     }
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn only_a_session_that_answered_and_may_be_kept_outlives_its_run() {
+        // (the turn failed, the session may be kept, it is kept)
+        for (failed, keep, kept) in [
+            (false, true, true),
+            (true, true, false),
+            (false, false, false),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let binary = root.path().join("claude-fixture");
+            fake::connected_cli(
+                &binary,
+                root.path(),
+                &format!(
+                    r#"printf '%s\n' '{{"type":"result","is_error":{failed},"result":"Answered."}}'"#
+                ),
+            );
+            let id = uuid::Uuid::new_v4().to_string();
+            let observed = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+            let updates = observed.clone();
+            let args = arguments(
+                "claude",
+                "synthetic-model",
+                "low",
+                &[root.path().into()],
+                false,
+            )
+            .unwrap();
+            let outcome = tokio::time::timeout(
+                Duration::from_secs(10),
+                follow_session(
+                    &binary,
+                    &args,
+                    root.path(),
+                    "Synthetic coding task",
+                    &id,
+                    (false, keep),
+                    &|_| Ok(()),
+                    Arc::new(move |access| {
+                        updates.lock().unwrap().push(access.status);
+                        Ok(())
+                    }),
+                    (Duration::from_secs(30), Duration::from_secs(5)),
+                ),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert_eq!(outcome.ok, !failed);
+            let pid = fake::pids(root.path()).pop().unwrap();
+            let last = || observed.lock().unwrap().last().cloned().unwrap();
+            assert_eq!(alive(&id).await, kept, "{failed} {keep}");
+            if kept {
+                // Handed to the user: reachable until it is closed or its connection expires.
+                assert!(fake::runs(&pid));
+                assert_eq!(last(), "connected");
+                close(&id).await;
+                assert!(!alive(&id).await);
+            }
+            assert!(fake::ends(&pid).await, "{failed} {keep}");
+            assert_eq!(last(), "offline");
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_cancelled_session_ends_its_process_and_reads_offline() {
+        let root = tempfile::tempdir().unwrap();
+        let binary = root.path().join("claude-fixture");
+        fake::connected_cli(&binary, root.path(), "while :; do sleep 1; done");
+        let observed = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let updates = observed.clone();
+        let args = arguments(
+            "claude",
+            "synthetic-model",
+            "low",
+            &[root.path().into()],
+            false,
+        )
+        .unwrap();
+        let following = {
+            let (binary, root) = (binary.clone(), root.path().to_path_buf());
+            tokio::spawn(async move {
+                follow_session(
+                    &binary,
+                    &args,
+                    &root,
+                    "Synthetic coding task",
+                    &uuid::Uuid::new_v4().to_string(),
+                    (false, true),
+                    &|_| Ok(()),
+                    Arc::new(move |access| {
+                        updates.lock().unwrap().push(access.status);
+                        Ok(())
+                    }),
+                    (Duration::from_secs(60), Duration::from_secs(5)),
+                )
+                .await
+            })
+        };
+        let pid = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if !observed.lock().unwrap().is_empty()
+                    && let Some(pid) = fake::pids(root.path()).pop()
+                {
+                    break pid;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(fake::runs(&pid));
+        // `implementation_cancel` aborts the run's task.
+        following.abort();
+        let _ = following.await;
+        assert!(fake::ends(&pid).await);
+        assert_eq!(
+            *observed.lock().unwrap(),
+            ["connected".to_owned(), "offline".to_owned()]
+        );
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn a_claude_coding_turn_never_waits_on_a_prompt_and_records_it() {
@@ -750,7 +959,7 @@ printf '{{"type":"system","subtype":"init","session_id":"%s"}}\n' "$session"
             root,
             "Synthetic coding task",
             &uuid::Uuid::new_v4().to_string(),
-            false,
+            (false, true),
             &|_| Ok(()),
             Arc::new(|_| Ok(())),
             limits,
@@ -947,7 +1156,7 @@ while read -r line; do :; done"##
                 root.path(),
                 "Synthetic coding task",
                 &uuid::Uuid::new_v4().to_string(),
-                false,
+                (false, true),
                 &|id| {
                     observed.lock().unwrap().extend(id.map(str::to_owned));
                     Ok(())

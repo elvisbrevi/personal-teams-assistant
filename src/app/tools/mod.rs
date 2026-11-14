@@ -1639,7 +1639,7 @@ pub(super) const TOOLS: &[Tool] = &[
     Tool {
         name: "workflow_run_cancel",
         title: "Cancel a workflow run",
-        description: "Cancels a workflow run in any stage: its active implementation run (planning or coding) is cancelled on its machine with the existing cancellation, keeping its file changes, and the run stops advancing for good. A creation already being sent is not stopped (see implementation_creation).",
+        description: "Cancels a workflow run in any stage: its active implementation run (planning or coding) is cancelled on its machine with the existing cancellation, keeping its file changes, every other session the run started that is still alive (a coding session handed to the user) is stopped (sessions_stopped), and the run stops advancing for good. A creation already being sent is not stopped (see implementation_creation).",
         effect: Effect::External,
         schema: || {
             object(
@@ -2651,7 +2651,7 @@ pub(super) fn confirmation(name: &str, args: &Value) -> Option<String> {
             args["run"].as_str().unwrap_or("this")
         ),
         "workflow_run_cancel" => format!(
-            "Cancel workflow run {} and its active implementation run, keeping its file changes? It stops advancing for good.",
+            "Cancel workflow run {} and its active implementation run, keeping its file changes, and stop every session it started that is still alive? It stops advancing for good.",
             args["run"].as_str().unwrap_or("this")
         ),
         "workflow_run_assign" => format!(
