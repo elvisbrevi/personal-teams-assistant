@@ -21,6 +21,7 @@ pub mod portable;
 pub mod questions;
 pub mod runtime;
 pub mod security;
+pub mod sessions;
 pub mod simulation;
 pub mod state;
 pub mod store;

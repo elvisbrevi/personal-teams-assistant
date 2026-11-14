@@ -480,9 +480,17 @@ pub struct Policy {
     pub sensitive_patterns: Vec<String>,
     #[serde(default)]
     pub allowed_senders: Vec<String>,
+    /// Earlier messages of the same chat read before deciding whether and how to answer
+    /// (1–50): a message that refers back («the one I mentioned») needs them.
+    #[serde(default = "default_history_messages")]
+    pub history_messages: usize,
 }
 fn default_detailed_answer_chars() -> usize {
     8000
+}
+pub const DEFAULT_HISTORY_MESSAGES: usize = 10;
+fn default_history_messages() -> usize {
+    DEFAULT_HISTORY_MESSAGES
 }
 impl Config {
     pub fn desktop_template() -> Result<Self> {
@@ -544,6 +552,10 @@ impl Config {
         ensure!(
             (30..=3600).contains(&self.policy.max_message_age_seconds),
             "invalid age limit"
+        );
+        ensure!(
+            (1..=50).contains(&self.policy.history_messages),
+            "policy.history_messages must be between 1 and 50"
         );
         ensure!(!self.policy.greeting.trim().is_empty(), "invalid greeting");
         crate::llm::validate(&self.llm)?;

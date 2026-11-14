@@ -178,7 +178,7 @@ The editable text an implementation agent starts from when it plans children, im
 _Avoid_: system prompt (in user-facing text)
 
 **Agent session**:
-The coding agent's own conversation associated with an implementation run and its work item. Its native session ID identifies it in that agent's tools and supported app links.
+A coding agent's own conversation (Claude Code, Codex or OpenCode): one the user started on a machine of their account, or one an implementation run started for its work item. Its native session ID identifies it in that agent's tools and supported app links. The agent sessions source reads the most recent ones as summaries; one whose requests carry `#private` is never read.
 _Avoid_: run ID
 
 **Workflow**:

@@ -52,6 +52,7 @@ pub async fn providers(config: &Config) -> Result<Value> {
                         review: false,
                         proposing: false,
                         unprompted: false,
+                        in_progress: false,
                         guidance: "",
                         previous_draft: "",
                         context_instructions: "",

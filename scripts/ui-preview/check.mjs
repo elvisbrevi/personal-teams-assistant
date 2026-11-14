@@ -2752,6 +2752,39 @@ if (flag !== '--axe-only') for (const [label, viewport] of [['desktop', { width:
   check(`runs ${label}: no client errors`, errors.length === 0, errors.join('; '));
   await context.close();
 }
+// Agent sessions as a source: added off and without audiences, the owner sees what it reads,
+// and the thread context setting is saved; at desktop and phone widths.
+for (const [label, options] of [['desktop', {}], ['phone', { context: { viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true } }]]) {
+  const { context, page, errors } = await open({ axe: true, ...options });
+  await page.addScriptTag({ content: axeSource });
+  await page.evaluate(() => { showTab('knowledge'); selectTab($('#knowledge-tabs'), 'sources'); });
+  check(`agent sessions ${label}: the offer shows while the map has no such source`, await page.isVisible('#sessions-offer'));
+  await page.click('#add-sessions-source');
+  check(`agent sessions ${label}: adding it hides the offer`, await page.isHidden('#sessions-offer'));
+  const source = page.locator('.resource', { has: page.locator('strong', { hasText: /^agent-sessions$/ }) });
+  await source.locator('button', { hasText: 'Ver lo que lee' }).click();
+  await page.waitForSelector('.session-preview .session-summary');
+  check(`agent sessions ${label}: the preview lists the summaries newest first`, await source.locator('.session-summary').count() === 2
+    && (await source.locator('.session-summary').first().innerText()).includes('payments-api'));
+  check(`agent sessions ${label}: a PTA run links its work item`, await source.locator('.session-summary a[href$="/edit/4101"]').count() === 1);
+  check(`agent sessions ${label}: an offline machine is unavailable, not empty`, (await source.locator('.session-preview').innerText()).includes('Sesiones de Desk no disponibles: sin conexión.'));
+  const violations = await page.evaluate(async () => (await axe.run(document, { runOnly: { type: 'tag', values: ['wcag2a', 'wcag2aa', 'wcag21aa', 'wcag22aa'] } })).violations);
+  check(`agent sessions ${label}: the source and its preview pass WCAG 2.2 AA`, violations.length === 0, JSON.stringify(violations.map(v => v.id)));
+  await source.scrollIntoViewIfNeeded();
+  await page.screenshot({ path: `${out}/${label}-agent-sessions.png`, fullPage: false });
+  await source.locator('input[type=number]').fill('20');
+  await page.evaluate(() => { showTab('settings'); selectTab($('#settings-tabs'), 'general'); });
+  check(`agent sessions ${label}: the thread context defaults to 10`, await page.inputValue('#history-messages') === '10');
+  await page.fill('#history-messages', '15');
+  await page.click('#save'); await page.waitForTimeout(300);
+  const saved = await page.evaluate(() => window.__ptaLastSave);
+  const added = saved?.map.resources.find(r => r.tool?.type === 'agent_sessions');
+  check(`agent sessions ${label}: it is saved disabled, without audiences or external processing`, added && !added.enabled && !added.external_processing
+    && !added.allowed_conversations.length && !added.allowed_senders.length && added.tool.sessions === 20, JSON.stringify(added));
+  check(`agent sessions ${label}: the thread context setting is saved`, saved?.config.policy.history_messages === 15);
+  check(`agent sessions ${label}: no client errors`, errors.length === 0, errors.join('; '));
+  await context.close();
+}
 await browser.close();
 fs.writeFileSync(`${out}/flows.json`, JSON.stringify(results, null, 1));
 const failed = results.filter(r => !r.ok).length;

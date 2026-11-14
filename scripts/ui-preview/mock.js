@@ -681,6 +681,18 @@
     implementation_runs: args => ({ runs: [...implementationRuns, ...workflowAgentRuns].filter(run => run.machine === args.machine && (!args.work_item_url || run.item.url === args.work_item_url)) }),
     implementation_creation: () => null,
     implementation_sessions: args => ({ sessions: [...implementationRuns, ...workflowAgentRuns].filter(run => args.urls.includes(run.item.url)).map(run => ({ ...run, online: true })) }),
+    // What an agent sessions source would read: synthetic summaries and one offline machine.
+    implementation_recent_sessions: args => ({ sessions: [
+      { provider: 'claude', session_id: 'c0ffee00-0000-4000-8000-000000000001', machine: 'Laptop', project: 'payments-api',
+        started_at: new Date(Date.now() - 50 * 60_000).toISOString(), updated_at: new Date(Date.now() - 8 * 60_000).toISOString(),
+        asked: 'Check the connection to the payments database from the QA server.',
+        concluded: 'The QA server reaches the database host, but the connection times out on port 1433 at the firewall.',
+        open: 'I asked networking to open the port and am waiting for their change' },
+      { provider: 'codex', session_id: 'c0ffee00-0000-4000-8000-000000000002', machine: 'Build server', project: 'receipts',
+        started_at: new Date(Date.now() - 5 * 3600_000).toISOString(), updated_at: new Date(Date.now() - 4 * 3600_000).toISOString(),
+        asked: 'Implement «Download receipts as PDF»', concluded: 'Opened the pull request; the pipeline passed.',
+        started_by: { run: 'run-1', work_item_url: 'https://dev.azure.com/contoso/Payments/_workitems/edit/4101', work_item_title: 'Download receipts as PDF', state: 'done' } },
+    ].slice(0, args.limit ?? 10), unavailable: [{ machine: 'Desk', reason: 'offline' }] }),
     implementation_open_session: args => { window.__ptaOpenedAgentSession = args; return { opened: true }; },
     implementation_mobile_session: args => {
       window.__ptaMobileSession = args;
